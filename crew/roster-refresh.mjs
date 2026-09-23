@@ -197,13 +197,13 @@ export function successorOf(key, catalogKeys, unreleased = new Set()) {
     const theirs = modelFamily(candidate.slice(provider.length + 1))
     if (!theirs || theirs.family !== own.family) continue
     if (!newer(theirs.version, own.version)) continue
-    // A catalog entry flagged beta or deprecated is never a successor: reseating onto it is a
+    // A catalog entry flagged alpha, beta or deprecated is never a successor: reseating onto it is a
     // decision about an unreleased or retiring model, not a version bump.
     if (unreleased.has(candidate)) { flagged = true; continue }
     if (!best || newer(theirs.version, best.version)) best = { key: candidate, version: theirs.version }
   }
   if (best) return { key, successor: best.key, reason: null }
-  return { key, successor: null, reason: flagged ? 'newer-only-beta-or-deprecated' : 'already-newest' }
+  return { key, successor: null, reason: flagged ? 'newer-only-unreleased' : 'already-newest' }
 }
 
 // Every seat (and fallback) as provider/id.
@@ -231,7 +231,8 @@ export function planBump(roster, rawCatalog) {
   for (const [providerId, provider] of Object.entries(rawCatalog || {})) {
     for (const [modelId, m] of Object.entries(provider?.models || {})) {
       catalogKeys.push(`${providerId}/${modelId}`)
-      if (m?.status === 'beta' || m?.status === 'deprecated') unreleased.add(`${providerId}/${modelId}`)
+      // models.dev flags alpha, beta and deprecated; only an entry with NO status is released.
+      if (m?.status != null) unreleased.add(`${providerId}/${modelId}`)
     }
   }
   const bumps = []
@@ -390,11 +391,12 @@ export function applyBump({ roster, ladder, routing, workflows = {} }, plan, raw
   for (const to of successors) place(to)
   nextRoster.models = models
   nextRoster.updated_at = today
-  const dated = (doc) => (doc && Object.hasOwn(doc, 'updated_at') ? { ...doc, updated_at: today } : doc)
+  // A document the bump names nothing in is returned as it was: no new date, no rewrite.
+  const dated = (before, after) => (before && JSON.stringify(after) !== JSON.stringify(before) && Object.hasOwn(after, 'updated_at') ? { ...after, updated_at: today } : after)
   return {
     roster: nextRoster,
-    ladder: ladder ? dated(bumpLadder(ladder, keyMap)) : ladder,
-    routing: routing ? dated(replaceIds(routing, keyMap)) : routing,
+    ladder: ladder ? dated(ladder, bumpLadder(ladder, keyMap)) : ladder,
+    routing: routing ? dated(routing, replaceIds(routing, keyMap)) : routing,
     workflows: Object.fromEntries(Object.entries(workflows).map(([name, doc]) => [name, replaceIds(doc, keyMap)])),
   }
 }
@@ -462,6 +464,25 @@ export function proseMentions(doc, bumps) {
   return hits
 }
 
+// Dated benches whose production is a replaced model. Advisory only: an apply has already
+// succeeded when this runs, so nothing here may fail it, and a directory it cannot read is named
+// (unmeasured), never skipped in silence.
+export function replacedBenches(benchRoot, from, fsx = { existsSync, readdirSync, readFileSync }) {
+  const benches = []
+  const unscanned = []
+  const list = (path) => { try { return fsx.readdirSync(path) } catch (err) { unscanned.push(`${path} (${err.code || err.message})`); return [] } }
+  if (!fsx.existsSync(benchRoot)) return { benches, unscanned }
+  for (const day of list(benchRoot)) {
+    const bench = join(benchRoot, day, 'bench')
+    if (!fsx.existsSync(bench)) continue
+    for (const role of list(bench)) {
+      const path = join(bench, role, 'candidates.json')
+      try { if (from.has(JSON.parse(fsx.readFileSync(path, 'utf8')).production)) benches.push(path) } catch {}
+    }
+  }
+  return { benches, unscanned }
+}
+
 const USAGE = 'usage: node crew/roster-refresh.mjs [--roster <path>] [--catalog <path>] [--out <path>] [--apply]'
 
 if (import.meta.main) {
@@ -471,9 +492,13 @@ if (import.meta.main) {
   }
 
   const rosterIdx = process.argv.indexOf('--roster')
-  const rosterPath = rosterIdx !== -1 && process.argv[rosterIdx + 1]
-    ? process.argv[rosterIdx + 1]
-    : new URL('./roster.json', import.meta.url)
+  // A --roster with no value (an unset "$ROSTER", a trailing flag) must never fall back to the
+  // shipped roster: under --apply that would rewrite this checkout's own configuration.
+  if (rosterIdx !== -1 && !process.argv[rosterIdx + 1]) {
+    console.error(`roster-refresh: --roster was given no path; refusing rather than falling back to the shipped roster\n${USAGE}`)
+    process.exit(1)
+  }
+  const rosterPath = rosterIdx !== -1 ? process.argv[rosterIdx + 1] : new URL('./roster.json', import.meta.url)
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
 
   let before
@@ -555,17 +580,18 @@ if (import.meta.main) {
       const { validateWorkflow } = await import('./workflows.mjs')
       const { loadCapabilities } = await import('./capabilities.mjs')
       const file = (path, doc, validate) => { const original = readFileSync(path, 'utf8'); return { path, original, next: json(doc, original), validate } }
-      const writes = [
-        file(rosterFile, next.roster, (tmp) => loadRoster(tmp)),
-        file(ladder.path, next.ladder, (tmp) => loadLadder({ path: tmp })),
-        file(routing.path, next.routing, (tmp) => loadRoutingPolicy({ path: tmp })),
-      ]
+      // A file whose content the bump does not change is not rewritten (its formatting and hash
+      // stay exactly as they were).
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+      const writes = [file(rosterFile, next.roster, (tmp) => loadRoster(tmp))]
+      if (!same(next.ladder, ladder.doc)) writes.push(file(ladder.path, next.ladder, (tmp) => loadLadder({ path: tmp })))
+      if (!same(next.routing, routing.doc)) writes.push(file(routing.path, next.routing, (tmp) => loadRoutingPolicy({ path: tmp })))
       // Validated as the shipped D1 check does (build tier, all four workflow roles) against the
       // STAGED ladder, so a workflow the new ladder refuses is never written.
       for (const w of workflows) {
         if (JSON.stringify(next.workflows[w.path]) === JSON.stringify(w.doc)) continue
         writes.push(file(w.path, next.workflows[w.path], (tmp) => validateWorkflow(JSON.parse(readFileSync(tmp, 'utf8')), {
-          register: loadCapabilities(), ladder: loadLadder({ path: `${ladder.path}.roster-refresh.tmp` }), tier: 'build', roles: ['lead', 'planner', 'builder', 'reviewer'], path: tmp,
+          register: loadCapabilities(), ladder: loadLadder({ path: writes.some((x) => x.path === ladder.path) ? `${ladder.path}.roster-refresh.tmp` : ladder.path }), tier: 'build', roles: ['lead', 'planner', 'builder', 'reviewer'], path: tmp,
         })))
       }
       commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync })
@@ -585,17 +611,8 @@ if (import.meta.main) {
     if (departures.length) console.log(`published cache rates that depart from the vendor's ratified multiplier — written as published; ratify each or correct it:\n${departures.map((d) => `- ${d}`).join('\n')}`)
     const benchRoot = join(dir, '..', 'docs', 'audits')
     const from = new Set(plan.bumps.map((b) => b.from))
-    const benches = []
-    if (existsSync(benchRoot)) {
-      for (const day of readdirSync(benchRoot)) {
-        const bench = join(benchRoot, day, 'bench')
-        if (!existsSync(bench)) continue
-        for (const role of readdirSync(bench)) {
-          const path = join(bench, role, 'candidates.json')
-          try { if (from.has(JSON.parse(readFileSync(path, 'utf8')).production)) benches.push(path) } catch {}
-        }
-      }
-    }
+    const { benches, unscanned } = replacedBenches(benchRoot, from)
+    if (unscanned.length) console.log(`bench directories that could not be scanned for a replaced production (unmeasured, not clear):\n${unscanned.map((u) => `- ${u}`).join('\n')}`)
     if (benches.length) console.log(`dated benches whose production is a replaced model — model-eval refuses them (production-absent) until they are re-declared, and they are dated records:\n${benches.map((b) => `- ${b}`).join('\n')}`)
     console.log('next: run npm test. The ratified-rates check pins every catalog key, so each new row is ratified there by hand. Move tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
   }

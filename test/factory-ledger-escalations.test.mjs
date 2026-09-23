@@ -137,6 +137,120 @@ test('build round cap is anchored to its own generated sentence', () => {
   assert.deepEqual(escalationCause({ where: 'build', why: 'no accepted build within rounds' }), { cause: 'rule-gap', actor: null })
 })
 
+// The three producers INTERPOLATE into their sentences — a round number
+// (crew/drive.mjs:8271), a phase word (crew/drive.mjs:9863) and a run id plus role
+// (crew/headless-rpc.mjs:1106). These cases vary each interpolated part on purpose: a rule
+// pinned to one sample's values would fire for that sample alone and ship inert.
+test('the three producer sentences classify whatever they interpolate', () => {
+  const planAt = (round) => `the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round ${round}, and no plan round remains to bounce it — neither is ever accepted`
+  const censusFor = (phase) => `the ${phase} census could not be measured: unlisted-survivor. It made no claim either way, so this is not a clean census.`
+  const cases = [
+    { where: 'plan-check', why: planAt(2), cause: 'plan-rounds-exhausted', actor: 'lead' },
+    { where: 'plan-check', why: planAt(3), cause: 'plan-rounds-exhausted', actor: 'lead' },
+    { where: 'plan-check', why: planAt(17), cause: 'plan-rounds-exhausted', actor: 'lead' },
+    { where: 'census-exhibits', why: censusFor('pre-build'), cause: 'infrastructure', actor: 'driver' },
+    { where: 'census-exhibits', why: censusFor('post-commit'), cause: 'infrastructure', actor: 'driver' },
+    { where: 'rpc-prompt-undelivered', why: 'rpc prompt d5 for seat planner was not delivered (prompt-unacknowledged)', cause: 'transport', actor: 'driver' },
+    { where: 'rpc-prompt-undelivered', why: 'rpc prompt d9 for seat builder was not delivered (prompt-unacknowledged)', cause: 'transport', actor: 'driver' },
+  ]
+  for (const { where, why, cause, actor } of cases) {
+    const mapped = escalationCause({ where, why })
+    assert.deepEqual(mapped, { cause, actor }, `${where}: ${why}`)
+    assert.equal(Object.isFrozen(mapped), true)
+  }
+})
+
+test('near-miss sentences at the three new locations stay rule-gap', () => {
+  const cases = [
+    { where: 'plan-check', why: 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round 3, and no plan round remains to bounce it.' },
+    // A census that failed for any OTHER reason is not this cause. Only unlisted-survivor is claimed.
+    { where: 'census-exhibits', why: 'the pre-build census could not be measured: empty-output. It made no claim either way, so this is not a clean census.' },
+    { where: 'census-exhibits', why: 'the post-commit census could not be measured: clock-unavailable. It made no claim either way, so this is not a clean census.' },
+    // A prompt that failed for a reason other than being unacknowledged is not claimed either.
+    { where: 'rpc-prompt-undelivered', why: 'rpc prompt d6 for seat planner was not delivered (seat-gone)' },
+    { where: 'plan-check', why: 'different sentence' },
+    { where: 'census-exhibits', why: 'different sentence' },
+    { where: 'rpc-prompt-undelivered', why: 'different sentence' },
+  ]
+  for (const { where, why } of cases) {
+    assert.deepEqual(escalationCause({ where, why }), { cause: 'rule-gap', actor: null }, `${where}: ${why}`)
+  }
+})
+
+test('pre-existing rule families keep their outcomes beside the new exact rules', () => {
+  const cases = [
+    [{ where: 'driver', why: 'sendLine: echo missing' }, { cause: 'transport', actor: 'driver' }],
+    [{ where: 'substrate-gone', why: '' }, { cause: 'transport', actor: 'driver' }],
+    [{ where: 'scope', why: '' }, { cause: 'plan-build-disagreement', actor: 'driver' }],
+    [{ where: 'seat-died', why: '' }, { cause: 'seat-lost', actor: 'driver' }],
+    [{ where: 'rpc-timeout', why: '' }, { cause: 'seat-timeout', actor: 'driver' }],
+    [{ where: 'rpc-aborted', why: '' }, { cause: 'seat-aborted', actor: 'driver' }],
+    [{ where: 'rpc-no-envelope', why: '' }, { cause: 'envelope-absent', actor: 'driver' }],
+    [{ where: 'rpc-malformed', why: '' }, { cause: 'envelope-unusable', actor: 'driver' }],
+    [{ where: 'planner', why: 'planner: no valid envelope at /x within 12s' }, { cause: 'seat-timeout', actor: 'driver' }],
+    [{ where: 'plan', why: 'no accepted plan within 3 rounds' }, { cause: 'plan-rounds-exhausted', actor: 'lead' }],
+    [{ where: 'build', why: 'no accepted build within 3 rounds' }, { cause: 'build-rounds-exhausted', actor: 'lead' }],
+    [{ where: 'builder', why: 'no valid envelope' }, { cause: 'budget', actor: 'driver' }],
+    [{ where: 'plan', why: 'brief contradiction' }, { cause: 'brief-contradiction', actor: 'operator' }],
+    [{ where: 'gate', why: '' }, { cause: 'gate-defect', actor: 'lead' }],
+    [{ where: 'review', why: 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round 3, and no plan round remains to bounce it' }, { cause: 'review-unresolved', actor: 'lead' }],
+    [{ where: 'driver', why: '' }, { cause: 'infrastructure', actor: 'driver' }],
+  ]
+  for (const [input, output] of cases) assert.deepEqual(escalationCause(input), output, JSON.stringify(input))
+})
+
+test('heterogeneous harden, build, plan and lane locations stay rule-gap', () => {
+  for (const where of ['harden', 'build', 'plan', 'lane']) {
+    assert.deepEqual(escalationCause({ where, why: 'heterogeneous sample' }), { cause: 'rule-gap', actor: null }, where)
+  }
+})
+
+test('producer-emitted escalation sentences classify exactly', () => {
+  // crew/drive.mjs:8271
+  const plan3 = 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round 3, and no plan round remains to bounce it — neither is ever accepted'
+  // crew/drive.mjs:8271
+  const plan2 = 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round 2, and no plan round remains to bounce it — neither is ever accepted'
+  // crew/drive.mjs:8271
+  const plan4 = 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round 4, and no plan round remains to bounce it — neither is ever accepted'
+  // crew/drive.mjs:9863
+  const censusPre = 'the pre-build census could not be measured: unlisted-survivor. It made no claim either way, so this is not a clean census.'
+  // crew/drive.mjs:9863
+  const censusPost = 'the post-commit census could not be measured: unlisted-survivor. It made no claim either way, so this is not a clean census.'
+  // crew/headless-rpc.mjs:1106
+  const rpcBuilder = 'rpc prompt d5 for seat builder was not delivered (prompt-unacknowledged)'
+  const positives = [
+    ['plan-check', plan3, 'plan-rounds-exhausted', 'lead'],
+    ['plan-check', plan2, 'plan-rounds-exhausted', 'lead'],
+    ['plan-check', plan4, 'plan-rounds-exhausted', 'lead'],
+    ['census-exhibits', censusPre, 'infrastructure', 'driver'],
+    ['census-exhibits', censusPost, 'infrastructure', 'driver'],
+    ['rpc-prompt-undelivered', rpcBuilder, 'transport', 'driver'],
+    ['rpc-prompt-undelivered', 'rpc prompt d6 for seat builder was not delivered (prompt-unacknowledged)', 'transport', 'driver'],
+  ]
+  for (const [where, why, cause, actor] of positives) {
+    const mapped = escalationCause({ where, why })
+    assert.deepEqual(mapped, { cause, actor }, `${where}: ${why}`)
+    assert.equal(Object.isFrozen(mapped), true)
+  }
+  const negatives = [
+    ['plan-check', `${plan3}.`],
+    ['plan-check', `x${plan3}`],
+    ['plan-check', 'the plan check returned a BLOCKER, or a finding malformed enough to be one, or is still at round 1, on round four, and no plan round remains to bounce it — neither is ever accepted'],
+    ['census-exhibits', 'the pre-build census could not be measured: census-malformed-output. It made no claim either way, so this is not a clean census.'],
+    // A run id and a role interpolate, so varying them must NOT stop the rule matching;
+    // what keeps a row out is a different FAILURE REASON, which is the only fixed part.
+    // A REAL other producer reason, not a synthetic one: failPromptDelivery sets
+    // prompt-write-failed when the write throws, and only that path carries a detail tail.
+    ['rpc-prompt-undelivered', 'rpc prompt d6 for seat builder was not delivered (prompt-write-failed): EPIPE'],
+    // The tail is anchored: `prompt-unacknowledged` never carries a detail, so a suffix is
+    // not a producer sentence and must not be claimed.
+    ['rpc-prompt-undelivered', 'rpc prompt d6 for seat builder was not delivered (prompt-unacknowledged) trailing junk'],
+  ]
+  for (const [where, why] of negatives) {
+    assert.deepEqual(escalationCause({ where, why }), { cause: 'rule-gap', actor: null }, `${where}: ${why}`)
+  }
+})
+
 test('plan-scope-widened producer stage maps to a plan-build disagreement', () => {
   assert.deepEqual(escalationCause({
     where: 'plan-scope-widened',

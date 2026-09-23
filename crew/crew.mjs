@@ -1377,9 +1377,9 @@ export function assertBandFloors(seats, tier, ladder, { adapters = null, localPr
   const floorRank = ladder.ranks.get(floorName)
   // #851 / ADR-037 decision 2: a judge seat is closed to a source:"local" model at
   // EVERY band, frontier included. The band floor cannot express this — tier_floors
-  // stays "utility" for all three tiers because the judge BUILDER seat is
-  // openai/gpt-5.6-luna, a utility member, so a frontier judge floor would make the
-  // whole tier undispatchable (#851, 2026-09-01). SOURCE, not rank, is the
+  // stays "utility" for all three tiers because the judge BUILDER seat was a utility
+  // member when this was ratified (openai/gpt-5.6-luna), so a frontier judge floor
+  // would have made the whole tier undispatchable (#851, 2026-09-01). SOURCE, not rank, is the
   // discriminator, and `models` is the ROSTER's own catalog — the runtime's, never
   // the target checkout's, exactly as the roster and the ladder already are.
   const judgeSeats = canonicalAssurance(tier) === 'rigorous'

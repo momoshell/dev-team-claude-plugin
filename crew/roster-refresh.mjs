@@ -573,6 +573,9 @@ if (import.meta.main) {
     ...plan.skipped.map((s) => `- ${s.key}: ${s.reason}`),
   ]
   console.log(planLines.join('\n'))
+  // Blind spot, stated where the operator decides: nothing here asks the seat's provider whether
+  // it serves a successor.
+  if (plan.bumps.length) console.log('unmeasured: whether each successor is served by the seat\'s provider account; the first lane on it is the probe.')
   if (args.apply && plan.bumps.length) {
     const dir = dirname(fileURLToPath(typeof rosterPath === 'string' ? pathToFileURL(resolve(rosterPath)) : rosterPath))
     const read = (name) => { const path = join(dir, name); return { path, doc: JSON.parse(readFileSync(path, 'utf8')) } }
@@ -611,7 +614,7 @@ if (import.meta.main) {
           register: loadCapabilities(), ladder: loadLadder({ path: writes.some((x) => x.path === ladder.path) ? `${ladder.path}.roster-refresh.tmp` : ladder.path }), tier: 'build', roles: ['lead', 'planner', 'builder', 'reviewer'], path: tmp,
         })))
       }
-      ;({ kept: keptBackups } = commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync }))
+      keptBackups = commitWrites(writes, { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync }).kept
       console.log(`\napplied ${plan.bumps.length} bump(s) to ${writes.map((w) => w.path).join(', ')}`)
     } catch (err) {
       console.error(err.message)
@@ -631,8 +634,6 @@ if (import.meta.main) {
     const { benches, unscanned } = replacedBenches(benchRoot, from)
     if (unscanned.length) console.log(`bench directories that could not be scanned for a replaced production (unmeasured, not clear):\n${unscanned.map((u) => `- ${u}`).join('\n')}`)
     if (benches.length) console.log(`dated benches whose production is a replaced model — model-eval refuses them (production-absent) until they are re-declared, and they are dated records:\n${benches.map((b) => `- ${b}`).join('\n')}`)
-    // Blind spot, stated: nothing here asks the seat's provider whether it serves a successor.
-    console.log('unmeasured: whether each successor is served by the seat\'s provider account; the first lane on it is the probe.')
     console.log('next: run npm test. The ratified-rates check pins every catalog key, so each new row is ratified there by hand. Move tests that pin which models are SEATED; a format, price-history or dated-record check that fails is a finding, not a test to update.')
     if (keptBackups.length) {
       console.error(`roster-refresh: --apply succeeded, but could not remove ${keptBackups.join(', ')}; delete it before the next run, which refuses while it exists`)

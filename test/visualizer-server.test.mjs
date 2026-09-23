@@ -108,7 +108,7 @@ function serverRosterFixture() {
         lead: null,
         planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
         builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
-        reviewer: cell('openai', 'gpt-5.6-sol', 'pi', 'medium'),
+        reviewer: cell('openai', 'gpt-6-sol', 'pi', 'medium'),
       },
       build: {
         lead: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
@@ -125,13 +125,11 @@ function serverRosterFixture() {
       },
     },
     models: {
-      'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-opus-5-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
       'openai/gpt-6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
       'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
-      'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
       'openai/gpt-6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
       'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
     },
@@ -1762,7 +1760,7 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     assert.equal(legal.json.ok, true)
     assert.match(legal.json.diff, /^--- a\/crew\/roster\.json$/m)
     assert.match(legal.json.diff, /^\+\+\+ b\/crew\/roster\.json$/m)
-    const sameVendor = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }) })
+    const sameVendor = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' } }) })
     assert.equal(sameVendor.status, 200)
     assert.equal(sameVendor.json.ok, true)
     assert.notEqual(sameVendor.json.diff, null)

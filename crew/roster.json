@@ -245,16 +245,16 @@
       "cost_out_per_mtok": 50,
       "cost_cache_read_per_mtok": 1,
       "cost_cache_write_per_mtok": 12.5,
-      "cache_rate_source": "models.dev lists cacheRead 1 and cacheWrite 12.5 per Mtok and context 1050000 for openai/gpt-6-astra; the pi model directory (last_verified 2026-09-16) recorded context 272000 with a second price tier above 272000 input tokens (input 20, output 75, cacheRead 2, cacheWrite 25) that this single-rate entry cannot represent — at context 1050000 that threshold is reachable in one request, and a request billed above it would be underpriced by this entry.",
-      "context": 1050000,
+      "cache_rate_source": "pi's model directory publishes these rates directly for openai-codex/gpt-6-astra rather than as multipliers of this entry's cost_in_per_mtok: cacheRead 1.00 and cacheWrite 12.50 per Mtok. The directory also declares a second price tier above 272000 input tokens (input 20, output 50->75, cacheRead 2, cacheWrite 25); that tier is NOT represented here because the schema carries one rate per column, and it is unreachable within a single request since the tier threshold equals this model's whole context window. A conversation billed above the threshold would be underpriced by this entry.",
+      "context": 272000,
       "tags": [
         "reasoning",
         "tool-call",
         "vendor-diverse",
         "frontier"
       ],
-      "source": "models.dev",
-      "last_verified": "2026-09-23"
+      "source": "~/.pi/agent/models-store.json (pi model directory, provider openai-codex)",
+      "last_verified": "2026-09-16"
     },
     "meta/muse-spark-1.3-contributor": {
       "cost_in_per_mtok": 0.1,

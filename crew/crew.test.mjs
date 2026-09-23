@@ -2374,7 +2374,6 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   const expectedCatalog = {
     'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
     'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
-    'openai/gpt-6-astra': [10, 50, 1, 12.5, 1050000],
     'anthropic/claude-opus-5-5': [4, 20, 0.2, 5, 1000000],
   }
   for (const [key, prices] of Object.entries(expectedCatalog)) {
@@ -2387,7 +2386,12 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
     assert.equal(Object.hasOwn(shipped.models, key), false)
   }
   assert.equal(shipped.models['openai/gpt-6-sol'].cache_rate_source, 'models.dev lists cache writes at 2.5 per Mtok for openai/gpt-6-sol, contradicting the older statement that OpenAI cache writes are not charged.')
-  assert.equal(shipped.models['openai/gpt-6-astra'].cache_rate_source, 'models.dev lists cacheRead 1 and cacheWrite 12.5 per Mtok and context 1050000 for openai/gpt-6-astra; the pi model directory (last_verified 2026-09-16) recorded context 272000 with a second price tier above 272000 input tokens (input 20, output 75, cacheRead 2, cacheWrite 25) that this single-rate entry cannot represent — at context 1050000 that threshold is reachable in one request, and a request billed above it would be underpriced by this entry.')
+  // Astra is seated through pi's openai-codex route, which serves a 272K context; its second
+  // price tier starts at 272000 input tokens, so it stays unreachable in one request only while
+  // the entry keeps the route's context, not the generic API figure models.dev lists.
+  const astra = shipped.models['openai/gpt-6-astra']
+  assert.deepEqual([astra.cost_in_per_mtok, astra.cost_out_per_mtok, astra.cost_cache_read_per_mtok, astra.cost_cache_write_per_mtok, astra.context], [10, 50, 1, 12.5, 272000])
+  assert.match(astra.source, /pi model directory, provider openai-codex/)
   const ladder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
   const frontier = ladder.bands.find((band) => band.band === 'frontier')
   const utility = ladder.bands.find((band) => band.band === 'utility')

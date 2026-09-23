@@ -7174,6 +7174,93 @@ test('b851 TL4 repeated unmeasured adjudication does not duplicate the blind spo
   assert.equal(result.details.hardening_unmeasured[0].outcome, 'unproven')
 })
 
+// P1-P3: unproven hardening never determines lane completion while refuted hardening
+// does. F1 stays unproven in all three via its retained failed witness; F2 carries its
+// own guard name, anchor, witness output and proof-command script on the shared file.
+const P_F2_FINDING = { id: 'F2', severity: 'must-fix', location: 'a.mjs:2', summary: 'the second defect' }
+const P_F2_ENTRY = { finding: 'F2', test: B376_TEST_FILE, name: 'F2 guard', file: B376_IMPL_FILE, find: 'const other = 0', replace: 'const other = 1' }
+const P_FILES = {
+  [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n',
+  [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\nconst other = 0\n',
+}
+const P_F1_FAIL_WITNESS = { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' }
+const P_F2_PROVING_WITNESS = { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+const pGreenFor = (name) => ({ ok: true, output: `ok 1 - ${name}\n# pass 1\n# fail 0` })
+const pRedFor = (name) => ({ ok: false, output: `not ok 1 - ${name}\n# pass 0\n# fail 1` })
+const pTwoFindingIo = ({ f2Witness, f2Proof }) => {
+  const io = b376ProofIo({
+    reviewer2: b376Review('changes-needed', [B376_FINDING, P_F2_FINDING]),
+    reviewer3: b376Review('pass', []),
+    builder2: b376Build([B376_HARDENED, P_F2_ENTRY]),
+    builder3: b376Build([B376_HARDENED, P_F2_ENTRY]),
+    files: { ...P_FILES },
+    witnessOutput: P_F1_FAIL_WITNESS,
+  })
+  const baseRun = io.run
+  const witnessCmd = hardenWitnessCommand(B376_TEST_FILE)
+  const f2Cmd = hardenCommand(B376_TEST_FILE, 'F2 guard')
+  let witnessCalls = 0
+  let f2Calls = 0
+  io.run = function (cmd) {
+    if (cmd === witnessCmd) {
+      witnessCalls += 1
+      // Round 2 proves only F1 (the sole debt review 1 arms); round 3 proves
+      // [F1, F2] in declaration order. Calls 1-2 are therefore F1's retained
+      // failed witness, call 3 is F2's own witness output.
+      if (witnessCalls <= 2) return P_F1_FAIL_WITNESS
+      return f2Witness
+    }
+    if (cmd === f2Cmd) {
+      f2Calls += 1
+      return f2Proof[f2Calls - 1] ?? f2Proof.at(-1)
+    }
+    return baseRun.call(this, cmd)
+  }
+  return io
+}
+const pRowsFor = (io, id) => io.calls.logs.filter((entry) => entry.finding_hardened?.finding === id).map((entry) => entry.finding_hardened)
+
+test('P1 unproven F1 with proven F2 still completes with one blind spot', () => {
+  const io = pTwoFindingIo({ f2Witness: P_F2_PROVING_WITNESS, f2Proof: [pGreenFor('F2 guard'), pRedFor('F2 guard'), pRedFor('F2 guard')] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const f2 = pRowsFor(io, 'F2')
+  assert.ok(f2.length >= 1, JSON.stringify(f2))
+  assert.equal(f2.at(-1).outcome, 'killed', JSON.stringify(f2.at(-1)))
+  const f1 = pRowsFor(io, 'F1')
+  assert.ok(f1.length >= 1, JSON.stringify(f1))
+  for (const row of f1) assert.equal(row.outcome, 'unproven', JSON.stringify(row))
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.hardening_unmeasured, [{ finding: 'F1', test: 'a.test.mjs', check: 'F1 guard', outcome: 'unproven', why: 'the witnessed a.test.mjs run was not green and parseable, so the absence of F1 guard proves nothing: counts {"pass":0,"fail":1,"skipped":0}' }])
+})
+
+test('P2 two independently unproven guards complete with two blind spots', () => {
+  const io = pTwoFindingIo({ f2Witness: P_F1_FAIL_WITNESS, f2Proof: [pRedFor('F2 guard')] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const f1 = pRowsFor(io, 'F1')
+  assert.ok(f1.length >= 1, JSON.stringify(f1))
+  for (const row of f1) assert.equal(row.outcome, 'unproven', JSON.stringify(row))
+  const f2 = pRowsFor(io, 'F2')
+  assert.ok(f2.length >= 1, JSON.stringify(f2))
+  for (const row of f2) assert.equal(row.outcome, 'unproven', JSON.stringify(row))
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.hardening_unmeasured.length, 2)
+  assert.deepEqual(result.details.hardening_unmeasured.map((entry) => entry.finding).sort(), ['F1', 'F2'])
+  for (const entry of result.details.hardening_unmeasured) assert.equal(entry.outcome, 'unproven', JSON.stringify(entry))
+})
+
+test('P3 a refuted F2 guard escalates the lane despite unproven F1', () => {
+  const io = pTwoFindingIo({ f2Witness: P_F2_PROVING_WITNESS, f2Proof: [pGreenFor('F2 guard'), pGreenFor('F2 guard'), pRedFor('F2 guard')] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const f1 = pRowsFor(io, 'F1')
+  assert.ok(f1.length >= 1, JSON.stringify(f1))
+  for (const row of f1) assert.equal(row.outcome, 'unproven', JSON.stringify(row))
+  const f2 = pRowsFor(io, 'F2')
+  assert.ok(f2.length >= 1, JSON.stringify(f2))
+  assert.equal(f2.at(-1).outcome, 'pre-repair-green', JSON.stringify(f2.at(-1)))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'harden')
+})
+
 test('b851 RV1-1 a passing pre-repair verdict with an introduced region stays pre-repair-green', () => {
   const introduced = { finding: 'F1', test: B376_TEST_FILE, name: 'F1 guard', file: B376_IMPL_FILE, find: 'if (x == null) return null', replace: 'if (x == null) return guard' }
   const io = b376ProofIo({ hardened: [introduced], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })

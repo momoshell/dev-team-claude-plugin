@@ -8,7 +8,7 @@ import {
   openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
   renameSync as fsRenameSync, statSync as fsStatSync, constants as fsConstants,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
@@ -59,8 +59,8 @@ export function teardownOutcome(liveness) {
 }
 
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
-export function seatCommandPath(taskDir, role) {
-  return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
+export function seatCommandPath(crewDir, role) {
+  return join(crewDir, 'rpc', role, SEAT_COMMAND_FILE)
 }
 export function steerFrame(message) { return { type: 'steer', message } }
 
@@ -1202,7 +1202,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const dir = seatDir(role)
     mkdir(dir, { recursive: true })
     const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
-    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), fifo = seatFile(role, SEAT_COMMAND_FILE), cmdPath = seatFile(role, 'cmd.json')
+    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), cmdPath = seatFile(role, 'cmd.json')
+    const fifo = seatCommandPath(paths.dir, role)
+    mkdir(dirname(fifo), { recursive: true })
     const old = session(role)
     const sessionId = member.session_id || old.sessionId || uuid()
     const resume = !!(member.started || old.sessionId)
@@ -1446,6 +1448,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
     try { closeFd(seat.fd) } catch {}
     const proof = proveGroupDead(seat)
+    try { if (proof.liveness === LIVENESS.DEAD && exists(seat.fifo)) unlink(seat.fifo) } catch {}
     // Do not clear here: proveGroupDead retains an unproven reservation so a
     // later reader can still find the worker whose death we could not prove.
     // The session id survives a retire on purpose: ensureProcess will resume it

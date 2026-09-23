@@ -210,7 +210,9 @@ function stageRpcSeat(f, role) {
   const dir = join(f.taskDir, 'headless-rpc', role)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'pgid'), '900')
-  writeFileSync(join(dir, 'cmd.fifo'), '')
+  const fifoDir = join(f.crewDir, 'rpc', role)
+  mkdirSync(fifoDir, { recursive: true })
+  writeFileSync(join(fifoDir, 'cmd.fifo'), '')
   return dir
 }
 function instrumentCursorReads(f, positions) {
@@ -3342,17 +3344,21 @@ test('a pidless fork returns a socket error without a result', async () => {
   } finally { await f.d.stop(); f.cleanup() }
 })
 
-test('send delivers a steer frame to a steerable rpc seat', async () => {
+test('C1', async () => {
   await each(async (f) => {
     const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
-    const seat = stageRpcSeat(f, 'builder')
+    stageRpcSeat(f, 'builder')
     const result = await f.d.send({ run, message: 'guidance', role: 'builder' })
     assert.equal(result.delivered, 'command-channel')
     assert.equal(result.run_id, run)
-    const frame = JSON.parse(readFileSync(join(seat, 'cmd.fifo'), 'utf8').trim())
+    assert.equal(result.role, 'builder')
+    assert.equal(result.transport, 'headless-rpc')
+    assert.equal(result.interjection, 'boundary')
+    assert.equal(typeof result.command_id, 'string')
+    const frame = JSON.parse(readFileSync(join(f.crewDir, 'rpc', 'builder', 'cmd.fifo'), 'utf8').trim())
     assert.equal(frame.type, 'steer')
     assert.equal(frame.message, 'guidance')
-    assert.equal(typeof frame.id, 'string')
+    assert.equal(frame.id, result.command_id)
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
 })
 
@@ -3457,7 +3463,7 @@ test('send with no role picks the single steerable seat and refuses when there a
     const seat = stageRpcSeat(single, 'builder')
     const result = await single.d.send({ run, message: 'guidance' })
     assert.equal(result.role, 'builder')
-    assert.equal(JSON.parse(readFileSync(join(seat, 'cmd.fifo'), 'utf8').trim()).message, 'guidance')
+    assert.equal(JSON.parse(readFileSync(join(single.crewDir, 'rpc', 'builder', 'cmd.fifo'), 'utf8').trim()).message, 'guidance')
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
   await each(async (multiple) => {
     const { run_id: run } = multiple.d.enqueue({ crew_dir: multiple.crewDir })

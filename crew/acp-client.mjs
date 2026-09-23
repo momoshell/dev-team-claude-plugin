@@ -2,10 +2,11 @@ import { spawn as cpSpawn } from 'node:child_process'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   mkdirSync as fsMkdirSync, openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
+  unlinkSync as fsUnlinkSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { splitFrames } from './headless-rpc.mjs'
+import { splitFrames, seatCommandPath } from './headless-rpc.mjs'
 import { shq } from './headless.mjs'
 import { reclaimStore, PHASES, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 
@@ -34,7 +35,7 @@ export function acpSeatPaths(dir, role) {
   const seat = join(dir, role)
   return Object.freeze({
     dir: seat, stream: join(seat, 'stream.jsonl'), stderr: join(seat, 'stderr'),
-    exit: join(seat, 'exit'), pgid: join(seat, 'pgid'), fifo: join(seat, 'cmd.fifo'),
+    exit: join(seat, 'exit'), pgid: join(seat, 'pgid'), fifo: seatCommandPath(dirname(dir), role),
   })
 }
 
@@ -55,6 +56,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   const read = deps.readFileSync || fsReadFileSync
   const write = deps.writeFileSync || fsWriteFileSync
   const mkdir = deps.mkdirSync || fsMkdirSync
+  const unlink = deps.unlinkSync || fsUnlinkSync
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
@@ -91,6 +93,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
 
   function start() {
     mkdir(paths.dir, { recursive: true })
+    mkdir(dirname(paths.fifo), { recursive: true })
     offset = streamEnd()
     rest = Buffer.alloc(0)
     const reservation = store.reserve(role, {
@@ -262,6 +265,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     try { if (fd != null) closeFd(fd) } catch {}
     const proof = proveDead()
     if (proof.liveness === LIVENESS.DEAD && handle) { try { store.clear(handle) } catch {} }
+    try { if (proof.liveness === LIVENESS.DEAD && exists(paths.fifo)) unlink(paths.fifo) } catch {}
     const result = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
     closeResult = result
     log({ at: now(), acp_teardown: { role, ...result } })

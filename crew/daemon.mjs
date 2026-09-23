@@ -1385,8 +1385,8 @@ export function daemon(options = {}) {
     if (member.transport !== 'headless-rpc') {
       throw runError('not-capable', `no command channel is implemented for transport ${JSON.stringify(member.transport)}`)
     }
-    const fifo = seatCommandPath(join(run.crew_dir, 'task'), role)
-    const seatDir = dirname(fifo)
+    const fifo = seatCommandPath(run.crew_dir, role)
+    const seatDir = join(run.crew_dir, 'task', 'headless-rpc', role)
     if (exists(join(seatDir, 'exit'))) throw runError('not-live', `seat ${role} has exited`)
     const workerPid = rpcPid(join(seatDir, 'pgid'))
     if (workerPid == null || processAlive(kill, workerPid) === false) throw runError('not-live', `seat ${role} has no running worker`)

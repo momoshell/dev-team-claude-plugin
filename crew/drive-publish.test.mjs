@@ -1540,6 +1540,28 @@ test('G1 overlapping closes and issues omit the duplicate reference', () => {
   assert.doesNotMatch(body, /Refs #1467/)
 })
 
+test('G2 plan and builder closes union de-duplicated, excluded from Refs, and carried into the PR body', () => {
+  const union = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, closes: [1520] } }),
+    builderEnv: buildEnv({ details: { ...buildEnv().details, closes: ['#1520', '1521', 'invalid', '#1521'] } }),
+  })
+  assert.equal(union.split('\n').find((line) => line.startsWith('Closes:')), 'Closes: #1520, #1521')
+  const overlapping = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, issues: [1521, 1522] } }),
+    builderEnv: buildEnv({ details: { ...buildEnv().details, closes: [1521] } }),
+  })
+  assert.equal(overlapping.split('\n').filter((line) => /^(?:Closes|Refs):/.test(line)).join('\n'), 'Closes: #1521\nRefs: #1522')
+  const trailers = issueTrailers(overlapping)
+  assert.deepEqual(trailers.closes, ['#1521'])
+  assert.deepEqual(trailers.refs, ['#1522'])
+  const body = composePrBody({ closes: trailers.closes, issues: trailers.refs })
+  assert.ok(body.split('\n').some((line) => line.startsWith('Closes #1521')))
+  assert.doesNotMatch(body, /Refs #1521/)
+  assert.match(body, /Refs #1522/)
+})
+
 test('all branch and task paths are shellArg quoted in publication commands', () => {
   const branch = "feat/'$HOME; echo pwn `x` with spaces"
   const taskDir = "/tmp/task/'$HOME; echo pwn with spaces"

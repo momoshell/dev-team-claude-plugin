@@ -1,4 +1,4 @@
-import { accessSync, constants, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rosterSeating } from './roster.mjs'
@@ -147,8 +147,9 @@ export function renderReport(diff, { generatedAt, rosterUpdatedAt, seatedCount }
 // ---- successors: bump every model the factory uses to the newest version in its family ----
 //
 // A family is recognised only by an explicit, closed set of id shapes. Anything else — a
-// local model, a codex variant, a `-pro`/`-mini` tier, a dated snapshot — has NO family and
-// is never bumped: a wrong guess would silently reseat the factory onto a different model.
+// local model, a codex variant, a tier suffix on a named model (gpt-6-sol-pro), a dated
+// snapshot — has NO family and is never bumped: a wrong guess would silently reseat the
+// factory onto a different model. A bare tier name IS a family (gpt-5-mini -> gpt-5.4-mini).
 export const FAMILY_SHAPES = Object.freeze([
   // gpt-<version>-<name>: gpt-5.6-sol, gpt-6-sol. One name token only, so gpt-6-sol-pro is not a sol.
   { pattern: /^gpt-(\d+)(?:\.(\d+))?-([a-z]+)$/, family: (m) => `gpt-*-${m[3]}` },
@@ -199,9 +200,9 @@ export function successorOf(key, catalogKeys) {
   return best ? { key, successor: best.key, reason: null } : { key, successor: null, reason: 'already-newest' }
 }
 
-// Every model the roster USES: the catalog keys, plus each seat as provider/id.
-export function usedModelKeys(roster) {
-  const keys = new Set(Object.keys(roster?.models || {}))
+// Every seat (and fallback) as provider/id.
+export function seatedModelKeys(roster) {
+  const keys = new Set()
   // Through the roster's own seating reader, so a v2 roster (seated under `assurances`) is
   // enumerated exactly as the runtime reads it — a v1-only walk silently left v2 seats behind.
   for (const seats of Object.values(rosterSeating(roster) || {})) {
@@ -213,6 +214,11 @@ export function usedModelKeys(roster) {
   return [...keys].sort()
 }
 
+// Every model the roster USES: the catalog keys, plus each seat.
+export function usedModelKeys(roster) {
+  return [...new Set([...Object.keys(roster?.models || {}), ...seatedModelKeys(roster)])].sort()
+}
+
 export function planBump(roster, rawCatalog) {
   const catalogKeys = []
   for (const [providerId, provider] of Object.entries(rawCatalog || {})) {
@@ -220,9 +226,13 @@ export function planBump(roster, rawCatalog) {
   }
   const bumps = []
   const skipped = []
+  const seated = new Set(seatedModelKeys(roster))
   for (const key of usedModelKeys(roster)) {
     const r = successorOf(key, catalogKeys)
-    if (r.successor) bumps.push({ from: key, to: r.successor })
+    // A predecessor kept only as a PRICE row (its successor already in the roster, no seat naming
+    // it) stays: the ledger prices its history from it. It is not a pending bump.
+    if (r.successor && !seated.has(key) && Object.hasOwn(roster?.models || {}, r.successor)) skipped.push({ key, reason: 'retained-price-row' })
+    else if (r.successor) bumps.push({ from: key, to: r.successor })
     else skipped.push({ key, reason: r.reason })
   }
   return { bumps, skipped }
@@ -322,9 +332,12 @@ export function applyBump({ roster, ladder, routing }, plan, rawCatalog, { today
     const target = keyMap[key] ?? (Object.values(keyMap).includes(key) ? key : null)
     if (target) tagsFor[target] = [...new Set([...(tagsFor[target] || []), ...(entry.tags || [])])]
   }
+  // A replaced model's entry STAYS as an unseated price row: the ledger prices its recorded
+  // history from this catalog, and dropping it would turn that history unpriced. No seat names it
+  // after the bump, and the ladder no longer admits it, so it cannot be seated again.
   const models = {}
   for (const [key, entry] of Object.entries(roster.models || {})) {
-    if (keyMap[key] || Object.values(keyMap).includes(key)) continue
+    if (Object.values(keyMap).includes(key)) continue
     models[key] = entry
   }
   for (const to of new Set(Object.values(keyMap))) {
@@ -332,10 +345,11 @@ export function applyBump({ roster, ladder, routing }, plan, rawCatalog, { today
   }
   nextRoster.models = Object.fromEntries(Object.entries(models).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
   nextRoster.updated_at = today
+  const dated = (doc) => (doc && Object.hasOwn(doc, 'updated_at') ? { ...doc, updated_at: today } : doc)
   return {
     roster: nextRoster,
-    ladder: ladder ? bumpLadder(ladder, keyMap) : ladder,
-    routing: routing ? replaceIds(routing, keyMap) : routing,
+    ladder: ladder ? dated(bumpLadder(ladder, keyMap)) : ladder,
+    routing: routing ? dated(replaceIds(routing, keyMap)) : routing,
   }
 }
 
@@ -347,20 +361,22 @@ export function commitWrites(writes, fsx) {
   // A backup left by an earlier failed rollback may be the ONLY original of its file. Starting again
   // would overwrite it, so recovery comes first.
   const leftover = writes.map((w) => `${w.path}.roster-refresh.bak`).filter((bak) => fsx.existsSync(bak))
-  if (leftover.length) throw new Error(`roster-refresh: --apply refused to start — ${leftover.join(', ')} holds the original from an earlier failed rollback; restore it by hand and delete the .bak before re-running`)
+  if (leftover.length) throw new Error(`roster-refresh: --apply refused to start — ${leftover.join(', ')} holds an original an earlier apply left behind (a failed rollback, or a backup it could not remove); compare it with its file, restore it by hand if it differs, and delete the .bak before re-running`)
   const staged = []
+  const backedUp = []
   try {
     for (const w of writes) fsx.accessSync(w.path, fsx.constants.W_OK)
     for (const w of writes) { const tmp = `${w.path}.roster-refresh.tmp`; fsx.writeFileSync(tmp, w.next); staged.push({ ...w, tmp }) }
     // The repo's own loaders read every staged file before any target changes: an output the
     // runtime would reject is never written, and --apply never reports a success it did not have.
     for (const st of staged) st.validate?.(st.tmp)
+    // Originals go to disk BEFORE any rename, so recovery never depends on a restore succeeding.
+    for (const st of staged) { st.bak = `${st.path}.roster-refresh.bak`; fsx.writeFileSync(st.bak, st.original); backedUp.push(st) }
   } catch (err) {
     for (const st of staged) { try { fsx.unlinkSync(st.tmp) } catch {} }
+    for (const st of backedUp) { try { fsx.unlinkSync(st.bak) } catch {} }
     throw new Error(`roster-refresh: --apply aborted before changing any file — ${err.message}`)
   }
-  // Originals go to disk BEFORE any rename, so recovery never depends on a restore succeeding.
-  for (const st of staged) { st.bak = `${st.path}.roster-refresh.bak`; fsx.writeFileSync(st.bak, st.original) }
   const done = []
   try {
     for (const st of staged) { fsx.renameSync(st.tmp, st.path); done.push(st) }
@@ -374,7 +390,9 @@ export function commitWrites(writes, fsx) {
     }
     throw new Error(`roster-refresh: --apply failed part-way and restored all ${done.length} file(s) it had replaced — ${err.message}`)
   }
-  for (const st of staged) { try { fsx.unlinkSync(st.bak) } catch {} }
+  const kept = []
+  for (const st of staged) { try { fsx.unlinkSync(st.bak) } catch { kept.push(st.bak) } }
+  if (kept.length) throw new Error(`roster-refresh: --apply succeeded, but could not remove ${kept.join(', ')}; delete it before the next run, which refuses while it exists`)
 }
 
 // Old ids still named in PROSE after an apply — reported for a human, never rewritten.
@@ -484,7 +502,7 @@ if (import.meta.main) {
         { path: rosterFile, original: readFileSync(rosterFile, 'utf8'), next: json(next.roster), validate: (tmp) => loadRoster(tmp) },
         { path: ladder.path, original: readFileSync(ladder.path, 'utf8'), next: json(next.ladder), validate: (tmp) => loadLadder({ path: tmp }) },
         { path: routing.path, original: readFileSync(routing.path, 'utf8'), next: json(next.routing), validate: (tmp) => loadRoutingPolicy({ path: tmp }) },
-      ], { accessSync, constants, writeFileSync, renameSync, unlinkSync })
+      ], { accessSync, constants, existsSync, writeFileSync, renameSync, unlinkSync })
     } catch (err) {
       console.error(err.message)
       process.exit(1)

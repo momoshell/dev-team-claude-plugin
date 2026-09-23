@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
@@ -266,6 +266,7 @@ test('renderReport body is deterministic', () => {
 })
 
 import { spawnSync } from 'node:child_process'
+import { scratchDir } from '../test/helpers.mjs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -490,7 +491,9 @@ test('APPLY1 every seat, fallback, catalog key, ladder member and route moves to
   assert.equal(next.roster.tiers.build.planner.id, 'gpt-6-sol')
   assert.equal(next.roster.tiers.build.reviewer.id, 'claude-opus-5-5')
   assert.equal(next.roster.tiers.judge['tech-lead'].fallback[0].id, 'gpt-6-sol')
-  assert.deepEqual(Object.keys(next.roster.models).sort(), ['anthropic/claude-opus-5-5', 'openai/gpt-6-sol'])
+  // The replaced entries stay as unseated price rows; the ladder no longer admits them.
+  assert.deepEqual(Object.keys(next.roster.models).sort(), ['anthropic/claude-opus-5', 'anthropic/claude-opus-5-5', 'openai/gpt-5.6-sol', 'openai/gpt-6-sol'])
+  assert.deepEqual(next.roster.models['openai/gpt-5.6-sol'], BUMP_ROSTER.models['openai/gpt-5.6-sol'])
   assert.deepEqual(next.ladder.bands[0].members, ['anthropic/claude-opus-5-5', 'openai/gpt-6-sol'])
   assert.equal(next.routing.routes.build.reviewer.candidates[0].id, 'gpt-6-sol')
   assert.equal(next.roster.updated_at, '2026-09-23')
@@ -536,7 +539,7 @@ test('APPLY5 two providers sharing a bare id each move to their OWN successor', 
 
 // Mutation killed: letting the retained entry win keeps a stale price the catalog has replaced.
 test('APPLY6 a successor already in the roster is refreshed from the catalog, never left stale', () => {
-  const roster = { tiers: {}, models: {
+  const roster = { tiers: { build: { planner: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi' } } }, models: {
     'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-01-01' },
     'openai/gpt-6-sol': { cost_in_per_mtok: 999, cost_out_per_mtok: 999, context: 1, tags: ['vendor-diverse'], source: 'stale', last_verified: '2025-01-01' },
   } }
@@ -544,7 +547,7 @@ test('APPLY6 a successor already in the roster is refreshed from the catalog, ne
   assert.equal(next.roster.models['openai/gpt-6-sol'].cost_in_per_mtok, 2)
   assert.equal(next.roster.models['openai/gpt-6-sol'].source, 'models.dev')
   assert.deepEqual(next.roster.models['openai/gpt-6-sol'].tags.sort(), ['reasoning', 'vendor-diverse'])
-  assert.equal(Object.hasOwn(next.roster.models, 'openai/gpt-5.6-sol'), false)
+  assert.equal(next.roster.models['openai/gpt-5.6-sol'].cost_in_per_mtok, 4)
 })
 
 // Mutation killed: reporting already-newest for a model the catalog does not list turns
@@ -699,4 +702,74 @@ test('HOUR1 an anthropic cache write is priced at the 1h rate, other vendors as 
   const sol = catalogEntry('openai/gpt-6-sol', catalog, { today: '2026-09-23' })
   assert.equal(sol.cost_cache_write_per_mtok, 2.5)
   assert.match(sol.cache_rate_source, /second price tier above 272000 tokens/)
+})
+
+// Mutation killed: planning a kept price row as a bump re-reports it, and re-applies it, on every run.
+test('RETAIN1 an unseated predecessor whose successor is already held is a price row, not a bump', () => {
+  const roster = { tiers: { build: { planner: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi' } } }, models: {
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1, tags: [], source: 'models.dev', last_verified: '2026-01-01' },
+    'openai/gpt-6-sol': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1, tags: [], source: 'models.dev', last_verified: '2026-09-23' },
+  } }
+  const plan = planBump(roster, BUMP_CATALOG)
+  assert.deepEqual(plan.bumps, [])
+  assert.deepEqual(plan.skipped.find((s) => s.key === 'openai/gpt-5.6-sol'), { key: 'openai/gpt-5.6-sol', reason: 'retained-price-row' })
+})
+
+// Mutation killed: a backup write outside the staging try escapes raw and leaves .tmp and .bak
+// files behind, which the next run then blames on a rollback that never happened.
+test('BAK1 a failed backup write changes no file and leaves nothing behind', () => {
+  const files = new Map([['a', 'A0'], ['b', 'B0']])
+  const fsx = {
+    constants: { W_OK: 2 }, accessSync: () => {},
+    writeFileSync: (p, t) => { if (p === 'b.roster-refresh.bak') throw new Error('ENOSPC'); files.set(p, t) },
+    renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => files.delete(p), existsSync: (p) => files.has(p),
+  }
+  const writes = [{ path: 'a', original: 'A0', next: 'A1' }, { path: 'b', original: 'B0', next: 'B1' }]
+  assert.throws(() => commitWrites(writes, fsx), /aborted before changing any file — ENOSPC/)
+  assert.deepEqual([...files.entries()], [['a', 'A0'], ['b', 'B0']])
+})
+
+// Mutation killed: swallowing a failed backup removal reports a clean apply that blocks the next run.
+test('BAK2 a backup that cannot be removed after a successful apply is reported', () => {
+  const files = new Map([['a', 'A0']])
+  const fsx = {
+    constants: { W_OK: 2 }, accessSync: () => {},
+    writeFileSync: (p, t) => files.set(p, t),
+    renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => { if (p.endsWith('.bak')) throw new Error('EPERM'); files.delete(p) },
+    existsSync: (p) => files.has(p),
+  }
+  assert.throws(() => commitWrites([{ path: 'a', original: 'A0', next: 'A1' }], fsx), /succeeded, but could not remove a\.roster-refresh\.bak/)
+  assert.equal(files.get('a'), 'A1')
+})
+
+// Mutation killed: the CLI's own fs object lacking a method commitWrites calls fails every real
+// --apply while every injected-fs unit test stays green.
+test('CLI1 --apply rewrites a scratch roster, ladder and routing policy end to end', () => {
+  const dir = scratchDir('roster-refresh-cli1-')
+  try {
+    for (const name of ['roster.json', 'model-ladder.json', 'routing-policy.json']) writeFileSync(join(dir, name), readFileSync(new URL(`./${name}`, import.meta.url)))
+    const shipped = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
+    const catalog = {}
+    const add = (key, e) => {
+      const [provider, ...rest] = key.split('/')
+      catalog[provider] ??= { models: {} }
+      catalog[provider].models[rest.join('/')] = { cost: { input: e.cost_in_per_mtok, output: e.cost_out_per_mtok, cache_read: e.cost_cache_read_per_mtok, cache_write: e.cost_cache_write_per_mtok }, limit: { context: e.context } }
+    }
+    for (const [key, e] of Object.entries(shipped.models)) add(key, e)
+    add('openai/gpt-6-sol', { cost_in_per_mtok: 2, cost_out_per_mtok: 10, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5, context: 1050000 })
+    const catalogPath = join(dir, 'catalog.json')
+    writeFileSync(catalogPath, JSON.stringify(catalog))
+    const before = readFileSync(join(dir, 'routing-policy.json'), 'utf8')
+    const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', join(dir, 'roster.json'), '--catalog', catalogPath, '--apply'], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /applied 1 bump\(s\)/)
+    const after = JSON.parse(readFileSync(join(dir, 'roster.json'), 'utf8'))
+    assert.equal(Object.hasOwn(after.models, 'openai/gpt-6-sol'), true)
+    assert.equal(Object.hasOwn(after.models, 'openai/gpt-5.6-sol'), true)
+    assert.equal(JSON.stringify(after.tiers).includes('"gpt-5.6-sol"'), false)
+    assert.notEqual(readFileSync(join(dir, 'routing-policy.json'), 'utf8'), before)
+    assert.deepEqual(readdirSync(dir).filter((n) => /\.roster-refresh\.(tmp|bak)$/.test(n)), [])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

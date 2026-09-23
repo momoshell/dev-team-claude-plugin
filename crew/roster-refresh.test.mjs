@@ -574,7 +574,7 @@ test('APPLY8 a failed write changes no file, and a failed rename restores what i
     accessSync: () => {},
     writeFileSync: (p, t) => { if (failOn.write === p) throw new Error(`cannot write ${p}`); files.set(p, t) },
     renameSync: (from, to) => { if (failOn.rename === to) throw new Error(`cannot rename ${to}`); files.set(to, files.get(from)); files.delete(from) },
-    unlinkSync: (p) => files.delete(p),
+    unlinkSync: (p) => files.delete(p), existsSync: (p) => files.has(p),
   })
   const writes = [['a', 'A0', 'A1'], ['b', 'B0', 'B1'], ['c', 'C0', 'C1']].map(([path, original, next]) => ({ path, original, next }))
   assert.throws(() => commitWrites(writes, fsx({ write: 'c.roster-refresh.tmp' })), /aborted before changing any file/)
@@ -619,7 +619,7 @@ test('VALIDATE1 a staged file the loader rejects changes no file', () => {
     constants: { W_OK: 2 }, accessSync: () => {},
     writeFileSync: (p, t) => files.set(p, t),
     renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) },
-    unlinkSync: (p) => files.delete(p),
+    unlinkSync: (p) => files.delete(p), existsSync: (p) => files.has(p),
   }
   const writes = [
     { path: 'a', original: 'A0', next: 'A1', validate: () => {} },
@@ -648,7 +648,7 @@ test('ROLLBACK2 a restore that fails is reported, and its original survives on d
     constants: { W_OK: 2 }, accessSync: () => {},
     writeFileSync: (p, t) => { if (restoring && p === 'a') throw new Error('disk full'); files.set(p, t) },
     renameSync: (from, to) => { if (to === 'b') { restoring = true; throw new Error('cannot rename b') } files.set(to, files.get(from)); files.delete(from) },
-    unlinkSync: (p) => files.delete(p),
+    unlinkSync: (p) => files.delete(p), existsSync: (p) => files.has(p),
   }
   const writes = [{ path: 'a', original: 'A0', next: 'A1' }, { path: 'b', original: 'B0', next: 'B1' }]
   assert.throws(() => commitWrites(writes, fsx), /could NOT restore a; .*MIXED/)
@@ -659,4 +659,44 @@ test('ROLLBACK2 a restore that fails is reported, and its original survives on d
 test('PROSE2 an exact stale id outside a reference field is reported', () => {
   const plan = { bumps: [{ from: 'openai/gpt-5.6-sol', to: 'openai/gpt-6-sol' }] }
   assert.deepEqual(proseMentions({ bands: [{ members: ['openai/gpt-6-sol'], membership_basis: 'openai/gpt-5.6-sol' }] }, plan.bumps).map((h) => h.path), ['.bands[0].membership_basis'])
+})
+
+// Mutation killed: starting again over a leftover backup overwrites the only original of a file
+// whose restore already failed.
+test('ROLLBACK3 a leftover recovery backup refuses the next apply and survives it', () => {
+  const files = new Map([['a', 'A1'], ['a.roster-refresh.bak', 'A0'], ['b', 'B0']])
+  const fsx = {
+    constants: { W_OK: 2 }, accessSync: () => {},
+    writeFileSync: (p, t) => files.set(p, t),
+    renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => files.delete(p), existsSync: (p) => files.has(p),
+  }
+  const writes = [{ path: 'a', original: 'A1', next: 'A2' }, { path: 'b', original: 'B0', next: 'B1' }]
+  assert.throws(() => commitWrites(writes, fsx), /refused to start — a\.roster-refresh\.bak/)
+  assert.deepEqual([files.get('a'), files.get('a.roster-refresh.bak'), files.get('b')], ['A1', 'A0', 'B0'])
+})
+
+// Mutation killed: dropping the bounds check writes a negative price or a fractional context that
+// roster.schema.json forbids and loadRoster never checks.
+test('BOUNDS1 a catalog value outside the schema bounds is refused, not written', () => {
+  const catalog = (cost, context) => ({ openai: { models: { 'gpt-6-sol': { cost, limit: { context } } } } })
+  assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: -3, output: 10 }, 1000), { today: '2026-09-23' }), /input is outside/)
+  assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10 }, 1.5), { today: '2026-09-23' }), /context is outside/)
+  assert.throws(() => catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10, cache_write: -1 }, 1000), { today: '2026-09-23' }), /cache_write is outside/)
+  assert.equal(catalogEntry('openai/gpt-6-sol', catalog({ input: 2, output: 10, cache_write: 0 }, 1000), { today: '2026-09-23' }).cost_cache_write_per_mtok, 0)
+})
+
+// Mutation killed: copying models.dev's anthropic cacheWrite ships the 5-minute rate under the
+// 1h definition every cost row prints.
+test('HOUR1 an anthropic cache write is priced at the 1h rate, other vendors as published', () => {
+  const catalog = {
+    anthropic: { models: { 'claude-opus-5-5': { cost: { input: 4, output: 20, cache_read: 0.2, cache_write: 5 }, limit: { context: 1000000 } } } },
+    openai: { models: { 'gpt-6-sol': { cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5, tiers: [{ input: 4, tier: { type: 'context', size: 272000 } }] }, limit: { context: 1050000 } } } },
+  }
+  const opus = catalogEntry('anthropic/claude-opus-5-5', catalog, { today: '2026-09-23' })
+  assert.equal(opus.cost_cache_write_per_mtok, 8)
+  assert.match(opus.cache_rate_source, /5-minute rate.*1h-TTL rate, 2\.00x/)
+  const sol = catalogEntry('openai/gpt-6-sol', catalog, { today: '2026-09-23' })
+  assert.equal(sol.cost_cache_write_per_mtok, 2.5)
+  assert.match(sol.cache_rate_source, /second price tier above 272000 tokens/)
 })

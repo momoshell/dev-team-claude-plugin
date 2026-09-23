@@ -237,14 +237,28 @@ export function catalogEntry(key, rawCatalog, { tags = [], today }) {
   if (!Number.isFinite(cost.input) || !Number.isFinite(cost.output) || !Number.isFinite(m?.limit?.context)) {
     throw new Error(`roster-refresh: refusing to write ${key} — the catalog publishes no input/output price or context for it`)
   }
+  // roster.schema.json bounds: every price a number >= 0, context an integer >= 1. loadRoster does
+  // not check model fields, so an out-of-bounds catalog value would otherwise be written as-is.
+  const outOfBounds = Object.entries({ input: cost.input, output: cost.output, cache_read: cost.cache_read, cache_write: cost.cache_write })
+    .filter(([, v]) => v != null && !(Number.isFinite(v) && v >= 0)).map(([k]) => k)
+  if (!Number.isInteger(m.limit.context) || m.limit.context < 1) outOfBounds.push('context')
+  if (outOfBounds.length) throw new Error(`roster-refresh: refusing to write ${key} — the catalog's ${outOfBounds.join(', ')} is outside roster.schema.json's bounds`)
   const entry = { cost_in_per_mtok: cost.input, cost_out_per_mtok: cost.output }
   const hasRead = Number.isFinite(cost.cache_read)
   const hasWrite = Number.isFinite(cost.cache_write)
+  // models.dev's anthropic cacheWrite is the 5-minute rate (1.25x input). The roster prices that
+  // column at the ratified 1h rate, 2.00x input (CELL_PRICE_UNITS), so a published anthropic write
+  // is converted, never copied; an unpublished one stays omitted.
+  const hourWrite = providerId === 'anthropic' && hasWrite
   if (hasRead) entry.cost_cache_read_per_mtok = cost.cache_read
-  if (hasWrite) entry.cost_cache_write_per_mtok = cost.cache_write
-  entry.cache_rate_source = hasRead && hasWrite
+  if (hasWrite) entry.cost_cache_write_per_mtok = hourWrite ? cost.input * 2 : cost.cache_write
+  const sentences = [hasRead && hasWrite
     ? 'models.dev published cache read and cache write rates for this model.'
-    : `models.dev publishes no ${[!hasRead && 'cache read', !hasWrite && 'cache write'].filter(Boolean).join(' or ')} rate for this model; it is omitted, not zero.`
+    : `models.dev publishes no ${[!hasRead && 'cache read', !hasWrite && 'cache write'].filter(Boolean).join(' or ')} rate for this model; it is omitted, not zero.`]
+  if (hourWrite) sentences.push(`Its cache write of ${cost.cache_write} is the 5-minute rate; this entry prices writes at the ratified 1h-TTL rate, 2.00x cost_in_per_mtok, derived from the multiplier rather than read from a published per-model figure.`)
+  const tier = Array.isArray(cost.tiers) ? cost.tiers.find((t) => Number.isFinite(t?.tier?.size)) : null
+  if (tier) sentences.push(`models.dev also declares a second price tier above ${tier.tier.size} tokens that this single-rate entry cannot represent; usage above it is underpriced here.`)
+  entry.cache_rate_source = sentences.join(' ')
   entry.context = m.limit.context
   entry.tags = tags
   entry.source = 'models.dev'
@@ -330,6 +344,10 @@ export function applyBump({ roster, ladder, routing }, plan, rawCatalog, { today
 // replaced is restored from the original text read at the start. A failed apply must never leave
 // the roster, the ladder and the routing policy naming different models.
 export function commitWrites(writes, fsx) {
+  // A backup left by an earlier failed rollback may be the ONLY original of its file. Starting again
+  // would overwrite it, so recovery comes first.
+  const leftover = writes.map((w) => `${w.path}.roster-refresh.bak`).filter((bak) => fsx.existsSync(bak))
+  if (leftover.length) throw new Error(`roster-refresh: --apply refused to start — ${leftover.join(', ')} holds the original from an earlier failed rollback; restore it by hand and delete the .bak before re-running`)
   const staged = []
   try {
     for (const w of writes) fsx.accessSync(w.path, fsx.constants.W_OK)

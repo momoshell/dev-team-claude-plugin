@@ -2372,10 +2372,15 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
   }
   assert.deepEqual(shipped.tiers.judge['tech-lead'].fallback.map((entry) => entry.id), ['claude-opus-5-5'])
   assert.equal(shipped.tiers.judge['tech-lead'].id, 'claude-fable-5-1')
+  // Fable is reached by explicit seating only: its override-only tag keeps the failure-upgrade
+  // reseat from climbing onto it from a cheaper anthropic seat.
+  assert.ok(shipped.models['anthropic/claude-fable-5-1'].tags.includes('override-only'))
+  assert.equal(nextModelRung(shipped, { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' }), null)
   const expectedCatalog = {
     'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
     'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
     'anthropic/claude-opus-5-5': [4, 20, 0.2, 8, 1000000],
+    'anthropic/claude-fable-5-1': [10, 50, 0.25, 20, 1000000],
   }
   for (const [key, prices] of Object.entries(expectedCatalog)) {
     const model = shipped.models[key]
@@ -2418,6 +2423,8 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
   assert.ok(frontier.members.includes('anthropic/claude-opus-5-5'))
   assert.ok(frontier.members.includes('openai/gpt-6-sol'))
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
+  assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
+  assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)
   for (const band of [frontier, utility]) {
     assert.match(String(band.membership_basis), /operator ratification on 2026-09-23/)
     assert.match(String(band.membership_basis), /no successor benchmark score was supplied/)

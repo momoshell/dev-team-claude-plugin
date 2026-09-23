@@ -14,7 +14,7 @@
         "openai/gpt-6-astra",
         "meta/muse-spark-1.3-contributor"
       ],
-      "membership_basis": "Frontier placement for meta/muse-spark-1.3-contributor is MEASURED, not asserted: Artificial Analysis scores Muse Spark 1.3 at 62 (max) and 61 (xhigh), which equals anthropic/claude-fable-5 (62), already frontier. Placement for openai/gpt-6-astra is an assertion ratified by the operator on 2026-09-17: the Artificial Analysis catalog carries no score for it. openai/gpt-6-sol and anthropic/claude-opus-5-5 replace their predecessors in this same band by operator ratification on 2026-09-23; no successor benchmark score was supplied. NOTE: floor_reference_score 80 is not met by any measured member of this band — the floors were ratified 2026-08-14 against a scale the current catalog no longer matches, and reconciling them is open work."
+      "membership_basis": "Frontier placement for meta/muse-spark-1.3-contributor is MEASURED, not asserted: Artificial Analysis scores Muse Spark 1.3 at 62 (max) and 61 (xhigh), which equals anthropic/claude-fable-5 (62), the frontier member when it was measured. Placement for openai/gpt-6-astra is an assertion ratified by the operator on 2026-09-17: the Artificial Analysis catalog carries no score for it. openai/gpt-6-sol, anthropic/claude-opus-5-5 and anthropic/claude-fable-5-1 replace their predecessors in this same band by operator ratification on 2026-09-23; no successor benchmark score was supplied. NOTE: floor_reference_score 80 is not met by any measured member of this band — the floors were ratified 2026-08-14 against a scale the current catalog no longer matches, and reconciling them is open work."
     },
     {
       "band": "workhorse",

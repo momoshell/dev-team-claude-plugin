@@ -3445,7 +3445,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const closes = normalizeIssues(planEnv?.details?.closes)
+  const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)])
   const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
   const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { normalizeCatalog, diffModels, readRosterModels, renderReport } from './roster-refresh.mjs'
+import { normalizeCatalog, diffModels, readRosterModels, renderReport, successorOf, planBump, applyBump, catalogEntry, proseMentions, commitWrites, bumpLadder } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
@@ -419,4 +419,244 @@ test('renderReport preserves removed models for legacy callers', () => {
   const report = renderReport(diffModels(NA, NB), { generatedAt: 'now', rosterUpdatedAt: 'today' })
   assert.match(report, /## Disappeared \(1\)/)
   assert.match(report, /openai\/gpt-5\.6-sol/)
+})
+
+
+// ---- --apply: successor planning -------------------------------------------------------------
+const price = (input, output, extra = {}) => ({ cost: { input, output, ...extra }, limit: { context: 1000000 } })
+const BUMP_CATALOG = {
+  openai: { models: {
+    'gpt-5.6-sol': price(4, 20), 'gpt-6-sol': price(2, 10, { cache_read: 0.2, cache_write: 2.5 }),
+    'gpt-6-sol-pro': price(40, 200), 'gpt-9-sol-mini': price(1, 1),
+    'gpt-5.6-luna': price(0.2, 1.2), 'gpt-6-luna': price(0.1, 0.5),
+  } },
+  anthropic: { models: {
+    'claude-opus-5': price(5, 25), 'claude-opus-5-5': price(4, 20, { cache_read: 0.2 }),
+    'claude-opus-5-5-20260922': price(4, 20), 'claude-opus-5-20260922': price(4, 20),
+  } },
+  meta: { models: { 'muse-spark-1.3-contributor': price(0.1, 0.2), 'muse-spark-1.4': price(1.25, 4.25) } },
+}
+const CATALOG_KEYS = Object.entries(BUMP_CATALOG).flatMap(([p, v]) => Object.keys(v.models).map((m) => `${p}/${m}`))
+
+// Mutation killed: letting the name group match more than one token picks gpt-6-sol-pro, and
+// a missing single-token bound picks gpt-9-sol-mini.
+test('SUCC1 a successor is the newest version of the SAME family, never a tier variant', () => {
+  assert.deepEqual(successorOf('openai/gpt-5.6-sol', CATALOG_KEYS), { key: 'openai/gpt-5.6-sol', successor: 'openai/gpt-6-sol', reason: null })
+  assert.equal(successorOf('openai/gpt-5.6-luna', CATALOG_KEYS).successor, 'openai/gpt-6-luna')
+})
+
+// Mutation killed: an unbounded minor reads the date in claude-opus-5-20260922 as version 5.20260922,
+// which beats every real release.
+test('SUCC2 a dated snapshot is never a successor', () => {
+  assert.equal(successorOf('anthropic/claude-opus-5', CATALOG_KEYS).successor, 'anthropic/claude-opus-5-5')
+})
+
+// Mutation killed: dropping the tier suffix from the muse family moves a contributor seat
+// onto the full-price non-contributor model.
+test('SUCC3 a tiered family keeps its tier', () => {
+  assert.deepEqual(successorOf('meta/muse-spark-1.3-contributor', CATALOG_KEYS), { key: 'meta/muse-spark-1.3-contributor', successor: null, reason: 'already-newest' })
+})
+
+// Mutation killed: guessing a family for an unrecognised shape would reseat a local model.
+test('SUCC4 an unrecognised id is never bumped, and says why', () => {
+  assert.deepEqual(successorOf('llama-swap/qwen3.8-27b', CATALOG_KEYS), { key: 'llama-swap/qwen3.8-27b', successor: null, reason: 'family-unrecognised' })
+})
+
+const BUMP_ROSTER = {
+  updated_at: '2026-01-01',
+  tiers: {
+    build: {
+      planner: { id: 'gpt-5.6-sol', agent: 'pi', provider: 'openai' },
+      reviewer: { id: 'claude-opus-5', agent: 'claude', provider: 'anthropic' },
+    },
+    judge: {
+      'tech-lead': { id: 'claude-opus-5', agent: 'claude', provider: 'anthropic', fallback: [{ id: 'gpt-5.6-sol', agent: 'pi', provider: 'openai' }] },
+    },
+  },
+  models: {
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-01-01' },
+    'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['frontier'], source: 'models.dev', last_verified: '2026-01-01' },
+  },
+}
+const BUMP_LADDER = { bands: [{ members: ['anthropic/claude-opus-5', 'openai/gpt-5.6-sol'], membership_basis: 'openai/gpt-5.6-sol scored 61; claude-opus-5 scored 63.' }] }
+// Real routing candidates carry their provider (crew/routing-policy.json); a bare id is never mapped.
+const BUMP_ROUTING = { routes: { build: { reviewer: { candidates: [{ provider: 'openai', id: 'gpt-5.6-sol' }] } } } }
+
+// Mutation killed: skipping seat fallbacks, the ladder or the routing policy leaves an old
+// version running somewhere the operator said it must not.
+test('APPLY1 every seat, fallback, catalog key, ladder member and route moves to the successor', () => {
+  const plan = planBump(BUMP_ROSTER, BUMP_CATALOG)
+  const next = applyBump({ roster: BUMP_ROSTER, ladder: BUMP_LADDER, routing: BUMP_ROUTING }, plan, BUMP_CATALOG, { today: '2026-09-23' })
+  assert.equal(next.roster.tiers.build.planner.id, 'gpt-6-sol')
+  assert.equal(next.roster.tiers.build.reviewer.id, 'claude-opus-5-5')
+  assert.equal(next.roster.tiers.judge['tech-lead'].fallback[0].id, 'gpt-6-sol')
+  assert.deepEqual(Object.keys(next.roster.models).sort(), ['anthropic/claude-opus-5-5', 'openai/gpt-6-sol'])
+  assert.deepEqual(next.ladder.bands[0].members, ['anthropic/claude-opus-5-5', 'openai/gpt-6-sol'])
+  assert.equal(next.routing.routes.build.reviewer.candidates[0].id, 'gpt-6-sol')
+  assert.equal(next.roster.updated_at, '2026-09-23')
+})
+
+// Mutation killed: replacing substrings rewrites a measured score onto a model that was never
+// measured — a true record turned into a false one.
+test('APPLY2 prose that records a measurement is left untouched and reported', () => {
+  const plan = planBump(BUMP_ROSTER, BUMP_CATALOG)
+  const next = applyBump({ roster: BUMP_ROSTER, ladder: BUMP_LADDER, routing: BUMP_ROUTING }, plan, BUMP_CATALOG, { today: '2026-09-23' })
+  assert.equal(next.ladder.bands[0].membership_basis, BUMP_LADDER.bands[0].membership_basis)
+  assert.deepEqual(proseMentions(next.ladder, plan.bumps).map((h) => h.path), ['.bands[0].membership_basis', '.bands[0].membership_basis'])
+})
+
+// Mutation killed: an unbounded match flags claude-opus-5-5 as a mention of claude-opus-5.
+test('APPLY3 a successor that extends the old id is not reported as a mention of it', () => {
+  const plan = { bumps: [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }] }
+  assert.deepEqual(proseMentions({ members: ['anthropic/claude-opus-5-5'], id: 'claude-opus-5-5' }, plan.bumps), [])
+})
+
+// Mutation killed: defaulting an unpublished cache rate to zero claims a free cache the catalog
+// never said exists.
+test('APPLY4 a cache rate the catalog does not publish is omitted and said so, never zero', () => {
+  const entry = catalogEntry('anthropic/claude-opus-5-5', BUMP_CATALOG, { tags: ['frontier'], today: '2026-09-23' })
+  assert.equal(entry.cost_cache_read_per_mtok, 0.2)
+  assert.equal(Object.hasOwn(entry, 'cost_cache_write_per_mtok'), false)
+  assert.match(entry.cache_rate_source, /no cache write rate/)
+  assert.deepEqual(entry.tags, ['frontier'])
+})
+
+// Mutation killed: a global bare-id map writes one provider's successor into another provider's seat.
+test('APPLY5 two providers sharing a bare id each move to their OWN successor', () => {
+  const catalog = { openai: { models: { 'gpt-5-sol': price(1, 1), 'gpt-6-sol': price(2, 2) } }, proxy: { models: { 'gpt-5-sol': price(1, 1), 'gpt-7-sol': price(3, 3) } } }
+  const roster = { tiers: { build: {
+    planner: { provider: 'openai', id: 'gpt-5-sol', agent: 'pi' },
+    reviewer: { provider: 'proxy', id: 'gpt-5-sol', agent: 'pi' },
+  } }, models: {} }
+  const plan = planBump(roster, catalog)
+  const next = applyBump({ roster }, plan, catalog, { today: '2026-09-23' })
+  assert.equal(next.roster.tiers.build.planner.id, 'gpt-6-sol')
+  assert.equal(next.roster.tiers.build.reviewer.id, 'gpt-7-sol')
+})
+
+// Mutation killed: letting the retained entry win keeps a stale price the catalog has replaced.
+test('APPLY6 a successor already in the roster is refreshed from the catalog, never left stale', () => {
+  const roster = { tiers: {}, models: {
+    'openai/gpt-5.6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-01-01' },
+    'openai/gpt-6-sol': { cost_in_per_mtok: 999, cost_out_per_mtok: 999, context: 1, tags: ['vendor-diverse'], source: 'stale', last_verified: '2025-01-01' },
+  } }
+  const next = applyBump({ roster }, planBump(roster, BUMP_CATALOG), BUMP_CATALOG, { today: '2026-09-23' })
+  assert.equal(next.roster.models['openai/gpt-6-sol'].cost_in_per_mtok, 2)
+  assert.equal(next.roster.models['openai/gpt-6-sol'].source, 'models.dev')
+  assert.deepEqual(next.roster.models['openai/gpt-6-sol'].tags.sort(), ['reasoning', 'vendor-diverse'])
+  assert.equal(Object.hasOwn(next.roster.models, 'openai/gpt-5.6-sol'), false)
+})
+
+// Mutation killed: reporting already-newest for a model the catalog does not list turns
+// absence into a version judgment nobody measured.
+test('SUCC5 a model the catalog does not list is unconfirmed, not newest', () => {
+  assert.deepEqual(successorOf('openai/gpt-4-terra', ['openai/gpt-6-sol']), { key: 'openai/gpt-4-terra', successor: null, reason: 'not-in-catalog' })
+  assert.equal(successorOf('openai/gpt-6-sol', ['openai/gpt-6-sol']).reason, 'already-newest')
+})
+
+// Mutation killed: dropping fallback enumeration leaves a fallback-only model on its old version.
+test('APPLY7 a model used ONLY as a fallback is bumped too', () => {
+  const roster = { tiers: { judge: { 'tech-lead': {
+    provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude',
+    fallback: [{ provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi' }],
+  } } }, models: {} }
+  const plan = planBump(roster, BUMP_CATALOG)
+  assert.deepEqual(plan.bumps, [{ from: 'openai/gpt-5.6-luna', to: 'openai/gpt-6-luna' }])
+  const next = applyBump({ roster }, plan, BUMP_CATALOG, { today: '2026-09-23' })
+  assert.equal(next.roster.tiers.judge['tech-lead'].fallback[0].id, 'gpt-6-luna')
+})
+
+// Mutation killed: writing targets directly leaves roster and ladder bumped while routing is not.
+test('APPLY8 a failed write changes no file, and a failed rename restores what it replaced', () => {
+  const files = new Map([['a', 'A0'], ['b', 'B0'], ['c', 'C0']])
+  const fsx = (failOn) => ({
+    constants: { W_OK: 2 },
+    accessSync: () => {},
+    writeFileSync: (p, t) => { if (failOn.write === p) throw new Error(`cannot write ${p}`); files.set(p, t) },
+    renameSync: (from, to) => { if (failOn.rename === to) throw new Error(`cannot rename ${to}`); files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => files.delete(p),
+  })
+  const writes = [['a', 'A0', 'A1'], ['b', 'B0', 'B1'], ['c', 'C0', 'C1']].map(([path, original, next]) => ({ path, original, next }))
+  assert.throws(() => commitWrites(writes, fsx({ write: 'c.roster-refresh.tmp' })), /aborted before changing any file/)
+  assert.deepEqual([files.get('a'), files.get('b'), files.get('c')], ['A0', 'B0', 'C0'])
+  assert.throws(() => commitWrites(writes, fsx({ rename: 'c' })), /restored all 2 file/)
+  assert.deepEqual([files.get('a'), files.get('b'), files.get('c')], ['A0', 'B0', 'C0'])
+  assert.equal([...files.keys()].some((k) => k.endsWith('.tmp') || k.endsWith('.bak')), false)
+})
+
+// Mutation killed: searching for a successor before confirming the model is listed bumps a model
+// the catalog cannot vouch for.
+test('SUCC6 an unlisted model is not bumped even when its family has a listed successor', () => {
+  assert.deepEqual(successorOf('openai/gpt-5.6-sol', ['openai/gpt-6-sol']), { key: 'openai/gpt-5.6-sol', successor: null, reason: 'not-in-catalog' })
+})
+
+// Mutation killed: dropping the dedupe writes a ladder naming the successor twice, which
+// loadLadder rejects.
+test('LADDER1 a band that already holds the successor keeps one copy', () => {
+  const next = bumpLadder({ bands: [{ members: ['openai/gpt-5.6-sol', 'openai/gpt-6-sol'] }] }, { 'openai/gpt-5.6-sol': 'openai/gpt-6-sol' })
+  assert.deepEqual(next.bands[0].members, ['openai/gpt-6-sol'])
+})
+
+// Mutation killed: dropping the cross-band check silently leaves one model in two bands.
+test('LADDER2 a successor already in a DIFFERENT band is refused, not placed', () => {
+  assert.throws(
+    () => bumpLadder({ bands: [{ members: ['openai/gpt-5.6-sol'] }, { members: ['openai/gpt-6-sol'] }] }, { 'openai/gpt-5.6-sol': 'openai/gpt-6-sol' }),
+    /placement decision, not a version bump/,
+  )
+})
+
+// Mutation killed: a string-value rule rewrites a membership basis that is exactly an id.
+test('APPLY9 a basis that is exactly an old id is a record and is never rewritten', () => {
+  const next = bumpLadder({ bands: [{ members: ['openai/gpt-5.6-sol'], membership_basis: 'openai/gpt-5.6-sol' }] }, { 'openai/gpt-5.6-sol': 'openai/gpt-6-sol' })
+  assert.equal(next.bands[0].membership_basis, 'openai/gpt-5.6-sol')
+  assert.deepEqual(next.bands[0].members, ['openai/gpt-6-sol'])
+})
+
+// Mutation killed: skipping validation writes an output the runtime's own loader rejects.
+test('VALIDATE1 a staged file the loader rejects changes no file', () => {
+  const files = new Map([['a', 'A0'], ['b', 'B0']])
+  const fsx = {
+    constants: { W_OK: 2 }, accessSync: () => {},
+    writeFileSync: (p, t) => files.set(p, t),
+    renameSync: (from, to) => { files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => files.delete(p),
+  }
+  const writes = [
+    { path: 'a', original: 'A0', next: 'A1', validate: () => {} },
+    { path: 'b', original: 'B0', next: 'B1', validate: () => { throw new Error('ladder names a model twice') } },
+  ]
+  assert.throws(() => commitWrites(writes, fsx), /aborted before changing any file — ladder names a model twice/)
+  assert.deepEqual([files.get('a'), files.get('b')], ['A0', 'B0'])
+  assert.equal([...files.keys()].some((k) => k.endsWith('.tmp')), false)
+})
+
+// Mutation killed: enumerating only v1 `tiers` leaves a v2 seat — seated under `assurances` and
+// absent from the model map — on its old version while its neighbours move.
+test('V2SEAT a v2 roster seat is bumped even when its model is not in the catalog map', () => {
+  const roster = { assurances: { standard: { reviewer: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' } } }, models: {} }
+  const plan = planBump(roster, BUMP_CATALOG)
+  assert.deepEqual(plan.bumps, [{ from: 'anthropic/claude-opus-5', to: 'anthropic/claude-opus-5-5' }])
+  const next = applyBump({ roster }, plan, BUMP_CATALOG, { today: '2026-09-23' })
+  assert.equal(next.roster.assurances.standard.reviewer.id, 'claude-opus-5-5')
+})
+
+// Mutation killed: swallowing a failed restore reports a whole rollback over a mixed config.
+test('ROLLBACK2 a restore that fails is reported, and its original survives on disk', () => {
+  const files = new Map([['a', 'A0'], ['b', 'B0']])
+  let restoring = false
+  const fsx = {
+    constants: { W_OK: 2 }, accessSync: () => {},
+    writeFileSync: (p, t) => { if (restoring && p === 'a') throw new Error('disk full'); files.set(p, t) },
+    renameSync: (from, to) => { if (to === 'b') { restoring = true; throw new Error('cannot rename b') } files.set(to, files.get(from)); files.delete(from) },
+    unlinkSync: (p) => files.delete(p),
+  }
+  const writes = [{ path: 'a', original: 'A0', next: 'A1' }, { path: 'b', original: 'B0', next: 'B1' }]
+  assert.throws(() => commitWrites(writes, fsx), /could NOT restore a; .*MIXED/)
+  assert.equal(files.get('a.roster-refresh.bak'), 'A0')
+})
+
+// Mutation killed: excluding exact matches hides a basis that is exactly a stale id.
+test('PROSE2 an exact stale id outside a reference field is reported', () => {
+  const plan = { bumps: [{ from: 'openai/gpt-5.6-sol', to: 'openai/gpt-6-sol' }] }
+  assert.deepEqual(proseMentions({ bands: [{ members: ['openai/gpt-6-sol'], membership_basis: 'openai/gpt-5.6-sol' }] }, plan.bumps).map((h) => h.path), ['.bands[0].membership_basis'])
 })

@@ -18,7 +18,7 @@ import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
-import { seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './seat-io.mjs'
+import { seatIo, paneTeardownRows, nextModelRung, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
@@ -2390,6 +2390,16 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
     assert.equal(Object.hasOwn(shipped.models, key), true)
     assert.equal(ladderMembers.includes(key), false)
     assert.equal(seated.includes(`"${key.slice(key.indexOf('/') + 1)}"`), false)
+  }
+  // Nor does the failure-upgrade reseat reach them: nextModelRung walks roster.models, not the
+  // ladder, so every seated cell's next rung must be a ladder member or none at all.
+  for (const seats of Object.values(shipped.tiers)) {
+    for (const seat of Object.values(seats)) {
+      for (const cell of [seat, ...(seat?.fallback || [])].filter(Boolean)) {
+        const rung = nextModelRung(shipped, cell)
+        if (rung) assert.ok(ladderMembers.includes(`${rung.cell.provider}/${rung.cell.id}`), `${cell.provider}/${cell.id} reseats onto ${rung.cell.id}, outside the ladder`)
+      }
+    }
   }
   assert.match(shipped.models['openai/gpt-6-sol'].cache_rate_source, /second price tier above 272000 input tokens/)
   assert.match(shipped.models['openai/gpt-6-luna'].cache_rate_source, /second price tier above 272000 input tokens/)

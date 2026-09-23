@@ -116,7 +116,8 @@
       "tags": [
         "reasoning",
         "tool-call",
-        "judge"
+        "judge",
+        "override-only"
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"
@@ -176,7 +177,8 @@
       "tags": [
         "reasoning",
         "tool-call",
-        "vendor-diverse"
+        "vendor-diverse",
+        "override-only"
       ],
       "source": "models.dev",
       "last_verified": "2026-08-30"
@@ -223,7 +225,8 @@
         "reasoning",
         "tool-call",
         "cheap",
-        "coding"
+        "coding",
+        "override-only"
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"

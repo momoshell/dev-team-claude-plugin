@@ -4260,9 +4260,17 @@ test('routing A1 validates the checkout-pinned schema and returns exactly one ch
   assert.equal(Object.hasOwn(result, 'chosen_cells'), false)
   assert.equal(Array.isArray(result.chosen_cell), false)
   const shippedPolicyText = JSON.stringify(loaded.policy)
-  for (const successor of ['gpt-6-sol', 'gpt-6-luna', 'claude-opus-5-5']) {
-    assert.ok(shippedPolicyText.includes(successor), `shipped routing policy must seat ${successor}`)
+  // Each route's candidates, exactly: main's routes with only the three ids renamed.
+  const opus = 'anthropic/claude-opus-5-5', luna = 'openai/gpt-6-luna', sol = 'openai/gpt-6-sol'
+  const routeCandidates = {}
+  for (const [tier, roles] of Object.entries(loaded.policy.routes)) {
+    for (const [role, route] of Object.entries(roles)) routeCandidates[`${tier}.${role}`] = route.candidates.map((cell) => `${cell.provider}/${cell.id}`)
   }
+  assert.deepEqual(routeCandidates, {
+    'mechanical.planner': [opus], 'mechanical.builder': [luna], 'mechanical.reviewer': [sol],
+    'build.lead': [opus], 'build.planner': [opus], 'build.builder': [luna], 'build.reviewer': [sol],
+    'judge.lead': [opus], 'judge.planner': [opus], 'judge.builder': [luna], 'judge.reviewer': [opus], 'judge.tech-lead': [sol],
+  })
   for (const predecessor of ['gpt-5.6-sol', 'gpt-5.6-luna']) {
     assert.equal(shippedPolicyText.includes(predecessor), false, `shipped routing policy must not seat ${predecessor}`)
   }

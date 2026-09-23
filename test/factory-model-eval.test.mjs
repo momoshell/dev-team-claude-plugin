@@ -1115,8 +1115,9 @@ test('routing policy and ledger write refusals stop bench admission without fabr
 const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
-  // Re-reviewed 2026-09-23 by the operator: production moves to the successor
-  // mechanical planner openai/gpt-6-sol at medium; the local candidate set is unchanged.
+  // Updated 2026-09-23 by the operator-ratified successor bump (PR #1507): production moves to
+  // openai/gpt-6-sol at medium; the local candidate set is unchanged. The operator ratified the
+  // bump, not this file: the new candidates.json has had no separate operator review.
   planner: '873a860fb2015ce78bdf3401ab954ed63f5038e4f2520214d6c4c94d32107d7a',
   // Re-reviewed 2026-09-20 by the operator: the mechanical builder effort moves low -> medium.
   // (Re-reviewed 2026-09-19: the only change then was `"tier": "mechanical"`.)

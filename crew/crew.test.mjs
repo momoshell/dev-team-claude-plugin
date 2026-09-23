@@ -2393,8 +2393,10 @@ test('shipped roster and ladder seat the ratified Sol, Luna and Opus successors'
   }
   // Nor does the failure-upgrade reseat reach them: nextModelRung walks roster.models, not the
   // ladder, so every seated cell's next rung must be a ladder member or none at all.
-  for (const seats of Object.values(shipped.tiers)) {
-    for (const seat of Object.values(seats)) {
+  // Every ladder member too: a member seated nowhere today is one roster edit from being seated.
+  const ladderCells = ladderMembers.map((key) => ({ provider: key.slice(0, key.indexOf('/')), id: key.slice(key.indexOf('/') + 1) }))
+  for (const seats of [...Object.values(shipped.tiers), { ladder: ladderCells }]) {
+    for (const seat of Object.values(seats).flatMap((s) => (Array.isArray(s) ? s : [s]))) {
       for (const cell of [seat, ...(seat?.fallback || [])].filter(Boolean)) {
         const rung = nextModelRung(shipped, cell)
         if (rung) assert.ok(ladderMembers.includes(`${rung.cell.provider}/${rung.cell.id}`), `${cell.provider}/${cell.id} reseats onto ${rung.cell.id}, outside the ladder`)

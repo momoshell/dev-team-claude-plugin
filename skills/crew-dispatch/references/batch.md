@@ -291,9 +291,32 @@ node crew/batch.mjs --context context.txt --items items.jsonl --model model-id -
 ```
 
 `--context`, `--items`, `--model`, and `--out` are required; `--effort` and
-`--concurrency` (an integer from 1 to 16, default 4) are optional. Unknown
+`--concurrency` (an integer from 1 to 16, default 4) are optional. `--agent`
+selects the transport and defaults to `claude`; `--agent pi` fans out through
+the pi CLI instead of Claude forks, and any other `--agent` is refused before
+any spawn. Unknown
 options are refused, and a validation, warm-call, or ledger-write failure
 exits nonzero.
+
+A pi batch warms one shared JSON session from the context file, then runs
+each JSONL item against its own byte-identical copy of that warm session
+file. The warm call runs `pi -p <prompt> --mode json --provider openai-codex
+--model <model> [--thinking <effort>] --no-tools --no-context-files
+--no-extensions --no-skills --no-prompt-templates --session-dir
+<batch>/sessions`, and each item reruns the same argv with its own prompt
+plus `--session <batch>/sessions/<id>.jsonl`. Every pi call shares the same
+per-batch neutral temp working directory and spawns with
+`PI_CACHE_RETENTION=long`. The warm call must leave exactly one `.jsonl`
+session file behind (missing, multiple, or unreadable fails the base row and
+runs no item); the batch copies that untouched warm file once per item and
+never derives a session name, never passes `--no-session` or `--fork`, and
+a failed copy fails only its item while the queue continues. Usage folds
+assistant `message_end` frames only, so replay and tool frames never count,
+and absent spend stays `null` with `cli-not-reported`.
+
+```sh
+node crew/batch.mjs --context context.txt --items items.jsonl --model model-id --out out --agent pi
+```
 
 ### Batch cache-read report
 
@@ -313,14 +336,20 @@ line, and an empty ledger, an unknown flag, or a missing directory argument
 is refused nonzero. Text prints one line per batch with the strategy,
 item counts, unmeasured count, the share as a decimal with its
 `(<numerator>/<denominator> tokens, <k> items)` denominators, the prefix
-`h of k` hits, and the fresh-baseline reason; `--json` emits the same
+`h of k` hits, the `hit_rule`, and the fresh-baseline reason; `--json` emits the same
 batch array as JSON. Fields per batch are `batch_id`, `strategy`, `total`,
 `ok`, `failed`, `unmeasured_items`, `cache_read_share` (`share`,
 `numerator_tokens`, `denominator_tokens`, `items`), `prefix_hits` (`hits`,
-`items`), and `fresh_baseline`. Absent data uses closed reasons only:
+`items`), `hit_rule`, and `fresh_baseline`. When the base row wrote zero cache tokens
+and its input is measured, the hit threshold is half the base prompt
+(`input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`,
+all divided by two) and the report names `hit_rule: half-base-prompt`; otherwise
+the threshold is the warmed prefix sum (`cache_read_input_tokens` +
+`cache_creation_input_tokens`) with `hit_rule: warmed-prefix`. Absent data uses closed reasons only:
 `zero-denominator` inside `cache_read_share` when no measured token
 remains (the share is `null` with its `0/0 tokens, 0 items` denominators
 retained), `base-usage-unmeasured` in `prefix_hits_reason` when the base
-row's cache usage is unmeasured (hits stay `null`, never zero), and
+row's cache usage is unmeasured (hits stay `null` with `hit_rule: null`,
+never zero), and
 `no-fresh-call-recorded` in `fresh_baseline_reason`, since no fresh call
 is recorded.

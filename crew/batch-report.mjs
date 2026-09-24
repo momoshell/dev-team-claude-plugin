@@ -58,13 +58,20 @@ function reportOne(batchId, rows) {
     : { share: numerator / denominator, numerator_tokens: numerator, denominator_tokens: denominator, items: measured.length, reason: null }
   let prefix_hits = null
   let prefix_hits_reason = null
-  if (base.cache_read_input_tokens === null || base.cache_creation_input_tokens === null) {
-    prefix_hits = null; prefix_hits_reason = 'base-usage-unmeasured'
+  let hit_rule = null
+  if (base.cache_read_input_tokens === null || base.cache_creation_input_tokens === null || (base.cache_creation_input_tokens === 0 && base.input_tokens === null)) {
+    prefix_hits = null; prefix_hits_reason = 'base-usage-unmeasured'; hit_rule = null
   } else {
-    const threshold = base.cache_read_input_tokens + base.cache_creation_input_tokens
+    const threshold = base.cache_creation_input_tokens === 0 ? (base.input_tokens + base.cache_read_input_tokens + base.cache_creation_input_tokens) / 2 : base.cache_read_input_tokens + base.cache_creation_input_tokens
     const hits = measured.filter((row) => row.cache_read_input_tokens >= threshold).length
-    prefix_hits = { hits, items: measured.length }
-    prefix_hits_reason = null
+    const section = {
+      prefix_hits: { hits, items: measured.length },
+      prefix_hits_reason: null,
+      hit_rule: base.cache_creation_input_tokens === 0 ? 'half-base-prompt' : 'warmed-prefix',
+    }
+    prefix_hits = section.prefix_hits
+    prefix_hits_reason = section.prefix_hits_reason
+    hit_rule = section.hit_rule
   }
   return {
     batch_id: batchId,
@@ -76,6 +83,7 @@ function reportOne(batchId, rows) {
     cache_read_share,
     prefix_hits,
     prefix_hits_reason,
+    hit_rule,
     fresh_baseline: null,
     fresh_baseline_reason: 'no-fresh-call-recorded',
   }
@@ -100,7 +108,8 @@ function formatBatchLine(batch) {
   const share = batch.cache_read_share
   const shareText = share.share === null ? `null (${share.reason})` : share.share.toFixed(4)
   const hitsText = batch.prefix_hits === null ? String(batch.prefix_hits_reason) : `${batch.prefix_hits.hits} of ${batch.prefix_hits.items}`
-  return `${batch.batch_id}: ${shareText} (${share.numerator_tokens}/${share.denominator_tokens} tokens, ${share.items} items), prefix_hits ${hitsText}`
+  const ruleText = batch.hit_rule === null || batch.hit_rule === undefined ? String(batch.prefix_hits_reason) : batch.hit_rule
+  return `${batch.batch_id}: ${shareText} (${share.numerator_tokens}/${share.denominator_tokens} tokens, ${share.items} items), prefix_hits ${hitsText} hit_rule ${ruleText}`
 }
 
 function readLedger(dir) {

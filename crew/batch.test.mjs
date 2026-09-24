@@ -6,14 +6,38 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, realpathSync, statSync } from 'node:fs'
+import { isAbsolute, dirname, join, relative } from 'node:path'
 
 import { runBatch } from './batch.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 
 const USAGE = { input_tokens: 11, output_tokens: 3, cache_read_input_tokens: 137, cache_creation_input_tokens: 17 }
 const ROW_KEYS = ['batch_id', 'role', 'item_id', 'parent_session_id', 'session_id', 'strategy', 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'total_cost_usd', 'status', 'why', 'started_at', 'ended_at', 'usage_absent_reasons'].sort()
+
+function assertIsolatedCalls(calls, fixtureDir) {
+  assert.ok(calls.length > 0)
+  const cwd = calls[0].options?.cwd
+  assert.equal(typeof cwd, 'string')
+  assert.ok(Object.hasOwn(calls[0].options, 'cwd'))
+  assert.equal(cwd, realpathSync(cwd))
+  assert.ok(isAbsolute(cwd))
+  assert.equal(statSync(cwd).isDirectory(), true)
+  assert.ok(relative(ROOT, cwd).startsWith('..'), `cwd inside ROOT: ${cwd}`)
+  assert.ok(relative(realpathSync(fixtureDir), cwd).startsWith('..'), `cwd inside fixture: ${cwd}`)
+  let current = cwd
+  while (true) {
+    assert.equal(existsSync(join(current, '.git')), false, `cwd inside a git work tree: ${cwd}`)
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  for (const call of calls) {
+    assert.equal(call.options?.cwd, cwd)
+    assert.equal(call.args.includes('--bare'), false)
+  }
+  return cwd
+}
 
 function writeInputs(dir, count = 5) {
   const context = join(dir, 'context.txt')
@@ -29,9 +53,9 @@ function writeInputs(dir, count = 5) {
 function fixtureSpawn({ calls, failIndex = null, emptyIndex = null, malformedIndex = null, missingResultIndex = null, missingSessionIndex = null, usageFor = null, delayMs = 12 } = {}) {
   let active = 0
   const state = { peak: 0 }
-  const spawn = (bin, args) => {
+  const spawn = (bin, args, options) => {
     const base = !args.includes('--resume')
-    calls.push({ bin, args: [...args], base })
+    calls.push({ bin, args: [...args], base, options })
     if (!base) {
       active += 1
       state.peak = Math.max(state.peak, active)
@@ -84,13 +108,36 @@ test('warm and fork argv carry the JSON shape without effort', async () => {
   const base = calls.filter((call) => call.base)
   const forks = calls.filter((call) => !call.base)
   assert.equal(base.length, 1)
-  assert.deepEqual(base[0].args, ['-p', 'shared context\n\nReply only ready.', '--output-format', 'json', '--model', 'probe-model'])
+  assert.deepEqual(base[0].args, ['-p', 'shared context\n\nReply only ready.', '--output-format', 'json', '--model', 'probe-model', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1'])
   assert.equal(forks.length, 2)
+  assert.deepEqual(forks[0].args, ['-p', 'question0', '--output-format', 'json', '--model', 'probe-model', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', 'warm-session', '--fork-session'])
+  assert.deepEqual(forks[1].args, ['-p', 'question1', '--output-format', 'json', '--model', 'probe-model', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', 'warm-session', '--fork-session'])
   for (const fork of forks) {
     assert.equal(fork.args[fork.args.indexOf('--output-format') + 1], 'json')
     assert.equal(fork.args[fork.args.indexOf('--resume') + 1], 'warm-session')
     assert.ok(fork.args.includes('--fork-session'))
     assert.equal(fork.args.includes('--effort'), false)
+  }
+  assertIsolatedCalls(calls, dir)
+})
+
+test('an unsafe temp root is refused before any spawn', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 2)
+  mkdirSync(join(dir, '.git'))
+  const unsafe = join(dir, 'tmp')
+  mkdirSync(unsafe)
+  const calls = []
+  const { spawn } = fixtureSpawn({ calls })
+  const prev = process.env.TMPDIR
+  process.env.TMPDIR = unsafe
+  try {
+    await assert.rejects(runBatch({ context, items, model: 'probe-model', out, spawn }), /crew\/batch: cannot create a neutral batch cwd/)
+    assert.equal(calls.length, 0)
+    assert.equal(readdirSync(unsafe).filter((name) => name.startsWith('crew-batch-')).length, 0)
+  } finally {
+    if (prev === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = prev
   }
 })
 
@@ -101,9 +148,13 @@ test('effort is forwarded to the warm call and every fork', async () => {
   const { spawn } = fixtureSpawn({ calls })
   await runBatch({ context, items, model: 'probe-model', effort: 'high', out, spawn })
   assert.equal(calls.length, 3)
+  assert.deepEqual(calls[0].args, ['-p', 'shared context\n\nReply only ready.', '--output-format', 'json', '--model', 'probe-model', '--effort', 'high', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1'])
   for (const call of calls) {
     assert.equal(call.args[call.args.indexOf('--effort') + 1], 'high')
   }
+  assert.deepEqual(calls[1].args, ['-p', 'question0', '--output-format', 'json', '--model', 'probe-model', '--effort', 'high', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', 'warm-session', '--fork-session'])
+  assert.deepEqual(calls[2].args, ['-p', 'question1', '--output-format', 'json', '--model', 'probe-model', '--effort', 'high', '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', 'warm-session', '--fork-session'])
+  assertIsolatedCalls(calls, dir)
 })
 
 test('a pool of 2 over 5 items peaks at 2 and saves every result', async () => {

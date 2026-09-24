@@ -3,8 +3,9 @@
 // own argv shape (--output-format json with --resume/--fork-session) and its
 // own ledger (<out>/batch.jsonl plus one <id>.txt per success); it never
 // touches pi, the roster, lane loops, or ingestion.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve as resolvePath } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve as resolvePath, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { spawn as childSpawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +36,51 @@ function checkEffort(effort) {
 
 function checkConcurrency(concurrency) {
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) fail(`concurrency must be an integer 1..16, got ${JSON.stringify(concurrency)}`)
+}
+
+// Neutral per-batch cwd: outside the caller cwd and every git work tree.
+// existsSync never throws, so a denied ancestor read reports absent; the
+// tmp-root rejection below is the backstop for that blind spot.
+function insideCallerCwdOrWorkTree(dir) {
+  const resolved = resolvePath(dir)
+  const cwd = resolvePath(process.cwd())
+  if (resolved === cwd || resolved.startsWith(cwd + sep)) return true
+  let current = resolved
+  while (true) {
+    if (existsSync(join(current, '.git'))) return true
+    const parent = dirname(current)
+    if (parent === current) return false
+    current = parent
+  }
+}
+
+function makeBatchCwd() {
+  let root
+  try {
+    root = realpathSync(tmpdir())
+  } catch (error) {
+    fail(`cannot resolve a neutral batch cwd: ${error?.code ?? error?.message ?? String(error)}`)
+  }
+  if (insideCallerCwdOrWorkTree(root)) {
+    fail(`cannot create a neutral batch cwd: temp root ${JSON.stringify(root)} is inside the caller cwd or a git work tree`)
+  }
+  let fresh
+  try {
+    fresh = mkdtempSync(join(root, 'crew-batch-'))
+  } catch (error) {
+    fail(`cannot create a neutral batch cwd under ${JSON.stringify(root)}: ${error?.code ?? error?.message ?? String(error)}`)
+  }
+  let batchCwd
+  try {
+    batchCwd = realpathSync(fresh)
+  } catch (error) {
+    fail(`cannot resolve the neutral batch cwd: ${error?.code ?? error?.message ?? String(error)}`)
+  }
+  // lean: backstop, unwitnessed (reachable only via a symlink swap between mkdtemp and realpath); witness with an injected realpath if this path ever matters.
+  if (insideCallerCwdOrWorkTree(batchCwd)) {
+    fail(`cannot create a neutral batch cwd: ${JSON.stringify(batchCwd)} is inside the caller cwd or a git work tree`)
+  }
+  return batchCwd
 }
 
 function readItems(itemsPath) {
@@ -131,10 +177,10 @@ function waitClose(child) {
 }
 
 // One bounded call: resolves a cold record, never throws for child behaviour.
-async function invoke(bin, args, spawn) {
+async function invoke(bin, args, spawn, cwd) {
   let child
   try {
-    child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd })
   } catch (error) {
     return { ok: false, stdout: '', why: `spawn-error: ${error?.message ?? String(error)}` }
   }
@@ -188,10 +234,11 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
   }
   const batchId = randomUUID()
   const bin = process.env.CREW_CLAUDE_BIN ?? 'claude'
+  const batchCwd = makeBatchCwd()
   const basePrompt = `${contextText}\n\nReply only ready.`
-  const baseArgs = ['-p', basePrompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : [])]
+  const baseArgs = ['-p', basePrompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1']
   const baseStarted = new Date().toISOString()
-  const baseCall = await invoke(bin, baseArgs, spawn)
+  const baseCall = await invoke(bin, baseArgs, spawn, batchCwd)
   const baseEnded = new Date().toISOString()
   const baseBody = baseCall.ok ? parseCall(baseCall.stdout) : { ok: false, why: baseCall.why }
   const baseSessionId = baseBody.ok && typeof baseBody.parsed.session_id === 'string' && baseBody.parsed.session_id.length > 0
@@ -234,8 +281,8 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
 
   async function runItem(item) {
     const startedAt = new Date().toISOString()
-    const itemArgs = ['-p', item.prompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--resume', baseSessionId, '--fork-session']
-    const call = await invoke(bin, itemArgs, spawn)
+    const itemArgs = ['-p', item.prompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', baseSessionId, '--fork-session']
+    const call = await invoke(bin, itemArgs, spawn, batchCwd)
     const endedAt = new Date().toISOString()
     const settled = (fields) => finishRow({
       batchId,

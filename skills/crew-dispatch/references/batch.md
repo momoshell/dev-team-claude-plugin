@@ -284,7 +284,7 @@ each successful item also lands at `<out>/<id>.txt`. A failed warm call stops
 the batch before any fork runs; a failed item leaves its row with a reason
 while the queue continues. Behaviour is pinned by `crew/batch.test.mjs`,
 which drives the executor through recorded fixtures only and never resolves
-or runs a live binary.
+or runs a live binary. Every warm call and fork shares one per-batch neutral temp working directory outside the caller cwd and any git work tree, spawned with `--setting-sources ''`, `--strict-mcp-config`, `--disable-slash-commands`, `--tools ''`, and `--max-turns 1` (the empty values stay empty) and never `--bare`, so the model cannot read or mutate the checkout.
 
 ```sh
 node crew/batch.mjs --context context.txt --items items.jsonl --model model-id --out out --effort high --concurrency 4

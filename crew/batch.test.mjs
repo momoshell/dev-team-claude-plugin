@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, realpathSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, realpathSync, statSync, symlinkSync } from 'node:fs'
 import { isAbsolute, dirname, join, relative } from 'node:path'
 
 import { runBatch } from './batch.mjs'
@@ -363,4 +363,234 @@ test('the CLI rejects extras and missing options without spawning', () => {
   const missing = spawnSync(process.execPath, [script, '--context', 'a', '--model', 'c', '--out', 'd'])
   assert.notEqual(missing.status, 0)
   assert.match(String(missing.stderr), /missing required option/)
+})
+
+// Pi session-copy fanout: every subprocess stays a fixture behind the
+// injectable spawn seam, and the warm session file is fixture-created.
+const PI_USAGE = { input: 11, output: 3, cacheRead: 86, cacheWrite: 5, cost: { total: 0.02 } }
+const PI_SESSION_BYTES = 'recorded warm pi session\n'
+
+function piFrames(reply, { usage = PI_USAGE, sessionId = 'warm-id' } = {}) {
+  const frames = [
+    { type: 'session', version: 3, id: sessionId },
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: reply }], ...(usage === null ? {} : { usage }) } },
+    { type: 'turn_end', message: { role: 'assistant', usage: { input: 500, output: 500, cacheRead: 500, cacheWrite: 500, cost: { total: 500 } } } },
+  ]
+  return frames.map((frame) => JSON.stringify(frame)).join('\n') + '\n'
+}
+
+function piFixtureSpawn({ calls, sessionBytes = PI_SESSION_BYTES, usageFor = null, warmMode = null, delayMs = 12 } = {}) {
+  let active = 0
+  const state = { peak: 0 }
+  const spawn = (bin, args, options) => {
+    const item = args.includes('--session')
+    const record = { bin, args: [...args], base: !item, options, bytesAtSpawn: undefined }
+    calls.push(record)
+    if (item) {
+      active += 1
+      state.peak = Math.max(state.peak, active)
+    }
+    const child = new EventEmitter()
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    setTimeout(() => {
+      const sessionDir = args[args.indexOf('--session-dir') + 1]
+      if (item) {
+        const copy = args[args.indexOf('--session') + 1]
+        try {
+          record.bytesAtSpawn = readFileSync(copy, 'utf8')
+        } catch {
+          record.bytesAtSpawn = null
+        }
+      } else if (warmMode === 'symlink') {
+        mkdirSync(sessionDir, { recursive: true })
+        symlinkSync(join(sessionDir, 'missing-target'), join(sessionDir, 'warm.jsonl'))
+      } else if (warmMode !== 'missing') {
+        mkdirSync(sessionDir, { recursive: true })
+        writeFileSync(join(sessionDir, 'warm.jsonl'), sessionBytes)
+        if (warmMode === 'ambiguous') writeFileSync(join(sessionDir, 'extra.jsonl'), 'other')
+      }
+      const prompt = item ? args[args.indexOf('-p') + 1] : null
+      const index = item ? Number(String(prompt).replace('question', '')) : -1
+      const usage = usageFor ? usageFor(index) : PI_USAGE
+      const reply = item ? `answer-${index}` : 'ready'
+      const sessionId = item ? `item-session-${index}` : 'warm-id'
+      child.stdout.end(piFrames(reply, { usage, sessionId }))
+      child.stderr.end('')
+      if (item) active -= 1
+      child.emit('close', 0)
+    }, item ? delayMs : 1)
+    return child
+  }
+  return { spawn, state }
+}
+
+function piItemCalls(calls) {
+  return calls.filter((call) => !call.base)
+}
+
+test('pi warm and item argv carry the isolated JSON shape with retention', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 2)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', out, spawn })
+  assert.equal(outcome.ok, true)
+  assert.equal(calls.length, 3)
+  const sessionDir = calls[0].args[calls[0].args.indexOf('--session-dir') + 1]
+  assert.deepEqual(calls[0].args, ['-p', 'shared context\n\nReply only ready.', '--mode', 'json', '--provider', 'openai-codex', '--model', 'gpt-6-luna', '--no-tools', '--no-context-files', '--no-extensions', '--no-skills', '--no-prompt-templates', '--session-dir', sessionDir])
+  for (const call of calls) {
+    assert.equal(call.bin, 'pi')
+    assert.equal(call.options?.env?.PI_CACHE_RETENTION, 'long')
+    assert.equal(call.args.includes('--no-session'), false)
+    assert.equal(call.args.includes('--fork'), false)
+    assert.equal(call.args.includes('--fork-session'), false)
+  }
+  const itemCalls = piItemCalls(calls)
+  assert.equal(itemCalls.length, 2)
+  const byPrompt = new Map(itemCalls.map((call) => [call.args[call.args.indexOf('-p') + 1], call]))
+  for (let index = 0; index < 2; index += 1) {
+    const call = byPrompt.get(`question${index}`)
+    assert.ok(call)
+    const copy = call.args[call.args.indexOf('--session') + 1]
+    assert.equal(copy, join(sessionDir, `item${index}.jsonl`))
+    assert.deepEqual(call.args, ['-p', `question${index}`, '--mode', 'json', '--provider', 'openai-codex', '--model', 'gpt-6-luna', '--no-tools', '--no-context-files', '--no-extensions', '--no-skills', '--no-prompt-templates', '--session-dir', sessionDir, '--session', copy])
+    assert.equal(call.bytesAtSpawn, PI_SESSION_BYTES)
+  }
+  const copies = itemCalls.map((call) => call.args[call.args.indexOf('--session') + 1])
+  assert.equal(new Set(copies).size, 2)
+  assert.ok(!copies.includes(join(sessionDir, 'warm.jsonl')))
+  assert.equal(readFileSync(join(sessionDir, 'warm.jsonl'), 'utf8'), PI_SESSION_BYTES)
+  assertIsolatedCalls(calls, dir)
+})
+
+test('pi effort rides --thinking on the warm call and every item', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 2)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls })
+  await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', effort: 'high', out, spawn })
+  assert.equal(calls.length, 3)
+  for (const call of calls) {
+    assert.equal(call.args[call.args.indexOf('--thinking') + 1], 'high')
+    assert.equal(call.args.includes('--effort'), false)
+  }
+})
+
+test('a pi pool of 2 over 5 items peaks at 2 with assistant-only spend', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 5)
+  const calls = []
+  const { spawn, state } = piFixtureSpawn({ calls })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', concurrency: 2, out, spawn })
+  assert.equal(outcome.ok, true)
+  assert.equal(state.peak, 2)
+  const rows = readRows(out)
+  assert.equal(rows.length, 6)
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), ROW_KEYS)
+    assert.equal(row.strategy, 'pi-session-copy')
+    assert.equal(row.status, 'ok')
+    assert.equal(row.input_tokens, 11)
+    assert.equal(row.output_tokens, 3)
+    assert.equal(row.cache_read_input_tokens, 86)
+    assert.equal(row.cache_creation_input_tokens, 5)
+    assert.equal(row.total_cost_usd, 0.02)
+    assert.deepEqual(row.usage_absent_reasons, null)
+  }
+  const base = rows.filter((row) => row.role === 'base')
+  assert.equal(base.length, 1)
+  assert.equal(base[0].session_id, 'warm-id')
+  assert.equal(base[0].parent_session_id, null)
+  for (let index = 0; index < 5; index += 1) {
+    const row = rows.find((item) => item.item_id === `item${index}`)
+    assert.equal(row.parent_session_id, 'warm-id')
+    assert.equal(row.session_id, `item-session-${index}`)
+    assert.equal(readFileSync(join(out, `item${index}.txt`), 'utf8'), `answer-${index}`)
+  }
+})
+
+test('pi rows without measured spend stay null with the closed reason', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 2)
+  const calls = []
+  const usageFor = (index) => (index === 0 ? { ...PI_USAGE, cost: undefined } : null)
+  const { spawn } = piFixtureSpawn({ calls, usageFor })
+  await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', out, spawn })
+  const rows = readRows(out)
+  const costless = rows.find((row) => row.item_id === 'item0')
+  assert.equal(costless.status, 'ok')
+  assert.equal(costless.cache_read_input_tokens, 86)
+  assert.equal(costless.total_cost_usd, null)
+  assert.deepEqual(costless.usage_absent_reasons, { total_cost_usd: 'cli-not-reported' })
+  assert.equal(readFileSync(join(out, 'item0.txt'), 'utf8'), 'answer-0')
+  const unmeasured = rows.find((row) => row.item_id === 'item1')
+  assert.equal(unmeasured.status, 'ok')
+  assert.equal(unmeasured.input_tokens, null)
+  assert.equal(unmeasured.total_cost_usd, null)
+  assert.deepEqual(unmeasured.usage_absent_reasons, {
+    input_tokens: 'cli-not-reported',
+    output_tokens: 'cli-not-reported',
+    cache_read_input_tokens: 'cli-not-reported',
+    cache_creation_input_tokens: 'cli-not-reported',
+    total_cost_usd: 'cli-not-reported',
+  })
+  assert.equal(readFileSync(join(out, 'item1.txt'), 'utf8'), 'answer-1')
+})
+
+test('an unknown agent is refused before any spawn', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 1)
+  let spawned = 0
+  const spawn = () => {
+    spawned += 1
+    throw new Error('must not spawn')
+  }
+  await assert.rejects(runBatch({ agent: 'unknown', context, items, model: 'gpt-6-luna', out, spawn }), /unsupported agent/)
+  assert.equal(spawned, 0)
+})
+
+test('the CLI refuses an unknown agent without spawning', () => {
+  const script = join(ROOT, 'crew', 'batch.mjs')
+  const child = spawnSync(process.execPath, [script, '--context', 'a', '--items', 'b', '--model', 'c', '--out', 'd', '--agent', 'bogus'])
+  assert.notEqual(child.status, 0)
+  assert.match(String(child.stderr), /unsupported agent/)
+})
+
+test('a missing or ambiguous warm session file fails the base with no items', async () => {
+  for (const warmMode of ['missing', 'ambiguous']) {
+    const dir = scratchDir()
+    const { context, items, out } = writeInputs(dir, 2)
+    const calls = []
+    const { spawn } = piFixtureSpawn({ calls, warmMode })
+    const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', out, spawn })
+    assert.equal(outcome.ok, false, warmMode)
+    assert.equal(calls.length, 1, warmMode)
+    const rows = readRows(out)
+    assert.equal(rows.length, 1, warmMode)
+    assert.equal(rows[0].role, 'base', warmMode)
+    assert.equal(rows[0].status, 'failed', warmMode)
+    assert.equal(rows[0].strategy, 'pi-session-copy', warmMode)
+    assert.match(rows[0].why, /missing-session-file/, warmMode)
+  }
+})
+
+test('an unreadable warm session fails each item copy while the queue continues', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 3)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, warmMode: 'symlink' })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', concurrency: 1, out, spawn })
+  assert.equal(outcome.ok, true)
+  assert.equal(calls.length, 1)
+  const rows = readRows(out)
+  assert.equal(rows.length, 4)
+  assert.equal(rows[0].role, 'base')
+  assert.equal(rows[0].status, 'ok')
+  for (let index = 0; index < 3; index += 1) {
+    const row = rows.find((item) => item.item_id === `item${index}`)
+    assert.equal(row.status, 'failed', `item${index}`)
+    assert.match(row.why, /session-copy-failed/, `item${index}`)
+    assert.equal(existsSync(join(out, `item${index}.txt`)), false, `item${index}`)
+  }
 })

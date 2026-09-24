@@ -3,7 +3,7 @@
 // own argv shape (--output-format json with --resume/--fork-session) and its
 // own ledger (<out>/batch.jsonl plus one <id>.txt per success); it never
 // touches pi, the roster, lane loops, or ingestion.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -11,6 +11,8 @@ import { spawn as childSpawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { modelString } from './adapters/adapter-claude.mjs'
+import { modelString as piModelString } from './adapters/adapter-pi.mjs'
+import { foldRpcUsage } from './headless-rpc.mjs'
 
 // Bounded capture so one chatty call cannot grow memory without a ceiling.
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -132,7 +134,7 @@ function absentReasons(usage, cost) {
   return Object.keys(reasons).length > 0 ? reasons : null
 }
 
-function finishRow({ batchId, role, itemId, parentSessionId, sessionId, usage, totalCost, status, why, startedAt, endedAt }) {
+function finishRow({ batchId, role, itemId, parentSessionId, sessionId, strategy, usage, totalCost, status, why, startedAt, endedAt }) {
   const cost = Number.isFinite(totalCost) && totalCost >= 0 ? totalCost : null
   return {
     batch_id: batchId,
@@ -140,7 +142,7 @@ function finishRow({ batchId, role, itemId, parentSessionId, sessionId, usage, t
     item_id: itemId,
     parent_session_id: parentSessionId,
     session_id: sessionId,
-    strategy: 'claude-fork',
+    strategy,
     input_tokens: usage.input_tokens ?? null,
     output_tokens: usage.output_tokens ?? null,
     cache_read_input_tokens: usage.cache_read_input_tokens ?? null,
@@ -177,10 +179,10 @@ function waitClose(child) {
 }
 
 // One bounded call: resolves a cold record, never throws for child behaviour.
-async function invoke(bin, args, spawn, cwd) {
+async function invoke(bin, args, spawn, cwd, opts = {}) {
   let child
   try {
-    child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd })
+    child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, ...(opts.env !== undefined ? { env: opts.env } : {}) })
   } catch (error) {
     return { ok: false, stdout: '', why: `spawn-error: ${error?.message ?? String(error)}` }
   }
@@ -212,14 +214,94 @@ function parseCall(text) {
   return { ok: true, parsed }
 }
 
-export async function runBatch({ context, items, model, effort, concurrency = 4, out, spawn = childSpawn }) {
+// Pi JSON-mode output is one frame per line. Only assistant message_end
+// frames carry billable spend; session, turn_end, replay, and tool frames
+// are inert for usage, and absent spend stays absent, never zero.
+function parsePiFrames(text) {
+  if (text.trim().length === 0) return { ok: false, why: 'empty-stdout: the CLI printed nothing' }
+  const lines = String(text).split('\n').filter((line) => line.trim().length > 0)
+  if (lines.length === 0) return { ok: false, why: 'empty-stdout: the CLI printed nothing' }
+  const frames = []
+  for (const line of lines) {
+    try {
+      frames.push(JSON.parse(line))
+    } catch (error) {
+      return { ok: false, why: `invalid-json: ${error?.message ?? String(error)}` }
+    }
+  }
+  const folded = foldRpcUsage(frames)
+  let sessionId = null
+  for (const frame of frames) {
+    if (!frame || typeof frame !== 'object') continue
+    const nested = frame.session && typeof frame.session === 'object' ? frame.session.id : undefined
+    if (typeof nested === 'string' && nested.length > 0) {
+      sessionId = nested
+      break
+    }
+    if (frame.type === 'session' && typeof frame.id === 'string' && frame.id.length > 0) {
+      sessionId = frame.id
+      break
+    }
+    if (typeof frame.session_id === 'string' && frame.session_id.length > 0) {
+      sessionId = frame.session_id
+      break
+    }
+  }
+  const parts = []
+  for (const frame of frames) {
+    if (!frame || frame.type !== 'message_end') continue
+    const message = frame.message
+    if (!message || message.role !== 'assistant') continue
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part && part.type === 'text' && typeof part.text === 'string') parts.push(part.text)
+      }
+    } else if (typeof message.content === 'string') {
+      parts.push(message.content)
+    }
+  }
+  let cost = null
+  let costSum = 0
+  let sawCost = false
+  for (const frame of frames) {
+    if (!frame || frame.type !== 'message_end') continue
+    const message = frame.message
+    if (!message || message.role !== 'assistant') continue
+    const total = message.usage?.cost?.total
+    if (Number.isFinite(total) && total >= 0) {
+      costSum += total
+      sawCost = true
+    }
+  }
+  if (sawCost) cost = costSum
+  const usage = {
+    input_tokens: folded?.billed_input_tokens,
+    output_tokens: folded?.billed_output_tokens,
+    cache_read_input_tokens: folded?.billed_cache_read_tokens,
+    cache_creation_input_tokens: folded?.billed_cache_write_tokens,
+  }
+  return { ok: true, frames, sessionId, result: parts.length > 0 ? parts.join('') : null, usage, totalCost: cost }
+}
+
+export async function runBatch({ context, items, model, effort, concurrency = 4, out, spawn = childSpawn, agent = 'claude' }) {
+  if (!['claude', 'pi'].includes(agent)) fail(`unsupported agent ${JSON.stringify(agent)}`)
   checkConcurrency(concurrency)
   checkModel(model)
   checkEffort(effort)
   checkOut(out)
   if (typeof context !== 'string' || context.length === 0) fail('context must be a nonempty path')
   if (typeof items !== 'string' || items.length === 0) fail('items must be a nonempty path')
-  const modelId = modelString({ provider: 'anthropic', id: model })
+  let modelId = null
+  let piModel = null
+  if (agent === 'pi') {
+    const full = piModelString({ provider: 'openai', id: model })
+    const marker = 'openai-codex/'
+    if (typeof full !== 'string' || !full.startsWith(marker)) fail(`unsupported pi model ${JSON.stringify(model)}`)
+    piModel = full.slice(marker.length)
+    if (piModel.length === 0) fail(`unsupported pi model ${JSON.stringify(model)}`)
+  } else {
+    modelId = modelString({ provider: 'anthropic', id: model })
+  }
   let contextText
   try {
     contextText = readFileSync(context, 'utf8')
@@ -233,37 +315,76 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
     fail(`cannot create out dir ${JSON.stringify(out)}: ${error?.code ?? error?.message ?? String(error)}`)
   }
   const batchId = randomUUID()
-  const bin = process.env.CREW_CLAUDE_BIN ?? 'claude'
+  const bin = agent === 'pi' ? 'pi' : (process.env.CREW_CLAUDE_BIN ?? 'claude')
   const batchCwd = makeBatchCwd()
+  const sessionDir = join(batchCwd, 'sessions')
+  const spawnOpts = { env: agent === 'pi' ? { ...process.env, PI_CACHE_RETENTION: 'long' } : undefined }
   const basePrompt = `${contextText}\n\nReply only ready.`
-  const baseArgs = ['-p', basePrompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1']
+  let baseArgs
+  if (agent === 'pi') {
+    try {
+      mkdirSync(sessionDir, { recursive: true })
+    } catch (error) {
+      fail(`cannot create pi session dir ${JSON.stringify(sessionDir)}: ${error?.code ?? error?.message ?? String(error)}`)
+    }
+    baseArgs = ['-p', basePrompt, '--mode', 'json', '--provider', 'openai-codex', '--model', piModel, ...(effort ? ['--thinking', effort] : []), '--no-tools', '--no-context-files', '--no-extensions', '--no-skills', '--no-prompt-templates', '--session-dir', sessionDir]
+  } else {
+    baseArgs = ['-p', basePrompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1']
+  }
   const baseStarted = new Date().toISOString()
-  const baseCall = await invoke(bin, baseArgs, spawn, batchCwd)
+  const baseCall = agent === 'pi' ? await invoke(bin, baseArgs, spawn, batchCwd, spawnOpts) : await invoke(bin, baseArgs, spawn, batchCwd)
   const baseEnded = new Date().toISOString()
-  const baseBody = baseCall.ok ? parseCall(baseCall.stdout) : { ok: false, why: baseCall.why }
-  const baseSessionId = baseBody.ok && typeof baseBody.parsed.session_id === 'string' && baseBody.parsed.session_id.length > 0
-    ? baseBody.parsed.session_id
-    : null
-  if (baseSessionId === null) {
-    const baseRow = finishRow({
+  const writeBaseFailure = (why, usage, totalCost) => {
+    const failedBase = finishRow({
       batchId,
       role: 'base',
       itemId: null,
       parentSessionId: null,
       sessionId: null,
-      usage: cleanUsage(baseBody.ok ? baseBody.parsed.usage : undefined),
-      totalCost: baseBody.ok ? baseBody.parsed.total_cost_usd : undefined,
+      strategy: agent === 'pi' ? 'pi-session-copy' : 'claude-fork',
+      usage: cleanUsage(usage),
+      totalCost,
       status: 'failed',
-      why: baseBody.ok ? 'missing-session-id: the warm call returned no session_id' : baseBody.why,
+      why,
       startedAt: baseStarted,
       endedAt: baseEnded,
     })
     try {
-      writeFileSync(join(out, 'batch.jsonl'), `${JSON.stringify(baseRow)}\n`, 'utf8')
+      writeFileSync(join(out, 'batch.jsonl'), `${JSON.stringify(failedBase)}\n`, 'utf8')
     } catch (error) {
       fail(`cannot write batch ledger: ${error?.code ?? error?.message ?? String(error)}`)
     }
-    return { batch_id: batchId, ok: false, rows: [baseRow], baseSessionId: null, out }
+    return { batch_id: batchId, ok: false, rows: [failedBase], baseSessionId: null, out }
+  }
+  let baseSessionId = null
+  let baseUsage = undefined
+  let baseCost = undefined
+  let baseSessionFile = null
+  if (agent === 'pi') {
+    if (!baseCall.ok) return writeBaseFailure(baseCall.why, undefined, undefined)
+    const parsed = parsePiFrames(baseCall.stdout)
+    if (!parsed.ok) return writeBaseFailure(parsed.why, undefined, undefined)
+    baseUsage = parsed.usage
+    baseCost = parsed.totalCost
+    if (parsed.sessionId === null) return writeBaseFailure('missing-session-id: the warm pi call returned no session id', parsed.usage, parsed.totalCost)
+    let names
+    try {
+      names = readdirSync(sessionDir).filter((name) => name.endsWith('.jsonl'))
+    } catch (error) {
+      return writeBaseFailure(`missing-session-file: cannot read the pi session dir: ${error?.code ?? error?.message ?? String(error)}`, parsed.usage, parsed.totalCost)
+    }
+    if (names.length !== 1) return writeBaseFailure(`missing-session-file: expected exactly one warm .jsonl in the pi session dir, found ${names.length}`, parsed.usage, parsed.totalCost)
+    baseSessionFile = join(sessionDir, names[0])
+    baseSessionId = parsed.sessionId
+  } else {
+    const baseBody = baseCall.ok ? parseCall(baseCall.stdout) : { ok: false, why: baseCall.why }
+    if (!baseBody.ok) return writeBaseFailure(baseBody.why, undefined, undefined)
+    if (typeof baseBody.parsed.session_id !== 'string' || baseBody.parsed.session_id.length === 0) {
+      return writeBaseFailure('missing-session-id: the warm call returned no session_id', baseBody.parsed.usage, baseBody.parsed.total_cost_usd)
+    }
+    baseUsage = baseBody.parsed.usage
+    baseCost = baseBody.parsed.total_cost_usd
+    baseSessionId = baseBody.parsed.session_id
   }
   const baseRow = finishRow({
     batchId,
@@ -271,8 +392,9 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
     itemId: null,
     parentSessionId: null,
     sessionId: baseSessionId,
-    usage: cleanUsage(baseBody.parsed.usage),
-    totalCost: baseBody.parsed.total_cost_usd,
+    strategy: agent === 'pi' ? 'pi-session-copy' : 'claude-fork',
+    usage: cleanUsage(baseUsage),
+    totalCost: baseCost,
     status: 'ok',
     why: null,
     startedAt: baseStarted,
@@ -281,6 +403,47 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
 
   async function runItem(item) {
     const startedAt = new Date().toISOString()
+    if (agent === 'pi') {
+      const sessionFile = join(sessionDir, `${item.id}.jsonl`)
+      try {
+        copyFileSync(baseSessionFile, sessionFile)
+      } catch (error) {
+        const copyEndedAt = new Date().toISOString()
+        return { status: 'failed', row: finishRow({ batchId, role: 'item', itemId: item.id, parentSessionId: baseSessionId, sessionId: null, strategy: agent === 'pi' ? 'pi-session-copy' : 'claude-fork', usage: cleanUsage(undefined), totalCost: undefined, status: 'failed', why: `session-copy-failed: ${error?.code ?? error?.message ?? String(error)}`, startedAt, endedAt: copyEndedAt }) }
+      }
+      const piArgs = ['-p', item.prompt, ...baseArgs.slice(2), '--session', sessionFile]
+      const piCall = await invoke(bin, piArgs, spawn, batchCwd, spawnOpts)
+      const piEndedAt = new Date().toISOString()
+      const piSettled = (fields) => finishRow({
+        batchId,
+        role: 'item',
+        itemId: item.id,
+        parentSessionId: baseSessionId,
+        sessionId: null,
+        strategy: agent === 'pi' ? 'pi-session-copy' : 'claude-fork',
+        startedAt,
+        endedAt: piEndedAt,
+        ...fields,
+      })
+      if (!piCall.ok) {
+        return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(undefined), totalCost: undefined, status: 'failed', why: piCall.why }) }
+      }
+      const piBody = parsePiFrames(piCall.stdout)
+      if (!piBody.ok) {
+        return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(undefined), totalCost: undefined, status: 'failed', why: piBody.why }) }
+      }
+      if (piBody.sessionId === null) {
+        return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(piBody.usage), totalCost: piBody.totalCost, status: 'failed', why: 'missing-session-id: the pi call returned no session id' }) }
+      }
+      if (typeof piBody.result !== 'string') {
+        return { status: 'failed', row: piSettled({ sessionId: piBody.sessionId, usage: cleanUsage(piBody.usage), totalCost: piBody.totalCost, status: 'failed', why: 'missing-result: the pi call returned no string result' }) }
+      }
+      return {
+        status: 'ok',
+        text: piBody.result,
+        row: piSettled({ sessionId: piBody.sessionId, usage: cleanUsage(piBody.usage), totalCost: piBody.totalCost, status: 'ok', why: null }),
+      }
+    }
     const itemArgs = ['-p', item.prompt, '--output-format', 'json', '--model', modelId, ...(effort ? ['--effort', effort] : []), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--tools', '', '--max-turns', '1', '--resume', baseSessionId, '--fork-session']
     const call = await invoke(bin, itemArgs, spawn, batchCwd)
     const endedAt = new Date().toISOString()
@@ -289,6 +452,7 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
       role: 'item',
       itemId: item.id,
       parentSessionId: baseSessionId,
+      strategy: agent === 'pi' ? 'pi-session-copy' : 'claude-fork',
       startedAt,
       endedAt,
       ...fields,
@@ -343,7 +507,7 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
 }
 
 function parseCliArgs(argv) {
-  const known = new Set(['--context', '--items', '--model', '--out', '--effort', '--concurrency'])
+  const known = new Set(['--context', '--items', '--model', '--out', '--effort', '--concurrency', '--agent'])
   const values = {}
   for (let index = 0; index < argv.length; index++) {
     const flag = argv[index]
@@ -369,6 +533,7 @@ function parseCliArgs(argv) {
     out: values['--out'],
     effort: values['--effort'],
     concurrency,
+    agent: values['--agent'] ?? 'claude',
   }
 }
 

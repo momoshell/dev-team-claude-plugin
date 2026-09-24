@@ -139,3 +139,52 @@ test('CLI combines multiple directories and refuses unknown flags and empty ledg
   writeFileSync(join(empty, 'batch.jsonl'), '')
   assert.notEqual(runCli([empty]).status, 0)
 })
+
+const HALF_BASE = { batch_id: 'batch-half', strategy: 'pi-session-copy', role: 'base', status: 'ok', input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+const HALF_ROWS = [HALF_BASE, ...[0, 49, 50, 90].map((n) => ({ ...HALF_BASE, role: 'item', cache_read_input_tokens: n }))]
+
+test('a zero-write measured base halves the prompt for the hit threshold', () => {
+  const [result] = reportBatches(HALF_ROWS)
+  assert.deepEqual(result.prefix_hits, { hits: 2, items: 4 })
+  assert.equal(result.hit_rule, 'half-base-prompt')
+})
+
+test('a nonzero base creation keeps the warmed-prefix rule', () => {
+  const [first] = reportBatches(ROWS)
+  assert.deepEqual(first.prefix_hits, { hits: 1, items: 2 })
+  assert.equal(first.hit_rule, 'warmed-prefix')
+})
+
+test('an unmeasured input with zero creation reports null hits and no rule', () => {
+  const absent = { ...HALF_BASE, batch_id: 'batch-u', input_tokens: null }
+  const [result] = reportBatches([absent, { ...absent, role: 'item', input_tokens: 100, cache_read_input_tokens: 90 }])
+  assert.equal(result.prefix_hits, null)
+  assert.equal(result.prefix_hits_reason, 'base-usage-unmeasured')
+  assert.equal(result.hit_rule, null)
+})
+
+test('CLI JSON and text name the half-base-prompt rule with its denominators', () => {
+  const dir = scratchDir('batch-report-half-')
+  writeLedger(dir, HALF_ROWS)
+  const json = runCli([dir, '--json'])
+  assert.equal(json.status, 0, json.stderr)
+  const reports = JSON.parse(json.stdout)
+  assert.equal(reports.length, 1)
+  assert.deepEqual(reports[0].prefix_hits, { hits: 2, items: 4 })
+  assert.equal(reports[0].hit_rule, 'half-base-prompt')
+  const text = runCli([dir])
+  assert.equal(text.status, 0, text.stderr)
+  assert.ok(text.stdout.includes('half-base-prompt'))
+  assert.ok(text.stdout.includes('2 of 4'))
+})
+
+test('CLI JSON and text keep the warmed-prefix rule on a nonzero base write', () => {
+  const dir = scratchDir('batch-report-warmed-')
+  writeLedger(dir, ROWS)
+  const json = runCli([dir, '--json'])
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(JSON.parse(json.stdout)[0].hit_rule, 'warmed-prefix')
+  const text = runCli([dir])
+  assert.equal(text.status, 0, text.stderr)
+  assert.ok(text.stdout.includes('warmed-prefix'))
+})

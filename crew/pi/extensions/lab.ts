@@ -41,13 +41,13 @@
 
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const LAB_TOOL_NAME = 'lab'
-export const LAB_API = Object.freeze(['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite'])
+export const LAB_API = Object.freeze(['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
 export const LAB_PERMISSION_FLAG = '--permission'
 export const LAB_ORIGIN_HEAD_REF = 'refs/remotes/origin/HEAD'
 // Two audit layers, deliberately not one. The per-path probe is defence in depth
@@ -104,6 +104,7 @@ export const LAB_REFUSALS = Object.freeze([
   'skill-grant-invalid', 'op-ungranted',
   'child-denied', 'child-timeout', 'child-unreaped', 'child-failed', 'net-unenforceable',
   'suite-failed', 'output-oversize',
+  'ledger-absent', 'ledger-statement-refused', 'ledger-value-unsupported',
 ])
 
 export interface LabScratch { path: string; head: string; detached: boolean; origin_url: string | null; origin_head: string | null }
@@ -112,6 +113,9 @@ export interface LabGrepHit { file: string; line: number; text: string }
 export interface LabGrepOptions { ignoreCase?: boolean; fixedString?: boolean; maxHits?: number; pathspec?: string[] }
 export interface LabGrepResult { pattern: string; hits: LabGrepHit[]; truncated: boolean }
 export interface LabMutateResult { file: string; count: number }
+// BLOB and non-finite cells are unsupported: ledger rows carry only text, finite number and null scalars.
+export type LabLedgerValue = string | number | null
+export interface LabLedgerResult { columns: string[]; rows: LabLedgerValue[][]; row_count: number; truncated: boolean }
 export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[] }
 export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
@@ -120,6 +124,7 @@ export interface LabApi {
   grep(pattern: string, opts?: LabGrepOptions): Promise<LabGrepResult>
   mutate(file: string, find: string, replace: string): Promise<LabMutateResult>
   runSuite(paths?: string[]): Promise<LabSuiteResult>
+  ledger(sql: string, params?: Array<null | number | string>): Promise<LabLedgerResult>
 }
 
 export const LAB_PARAMS = {
@@ -127,7 +132,7 @@ export const LAB_PARAMS = {
   additionalProperties: true,
   properties: {
     program: {
-      description: 'A seat-authored program using scratchCheckout, read, grep, mutate and runSuite against a clone of the committed HEAD. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
+      description: 'A seat-authored program using scratchCheckout, read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
     skill: {
       description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
@@ -226,6 +231,100 @@ export function allowReadPaths(target: string, deps: any = {}): string[] {
   let resolved = raw
   try { resolved = real(raw) } catch { /* a path that does not resolve is still granted as given */ }
   return [...new Set([raw, resolved])]
+}
+
+export function ledgerDbPath(env: any): string {
+  if (env.DEVTEAM_LEDGER_DB) return env.DEVTEAM_LEDGER_DB
+  const dir = env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
+  return join(dir, 'ledger.db')
+}
+
+export function stripLedgerLeading(sql: string): string {
+  let rest = String(sql)
+  for (;;) {
+    const trimmed = rest.replace(/^\s+/, '')
+    if (trimmed.startsWith('--')) {
+      const end = trimmed.indexOf('\n')
+      if (end < 0) return ''
+      rest = trimmed.slice(end + 1)
+      continue
+    }
+    if (trimmed.startsWith('/*')) {
+      const end = trimmed.indexOf('*/')
+      if (end < 0) return ''
+      rest = trimmed.slice(end + 2)
+      continue
+    }
+    return trimmed
+  }
+}
+
+// The ledger query child. node:sqlite is synchronous and exposes no interrupt or
+// progress handler, so a query run in the host process blocks the host event loop
+// and every lab deadline timer with it (a WITH RECURSIVE aggregate never yields a
+// row). The query therefore runs here, in a child the host SIGKILLs at its op
+// timeout. The child writes one JSON verdict to stdout and never throws past it.
+export const LEDGER_QUERY_CHILD = [
+  "import { DatabaseSync } from 'node:sqlite'",
+  "let input = ''",
+  "process.stdin.setEncoding('utf8')",
+  'for await (const chunk of process.stdin) input += chunk',
+  'const { ledgerPath, sql, bindings } = JSON.parse(input)',
+  'let ledgerDb = null',
+  'let verdict',
+  'try {',
+  '  ledgerDb = new DatabaseSync(ledgerPath, { readOnly: true })',
+  '  const prepared = ledgerDb.prepare(sql)',
+  '  prepared.setReturnArrays(true)',
+  '  const columns = prepared.columns().map((column) => column.name)',
+  '  const rows = []',
+  '  let truncated = false',
+  '  let unsupported = false',
+  '  for (const row of prepared.iterate(...bindings)) {',
+  '    if (rows.length >= 1000) {',
+  '      truncated = true',
+  '      break',
+  '    }',
+  '    if (row.some((cell) => cell instanceof Uint8Array || (typeof cell === \'number\' && !Number.isFinite(cell)))) { unsupported = true; break }',
+  '    rows.push(row)',
+  '  }',
+  "  verdict = unsupported ? { ok: false, kind: 'unsupported' } : { ok: true, columns, rows, truncated }",
+  '} catch (error) {',
+  "  verdict = { ok: false, kind: /read[- ]?only|attempt to write/i.test(String(error?.message || '')) ? 'readonly' : 'error' }",
+  '} finally {',
+  '  try { ledgerDb?.close() } catch {}',
+  '}',
+  'process.stdout.write(JSON.stringify(verdict))',
+].join('\n')
+
+export function hasLedgerSecondStatement(sql: string): boolean {
+  let quote: string | null = null
+  let lineComment = false
+  let blockComment = false
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i]
+    const next = sql[i + 1] || ''
+    if (lineComment) {
+      if (ch === '\n') lineComment = false
+      continue
+    }
+    if (blockComment) {
+      if (ch === '*' && next === '/') { blockComment = false; i += 1 }
+      continue
+    }
+    if (quote) {
+      if (ch === quote && next === quote) { i += 1; continue }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '-' && next === '-') { lineComment = true; i += 1; continue }
+    if (ch === '/' && next === '*') { blockComment = true; i += 1; continue }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue }
+    if (ch === '[') { quote = ']'; continue }
+    if (ch === ';' && !stripLedgerLeading(sql.slice(i + 1))) continue
+    if (ch === ';') return true
+  }
+  return false
 }
 
 // One REPEATED flag per path (ground truth 14). No value ends in `*` — the
@@ -558,7 +657,7 @@ const main = async () => {
   if (!audit.net_enforceable) { emit({ done: true, refused: 'net-unenforceable', audit }); return }
   if (!audit.ok) { emit({ done: true, refused: 'child-denied', audit }); return }
   const lab = {}
-  for (const name of ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite']) lab[name] = (...args) => rpc(name, args)
+  for (const name of ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger']) lab[name] = (...args) => rpc(name, args)
   globalThis.lab = Object.freeze(lab)
   try {
     const imported = await import(programUrl)
@@ -598,6 +697,8 @@ export function createLabTool(deps: any = {}) {
   const childTimeoutMs = deps.childTimeoutMs ?? LAB_CHILD_TIMEOUT_MS
   const killGraceMs = deps.killGraceMs ?? 2000
   const opTimeoutMs = deps.opTimeoutMs ?? LAB_OP_TIMEOUT_MS
+  const ledgerSpawn = deps.ledgerSpawn || nodeSpawn
+  const ledgerTimeoutMs = deps.ledgerTimeoutMs ?? opTimeoutMs
   const opMaxBuffer = deps.opMaxBuffer ?? LAB_OP_MAXBUFFER
   const suiteTimeoutMs = deps.suiteTimeoutMs ?? LAB_SUITE_TIMEOUT_MS
   const reapPollMs = deps.reapPollMs ?? LAB_REAP_POLL_MS
@@ -661,6 +762,8 @@ export function createLabTool(deps: any = {}) {
   let scratchParent: string | null = null
   let scratchRetained: string | null = null
   let suiteControl: any = null
+  // In-flight ledger query children, cancelled with the program that asked for them.
+  const ledgerCancels = new Set<() => void>()
 
   const makeScratch = async (): Promise<LabScratch> => {
     const repoRoot = currentRepoRoot
@@ -698,6 +801,49 @@ export function createLabTool(deps: any = {}) {
     if (opts.pathspec !== undefined && (!Array.isArray(opts.pathspec) || opts.pathspec.some((one: any) => typeof one !== 'string'))) throw refusalError('op-args-invalid', 'grep options are invalid')
     return opts
   }
+
+  // Runs one ledger query in LEDGER_QUERY_CHILD. The host awaits a child, never a
+  // synchronous SQLite call, so its event loop and the lab deadline stay live; the
+  // child is SIGKILLed at ledgerTimeoutMs and its stdout is capped at opMaxBuffer BYTES.
+  // It gets the same NODE_OPTIONS scrub as the suite child: an inherited preload
+  // would run inside the query child and can fail a valid query.
+  const runLedgerQuery = (ledgerPath: string, sql: string, bindings: any[]): Promise<any> => new Promise((resolve, reject) => {
+    let child: any
+    try {
+      const childEnv = { ...env }
+      delete childEnv.NODE_OPTIONS
+      child = ledgerSpawn(execPath, ['--no-warnings', '--input-type=module', '-e', LEDGER_QUERY_CHILD], { shell: false, stdio: ['pipe', 'pipe', 'ignore'], env: childEnv })
+    } catch {
+      reject(refusalError('child-failed', 'the ledger query could not be spawned'))
+      return
+    }
+    const chunks: any[] = []
+    let outBytes = 0
+    let settled = false
+    const stop = () => { try { child.kill('SIGKILL') } catch { /* an exited child needs no kill */ } }
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimer(timer)
+      ledgerCancels.delete(cancel)
+      fn()
+    }
+    const cancel = () => { stop(); settle(() => reject(refusalError('child-failed', 'the child is terminating'))) }
+    ledgerCancels.add(cancel)
+    const timer = setTimer(() => { stop(); settle(() => reject(refusalError('op-timeout', 'ledger query timed out'))) }, ledgerTimeoutMs)
+    child.stdout?.on('data', (chunk: any) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
+      chunks.push(bytes)
+      outBytes += bytes.length
+      if (outBytes > opMaxBuffer) { stop(); settle(() => reject(refusalError('op-oversize', 'ledger result is too large'))) }
+    })
+    child.on('error', () => settle(() => reject(refusalError('child-failed', 'ledger query failed'))))
+    child.on('close', () => settle(() => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { reject(refusalError('child-failed', 'ledger query failed')) }
+    }))
+    child.stdin?.on?.('error', () => { /* a child that died before reading its request settles through close */ })
+    child.stdin?.end(JSON.stringify({ ledgerPath, sql, bindings }))
+  })
 
   const runSuiteProcess = async (paths: string[], scratch: LabScratch): Promise<any> => {
     const args = ['--test', '--test-timeout=30000', '--test-reporter=tap', '--', ...paths]
@@ -865,7 +1011,7 @@ export function createLabTool(deps: any = {}) {
   return {
     name: LAB_TOOL_NAME,
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The five lab.* operations are scratchCheckout, read, grep, mutate and runSuite; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
+    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
@@ -954,6 +1100,32 @@ export function createLabTool(deps: any = {}) {
         if (op === 'scratchCheckout') {
           if (args.length) throw refusalError('op-args-invalid', 'scratchCheckout takes no arguments')
           return ensureScratch()
+        }
+        if (op === 'ledger') {
+          if (args.length < 1 || args.length > 2) throw refusalError('op-args-invalid', 'ledger takes SQL and optional params')
+          const sql = args[0]
+          if (typeof sql !== 'string' || !sql.trim().length) throw refusalError('op-args-invalid', 'ledger SQL is invalid')
+          let bindings: any[] = []
+          if (args.length === 2) {
+            if (!Array.isArray(args[1]) || args[1].some((one: any) => one !== null && (typeof one === 'number' ? !Number.isFinite(one) : typeof one !== 'string'))) throw refusalError('op-args-invalid', 'ledger params are invalid')
+            bindings = args[1]
+          }
+          const statement = stripLedgerLeading(sql)
+          if (!/^(SELECT|WITH)\b/i.test(statement)) throw refusalError('ledger-statement-refused')
+          if (hasLedgerSecondStatement(sql)) throw refusalError('ledger-statement-refused', 'ledger takes a single statement')
+          const ledgerPath = ledgerDbPath(env)
+          try { statSync(ledgerPath) } catch (error: any) {
+            if (error?.code === 'ENOENT') throw refusalError('ledger-absent', 'ledger file is missing')
+            throw error
+          }
+          const verdict: any = await runLedgerQuery(ledgerPath, sql, bindings)
+          if (verdict?.ok === true && Array.isArray(verdict.columns) && Array.isArray(verdict.rows)) {
+            const { columns, rows, truncated } = verdict
+            return { columns, rows, row_count: rows.length, truncated: truncated === true }
+          }
+          if (verdict?.kind === 'unsupported') throw refusalError('ledger-value-unsupported', 'ledger returns string, finite number and null values only; BLOB and non-finite numbers are unsupported')
+          if (verdict?.kind === 'readonly' && /^WITH\b/i.test(statement)) throw refusalError('ledger-statement-refused', 'ledger statement would write')
+          throw refusalError('child-failed', 'ledger query failed')
         }
         if (!scratchPromise) throw refusalError('no-scratch', 'scratchCheckout must run first')
         const scratch = await ensureScratch()
@@ -1103,6 +1275,7 @@ export function createLabTool(deps: any = {}) {
           const finishLater = async () => {
             if (selected !== 'normal') {
               try { suiteControl?.terminate?.() } catch { /* suite ownership handles its own failure path */ }
+              for (const cancelLedger of [...ledgerCancels]) cancelLedger()
             }
             try { await opChain } catch { /* served requests already became refusal frames */ }
             finalize(selected, code, signalValue)
@@ -1150,6 +1323,7 @@ export function createLabTool(deps: any = {}) {
           const selected = reason === 'deadline' ? (timedOut ? 'child-timeout' : 'child-failed') : reason
           pendingReason = pendingReason || selected
           try { suiteControl?.terminate?.() } catch { /* suite ownership handles its own failure path */ }
+          for (const cancelLedger of [...ledgerCancels]) cancelLedger()
           killChild()
         }
         const serve = async (frame: any): Promise<any> => {

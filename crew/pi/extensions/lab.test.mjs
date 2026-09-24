@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync as nodeSpawnSync } from 'node:child_process'
+import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
+import { DatabaseSync } from 'node:sqlite'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -630,8 +631,8 @@ test('the register grants lab to planner pi only', () => {
   }
 })
 
-test('the exported API has exactly five operation names', () => {
-  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite'])
+test('the exported API has exactly six operation names', () => {
+  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
   assert.equal(mod.LAB_TOOL_NAME, 'lab')
 })
 
@@ -1383,4 +1384,326 @@ test('detached is read back from symbolic-ref -q HEAD, including attached absenc
   const attached = runClone(false)
   await attached.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
   assert.equal(attached.program.responses[0].value.detached, false)
+})
+
+function ledgerDb(rows, prefix = 'lab-ledger-') {
+  const dir = temp(prefix)
+  const dbPath = join(dir, 'ledger.db')
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec('CREATE TABLE measurements (id INTEGER PRIMARY KEY, value TEXT, score REAL)')
+    const insert = db.prepare('INSERT INTO measurements (id, value, score) VALUES (?, ?, ?)')
+    for (const [id, value, score] of rows) insert.run(id, value, score)
+  } finally {
+    db.close()
+  }
+  return dbPath
+}
+
+function ledgerCount(dbPath) {
+  const db = new DatabaseSync(dbPath)
+  try { return db.prepare('SELECT COUNT(*) AS n FROM measurements').get().n }
+  finally { db.close() }
+}
+
+test('ledger L1 (returns bounded rows for positional null, number and string params)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5], [2, 'beta', 2.5], [3, null, null]], 'lab-ledger-l1-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT value FROM measurements WHERE id = ?', [1]] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  const result = await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(result.details.outcome, 'ok')
+  assertOpsAnswered(run, 1)
+  assert.deepEqual(run.program.responses[0].value, { columns: ['value'], rows: [['alpha']], row_count: 1, truncated: false })
+  assert.equal(run.syncCalls.length, 0)
+
+  const asString = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT id FROM measurements WHERE value = ?', ['beta']] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await asString.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(asString.program.responses[0].value.rows, [[2]])
+
+  const asNull = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT id FROM measurements WHERE value IS ?', [null]] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await asNull.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(asNull.program.responses[0].value.rows, [[3]])
+
+  const trailing = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['-- fixture comment\nSELECT id FROM measurements WHERE id = 2;'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await trailing.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(trailing.program.responses[0].value.rows, [[2]])
+
+  const withSelect = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['WITH picked AS (SELECT id FROM measurements WHERE id = 1) SELECT id FROM picked'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await withSelect.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(withSelect.program.responses[0].value.rows, [[1]])
+
+  const sameNameJoin = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT a.id, b.id FROM measurements a JOIN measurements b ON b.id = a.id + 1 WHERE a.id = 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await sameNameJoin.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(sameNameJoin.program.responses[0].value.columns, ['id', 'id'], 'same-name-join-guard')
+  assert.deepEqual(sameNameJoin.program.responses[0].value.rows, [[1, 2]], 'same-name-join-guard')
+})
+
+test('ledger L2 (refuses non-SELECT prefixes, second statements and malformed SQL)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-l2-')
+  for (const sql of [
+    'DELETE FROM measurements',
+    'DROP TABLE measurements',
+    "INSERT INTO measurements VALUES (9, 'x', 1)",
+    'SELECT id FROM measurements; SELECT id FROM measurements',
+    'SELECT id FROM measurements; DELETE FROM measurements',
+  ]) {
+    const run = scriptedHarness({
+      requests: [{ id: 1, op: 'ledger', args: [sql] }],
+      envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+    })
+    await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+    assert.equal(run.program.responses[0].refused, 'ledger-statement-refused', sql)
+  }
+  const quoted = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ["SELECT ';' AS semi"] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await quoted.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(quoted.program.responses[0].value.rows, [[';']])
+  const malformed = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELEC oops FROM nowhere'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await malformed.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(malformed.program.responses[0].ok, false)
+  for (const args of [[], ['', []], ['   '], [null], [42], [['SELECT 1']], ['SELECT 1', 'x'], ['SELECT 1', [{}]], ['SELECT 1', [[1]]], ['SELECT 1', [true]], ['SELECT 1', [], 'extra']]) {
+    const run = scriptedHarness({
+      requests: [{ id: 1, op: 'ledger', args }],
+      envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+    })
+    await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+    assert.equal(run.program.responses[0].refused, 'op-args-invalid', JSON.stringify(args))
+  }
+})
+
+test('ledger L3 (refuses WITH INSERT writes and leaves the fixture unchanged)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-l3-')
+  assert.equal(ledgerCount(dbPath), 1)
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ["WITH x AS (SELECT 2 AS id, 'beta' AS value, 2.5 AS score) INSERT INTO measurements SELECT * FROM x RETURNING id"] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(run.program.responses[0].refused, 'ledger-statement-refused')
+  assert.equal(ledgerCount(dbPath), 1)
+  const again = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT COUNT(*) AS n FROM measurements'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await again.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(again.program.responses[0].value.rows, [[1]])
+})
+
+test('ledger L4 (truncates a 1001-row fixture at exactly 1000 rows)', async () => {
+  const rows = Array.from({ length: 1001 }, (_, index) => [index + 1, `v${index + 1}`, index + 0.5])
+  const dbPath = ledgerDb(rows, 'lab-ledger-l4-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT id FROM measurements ORDER BY id'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  const value = run.program.responses[0].value
+  assert.deepEqual(value.columns, ['id'])
+  assert.equal(value.rows.length, 1000)
+  assert.equal(value.row_count, 1000)
+  assert.equal(value.truncated, true)
+  assert.deepEqual(value.rows[0], [1])
+  assert.deepEqual(value.rows[999], [1000])
+})
+
+test('ledger L5 (prefers DEVTEAM_LEDGER_DB over the DEVTEAM_LEDGER_DIR fallback)', async () => {
+  const dirFallback = temp('lab-ledger-l5-dir-')
+  const dirDb = new DatabaseSync(join(dirFallback, 'ledger.db'))
+  try {
+    dirDb.exec('CREATE TABLE measurements (id INTEGER PRIMARY KEY, value TEXT, score REAL)')
+    dirDb.prepare('INSERT INTO measurements VALUES (?, ?, ?)').run(1, 'from-dir', 1)
+  } finally {
+    dirDb.close()
+  }
+  const overridePath = ledgerDb([[1, 'from-db', 1]], 'lab-ledger-l5-db-')
+  const both = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT value FROM measurements WHERE id = 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: overridePath, DEVTEAM_LEDGER_DIR: dirFallback },
+  })
+  await both.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(both.program.responses[0].value.rows, [['from-db']])
+  const fallback = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT value FROM measurements WHERE id = 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: '', DEVTEAM_LEDGER_DIR: dirFallback },
+  })
+  await fallback.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(fallback.program.responses[0].value.rows, [['from-dir']])
+})
+
+test('ledger L6 (reports ledger-absent for a missing file without creating it)', async () => {
+  const missing = join(temp('lab-ledger-l6-'), 'ledger.db')
+  assert.equal(existsSync(missing), false)
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: missing },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(run.program.responses[0].refused, 'ledger-absent')
+  assert.equal(existsSync(missing), false)
+  assert.equal(run.syncCalls.length, 0)
+})
+
+test('ledger A1 (pins the six-name API and grants ledger beside scratchCheckout)', () => {
+  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
+  const dir = grantFixture(skillGrant(['scratchCheckout', 'ledger']), 'lab-grant-ledger-')
+  const loaded = mod.loadSkillLabGrant(dir)
+  assert.deepEqual(loaded.ops, ['scratchCheckout', 'ledger'])
+  assert.deepEqual(loaded.host_authority, [])
+  assert.ok(mod.LAB_REFUSALS.includes('ledger-absent'))
+  assert.ok(mod.LAB_REFUSALS.includes('ledger-statement-refused'))
+})
+
+test('ledger same-name-join-guard (duplicate id columns stay positional)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5], [2, 'beta', 2.5]], 'lab-ledger-join-guard-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT a.id, b.id FROM measurements a JOIN measurements b ON b.id = a.id + 1 WHERE a.id = 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(run.program.responses[0].value.columns, ['id', 'id'])
+  assert.deepEqual(run.program.responses[0].value.rows, [[1, 2]])
+})
+
+test('ledger deadline (a runaway WITH RECURSIVE aggregate is killed at the op timeout while the host loop stays live)', { timeout: 30000 }, async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-deadline-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT SUM(n) FROM c'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+    deps: { ledgerTimeoutMs: 400 },
+  })
+  let hostTicked = false
+  const tick = setTimeout(() => { hostTicked = true }, 50)
+  const started = Date.now()
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  clearTimeout(tick)
+  assert.equal(run.program.responses[0].refused, 'op-timeout')
+  assert.equal(hostTicked, true, 'the host event loop ran a timer while the query was in flight')
+  assert.ok(Date.now() - started < 10000, 'the runaway query was killed near its op timeout')
+})
+
+test('ledger real-child (a real program child reaches lab.ledger through its RPC stub)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-real-')
+  const holder = temp()
+  const taskDir = join(holder, 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const env = { ...process.env, CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir, DEVTEAM_LEDGER_DB: dbPath }
+  delete env.NODE_OPTIONS
+  const result = await mod.createLabTool({ env }).execute('real-ledger', paramsFor("export default await lab.ledger('SELECT value FROM measurements WHERE id = ?', [1])"), null, null, { cwd: ROOT })
+  assert.equal(result.details.outcome, 'ok', JSON.stringify(result.details))
+  assert.deepEqual(result.details.result, { columns: ['value'], rows: [['alpha']], row_count: 1, truncated: false })
+})
+
+test('ledger values (a BLOB cell is refused as ledger-value-unsupported; a bracket-quoted identifier is one statement)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-values-')
+  assert.ok(mod.LAB_REFUSALS.includes('ledger-value-unsupported'))
+  const blob = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT CAST(value AS BLOB) FROM measurements'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await blob.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(blob.program.responses[0].refused, 'ledger-value-unsupported')
+  const infinite = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT 1e999 AS measurement'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await infinite.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(infinite.program.responses[0].refused, 'ledger-value-unsupported', 'a non-finite measurement must not serialise as an apparent SQL NULL')
+  const bracket = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT 1 AS [a;b]'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await bracket.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(bracket.program.responses[0].value, { columns: ['a;b'], rows: [[1]], row_count: 1, truncated: false })
+})
+
+test('ledger abort (aborting a program mid-query SIGKILLs its ledger child instead of waiting out the op timeout)', { timeout: 30000 }, async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-abort-')
+  const holder = temp()
+  const taskDir = join(holder, 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const env = { ...process.env, CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir, DEVTEAM_LEDGER_DB: dbPath }
+  delete env.NODE_OPTIONS
+  const ledgerChildren = []
+  const ledgerSpawn = (...args) => { const child = nodeSpawn(...args); ledgerChildren.push(child); return child }
+  const controller = new AbortController()
+  const started = Date.now()
+  const pending = mod.createLabTool({ env, ledgerSpawn }).execute('abort-ledger', paramsFor("export default await lab.ledger('WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT SUM(n) FROM c')"), controller.signal, null, { cwd: ROOT })
+  const deadline = Date.now() + 10000
+  while (ledgerChildren.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(ledgerChildren.length, 1, 'the program started one ledger query child')
+  controller.abort()
+  const result = await pending
+  assert.notEqual(result.details.outcome, 'ok')
+  assert.ok(Date.now() - started < 15000, 'the aborted call returned without waiting out the 60 s op timeout')
+  const child = ledgerChildren[0]
+  if (child.exitCode === null && child.signalCode === null) await new Promise((resolve) => child.once('close', resolve))
+  assert.equal(child.signalCode, 'SIGKILL', 'the ledger child was killed, not left running')
+})
+
+test('ledger comments (an unterminated trailing block comment is not a second statement)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-comments-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT id FROM measurements; /* trailing'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(run.program.responses[0].value, { columns: ['id'], rows: [[1]], row_count: 1, truncated: false })
+})
+
+test('ledger bytes (the output cap counts UTF-8 bytes, not characters)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-bytes-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT ? AS v', ['é'.repeat(100)]] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+    deps: { opMaxBuffer: 180 },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(run.program.responses[0].refused, 'op-oversize', 'about 150 characters but about 250 bytes must exceed a 180-byte cap')
+})
+
+test('ledger env (the query child does not inherit NODE_OPTIONS)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-env-')
+  const run = scriptedHarness({
+    requests: [{ id: 1, op: 'ledger', args: ['SELECT value FROM measurements WHERE id = 1'] }],
+    envPatch: { DEVTEAM_LEDGER_DB: dbPath, NODE_OPTIONS: `--require ${join(dirname(dbPath), 'missing-preload.cjs')}` },
+  })
+  await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(run.program.responses[0].value, { columns: ['value'], rows: [['alpha']], row_count: 1, truncated: false })
+})
+
+test('ledger input (a multibyte parameter larger than one 64 KiB stdin chunk arrives intact at every chunk alignment)', async () => {
+  const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-input-')
+  // A 3-byte character against a 65536-byte pipe chunk: across three pad lengths at
+  // least one alignment puts a chunk boundary inside a character.
+  for (const pad of ['', 'x', 'xx']) {
+    const value = pad + '€'.repeat(100000)
+    const run = scriptedHarness({
+      requests: [{ id: 1, op: 'ledger', args: ['SELECT length(?) AS n', [value]] }],
+      envPatch: { DEVTEAM_LEDGER_DB: dbPath },
+    })
+    await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+    assert.deepEqual(run.program.responses[0].value, { columns: ['n'], rows: [[value.length]], row_count: 1, truncated: false }, `pad ${pad.length}`)
+  }
 })

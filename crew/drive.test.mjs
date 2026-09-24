@@ -3411,6 +3411,16 @@ test('b433 suite refusal reaches the next brief and survives a configured ceilin
   assert.match(ceiling.calls.writes[ceiling.calls.assign.find((entry) => entry.role === 'planner' && entry.n === 2).briefFile], /suite-run-not-owned/)
 })
 
+test('#1522 reviewer suite refusal re-ask reads the gate proof instead of running it', () => {
+  const reviewerLine = enforcementPreamble(suiteRefusalEnv('reviewer1', 'reviewer')).lines[1] ?? ''
+  assert.equal(reviewerLine, `The same assignment is asked again — run no test or gate command; read the gate proof at ${TD}/gate.mjs.`)
+  assert.equal(/run the gate at its absolute path instead/i.test(reviewerLine), false)
+  assert.equal(/Re-run the validation lane yourself:/.test(reviewerLine), false)
+  const oldSentence = `The driver's gate-proof stage carries this evidence at ${TD}/gate.mjs. The same assignment is asked again — do not run that command; run the gate at its absolute path instead.`
+  assert.equal(enforcementPreamble(suiteRefusalEnv('planner1', 'planner')).lines[1] ?? '', oldSentence)
+  assert.equal(enforcementPreamble(suiteRefusalEnv('builder1', 'builder')).lines[1] ?? '', oldSentence)
+})
+
 const CHOICE_OPTIONS = Object.freeze({
   scope: ['widen-fence-to', 'split-lane', 'park'],
   'plan-check': ['adopt-and-continue', 're-dispatch', 'park'],

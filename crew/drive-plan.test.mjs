@@ -1820,7 +1820,7 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
   assert.equal(io.calls.writes[`${TD}/review-brief-1.md`], [
     '# Review (round 1)', '',
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
-    'Re-run the validation lane yourself: lane-cmd',
+    `Run no test or gate command; read the gate proof at ${TD}/gate.mjs and the suite result in ${TD}/journal.jsonl.`,
     'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
     'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
     'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',
@@ -1833,6 +1833,7 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
     '## Diff-mutant findings',
     '[]',
   ].join('\n'))
+  assert.equal(/Re-run the validation lane yourself:/.test(io.calls.writes[`${TD}/review-brief-1.md`]), false)
 })
 
 test('a directed run with no validation lane escalates', () => {

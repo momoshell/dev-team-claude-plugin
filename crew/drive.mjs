@@ -385,7 +385,9 @@ function suiteRefusalPreamble(env) {
     kind: 'suite-run-not-owned',
     lines: [
       `Your previous dispatch was REFUSED: suite-run-not-owned. You ran ${JSON.stringify(refusal.command)}, which your role does not own.`,
-      `The driver's gate-proof stage carries this evidence at ${refusal.gate_path}. The same assignment is asked again — do not run that command; run the gate at its absolute path instead.`,
+      refusal.role === 'reviewer'
+        ? `The same assignment is asked again — run no test or gate command; read the gate proof at ${refusal.gate_path}.`
+        : `The driver's gate-proof stage carries this evidence at ${refusal.gate_path}. The same assignment is asked again — do not run that command; run the gate at its absolute path instead.`,
     ],
   }
 }
@@ -10800,7 +10802,7 @@ function runTask(ctx, io, crash) {
         ...carriedHead,
         `# Review (round ${roundNo})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
-        `Re-run the validation lane yourself: ${lane}`,
+        `Run no test or gate command; read the gate proof at ${acceptedGatePath} and the suite result in ${journal}.`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
         'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
         'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',

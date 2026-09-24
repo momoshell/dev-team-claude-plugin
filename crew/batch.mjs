@@ -252,6 +252,8 @@ function parsePiFrames(text) {
     if (!frame || frame.type !== 'message_end') continue
     const message = frame.message
     if (!message || message.role !== 'assistant') continue
+    const failedAttempt = message.stopReason === 'error' || message.stopReason === 'aborted'
+    if (failedAttempt) continue
     if (Array.isArray(message.content)) {
       for (const part of message.content) {
         if (part && part.type === 'text' && typeof part.text === 'string') parts.push(part.text)
@@ -280,6 +282,12 @@ function parsePiFrames(text) {
     cache_read_input_tokens: folded?.billed_cache_read_tokens,
     cache_creation_input_tokens: folded?.billed_cache_write_tokens,
   }
+  const message = frames.findLast((frame) => frame?.type === 'message_end' && frame.message?.role === 'assistant')?.message
+  if (message) {
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+      return { ok: false, why: `provider-error: ${message.errorMessage ?? 'no errorMessage'}`, usage, totalCost: cost }
+    }
+  }
   return { ok: true, frames, sessionId, result: parts.length > 0 ? parts.join('') : null, usage, totalCost: cost }
 }
 
@@ -294,6 +302,7 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
   let modelId = null
   let piModel = null
   if (agent === 'pi') {
+    if (model.includes('/')) fail('pi --model requires a bare codex model id, e.g. --model gpt-6-luna')
     const full = piModelString({ provider: 'openai', id: model })
     const marker = 'openai-codex/'
     if (typeof full !== 'string' || !full.startsWith(marker)) fail(`unsupported pi model ${JSON.stringify(model)}`)
@@ -363,7 +372,7 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
   if (agent === 'pi') {
     if (!baseCall.ok) return writeBaseFailure(baseCall.why, undefined, undefined)
     const parsed = parsePiFrames(baseCall.stdout)
-    if (!parsed.ok) return writeBaseFailure(parsed.why, undefined, undefined)
+    if (!parsed.ok) return writeBaseFailure(parsed.why, parsed.usage, parsed.totalCost)
     baseUsage = parsed.usage
     baseCost = parsed.totalCost
     if (parsed.sessionId === null) return writeBaseFailure('missing-session-id: the warm pi call returned no session id', parsed.usage, parsed.totalCost)
@@ -430,7 +439,7 @@ export async function runBatch({ context, items, model, effort, concurrency = 4,
       }
       const piBody = parsePiFrames(piCall.stdout)
       if (!piBody.ok) {
-        return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(undefined), totalCost: undefined, status: 'failed', why: piBody.why }) }
+        return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(piBody.usage), totalCost: piBody.totalCost, status: 'failed', why: piBody.why }) }
       }
       if (piBody.sessionId === null) {
         return { status: 'failed', row: piSettled({ sessionId: null, usage: cleanUsage(piBody.usage), totalCost: piBody.totalCost, status: 'failed', why: 'missing-session-id: the pi call returned no session id' }) }

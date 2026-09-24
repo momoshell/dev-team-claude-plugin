@@ -304,7 +304,10 @@ file. The warm call runs `pi -p <prompt> --mode json --provider openai-codex
 --model <model> [--thinking <effort>] --no-tools --no-context-files
 --no-extensions --no-skills --no-prompt-templates --session-dir
 <batch>/sessions`, and each item reruns the same argv with its own prompt
-plus `--session <batch>/sessions/<id>.jsonl`. Every pi call shares the same
+plus `--session <batch>/sessions/<id>.jsonl`. `--model` takes the bare codex
+model id (e.g. `gpt-6-luna`), never a provider-prefixed id such as
+`openai/gpt-6-luna` or `openai-codex/gpt-6-luna`, and
+a slash-bearing id is refused before any spawn. Every pi call shares the same
 per-batch neutral temp working directory and spawns with
 `PI_CACHE_RETENTION=long`. The warm call must leave exactly one `.jsonl`
 session file behind (missing, multiple, or unreadable fails the base row and
@@ -315,7 +318,7 @@ assistant `message_end` frames only, so replay and tool frames never count,
 and absent spend stays `null` with `cli-not-reported`.
 
 ```sh
-node crew/batch.mjs --context context.txt --items items.jsonl --model model-id --out out --agent pi
+node crew/batch.mjs --context context.txt --items items.jsonl --model gpt-6-luna --out out --agent pi
 ```
 
 ### Batch cache-read report

@@ -370,16 +370,21 @@ test('the CLI rejects extras and missing options without spawning', () => {
 const PI_USAGE = { input: 11, output: 3, cacheRead: 86, cacheWrite: 5, cost: { total: 0.02 } }
 const PI_SESSION_BYTES = 'recorded warm pi session\n'
 
-function piFrames(reply, { usage = PI_USAGE, sessionId = 'warm-id' } = {}) {
+const PI_ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+const PI_PROVIDER_MESSAGE = 'Codex error: unsupported account model'
+const PI_RETRY_USAGE_A = { input: 2, output: 1, cacheRead: 4, cacheWrite: 8, cost: { total: 0.25 } }
+const PI_RETRY_USAGE_B = { input: 3, output: 5, cacheRead: 7, cacheWrite: 9, cost: { total: 0.5 } }
+
+function piFrames(reply, { usage = PI_USAGE, sessionId = 'warm-id', stopReason = null, errorMessage = undefined } = {}) {
   const frames = [
     { type: 'session', version: 3, id: sessionId },
-    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: reply }], ...(usage === null ? {} : { usage }) } },
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: reply }], ...(usage === null ? {} : { usage }), ...(stopReason === null ? {} : { stopReason }), ...(errorMessage === undefined ? {} : { errorMessage }) } },
     { type: 'turn_end', message: { role: 'assistant', usage: { input: 500, output: 500, cacheRead: 500, cacheWrite: 500, cost: { total: 500 } } } },
   ]
   return frames.map((frame) => JSON.stringify(frame)).join('\n') + '\n'
 }
 
-function piFixtureSpawn({ calls, sessionBytes = PI_SESSION_BYTES, usageFor = null, warmMode = null, delayMs = 12 } = {}) {
+function piFixtureSpawn({ calls, sessionBytes = PI_SESSION_BYTES, usageFor = null, warmMode = null, delayMs = 12, warmStop = null, warmErrorMessage = PI_PROVIDER_MESSAGE, rejectedIndex = null, rejectedStop = 'error', rejectedMessage = PI_PROVIDER_MESSAGE, retryIndex = null, retryStop = 'error' } = {}) {
   let active = 0
   const state = { peak: 0 }
   const spawn = (bin, args, options) => {
@@ -412,10 +417,20 @@ function piFixtureSpawn({ calls, sessionBytes = PI_SESSION_BYTES, usageFor = nul
       }
       const prompt = item ? args[args.indexOf('-p') + 1] : null
       const index = item ? Number(String(prompt).replace('question', '')) : -1
-      const usage = usageFor ? usageFor(index) : PI_USAGE
+      const rejected = item ? rejectedIndex === index : warmStop !== null
+      const usage = usageFor ? usageFor(index) : (rejected ? PI_ZERO : PI_USAGE)
       const reply = item ? `answer-${index}` : 'ready'
       const sessionId = item ? `item-session-${index}` : 'warm-id'
-      child.stdout.end(piFrames(reply, { usage, sessionId }))
+      const stopReason = rejected ? (item ? rejectedStop : warmStop) : null
+      const errorMessage = rejected ? (item ? rejectedMessage : warmErrorMessage) : undefined
+      if (item && retryIndex === index) {
+        const sid = `item-session-${index}`
+        const attempt = piFrames('partial', { usage: PI_RETRY_USAGE_A, sessionId: sid, stopReason: retryStop, errorMessage: '429 rate limited' }).trim().split('\n').filter((frameLine) => JSON.parse(frameLine).type === 'message_end')
+        const success = piFrames(`answer-${index}`, { usage: PI_RETRY_USAGE_B, sessionId: sid }).trim().split('\n').filter((frameLine) => JSON.parse(frameLine).type === 'message_end')
+        child.stdout.end([JSON.stringify({ type: 'session', version: 3, id: sid }), ...attempt, JSON.stringify({ type: 'auto_retry_start' }), ...success].join('\n') + '\n')
+      } else {
+        child.stdout.end(piFrames(reply, { usage, sessionId, stopReason, errorMessage }))
+      }
       child.stderr.end('')
       if (item) active -= 1
       child.emit('close', 0)
@@ -593,4 +608,135 @@ test('an unreadable warm session fails each item copy while the queue continues'
     assert.match(row.why, /session-copy-failed/, `item${index}`)
     assert.equal(existsSync(join(out, `item${index}.txt`)), false, `item${index}`)
   }
+})
+
+test('a provider-rejected pi warm call fails the base with the diagnostic and measured zero usage', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 2)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, warmStop: 'error' })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', out, spawn })
+  assert.equal(outcome.ok, false)
+  assert.equal(calls.length, 1)
+  const rows = readRows(out)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].role, 'base')
+  assert.equal(rows[0].status, 'failed')
+  assert.equal(rows[0].why, `provider-error: ${PI_PROVIDER_MESSAGE}`)
+  assert.equal(rows[0].input_tokens, 0)
+  assert.equal(rows[0].output_tokens, 0)
+  assert.equal(rows[0].cache_read_input_tokens, 0)
+  assert.equal(rows[0].cache_creation_input_tokens, 0)
+  assert.equal(existsSync(join(out, 'item0.txt')), false)
+  assert.equal(existsSync(join(out, 'item1.txt')), false)
+  assertIsolatedCalls(calls, dir)
+})
+
+test('an aborted pi frame without a diagnostic fails with the fallback and measured zeros', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 1)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, warmStop: 'aborted', warmErrorMessage: null })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', out, spawn })
+  assert.equal(outcome.ok, false)
+  const rows = readRows(out)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].status, 'failed')
+  assert.equal(rows[0].why, 'provider-error: no errorMessage')
+  assert.equal(rows[0].input_tokens, 0)
+  assert.equal(rows[0].output_tokens, 0)
+  assert.equal(rows[0].cache_read_input_tokens, 0)
+  assert.equal(rows[0].cache_creation_input_tokens, 0)
+})
+
+test('a provider-rejected pi item fails its row while later items still succeed', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 3)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, rejectedIndex: 0 })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', concurrency: 1, out, spawn })
+  assert.equal(outcome.ok, true)
+  assert.equal(calls.length, 4)
+  const rows = readRows(out)
+  assert.equal(rows.length, 4)
+  assert.equal(rows[0].role, 'base')
+  assert.equal(rows[0].status, 'ok')
+  const failed = rows.find((row) => row.item_id === 'item0')
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.why, `provider-error: ${PI_PROVIDER_MESSAGE}`)
+  assert.equal(failed.input_tokens, 0)
+  assert.equal(failed.output_tokens, 0)
+  assert.equal(failed.cache_read_input_tokens, 0)
+  assert.equal(failed.cache_creation_input_tokens, 0)
+  assert.equal(existsSync(join(out, 'item0.txt')), false)
+  for (const index of [1, 2]) {
+    const row = rows.find((item) => item.item_id === `item${index}`)
+    assert.equal(row.status, 'ok', `item${index}`)
+    assert.equal(readFileSync(join(out, `item${index}.txt`), 'utf8'), `answer-${index}`, `item${index}`)
+  }
+})
+
+test('a rejected pi frame followed by a successful retry succeeds with the final text and summed usage', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 1)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, retryIndex: 0 })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', concurrency: 1, out, spawn })
+  assert.equal(outcome.ok, true)
+  const rows = readRows(out)
+  assert.equal(rows.length, 2)
+  const item = rows.find((row) => row.item_id === 'item0')
+  assert.equal(item.status, 'ok')
+  assert.equal(item.why, null)
+  const text = readFileSync(join(out, 'item0.txt'), 'utf8')
+  assert.equal(text, 'answer-0')
+  assert.equal(text.includes('partial'), false)
+  assert.equal(item.input_tokens, 5)
+  assert.equal(item.output_tokens, 6)
+  assert.equal(item.cache_read_input_tokens, 11)
+  assert.equal(item.cache_creation_input_tokens, 17)
+  assert.equal(item.total_cost_usd, 0.75)
+  assert.deepEqual(item.usage_absent_reasons, null)
+})
+
+test('an aborted pi frame followed by a successful retry succeeds with the final text and summed usage', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 1)
+  const calls = []
+  const { spawn } = piFixtureSpawn({ calls, retryIndex: 0, retryStop: 'aborted' })
+  const outcome = await runBatch({ agent: 'pi', context, items, model: 'gpt-6-luna', concurrency: 1, out, spawn })
+  assert.equal(outcome.ok, true)
+  const rows = readRows(out)
+  assert.equal(rows.length, 2)
+  const item = rows.find((row) => row.item_id === 'item0')
+  assert.equal(item.status, 'ok')
+  assert.equal(item.why, null)
+  const text = readFileSync(join(out, 'item0.txt'), 'utf8')
+  assert.equal(text, 'answer-0')
+  assert.equal(text.includes('partial'), false)
+  assert.equal(item.input_tokens, 5)
+  assert.equal(item.output_tokens, 6)
+  assert.equal(item.cache_read_input_tokens, 11)
+  assert.equal(item.cache_creation_input_tokens, 17)
+  assert.equal(item.total_cost_usd, 0.75)
+  assert.deepEqual(item.usage_absent_reasons, null)
+})
+
+test('a slash-bearing pi model is refused with the bare-id hint before any spawn', async () => {
+  const dir = scratchDir()
+  const { context, items, out } = writeInputs(dir, 1)
+  let spawned = 0
+  const spawn = () => {
+    spawned += 1
+    throw new Error('must not spawn')
+  }
+  await assert.rejects(runBatch({ agent: 'pi', context, items, model: 'openai/gpt-6-luna', out, spawn }), /pi --model requires a bare codex model id, e.g\. --model gpt-6-luna/)
+  assert.equal(spawned, 0)
+})
+
+test('the CLI refuses a slash-bearing pi model before reading context or items', () => {
+  const script = join(ROOT, 'crew', 'batch.mjs')
+  const child = spawnSync(process.execPath, [script, '--context', join('no-such-dir', 'context.txt'), '--items', join('no-such-dir', 'items.jsonl'), '--model', 'openai-codex/gpt-6-luna', '--out', join('no-such-dir', 'out'), '--agent', 'pi'])
+  assert.notEqual(child.status, 0)
+  assert.match(String(child.stderr), /pi --model requires a bare codex model id, e\.g\. --model gpt-6-luna/)
 })

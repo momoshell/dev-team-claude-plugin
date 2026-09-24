@@ -294,3 +294,33 @@ node crew/batch.mjs --context context.txt --items items.jsonl --model model-id -
 `--concurrency` (an integer from 1 to 16, default 4) are optional. Unknown
 options are refused, and a validation, warm-call, or ledger-write failure
 exits nonzero.
+
+### Batch cache-read report
+
+The reporter `crew/batch-report.mjs` reads one or more ledgers and states
+each batch's measured cache-read share with its token and item denominators
+plus its whole-warmed-prefix hits. Behaviour is pinned by
+`crew/batch-report.test.mjs`, which uses synthetic ledgers only.
+
+```sh
+node crew/batch-report.mjs out
+node crew/batch-report.mjs out-a out-b --json
+```
+
+Each `<out-dir>` must hold a `batch.jsonl` ledger; a missing or unreadable
+ledger names its path, malformed JSON names its ledger path and one-based
+line, and an empty ledger, an unknown flag, or a missing directory argument
+is refused nonzero. Text prints one line per batch with the strategy,
+item counts, unmeasured count, the share as a decimal with its
+`(<numerator>/<denominator> tokens, <k> items)` denominators, the prefix
+`h of k` hits, and the fresh-baseline reason; `--json` emits the same
+batch array as JSON. Fields per batch are `batch_id`, `strategy`, `total`,
+`ok`, `failed`, `unmeasured_items`, `cache_read_share` (`share`,
+`numerator_tokens`, `denominator_tokens`, `items`), `prefix_hits` (`hits`,
+`items`), and `fresh_baseline`. Absent data uses closed reasons only:
+`zero-denominator` inside `cache_read_share` when no measured token
+remains (the share is `null` with its `0/0 tokens, 0 items` denominators
+retained), `base-usage-unmeasured` in `prefix_hits_reason` when the base
+row's cache usage is unmeasured (hits stay `null`, never zero), and
+`no-fresh-call-recorded` in `fresh_baseline_reason`, since no fresh call
+is recorded.

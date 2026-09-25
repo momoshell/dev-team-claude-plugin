@@ -1783,7 +1783,7 @@ test('ingest-all backfills active and archived journals whole-window and counts 
   const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
   assert.equal(result.code, 0)
   assert.deepEqual(result.report, {
-    journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 },
+    journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 }, incomplete: [],
     rows_applied: 10, rows_ignored: 0, rows_failed: 0,
   })
   assert.equal(lines.length, 1)
@@ -1811,7 +1811,7 @@ test('ingest-all replay adds zero rows and zero JSONL bytes', () => {
   const second = ingestAll({ root, deps: ingestAllDeps(() => {}) })
   assert.equal(second.code, 0)
   assert.deepEqual(second.report, {
-    journals_seen: 1, ingested: 1, skipped_by_reason: {},
+    journals_seen: 1, ingested: 1, skipped_by_reason: {}, incomplete: [],
     rows_applied: 0, rows_ignored: 5, rows_failed: 0,
   })
   assert.deepEqual(ingestAllSnapshot(dbPath), before)
@@ -1847,7 +1847,7 @@ test('ingest-all on an empty root reports zeros with one JSON line', () => {
   const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
   assert.equal(result.code, 0)
   assert.deepEqual(result.report, {
-    journals_seen: 0, ingested: 0, skipped_by_reason: {},
+    journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [],
     rows_applied: 0, rows_ignored: 0, rows_failed: 0,
   })
   assert.equal(lines.length, 1)
@@ -1942,4 +1942,18 @@ test('ingest-all counts a mismatched identity without rows', () => {
   assert.deepEqual(result.report.skipped_by_reason, { identity_unresolved: 1 })
   assert.equal(result.report.ingested, 0)
   assert.ok(Object.values(ingestAllSnapshot(dbPath)).every((rows) => rows.length === 0))
+})
+
+test('ingest-all never counts an incomplete journal as ingested and exposes its first failure', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  writeFileSync(join(root, 'dt-one', 'lane-a', 'journal.jsonl'), 'this is not json\nneither is this\n')
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1 })
+  assert.equal(result.report.incomplete.length, 1)
+  assert.equal(result.report.incomplete[0].reason, 'journal line is not valid JSON')
+  assert.equal(result.report.incomplete[0].line, 1)
 })

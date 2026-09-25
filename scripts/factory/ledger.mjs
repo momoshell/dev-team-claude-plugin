@@ -73,10 +73,10 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync, readdirSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync, readdirSync, mkdtempSync, rmSync,
 } from 'node:fs'
 import { dirname, join, resolve, parse, sep } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
@@ -6747,24 +6747,36 @@ function bootSeatArgs(source, role, adwId) {
 }
 
 // Idempotency key for one journal fact: the table's declared TABLES natural
-// unique tuple, null-safe and type-normalized. NULL participates in equality
-// (unlike SQLite's NULL-distinct UNIQUE semantics), so a repeated nullable
-// composite key (provider role/dispatch, reask, rpc dispatch) still collides.
-// Numeric strings coerce the way column affinity does ('42' and 42 land the
-// same); created_at is never part of any journal-fed tuple, so replays with
-// fresh timestamps still collide. Non-finite numbers behave as absent.
-function ingestKeyComponent(value) {
+// unique tuple, null-safe and normalized the way SQLite's column AFFINITY would
+// store each value. A numeric-looking string coerces only in an INTEGER, REAL or
+// NUMERIC column; in a TEXT column '01' and '1' stay distinct (and a number is
+// stored as its text), exactly as the declared UNIQUE key distinguishes them.
+// NULL participates in equality (unlike SQLite's NULL-distinct UNIQUE), so a
+// repeated nullable composite key still collides. created_at is never part of a
+// journal-fed tuple, so replays with fresh timestamps collide.
+function columnAffinity(table, column) {
+  const decl = String(TABLES[table]?.columns?.find((one) => one.name === column)?.decl || '').toUpperCase()
+  if (decl.includes('INT')) return 'numeric'
+  if (/CHAR|CLOB|TEXT/.test(decl)) return 'text'
+  if (/REAL|FLOA|DOUB|NUMERIC|DECIMAL|BOOL/.test(decl)) return 'numeric'
+  return 'none'
+}
+
+function ingestKeyComponent(value, affinity) {
   if (value === undefined || value === null) return 'null'
-  if (typeof value === 'boolean') return value ? 'num:1' : 'num:0'
-  if (typeof value === 'number') return Number.isFinite(value) ? `num:${Math.trunc(value)}` : 'null'
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    if (trimmed !== '' && DRIFT_NUMERIC_LITERAL.test(trimmed)) {
-      const numeric = Number(trimmed)
-      if (Number.isFinite(numeric)) return `num:${Math.trunc(numeric)}`
+  if (typeof value === 'number' && !Number.isFinite(value)) return 'null'
+  if (affinity === 'numeric') {
+    if (typeof value === 'boolean') return value ? 'num:1' : 'num:0'
+    if (typeof value === 'number') return `num:${value}`
+    if (typeof value === 'string') {
+      const trimmed = value.trim()
+      if (trimmed !== '' && DRIFT_NUMERIC_LITERAL.test(trimmed) && Number.isFinite(Number(trimmed))) return `num:${Number(trimmed)}`
+      return `str:${value}`
     }
-    return `str:${value}`
   }
+  if (affinity === 'text' && (typeof value === 'number' || typeof value === 'string')) return `str:${String(value)}`
+  if (typeof value === 'string') return `str:${value}`
+  if (typeof value === 'number') return `num:${value}`
   return `json:${JSON.stringify(value)}`
 }
 
@@ -6776,10 +6788,17 @@ function journalFactIdentity(writer) {
   return { table, unique: TABLES[table].unique[0] }
 }
 
+function identityKey(identity, row) {
+  return `${identity.table}::${identity.unique.map((column) => ingestKeyComponent(row?.[column], columnAffinity(identity.table, column))).join('|')}`
+}
+
 function journalFactKey(writer, args) {
   const identity = journalFactIdentity(writer)
-  if (!identity) return null
-  return `${identity.table}::${identity.unique.map((column) => ingestKeyComponent(args?.[column])).join('|')}`
+  return identity ? identityKey(identity, args) : null
+}
+
+function mirrorErrorCount(ledger) {
+  try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
 }
 
 export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false } = {}) {
@@ -6792,11 +6811,29 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
       const identity = journalFactIdentity(writer)
       if (!identity || seeded.has(identity.table)) continue
       seeded.add(identity.table)
-      for (const row of ledger.dumpTable(identity.table) || []) {
-        seen.add(`${identity.table}::${identity.unique.map((column) => ingestKeyComponent(row?.[column])).join('|')}`)
-      }
+      for (const row of ledger.dumpTable(identity.table) || []) seen.add(identityKey(identity, row))
     }
   }
+  // Dry-run never writes the real ledger, but it still runs every writer's own
+  // validation, against a throwaway ledger, so a row reported applied in a dry
+  // run is one the real run would accept.
+  let scratchDir = null
+  let writeTarget = ledger
+  if (dry_run) {
+    scratchDir = mkdtempSync(join(tmpdir(), 'ledger-dry-run-'))
+    writeTarget = openLedger({ dbPath: join(scratchDir, 'ledger.db') })
+  }
+  try {
+    return ingestJournalRows(journalPath, writeTarget, { adw_id, sinceMs, seen })
+  } finally {
+    if (scratchDir) {
+      try { writeTarget.close() } catch { /* a throwaway ledger */ }
+      try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
+    }
+  }
+}
+
+function ingestJournalRows(journalPath, ledger, { adw_id, sinceMs, seen }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -6809,6 +6846,7 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   let ignored = 0
   let failed = 0
   let firstFailure = null
+  let mirrorFailed = false
   const lines = String(content).split('\n')
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1
@@ -6868,19 +6906,27 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
     }
     for (const fact of pending) {
       const key = journalFactKey(fact.writer, fact.args)
-      if (key !== null && seen.has(key)) ignored += 1
-      if (seen.has(key)) continue
-      seen.add(key)
-      if (dry_run) applied += 1
-      if (dry_run) continue
+      if (key !== null && seen.has(key)) { ignored += 1; continue }
+      const mirrorBefore = mirrorErrorCount(ledger)
       const error = applyJournalFact(ledger, fact.writer, fact.args)
-      if (error === null) {
-        applied += 1
-      } else {
+      if (error !== null) {
         failed += 1
         if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
+        continue
       }
+      // A writer that appended its JSONL line but could not mirror it reports
+      // success; a re-run would then append the same fact again. Count it as a
+      // failure and stop this journal, so the store's health is looked at first.
+      if (mirrorErrorCount(ledger) > mirrorBefore) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: 'mirror-error' }
+        mirrorFailed = true
+        break
+      }
+      if (key !== null) seen.add(key)
+      applied += 1
     }
+    if (mirrorFailed) break
   }
   return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
 }

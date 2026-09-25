@@ -1074,7 +1074,7 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
   const d = normalDeps(deps)
   const crewRoot = typeof root === 'string' && root.trim() ? root : join(d.home, '.crew')
   const dry_run = dryRun === true
-  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, rows_applied: 0, rows_ignored: 0, rows_failed: 0 }
+  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [], rows_applied: 0, rows_ignored: 0, rows_failed: 0 }
   const noteSkip = (reason) => {
     summary.skipped_by_reason[reason] = (summary.skipped_by_reason[reason] || 0) + 1
   }
@@ -1156,11 +1156,18 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       unmeasured = true
       continue
     }
-    summary.ingested += 1
     summary.rows_applied += detail.applied || 0
     summary.rows_ignored += (detail.ignored || 0) + (detail.skipped || 0)
     summary.rows_failed += detail.failed || 0
-    if (detail.failed > 0 || detail.complete === false) unmeasured = true
+    // An ingest that skipped or failed rows is not a successful one: it is counted
+    // under ingest_incomplete with its first failure, never under ingested.
+    if (detail.failed > 0 || detail.complete === false) {
+      noteSkip('ingest_incomplete')
+      summary.incomplete.push({ journal: journalPath, reason: detail.first_failure?.reason ?? 'unreported', line: detail.first_failure?.line ?? null })
+      unmeasured = true
+      continue
+    }
+    summary.ingested += 1
   }
   d.log(JSON.stringify(summary))
   const refusal = unmeasured ? { reason: CLOSEOUT_REFUSALS.INGEST_UNMEASURED, step: 'ingest-all', message: 'ingest-all completed with unmeasured or failed ingests' } : null

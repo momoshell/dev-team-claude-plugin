@@ -2786,3 +2786,67 @@ test('ingest-all dry_run counts eligible facts without invoking writers', { skip
     assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
   } finally { ledger.close() }
 })
+
+// Sol review of the b938 hand-finish (2026-09-25): each test pins one finding.
+test('ingest key follows column affinity: TEXT ids 01 and 1 stay two screener proposals', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const row = (proposalId, offset) => ({ at: new Date(Date.parse('2030-01-01T00:00:00.000Z') + offset).toISOString(), screener_proposal: { round: 1, proposal_id: proposalId, axis: 'a', model: 'm', outcome: 'adopted' } })
+  writeFileSync(journalPath, `${[row('01', 0), row('1', 1000)].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'affinity' })
+    assert.equal(result.applied, 2)
+    assert.deepEqual(ledger.dumpTable('screener_proposals').map((one) => one.proposal_id).sort(), ['01', '1'])
+  } finally { ledger.close() }
+})
+
+test('a rejected fact does not claim its key: a valid row sharing it is still written', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const at = '2030-01-01T00:00:00.000Z'
+  writeFileSync(journalPath, `${[
+    { at, role: 'builder', id: 'd1', provider_failure: { kind: 'not-a-kind', status: 429 } },
+    { at, role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'seen-after-write' })
+    assert.equal(result.failed, 1)
+    assert.equal(result.applied, 1)
+    assert.equal(ledger.dumpTable('provider_failures').length, 1)
+    assert.equal(ledger.dumpTable('provider_failures')[0].kind, 'rate_limit')
+  } finally { ledger.close() }
+})
+
+test('dry-run runs writer validation: an invalid fact is failed, not applied, and nothing is written', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'not-a-kind', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'dry-validate', dry_run: true })
+    assert.equal(result.applied, 0)
+    assert.equal(result.failed, 1)
+    assert.equal(result.complete, false)
+    assert.equal(ledger.dumpTable('provider_failures').length, 0)
+  } finally { ledger.close() }
+})
+
+test('a mirror error fails the fact and stops the journal instead of reporting success', () => {
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+    { at: '2030-01-01T00:00:01.000Z', role: 'builder', id: 'd2', provider_failure: { kind: 'rate_limit', status: 429 } },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  let mirrorErrors = 0
+  let writes = 0
+  const ledger = {
+    dumpTable: () => [],
+    recordProviderFailure() { writes += 1; mirrorErrors += 1 },
+    stats: () => ({ mirror_errors: mirrorErrors }),
+  }
+  const result = ingestJournal(journalPath, ledger, { adw_id: 'mirror' })
+  assert.equal(result.applied, 0)
+  assert.equal(result.failed, 1)
+  assert.equal(result.complete, false)
+  assert.deepEqual(result.first_failure, { line: 1, reason: 'mirror-error' })
+  assert.equal(writes, 1, 'the journal stops at the first mirror error')
+})

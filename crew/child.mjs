@@ -21,7 +21,7 @@ import { seatIo as defaultSeatIo, settleSeatTeardown } from './seat-io.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
-import { runOutcome, runScopedPaths, returnsInheritanceRecord, RUN_START_EVENT } from './crew.mjs'
+import { runOutcome, runScopedPaths, returnsInheritanceRecord, RUN_START_EVENT, persistedAdapters } from './crew.mjs'
 import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
@@ -407,7 +407,7 @@ export function runChild(argv, injected = {}) {
       err.stage = 'ledger-sidecar'
       result = failure(err)
     } else {
-      io = seatIo(crew, runPaths, checkout, emitter, injected.adapters || null, spec, noCmux)
+      io = seatIo(crew, runPaths, checkout, emitter, injected.adapters || persistedAdapters(crew), spec, noCmux)
       const protectedFloor = probeProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis

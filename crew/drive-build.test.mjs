@@ -6484,14 +6484,21 @@ const diffSettlementReport = (generation) => ({
   omitted_reason: DIFF_SETTLEMENT_OMITTED_REASON, blind_spot: null, skip_counts: {}, mutants: [],
 })
 
-function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null } = {}) {
-  const files = { [DIFF_SETTLEMENT_PATH]: 'before\n' }
+function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false } = {}) {
+  const files = { [DIFF_SETTLEMENT_PATH]: runnerUnavailable ? 'baseline\n' : 'before\n' }
+  const snapshotPath = `${TD}/diff-1-0-current-${DIFF_SETTLEMENT_FILE}`
   const plan = planEnv({ details: {
     ...planEnv().details, files_in_scope: [DIFF_SETTLEMENT_FILE], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
   } })
   const envelopes = {
     'planner:1': plan,
-    'builder:1': buildEnv(),
+    'builder:1': () => {
+      if (runnerUnavailable) {
+        if (absentCurrent) delete files[DIFF_SETTLEMENT_PATH]
+        else files[DIFF_SETTLEMENT_PATH] = 'before\n'
+      }
+      return buildEnv()
+    },
     'reviewer:1': review === 'changes-needed' ? reviewEnv('changes-needed') : reviewEnv('pass'),
   }
   if (onBuilder2) envelopes['builder:2'] = () => {
@@ -6510,11 +6517,19 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
     cleanRuns: { 'gate-cmd': { ok: false, output: DIFF_SETTLEMENT_RED } },
-    files, writeThrough: true,
-    diffListing: `${DIFF_SETTLEMENT_FILE}\0`, changed: [DIFF_SETTLEMENT_FILE],
+    files, writeThrough: true, lstats,
+    throwWrites: failRestore ? [DIFF_SETTLEMENT_PATH] : [],
+    diffListing: () => `${DIFF_SETTLEMENT_FILE}\0${contaminate && Object.hasOwn(files, `${CTX.checkout}/untracked.mjs`) ? 'untracked.mjs\0' : ''}`, changed: [DIFF_SETTLEMENT_FILE],
     diffReports: (command, index) => {
       const match = /diff-mutation-(\d+)\.json/.exec(String(command))
       const generation = Number(match?.[1] ?? index + 1)
+      if (runnerUnavailable) {
+        if (snapshotState === 'missing') delete files[snapshotPath]
+        if (snapshotState === 'mismatched') files[snapshotPath] = 'untrusted snapshot\n'
+        files[DIFF_SETTLEMENT_PATH] = 'mutated by failed runner\n'
+        if (contaminate) files[`${CTX.checkout}/untracked.mjs`] = 'unexpected\n'
+        return { ok: false, status: 1, stderr: 'runner died', output: '' }
+      }
       return { ok: true, output: `DIFF-MUTATION-SUMMARY ${JSON.stringify(diffSettlementReport(generation))}` }
     },
   })
@@ -6531,6 +6546,62 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
 
 const diffSettlementFatal = (io) => io.calls.logs.find((row) => row.diff_mutation_proof)?.diff_mutation_proof?.fatal
 
+
+test('RV1-1 missing and mismatched snapshots refuse without restoring', () => {
+  for (const snapshotState of ['missing', 'mismatched']) {
+    const fixture = diffSettlementIo({ runnerUnavailable: true, snapshotState })
+    const result = driveTask(CTX, fixture.io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(diffSettlementFatal(fixture.io)?.reason, 'tree-not-restored')
+    assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], 'mutated by failed runner\n')
+    assert.equal(fixture.io.calls.logs.some((row) => row.diff_proof_restored), false)
+  }
+})
+
+test('RV1-3 recovery refuses symlink targets and newly present absent cells', () => {
+  const symlink = diffSettlementIo({ runnerUnavailable: true, lstats: { [DIFF_SETTLEMENT_PATH]: { type: 'symlink' } } })
+  const symlinkResult = driveTask(CTX, symlink.io)
+  assert.equal(symlinkResult.status, 'escalation')
+  assert.equal(diffSettlementFatal(symlink.io)?.reason, 'tree-not-restored')
+  assert.equal(symlink.io.calls.writeLog.some((entry) => entry.path === DIFF_SETTLEMENT_PATH), false)
+  assert.equal(symlink.io.calls.logs.some((row) => row.diff_proof_restored), false)
+  const absent = diffSettlementIo({ runnerUnavailable: true, absentCurrent: true })
+  const absentResult = driveTask(CTX, absent.io)
+  assert.equal(absentResult.status, 'escalation')
+  assert.equal(diffSettlementFatal(absent.io)?.reason, 'tree-not-restored')
+  assert.equal(absent.io.calls.logs.some((row) => row.diff_proof_restored), false)
+  const noLstat = diffSettlementIo({ runnerUnavailable: true })
+  delete noLstat.io.lstat
+  const noLstatResult = driveTask(CTX, noLstat.io)
+  assert.equal(noLstatResult.status, 'escalation')
+  assert.match(diffSettlementFatal(noLstat.io)?.why || '', /target type is unverifiable/)
+  assert.equal(noLstat.io.calls.logs.some((row) => row.diff_proof_restored), false)
+})
+
+test('T4 unavailable runner restores the current snapshot and journals it', () => {
+  const fixture = diffSettlementIo({ runnerUnavailable: true })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'done', JSON.stringify({ escalation: result.details.escalation, file: fixture.files[DIFF_SETTLEMENT_PATH], report: fixture.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof }))
+  assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], 'before\n')
+  const report = fixture.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof
+  assert.equal(report.report_source, 'runner-unavailable')
+  assert.deepEqual(report.diff_proof_restored, { generation: 1, files: [DIFF_SETTLEMENT_FILE] })
+  assert.match(report.why, /exit status 1; stderr: runner died/)
+})
+
+test('T5 unavailable runner recovery still refuses untracked contamination', () => {
+  const fixture = diffSettlementIo({ runnerUnavailable: true, contaminate: true })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(diffSettlementFatal(fixture.io)?.reason, 'tree-not-restored')
+})
+
+test('T6 failed snapshot restoration is fatal', () => {
+  const fixture = diffSettlementIo({ runnerUnavailable: true, failRestore: true })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.match(diffSettlementFatal(fixture.io)?.why || '', /snapshot recovery failed/)
+})
 
 test('A1 settle-time inventory read failure reports typed tree contamination', () => {
   const fixture = diffSettlementIo({ settleRead: 'throw' })

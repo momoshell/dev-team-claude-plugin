@@ -16,7 +16,7 @@
 // printed no readable GATE-SUMMARY, or whose checks THREW, is not a kill however loudly
 // it says FAIL — and a declaration SHAPE the driver would reject is never accepted here.
 
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
@@ -87,26 +87,55 @@ function runGateDefault(gateCmd, cwd) {
   return { ok: res.status === 0, output }
 }
 
-// Diff mode deliberately uses the same synchronous child-process primitive as the
-// declared proof, but keeps command execution injectable for its fixture lane. A
-// result with an error or a null status is not a red test: the command was not a
-// completed observation and must remain a typed skip.
-export const DIFF_RUN_TIMEOUT_MS = 900_000
+// Diff mode runs detached process groups so a timeout can reap the shell and descendants.
+export const DIFF_RUN_TIMEOUT_MS = 120_000
+export const DIFF_TOTAL_DEADLINE_MS = 720_000
 function runCommandDefault(command, cwd, options = {}) {
-  const res = spawnSync('/bin/sh', ['-c', command], {
-    cwd, encoding: 'utf8', maxBuffer: RUN_MAX_BUFFER_BYTES,
-    timeout: options.timeout ?? DIFF_RUN_TIMEOUT_MS,
-    env: options.env || colourNeutralEnv(process.env),
+  return new Promise((resolve) => {
+    const child = spawn('/bin/sh', ['-c', command], {
+      cwd, detached: true, env: options.env || colourNeutralEnv(process.env), stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let size = 0
+    let overflow = false
+    let timedOut = false
+    let escalation
+    const append = (chunk, target) => {
+      size += chunk.length
+      if (size > RUN_MAX_BUFFER_BYTES) {
+        overflow = true
+        try { process.kill(-child.pid, 'SIGTERM') } catch {}
+        clearTimeout(timer)
+        escalation = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch {} }, 100)
+        return
+      }
+      if (target === 'stdout') stdout += chunk.toString('utf8')
+      else stderr += chunk.toString('utf8')
+    }
+    child.stdout.on('data', (chunk) => append(chunk, 'stdout'))
+    child.stderr.on('data', (chunk) => append(chunk, 'stderr'))
+    const timer = setTimeout(() => {
+      timedOut = true
+      try { process.kill(-child.pid, 'SIGTERM') } catch {}
+      escalation = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch {} }, 150)
+    }, options.timeout ?? DIFF_RUN_TIMEOUT_MS)
+    child.on('error', (error) => {
+      clearTimeout(timer); clearTimeout(escalation)
+      resolve({ ok: false, output: `${stdout}${stderr}`, status: null, signal: null, error: { code: error.code, message: error.message }, completed: false })
+    })
+    child.on('close', (status, signal) => {
+      clearTimeout(timer); clearTimeout(escalation)
+      if (timedOut || overflow) {
+        // Keep the group cleanup active even when the shell closed before a grandchild.
+        try { process.kill(-child.pid, 'SIGKILL') } catch {}
+      }
+      resolve({ ok: !timedOut && !overflow && status === 0, output: `${stdout}${stderr}`,
+        status: timedOut || overflow ? null : status, signal: signal || null,
+        error: timedOut ? { code: 'ETIMEDOUT', message: 'diff command timed out' } : overflow ? { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'diff command exceeded output limit' } : null,
+        completed: !timedOut && !overflow && status !== null })
+    })
   })
-  const output = `${res.stdout || ''}${res.stderr || ''}`
-  return {
-    ok: res.status === 0,
-    output,
-    status: res.status,
-    signal: res.signal || null,
-    error: res.error ? { code: res.error.code, message: res.error.message } : null,
-    completed: !res.error && res.status !== null,
-  }
 }
 
 function makeWorktreeDefault(checkout, ref) {
@@ -848,16 +877,17 @@ export function diffRunnerUnavailable(cause) {
 
 export function normalizeDiffCommandResult(result) {
   if (!result || typeof result !== 'object') return diffRunnerUnavailable('result-not-object')
+  if (result.error?.code === 'ETIMEDOUT') return { available: true, timeout: true, ok: false, output: String(result.output || '') }
   if (result.error || result.signal || result.completed === false || result.status === null) return diffRunnerUnavailable('result-incomplete')
   if (typeof result.ok !== 'boolean') return diffRunnerUnavailable('ok-missing')
   if (Number.isInteger(result.status) && ((result.status === 0) !== result.ok)) return diffRunnerUnavailable('status-ok-mismatch')
   return { available: true, ok: result.ok, output: String(result.output || '') }
 }
 
-export function runDiffCommand(d, command, checkout) {
+export async function runDiffCommand(d, command, checkout, timeout = DIFF_RUN_TIMEOUT_MS) {
   try {
-    return normalizeDiffCommandResult(d.runCommand(command, checkout, {
-      timeout: DIFF_RUN_TIMEOUT_MS,
+    return normalizeDiffCommandResult(await d.runCommand(command, checkout, {
+      timeout,
       env: colourNeutralEnv(process.env),
     }))
   } catch { return diffRunnerUnavailable('runner-threw') }
@@ -869,6 +899,7 @@ function diffFatal(why, beforeDigest = null, afterDigest = null) {
 
 function countDiffReport(records, generated, omitted, config, totalCandidates, fatal = null, initialSkips = []) {
   const killed = records.filter((row) => row.outcome === 'killed').length
+  const timeout_killed = records.filter((row) => row.kill_reason === 'timeout').length
   const survived = records.filter((row) => row.outcome === 'survived').length
   const skipped = initialSkips.length + records.filter((row) => row.outcome === 'skipped').length
   const skipCounts = {}
@@ -884,6 +915,7 @@ function countDiffReport(records, generated, omitted, config, totalCandidates, f
     total_candidates: totalCandidates,
     generated,
     killed,
+    timeout_killed,
     survived,
     skipped,
     omitted,
@@ -911,7 +943,7 @@ export function validateDiffConfig(config) {
   return errors
 }
 
-export function runDiffMutationProof(config, deps = {}) {
+export async function runDiffMutationProof(config, deps = {}) {
   const d = normalDeps(deps)
   const validation = validateDiffConfig(config)
   if (validation.length > 0) {
@@ -938,6 +970,10 @@ export function runDiffMutationProof(config, deps = {}) {
     unseenCandidates.push(candidate)
   }
   const mutantCap = config.cap
+  const now = typeof deps.now === 'function' ? deps.now : Date.now
+  const totalDeadlineMs = Number.isFinite(deps.totalDeadlineMs) ? Math.max(1, deps.totalDeadlineMs) : DIFF_TOTAL_DEADLINE_MS
+  const totalDeadline = now() + totalDeadlineMs
+  const runTimeoutMs = Number.isFinite(deps.runTimeoutMs) ? Math.max(1, deps.runTimeoutMs) : DIFF_RUN_TIMEOUT_MS
   const selected = unseenCandidates.slice(0, mutantCap)
   const omitted = Math.max(0, unseenCandidates.length - selected.length)
   let fatal = null
@@ -979,9 +1015,16 @@ export function runDiffMutationProof(config, deps = {}) {
           else {
             writeAttempted = true
             d.writeFile(guardWrite.abs, reapplied.bytes)
-            validationResult = runDiffCommand(d, config.validation_lane, config.checkout)
-            gateResult = runDiffCommand(d, config.gate_cmd, config.checkout)
-            const firstUnavailable = !validationResult.available ? validationResult : !gateResult.available ? gateResult : null
+            const remaining = () => Math.max(0, totalDeadline - now())
+            validationResult = remaining() > 0
+              ? await runDiffCommand(d, config.validation_lane, config.checkout, Math.min(runTimeoutMs, remaining()))
+              : diffRunnerUnavailable('result-incomplete')
+            if (!validationResult.available || !validationResult.timeout) {
+              gateResult = remaining() > 0
+                ? await runDiffCommand(d, config.gate_cmd, config.checkout, Math.min(runTimeoutMs, remaining()))
+                : diffRunnerUnavailable('result-incomplete')
+            }
+            const firstUnavailable = !validationResult.available ? validationResult : gateResult && !gateResult.available ? gateResult : null
             if (firstUnavailable) {
               runtimeSkip = firstUnavailable.why
               runtimeSkipCause = firstUnavailable.cause
@@ -1017,16 +1060,18 @@ export function runDiffMutationProof(config, deps = {}) {
       break
     }
     if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
-    const outcome = validationResult.ok && gateResult.ok ? 'survived' : 'killed'
+    const timedOut = validationResult?.timeout || gateResult?.timeout
+    const outcome = timedOut ? 'killed' : validationResult.ok && gateResult.ok ? 'survived' : 'killed'
     records.push({
       ...candidate, outcome,
+      ...(timedOut ? { kill_reason: 'timeout' } : {}),
       validation_lane: config.validation_lane,
       gate_cmd: config.gate_cmd,
       validation_ok: validationResult.ok,
-      gate_ok: gateResult.ok,
+      gate_ok: gateResult?.ok ?? null,
       validation_output: validationResult.output,
-      gate_output: gateResult.output,
-      why: outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
+      gate_output: gateResult?.output ?? '',
+      why: timedOut ? 'the validation lane or gate timed out under the mutation' : outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
     })
   }
   return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
@@ -1115,7 +1160,7 @@ export async function main(argv, deps = {}) {
           [diffSkip({ reason: 'malformed-diff' })])
       }
       if (!report) {
-        try { report = runDiffMutationProof(config, d) }
+        try { report = await runDiffMutationProof(config, d) }
         catch (err) {
           report = countDiffReport([], 0, 0, config, 0, null, [diffSkip({ reason: 'runner-unavailable', cause: 'runner-threw' })])
           report.runner_unavailable = err?.message ?? String(err)

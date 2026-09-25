@@ -9006,9 +9006,48 @@ function runTask(ctx, io, crash) {
     if (runnerReportUnavailable) {
       reportSource = 'runner-unavailable'
       diffMutationReport = diffZeroReport('runner-unavailable')
-      diffMutationReport.why = `exit status ${runner?.status ?? 'unknown'}; stderr: ${String(runner?.stderr ?? '').trim() || '<empty>'}`
+      const observedExit = Number.isInteger(runner?.status) ? `exit status ${runner.status}` : runner?.signal ? `signal ${runner.signal}` : 'exit status unknown'
+      diffMutationReport.why = `${observedExit}; stderr: ${String(runner?.stderr ?? '').slice(-2000).trim() || '<empty>'}`
     }
     diffMutationReport.report_source = reportSource
+    if (runnerReportUnavailable && (runner?.ok !== true || Number.isInteger(runner?.status) || runner?.signal)) {
+      const restored = []
+      try {
+        for (const [index, path] of built.changed.entries()) {
+          const cell = current.cells.get(path)
+          if (!cell || cell.state === 'unreadable') throw new Error(`current snapshot state is unverifiable for ${path}`)
+          const snapshotPath = diffSnapshotName(round, index, 'current', path)
+          const snapshot = io.readFile(snapshotPath)
+          if (snapshot === null || snapshot === undefined) throw new Error(`current task snapshot is unavailable for ${path}`)
+          const bytes = Buffer.isBuffer(snapshot) || snapshot instanceof Uint8Array || typeof snapshot === 'string' ? snapshot : null
+          if (!bytes) throw new Error(`current task snapshot is unreadable for ${path}`)
+          if (cell.state === 'present' && !diffBytesEqual(bytes, cell.bytes)) throw new Error(`current task snapshot does not match pre-run bytes for ${path}`)
+          if (cell.state === 'absent' && Buffer.from(bytes).length !== 0) throw new Error(`absent current task snapshot is not empty for ${path}`)
+          if (typeof io.lstat !== 'function') throw new Error(`target type is unverifiable for ${path}`)
+          const metadata = io.lstat(`${ctx.checkout}/${path}`)
+          if (cell.state === 'absent') {
+            if (metadata !== null) throw new Error(`absent diff target unexpectedly exists for ${path}`)
+            continue
+          }
+          if (metadata !== null && metadata?.type !== 'file') throw new Error(`unsafe diff target type for ${path}`)
+          let live
+          try { live = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { throw new Error(`target state is unreadable for ${path}: ${err?.message ?? String(err)}`) }
+          const runnerFailed = (runner?.status !== undefined && runner.status !== 0) || Boolean(runner?.signal)
+          if (runnerFailed || !diffBytesEqual(live, bytes)) {
+            io.writeFile(`${ctx.checkout}/${path}`, bytes)
+            restored.push(path)
+          }
+        }
+        diffMutationReport.diff_proof_restored = { generation: gateGeneration, files: restored }
+        io.log(recordRow({ at: io.now(), diff_proof_restored: diffMutationReport.diff_proof_restored }))
+      } catch (err) {
+        diffMutationReport.fatal = { reason: 'tree-not-restored', why: `runner-unavailable snapshot recovery failed: ${err?.message ?? String(err)}` }
+        journalDiffMutation()
+        diffMutationReports.push(diffMutationReport)
+        gateProofFatal = `tree-not-restored: ${diffMutationReport.fatal.why}`
+        return { settled: false, fatal: gateProofFatal }
+      }
+    }
     if (diffMutationReport.fatal) {
       journalDiffMutation()
       diffMutationReports.push(diffMutationReport)
@@ -9049,13 +9088,14 @@ function runTask(ctx, io, crash) {
   const diffFindingLines = (report) => {
     if (!report || !Array.isArray(report.mutants)) return []
     const survivors = report.mutants.filter((mutant) => mutant.outcome === 'survived')
-    if (survivors.length === 0) return ['## Diff-mutant findings', '[]']
     const bounded = survivors.map((mutant) => ({
       id: mutant.id, path: mutant.path, line: mutant.line, operator: mutant.operator,
       replacement: mutant.replacement, validation_lane: mutant.validation_lane ?? lane,
       gate_cmd: mutant.gate_cmd ?? gateCmd,
     }))
-    return ['## Diff-mutant findings', JSON.stringify(bounded)]
+    const lines = ['## Diff-mutant findings', JSON.stringify(bounded)]
+    if (report.timeout_killed > 0) lines.push(`Timeout kills: ${report.timeout_killed} of ${report.killed} kills were per-run timeouts (120s), not red runs; a timeout kill does not prove the gate discriminates.`)
+    return lines
   }
   const diffMutationDisposition = (survivors) => survivors.length > 0 ? 'review' : 'continue'
   const journalDiffJudgments = (details, report) => {

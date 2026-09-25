@@ -1,7 +1,7 @@
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, renameSync as fsRenameSync, mkdirSync as fsMkdirSync,
-  readdirSync as fsReaddirSync, statSync as fsStatSync, realpathSync as fsRealpathSync,
+  readdirSync as fsReaddirSync, statSync as fsStatSync, lstatSync as fsLstatSync, realpathSync as fsRealpathSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -3221,6 +3221,15 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       try {
         return { mtimeMs: fsStatSync(abspath).mtimeMs }
       } catch { return null }
+    },
+    lstat(abspath) {
+      try {
+        const stat = fsLstatSync(abspath)
+        return { type: stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'other' }
+      } catch (err) {
+        if (err?.code === 'ENOENT') return null
+        throw err
+      }
     },
     run(cmd) {
       const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })

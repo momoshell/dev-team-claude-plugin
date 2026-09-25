@@ -3301,6 +3301,15 @@ test('B1 green mutant is a typed survivor in the reviewer brief', () => {
   assert.deepEqual(findings, [{ id: diffSurvivor.id, path: diffSurvivor.path, line: diffSurvivor.line, operator: diffSurvivor.operator, replacement: diffSurvivor.replacement, validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd' }])
 })
 
+test('RV1-4 reviewer brief discloses timeout kills beside empty findings', () => {
+  const timeout = { id: 'timed-out', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'killed', kill_reason: 'timeout' }
+  const io = diffDriverIo({ report: diffReport([timeout], { timeout_killed: 1 }) })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const brief = io.calls.writes[`${TD}/review-brief-1.md`]
+  assert.match(brief, /## Diff-mutant findings\n\[\]\nTimeout kills: 1 of 1 kills were per-run timeouts \(120s\), not red runs; a timeout kill does not prove the gate discriminates\./)
+})
+
 test('D1 diff proof leaves declared-anchor proof bytes unchanged', () => {
   const mutation = { check: 'declared', file: 'a.mjs', find: 'true', replace: 'false' }
   const noDiff = diffDriverIo({ mutations: [mutation], report: diffReport([]) })

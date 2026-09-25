@@ -1185,13 +1185,16 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         try {
           const drift = typeof ledger.jsonlDrift === 'function' ? ledger.jsonlDrift() : null
           consistent = !!drift && drift.measured === true && drift.writers.every((writer) => writer.drift === 0)
-          // jsonlDrift proves every authority key has a mirror row; it does not see
-          // mirror rows the authority lost. A table may hold no more rows than the
-          // distinct keys its writers put in the authority.
+          // jsonlDrift's writers prove every authority key has a mirror row; its
+          // tables prove the other direction, no mirror row whose key the
+          // authority lost. A table no authority line feeds must be empty.
           if (consistent && typeof ledger.dumpTable === 'function') {
-            const authorityKeys = new Map()
-            for (const writer of drift.writers) authorityKeys.set(writer.table, (authorityKeys.get(writer.table) || 0) + (writer.distinct_keys || 0))
-            consistent = Object.keys(LEDGER_TABLES).every((table) => (ledger.dumpTable(table) || []).length <= (authorityKeys.get(table) || 0))
+            const measuredTables = new Map((drift.tables || []).map((one) => [one.table, one]))
+            consistent = Object.keys(LEDGER_TABLES).every((table) => {
+              const measuredTable = measuredTables.get(table)
+              if (measuredTable) return measuredTable.mirror_only_rows === 0
+              return (ledger.dumpTable(table) || []).length === 0
+            })
           }
           // A brand-new store has neither an authority line nor a mirror row yet:
           // that is consistent. A missing authority beside mirror rows is not.
@@ -1216,6 +1219,9 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
         continue
       }
+      // A mirror error means this journal appended authority lines the mirror
+      // lacks: the store is now divergent, so later lanes on it refuse too.
+      if (detail?.first_failure?.reason === 'mirror-error') storeVerdicts.set(dbPath, false)
       const degradedAfter = degradedMirror(ledger)
       try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
       if (degradedAfter) {

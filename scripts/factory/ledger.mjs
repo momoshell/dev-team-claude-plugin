@@ -6257,6 +6257,21 @@ export function openLedger({
       }
       writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present, collapsed_keys: collapsedKeys })
     }
+    // Per table, the other direction: mirror rows whose key no authority line
+    // names (an authority line was lost). Keys are unioned across writers that
+    // share a table, so a shared key space is never double-counted.
+    const tableAuthority = new Map()
+    for (const info of perWriter.values()) {
+      if (!tableAuthority.has(info.table)) tableAuthority.set(info.table, new Set())
+      for (const key of info.keys) tableAuthority.get(info.table).add(key)
+    }
+    const tables = []
+    for (const [table, rowSet] of rowKeysByTable) {
+      const authority = tableAuthority.get(table) || new Set()
+      let mirrorOnly = 0
+      if (rowSet) for (const key of rowSet) if (!authority.has(key)) mirrorOnly += 1
+      tables.push({ table, authority_keys: authority.size, mirror_rows: rowSet ? rowSet.size : null, mirror_only_rows: rowSet ? mirrorOnly : null })
+    }
     const unreadableTables = writers.filter((w) => w.drift === null).map((w) => w.table)
     const measured = unparsed === 0 && unknownKind === 0 && unreadableTables.length === 0
     const causes = []
@@ -6272,6 +6287,7 @@ export function openLedger({
       unparsed_lines: unparsed,
       unknown_kind_lines: unknownKind,
       writers,
+      tables,
       drift_total: driftTotal,
       remedy: driftTotal > 0 ? DRIFT_REMEDY : null,
       collapsed_lines_total: measured ? collapsedLines : null,

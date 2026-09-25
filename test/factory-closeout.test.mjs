@@ -2133,3 +2133,46 @@ test('ingest-all refuses a store that lost one authority line while its mirror k
   assert.equal(result.code, 1)
   assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
 })
+
+test('ingest-all counts authority keys as a union per table: writers sharing a key space cannot mask a lost line', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.recordEvent({ adw_id: 'shared', type: 'log', payload: { level: 'info', message: 'one' } })
+  ledger.recordEvent({ adw_id: 'shared', type: 'log', payload: { level: 'info', message: 'two' } })
+  ledger.close()
+  // A second writer names event 1's key in the authority only; then event 2's
+  // authority line is lost. Summed per-writer keys (2) would still cover the
+  // two mirror rows; the union (1) does not.
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+  const kept = lines.filter((line) => !(line.includes('"kind":"recordEvent"') && line.includes('"message":"two"')))
+  assert.equal(kept.length, lines.length - 1)
+  kept.push(JSON.stringify({ v: 1, kind: 'recordSourceError', at: '2030-01-01T00:00:00.000Z', args: { adw_id: 'shared', seq: 1, source_path: '/x', source_kind: 'journal', byte_size: 1, violation_names: [], reason: 'Error', phase_id: null, parent_id: null } }))
+  writeFileSync(jsonlPath, `${kept.join('\n')}\n`)
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all stops writing to a store after a journal reports a mirror error', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  let calls = 0
+  const deps = harness({
+    log: () => {},
+    ingestJournal: (journalPath, ledger, options) => {
+      calls += 1
+      if (calls === 1) return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: 1, reason: 'mirror-error' } }
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps })
+  assert.equal(result.code, 1)
+  assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1, store_drift: 1 })
+})

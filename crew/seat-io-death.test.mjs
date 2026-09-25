@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { scratchDir } from '../test/helpers.mjs'
@@ -8,6 +8,7 @@ import {
   DESCENDANT_DIR,
   HEADLESS_EXIT_REASONS,
   HEADLESS_RPC_TRANSPORT,
+  HEADLESS_SIGNAL_REASONS,
   HEADLESS_TRANSPORT,
   REASK_GRACE_POLICY,
   REASK_TIMEOUT_S,
@@ -16,6 +17,7 @@ import {
   ROOT_DEATH_GROWTH_WINDOW_MS,
   ROOT_DEATH_SUPPRESSED_EVENT,
   cellFailureKind,
+  seatDiedExit,
   seatIo,
   seatRootDeath,
 } from './seat-io.mjs'
@@ -94,6 +96,8 @@ function runHeadless({
   logThrowsOn = null,
   exitBytes = null,
   exitReadThrows = false,
+  signalBytes = null,
+  signalReadThrows = false,
 } = {}) {
   const dir = scratchDir('seat-io-death-')
   const taskDir = join(dir, 'task')
@@ -108,6 +112,12 @@ function runHeadless({
   if (exitBytes != null) {
     mkdirSync(join(taskDir, 'headless', dispatchId), { recursive: true })
     writeFileSync(exitPath, exitBytes)
+  }
+  // The wrapper's received-signal file lives beside its exit file.
+  const signalPath = join(taskDir, 'headless', dispatchId, 'signal')
+  if (signalBytes != null) {
+    mkdirSync(join(taskDir, 'headless', dispatchId), { recursive: true })
+    writeFileSync(signalPath, signalBytes)
   }
 
   let clock = 0
@@ -168,6 +178,16 @@ function runHeadless({
     const realRead = readFileSync
     deps.readFileSync = (path, ...rest) => {
       if (String(path) === exitPath) throw new Error('injected exit-file read failure')
+      return realRead(path, ...rest)
+    }
+  }
+  // A signal-path-only read failure: chained after the exit injection above
+  // so both can be armed at once, and descendant-record reads still reach
+  // whichever reader came before.
+  if (signalReadThrows) {
+    const realRead = deps.readFileSync || readFileSync
+    deps.readFileSync = (path, ...rest) => {
+      if (String(path) === signalPath) throw new Error('injected signal-file read failure')
       return realRead(path, ...rest)
     }
   }
@@ -769,5 +789,80 @@ test('G1', () => {
     assert.equal(run.error?.reclaim?.root_liveness, 'dead')
     assert.equal(run.error?.reclaim?.reason, 'probe-dead')
     assert.match(run.error?.message ?? '', /worker root 999001 \(pgid 999001\) is gone/)
+  })
+})
+
+// #1478 step 1: the seat_died row carries the wrapper's durably recorded
+// received signal beside its exit diagnosis.
+test('D1 seat_died carries recorded wrapper_signal', () => {
+  withRun({ ps: 'absent', exitBytes: '23', signalBytes: 'TERM' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.wrapper_signal, 'TERM')
+    assert.equal(run.diedRow.wrapper_signal_reason, null)
+  })
+  for (const name of ['HUP', 'INT']) {
+    withRun({ ps: 'absent', signalBytes: name }, (run) => {
+      assert.ok(run.diedRow, `signal ${name} must still journal a seat_died row`)
+      assert.equal(run.diedRow.wrapper_signal, name)
+      assert.equal(run.diedRow.wrapper_signal_reason, null)
+    })
+  }
+  withRun({ ps: 'absent', signalBytes: 'TERM\n' }, (run) => {
+    assert.equal(run.diedRow.wrapper_signal, 'TERM')
+    assert.equal(run.diedRow.wrapper_signal_reason, null)
+  })
+  for (const signalBytes of ['', 'term\n', 'TERM ', ' TERM', 'KILL', 'TERM\n\n', 'TERM\nHUP']) {
+    withRun({ ps: 'absent', signalBytes }, (run) => {
+      assert.ok(run.diedRow, `signal bytes ${JSON.stringify(signalBytes)} must still journal a seat_died row`)
+      assert.equal(run.diedRow.wrapper_signal, null)
+      assert.equal(run.diedRow.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED)
+      assert.notEqual(run.diedRow.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.ABSENT)
+    })
+  }
+  withRun({ ps: 'absent', signalBytes: 'TERM', signalReadThrows: true }, (run) => {
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.wrapper_signal, null)
+    assert.equal(run.diedRow.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED)
+  })
+  const probeDir = scratchDir('seat-io-signal-probe-')
+  assert.deepEqual(
+    seatDiedExit({ transport: HEADLESS_RPC_TRANSPORT, workerId: 'd1' }, probeDir),
+    { exit_status: null, exit_status_reason: null, wrapper_signal: null, wrapper_signal_reason: null },
+  )
+  assert.deepEqual(
+    seatDiedExit({ transport: HEADLESS_TRANSPORT }, probeDir),
+    { exit_status: null, exit_status_reason: null, wrapper_signal: null, wrapper_signal_reason: null },
+  )
+})
+
+test('D3 a signal file behind an unreadable directory is unreadable, never absent', { skip: process.getuid?.() === 0 ? 'root reads through mode 000' : false }, () => {
+  const taskDir = scratchDir('seat-io-signal-perm-')
+  const runDir = join(taskDir, 'headless', 'd1')
+  mkdirSync(runDir, { recursive: true })
+  writeFileSync(join(runDir, 'signal'), 'TERM')
+  chmodSync(runDir, 0o000)
+  try {
+    const row = seatDiedExit({ transport: HEADLESS_TRANSPORT, workerId: 'd1' }, taskDir)
+    assert.equal(row.wrapper_signal, null)
+    assert.equal(row.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED)
+  } finally {
+    chmodSync(runDir, 0o755)
+  }
+})
+
+test('D2 absent signal has closed absence reason', () => {
+  withRun({ ps: 'absent' }, (run) => {
+    assert.equal(run.error?.stage, SEAT_DIED_STAGE)
+    assert.ok(run.diedRow)
+    assert.equal(run.diedRow.wrapper_signal, null)
+    assert.equal(typeof run.diedRow.wrapper_signal !== 'string', true)
+    assert.equal(run.diedRow.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.ABSENT)
+    assert.notEqual(run.diedRow.wrapper_signal_reason, HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED)
+  })
+  assert.ok(Object.isFrozen(HEADLESS_SIGNAL_REASONS))
+  assert.deepEqual({ ...HEADLESS_SIGNAL_REASONS }, {
+    ABSENT: 'signal-file-absent',
+    UNREADABLE_OR_MALFORMED: 'signal-file-unreadable-or-malformed',
   })
 })

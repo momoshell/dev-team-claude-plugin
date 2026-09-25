@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { spawn as realSpawn } from 'node:child_process'
 import {
   attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
@@ -4432,5 +4433,157 @@ test('a repair with no crew.json ancestor fails closed instead of journaling by 
       }, name)
       assert.deepEqual(writes, [], `${name}: no journal row without a crew directory`)
     } finally { f.cleanup() }
+  }
+})
+
+// #1478 step 1: the detached wrapper must survive a delivered TERM/HUP/INT and
+// durably record the received signal. These three tests spawn the REAL wrapper
+// (injected real spawn, node worker binary stated explicitly in the adapter
+// command) and signal the actual wrapper PID or its process group.
+const RELEASE_WORKER_SOURCE = `import { existsSync, writeFileSync } from 'node:fs'
+writeFileSync(process.argv[2], String(process.pid))
+writeFileSync(process.argv[3], 'ready\\n')
+const release = process.argv[4]
+const timer = setInterval(() => {
+  let released = false
+  try { released = existsSync(release) } catch {}
+  if (released) { clearInterval(timer); process.exit(41) }
+}, 50)
+`
+const SLEEP_WORKER_SOURCE = `import { writeFileSync } from 'node:fs'
+writeFileSync(process.argv[2], String(process.pid))
+writeFileSync(process.argv[3], 'ready\\n')
+setInterval(() => {}, 1000)
+`
+const CLEAN_TERM_WORKER_SOURCE = `import { writeFileSync } from 'node:fs'
+writeFileSync(process.argv[2], String(process.pid))
+process.on('SIGTERM', () => process.exit(0))
+writeFileSync(process.argv[3], 'ready\\n')
+setInterval(() => {}, 1000)
+`
+async function wrapperPoll(fn, timeoutMs, what) {
+  const start = Date.now()
+  for (;;) {
+    let value = null
+    try { value = fn() } catch { value = null }
+    if (value != null && value !== false) return value
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+async function spawnSignalWrapper(workerSource) {
+  const dir = scratchDir('headless-wrapper-')
+  const taskDir = join(dir, 'task')
+  const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir, { recursive: true })
+  mkdirSync(returnsDir, { recursive: true })
+  writeFileSync(join(dir, 'worker.mjs'), workerSource)
+  writeFileSync(join(taskDir, 'brief.md'), 'wrapper signal test')
+  const workerPath = join(dir, 'worker.mjs')
+  const pidPath = join(dir, 'worker.pid')
+  const readyPath = join(dir, 'ready')
+  const releasePath = join(dir, 'release')
+  const adapter = { headlessCommand: () => ({ bin: process.execPath, args: [workerPath, pidPath, readyPath, releasePath], env: {} }) }
+  const io = headlessIo({ crew: { checkout: dir, members: { builder: { model: 'sonnet', transport: 'headless-json' } } }, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { builder: { adapter } }, bin: process.execPath, deps: { spawn: realSpawn, uuid: () => 'wrapper-1', log() {} } })
+  const run = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
+  const runDir = join(taskDir, 'headless', run.id)
+  // The wrapper publishes its own pid atomically before the worker runs; that
+  // file is the actual wrapper PID the signal tests must address.
+  const pgidPath = join(runDir, 'pgid')
+  const wrapperPid = await wrapperPoll(() => { try { const n = Number(readFileSync(pgidPath, 'utf8')); return Number.isInteger(n) && n > 0 ? n : null } catch { return null } }, 10000, 'wrapper pgid')
+  return { dir, run, wrapperPid, readyPath, pidPath, releasePath, exitPath: join(runDir, 'exit'), signalPath: join(runDir, 'signal') }
+}
+async function reapWrapperGroup(wrapperPid) {
+  try { process.kill(-wrapperPid, 'SIGKILL') } catch {}
+  const start = Date.now()
+  while (Date.now() - start < 5000) {
+    try { process.kill(wrapperPid, 0) } catch { return }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+test('T1 wrapper-only TERM preserves running child and child exit status', async () => {
+  const w = await spawnSignalWrapper(RELEASE_WORKER_SOURCE)
+  try {
+    await wrapperPoll(() => existsSync(w.readyPath) || null, 10000, 'worker readiness')
+    const workerPid = Number(readFileSync(w.pidPath, 'utf8'))
+    assert.ok(Number.isInteger(workerPid) && workerPid > 0, 'worker must publish its pid')
+    assert.equal(existsSync(w.exitPath), false, 'no exit before the child finishes')
+    process.kill(w.wrapperPid, 'SIGTERM')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.doesNotThrow(() => process.kill(workerPid, 0), 'wrapper-only TERM must leave the child running')
+    assert.doesNotThrow(() => process.kill(w.wrapperPid, 0), 'the wrapper must survive its own TERM')
+    writeFileSync(w.releasePath, 'release\n')
+    await wrapperPoll(() => { try { return readFileSync(w.exitPath, 'utf8') === '41' || null } catch { return null } }, 15000, 'child exit status')
+    assert.equal(readFileSync(w.exitPath, 'utf8'), '41')
+    assert.equal(readFileSync(w.signalPath, 'utf8'), 'TERM')
+  } finally {
+    await reapWrapperGroup(w.wrapperPid)
+    rmSync(w.dir, { recursive: true, force: true })
+  }
+})
+test('T2 wrapper-only TERM atomically records signal name', async () => {
+  const w = await spawnSignalWrapper(RELEASE_WORKER_SOURCE)
+  try {
+    await wrapperPoll(() => existsSync(w.readyPath) || null, 10000, 'worker readiness')
+    process.kill(w.wrapperPid, 'SIGTERM')
+    await wrapperPoll(() => { try { return readFileSync(w.signalPath, 'utf8') === 'TERM' || null } catch { return null } }, 10000, 'signal file')
+    assert.equal(readFileSync(w.signalPath, 'utf8'), 'TERM')
+    assert.equal(existsSync(`${w.signalPath}.tmp`), false, 'the signal rename must leave no partial file')
+  } finally {
+    await reapWrapperGroup(w.wrapperPid)
+    rmSync(w.dir, { recursive: true, force: true })
+  }
+})
+test('T3 group TERM writes child exit status 143', async () => {
+  const w = await spawnSignalWrapper(SLEEP_WORKER_SOURCE)
+  try {
+    await wrapperPoll(() => existsSync(w.readyPath) || null, 10000, 'worker readiness')
+    process.kill(-w.wrapperPid, 'SIGTERM')
+    await wrapperPoll(() => { try { return readFileSync(w.exitPath, 'utf8') === '143' || null } catch { return null } }, 15000, 'group-TERM exit status')
+    assert.equal(readFileSync(w.exitPath, 'utf8'), '143')
+  } finally {
+    await reapWrapperGroup(w.wrapperPid)
+    rmSync(w.dir, { recursive: true, force: true })
+  }
+})
+test('T5 group TERM on a worker that exits 0 records 0, not the interrupted wait status', async () => {
+  for (let trial = 0; trial < 5; trial += 1) {
+    const w = await spawnSignalWrapper(CLEAN_TERM_WORKER_SOURCE)
+    try {
+      await wrapperPoll(() => existsSync(w.readyPath) || null, 10000, 'worker readiness')
+      process.kill(-w.wrapperPid, 'SIGTERM')
+      await wrapperPoll(() => { try { return readFileSync(w.exitPath, 'utf8') || null } catch { return null } }, 15000, 'clean-exit status')
+      assert.equal(readFileSync(w.exitPath, 'utf8'), '0', `trial ${trial}: a worker that handled TERM and exited 0 must be recorded as 0`)
+      assert.equal(readFileSync(w.signalPath, 'utf8'), 'TERM')
+    } finally {
+      await reapWrapperGroup(w.wrapperPid)
+      rmSync(w.dir, { recursive: true, force: true })
+    }
+  }
+})
+test('T4 wrapper-only HUP and INT record signal name and preserve child exit status', async () => {
+  for (const [sig, name] of [['SIGHUP', 'HUP'], ['SIGINT', 'INT']]) {
+    const w = await spawnSignalWrapper(RELEASE_WORKER_SOURCE)
+    try {
+      await wrapperPoll(() => existsSync(w.readyPath) || null, 10000, `worker readiness before ${name}`)
+      const workerPid = Number(readFileSync(w.pidPath, 'utf8'))
+      assert.ok(Number.isInteger(workerPid) && workerPid > 0, `worker must publish its pid before ${name}`)
+      assert.equal(existsSync(w.exitPath), false, `no exit before the child finishes (${name})`)
+      process.kill(w.wrapperPid, sig)
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      assert.doesNotThrow(() => process.kill(workerPid, 0), `wrapper-only ${name} must leave the child running`)
+      assert.doesNotThrow(() => process.kill(w.wrapperPid, 0), `the wrapper must survive its own ${name}`)
+      await wrapperPoll(() => { try { return readFileSync(w.signalPath, 'utf8') === name || null } catch { return null } }, 10000, `signal file ${name}`)
+      assert.equal(readFileSync(w.signalPath, 'utf8'), name)
+      writeFileSync(w.releasePath, 'release\n')
+      await wrapperPoll(() => { try { return readFileSync(w.exitPath, 'utf8') === '41' || null } catch { return null } }, 15000, `child exit status after ${name}`)
+      const status = readFileSync(w.exitPath, 'utf8')
+      assert.equal(status, '41')
+      assert.notEqual(status, '129')
+      assert.notEqual(status, '130')
+    } finally {
+      await reapWrapperGroup(w.wrapperPid)
+      rmSync(w.dir, { recursive: true, force: true })
+    }
   }
 })

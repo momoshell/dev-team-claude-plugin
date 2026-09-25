@@ -1904,7 +1904,10 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     })
     const args = command.args || []
     const pgid = join(dir, 'pgid')
-    const shell = `printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin)} ${args.map(shq).join(' ')} >${shq(stream)} 2>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
+    const signal = join(dir, 'signal')
+    const signalTrap = (name) => `printf '%s' ${name} >${shq(`${signal}.tmp`)}; mv ${shq(`${signal}.tmp`)} ${shq(signal)}`
+    const termTrap = signalTrap('TERM')
+    const shell = `printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; trap ${shq(termTrap)} TERM; trap ${shq(signalTrap('HUP'))} HUP; trap ${shq(signalTrap('INT'))} INT; ${shq(command.bin)} ${args.map(shq).join(' ')} >${shq(stream)} 2>${shq(stderr)} & worker=$!; while :; do wait "$worker"; status=$?; if [ "$status" -gt 128 ]; then if kill -0 "$worker" 2>/dev/null; then continue; fi; wait "$worker" 2>/dev/null; reaped=$?; if [ "$reaped" -ne 127 ]; then status=$reaped; fi; fi; break; done; printf '%s' "$status" >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
     const reserveOnce = () => store.reserve(role, { phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid }, role, id: runId, dir, returnPath, exit, startedAt: now() })
     const raced = reask ? { reservation: reserveOnce(), waited_ms: 0, dispatch: null } : settleReservation({ role, sessionId, roundFor, deadline, reserve: reserveOnce, first: reserveOnce() })
     const reservation = raced.reservation

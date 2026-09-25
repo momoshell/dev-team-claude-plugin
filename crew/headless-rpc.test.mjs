@@ -436,6 +436,160 @@ test('C2 RPC recorded boundary and census disagreement is decided by the boundar
   } finally { f.cleanup() }
 })
 
+test('ceiling steer C1', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  const f = fixture({ turnCeilings: { builder: 3 }, log: (row) => rows.push(row), onSleep: ({ sleepCount, appendStream }) => {
+    if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+    if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = f.writes.find((frame) => frame.type === 'prompt')?.id
+    const ordinary = ordinaryRpcEnvelope(run.id)
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinary)
+    const steers = f.writes.filter((frame) => frame.type === 'steer')
+    assert.equal(f.sleepCount(), 3)
+    assert.equal(steers.length, 1)
+    assert.equal(steers[0].message, `you are 1 turns from your turn ceiling; stop exploring, write your ReturnEnvelope to ${run.returnPath} now`)
+    assert.deepEqual(rows.filter((row) => row.rpc_ceiling_steer).map((row) => row.rpc_ceiling_steer), [{ role: 'builder', id: run.id, turns: 2, budget: 3, k: 1 }])
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('ceiling steer C2', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const frames = Array.from({ length: 3 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  const f = fixture({ turnCeilings: {}, log: (row) => rows.push(row), onSleep: ({ sleepCount, appendStream }) => {
+    if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+    if (sleepCount === 2) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = f.writes.find((frame) => frame.type === 'prompt')?.id
+    const ordinary = ordinaryRpcEnvelope(run.id)
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinary)
+    assert.equal(f.writes.filter((frame) => frame.type === 'steer').length, 0)
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer).length, 0)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('ceiling steer is never sent once the turn has settled in the same poll', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  const f = fixture({ turnCeilings: { builder: 3 }, log: (row) => rows.push(row), onSleep: ({ sleepCount, appendStream }) => {
+    if (sleepCount === 1) {
+      writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+      appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n{"type":"agent_settled"}\n`)
+    }
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = f.writes.find((frame) => frame.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.equal(f.writes.filter((frame) => frame.type === 'steer').length, 0)
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer || row.rpc_ceiling_steer_failed).length, 0)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('a partial steer write is a failed steer and the torn seat refuses reuse', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  const writes = []
+  const f = fixture({
+    turnCeilings: { builder: 3 }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => { const frame = JSON.parse(line); if (frame.type === 'steer') return 10; writes.push(frame); return undefined },
+    onSleep: ({ sleepCount, appendStream }) => {
+      if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+      if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = writes.find((frame) => frame.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer).length, 0)
+    assert.deepEqual(rows.filter((row) => row.rpc_ceiling_steer_failed).map((row) => row.rpc_ceiling_steer_failed.error), ['PARTIAL_WRITE'])
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), /refused reuse/)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('a steer that writes part of its frame and then fails leaves a torn seat that refuses reuse', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  let steerCalls = 0
+  const writes = []
+  let clock = 0
+  const f = fixture({
+    turnCeilings: { builder: 3 }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => {
+      const frame = JSON.parse(line)
+      if (frame.type === 'steer') {
+        steerCalls += 1
+        if (steerCalls === 1) return 10
+        throw Object.assign(new Error('EPIPE: broken pipe'), { code: 'EPIPE' })
+      }
+      writes.push(frame); return undefined
+    },
+    onSleep: ({ sleepCount, appendStream }) => {
+      if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+      if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = writes.find((frame) => frame?.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.equal(steerCalls, 2, 'the steer must write part of its frame and then fail')
+    assert.deepEqual(rows.filter((row) => row.rpc_ceiling_steer_failed).map((row) => row.rpc_ceiling_steer_failed.error), ['EPIPE'])
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), /refused reuse/)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('ceiling steer write failure is journalled and never replaces the envelope', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  const rows = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  let promptId
+  let run
+  const writes = []
+  const f = fixture({
+    turnCeilings: { builder: 3 }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => { const frame = JSON.parse(line); if (frame.type === 'steer') throw Object.assign(new Error('EPIPE: broken pipe'), { code: 'EPIPE' }); writes.push(frame); return undefined },
+    onSleep: ({ sleepCount, appendStream }) => {
+      if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+      if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = writes.find((frame) => frame.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer).length, 0)
+    assert.deepEqual(rows.filter((row) => row.rpc_ceiling_steer_failed).map((row) => row.rpc_ceiling_steer_failed.error), ['EPIPE'])
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
 test('D1 RPC at and under ceiling is byte-identical', () => {
   const capture = recordedRpcBoundaryCapture()
   assert.equal(rpcCensus(capture)[0]?.turns, 2)

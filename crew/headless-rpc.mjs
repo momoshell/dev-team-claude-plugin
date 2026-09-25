@@ -760,6 +760,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   const configuredPromptDeliveryWindow = Number(deps.promptDeliveryWindowMs)
   const promptDeliveryWindowMs = Number.isFinite(configuredPromptDeliveryWindow) && configuredPromptDeliveryWindow >= 0
     ? configuredPromptDeliveryWindow : RPC_PROMPT_DELIVERY_WINDOW_MS
+  const configuredCeilingSteerTurns = Number(process.env.CREW_CEILING_STEER_TURNS)
+  const ceilingSteerTurns = Number.isInteger(configuredCeilingSteerTurns) && configuredCeilingSteerTurns > 0 ? configuredCeilingSteerTurns : 10
   const sleep = deps.sleep || ((ms) => {
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
@@ -1153,6 +1155,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       try {
         written = writeFd(seat.fd, encoded, offset, encoded.length - offset)
       } catch (error) {
+        // A throw after a partial write must say how much went out: the bytes
+        // already in the FIFO are a fragment the next frame would be read onto.
+        if (error && typeof error === 'object') error.bytesWritten = offset
         if (error?.code !== 'EAGAIN' && error?.code !== 'EWOULDBLOCK') throw error
         if (now() >= deadline) throw error
         sleep(FIFO_RETRY_MS)
@@ -1177,13 +1182,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     let written
     try {
       written = writeAllToFifo(seat, encoded, deadline)
-      if (command === 'prompt' && written !== undefined
-        && (typeof written !== 'number' || written !== encoded.length)) {
-        const error = Object.assign(new Error(`prompt FIFO write was partial (${String(written)} of ${encoded.length} bytes)`), { code: 'PARTIAL_WRITE' })
+      if (written !== undefined && (typeof written !== 'number' || written !== encoded.length)) {
+        // A short write leaves a frame fragment in the FIFO, and the NEXT frame
+        // written to it (another command, or the next assignment's prompt) would
+        // be read concatenated to it. The seat is torn: it refuses reuse, the
+        // same fail-closed path an undelivered prompt takes, whatever the command.
+        seat.deliveryFailed = true
+        const error = Object.assign(new Error(`${command} FIFO write was partial (${String(written)} of ${encoded.length} bytes)`), { code: 'PARTIAL_WRITE' })
         throw error
       }
     } catch (error) {
       pending.delete(id)
+      if (Number(error?.bytesWritten) > 0) seat.deliveryFailed = true
       if (command !== 'prompt') throw error
       seat.deliveryFailed = true
       if (turn) {
@@ -1618,6 +1628,23 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // exactly what K2's mutation does.
   function pollAndEnforce(seat, turn, returnPath, options = {}) {
     const frames = pollSeat(seat)
+    const budget = turnCeilings?.[turn.role] ?? 0
+    if (!Number.isFinite(turnCeilings?.[turn.role]) || budget <= 1 || turn.ceilingSteered) return { frames, enforced: enforceRpcBeforeEnvelope(seat, turn, returnPath, options) }
+    const k = Math.min(ceilingSteerTurns, Math.max(1, budget - 1))
+    // Only an IN-FLIGHT turn is steered: a steer queued after settlement would be
+    // delivered to the NEXT assignment, and a written envelope needs no warning.
+    const inFlight = !turn.state.settled && !turn.state.ended && !exists(returnPath)
+    if (inFlight && turn.providerBoundary.turns >= budget - k && turn.providerBoundary.turns <= budget && !turn.enforced) {
+      turn.ceilingSteered = true
+      // Advice, never the outcome: a steer that cannot be written is journalled and
+      // the turn proceeds to its ordinary envelope wait or ceiling decision.
+      try {
+        send(seat, steerFrame(`you are ${k} turns from your turn ceiling; stop exploring, write your ReturnEnvelope to ${returnPath} now`), 'steer')
+        log({ rpc_ceiling_steer: { role: turn.role, id: turn.id, turns: turn.providerBoundary.turns, budget, k } })
+      } catch (err) {
+        log({ rpc_ceiling_steer_failed: { role: turn.role, id: turn.id, turns: turn.providerBoundary.turns, budget, k, error: String(err?.code || err?.message || err) } })
+      }
+    }
     return { frames, enforced: enforceRpcBeforeEnvelope(seat, turn, returnPath, options) }
   }
   // Every terminal passes through finishTurn, so the per-role cumulative

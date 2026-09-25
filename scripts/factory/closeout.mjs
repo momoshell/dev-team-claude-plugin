@@ -1084,7 +1084,12 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
   try {
     entries = d.readdirSync(crewRoot, { withFileTypes: true })
   } catch (error) {
-    throw new CloseoutRefusal(`cannot read crew root ${crewRoot}: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, 'ingest-all')
+    // A refusal still prints the one JSON summary line, so a caller parsing
+    // stdout gets the reason as data, never prose.
+    noteSkip('root_unreadable')
+    d.log(JSON.stringify(summary))
+    const message = `cannot read crew root ${crewRoot}: ${error?.message || String(error)}`
+    return { verb: 'ingest-all', root: crewRoot, report: summary, refusal: { reason: CLOSEOUT_REFUSALS.CREW_UNREADABLE, step: 'ingest-all', message }, code: EXIT_REFUSED }
   }
   const batches = entries
     .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory() && (entry.name.startsWith('dt-') || entry.name.startsWith('.archive-dt-')))
@@ -1136,7 +1141,20 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       if (!identity) continue
       const dbPath = identity.db_path
       let ledger = null
-      if (!dry_run || d.existsSync(dbPath)) {
+      // existsSync reads a ledger behind an unreadable dir as absent; stat it, so
+      // only ENOENT is an absent mirror and any other failure is unmeasured.
+      let mirrorPresent = true
+      if (dry_run) {
+        try { d.statSync(dbPath) } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            noteSkip('ledger_unreadable')
+            unmeasured = true
+            continue
+          }
+          mirrorPresent = false
+        }
+      }
+      if (!dry_run || mirrorPresent) {
         try {
           ledger = dry_run ? d.openLedger({ dbPath, readOnly: true }) : d.openLedger({ dbPath })
         } catch (error) {

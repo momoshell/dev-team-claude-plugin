@@ -1902,10 +1902,12 @@ test('ingest-all counts degraded mirrors and failed ingests without ingesting', 
 
 test('ingest-all refuses an unreadable root and ignores non-journal shapes', () => {
   const file = put(join(scratch('factory-ingest-all-file-'), 'root-file'), 'x')
-  assert.throws(
-    () => ingestAll({ root: file, deps: ingestAllDeps(() => {}) }),
-    (error) => error.reason === CLOSEOUT_REFUSALS.CREW_UNREADABLE,
-  )
+  const rootLines = []
+  const refusedRoot = ingestAll({ root: file, deps: ingestAllDeps((line) => rootLines.push(line)) })
+  assert.equal(refusedRoot.code, 1)
+  assert.equal(refusedRoot.refusal.reason, CLOSEOUT_REFUSALS.CREW_UNREADABLE)
+  assert.equal(rootLines.length, 1, 'a refusal still prints exactly one JSON summary line')
+  assert.deepEqual(JSON.parse(rootLines[0]).skipped_by_reason, { root_unreadable: 1 })
   const root = ingestAllRoot()
   const dbPath = join(root, 'backfill.db')
   ingestAllLane(root, dbPath, 'dt-two', 'lane-a')
@@ -2063,4 +2065,23 @@ test('ingest-all keeps malformed journal lines as skipped, distinct from ignored
   const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
   assert.equal(result.report.rows_skipped, 1)
   assert.equal(result.report.rows_ignored, 0)
+})
+
+test('ingest-all --dry-run refuses a ledger it cannot stat instead of treating it as absent', { skip: process.getuid?.() === 0 ? 'root reads through mode 000' : false }, () => {
+  const root = ingestAllRoot()
+  const lockedDir = join(root, 'locked')
+  mkdirSync(lockedDir, { recursive: true })
+  const dbPath = join(lockedDir, 'ledger.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const real = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(real.code, 0)
+  chmodSync(lockedDir, 0o000)
+  try {
+    const dry = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+    assert.equal(dry.code, 1)
+    assert.deepEqual(dry.report.skipped_by_reason, { ledger_unreadable: 1 })
+    assert.equal(dry.report.ingested, 0)
+  } finally {
+    chmodSync(lockedDir, 0o755)
+  }
 })

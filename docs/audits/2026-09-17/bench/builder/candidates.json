@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "role": "builder",
-  "production": "meta/muse-spark-1.3-contributor",
+  "production": "openai/gpt-6-luna",
   "tier": "mechanical",
   "candidates": [
     {
-      "provider": "meta",
-      "id": "muse-spark-1.3-contributor",
+      "provider": "openai",
+      "id": "gpt-6-luna",
       "agent": "pi",
       "effort": "medium",
       "source": "models.dev"

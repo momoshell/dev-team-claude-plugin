@@ -2362,7 +2362,7 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
 
 test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable successors', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-09-23')
+  assert.equal(shipped.updated_at, '2026-09-25')
   for (const tier of ['mechanical', 'build', 'judge']) {
     assert.equal(shipped.tiers[tier].planner.id, 'gpt-6-sol')
     assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')

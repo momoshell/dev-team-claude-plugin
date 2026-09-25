@@ -15,7 +15,6 @@ import {
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild, specExecution } from './child.mjs'
-import { EMPTY_GRANTS } from './crew.mjs'
 import { DEFAULT_TRANSPORT, emitAdapter, seatIo, settleSeatTeardown } from './seat-io.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
@@ -1929,7 +1928,7 @@ test('runChild supplies persisted grants to seat IO and preserves injected adapt
   const f = fixture({ roles: ['builder'], agent: 'pi' })
   const crewPath = join(f.crewDir, 'crew.json')
   const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
-  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { ...EMPTY_GRANTS, extensions: ['crew/pi/extensions/gate-builder.ts'] } }
+  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { tools: [], extensions: ['crew/pi/extensions/gate-builder.ts'], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] } }
   writeFileSync(crewPath, JSON.stringify(crew))
   const setup = { driveTask: () => ({ status: 'done' }), preflight: false, openRun: () => ({ startRun() {}, linkRun() {}, endRun() {}, sidecar: () => null }), checkoutProtectedPaths: () => ({ paths: [], basis: 'test' }) }
   try {
@@ -1946,7 +1945,7 @@ test('runChild refuses malformed persisted grants before calling seat IO', () =>
   const f = fixture({ roles: ['builder'], agent: 'pi' })
   const crewPath = join(f.crewDir, 'crew.json')
   const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
-  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { ...EMPTY_GRANTS, tools: [' '] } }
+  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { tools: [' '], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] } }
   writeFileSync(crewPath, JSON.stringify(crew))
   let called = false
   try {

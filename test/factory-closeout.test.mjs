@@ -1913,13 +1913,13 @@ test('ingest-all refuses an unreadable root and ignores non-journal shapes', () 
   const lines = []
   const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
   assert.equal(result.code, 0)
-  assert.equal(result.report.journals_seen, 0)
-  assert.deepEqual(result.report.skipped_by_reason, { lane_ambiguous: 1 })
-  assert.equal(result.report.ingested, 0)
+  assert.equal(result.report.journals_seen, 2)
+  assert.deepEqual(result.report.skipped_by_reason, {})
+  assert.equal(result.report.ingested, 2)
   assert.equal(lines.length, 1)
 })
 
-test('ingest-all records lane_ambiguous for a batch holding two lane dirs', () => {
+test('ingest-all ingests every lane dir of a batch holding two, each on its own identity', () => {
   const root = ingestAllRoot()
   const dbPath = join(root, 'backfill.db')
   ingestAllLane(root, dbPath, 'dt-two', 'lane-a')
@@ -1927,10 +1927,21 @@ test('ingest-all records lane_ambiguous for a batch holding two lane dirs', () =
   const lines = []
   const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
   assert.equal(result.code, 0)
-  assert.equal(result.report.journals_seen, 0)
-  assert.equal(result.report.ingested, 0)
-  assert.deepEqual(result.report.skipped_by_reason, { lane_ambiguous: 1 })
+  assert.equal(result.report.journals_seen, 2)
+  assert.equal(result.report.ingested, 2)
+  assert.deepEqual(result.report.skipped_by_reason, {})
   assert.equal(lines.length, 1)
+})
+
+test('ingest-all resolves an archived lane dir by the name before its .archive- mark', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, '.archive-dt-lane-c', 'lane-c.archive-2026-09-13T08-41-36Z', { taskSlug: 'lane-c' })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.journals_seen, 1)
+  assert.equal(result.report.ingested, 1)
+  assert.deepEqual(result.report.skipped_by_reason, {})
 })
 
 test('ingest-all counts a mismatched identity without rows', () => {

@@ -2850,3 +2850,55 @@ test('a mirror error fails the fact and stops the journal instead of reporting s
   assert.deepEqual(result.first_failure, { line: 1, reason: 'mirror-error' })
   assert.equal(writes, 1, 'the journal stops at the first mirror error')
 })
+
+test('ingest keys encode the unique tuple unambiguously: separator-bearing values stay distinct', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', event: 'plan-adopted', lane: 'a|str:b', plan_sha: 'c' },
+    { at: '2030-01-01T00:00:01.000Z', event: 'plan-adopted', lane: 'a', plan_sha: 'b|str:c' },
+    { at: '2030-01-01T00:00:02.000Z', event: 'plan-adopted', lane: 'x|y', plan_sha: 'z' },
+    { at: '2030-01-01T00:00:03.000Z', event: 'plan-adopted', lane: 'x', plan_sha: 'y|z' },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'encoding' })
+    assert.equal(result.applied, 4)
+    assert.equal(ledger.dumpTable('plan_adoptions').length, 4)
+    const second = ingestJournal(journalPath, ledger, { adw_id: 'encoding' })
+    assert.equal(second.applied, 0)
+    assert.equal(second.ignored, 4)
+  } finally { ledger.close() }
+})
+
+test('ingest keys come from stored values: two lanes the writer truncates to one row are one fact', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const prefix = 'l'.repeat(200)
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', event: 'plan-adopted', lane: `${prefix}-first`, plan_sha: 'sha' },
+    { at: '2030-01-01T00:00:01.000Z', event: 'plan-adopted', lane: `${prefix}-second`, plan_sha: 'sha' },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const first = ingestJournal(journalPath, ledger, { adw_id: 'truncation' })
+    assert.equal(first.applied, 1)
+    assert.equal(first.ignored, 1)
+    assert.equal(ledger.dumpTable('plan_adoptions').length, 1)
+    const logBefore = readFileSync(ledger._jsonlPath)
+    const second = ingestJournal(journalPath, ledger, { adw_id: 'truncation' })
+    assert.equal(second.applied, 0)
+    assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore, 'a replay appends no JSONL bytes')
+  } finally { ledger.close() }
+})
+
+test('dry-run applies a valid fact to nothing real: counted applied, zero rows, zero JSONL bytes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const logBefore = existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath) : Buffer.alloc(0)
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'dry-valid', dry_run: true })
+    assert.equal(result.applied, 1)
+    assert.equal(ledger.dumpTable('provider_failures').length, 0)
+    assert.deepEqual(existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath) : Buffer.alloc(0), logBefore)
+  } finally { ledger.close() }
+})

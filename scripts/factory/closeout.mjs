@@ -1099,75 +1099,80 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       unmeasured = true
       continue
     }
+    // Every lane directory in the batch that holds a journal is its own lane: a
+    // batch dir can carry several (recovery copies, re-dispatches), and each is
+    // resolved and ingested on its own identity.
     const lanes = children
       .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory())
       .map((entry) => entry.name)
       .sort()
-    if (lanes.length > 1) noteSkip('lane_ambiguous')
-    if (lanes.length !== 1) continue
-    const laneName = lanes[0]
-    const crewDir = join(crewRoot, batch, laneName)
-    const journalPath = join(crewDir, 'journal.jsonl')
-    if (!d.existsSync(journalPath)) continue
-    summary.journals_seen += 1
-    let identity = null
-    try {
-      identity = reapIdentity({ crewDir, lane: laneName, deps: d })
-    } catch {
-      identity = null
-    }
-    if (!identity) summary.skipped_by_reason.identity_unresolved = (summary.skipped_by_reason.identity_unresolved || 0) + 1
-    if (!identity) continue
-    const dbPath = identity.db_path
-    let ledger = null
-    if (!dry_run || d.existsSync(dbPath)) {
+    for (const laneName of lanes) {
+      const crewDir = join(crewRoot, batch, laneName)
+      const journalPath = join(crewDir, 'journal.jsonl')
+      if (!d.existsSync(journalPath)) continue
+      summary.journals_seen += 1
+      // An archived lane dir is renamed <lane>.archive-<iso>; its run.json still
+      // names <lane>, so identity is checked against the name before the mark.
+      const identityLane = laneName.includes(ARCHIVE_MARK) ? laneName.slice(0, laneName.indexOf(ARCHIVE_MARK)) : laneName
+      let identity = null
       try {
-        ledger = dry_run ? d.openLedger({ dbPath, readOnly: true }) : d.openLedger({ dbPath })
+        identity = reapIdentity({ crewDir, lane: identityLane, deps: d })
+      } catch {
+        identity = null
+      }
+      if (!identity) summary.skipped_by_reason.identity_unresolved = (summary.skipped_by_reason.identity_unresolved || 0) + 1
+      if (!identity) continue
+      const dbPath = identity.db_path
+      let ledger = null
+      if (!dry_run || d.existsSync(dbPath)) {
+        try {
+          ledger = dry_run ? d.openLedger({ dbPath, readOnly: true }) : d.openLedger({ dbPath })
+        } catch (error) {
+          noteSkip('open_failed')
+          unmeasured = true
+          continue
+        }
+      }
+      if (degradedMirror(ledger)) {
+        noteSkip('ledger_degraded')
+        unmeasured = true
+        try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      let detail = null
+      try {
+        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run })
       } catch (error) {
-        noteSkip('open_failed')
+        noteSkip('ingest_error')
+        unmeasured = true
+        try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      const degradedAfter = degradedMirror(ledger)
+      try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
+      if (degradedAfter) {
+        noteSkip('ledger_degraded')
         unmeasured = true
         continue
       }
+      if (!detail || typeof detail !== 'object') {
+        noteSkip('ingest_error')
+        unmeasured = true
+        continue
+      }
+      summary.rows_applied += detail.applied || 0
+      summary.rows_ignored += (detail.ignored || 0) + (detail.skipped || 0)
+      summary.rows_failed += detail.failed || 0
+      // An ingest that skipped or failed rows is not a successful one: it is counted
+      // under ingest_incomplete with its first failure, never under ingested.
+      if (detail.failed > 0 || detail.complete === false) {
+        noteSkip('ingest_incomplete')
+        summary.incomplete.push({ journal: journalPath, reason: detail.first_failure?.reason ?? 'unreported', line: detail.first_failure?.line ?? null })
+        unmeasured = true
+        continue
+      }
+      summary.ingested += 1
     }
-    if (degradedMirror(ledger)) {
-      noteSkip('ledger_degraded')
-      unmeasured = true
-      try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
-      continue
-    }
-    let detail = null
-    try {
-      detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run })
-    } catch (error) {
-      noteSkip('ingest_error')
-      unmeasured = true
-      try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
-      continue
-    }
-    const degradedAfter = degradedMirror(ledger)
-    try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
-    if (degradedAfter) {
-      noteSkip('ledger_degraded')
-      unmeasured = true
-      continue
-    }
-    if (!detail || typeof detail !== 'object') {
-      noteSkip('ingest_error')
-      unmeasured = true
-      continue
-    }
-    summary.rows_applied += detail.applied || 0
-    summary.rows_ignored += (detail.ignored || 0) + (detail.skipped || 0)
-    summary.rows_failed += detail.failed || 0
-    // An ingest that skipped or failed rows is not a successful one: it is counted
-    // under ingest_incomplete with its first failure, never under ingested.
-    if (detail.failed > 0 || detail.complete === false) {
-      noteSkip('ingest_incomplete')
-      summary.incomplete.push({ journal: journalPath, reason: detail.first_failure?.reason ?? 'unreported', line: detail.first_failure?.line ?? null })
-      unmeasured = true
-      continue
-    }
-    summary.ingested += 1
   }
   d.log(JSON.stringify(summary))
   const refusal = unmeasured ? { reason: CLOSEOUT_REFUSALS.INGEST_UNMEASURED, step: 'ingest-all', message: 'ingest-all completed with unmeasured or failed ingests' } : null

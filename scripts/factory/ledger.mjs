@@ -6746,55 +6746,27 @@ function bootSeatArgs(source, role, adwId) {
   }
 }
 
-// Idempotency key for one journal fact: the table's declared TABLES natural
-// unique tuple, null-safe and normalized the way SQLite's column AFFINITY would
-// store each value. A numeric-looking string coerces only in an INTEGER, REAL or
-// NUMERIC column; in a TEXT column '01' and '1' stay distinct (and a number is
-// stored as its text), exactly as the declared UNIQUE key distinguishes them.
-// NULL participates in equality (unlike SQLite's NULL-distinct UNIQUE), so a
-// repeated nullable composite key still collides. created_at is never part of a
-// journal-fed tuple, so replays with fresh timestamps collide.
-function columnAffinity(table, column) {
-  const decl = String(TABLES[table]?.columns?.find((one) => one.name === column)?.decl || '').toUpperCase()
-  if (decl.includes('INT')) return 'numeric'
-  if (/CHAR|CLOB|TEXT/.test(decl)) return 'text'
-  if (/REAL|FLOA|DOUB|NUMERIC|DECIMAL|BOOL/.test(decl)) return 'numeric'
-  return 'none'
-}
-
-function ingestKeyComponent(value, affinity) {
-  if (value === undefined || value === null) return 'null'
-  if (typeof value === 'number' && !Number.isFinite(value)) return 'null'
-  if (affinity === 'numeric') {
-    if (typeof value === 'boolean') return value ? 'num:1' : 'num:0'
-    if (typeof value === 'number') return `num:${value}`
-    if (typeof value === 'string') {
-      const trimmed = value.trim()
-      if (trimmed !== '' && DRIFT_NUMERIC_LITERAL.test(trimmed) && Number.isFinite(Number(trimmed))) return `num:${Number(trimmed)}`
-      return `str:${value}`
-    }
-  }
-  if (affinity === 'text' && (typeof value === 'number' || typeof value === 'string')) return `str:${String(value)}`
-  if (typeof value === 'string') return `str:${value}`
-  if (typeof value === 'number') return `num:${value}`
-  return `json:${JSON.stringify(value)}`
-}
-
-// Writer token (the JOURNAL_FACT_KEYS / JOURNAL_FACT_EVENTS value held in
-// `writer`) -> { table, unique }. Boot rows fan out to recordRunSeat.
+// Idempotency key for one journal fact, built from the row the writer actually
+// STORED, never from the raw journal arguments: each fact is first written to a
+// throwaway ledger and its new mirror row is read back. The writer's own
+// normalization (truncation, redaction, text/number coercion) and SQLite's
+// column affinity therefore shape the key exactly as they shape the real row,
+// and the real ledger is seeded with the same function over its stored rows.
+// The unique tuple is JSON-encoded, so no component value can impersonate a
+// separator. NULL participates in equality (unlike SQLite's NULL-distinct
+// UNIQUE), so a repeated nullable composite key still collides.
 function journalFactIdentity(writer) {
-  const table = writer === JOURNAL_FACT_EVENTS.boot ? 'run_seats' : WRITER_MIRROR_TABLES[writer]
+  const table = writer === JOURNAL_FACT_EVENTS.boot || writer === 'recordRunSeat' ? 'run_seats' : WRITER_MIRROR_TABLES[writer]
   if (!table || !TABLES[table] || !Array.isArray(TABLES[table].unique[0])) return null
   return { table, unique: TABLES[table].unique[0] }
 }
 
-function identityKey(identity, row) {
-  return `${identity.table}::${identity.unique.map((column) => ingestKeyComponent(row?.[column], columnAffinity(identity.table, column))).join('|')}`
+function storedKey(identity, row) {
+  return `${identity.table}::${JSON.stringify(identity.unique.map((column) => row?.[column] ?? null))}`
 }
 
-function journalFactKey(writer, args) {
-  const identity = journalFactIdentity(writer)
-  return identity ? identityKey(identity, args) : null
+function storedKeys(ledger, identity) {
+  return new Set((ledger.dumpTable(identity.table) || []).map((row) => storedKey(identity, row)))
 }
 
 function mirrorErrorCount(ledger) {
@@ -6811,29 +6783,23 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
       const identity = journalFactIdentity(writer)
       if (!identity || seeded.has(identity.table)) continue
       seeded.add(identity.table)
-      for (const row of ledger.dumpTable(identity.table) || []) seen.add(identityKey(identity, row))
+      for (const key of storedKeys(ledger, identity)) seen.add(key)
     }
   }
-  // Dry-run never writes the real ledger, but it still runs every writer's own
-  // validation, against a throwaway ledger, so a row reported applied in a dry
-  // run is one the real run would accept.
-  let scratchDir = null
-  let writeTarget = ledger
-  if (dry_run) {
-    scratchDir = mkdtempSync(join(tmpdir(), 'ledger-dry-run-'))
-    writeTarget = openLedger({ dbPath: join(scratchDir, 'ledger.db') })
-  }
+  // Every fact runs through a throwaway ledger first: it validates the fact with
+  // the writer's own checks and yields the stored row the key is built from.
+  // Dry-run stops there, so the real ledger is only ever read.
+  const scratchDir = mkdtempSync(join(tmpdir(), 'ledger-ingest-'))
+  const scratch = openLedger({ dbPath: join(scratchDir, 'ledger.db') })
   try {
-    return ingestJournalRows(journalPath, writeTarget, { adw_id, sinceMs, seen })
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen })
   } finally {
-    if (scratchDir) {
-      try { writeTarget.close() } catch { /* a throwaway ledger */ }
-      try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
-    }
+    try { scratch.close() } catch { /* a throwaway ledger */ }
+    try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
   }
 }
 
-function ingestJournalRows(journalPath, ledger, { adw_id, sinceMs, seen }) {
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -6905,8 +6871,35 @@ function ingestJournalRows(journalPath, ledger, { adw_id, sinceMs, seen }) {
       }
     }
     for (const fact of pending) {
-      const key = journalFactKey(fact.writer, fact.args)
-      if (key !== null && seen.has(key)) { ignored += 1; continue }
+      const identity = journalFactIdentity(fact.writer)
+      const before = identity ? storedKeys(scratch, identity) : null
+      const scratchMirrorBefore = mirrorErrorCount(scratch)
+      const rejected = applyJournalFact(scratch, fact.writer, fact.args)
+      if (rejected !== null) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(rejected) }
+        continue
+      }
+      if (mirrorErrorCount(scratch) > scratchMirrorBefore) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: 'mirror-error' }
+        continue
+      }
+      let key = null
+      if (identity) {
+        const added = [...storedKeys(scratch, identity)].filter((one) => !before.has(one))
+        // No new stored row and no error: INSERT OR IGNORE met the same natural
+        // key earlier in this journal, so the fact is already accounted for.
+        if (added.length === 0) { ignored += 1; continue }
+        key = added[0]
+        if (seen.has(key)) { ignored += 1; continue }
+      }
+      if (target === null) {
+        if (key !== null) seen.add(key)
+        applied += 1
+        continue
+      }
+      const ledger = target
       const mirrorBefore = mirrorErrorCount(ledger)
       const error = applyJournalFact(ledger, fact.writer, fact.args)
       if (error !== null) {

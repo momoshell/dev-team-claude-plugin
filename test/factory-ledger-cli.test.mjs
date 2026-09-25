@@ -436,6 +436,9 @@ test('doctor reports the retired envelopes reason beside an empty row count', { 
   const payload = JSON.parse(res.stdout)
   assert.equal(payload.row_counts.envelopes, 0)
   assert.ok(typeof payload.retired_tables.envelopes === 'string' && payload.retired_tables.envelopes.length >= 40)
+  assert.deepEqual(Object.keys(payload.path_dependent_tables).sort(), ['run_links', 'run_observations'])
+  assert.match(payload.path_dependent_tables.run_observations, /crew:watch --follow/)
+  assert.match(payload.path_dependent_tables.run_links, /only by the daemon path/)
 })
 test('doctor reports the retired processes reason beside an empty row count', { skip: SKIP }, () => {
   const dbPath = join(nextDir(), 'doctor-retired-processes.db')

@@ -109,6 +109,10 @@ Model escalation triage is record-only: `escalation_proposals` stores one option
 
 `processes` is retired: it has never held a row in any production ledger (454 real sessions, 0 process rows, measured 2026-08-25). `startProcess` has no caller outside `scripts/factory/ledger.mjs` itself and its own tests — nothing in `crew/`, `scripts/` or `visualizer/` records a spawned process — so `ledger procs <adw_id>` returns `[]` for every run. The table, `startProcess` and `endProcess` stay declared because the schema fence is additive-only and `replayJsonl` depends on the closed `WRITERS` set. A zero row count is **retired**, not *nothing happened*; `ledger doctor` reports the reason beside `row_counts.processes` in `retired_tables`. Wiring a writer is a separate decision that must first name whose pid a row represents.
 
+## Path-dependent tables
+
+`run_observations` is written by `crew:watch --follow` and `closeout reconcile`, and `run_links` only by the daemon path. A zero row count means the relevant writer paths were not observed, not that no activity occurred; `ledger doctor` reports these explanations in `doctor.path_dependent_tables`.
+
 ## Context occupancy
 
 | transport | `context_tokens` | `context_window` | why |

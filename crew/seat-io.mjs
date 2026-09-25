@@ -3871,10 +3871,38 @@ export function readHeadlessExit(path, deps = {}) {
 // try/catch here: readHeadlessExit is total, and a reader failure must stay
 // visible to the F1 proof instead of being folded into a diagnosis.
 export function seatDiedExit(info, taskDir, fs = {}) {
-  if (info?.transport !== HEADLESS_TRANSPORT || typeof info?.workerId !== 'string' || !info.workerId) return { exit_status: null, exit_status_reason: null }
+  if (info?.transport !== HEADLESS_TRANSPORT || typeof info?.workerId !== 'string' || !info.workerId) return { exit_status: null, exit_status_reason: null, wrapper_signal: null, wrapper_signal_reason: null }
   const exit = readHeadlessExit(join(taskDir, 'headless', info.workerId, 'exit'), fs)
+  const signal = readHeadlessSignal(join(taskDir, 'headless', info.workerId, 'signal'), fs)
   return {
     exit_status: exit.status,
     exit_status_reason: exit.reason,
+    wrapper_signal: signal.status,
+    wrapper_signal_reason: signal.reason,
   }
+}
+// The headless-json wrapper durably records a received TERM/HUP/INT at
+// headless/<workerId>/signal (crew/headless.mjs traps and renames atomically).
+// This section only consumes that durable file: a closed diagnosis for the
+// seat_died journal row. A non-headless transport or a missing workerId keeps
+// null fields rather than overclaiming an absence reason.
+export const HEADLESS_SIGNAL_REASONS = Object.freeze({
+  ABSENT: 'signal-file-absent',
+  UNREADABLE_OR_MALFORMED: 'signal-file-unreadable-or-malformed',
+})
+// A diagnostic reader that never throws. It reads the file directly rather than
+// asking existsSync first: existsSync reports false for a file it cannot reach
+// (an unreadable directory), which would journal a present signal as absent.
+// Only ENOENT is an absence; every other read failure, an empty file, and any
+// bytes outside the three exact signal names are unreadable-or-malformed. Only
+// one optional terminating newline is accepted; nothing is trimmed.
+export function readHeadlessSignal(path, deps = {}) {
+  const readFileSync = deps.readFileSync || fsReadFileSync
+  let raw
+  try { raw = String(readFileSync(path, 'utf8')) } catch (error) {
+    return { status: null, reason: error?.code === 'ENOENT' ? HEADLESS_SIGNAL_REASONS.ABSENT : HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED }
+  }
+  const match = /^(TERM|HUP|INT)\n?$/.exec(raw)
+  if (match) return { status: match[1], reason: null }
+  return { status: null, reason: HEADLESS_SIGNAL_REASONS.UNREADABLE_OR_MALFORMED }
 }

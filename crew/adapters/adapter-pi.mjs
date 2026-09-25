@@ -2,7 +2,6 @@ import { fileURLToPath } from 'node:url'
 import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
-import { ACP_TRANSPORT_PROFILE } from '../capabilities.mjs'
 
 // crew/adapters/adapter-pi.mjs — the pi agent adapter.
 //
@@ -56,10 +55,16 @@ const PROFILES = Object.freeze({
     // #131 — drive.mjs bounce paths reassign a settled pane seat.
     reassign: true,
   }),
+  // Literal, not spread from capabilities.mjs ACP_TRANSPORT_PROFILE: this module is in
+  // subagent.ts's import closure, which must stay node:-only (subagent.test.mjs).
+  // capabilities.test.mjs pins every shared key to ACP_TRANSPORT_PROFILE.
   acp: Object.freeze({
-    ...ACP_TRANSPORT_PROFILE,
+    interjection: 'turn',
+    abort: 'cancel',
     // acp-server.ts advertises loadSession: false.
     session_resume: false,
+    durable_cursor: 'protocol',
+    reassign: false,
     // acp-server.ts forwards tool permission requests.
     permission_requests: true,
   }),

@@ -733,3 +733,37 @@ test('K1', () => {
     assert.deepEqual(readdirSync(dir), [], `refused value wrote a launch artifact: ${JSON.stringify(value)}`)
   }
 })
+
+// The pane seat launches through `env`, which INHERITS the parent environment:
+// the advisor endpoint must be set explicitly or an operator's value leaks in.
+function paneAdvisorEnv(advisorCell, inherited) {
+  const command = seatCommand({
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '',
+    taskDir: '/tmp/task', bootBrief: 'brief', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true }, advisorCell,
+  })
+  const prefix = command.slice(0, command.indexOf(' pi --model '))
+  const out = spawnSync('/bin/sh', ['-c', `${prefix} /usr/bin/env -0`], { env: { PATH: process.env.PATH, CREW_ADVISOR_ENDPOINT: inherited } })
+  assert.equal(out.status, 0, String(out.stderr))
+  return Object.fromEntries(String(out.stdout).split('\0').filter(Boolean).map((row) => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]))
+}
+
+test('a model-only advised pane seat clears an inherited advisor endpoint and attaches without probing any URL', async () => {
+  const models = { 'provider/model': { provider: 'provider', id: 'model' } }
+  const env = paneAdvisorEnv({ model: 'provider/model', models }, 'http://evil.example')
+  assert.equal(env.CREW_ADVISOR_ENDPOINT, '')
+  const { attachAdvisor } = await import('./pi/extensions/advisor.ts')
+  const rows = []; const urls = []
+  const dir = scratchDir('pane-advisor-')
+  await attachAdvisor({ on() {}, sendMessage() {} }, {
+    env: { ...env, CREW_TASK_DIR: dir },
+    deps: { appendFile: (_path, line) => rows.push(JSON.parse(line)), fetchFn: (url) => { urls.push(String(url)); throw new Error('must not probe') } },
+  })
+  assert.deepEqual(urls, [])
+  assert.equal(rows.at(-1).advisor_boot.outcome, 'attached')
+  assert.equal(JSON.stringify(rows).includes('evil.example'), false)
+})
+
+test('a pane seat whose boot record names an endpoint carries exactly that endpoint, not the inherited one', () => {
+  const env = paneAdvisorEnv({ endpoint: 'http://127.0.0.1:8080/v1', model: 'qwen3' }, 'http://evil.example')
+  assert.equal(env.CREW_ADVISOR_ENDPOINT, 'http://127.0.0.1:8080/v1')
+})

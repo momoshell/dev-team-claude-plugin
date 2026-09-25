@@ -351,8 +351,12 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     // The advisor activates no tool; --tools stays the complete built-in set.
     ...(advisor ? [
       `${PI_ADVISOR_ENV}=1`,
-      ...(advisorCell?.endpoint !== undefined ? [`${PI_ADVISOR_ENDPOINT_ENV}=${shellSingleQuote(advisorCell.endpoint)}`] : []),
+      // ALWAYS set, never inherited through `env`: the boot record's endpoint,
+      // or '' for a model-only (pi-child) cell, so an endpoint boot never
+      // admitted cannot receive the delta.
+      `${PI_ADVISOR_ENDPOINT_ENV}=${shellSingleQuote(advisorCell?.endpoint || '')}`,
       ...(advisorCell?.model !== undefined ? [`${PI_ADVISOR_MODEL_ENV}=${shellSingleQuote(advisorCell.model)}`] : []),
+      ...(advisorCell?.models !== undefined ? [`CREW_ADVISOR_MODELS=${shellSingleQuote(JSON.stringify(advisorCell.models))}`] : []),
     ] : []),
     // The register-resolved allowlist, transported to the extension. Emitted
     // ONLY when an agent is granted, so every ungranted command is unchanged.

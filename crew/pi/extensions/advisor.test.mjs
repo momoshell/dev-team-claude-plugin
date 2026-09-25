@@ -2,7 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
+import { seatCommand } from '../../adapters/adapter-pi.mjs'
 import {
   ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell,
   DEFAULT_TRANSPORT, advisorBootRecord, assertAdvisorCellLive,
@@ -92,7 +95,7 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || specifier === './subagent.ts'))
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
 })
@@ -110,7 +113,7 @@ const sharedAdvisorCells = Object.freeze([
   { endpoint: '', model: 'qwen3-coder' },
 ])
 
-test('A1 extension admits the canonical LAN endpoint/model cell', () => {
+test('extension admits the canonical LAN endpoint/model cell', () => {
   assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[1]), {
     endpoint: 'http://10.112.20.20:8080/v1', model: 'qwen3-coder',
   })
@@ -123,13 +126,13 @@ test('B1 extension retains exact refusal reasons for invalid cells', () => {
     [sharedAdvisorCells[6], { reason: 'endpoint-not-local' }],
     [sharedAdvisorCells[7], { reason: 'model-unset' }],
     [sharedAdvisorCells[8], { reason: 'model-unsafe' }],
-    [sharedAdvisorCells[9], { reason: 'endpoint-unset' }],
+    [sharedAdvisorCells[9], { reason: 'model-unsafe' }],
   ]
   for (const [cell, expected] of refusals) assert.deepEqual(advisor.classifyAdvisorCell(cell), expected)
 })
 
-test('RV1-1 extension classifies an unset endpoint as endpoint-unset', () => {
-  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[9]), { reason: 'endpoint-unset' })
+test('RV1-1 extension classifies an unset endpoint without roster membership as model-unsafe', () => {
+  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[9]), { reason: 'model-unsafe' })
 })
 
 test('C1 extension and boot classifiers agree across the shared input table', () => {
@@ -338,7 +341,165 @@ test('every delta source is redacted before it is stored, sent or frozen', async
   }
 })
 
-test('A1 planner seat with grant is advised', async () => {
+test('A1', async () => {
+  const f = fixture(); const journal = sink(); let argv; let input
+  const judgment = { class: 'edge-path', severity: 'medium', claim: 'child found a grounded edge path', evidence: ['outside.mjs:1'] }
+  const spawn = (bin, args) => {
+    argv = [bin, ...args]
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end(value) { input = value; setImmediate(() => {
+      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ ...judgment, claim: 'older result' }) }], usage: { input: 2, output: 1 } } }) + '\n')
+      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(judgment) }], usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 } } }) + '\n')
+      child.emit('close', 0)
+    }) } }
+    child.kill = () => true
+    return child
+  }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
+  } })
+  const path = join(f.tree, 'outside.mjs'); writeFileSync(path, 'const x = 1\\n')
+  const change = { path, edits: [{ oldText: 'x', newText: 'const x = 1' }] }
+  a.onToolCall(call('child', 'edit', change), {}); a.onToolResult(result('child', 'edit', change, 'ok'), {})
+  await a.settled()
+  assert.deepEqual(argv.slice(0, 14), ['/stub/pi','-p','--mode','json','--no-session','--model','provider/model','--tools','read,grep,find,ls','--exclude-tools','edit,write,bash','--no-extensions','--no-skills','--append-system-prompt'])
+  assert.equal(argv.length, 15); assert.equal(argv[14].startsWith('/'), true)
+  const payload = JSON.parse(input); assert.equal(payload.trigger, 'tier0-note'); assert.match(JSON.stringify(payload.delta), /outside.mjs:1/)
+  assert.equal(a.notes().some((note) => note.outcome === 'injected' && note.claim === judgment.claim), true, JSON.stringify(journal.rows))
+  const consult = journal.rows.find((row) => row.advisor_consult)?.advisor_consult
+  assert.deepEqual(consult.usage, { billed_input_tokens: 9, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
+  assert.equal(consult.model, 'provider/model')
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('model-only attach uses the supplied roster catalog without probing or resolving pi', async () => {
+  const f = fixture(); const journal = sink(); const p = pi(); let probes = 0; let spawned = 0
+  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: '', CREW_ADVISOR_MODEL: 'provider/model', CREW_ADVISOR_MODELS: { 'provider/model': {} } }), deps: {
+    ...journal, taskDir: f.taskDir, fetchFn: async () => { probes++; return { status: 200 } },
+    resolveBinary: () => { spawned++; throw new Error('must not resolve during attach') }, spawn: () => { spawned++; throw new Error('must not spawn during attach') },
+  } })
+  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
+  assert.equal(probes, 0); assert.equal(spawned, 0)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('RV1-1 seatCommand roster env reaches model-only attach', async () => {
+  const f = fixture(); const journal = sink(); const p = pi(); let probes = 0
+  const models = { 'provider/model': { source: 'remote' }, 'other/model': { source: 'remote' } }
+  const command = seatCommand({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, bootBrief: 'brief', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true }, advisorCell: { model: 'provider/model', models } })
+  const serialized = /(?:^|\s)CREW_ADVISOR_MODELS='([^']*)'/.exec(command)?.[1]
+  assert.equal(serialized, JSON.stringify(models))
+  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model', CREW_ADVISOR_MODELS: serialized }), deps: {
+    ...journal, taskDir: f.taskDir, fetchFn: async () => { probes++; return { status: 200 } },
+  } })
+  assert.equal(p.handlers.length, 2); assert.equal(probes, 0)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('RV1-2 strips normalized injected spans without dropping ordinary evidence', () => {
+  const claim = 'Guard at lib/widget.mjs:2 misses the null path.'
+  const cleaned = advisor.stripAdvisorNotes(`lib/widget.mjs:2: ordinary evidence ${claim}`, new Set([advisor.normalizeNote(claim)]))
+  assert.match(cleaned, /ordinary evidence/)
+  assert.equal(cleaned.includes(claim), false)
+})
+
+test('RV1-3 journals stale child consult usage before suppressing stale notes', async () => {
+  const f = fixture(); const journal = sink(); let finish
+  const spawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { finish = () => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'stale finding', evidence: ['lib/widget.mjs:2'] }), usage: { input: 4, output: 2 } } }) + '\n'); child.emit('close', 0) } } }
+    child.kill = () => true; return child
+  }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
+  } })
+  const readPath = join(f.tree, 'lib', 'widget.mjs')
+  a.onToolResult(result('stale-read', 'read', { path: readPath, offset: 1 }, 'lib/widget.mjs:2: evidence'), {})
+  const change = { path: join(f.tree, 'stale.mjs'), edits: [{ newText: 'x' }] }
+  a.onToolCall(call('stale', 'edit', change), {}); a.onToolResult(result('stale', 'edit', change, 'ok'), {})
+  await new Promise((resolve) => setImmediate(resolve))
+  writeFileSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({ schema_version: 1, run_started_at: 2, tripwires: [] }))
+  finish()
+  await a.settled()
+  const consults = journal.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+  assert.equal(consults.length, 1)
+  assert.deepEqual(consults[0].usage, { billed_input_tokens: 4, billed_output_tokens: 2, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+  assert.equal(a.notes().some((note) => note.claim === 'stale finding'), false)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('pi-child timeout, oversize output and invalid frames are closed failures', async () => {
+  for (const mode of ['timeout', 'oversize', 'invalid']) {
+    const f = fixture(); const journal = sink()
+    const spawn = () => {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+      child.stdin = { end() { if (mode === 'timeout') return; setImmediate(() => {
+        child.stdout.write(mode === 'oversize' ? Buffer.alloc(advisor.RESPONSE_CAP_BYTES + 1) : 'not-json\\n')
+        child.emit('close', 0)
+      }) } }
+      child.kill = () => true
+      return child
+    }
+    const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+      cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+      resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn, consultTimeoutMs: 5,
+    } })
+    const readPath = join(f.tree, 'lib', 'widget.mjs')
+    a.onToolResult(result(`${mode}-read`, 'read', { path: readPath, offset: 1 }, 'lib/widget.mjs:2: evidence'), {})
+    const target = join(f.tree, `${mode}.mjs`); const change = { path: target, edits: [{ newText: 'x' }] }
+    a.onToolCall(call(mode, 'edit', change), {}); a.onToolResult(result(mode, 'edit', change, 'ok'), {})
+    await a.settled()
+    const rejected = journal.rows.find((row) => row.advisor_note?.outcome === 'rejected')?.advisor_note
+    assert.ok(rejected, mode)
+    assert.ok(rejected.codes.includes(mode === 'oversize' ? 'body-too-large' : mode === 'invalid' ? 'body-not-json' : 'transport-failed'), mode)
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})
+
+test('A2', async () => {
+  const f = fixture(); const journal = sink(); const fetchFn = fetcher(); let spawned = 0
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'),
+    fileMtime: () => 2, fetchFn, spawn: () => { spawned++; throw new Error('must not spawn') },
+  } })
+  const path = join(f.tree, 'outside.mjs'); writeFileSync(path, 'const x = 1\\n')
+  const change = { path, edits: [{ oldText: 'x', newText: 'const x = 1' }] }
+  a.onToolCall(call('http', 'edit', change), {}); a.onToolResult(result('http', 'edit', change, 'ok'), {}); await a.settled()
+  assert.equal(fetchFn.posts.length, 1); assert.equal(fetchFn.posts[0].init.method, 'POST'); assert.equal(spawned, 0)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('A3', async () => {
+  const f = fixture(); const journal = sink(); const fetchFn = fetcher(); const inputs = []
+  const childSpawn = (bin, args) => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end(value) { inputs.push(value); setImmediate(() => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'Guard at lib/widget.mjs:2 misses the null path.', evidence: ['lib/widget.mjs:2'] }) } }) + '\n'); child.emit('close', 0) }) } }; child.kill = () => true; return child
+  }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    fetchFn, spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }),
+  } })
+  const path = join(f.tree, 'lib', 'widget.mjs')
+  const trigger = (id, target) => {
+    const change = { path: join(f.tree, target), edits: [{ newText: 'x' }] }
+    a.onToolCall(call(id, 'edit', change), {}); a.onToolResult(result(id, 'edit', change, 'ok'), {})
+  }
+  a.onToolResult(result('read-initial', 'read', { path, offset: 1 }, 'lib/widget.mjs:2: initial grounded evidence'), {})
+  trigger('first', 'outside-one.mjs'); await a.settled()
+  a.onToolResult(result('read-mixed', 'read', { path, offset: 1 }, 'lib/widget.mjs:2: ordinary evidence Guard at lib/widget.mjs:2 misses the null path.'), {})
+  trigger('second', 'outside-two.mjs'); await a.settled()
+  const deltaText = JSON.stringify(JSON.parse(inputs[1]).delta)
+  assert.match(deltaText, /ordinary evidence/)
+  assert.equal(deltaText.includes('Guard at lib/widget.mjs:2 misses the null path.'), false)
+  const consult = journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
+  assert.equal(consult.usage, null); assert.equal(consult.usage_reason, 'usage-unavailable')
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('planner seat with grant is advised', async () => {
   const f = fixture(); const journal = sink(); const p = pi(); const fetchFn = fetcher()
   await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir }), deps: {
     ...journal, taskDir: f.taskDir, fetchFn,
@@ -538,4 +699,155 @@ test('K1 planner edge-path gloss fits plan and gate', () => {
   assert.match(advisor.PLANNER_SYSTEM_PROMPT, /Ground truth citation that does not hold at the ref where the plan was written/)
   assert.doesNotMatch(advisor.PLANNER_SYSTEM_PROMPT, /EPERM, unknown, interrupted, and empty paths/)
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
+})
+
+function childConsult({ childSpawn, extraDeps = {} }) {
+  const f = fixture(); const journal = sink(); const fetchFn = fetcher()
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    fetchFn, spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }), ...extraDeps,
+  } })
+  const run = async () => {
+    const path = join(f.tree, 'lib', 'widget.mjs')
+    a.onToolResult(result('read', 'read', { path, offset: 1 }, 'lib/widget.mjs:2: evidence'), {})
+    const change = { path: join(f.tree, 'outside.mjs'), edits: [{ newText: 'x' }] }
+    a.onToolCall(call('edit', 'edit', change), {}); a.onToolResult(result('edit', 'edit', change, 'ok'), {})
+    await a.settled()
+  }
+  return { f, journal, run, cleanup: () => rmSync(f.root, { recursive: true, force: true }) }
+}
+
+test('a judgment child that ignores SIGTERM is killed and has closed before the consult settles', async () => {
+  const signals = []; let closed = false
+  const childSpawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() {} }
+    child.kill = (signal) => { signals.push(signal); if (signal === 'SIGKILL') setImmediate(() => { closed = true; child.emit('close', null) }); return true }
+    return child
+  }
+  const c = childConsult({ childSpawn, extraDeps: { consultTimeoutMs: 5, childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+    assert.equal(closed, true, 'the consult settled before the child closed')
+    assert.ok(c.journal.rows.find((row) => row.advisor_note?.outcome === 'rejected')?.advisor_note.codes.includes('transport-failed'))
+  } finally { c.cleanup() }
+})
+
+test('usage folded before a later invalid frame is kept on the consult row', async () => {
+  const childSpawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { setImmediate(() => {
+      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'partial', usage: { input: 17, output: 3 } } }) + '\n')
+      child.stdout.write('{not json\n')
+    }) } }
+    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
+    return child
+  }
+  const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    const consult = c.journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
+    assert.notEqual(consult.usage, null)
+    assert.equal(consult.usage_reason, undefined)
+    assert.equal(JSON.stringify(consult.usage).includes('17'), true)
+  } finally { c.cleanup() }
+})
+
+test('a UTF-8 character split across stdout chunks is decoded whole', async () => {
+  const claim = 'Guard at lib/widget.mjs:2 misses the Café null path.'
+  const childSpawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { setImmediate(() => {
+      const bytes = Buffer.from(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n', 'utf8')
+      const split = bytes.indexOf(Buffer.from('é', 'utf8')) + 1
+      child.stdout.write(bytes.subarray(0, split)); setImmediate(() => { child.stdout.write(bytes.subarray(split)); child.emit('close', 0) })
+    }) } }
+    child.kill = () => true
+    return child
+  }
+  const c = childConsult({ childSpawn })
+  try {
+    await c.run()
+    const text = JSON.stringify(c.journal.rows.filter((row) => row.advisor_note || row.advisor_consult))
+    assert.equal(text.includes('�'), false, 'a replacement character reached the journal')
+    assert.equal(text.includes('Café'), true)
+  } finally { c.cleanup() }
+})
+
+test('an asynchronous EPIPE on the child stdin fails the consult as transport-failed instead of crashing the seat', async () => {
+  const signals = []
+  const childSpawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    const stdin = new EventEmitter()
+    stdin.end = () => { setImmediate(() => stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))) }
+    child.stdin = stdin
+    child.kill = (signal) => { signals.push(signal); setImmediate(() => child.emit('close', null)); return true }
+    return child
+  }
+  const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    assert.deepEqual(signals, ['SIGTERM'])
+    const rejected = c.journal.rows.find((row) => row.advisor_note?.outcome === 'rejected')?.advisor_note
+    assert.ok(rejected?.codes.includes('transport-failed'))
+  } finally { c.cleanup() }
+})
+
+function framesChild(frames, { chunked = false } = {}) {
+  return () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { setImmediate(() => {
+      if (chunked) for (const frame of frames) child.stdout.write(frame)
+      else child.stdout.write(frames.join(''))
+      setImmediate(() => child.emit('close', 0))
+    }) } }
+    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
+    return child
+  }
+}
+const judgmentFrame = (claim) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n'
+
+test('many small frames whose TOTAL exceeds the stream cap are rejected body-too-large', async () => {
+  const { STREAM_CAP_BYTES } = await import('./subagent.ts')
+  const filler = JSON.stringify({ type: 'turn_start', pad: 'x'.repeat(1000) }) + '\n'
+  const count = Math.ceil(STREAM_CAP_BYTES / Buffer.byteLength(filler)) + 1
+  const frames = [...Array.from({ length: count }, () => filler), judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
+  assert.ok(frames.every((frame) => Buffer.byteLength(frame) < advisor.RESPONSE_CAP_BYTES))
+  const c = childConsult({ childSpawn: framesChild(frames, { chunked: true }), extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
+    assert.ok(notes.find((note) => note.outcome === 'rejected')?.codes.includes('body-too-large'))
+    assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
+  } finally { c.cleanup() }
+})
+
+test('frames under 40 KB delivered in one chunk over 64 KiB are parsed frame by frame and accepted', async () => {
+  const filler = JSON.stringify({ type: 'tool_execution_end', result: 'y'.repeat(35_000) }) + '\n'
+  const frames = [filler, filler, filler, judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
+  assert.ok(frames.every((frame) => Buffer.byteLength(frame) < 40_000))
+  assert.ok(Buffer.byteLength(frames.join('')) > advisor.RESPONSE_CAP_BYTES)
+  const c = childConsult({ childSpawn: framesChild(frames) })
+  try {
+    await c.run()
+    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
+    assert.equal(notes.some((note) => note.outcome === 'rejected'), false, JSON.stringify(notes))
+    assert.equal(JSON.stringify(notes).includes('misses the null path'), true)
+  } finally { c.cleanup() }
+})
+
+test('a single complete frame over 64 KiB within the stream total is rejected body-too-large', async () => {
+  const { STREAM_CAP_BYTES } = await import('./subagent.ts')
+  const big = JSON.stringify({ type: 'tool_execution_end', result: 'z'.repeat(advisor.RESPONSE_CAP_BYTES + 1024) }) + '\n'
+  const frames = [big, judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
+  assert.ok(Buffer.byteLength(big) > advisor.RESPONSE_CAP_BYTES)
+  assert.ok(Buffer.byteLength(frames.join('')) < STREAM_CAP_BYTES)
+  const c = childConsult({ childSpawn: framesChild(frames), extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
+    assert.ok(notes.find((note) => note.outcome === 'rejected')?.codes.includes('body-too-large'), JSON.stringify(notes))
+    assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
+  } finally { c.cleanup() }
 })

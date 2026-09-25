@@ -16,7 +16,7 @@ import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
+import { PI_ADVISOR_EXTENSION, PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 export const RPC_PROMPT_DELIVERY_WINDOW_MS = 30_000
@@ -261,10 +261,11 @@ const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], ski
 export function rpcCommand(spec = {}) {
   const {
     bin = 'pi', model, effort, sessionDir, sessionId, resume, promptFile,
-    deny, env = {}, grants = RPC_NO_GRANTS, configDir,
+    deny, env = {}, grants = RPC_NO_GRANTS, configDir, advisorCell = null,
   } = spec
   const piDeny = translateDeny(deny)
-  const extensions = [...new Set(grants?.extensions || [])]
+  const advisor = grants?.advisor === true
+  const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
   const configEnv = configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}
@@ -285,6 +286,15 @@ export function rpcCommand(spec = {}) {
     env: {
       ...env,
       ...configEnv,
+      ...(advisor ? {
+        CREW_ADVISOR: '1',
+        // ALWAYS set, never inherited: the boot record's endpoint, or '' for a
+        // model-only (pi-child) cell. An endpoint in the operator's or worker's
+        // environment that boot never admitted must not receive the delta.
+        CREW_ADVISOR_ENDPOINT: advisorCell?.endpoint || '',
+        ...(advisorCell?.model !== undefined ? { CREW_ADVISOR_MODEL: advisorCell.model } : {}),
+        ...(advisorCell?.models !== undefined ? { CREW_ADVISOR_MODELS: JSON.stringify(advisorCell.models) } : {}),
+      } : {}),
       ...(grants?.agents?.length
         ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) }
         : {}),
@@ -1263,6 +1273,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       deny: member.deny, bin: bin || 'pi', taskDir: taskDir || paths.taskDir,
       grants: adapters?.[role]?.grants,
       configDir: adapters?.[role]?.configDir,
+      advisorCell: adapters?.[role]?.grants?.advisor === true && crew.advisor?.granted?.includes(role)
+        ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
+        : null,
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })
     const args = command.args || []

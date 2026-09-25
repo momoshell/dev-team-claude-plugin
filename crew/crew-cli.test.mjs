@@ -2824,6 +2824,44 @@ test('J1 boot retains adapter and transport refusals', async () => {
     (err) => { assert.equal(err.reason, 'transport-unsupported'); return true },
   )
   assert.equal(probes, 0)
+  await assert.rejects(() => assertAdvisorCellLive({ record,
+    adapters: { planner: { name: 'pi', transport: 'headless', grants: { advisor: true } } },
+    probeEndpoint: async () => { probes += 1; return true },
+  }), (err) => { assert.equal(err.reason, 'transport-unsupported'); return true })
+  assert.equal(probes, 0)
+  const roster = { models: { 'provider/model': {} } }
+  const modelRecord = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  let modelProbes = 0
+  await assertAdvisorCellLive({ record: modelRecord, models: roster.models,
+    adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
+    probeEndpoint: async () => { modelProbes += 1; return true },
+  })
+  assert.equal(modelProbes, 0)
+})
+
+test('A4', async () => {
+  const roster = { models: { 'provider/model': {} } }
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  let probes = 0
+  await assertAdvisorCellLive({ record, models: roster.models,
+    adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
+    probeEndpoint: async () => { probes += 1; return true },
+  })
+  assert.equal(probes, 0)
+})
+
+test('A5', async () => {
+  const roster = { models: { 'provider/other': {} } }
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  let probes = 0
+  await assert.rejects(() => assertAdvisorCellLive({ record, models: roster.models,
+    adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
+    probeEndpoint: async () => { probes += 1; return true },
+  }), (err) => { assert.equal(err.reason, 'model-unsafe'); return true })
+  assert.equal(probes, 0)
 })
 
 test('RV1-1 advisor vacuity pin stays synchronized', () => {

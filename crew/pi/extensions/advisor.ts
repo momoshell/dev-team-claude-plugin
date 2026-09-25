@@ -20,10 +20,12 @@
 // No oh-my-pi source is copied here and no holder-specific licence notice is
 // invented: that checkout is not present in the build environment.
 
-import { execFileSync } from 'node:child_process'
-import { appendFileSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
+import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, join, relative, resolve } from 'node:path'
+import { resolvePiBinary, createStreamReducer, STREAM_CAP_BYTES } from './subagent.ts'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
@@ -70,6 +72,9 @@ export const EVIDENCE_MAX = 5
 export const EVIDENCE_ITEM_CAP_BYTES = 200
 export const PROBE_TIMEOUT_MS = 2000
 export const CONSULT_TIMEOUT_MS = 20_000
+// A judgment child that ignores SIGTERM gets SIGKILL after this grace, and a
+// consult settles only once the child has closed (or a second grace has passed).
+export const CHILD_KILL_GRACE_MS = 2_000
 export const GIT_TIMEOUT_MS = 5000
 export const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
@@ -350,7 +355,7 @@ export function isSelfEcho(text, injected) {
   if (!normalized) return false
   const values = injected instanceof Set ? injected : new Set(injected || [])
   for (const note of values) {
-    if (note && normalized.includes(String(note))) return true
+    if (note && normalized === String(note)) return true
   }
   return false
 }
@@ -371,6 +376,20 @@ function excerptText({ path, content, line }) {
   const start = Math.max(0, Number(line || 1) - 1)
   const selected = lines.slice(start, start + EXCERPT_LINES)
   return selected.map((item, index) => `${path}:${start + index + 1}: ${item}`).join('\n')
+}
+
+export function stripAdvisorNotes(text, injected) {
+  let cleaned = String(text ?? '')
+  const values = injected instanceof Set ? injected : new Set(injected || [])
+  for (const note of values) {
+    if (!note) continue
+    const words = String(note).split(/\s+/).filter(Boolean)
+    if (!words.length) continue
+    const sequence = words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^\\p{L}\\p{N}]+')
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${sequence}(?![\\p{L}\\p{N}])`, 'giu')
+    cleaned = cleaned.replace(pattern, '')
+  }
+  return cleaned.trim() ? cleaned : ''
 }
 
 function entryFromText(text) {
@@ -535,8 +554,19 @@ export async function probeEndpoint(url, { fetchFn = fetch, timeoutMs = PROBE_TI
   } catch { return false }
 }
 
-export function classifyAdvisorCell({ endpoint, model } = {}) {
-  if (typeof endpoint !== 'string' || endpoint === '') return { reason: 'endpoint-unset' }
+function classifyAdvisorModel(model, models) {
+  if (typeof model !== 'string' || model === '') return { reason: 'model-unset' }
+  if (!SAFE_MODEL.test(model) || !model.includes('/')) return { reason: 'model-unsafe' }
+  if (!models || typeof models !== 'object' || Array.isArray(models)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(models))) return { reason: 'model-unsafe' }
+  const roster = { models }
+  if (!Object.hasOwn(roster.models, model)) return { reason: 'model-unsafe' }
+  return { model }
+}
+
+export function classifyAdvisorCell({ endpoint, model, models } = {}) {
+  if (endpoint === '' || endpoint === undefined) return classifyAdvisorModel(model, models)
+  if (typeof endpoint !== 'string') return { reason: 'endpoint-unset' }
   let parsed
   try { parsed = new URL(endpoint) } catch { return { reason: 'endpoint-not-local' } }
   const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
@@ -552,7 +582,11 @@ export function classifyAdvisorCell({ endpoint, model } = {}) {
 }
 
 export function advisorCell(env = process.env) {
-  return { endpoint: env?.[ADVISOR_ENDPOINT_ENV], model: env?.[ADVISOR_MODEL_ENV] }
+  let models = env?.CREW_ADVISOR_MODELS
+  if (typeof models === 'string') {
+    try { models = JSON.parse(models) } catch { models = undefined }
+  }
+  return { endpoint: env?.[ADVISOR_ENDPOINT_ENV], model: env?.[ADVISOR_MODEL_ENV], models }
 }
 
 function abortSignal(controller) {
@@ -644,6 +678,10 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     try { return statSync(path).mtimeMs } catch { return null }
   })
   const fetchFn = deps.fetchFn || fetch
+  const spawn = deps.spawn || nodeSpawn
+  const resolveBinary = deps.resolveBinary || resolvePiBinary
+  const consultTimeoutMs = deps.consultTimeoutMs ?? CONSULT_TIMEOUT_MS
+  const childKillGraceMs = deps.childKillGraceMs ?? CHILD_KILL_GRACE_MS
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
   const journalPath = journalPathFrom(taskDir)
@@ -959,19 +997,25 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       return
     }
     consults += 1
+    const snapshot = Object.freeze(delta.map((entry) => {
+      const text = entry.text
+      const cleaned = stripAdvisorNotes(text, injected)
+      const rebuilt = entryFromText(cleaned)
+      return Object.freeze({ text: cleaned, anchors: Object.freeze(rebuilt.anchors) })
+    }).filter((entry) => entry.text))
     const captured = {
-      epoch: contextEpoch, generation,
-      snapshot: Object.freeze(delta.map((entry) => Object.freeze({ text: entry.text, anchors: Object.freeze([...entry.anchors]) }))),
-      anchors: new Set(anchors), controller: new AbortController(),
+      epoch: contextEpoch, generation, snapshot,
+      anchors: new Set(snapshot.flatMap((e) => e.anchors)), controller: new AbortController(),
     }
     controllers.add(captured.controller)
     // The scrub is a fact, not a silence: one row per consult, always, carrying
     // the per-kind count of what this consult's delta had removed from it.
-    appendAdvisorRow('advisor_consult', {
+    const consultPayload = {
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
       redacted: redactionTally(delta),
-    })
+      model: String(env?.[ADVISOR_MODEL_ENV] || ''),
+    }
     const body = JSON.stringify({
       model: String(env?.[ADVISOR_MODEL_ENV] || ''), temperature: 0, stream: false,
       messages: [
@@ -982,7 +1026,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const request = (async () => {
       let codes = []
       let judgment = null
+      let foldedUsage = null
       try {
+        if (env?.[ADVISOR_ENDPOINT_ENV]) {
         const response = await fetchFn(requestUrl(String(env?.[ADVISOR_ENDPOINT_ENV] || '')), {
           method: 'POST', headers: { 'content-type': 'application/json' }, body,
           signal: abortSignal(captured.controller),
@@ -1012,12 +1058,113 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
             }
           }
         }
+        } else {
+          const resolved = resolveBinary(deps.binaryDeps || {})
+          if (!resolved || resolved.error || !String(resolved.command || resolved.binary || '').startsWith('/')) throw new Error('pi binary unresolved')
+          const binary = resolved.command || resolved.binary
+          const prefix = resolved.args || []
+          const dir = mkdtempSync(join(tmpdir(), 'crew-advisor-'))
+          const promptFile = join(dir, 'system-prompt.txt')
+          try {
+            writeFileSync(promptFile, systemPrompt(role), { mode: 0o600 })
+            const childArgs = ['-p','--mode','json','--no-session','--model',String(env?.[ADVISOR_MODEL_ENV] || ''),'--tools','read,grep,find,ls','--exclude-tools','edit,write,bash','--no-extensions','--no-skills','--append-system-prompt',promptFile]
+            const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
+            const reducer = createStreamReducer()
+            let stdout = '', stderr = '', settled = false, streamBytes = 0
+            // Incremental decoding: a UTF-8 character split across two chunks
+            // must not be decoded half by half (the shared subagent reader's rule).
+            const outDecoder = new StringDecoder('utf8'), errDecoder = new StringDecoder('utf8')
+            const childResult = await new Promise((resolveChild, rejectChild) => {
+              let timeout, killTimer, hardTimer, failure = null
+              // Every failure carries whatever spend was already folded: a measured
+              // cost is never erased because a LATER frame went wrong.
+              const settle = (error, value) => {
+                if (settled) return; settled = true
+                clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(hardTimer)
+                captured.controller.signal.removeEventListener('abort', abort)
+                if (error) { error.usage = reducer.usage(); rejectChild(error) } else resolveChild(value)
+              }
+              // A failure stops the child and settles only once it has closed:
+              // SIGTERM, then SIGKILL after a grace, then settle anyway after a
+              // second grace so a child that never closes cannot hang the consult.
+              const fail = (error) => {
+                if (settled || failure) return
+                failure = error
+                try { child.kill('SIGTERM') } catch {}
+                killTimer = setTimeout(() => {
+                  try { child.kill('SIGKILL') } catch {}
+                  hardTimer = setTimeout(() => settle(failure), childKillGraceMs)
+                }, childKillGraceMs)
+              }
+              const abort = () => fail(new Error('aborted'))
+              timeout = setTimeout(abort, consultTimeoutMs)
+              captured.controller.signal.addEventListener('abort', abort, { once: true })
+              // Two bounds, as the subagent reader keeps them. The TOTAL raw bytes
+              // the child wrote are capped at STREAM_CAP_BYTES: pi's JSON mode
+              // replays messages across message_end/turn_end/agent_end, so a child
+              // that reads files emits far more than its judgment, and a total cap
+              // at the response size would reject it. Each FRAME, complete or still
+              // unparsed, is capped at RESPONSE_CAP_BYTES: the memory held for one
+              // line is bounded, and several small frames in one chunk are not
+              // measured as one oversize frame.
+              const oversize = () => fail(Object.assign(new Error('oversize'), { code: 'body-too-large' }))
+              child.stdout?.on('data', (chunk) => {
+                if (failure) return
+                const bytes = Buffer.from(chunk)
+                streamBytes += bytes.length
+                if (streamBytes > STREAM_CAP_BYTES) { oversize(); return }
+                stdout += outDecoder.write(bytes)
+                let index
+                while ((index = stdout.indexOf('\n')) >= 0) {
+                  const frameLine = stdout.slice(0, index); stdout = stdout.slice(index + 1)
+                  if (byteLength(frameLine) > RESPONSE_CAP_BYTES) { oversize(); return }
+                  if (!frameLine.trim()) continue
+                  try { reducer.push(JSON.parse(frameLine)) } catch { fail(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
+                }
+                if (byteLength(stdout) > RESPONSE_CAP_BYTES) { oversize(); return }
+              })
+              child.stderr?.on('data', (chunk) => { if (failure) return; stderr += errDecoder.write(Buffer.from(chunk)); if (byteLength(stderr) > RESPONSE_CAP_BYTES) fail(Object.assign(new Error('oversize'), { code: 'body-too-large' })) })
+              child.on('error', () => settle(new Error('spawn failed')))
+              child.on('close', (code) => {
+                if (settled) return
+                if (failure) { settle(failure); return }
+                stdout += outDecoder.end()
+                if (stdout.trim()) { try { reducer.push(JSON.parse(stdout)) } catch { settle(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return } }
+                if (code !== 0) { settle(new Error('child failed')); return }
+                settle(null, { text: reducer.text(), usage: reducer.usage() })
+              })
+              // A child that closes stdin before the write lands raises EPIPE
+              // ASYNCHRONOUSLY on the stream; unhandled, that 'error' event kills
+              // the seat. It takes the consult's failure path instead.
+              if (typeof child.stdin?.on === 'function') child.stdin.on('error', () => fail(new Error('stdin failed')))
+              try { child.stdin.end(JSON.stringify({ trigger, delta: captured.snapshot })) } catch { settle(new Error('stdin failed')) }
+            })
+            foldedUsage = childResult.usage
+            const content = childResult.text
+            if (!content) codes = ['content-missing']
+            else {
+              let value
+              try { value = JSON.parse(content) } catch { codes = ['body-not-json'] }
+              if (!codes.length) {
+                const verdict = validateJudgment(value, { anchors: captured.anchors, scopeFiles: context?.files_in_scope || [] })
+                codes = verdict.codes || []
+                judgment = verdict.judgment || null
+              }
+            }
+          } finally { rmSync(dir, { recursive: true, force: true }) }
+        }
       } catch (error) {
-        if (captured.controller.signal.aborted) return
-        codes = ['transport-failed']
+        if (error?.usage !== undefined && foldedUsage === null) foldedUsage = error.usage
+        if (captured.controller.signal.aborted) codes = ['transport-failed']
+        else codes = error?.code === 'body-too-large' || error?.code === 'body-not-json' ? [error.code] : ['transport-failed']
       } finally {
         controllers.delete(captured.controller)
       }
+      if (!env?.[ADVISOR_ENDPOINT_ENV]) {
+        consultPayload.usage = foldedUsage
+        if (foldedUsage === null) consultPayload.usage_reason = 'usage-unavailable'
+      }
+      appendAdvisorRow('advisor_consult', consultPayload)
       if (!liveGeneration(captured)) return
       if (codes.length || !judgment) {
         const payload = {
@@ -1079,11 +1226,14 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   if (!ADVISED_ROLES.has(role)) return unavailable('role-unsupported')
   const cell = classifyAdvisorCell(advisorCell(env))
   if (cell.reason) return unavailable(cell.reason)
-  let live = false
-  try {
-    live = await probeEndpoint(cell.endpoint, { fetchFn: deps.fetchFn, timeoutMs: PROBE_TIMEOUT_MS })
-  } catch { live = false }
-  if (!live) return unavailable('endpoint-dead')
+  const modelOnly = !cell.endpoint
+  if (!modelOnly) {
+    let live = false
+    try {
+      live = await probeEndpoint(cell.endpoint, { fetchFn: deps.fetchFn, timeoutMs: PROBE_TIMEOUT_MS })
+    } catch { live = false }
+    if (!live) return unavailable('endpoint-dead')
+  }
   if (typeof pi?.on !== 'function' || typeof pi?.sendMessage !== 'function') throw new Error('advisor extension needs pi.on and pi.sendMessage')
   const boot = { role, outcome: 'attached', endpoint: cell.endpoint, model: cell.model, config_version: ADVISOR_CONFIG_VERSION }
   const written = appendLine({

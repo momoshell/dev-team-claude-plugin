@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS,
+  briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
@@ -501,6 +501,62 @@ test('ceiling steer is never sent once the turn has settled in the same poll', (
     assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
     assert.equal(f.writes.filter((frame) => frame.type === 'steer').length, 0)
     assert.equal(rows.filter((row) => row.rpc_ceiling_steer || row.rpc_ceiling_steer_failed).length, 0)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('D1 ceiling FIFO bounds permanent steer EAGAIN', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  let clock = 0; let promptId; let run; let steerFirst; let steerLast
+  const rows = []; const writes = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  const f = fixture({ turnCeilings: { builder: 3 }, promptDeliveryWindowMs: 30_000, now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => { const frame = JSON.parse(line); if (frame.type === 'steer') { steerFirst ??= clock; steerLast = clock; const e = new Error('blocked'); e.code = 'EAGAIN'; throw e } writes.push(frame); return undefined },
+    onSleep: ({ sleepCount, appendStream }) => {
+      if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+      if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = writes.find((frame) => frame.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.ok(steerLast - steerFirst <= CEILING_STEER_WRITE_MS + 100)
+    assert.ok(steerLast - steerFirst >= CEILING_STEER_WRITE_MS)
+    assert.ok(clock < 30_000)
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer_failed?.error === 'EAGAIN').length, 1)
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer).length, 0)
+  } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
+})
+
+test('D2 ceiling FIFO leaves prompt EAGAIN at its configured window', () => {
+  let clock = 0; let attempts = 0; const window = CEILING_STEER_WRITE_MS + 500
+  const f = fixture({ promptDeliveryWindowMs: window, now: () => clock, sleep: (ms) => { clock += ms }, writeSync: () => { attempts++; const e = new Error('blocked'); e.code = 'EAGAIN'; throw e } })
+  try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (e) => e.stage === 'rpc-prompt-undelivered'); assert.equal(clock, window); assert.ok(attempts > 1) } finally { f.cleanup() }
+})
+
+test('D3 ceiling FIFO preserves torn-seat handling after partial EAGAIN', () => {
+  const previous = process.env.CREW_CEILING_STEER_TURNS
+  process.env.CREW_CEILING_STEER_TURNS = '1'
+  let clock = 0; let promptId; let run; let steerFirst; let steerLast; let steerCalls = 0
+  const rows = []; const writes = []
+  const turnFrames = Array.from({ length: 2 }, () => [{ type: 'turn_start' }, { type: 'tool_execution_start' }, { type: 'turn_end' }]).flat()
+  const f = fixture({ turnCeilings: { builder: 3 }, now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row),
+    writeSync: (_fd, line) => { const frame = JSON.parse(line); if (frame.type === 'steer') { steerFirst ??= clock; steerLast = clock; steerCalls += 1; if (steerCalls === 1) return 10; const e = new Error('blocked'); e.code = 'EAGAIN'; throw e } writes.push(frame); return undefined },
+    onSleep: ({ sleepCount, appendStream }) => {
+      if (sleepCount === 1) appendStream(`${JSON.stringify({ type: 'response', id: promptId, command: 'prompt', success: true })}\n${turnFrames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+      if (sleepCount === 3) { appendStream('{"type":"agent_settled"}\n'); writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id))) }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    promptId = writes.find((frame) => frame.type === 'prompt')?.id
+    assert.deepEqual(f.io.wait(run.returnPath, 600), ordinaryRpcEnvelope(run.id))
+    assert.ok(steerLast - steerFirst <= CEILING_STEER_WRITE_MS + 100)
+    assert.ok(steerLast - steerFirst >= CEILING_STEER_WRITE_MS)
+    assert.ok(steerCalls > 2)
+    assert.equal(rows.filter((row) => row.rpc_ceiling_steer_failed?.error === 'EAGAIN').length, 1)
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), /refused reuse/)
   } finally { f.cleanup(); if (previous === undefined) delete process.env.CREW_CEILING_STEER_TURNS; else process.env.CREW_CEILING_STEER_TURNS = previous }
 })
 

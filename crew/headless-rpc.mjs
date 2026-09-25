@@ -251,6 +251,10 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
 }
 
 const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [] })
+// The optional ceiling steer's own FIFO write bound (#1542). Advice never borrows the
+// prompt's delivery window: a full FIFO costs the turn two retries, not 30 seconds.
+// Declared here, not beside FIFO_RETRY_MS, so the lines pinned above it do not move.
+export const CEILING_STEER_WRITE_MS = 2 * FIFO_RETRY_MS
 
 // Live-probed facts: rpc honours both `-e` and `--tools`, and its allowlist
 // gates extension tools, so activating `agent` is mandatory rather than
@@ -1181,14 +1185,16 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
   }
 
-  function send(seat, obj, command = obj.type || obj.command || 'command') {
+  function send(seat, obj, command = obj.type || obj.command || 'command', writeDeadlineMs) {
     const id = obj.id || commandId(seat.turn, command)
     const value = { ...obj, id }
     const encoded = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
     const turn = seat.turn
-    const deadline = command === 'prompt' && turn
-      ? turn.sentAt + promptDeliveryWindowMs
-      : now() + promptDeliveryWindowMs
+    const deadline = writeDeadlineMs === undefined
+      ? command === 'prompt' && turn
+        ? turn.sentAt + promptDeliveryWindowMs
+        : now() + promptDeliveryWindowMs
+      : now() + writeDeadlineMs
     let written
     try {
       written = writeAllToFifo(seat, encoded, deadline)
@@ -1652,7 +1658,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       // Advice, never the outcome: a steer that cannot be written is journalled and
       // the turn proceeds to its ordinary envelope wait or ceiling decision.
       try {
-        send(seat, steerFrame(`you are ${k} turns from your turn ceiling; stop exploring, write your ReturnEnvelope to ${returnPath} now`), 'steer')
+        send(seat, steerFrame(`you are ${k} turns from your turn ceiling; stop exploring, write your ReturnEnvelope to ${returnPath} now`), 'steer', CEILING_STEER_WRITE_MS)
         log({ rpc_ceiling_steer: { role: turn.role, id: turn.id, turns: turn.providerBoundary.turns, budget, k } })
       } catch (err) {
         log({ rpc_ceiling_steer_failed: { role: turn.role, id: turn.id, turns: turn.providerBoundary.turns, budget, k, error: String(err?.code || err?.message || err) } })

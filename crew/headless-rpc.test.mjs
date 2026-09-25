@@ -11,6 +11,7 @@ import {
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
+import { attachAdvisor } from './pi/extensions/advisor.ts'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
@@ -732,6 +733,35 @@ test('RV1-1 an agents grant with no extension registering the agent tool refuses
   const backed = { ...unbacked, extensions: [...unbacked.extensions, '/repo/crew/pi/extensions/subagent.ts'] }
   const ok = rpcCommand({ ...common, grants: backed })
   assert.equal(ok.args[ok.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
+})
+
+test('RV2-1 rpc advisor grant emits attachable model-only extension and catalog without probes', async () => {
+  const f = fixture({ grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
+  const models = { 'provider/model': { provider: 'provider', id: 'model' } }
+  f.crew.advisor = { granted: ['builder'], endpoint: undefined, model: 'provider/model', models, model_only: true }
+  const rows = []
+  let probes = 0
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    const extensionAt = command.args.indexOf('-e')
+    assert.notEqual(extensionAt, -1)
+    assert.equal(command.args[extensionAt + 1], piAdapter.PI_ADVISOR_EXTENSION)
+    assert.equal(command.env.CREW_ADVISOR, '1')
+    assert.equal(command.env.CREW_ADVISOR_MODEL, 'provider/model')
+    assert.deepEqual(JSON.parse(command.env.CREW_ADVISOR_MODELS), models)
+    const pi = { on() {}, sendMessage() {} }
+    await attachAdvisor(pi, {
+      env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
+      deps: {
+        appendFile: (_path, line) => rows.push(JSON.parse(line)),
+        fetchFn: () => { probes += 1; throw new Error('model-only advisor must not probe') },
+      },
+    })
+    assert.equal(rows.at(-1).advisor_boot.outcome, 'attached')
+    assert.equal(rows.some((row) => row.advisor_unavailable), false)
+    assert.equal(probes, 0)
+  } finally { f.cleanup() }
 })
 
 test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () => {
@@ -3561,3 +3591,40 @@ test('RV2-4 a marker-only teardown that cannot prove death keeps the live worker
     } finally { restarted.cleanup() }
   } finally { first.cleanup() }
 })
+
+function withInheritedEndpoint(value, body) {
+  const had = Object.hasOwn(process.env, 'CREW_ADVISOR_ENDPOINT'); const prior = process.env.CREW_ADVISOR_ENDPOINT
+  process.env.CREW_ADVISOR_ENDPOINT = value
+  const restore = () => { if (had) process.env.CREW_ADVISOR_ENDPOINT = prior; else delete process.env.CREW_ADVISOR_ENDPOINT }
+  try { const out = body(); return out?.then ? out.finally(restore) : (restore(), out) } catch (error) { restore(); throw error }
+}
+
+test('a model-only advised rpc seat clears an inherited advisor endpoint and attaches without probing any URL', () => withInheritedEndpoint('http://evil.example', async () => {
+  const f = fixture({ grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
+  const models = { 'provider/model': { provider: 'provider', id: 'model' } }
+  f.crew.advisor = { granted: ['builder'], endpoint: undefined, model: 'provider/model', models, model_only: true }
+  const rows = []; const urls = []
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.equal(command.env.CREW_ADVISOR_ENDPOINT, '')
+    await attachAdvisor({ on() {}, sendMessage() {} }, {
+      env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
+      deps: { appendFile: (_path, line) => rows.push(JSON.parse(line)), fetchFn: (url) => { urls.push(String(url)); throw new Error('must not probe') } },
+    })
+    assert.deepEqual(urls, [])
+    const boot = rows.at(-1).advisor_boot
+    assert.equal(boot.outcome, 'attached')
+    assert.equal(JSON.stringify(rows).includes('evil.example'), false)
+  } finally { f.cleanup() }
+}))
+
+test('an rpc seat whose boot record names an endpoint carries exactly that endpoint, not the inherited one', () => withInheritedEndpoint('http://evil.example', () => {
+  const f = fixture({ grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
+  f.crew.advisor = { granted: ['builder'], endpoint: 'http://127.0.0.1:8080/v1', model: 'qwen3', model_only: false }
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.equal(command.env.CREW_ADVISOR_ENDPOINT, 'http://127.0.0.1:8080/v1')
+  } finally { f.cleanup() }
+}))

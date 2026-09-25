@@ -294,8 +294,19 @@ export const ADVISOR_BOOT_REFUSALS = Object.freeze([
 const ADVISED_ROLES = Object.freeze(new Set(['builder', 'planner']))
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 
-export function classifyAdvisorCell({ endpoint, model } = {}) {
-  if (typeof endpoint !== 'string' || endpoint === '') return { reason: 'endpoint-unset' }
+function classifyAdvisorModel(model, models) {
+  if (typeof model !== 'string' || model === '') return { reason: 'model-unset' }
+  if (!SAFE_MODEL.test(model) || !model.includes('/')) return { reason: 'model-unsafe' }
+  if (!models || typeof models !== 'object' || Array.isArray(models)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(models))) return { reason: 'model-unsafe' }
+  const roster = { models }
+  if (!Object.hasOwn(roster.models, model)) return { reason: 'model-unsafe' }
+  return { model }
+}
+
+export function classifyAdvisorCell({ endpoint, model, models } = {}) {
+  if (endpoint === '' || endpoint === undefined) return classifyAdvisorModel(model, models)
+  if (typeof endpoint !== 'string') return { reason: 'endpoint-unset' }
   let parsed
   try { parsed = new URL(endpoint) } catch { return { reason: 'endpoint-not-local' } }
   const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
@@ -339,7 +350,7 @@ export function advisorEndpointLabel(endpoint) {
   return origin ? `${origin.host}:${origin.port ?? 'unknown-port'}` : 'an unset or unparseable endpoint'
 }
 
-export function advisorBootRecord({ adapters = {}, env = process.env } = {}) {
+export function advisorBootRecord({ adapters = {}, env = process.env, models } = {}) {
   const granted = Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort()
   const rawEndpoint = env?.CREW_ADVISOR_ENDPOINT
   const origin = advisorEndpointOrigin(rawEndpoint)
@@ -352,6 +363,8 @@ export function advisorBootRecord({ adapters = {}, env = process.env } = {}) {
     endpoint_host: origin?.host ?? null,
     endpoint_port: origin?.port ?? null,
     model: env?.CREW_ADVISOR_MODEL,
+    models,
+    model_only: !rawEndpoint,
     config_version: ADVISOR_CONFIG_VERSION,
   }
 }
@@ -376,7 +389,9 @@ function advisorRefusal(reason, role, record) {
     ? 'select --agent-builder pi'
     : reason === 'transport-unsupported'
       ? 'use a pane transport'
-      : reason.startsWith('endpoint-') || reason.startsWith('model-')
+      : reason.startsWith('model-') && !record?.endpoint
+        ? 'set CREW_ADVISOR_MODEL to a safe provider/id declared in the runtime roster models catalog'
+        : reason.startsWith('endpoint-') || reason.startsWith('model-')
         ? `point CREW_ADVISOR_ENDPOINT at an http(s) endpoint reachable from this machine (this boot reached for ${where}) and CREW_ADVISOR_MODEL at a safe model id`
         : 'use a register-granted builder or planner advisor seat'
   return Object.assign(new Error(`advisor seat ${role} refuses to boot: ${reason} — ${fix}`), {
@@ -384,15 +399,16 @@ function advisorRefusal(reason, role, record) {
   })
 }
 
-export async function assertAdvisorCellLive({ record, adapters = {}, taskSlug, probeEndpoint = probeLocalEndpoint, note = noteRunlessCellFailure } = {}) {
+export async function assertAdvisorCellLive({ record, adapters = {}, models, taskSlug, probeEndpoint = probeLocalEndpoint, note = noteRunlessCellFailure } = {}) {
   if (!record?.granted?.length) return
   for (const role of record.granted) {
     if (!ADVISED_ROLES.has(role)) throw advisorRefusal('role-unsupported', role, record)
     const adapter = adapters[role]
     if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
-    if (adapter?.transport !== DEFAULT_TRANSPORT) throw advisorRefusal('transport-unsupported', role, record)
-    const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model })
+    if (![DEFAULT_TRANSPORT, HEADLESS_RPC_TRANSPORT].includes(adapter?.transport)) throw advisorRefusal('transport-unsupported', role, record)
+    const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model, models: models ?? record.models })
     if (cell.reason) throw advisorRefusal(cell.reason, role, record)
+    if (!record.endpoint) continue
     let advisorLive = false
     try { advisorLive = await probeEndpoint(record.endpoint) } catch { advisorLive = false }
     if (!advisorLive) {
@@ -3035,8 +3051,18 @@ export async function bootCmd(args, deps = {}) {
     } : {}),
   })
   assertCellsClosed(breaker)
-  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv })
-  await assertAdvisorCellLive({ record: advisorRecord, adapters, taskSlug,
+  if (!roster && Object.values(adapters).some((adapter) => adapter?.grants?.advisor === true)
+    && !bootEnv.CREW_ADVISOR_ENDPOINT) {
+    const rosterPath = rosterSourcePath(args)
+    try {
+      roster = loadRosterSource(rosterPath, args, { readFile: readRosterFileDep }).roster
+    } catch (err) {
+      if (err?.reason) throw err
+      throw new Error(`advisor model-only boot needs a readable runtime roster at ${rosterPath}: ${err.message}`)
+    }
+  }
+  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv, models: roster?.models })
+  await assertAdvisorCellLive({ record: advisorRecord, adapters, models: roster?.models, taskSlug,
     probeEndpoint: probeEndpointDep || probeLocalEndpoint,
     note: noteRunlessCellFailure })
   // Materialise exactly once, after roster/ladder/capability/breaker facts are
@@ -3191,7 +3217,7 @@ export async function bootCmd(args, deps = {}) {
       taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
       grants: adapters[role].grants, search: adapters[role].search, configDir: adapters[role].configDir,
       advisorCell: adapters[role].grants?.advisor === true
-        ? { endpoint: advisorRecord.endpoint, model: advisorRecord.model } : null,
+        ? { endpoint: advisorRecord.endpoint, model: advisorRecord.model, models: advisorRecord.model_only ? advisorRecord.models : undefined } : null,
     })
     const layout = composeLayout(paneRoles, mk)
 

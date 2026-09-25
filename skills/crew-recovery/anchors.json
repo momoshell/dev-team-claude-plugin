@@ -2,10 +2,10 @@
   "scripts/factory/make-brief.mjs:992": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:57": "builder: 2400, reviewer: 1800",
   "scripts/factory/crew-watch.mjs:184": "export function seatLivenessLines(",
-  "crew/crew.mjs:3800": "escalation -> NEVER teardown",
-  "crew/crew.mjs:4457": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4344": "const seats = rows.length",
   "crew/drive.mjs:8594": "const completeCheckProof = (label, options = {}) => {",
   "crew/seat-io.mjs:127": "export const TRANSCRIPT_STALE_MS = 900_000",
-  "crew/seat-io.mjs:1713": "export function recogniseProviderRetry(text) {"
+  "crew/seat-io.mjs:1713": "export function recogniseProviderRetry(text) {",
+  "crew/crew.mjs:3826": "escalation -> NEVER teardown",
+  "crew/crew.mjs:4483": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:4370": "const seats = rows.length"
 }

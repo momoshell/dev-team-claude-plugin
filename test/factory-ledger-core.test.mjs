@@ -2241,7 +2241,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 42)
+    assert.equal(Object.keys(TABLES).length, 43)
   } finally {
     conn.close()
     ledger.close()

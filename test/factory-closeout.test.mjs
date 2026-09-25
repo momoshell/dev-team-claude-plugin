@@ -1786,7 +1786,7 @@ test('ingest-all backfills active and archived journals whole-window and counts 
   assert.equal(result.code, 1, 'an unresolved identity is unmeasured, so the command refuses')
   assert.deepEqual(result.report, {
     journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 }, incomplete: [],
-    rows_applied: 10, rows_ignored: 0, rows_failed: 0,
+    rows_applied: 10, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
   })
   assert.equal(lines.length, 1)
   assert.deepEqual(JSON.parse(lines[0]), result.report)
@@ -1814,7 +1814,7 @@ test('ingest-all replay adds zero rows and zero JSONL bytes', () => {
   assert.equal(second.code, 0)
   assert.deepEqual(second.report, {
     journals_seen: 1, ingested: 1, skipped_by_reason: {}, incomplete: [],
-    rows_applied: 0, rows_ignored: 5, rows_failed: 0,
+    rows_applied: 0, rows_ignored: 5, rows_skipped: 0, rows_failed: 0,
   })
   assert.deepEqual(ingestAllSnapshot(dbPath), before)
   assert.deepEqual(readFileSync(jsonlPath), logBefore)
@@ -1850,7 +1850,7 @@ test('ingest-all on an empty root reports zeros with one JSON line', () => {
   assert.equal(result.code, 0)
   assert.deepEqual(result.report, {
     journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [],
-    rows_applied: 0, rows_ignored: 0, rows_failed: 0,
+    rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
   })
   assert.equal(lines.length, 1)
 })
@@ -2030,4 +2030,37 @@ test('ingest-all refuses a plan-adopted row naming another lane instead of filin
   assert.equal(result.code, 1)
   assert.equal(result.report.incomplete[0].reason, 'lane-mismatch')
   assert.equal(ingestAllSnapshot(dbPath).plan_adoptions.filter((row) => row.lane === 'other-lane').length, 0)
+})
+
+test('ingest-all refuses a numeric adw_id that differs from the resolved string identity', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:01.000Z', adw_id: 123, seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.incomplete[0].reason, 'adw-id-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).seat_turn_census.length, 0)
+})
+
+test('ingest-all resolves a recovery-copy lane dir by the name before its .recovery-copy mark', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-lane-d', 'lane-d.recovery-copy', { taskSlug: 'lane-d', facts: [
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.ingested, 1)
+})
+
+test('ingest-all keeps malformed journal lines as skipped, distinct from ignored duplicates', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  writeFileSync(join(root, 'dt-one', 'lane-a', 'journal.jsonl'), 'not json\n')
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.report.rows_skipped, 1)
+  assert.equal(result.report.rows_ignored, 0)
 })

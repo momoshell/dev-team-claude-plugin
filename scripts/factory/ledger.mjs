@@ -6861,7 +6861,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     // By default a row's own adw_id wins (HoldC1). A backfill that resolved the
     // journal's identity itself (ingest-all) passes strict_adw_id: a row naming
     // another run is refused rather than filed under that run.
-    if (strict_adw_id && adw_id && typeof source.adw_id === 'string' && source.adw_id !== adw_id) {
+    if (strict_adw_id && adw_id && source.adw_id !== undefined && source.adw_id !== null && source.adw_id !== adw_id) {
       failed += 1
       if (firstFailure === null) firstFailure = { line: lineNo, reason: 'adw-id-mismatch' }
       continue

@@ -1074,7 +1074,7 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
   const d = normalDeps(deps)
   const crewRoot = typeof root === 'string' && root.trim() ? root : join(d.home, '.crew')
   const dry_run = dryRun === true
-  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [], rows_applied: 0, rows_ignored: 0, rows_failed: 0 }
+  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [], rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0 }
   const noteSkip = (reason) => {
     summary.skipped_by_reason[reason] = (summary.skipped_by_reason[reason] || 0) + 1
   }
@@ -1119,9 +1119,11 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       }
       if (!laneEntries.map((entry) => String(entry?.name ?? entry)).includes('journal.jsonl')) continue
       summary.journals_seen += 1
-      // An archived lane dir is renamed <lane>.archive-<iso>; its run.json still
-      // names <lane>, so identity is checked against the name before the mark.
-      const identityLane = laneName.includes(ARCHIVE_MARK) ? laneName.slice(0, laneName.indexOf(ARCHIVE_MARK)) : laneName
+      // An archived lane dir is renamed <lane>.archive-<iso> and a recovery copy
+      // <lane>.recovery-copy[-rN]; run.json still names <lane> in both, so identity
+      // is checked against the name before the first such mark.
+      const marks = [ARCHIVE_MARK, RECOVERY_COPY_SUFFIX].map((mark) => laneName.indexOf(mark)).filter((at) => at > 0)
+      const identityLane = marks.length ? laneName.slice(0, Math.min(...marks)) : laneName
       let identity = null
       try {
         identity = reapIdentity({ crewDir, lane: identityLane, deps: d })
@@ -1171,7 +1173,8 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         continue
       }
       summary.rows_applied += detail.applied || 0
-      summary.rows_ignored += (detail.ignored || 0) + (detail.skipped || 0)
+      summary.rows_ignored += detail.ignored || 0
+      summary.rows_skipped += detail.skipped || 0
       summary.rows_failed += detail.failed || 0
       // An ingest that skipped or failed rows is not a successful one: it is counted
       // under ingest_incomplete with its first failure, never under ingested.

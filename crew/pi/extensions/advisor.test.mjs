@@ -775,6 +775,25 @@ test('a UTF-8 character split across stdout chunks is decoded whole', async () =
   } finally { c.cleanup() }
 })
 
+for (const stream of ['stdout', 'stderr']) {
+  test(`E${stream === 'stdout' ? 1 : 2} advisor ${stream} stream error`, async () => {
+    const signals = []
+    const childSpawn = () => {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+      child.stdin = { end() { setImmediate(() => child[stream].emit('error', new Error('read failed'))) } }
+      child.kill = (signal) => { signals.push(signal); setImmediate(() => child.emit('close', null)); return true }
+      return child
+    }
+    const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5 } })
+    try {
+      await c.run()
+      assert.deepEqual(signals, ['SIGTERM'])
+      const rejected = c.journal.rows.find((row) => row.advisor_note?.tier === 1 && row.advisor_note?.outcome === 'rejected')?.advisor_note
+      assert.ok(rejected?.codes.includes('transport-failed'))
+    } finally { c.cleanup() }
+  })
+}
+
 test('an asynchronous EPIPE on the child stdin fails the consult as transport-failed instead of crashing the seat', async () => {
   const signals = []
   const childSpawn = () => {

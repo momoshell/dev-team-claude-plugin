@@ -1124,6 +1124,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                 if (byteLength(stdout) > RESPONSE_CAP_BYTES) { oversize(); return }
               })
               child.stderr?.on('data', (chunk) => { if (failure) return; stderr += errDecoder.write(Buffer.from(chunk)); if (byteLength(stderr) > RESPONSE_CAP_BYTES) fail(Object.assign(new Error('oversize'), { code: 'body-too-large' })) })
+              if (typeof child.stdout?.on === 'function') child.stdout.on('error', () => fail(new Error('stdout failed')))
+              if (typeof child.stderr?.on === 'function') child.stderr.on('error', () => fail(new Error('stderr failed')))
               child.on('error', () => settle(new Error('spawn failed')))
               child.on('close', (code) => {
                 if (settled) return

@@ -1411,6 +1411,12 @@ test('the ACP transport profile matches the pane transport shape', () => {
   const before = profile.abort
   try { profile.abort = 'signal' } catch {}
   assert.equal(profile.abort, before)
+  const piAcp = piCapabilitiesFor({ transport: 'acp' })
+  assert.equal(piAcp.session_resume, false)
+  assert.equal(piAcp.permission_requests, true)
+  // adapter-pi.mjs states the ACP profile as literals (its import closure is node:-only);
+  // every shared key except the pi-specific session_resume must track the transport profile.
+  for (const key of Object.keys(profile).filter((key) => key !== 'session_resume')) assert.equal(piAcp[key], profile[key], key)
   const pane = capabilitiesFor({ transport: 'pane' })
   const transportKeys = ['interjection', 'abort', 'session_resume', 'durable_cursor', 'reassign']
   assert.deepEqual(Object.keys(profile).sort(), Object.keys(pane).filter((key) => transportKeys.includes(key)).sort())

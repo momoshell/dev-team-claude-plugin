@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
@@ -47,6 +47,48 @@ function piOnPath() {
   }
   return null
 }
+
+test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
+  const bridge = join(process.cwd(), 'crew/pi/acp-bridge.mjs')
+  const toolSet = 'read,bash,edit,write,grep,find,ls'
+  const roles = [
+    ['builder', 'Task,Agent,Workflow', [], ['bash', 'edit', 'write', 'powershell']],
+    ['planner', 'Edit,NotebookEdit', ['edit'], ['bash', 'write', 'powershell']],
+    ['tech-lead', 'Edit,NotebookEdit,Task,Agent,Workflow', ['edit'], ['bash', 'write', 'powershell']],
+  ]
+  for (const [role, deny, autoDeny, escalate] of roles) {
+    const spec = { bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny, cwd: '/tmp', env: { SENTINEL: 'yes' } }
+    const launch = acpLaunch(spec)
+    assert.deepEqual(launch, {
+      bin: process.execPath,
+      args: [bridge, '--model', spec.model, '--append-system-prompt', spec.promptFile, '--tools', toolSet,
+        ...(autoDeny.length ? ['--exclude-tools', autoDeny.join(',')] : []), '--no-context-files', '--no-extensions', '--no-skills'],
+      env: { SENTINEL: 'yes', CREW_PI_BIN: spec.bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
+      sessionParams: { cwd: '/tmp', mcpServers: [] },
+      policy: { autoDeny, autoApprove: [], escalate },
+    }, role)
+  }
+
+  const bare = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', cwd: '/tmp', env: {} })
+  assert.equal(bare.args.includes('-e'), false)
+  assert.equal(Object.hasOwn(bare.env, 'CREW_ADVISOR_ENDPOINT'), false)
+  const extension = join(process.cwd(), 'crew/pi/extensions/subagent.ts')
+  const grants = { tools: [], extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }], skills: ['/skill.md'], advisor: true }
+  const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
+  const advisorExtension = join(process.cwd(), 'crew/pi/extensions/advisor.ts')
+  assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
+  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
+  assert.equal(acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } }).env.CREW_ADVISOR_ENDPOINT, '')
+
+  // No Claude deny name maps to pi's ACP-only powershell gate; it remains gated.
+  const allDenied = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: 'Bash,Edit,Write' })
+  assert.deepEqual(allDenied.policy, { autoDeny: ['bash', 'edit', 'write'], autoApprove: [], escalate: ['powershell'] })
+  assert.equal(allDenied.env.CREW_ACP_GATED_TOOLS, 'powershell')
+  assert.deepEqual(allDenied.args.slice(allDenied.args.indexOf('--exclude-tools'), allDenied.args.indexOf('--exclude-tools') + 2), ['--exclude-tools', 'bash,edit,write'])
+  for (const name of ['Task', 'Agent', 'Workflow']) assert.doesNotThrow(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: name }))
+  for (const bin of ['pi', './pi']) assert.throws(() => acpLaunch({ bin }), /absolute/)
+  assert.throws(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', deny: 'Read,NoSuchTool' }), /NoSuchTool/)
+})
 
 test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete built-in set', () => {
   const expected = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']

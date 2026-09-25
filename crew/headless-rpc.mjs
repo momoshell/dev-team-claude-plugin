@@ -16,7 +16,7 @@ import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { PI_ADVISOR_EXTENSION, PI_BUILTIN_TOOLS, piActivatedTools, translateDeny } from './adapters/adapter-pi.mjs'
+import { piRpcSeatParts } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 export const RPC_PROMPT_DELIVERY_WINDOW_MS = 30_000
@@ -250,7 +250,6 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
   }
 }
 
-const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [] })
 // The optional ceiling steer's own FIFO write bound (#1542). Advice never borrows the
 // prompt's delivery window: a full FIFO costs the turn two retries, not 30 seconds.
 // Declared here, not beside FIFO_RETRY_MS, so the lines pinned above it do not move.
@@ -263,16 +262,8 @@ export const CEILING_STEER_WRITE_MS = 2 * FIFO_RETRY_MS
 // must quote its values. The adapter configDir is mirrored in the spawn environment; skills are
 // mirrored only as explicit paths; discovery stays off.
 export function rpcCommand(spec = {}) {
-  const {
-    bin = 'pi', model, effort, sessionDir, sessionId, resume, promptFile,
-    deny, env = {}, grants = RPC_NO_GRANTS, configDir, advisorCell = null,
-  } = spec
-  const piDeny = translateDeny(deny)
-  const advisor = grants?.advisor === true
-  const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
-  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
-  const skills = grants?.skills || []
-  const configEnv = configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}
+  const { bin = 'pi', model, effort, sessionDir, sessionId, resume } = spec
+  const seat = piRpcSeatParts(spec)
   return {
     bin,
     args: [
@@ -280,29 +271,9 @@ export function rpcCommand(spec = {}) {
       ...(effort ? ['--thinking', effort] : []),
       '--session-dir', sessionDir,
       ...(resume ? ['--session', sessionId] : ['--session-id', sessionId]),
-      '--append-system-prompt', promptFile,
-      '--tools', activatedTools.join(','),
-      ...(piDeny.length ? ['--exclude-tools', piDeny.join(',')] : []),
-      '--no-context-files', '--no-extensions',
-      ...extensions.flatMap((extension) => ['-e', extension]),
-      ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
+      ...seat.args.slice(seat.args.indexOf('--append-system-prompt')),
     ],
-    env: {
-      ...env,
-      ...configEnv,
-      ...(advisor ? {
-        CREW_ADVISOR: '1',
-        // ALWAYS set, never inherited: the boot record's endpoint, or '' for a
-        // model-only (pi-child) cell. An endpoint in the operator's or worker's
-        // environment that boot never admitted must not receive the delta.
-        CREW_ADVISOR_ENDPOINT: advisorCell?.endpoint || '',
-        ...(advisorCell?.model !== undefined ? { CREW_ADVISOR_MODEL: advisorCell.model } : {}),
-        ...(advisorCell?.models !== undefined ? { CREW_ADVISOR_MODELS: JSON.stringify(advisorCell.models) } : {}),
-      } : {}),
-      ...(grants?.agents?.length
-        ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) }
-        : {}),
-    },
+    env: seat.env,
   }
 }
 

@@ -866,6 +866,24 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   ])
   assert.deepEqual(JSON.parse(subagent.env.CREW_PI_AGENTS), [{ name: 'scout', def: '/scout.json' }])
 
+  const completeGrant = rpcCommand({
+    ...common,
+    grants: {
+      tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'],
+      agents: [{ name: 'scout', def: '/scout.json' }], skills: ['/skill.md'], advisor: true,
+    },
+    advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' },
+  })
+  assert.deepEqual(completeGrant.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
+    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,agent', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(process.cwd(), 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
+  ])
+  assert.deepEqual(completeGrant.env, {
+    X: '1', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor',
+    CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
+  })
+
   const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }
   const bare = rpcCommand({ ...common, grants: bareGrants })
   const skilled = rpcCommand({ ...common, grants: { ...bareGrants, skills: ['/skill.md'] } })

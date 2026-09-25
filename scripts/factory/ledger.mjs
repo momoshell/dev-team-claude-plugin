@@ -6773,7 +6773,7 @@ function mirrorErrorCount(ledger) {
   try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false } = {}) {
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
   const seen = new Set()
@@ -6792,18 +6792,22 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   const scratchDir = mkdtempSync(join(tmpdir(), 'ledger-ingest-'))
   const scratch = openLedger({ dbPath: join(scratchDir, 'ledger.db') })
   try {
-    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen })
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present })
   } finally {
     try { scratch.close() } catch { /* a throwaway ledger */ }
     try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
   }
 }
 
-function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen }) {
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
   } catch (err) {
+    // A caller that already discovered the journal (ingest-all) passes
+    // require_present: a journal gone by read time vanished mid-run, which is an
+    // incomplete ingest, never a clean absence.
+    if (err?.code === 'ENOENT' && require_present) return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'journal-vanished' } }
     if (err?.code === 'ENOENT') return { ...INGEST_ABSENT }
     return ingestReadFailure(err)
   }

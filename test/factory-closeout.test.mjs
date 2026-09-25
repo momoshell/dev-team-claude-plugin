@@ -8,6 +8,7 @@ import {
   renameSync,
   statSync,
   utimesSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -54,7 +55,7 @@ import {
   refsFromPrBody,
   stripAnsi,
 } from '../scripts/factory/closeout.mjs'
-import { openLedger, TABLES } from '../scripts/factory/ledger.mjs'
+import { openLedger, TABLES, ingestJournal as realIngestJournal } from '../scripts/factory/ledger.mjs'
 
 const lane = 'b415-closeout'
 const CLOSEOUT_LEDGER_SANDBOX = join(tmpdir(), `factory-closeout-ledger-${process.pid}.db`)
@@ -1967,4 +1968,22 @@ test('ingest-all never counts an incomplete journal as ingested and exposes its 
   assert.equal(result.report.incomplete.length, 1)
   assert.equal(result.report.incomplete[0].reason, 'journal line is not valid JSON')
   assert.equal(result.report.incomplete[0].line, 1)
+})
+
+test('ingest-all counts a journal that vanishes between discovery and read as incomplete, never ingested', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const vanishing = harness({
+    log: () => {},
+    ingestJournal: (journalPath, ledger, options) => {
+      unlinkSync(journalPath)
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps: vanishing })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1 })
+  assert.equal(result.report.incomplete[0].reason, 'journal-vanished')
 })

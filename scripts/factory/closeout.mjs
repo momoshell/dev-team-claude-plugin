@@ -1141,7 +1141,7 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       }
       let detail = null
       try {
-        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run })
+        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true })
       } catch (error) {
         noteSkip('ingest_error')
         unmeasured = true

@@ -121,6 +121,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
   assert.deepEqual(result.unmeasured, [
     'crew/batch-report.test.mjs',
     'crew/batch.test.mjs',
+    'crew/pi/extensions/acp-server.test.mjs',
     'crew/pi/extensions/submit.test.mjs',
     'skills/frontend-svelte/exhibits.test.mjs',
     'skills/lean-build/exhibits.test.mjs',

@@ -2017,7 +2017,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
     writes: 'none',
     accepted_by: 'envelope shape',
     envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary', 'evidence'], optional_item_fields: ['program', 'output'] }],
-    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
+    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing. `program` is a command or script you actually ran, and it always travels with the `output` it produced. If you ran nothing, omit both.',
   }
   const REPAIR_SNAPSHOT = {
     execution: 'reviewed', required_seats: 'tier',
@@ -2051,7 +2051,11 @@ test('scout rejects envelopes that do not match its declared shape', () => {
     { artifacts: ['/etc/passwd'] }, { artifacts: [`${TD}/../escape.md`] }, { details: null },
   ]
   for (const over of cases) {
-    const io = fakeIo({ envelopes: { 'planner:1': reconEnv(over) }, changed: [] })
+    const malformed = reconEnv(over)
+    const io = fakeIo({ envelopes: {
+      'planner:1': malformed,
+      'planner1.shape-reask.planner.json': malformed,
+    }, changed: [] })
     const result = driveTask({ ...CTX, variant: 'scout' }, io)
     assert.equal(result.status, 'escalation')
     assert.equal(result.details.escalation.where, 'envelope')
@@ -2290,7 +2294,10 @@ test('an envelope refusal escalates naming the reason the validator produced', (
   for (const [expectedReason, env] of cases) {
     const direct = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
     assert.equal(direct.reason, expectedReason)
-    const io = fakeIo({ envelopes: { 'planner:1': env }, changed: [] })
+    const io = fakeIo({ envelopes: {
+      'planner:1': env,
+      'planner1.shape-reask.planner.json': env,
+    }, changed: [] })
     const result = driveTask({ ...CTX, variant: 'scout' }, io)
     assert.equal(result.status, 'escalation')
     assert.equal(result.details.escalation.where, 'envelope')

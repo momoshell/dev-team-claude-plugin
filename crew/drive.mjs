@@ -6,7 +6,7 @@ import { loadCapabilities } from './capabilities.mjs'
 import { protectedHitsIn, resolveProtectedPaths, promptDocumentHits, promptScopeHits, promptSurfacePaths } from './protected-paths.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
@@ -6395,7 +6395,7 @@ function runTask(ctx, io, crash) {
     return null
   }
 
-  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null } = {}) {
+  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null, reask = null, onDispatch = null } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -6408,7 +6408,8 @@ function runTask(ctx, io, crash) {
         `Original brief: ${briefFile}`, '',
       ].join('\n'))
     }
-    const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role) })
+    const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}) })
+    onDispatch?.({ id, returnPath })
     const dispatchRunId = typeof ctx.run_id === 'string' && /\/returns\/[^/]+\/[^/]+\.json$/.test(String(returnPath))
       ? ctx.run_id
       : undefined
@@ -7374,8 +7375,10 @@ function runTask(ctx, io, crash) {
     io.writeFile(briefPath, briefText())
     let env = null
     let seatFailure = null
+    let firstDispatch = null
     try {
       env = assignAndWait(seat, briefPath, variant, {
+        onDispatch: (identity) => { firstDispatch = identity },
         strictIdentity: shape.strict_identity === true,
         briefBuilder: ({ id, runId }) => briefText({ id, runId }),
       })
@@ -7405,8 +7408,54 @@ function runTask(ctx, io, crash) {
       return escalate(variant, `the ${seat} seat returned status=${env.status}: ${env.summary || ''}`, env.artifacts || [])
     }
     const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
-    if (defect) {
-      return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${defect.reason}]: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+    if (defect && env.status === 'done') {
+      const first = defect
+      const firstEnv = env
+      const retryPath = firstDispatch?.returnPath
+        ? join(dirname(firstDispatch.returnPath), `${firstDispatch.id}.shape-reask.${seat}.json`)
+        : null
+      if (!firstDispatch || !retryPath) return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${first.reason}]: ${first.why}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+      // ONE grace per assignment, shared with seat-io's own re-asks: when seat-io
+      // already asked this assignment again (unusable bytes, a lost seat), the
+      // shape defect escalates with both causes rather than asking a third time.
+      const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(firstDispatch.returnPath) : null
+      if (graceSpentBy) return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${first.reason}]: ${first.why}; no shape re-ask: this assignment's one re-ask grace was already spent by a seat re-ask (${graceSpentBy})`, Array.isArray(env.artifacts) ? env.artifacts : [])
+      const reask = { id: firstDispatch.id, returnPath: retryPath }
+      const reason = `[${first.reason}]: ${first.why}`
+      const row = (outcome) => recordRow({ at: io.now(), envelope_shape_reask: { variant, seat, reason, outcome } })
+      try { io.log(row('pending')) } catch { /* the shape re-ask journal is never load-bearing */ }
+      const secondBrief = art(`${variant}-shape-reask.md`)
+      io.writeFile(secondBrief, `${briefText({ id: firstDispatch.id, runId: ctx.run_id })}\n\nThis is a correction request for original assignment ${firstDispatch.id}. Your prior envelope was refused: ${reason}. Return a corrected envelope satisfying the complete contract; preserve the original assignment identity.\n`)
+      let secondEnv = null
+      let secondFailure = null
+      try {
+        // ONE dispatch, never assignAndWait: the correction is this assignment's
+        // only re-ask, so a suite refusal or zero-turn non-start on it escalates
+        // as a non-done result instead of re-dispatching onto the same path.
+        secondEnv = dispatchOnce(seat, secondBrief, 'envelope-shape-reask', {
+          reask, strictIdentity: shape.strict_identity === true,
+          briefBuilder: ({ id, runId }) => `${briefText({ id, runId })}\n\nThis is a correction request for original assignment ${firstDispatch.id}. Your prior envelope was refused: ${reason}. Return a corrected envelope satisfying the complete contract; preserve the original assignment identity.\n`,
+        })
+      } catch (err) { secondFailure = err }
+      if (runs('scope-gate')) {
+        const outOfScope = outOfScopeFiles(io.changedFiles(), scopeMatcher([]))
+        if (outOfScope.length > 0) {
+          try { io.log(row('scope-refused')) } catch { /* the shape re-ask journal is never load-bearing */ }
+          return escalate('scope', `a ${variant} shape re-ask writes nothing, but the tree carries ${outOfScope.length} changed file(s): ${outOfScope.join(', ')}`, Array.isArray(secondEnv?.artifacts) ? secondEnv.artifacts : Array.isArray(firstEnv.artifacts) ? firstEnv.artifacts : [], {}, { files: escalationFiles(outOfScope) })
+        }
+      }
+      const afterPrefix = `after a shape re-ask for ${reason}; `
+      const secondRefusal = handledEnvelopeRefusalWhy(secondEnv)
+      if (secondRefusal) { try { io.log(row('refused')) } catch { /* the shape re-ask journal is never load-bearing */ }; return escalate(variant, `${afterPrefix}${secondRefusal}`, Array.isArray(secondEnv?.artifacts) ? secondEnv.artifacts : Array.isArray(firstEnv.artifacts) ? firstEnv.artifacts : []) }
+      if (secondFailure) { try { io.log(row('failed')) } catch { /* the shape re-ask journal is never load-bearing */ }; return escalate(variant, `${afterPrefix}the ${seat} seat failed: ${secondFailure.message}`, Array.isArray(firstEnv.artifacts) ? firstEnv.artifacts : []) }
+      if (secondEnv?.status !== 'done') { pendingEnforcement.delete(seat); try { io.log(row('non-done')) } catch { /* the shape re-ask journal is never load-bearing */ }; return escalate(variant, `${afterPrefix}the ${seat} seat returned status=${secondEnv?.status}: ${secondEnv?.summary || ''}`, Array.isArray(secondEnv?.artifacts) ? secondEnv.artifacts : []) }
+      const secondDefect = envelopeDefect(secondEnv, shape, { taskDir: ctx.taskDir })
+      if (secondDefect) {
+        try { io.log(row('defective')) } catch { /* the shape re-ask journal is never load-bearing */ }
+        return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${first.reason}]: ${first.why}; [${secondDefect.reason}]: ${secondDefect.why}`, Array.isArray(secondEnv.artifacts) ? secondEnv.artifacts : [])
+      }
+      try { io.log(row('accepted')) } catch { /* the shape re-ask journal is never load-bearing */ }
+      env = secondEnv
     }
     if (reviewIdentity.expected) {
       const returnedReviewIdentity = { base_sha: env.details.base, head_sha: env.details.head }

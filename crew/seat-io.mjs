@@ -2134,14 +2134,23 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const resolveBin = deps.resolveWorkerBin || resolveWorkerBin
   let seq = 0
   const seatFor = new Map()
-  const reasked = new Set()   // assignments whose one shared re-ask grace is spent
+  // ONE grace per assignment (#1537, operator's rule). An "ask" is a send the seat
+  // ANSWERED (produced output: an envelope, a file, or model text). The one grace
+  // covers re-asks caused by the seat's answer or its absence after starting: a
+  // bad/missing/unusable envelope, a shape defect, a seat death, a timeout or an
+  // abort. A provider refusal BEFORE any output (429/529/5xx/auth, and the model
+  // fallback it triggers) is delivery of the same ask: it neither spends the grace
+  // nor is blocked by it. So the pane reprompt after a provider rejection is
+  // delivery (bounded only by its own #567 re-send set) and never charges here;
+  // the pane re-send after silence following a started turn is a re-ask and does.
+  const reasked = new Map()   // assignment -> the cause that spent its one shared re-ask grace
   const graceKey = (info, returnPath) => `${info?.role || 'unknown'}:${info?.id ?? returnPath}`
   const graceIsSpent = (info, returnPath, err) => {
     const key = graceKey(info, returnPath)
-    if (err?.graceSpent === true) reasked.add(key)
+    if (err?.graceSpent === true && !reasked.has(key)) reasked.set(key, 'transport-grace-spent')
     return reasked.has(key)
   }
-  const spendGrace = (info, returnPath) => { reasked.add(graceKey(info, returnPath)) }
+  const spendGrace = (info, returnPath, cause) => { reasked.set(graceKey(info, returnPath), cause) }
   const refusalFloor = new Map()      // role -> the instant after which a frame is THIS request's
   const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
   const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
@@ -2667,7 +2676,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // 'reask'. The bound is the SAME set #567's reprompt uses, so one assignment
     // can never be re-sent twice by the two paths between them.
     const member = crew.members?.[info?.role] || null
-    if (repromptedRefusals.has(returnPath)) {
+    if (repromptedRefusals.has(returnPath) || graceIsSpent(info, returnPath)) {
       silenceWatch.delete(returnPath)
       note('declined', { why: `the re-send bound of ${REASK_MAX} per assignment is already spent` })
       return null
@@ -2685,6 +2694,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('undelivered', { why: sendErr?.message || 'assignment send failed' })
       return null
     }
+    // Charged only once the re-send is out: a send that throws is no ask (#1537).
+    spendGrace(info, returnPath, 'silence-resend')
     note('sent')
     return { restartBudget: true, silence: 'sent' }   // verbatim: mutation G7
   }
@@ -2718,7 +2729,6 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('declined', { why: decision.why })
       return { envelope: null, error: err }
     }
-    spendGrace(info, returnPath)
     const staleRaw = typeof err.raw === 'string' ? err.raw : null
     const reaskId = info?.id || 'reask'
     const briefPath = join(paths.taskDir, `reask-${reaskId}.${role}.md`)
@@ -2738,21 +2748,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // and the recovery would be spent for nothing. EVERY delivery attempt is
         // journalled with its ordinal — a minute of refused deliveries that only
         // reported its own last line would be a minute nobody can read back.
-        let polls = 0
-        for (;;) {
-          attempts = polls + 1
-          try {
-            const attempt = transport.assign(headlessReaskSpec(info, { role, briefFile: briefPath, id: reaskId, returnPath: reaskPath }))
-            collectPath = attempt?.returnPath || reaskPath
-            bindHeadlessIdentity(info, attempt)
-            break
-          } catch (assignErr) {
-            if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
-            note('busy', { attempt: attempts, why: assignErr.message })
-            polls += 1
-            sleep(REASK_SETTLE_MS)
-          }
-        }
+        const attempt = assignWithReask(transport, info, headlessReaskSpec(info, { role, briefFile: briefPath, id: reaskId, returnPath: reaskPath }), (ordinal, assignErr) => {
+          attempts = ordinal + 1
+          note('busy', { attempt: ordinal, why: assignErr.message })
+        })
+        collectPath = attempt?.returnPath || reaskPath
+        bindHeadlessIdentity(info, attempt)
       } else {
         sendLine(surfaceId, assignmentLine({ id: reaskId, role, briefFile: briefPath, returnPath, taskDir: paths.taskDir }))
       }
@@ -2762,6 +2763,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('undelivered', { why: sendErr.message, attempt: attempts })
       return { envelope: null, error: err }
     }
+    // Charged only once the re-ask is delivered: a send that throws is no ask (#1537).
+    spendGrace(info, returnPath, cellFailureKind(err))
     note('sent', { brief: briefPath, attempt: attempts })
     const window = Math.min(timeoutS, REASK_TIMEOUT_S)
     try {
@@ -2855,7 +2858,6 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('declined', { why })
       return { envelope: null, error: err }
     }
-    spendGrace(info, returnPath)
     const briefPath = join(paths.taskDir, `retry-${retryId}.${role}.md`)
     const spentForBrief = Number.isFinite(spentMs) ? `${Math.max(0, spentMs) / 1000} seconds` : 'an unknown amount of time'
     try {
@@ -2906,6 +2908,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         note('undelivered', { why: sendErr?.message || String(sendErr), attempt: deliveryAttempts })
         return { envelope: null, error: err }
       }
+      // Charged only once the retry is delivered: a send that throws is no ask (#1537).
+      spendGrace(info, returnPath, kind)
       try {
         const waitStartedAt = now()
         const env = withHeadlessWatch(info, () => transport.wait(collectPath, retryWindowS), { returnPath: collectPath, timeoutS: retryWindowS, waitStartedAt })
@@ -3049,6 +3053,18 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       },
     }
   }
+  const assignWithReask = (transport, info, spec, observe = () => {}) => {
+    let polls = 0
+    for (;;) {
+      try { return transport.assign(spec) }
+      catch (assignErr) {
+        if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
+        observe(polls + 1, assignErr)
+        polls += 1
+        sleep(REASK_SETTLE_MS)
+      }
+    }
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -3060,22 +3076,45 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       try {
         const m = crew.members[role]
         if (!m) throw new Error(`role ${role} not seated in this crew`)
+        if (spec.reask && (typeof spec.reask.id !== 'string' || !spec.reask.id.trim() || typeof spec.reask.returnPath !== 'string' || !spec.reask.returnPath.trim())) throw new Error('malformed reask identity')
+        if (spec.reask && seatFor.has(spec.reask.returnPath)) throw new Error(`reask return path already assigned: ${spec.reask.returnPath}`)
+        if (spec.reask && graceIsSpent({ role, id: spec.reask.id }, spec.reask.returnPath)) throw new Error(`reask grace already spent for ${role}:${spec.reask.id} (${reasked.get(graceKey({ role, id: spec.reask.id }, spec.reask.returnPath))})`)
         if (m.transport !== DEFAULT_TRANSPORT) {
           const transport = transportIo(m.transport, role)
-          const result = transport.assign(spec)
+          let result
+          if (spec.reask) {
+            let attempt = 0
+            const reaskSpec = headlessReaskSpec({ role, policy: spec.policy ?? null }, { role, briefFile, id: spec.reask.id, returnPath: spec.reask.returnPath })
+            try {
+              result = assignWithReask(transport, { role, policy: spec.policy ?? null }, reaskSpec, (ordinal, assignErr) => {
+                attempt = ordinal
+                try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'busy', attempt: ordinal, why: assignErr?.message || String(assignErr) })) }
+                catch { /* the journal is diagnostics, never load-bearing for a delivery */ }
+              })
+            } catch (assignErr) {
+              try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'undelivered', attempt: attempt + 1, why: assignErr?.message || String(assignErr) })) }
+              catch { /* the journal is diagnostics, never load-bearing for a delivery */ }
+              throw assignErr
+            }
+          } else result = transport.assign(spec)
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
           const assignedAt = now()
           const info = { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport, policy: spec.policy ?? null }
           bindHeadlessIdentity(info, result)
           seatFor.set(result.returnPath, info)
+          // A caller's re-ask IS this assignment's one grace: its wait must never
+          // spend a second one on an unparseable or lost correction.
+          if (spec.reask) spendGrace(info, result.returnPath, 'caller-reask')
           refusalFloor.set(role, assignedAt)
           lastRefusal.delete(role)
           return result
         }
-        seq += 1
-        id = `d${seq}`
-        const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+        const reask = spec.reask
+        if (reask && (typeof reask.id !== 'string' || !reask.id.trim() || typeof reask.returnPath !== 'string' || !reask.returnPath.trim())) throw new Error('malformed reask identity')
+        id = reask?.id ?? `d${++seq}`
+        const returnPath = reask?.returnPath ?? join(paths.returnsDir, `${id}.${role}.json`)
+        if (reask && seatFor.has(returnPath)) throw new Error(`reask return path already assigned: ${returnPath}`)
         // Anti-replay: seq restarts every process, so a crashed/escalated run
         // leaves files a re-run's wait() would instantly (and wrongly) accept.
         if (existsSync(returnPath)) unlinkSync(returnPath)
@@ -3084,6 +3123,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         refusalFloor.set(role, assignedAt)
         lastRefusal.delete(role)
         sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+        // The correction is an ask and spends the grace once it is sent, so a
+        // later silence re-send declines; a provider-rejection reprompt of it is delivery.
+        if (reask) spendGrace(seatFor.get(returnPath), returnPath, 'caller-reask')
         return { id, returnPath }
       } catch (err) {
         noteCellFailure(role, id, cellFailureKind(err), err)
@@ -3223,6 +3265,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // report, and drive.mjs calls it with `?.` (crew/io-contract.test.mjs:235
     // checks membership, never an exhaustive key set).
     waitDiagnosis(returnPath) { return lastDiagnosis.get(returnPath) ?? null },
+    // The cause that spent this assignment's ONE shared re-ask grace, or null:
+    // a caller (the driver's shape re-ask) reads it so it never asks twice.
+    reaskGraceSpent(returnPath) {
+      const info = seatFor.get(returnPath)
+      return info ? (reasked.get(graceKey(info, returnPath)) ?? null) : null
+    },
     captureDescendants() { return capture.round(true) },
     reclaimDescendants() {
       // settleSeatTeardown calls THIS method, and it is the run-end sweep that

@@ -33,7 +33,7 @@ export const VARIANTS = Object.freeze({
         optional_item_fields: Object.freeze(['program', 'output']),
       }),
     ]),
-    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
+    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing. `program` is a command or script you actually ran, and it always travels with the `output` it produced. If you ran nothing, omit both.',
   }),
   review_only: Object.freeze({
     execution: 'envelope',

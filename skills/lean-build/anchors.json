@@ -3,5 +3,5 @@
   "crew/variants.mjs:13": "'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',",
   "test/helpers.mjs:39": "export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {",
   "crew/headless-rpc.mjs:133": "unreadable.push({ lane, candidates: null, reason: closedReason(error) })",
-  "crew/seat-io.mjs:3653": "if (toAdd.length > 0) execFileSync('git', ['add', '--', ...toAdd], { cwd: checkout })"
+  "crew/seat-io.mjs:3701": "if (toAdd.length > 0) execFileSync('git', ['add', '--', ...toAdd], { cwd: checkout })"
 }

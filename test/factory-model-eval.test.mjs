@@ -1119,9 +1119,11 @@ const reviewedCandidateShas = {
   // openai/gpt-6-sol at medium; the local candidate set is unchanged. The operator ratified the
   // bump, not this file: the new candidates.json has had no separate operator review.
   planner: '873a860fb2015ce78bdf3401ab954ed63f5038e4f2520214d6c4c94d32107d7a',
-  // Re-reviewed 2026-09-20 by the operator: the mechanical builder effort moves low -> medium.
-  // (Re-reviewed 2026-09-19: the only change then was `"tier": "mechanical"`.)
-  builder: '061c879340054af7221a8dba80019dbe0f1042e8104ab1c3e337b8ff8a8a74e5',
+  // Updated 2026-09-25 by the operator-ratified builder reseat: production moves from
+  // meta/muse-spark-1.3-contributor to openai/gpt-6-luna at medium; the local candidate set is
+  // unchanged. The operator ratified the seat, not this file: no separate operator review.
+  // (Re-reviewed 2026-09-20: builder effort low -> medium. 2026-09-19: `"tier": "mechanical"`.)
+  builder: '1367e4fad4388c4aaaea385bb1314f1a84670df8dc955b46d7a5e482eb15d58b',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`

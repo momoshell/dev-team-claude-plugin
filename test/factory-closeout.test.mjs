@@ -553,6 +553,78 @@ test('A1 measured turns are emitted before destructive reap steps', () => {
   assert.ok(calls.spawn.findIndex((call) => call.argv.includes('ledger.mjs turns')) < calls.spawn.findIndex((call) => call.argv.includes('worktree remove')))
 })
 
+test('W1 boot before run-start widens ingest and public window while preserving until', () => {
+  const boot = '2026-09-04T06:04:45.000Z'
+  const start = '2026-09-04T06:04:46.127Z'
+  const fixture = turnsFixture('closeout-reap-boot-window-', { rows: [
+    { at: boot, event: 'boot' },
+    { at: start, event: 'run-start' },
+    { at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' },
+  ] })
+  let ingestSince
+  const { deps } = harness({ home: fixture.home, ingestJournal: (_path, _ledger, options) => {
+    ingestSince = options.since
+    return { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true }
+  }, answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
+  ] })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const window = rows(result).find((row) => row.step === 'turns').detail.window
+  assert.equal(ingestSince, boot)
+  assert.equal(window.since, boot)
+  assert.equal(window.since_source, 'boot')
+  assert.equal(window.until, '2026-09-04T06:04:47.000Z')
+})
+
+test('W2 boot selection resets at each run-start and chooses the eligible preceding boot', () => {
+  const stale = '2026-09-04T06:04:49.000Z'
+  const first = '2026-09-04T06:04:46.127Z'
+  const eligible = '2026-09-04T06:04:47.000Z'
+  const second = '2026-09-04T06:04:48.127Z'
+  const fixture = turnsFixture('closeout-reap-boot-reset-', { rows: [
+    { at: stale, event: 'boot' }, { at: first, event: 'run-start' },
+    { at: eligible, event: 'boot' }, { at: second, event: 'run-start' },
+  ] })
+  const { deps } = harness({ home: fixture.home, answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
+  ] })
+  const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
+  assert.equal(window.since, eligible)
+  assert.equal(window.since_source, 'boot')
+})
+
+test('W2 rejects a boot after the prior start when its timestamp is earlier than that start', () => {
+  const first = '2026-09-04T06:04:46.127Z'
+  const backwardBoot = '2026-09-04T06:04:45.900Z'
+  const second = '2026-09-04T06:04:48.127Z'
+  const fixture = turnsFixture('closeout-reap-backward-boot-', { rows: [
+    { at: first, event: 'run-start' },
+    { at: backwardBoot, event: 'boot' },
+    { at: second, event: 'run-start' },
+  ] })
+  const { deps } = harness({ home: fixture.home, answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
+  ] })
+  const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
+  assert.equal(window.since, second)
+  assert.equal(window.since_source, 'run-start')
+})
+
+test('W3 no eligible boot falls back to run-start source', () => {
+  const start = '2026-09-04T06:04:46.127Z'
+  const fixture = turnsFixture('closeout-reap-no-boot-', { rows: [{ at: start, event: 'run-start' }] })
+  const { deps } = harness({ home: fixture.home, answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
+  ] })
+  const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
+  assert.equal(window.since, start)
+  assert.equal(window.since_source, 'run-start')
+})
+
 test('A1 reap ingests census and reports measured lane economy', () => {
   const start = '2026-09-04T06:04:46.127Z'
   const censusAt = '2026-09-04T06:04:46.500Z'
@@ -624,6 +696,7 @@ test('RV1-1 reap ingestion is bounded to the latest run start', () => {
   const wide = runTurns(fixture, ['--adw-id', fixture.adwId, '--since', firstStart, '--until', '2026-09-04T06:04:48.000Z'])
   assert.equal(result.code, 0)
   assert.equal(detail.window.since, secondStart)
+  assert.equal(detail.window.since_source, 'run-start')
   assert.equal(detail.ingest.applied, 1)
   assert.equal(wide.status, 0, wide.stderr)
   const widePayload = JSON.parse(wide.stdout)

@@ -359,6 +359,10 @@ export const RETIRED_TABLES = Object.freeze({
   envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/seat-io.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
   processes: 'Retired: never held a row in any production ledger — startProcess has no caller outside scripts/factory/ledger.mjs itself and its own tests (#405), so `ledger procs <adw_id>` returns [] for every run. The table, startProcess and endProcess stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
 })
+export const PATH_DEPENDENT_TABLES = Object.freeze({
+  run_observations: 'run_observations is written by crew:watch --follow and closeout reconcile, so zero rows mean neither path was observed.',
+  run_links: 'run_links is written only by the daemon path, so zero rows mean that path was not observed.',
+})
 
 // Unique indexes a prior schema declared and this one has WIDENED. migrationsFor
 // derives an index name from its columns, so a widened key mints a NEW index and
@@ -8873,6 +8877,7 @@ export function main(argv) {
         db_path: dbPath,
         row_counts: rowCounts,
         retired_tables: RETIRED_TABLES,
+        path_dependent_tables: PATH_DEPENDENT_TABLES,
         pragmas,
         fts5,
         jsonl_drift: drift,

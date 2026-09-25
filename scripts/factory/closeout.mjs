@@ -473,6 +473,9 @@ function currentRunWindow({ lane, laneDir, deps }) {
 
   let start = null
   let latest = null
+  let candidateBoot = null
+  let selectedBoot = null
+  let prevStart = null
   let unusableBoundary = null
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -490,16 +493,23 @@ function currentRunWindow({ lane, laneDir, deps }) {
           : `run-start in ${journalPath} has an unusable timestamp`
         continue
       }
+      selectedBoot = candidateBoot && candidateBoot.timestamp <= timestamp && (prevStart === null || candidateBoot.timestamp > prevStart) ? candidateBoot : null
+      candidateBoot = null
+      prevStart = timestamp
       start = { at, timestamp }
       latest = timestamp
       unusableBoundary = null
       continue
     }
-    if (!start) continue
     if (!Object.prototype.hasOwnProperty.call(row, 'at')) continue
     const timestamp = journalTimestampMs(row.at)
     if (!Number.isFinite(timestamp)) continue
-    if (timestamp > latest) latest = timestamp
+    if (start && timestamp > latest) latest = timestamp
+    if (row.event === 'boot') {
+      if (!candidateBoot || timestamp >= candidateBoot.timestamp) candidateBoot = { at: row.at, timestamp }
+      continue
+    }
+    if (!start) continue
   }
   if (unusableBoundary) throw new Error(unusableBoundary)
   if (!start || !Number.isFinite(latest)) throw new Error(`no timestamped ${RUN_START_EVENT} in ${journalPath}`)
@@ -510,14 +520,15 @@ function currentRunWindow({ lane, laneDir, deps }) {
     throw new Error(`latest journal timestamp in ${journalPath} cannot form a whole-second boundary: ${error?.message || String(error)}`)
   }
   let since
+  const boundary = selectedBoot ?? start
   try {
-    since = typeof start.at === 'string' && !Number.isFinite(Number(start.at))
-      ? start.at
-      : new Date(start.timestamp).toISOString()
+    since = typeof boundary.at === 'string' && !Number.isFinite(Number(boundary.at))
+      ? boundary.at
+      : new Date(boundary.timestamp).toISOString()
   } catch (error) {
     throw new Error(`run-start in ${journalPath} has an unusable timestamp: ${error?.message || String(error)}`)
   }
-  return { since, until, crewDir, journalPath, identity }
+  return { since, since_source: selectedBoot ? 'boot' : 'run-start', until, crewDir, journalPath, identity }
 }
 
 function ingestReadFailure(error) {
@@ -568,7 +579,7 @@ function reapTurnEconomy({ lane, laneDir, root, deps }) {
   try { context = currentRunWindow({ lane, laneDir, deps: d }) } catch (error) {
     return turnEconomyUnavailable(error?.message || String(error))
   }
-  const window = { since: context.since, until: context.until }
+  const window = { since: context.since, since_source: context.since_source, until: context.until }
   const ingest = safeReapIngest({ journalPath: context.journalPath, identity: context.identity, deps: d, since: context.since })
   const command = {
     file: 'node',

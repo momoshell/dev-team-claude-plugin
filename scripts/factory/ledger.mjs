@@ -6773,7 +6773,7 @@ function mirrorErrorCount(ledger) {
   try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false, strict_adw_id = false, _scratchLedgerForTest = null } = {}) {
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false, strict_adw_id = false, lane = null, _scratchLedgerForTest = null } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
   const seen = new Set()
@@ -6799,14 +6799,14 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
     if (scratch.degraded || (typeof scratch.stats === 'function' && scratch.stats().degraded)) {
       return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
     }
-    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id })
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane })
   } finally {
     try { scratch.close() } catch { /* a throwaway ledger */ }
     try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
   }
 }
 
-function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id }) {
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -6864,6 +6864,13 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     if (strict_adw_id && adw_id && typeof source.adw_id === 'string' && source.adw_id !== adw_id) {
       failed += 1
       if (firstFailure === null) firstFailure = { line: lineNo, reason: 'adw-id-mismatch' }
+      continue
+    }
+    // plan-adopted names the ADOPTING lane (journals show lane === task); under
+    // strict identity a row naming another lane is refused the same way.
+    if (strict_adw_id && lane && writer === JOURNAL_FACT_EVENTS['plan-adopted'] && source.lane !== lane) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: 'lane-mismatch' }
       continue
     }
     const pending = []

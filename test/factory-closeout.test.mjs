@@ -1783,7 +1783,7 @@ test('ingest-all backfills active and archived journals whole-window and counts 
   ingestAllLane(root, dbPath, 'dt-three', 'lane-c', { identity: false })
   const lines = []
   const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
-  assert.equal(result.code, 0)
+  assert.equal(result.code, 1, 'an unresolved identity is unmeasured, so the command refuses')
   assert.deepEqual(result.report, {
     journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 }, incomplete: [],
     rows_applied: 10, rows_ignored: 0, rows_failed: 0,
@@ -1938,7 +1938,10 @@ test('ingest-all ingests every lane dir of a batch holding two, each on its own 
 test('ingest-all resolves an archived lane dir by the name before its .archive- mark', () => {
   const root = ingestAllRoot()
   const dbPath = join(root, 'backfill.db')
-  ingestAllLane(root, dbPath, '.archive-dt-lane-c', 'lane-c.archive-2026-09-13T08-41-36Z', { taskSlug: 'lane-c' })
+  ingestAllLane(root, dbPath, '.archive-dt-lane-c', 'lane-c.archive-2026-09-13T08-41-36Z', { taskSlug: 'lane-c', facts: [
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: '2030-01-01T00:00:04.000Z', event: 'plan-adopted', lane: 'lane-c', plan_sha: 'sha1' },
+  ] })
   const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
   assert.equal(result.code, 0)
   assert.equal(result.report.journals_seen, 1)
@@ -1951,7 +1954,7 @@ test('ingest-all counts a mismatched identity without rows', () => {
   const dbPath = join(root, 'backfill.db')
   ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { taskSlug: 'other-lane' })
   const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
-  assert.equal(result.code, 0)
+  assert.equal(result.code, 1)
   assert.deepEqual(result.report.skipped_by_reason, { identity_unresolved: 1 })
   assert.equal(result.report.ingested, 0)
   assert.ok(Object.values(ingestAllSnapshot(dbPath)).every((rows) => rows.length === 0))
@@ -2015,4 +2018,16 @@ test('ingest-all reports an unreadable lane dir as unmeasured, never as no journ
   } finally {
     chmodSync(laneDir, 0o755)
   }
+})
+
+test('ingest-all refuses a plan-adopted row naming another lane instead of filing it there', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:04.000Z', event: 'plan-adopted', lane: 'other-lane', plan_sha: 'sha1' },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.incomplete[0].reason, 'lane-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).plan_adoptions.filter((row) => row.lane === 'other-lane').length, 0)
 })

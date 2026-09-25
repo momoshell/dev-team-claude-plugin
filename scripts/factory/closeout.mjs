@@ -1128,7 +1128,9 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       } catch {
         identity = null
       }
-      if (!identity) summary.skipped_by_reason.identity_unresolved = (summary.skipped_by_reason.identity_unresolved || 0) + 1
+      // A discovered journal whose identity cannot be resolved was not measured:
+      // it is counted and the command refuses, never a clean exit.
+      if (!identity) { noteSkip('identity_unresolved'); unmeasured = true }
       if (!identity) continue
       const dbPath = identity.db_path
       let ledger = null
@@ -1149,7 +1151,7 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       }
       let detail = null
       try {
-        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true, strict_adw_id: true })
+        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true, strict_adw_id: true, lane: identityLane })
       } catch (error) {
         noteSkip('ingest_error')
         unmeasured = true

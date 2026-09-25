@@ -2085,3 +2085,36 @@ test('ingest-all --dry-run refuses a ledger it cannot stat instead of treating i
     chmodSync(lockedDir, 0o755)
   }
 })
+
+function dropMirror(dbPath) {
+  for (const suffix of ['', '-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* absent */ } }
+}
+
+test('ingest-all refuses a store whose mirror was deleted while its JSONL authority survives', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const logBefore = readFileSync(jsonlPath)
+  dropMirror(dbPath)
+  const real = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(real.code, 1)
+  assert.deepEqual(real.report.skipped_by_reason, { store_drift: 1 })
+  assert.deepEqual(readFileSync(jsonlPath), logBefore, 'no fact is re-appended to the authority')
+  dropMirror(dbPath)
+  const dry = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+  assert.equal(dry.code, 1)
+  assert.deepEqual(dry.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all refuses a store whose JSONL authority was deleted while its mirror keeps rows', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  unlinkSync(join(root, 'ledger.jsonl'))
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})

@@ -29,7 +29,7 @@ import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../
 import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
 import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
-import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
+import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
@@ -1080,6 +1080,10 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
   }
   const degradedMirror = (ledger) => !!ledger && (!!ledger.degraded || (typeof ledger.stats === 'function' && !!ledger.stats().degraded))
   let unmeasured = false
+  // One store-consistency verdict per ledger path: jsonlDrift compares the JSONL
+  // authority with the SQLite mirror, and it reads the whole authority, so it
+  // runs once per store, not once per journal.
+  const storeVerdicts = new Map()
   let entries
   try {
     entries = d.readdirSync(crewRoot, { withFileTypes: true })
@@ -1153,6 +1157,13 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
           }
           mirrorPresent = false
         }
+        // A missing mirror beside a surviving JSONL authority is a divergent
+        // store, not an empty one: dedupe against it would re-append facts.
+        if (!mirrorPresent && d.existsSync(join(dirname(dbPath), 'ledger.jsonl'))) {
+          noteSkip('store_drift')
+          unmeasured = true
+          continue
+        }
       }
       if (!dry_run || mirrorPresent) {
         try {
@@ -1167,6 +1178,25 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         noteSkip('ledger_degraded')
         unmeasured = true
         try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      if (ledger && !storeVerdicts.has(dbPath)) {
+        let consistent = false
+        try {
+          const drift = typeof ledger.jsonlDrift === 'function' ? ledger.jsonlDrift() : null
+          consistent = !!drift && drift.measured === true && drift.writers.every((writer) => writer.drift === 0)
+          // A brand-new store has neither an authority line nor a mirror row yet:
+          // that is consistent. A missing authority beside mirror rows is not.
+          if (!consistent && !d.existsSync(join(dirname(dbPath), 'ledger.jsonl')) && typeof ledger.dumpTable === 'function') {
+            consistent = Object.keys(LEDGER_TABLES).every((table) => (ledger.dumpTable(table) || []).length === 0)
+          }
+        } catch { consistent = false }
+        storeVerdicts.set(dbPath, consistent)
+      }
+      if (ledger && storeVerdicts.get(dbPath) === false) {
+        noteSkip('store_drift')
+        unmeasured = true
+        try { ledger.close() } catch { /* skip already recorded */ }
         continue
       }
       let detail = null

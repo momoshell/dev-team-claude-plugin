@@ -6777,6 +6777,9 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
   const seen = new Set()
+  // dumpTable counts a failed read (a missing table, a locked file) as a mirror
+  // error and returns []; an empty seed read that way is not an empty mirror.
+  const seedErrorsBefore = mirrorErrorCount(ledger)
   if (ledger && typeof ledger.dumpTable === 'function') {
     const seeded = new Set()
     for (const writer of [...Object.values(JOURNAL_FACT_KEYS), ...Object.values(JOURNAL_FACT_EVENTS)]) {
@@ -6785,6 +6788,9 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
       seeded.add(identity.table)
       for (const key of storedKeys(ledger, identity)) seen.add(key)
     }
+  }
+  if (mirrorErrorCount(ledger) > seedErrorsBefore) {
+    return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'seed-read-error' } }
   }
   // Every fact runs through a throwaway ledger first: it validates the fact with
   // the writer's own checks and yields the stored row the key is built from.

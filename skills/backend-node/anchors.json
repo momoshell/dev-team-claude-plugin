@@ -38,8 +38,8 @@
   "crew/pi/extensions/subagent.test.mjs:183": "assert.doesNotMatch(source, /^\\s*namespace",
   "crew/pi/extensions/subagent.test.mjs:476": "usage is a complete pi Usage or absent",
   "crew/pi/extensions/subagent.test.mjs:176": "imports.every((specifier) => specifier.startsWith('node:'))",
-  "scripts/factory/ledger.mjs:7448": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:7414": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:7456": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:8883": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:7454": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7420": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:7462": "unknown flag --${name}",
+  "scripts/factory/ledger.mjs:8889": "unknown verb: ${verb}"
 }

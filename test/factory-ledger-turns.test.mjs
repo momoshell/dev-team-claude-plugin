@@ -2915,3 +2915,20 @@ test('a degraded scratch ledger makes the ingest unmeasured instead of reading e
     assert.deepEqual(result.first_failure, { line: null, reason: 'scratch-ledger-degraded' })
   } finally { ledger.close() }
 })
+
+test('a seed read that errors (tables missing from the real ledger) makes the ingest unmeasured, not empty', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'foreign.db')
+  const raw = new (require('node:sqlite').DatabaseSync)(dbPath)
+  raw.exec('CREATE TABLE unrelated (x INTEGER)')
+  raw.close()
+  const ledger = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'seed-error', dry_run: true })
+    assert.equal(result.applied, 0)
+    assert.equal(result.complete, false)
+    assert.deepEqual(result.first_failure, { line: null, reason: 'seed-read-error' })
+  } finally { ledger.close() }
+})

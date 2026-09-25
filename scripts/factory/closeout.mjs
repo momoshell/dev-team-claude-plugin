@@ -35,7 +35,7 @@ import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
 // read is indistinguishable from a failure without it.
 export const SPAWN_MAX_BUFFER = 256 * 1024 * 1024
-export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile'])
+export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile', 'ingest-all'])
 export const EXIT_OK = 0
 export const EXIT_REFUSED = 1
 export const EXIT_USAGE = 2
@@ -112,6 +112,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   RECONCILE_TERMINAL_ENVELOPE: 'reconcile-terminal-envelope',
   RECONCILE_EVIDENCE_UNKNOWN: 'reconcile-evidence-unknown',
   RECONCILE_WRITE_FAILED: 'reconcile-write-failed',
+  INGEST_UNMEASURED: 'ingest-unmeasured',
   INTERNAL: 'internal',
 })
 
@@ -1064,6 +1065,108 @@ function archiveRecoveryCopies({ lane, checkout, deps }) {
   return { archived, root, unknown: false }
 }
 
+// ingest-all (#1527): backfill whole journals under the crew root. Identity
+// comes only from each lane's ledger/run.json via reapIdentity — never
+// guessed. Each discovered journal counts once; a journal whose identity,
+// mirror, or ingest fails is skipped with an honest reason and never counted
+// ingested. Prints ONE JSON summary line; a nonzero code keeps that summary.
+export function ingestAll({ root, dryRun = false, deps } = {}) {
+  const d = normalDeps(deps)
+  const crewRoot = typeof root === 'string' && root.trim() ? root : join(d.home, '.crew')
+  const dry_run = dryRun === true
+  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, rows_applied: 0, rows_ignored: 0, rows_failed: 0 }
+  const noteSkip = (reason) => {
+    summary.skipped_by_reason[reason] = (summary.skipped_by_reason[reason] || 0) + 1
+  }
+  const degradedMirror = (ledger) => !!ledger && (!!ledger.degraded || (typeof ledger.stats === 'function' && !!ledger.stats().degraded))
+  let unmeasured = false
+  let entries
+  try {
+    entries = d.readdirSync(crewRoot, { withFileTypes: true })
+  } catch (error) {
+    throw new CloseoutRefusal(`cannot read crew root ${crewRoot}: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.CREW_UNREADABLE, 'ingest-all')
+  }
+  const batches = entries
+    .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory() && (entry.name.startsWith('dt-') || entry.name.startsWith('.archive-dt-')))
+    .map((entry) => entry.name)
+    .sort()
+  for (const batch of batches) {
+    let children
+    try {
+      children = d.readdirSync(join(crewRoot, batch), { withFileTypes: true })
+    } catch (error) {
+      noteSkip('io_error')
+      unmeasured = true
+      continue
+    }
+    const lanes = children
+      .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+    if (lanes.length > 1) noteSkip('lane_ambiguous')
+    if (lanes.length !== 1) continue
+    const laneName = lanes[0]
+    const crewDir = join(crewRoot, batch, laneName)
+    const journalPath = join(crewDir, 'journal.jsonl')
+    if (!d.existsSync(journalPath)) continue
+    summary.journals_seen += 1
+    let identity = null
+    try {
+      identity = reapIdentity({ crewDir, lane: laneName, deps: d })
+    } catch {
+      identity = null
+    }
+    if (!identity) summary.skipped_by_reason.identity_unresolved = (summary.skipped_by_reason.identity_unresolved || 0) + 1
+    if (!identity) continue
+    const dbPath = identity.db_path
+    let ledger = null
+    if (!dry_run || d.existsSync(dbPath)) {
+      try {
+        ledger = dry_run ? d.openLedger({ dbPath, readOnly: true }) : d.openLedger({ dbPath })
+      } catch (error) {
+        noteSkip('open_failed')
+        unmeasured = true
+        continue
+      }
+    }
+    if (degradedMirror(ledger)) {
+      noteSkip('ledger_degraded')
+      unmeasured = true
+      try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+      continue
+    }
+    let detail = null
+    try {
+      detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run })
+    } catch (error) {
+      noteSkip('ingest_error')
+      unmeasured = true
+      try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+      continue
+    }
+    const degradedAfter = degradedMirror(ledger)
+    try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
+    if (degradedAfter) {
+      noteSkip('ledger_degraded')
+      unmeasured = true
+      continue
+    }
+    if (!detail || typeof detail !== 'object') {
+      noteSkip('ingest_error')
+      unmeasured = true
+      continue
+    }
+    summary.ingested += 1
+    summary.rows_applied += detail.applied || 0
+    summary.rows_ignored += (detail.ignored || 0) + (detail.skipped || 0)
+    summary.rows_failed += detail.failed || 0
+    if (detail.failed > 0 || detail.complete === false) unmeasured = true
+  }
+  d.log(JSON.stringify(summary))
+  const refusal = unmeasured ? { reason: CLOSEOUT_REFUSALS.INGEST_UNMEASURED, step: 'ingest-all', message: 'ingest-all completed with unmeasured or failed ingests' } : null
+  return { verb: 'ingest-all', root: crewRoot, report: summary, refusal, code: refusal ? EXIT_REFUSED : EXIT_OK }
+}
+
 export function reap({ lanes, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const batch = Array.isArray(lanes) ? lanes : []
@@ -1563,13 +1666,15 @@ export function reconcile({ lane, checkout, crewDir, dbPath, dryRun = false, rea
   return { verb: 'reconcile', lane: name, report, refusal: report.refusal, code: report.refusal ? EXIT_REFUSED : EXIT_OK }
 }
 
-export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane> | reconcile <lane>) [--checkout <dir>] [--dry-run]'
+export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane> | reconcile <lane> | ingest-all [--root <dir>]) [--checkout <dir>] [--dry-run]'
 
 export function parseArgs(argv) {
   if (!Array.isArray(argv)) throw new CloseoutUsageError(USAGE)
   let verb = null
   let checkout = process.cwd()
   let checkout_explicit = false
+  let root = null
+  let root_explicit = false
   let help = false
   let dry_run = false
   let reason = null
@@ -1593,17 +1698,29 @@ export function parseArgs(argv) {
       index += 1
       continue
     }
+    if (argument === '--root') {
+      const value = argv[index + 1]
+      if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: --root requires a value`)
+      root = value
+      root_explicit = true
+      index += 1
+      continue
+    }
     if (typeof argument !== 'string' || argument.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: unknown option ${String(argument)}`)
     if (!verb) verb = argument
     else lanes.push(argument)
   }
   if (help) return { verb, lanes, checkout, checkout_explicit, help }
   if (!CLOSEOUT_VERBS.includes(verb)) throw new CloseoutUsageError(`${USAGE}: unknown verb ${String(verb)}`)
-  if (dry_run && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --dry-run is only valid for reconcile`)
+  if (dry_run && verb !== 'reconcile' && verb !== 'ingest-all') throw new CloseoutUsageError(`${USAGE}: --dry-run is only valid for reconcile and ingest-all`)
   if (reason !== null && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --reason is only valid for reconcile`)
-  if (lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
+  if (root_explicit && verb !== 'ingest-all') throw new CloseoutUsageError(`${USAGE}: --root is only valid for ingest-all`)
+  if (verb === 'ingest-all' && checkout_explicit) throw new CloseoutUsageError(`${USAGE}: --checkout is not valid for ingest-all`)
+  if (verb === 'ingest-all' && lanes.length !== 0) throw new CloseoutUsageError(`${USAGE}: ingest-all takes no lane arguments`)
+  if (verb !== 'ingest-all' && lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
   if (verb === 'recover' && lanes.length !== 1) throw new CloseoutUsageError(`${USAGE}: recover accepts exactly one lane`)
   const parsed = { verb, lanes, checkout, checkout_explicit, help }
+  if (root_explicit) parsed.root = root
   if (dry_run) parsed.dry_run = true
   if (reason !== null) parsed.reason = reason
   return parsed
@@ -1621,6 +1738,8 @@ export function main(argv, deps = {}) {
         ? reap({ ...options, lanes: parsed.lanes })
         : parsed.verb === 'recover'
           ? recover({ ...options, lane: parsed.lanes[0], checkoutExplicit: parsed.checkout_explicit })
+          : parsed.verb === 'ingest-all'
+          ? ingestAll({ root: parsed.root, dryRun: parsed.dry_run === true, deps: d })
           : reconcile({ ...options, lane: parsed.lanes[0], dryRun: parsed.dry_run === true, reason: parsed.reason })
     if (result.refusal) return EXIT_REFUSED
     return EXIT_OK

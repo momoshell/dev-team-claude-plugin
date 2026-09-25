@@ -6746,8 +6746,57 @@ function bootSeatArgs(source, role, adwId) {
   }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null } = {}) {
+// Idempotency key for one journal fact: the table's declared TABLES natural
+// unique tuple, null-safe and type-normalized. NULL participates in equality
+// (unlike SQLite's NULL-distinct UNIQUE semantics), so a repeated nullable
+// composite key (provider role/dispatch, reask, rpc dispatch) still collides.
+// Numeric strings coerce the way column affinity does ('42' and 42 land the
+// same); created_at is never part of any journal-fed tuple, so replays with
+// fresh timestamps still collide. Non-finite numbers behave as absent.
+function ingestKeyComponent(value) {
+  if (value === undefined || value === null) return 'null'
+  if (typeof value === 'boolean') return value ? 'num:1' : 'num:0'
+  if (typeof value === 'number') return Number.isFinite(value) ? `num:${Math.trunc(value)}` : 'null'
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed !== '' && DRIFT_NUMERIC_LITERAL.test(trimmed)) {
+      const numeric = Number(trimmed)
+      if (Number.isFinite(numeric)) return `num:${Math.trunc(numeric)}`
+    }
+    return `str:${value}`
+  }
+  return `json:${JSON.stringify(value)}`
+}
+
+// Writer token (the JOURNAL_FACT_KEYS / JOURNAL_FACT_EVENTS value held in
+// `writer`) -> { table, unique }. Boot rows fan out to recordRunSeat.
+function journalFactIdentity(writer) {
+  const table = writer === JOURNAL_FACT_EVENTS.boot ? 'run_seats' : WRITER_MIRROR_TABLES[writer]
+  if (!table || !TABLES[table] || !Array.isArray(TABLES[table].unique[0])) return null
+  return { table, unique: TABLES[table].unique[0] }
+}
+
+function journalFactKey(writer, args) {
+  const identity = journalFactIdentity(writer)
+  if (!identity) return null
+  return `${identity.table}::${identity.unique.map((column) => ingestKeyComponent(args?.[column])).join('|')}`
+}
+
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
+  // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
+  const seen = new Set()
+  if (ledger && typeof ledger.dumpTable === 'function') {
+    const seeded = new Set()
+    for (const writer of [...Object.values(JOURNAL_FACT_KEYS), ...Object.values(JOURNAL_FACT_EVENTS)]) {
+      const identity = journalFactIdentity(writer)
+      if (!identity || seeded.has(identity.table)) continue
+      seeded.add(identity.table)
+      for (const row of ledger.dumpTable(identity.table) || []) {
+        seen.add(`${identity.table}::${identity.unique.map((column) => ingestKeyComponent(row?.[column])).join('|')}`)
+      }
+    }
+  }
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -6791,44 +6840,46 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
       }
     }
     if (!writer) { ignored += 1; continue }
+    // Fan every eligible row out to (writer, args) pairs first so the
+    // idempotency guard below stays a single site: boot roles and fact rows
+    // share one natural-key seen-set and one dry-run gate.
+    const pending = []
     if (writer === JOURNAL_FACT_EVENTS.boot) {
       if (!Array.isArray(source.roles)) {
         ignored += 1
         continue
       }
       for (const role of source.roles) {
-        let args
         try {
-          args = bootSeatArgs(source, role, adw_id)
+          pending.push({ writer: 'recordRunSeat', args: bootSeatArgs(source, role, adw_id) })
         } catch (err) {
           failed += 1
           firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
-          continue
-        }
-        const error = applyJournalFact(ledger, 'recordRunSeat', args)
-        if (error === null) {
-          applied += 1
-        } else {
-          failed += 1
-          firstFailure ??= { line: lineNo, reason: ingestFailureReason(error) }
         }
       }
-      continue
-    }
-    let args
-    try {
-      args = journalFactArgs(writer, source, adw_id)
-    } catch (err) {
-      failed += 1
-      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
-      continue
-    }
-    const error = applyJournalFact(ledger, writer, args)
-    if (error === null) {
-      applied += 1
     } else {
-      failed += 1
-      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
+      try {
+        pending.push({ writer, args: journalFactArgs(writer, source, adw_id) })
+      } catch (err) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
+        continue
+      }
+    }
+    for (const fact of pending) {
+      const key = journalFactKey(fact.writer, fact.args)
+      if (key !== null && seen.has(key)) ignored += 1
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (dry_run) applied += 1
+      if (dry_run) continue
+      const error = applyJournalFact(ledger, fact.writer, fact.args)
+      if (error === null) {
+        applied += 1
+      } else {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
+      }
     }
   }
   return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }

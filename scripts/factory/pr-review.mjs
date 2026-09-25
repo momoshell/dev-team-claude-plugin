@@ -5,8 +5,10 @@
 import { createHash } from 'node:crypto'
 import { readlinkSync, realpathSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -37,6 +39,9 @@ export const PR_REVIEW_REFUSALS = Object.freeze({
   TEARDOWN_FAILED: 'teardown-failed',
   HEAD_MOVED: 'head-moved',
   POST_FAILED: 'post-failed',
+  DIRTY_WORKTREE: 'dirty-worktree',
+  LOCAL_BASE_UNRESOLVED: 'local-base-unresolved',
+  ARTIFACT_WRITE_FAILED: 'artifact-write-failed',
 })
 
 const REFUSAL_NAMES = new Set(Object.values(PR_REVIEW_REFUSALS))
@@ -149,14 +154,20 @@ function positivePr(value) {
 
 export function parseMainArgs(argv) {
   if (!Array.isArray(argv) || argv.length === 0) {
-    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]')
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents] | --local [--repo <path>] [--base <ref>] [--model-reviewer <provider/model>] [--artifact-dir <path>] [--no-post] [--panel] [--panel-distinct-agents]')
   }
   let pr = null
+  let local = false
+  let repo = null
+  let base = null
+  let modelReviewer = null
+  let artifactDir = null
   let requestChanges = false
   let noPost = false
   let panel = false
   let panelDistinctAgents = false
   for (let index = 0; index < argv.length; index += 1) {
+    const takeValue = (name) => { const v = argv[++index]; if (typeof v !== 'string' || v.startsWith('--') || v.trim() === '') refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, `missing value for ${name}`); return v }
     const argument = argv[index]
     if (argument === '--pr') {
       if (pr !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --pr option')
@@ -165,6 +176,24 @@ export function parseMainArgs(argv) {
         refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'missing value for --pr')
       }
       pr = positivePr(value)
+    } else if (argument === '--local') {
+      if (local) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --local option')
+      local = true
+    } else if (argument === '--repo') {
+      if (repo !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --repo option')
+      repo = takeValue('--repo')
+    } else if (argument === '--base') {
+      if (base !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --base option')
+      base = takeValue('--base')
+    } else if (argument === '--model-reviewer') {
+      if (modelReviewer !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --model-reviewer option')
+      modelReviewer = takeValue('--model-reviewer')
+      modelReviewer = modelReviewer.trim()
+      const slash = modelReviewer.indexOf('/')
+      if (slash <= 0 || slash >= modelReviewer.length - 1 || modelReviewer.slice(0, slash).trim() === '' || modelReviewer.slice(slash + 1).trim() === '' || /\s/.test(modelReviewer)) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'invalid value for --model-reviewer: expected <provider>/<model>')
+    } else if (argument === '--artifact-dir') {
+      if (artifactDir !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --artifact-dir option')
+      artifactDir = takeValue('--artifact-dir')
     } else if (argument === '--request-changes') {
       if (requestChanges) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'duplicate --request-changes option')
       requestChanges = true
@@ -181,10 +210,13 @@ export function parseMainArgs(argv) {
       refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, `unknown option: ${String(argument)}`)
     }
   }
-  if (pr === null) {
-    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]')
+  if (local && pr !== null) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, '--local and --pr conflict: choose exactly one mode')
+  if (!local && pr === null) {
+    refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, 'usage: node scripts/factory/pr-review.mjs --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents] | --local [--repo <path>] [--base <ref>] [--model-reviewer <provider/model>] [--artifact-dir <path>] [--no-post] [--panel] [--panel-distinct-agents]')
   }
-  return { pr, requestChanges, noPost, panel, panelDistinctAgents }
+  if (!local && (repo !== null || base !== null)) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, '--repo and --base are local-only options')
+  if (local && requestChanges) refuse(PR_REVIEW_REFUSALS.MALFORMED_PR, '--request-changes is posting-only and cannot be used with --local')
+  return { pr, local, repo, base, modelReviewer, artifactDir, requestChanges, noPost, panel, panelDistinctAgents }
 }
 
 function parseJson(value) {
@@ -658,27 +690,134 @@ async function postReview(pr, report, config, d) {
   return { ...report, posted: true, review_body: body }
 }
 
-export async function runPrReview(input = {}, maybeDeps = {}) {
-  const config = input && typeof input === 'object' && !Array.isArray(input)
-    ? input
-    : { pr: input, deps: maybeDeps }
-  const pr = positivePr(config.pr)
-  const depConfig = { ...(config.deps || maybeDeps || {}) }
-  if (config.checkout !== undefined) depConfig.checkout = config.checkout
-  if (config.tempRoot !== undefined) depConfig.tempRoot = config.tempRoot
-  const d = normalDeps(depConfig)
-  const metadata = await resolvePullRequest(pr, d)
-  const base = await resolveBase(metadata.head_sha, d)
-  let diff
-  let changedFiles
-  try {
-    diff = await gitText(d, ['diff', `${base}...${metadata.head_sha}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the PR')
-    const changedText = await gitText(d, ['diff', '--name-only', '-z', `${base}...${metadata.head_sha}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not list changed files')
-    changedFiles = parseChangedFiles(changedText)
-  } catch (error) {
-    throw error
-  }
+function buildBootArgs(config, task, worktree) {
+  const bootArgs = config.panel
+    ? ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer,tech-lead,lead', '--profile', 'code_review']
+    : ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer', '--profile', 'code_review']
+  if (config.modelReviewer) bootArgs.push('--model-reviewer', config.modelReviewer)
+  if (config.panelDistinctAgents) bootArgs.push('--panel-distinct-agents')
+  return bootArgs
+}
 
+async function safeGitOutput(d, args, cwd) {
+  try {
+    const result = await invoke(d.git, args, { cwd: cwd || d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
+    if (!commandSucceeded(result)) return null
+    const text = commandOutput(result)
+    const trimmed = (text.endsWith('\n') ? text.slice(0, -1) : text).trim()
+    return trimmed === '' ? null : trimmed
+  } catch { return null }
+}
+
+async function writeReviewArtifact({ d, artifactDir, repo, branch, head, base, mergeBase, dirty, report, error, model, rulesCommit, reviewBody }) {
+  const artifactVerdict = error ? 'unmeasured' : report.outcome === 'no-findings' ? 'pass' : 'changes'
+  const artifact = { repo, branch, head, base, merge_base: mergeBase, dirty, verdict: artifactVerdict, verdict_reason: error ? error.reason : report.outcome, model: model ?? null, rules_ref: 'HEAD', rules_commit: rulesCommit ?? null, created_at: new Date().toISOString() }
+  try {
+    mkdirSync(artifactDir, { recursive: true })
+    const mdPath = join(artifactDir, `${head}.md`)
+    const jsonPath = join(artifactDir, `${head}.json`)
+    const markdown = reviewBody ?? `# Review ${artifactVerdict}\n\n${artifact.verdict_reason}\n`
+    await d.writeFile(mdPath, markdown, 'utf8')
+    const tmpPath = join(artifactDir, `${head}.json.tmp-${String(process.pid)}`)
+    await d.writeFile(tmpPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8')
+    renameSync(tmpPath, jsonPath)
+  } catch (cause) {
+    if (cause instanceof PrReviewError) throw cause
+    refuse(PR_REVIEW_REFUSALS.ARTIFACT_WRITE_FAILED, `cannot write review artifact: ${errorText(cause)}`)
+  }
+  return artifact
+}
+
+async function checkCleanWorktree(d) {
+  let result
+  try {
+    result = await invoke(d.git, ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
+  } catch (error) {
+    refuse(PR_REVIEW_REFUSALS.DIRTY_WORKTREE, `git status could not prove a clean worktree: ${errorText(error)}`)
+  }
+  if (!commandSucceeded(result)) refuse(PR_REVIEW_REFUSALS.DIRTY_WORKTREE, `git status could not prove a clean worktree: ${commandFailure(result, 'git status failed')}`)
+  const dirty = commandOutput(result).length > 0
+  if (dirty) refuse(PR_REVIEW_REFUSALS.DIRTY_WORKTREE, 'worktree has uncommitted changes or untracked files')
+}
+
+function shaFrom(text, reason, detail) {
+  const sha = text.endsWith('\n') ? text.slice(0, -1) : text
+  if (!SHA.test(sha)) refuse(reason, detail)
+  return sha
+}
+
+async function resolveLocalHead(d) {
+  const text = await gitText(d, ['rev-parse', '--verify', 'HEAD'], PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA, 'git rev-parse could not resolve HEAD')
+  return shaFrom(text, PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA, 'git rev-parse returned a malformed HEAD SHA')
+}
+
+async function resolveLocalBaseSha(ref, d) {
+  const text = await gitText(d, ['rev-parse', '--verify', ref], PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `git rev-parse could not resolve base ${ref}`)
+  return shaFrom(text, PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `base ref ${ref} resolved to a malformed SHA`)
+}
+
+async function resolveLocalBaseRef(d, explicit) {
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    const name = explicit.trim()
+    const sha = await resolveLocalBaseSha(name, d)
+    return { baseRef: name, baseSha: sha }
+  }
+  for (const candidate of ['origin/HEAD', 'origin/main', 'main']) {
+    let result
+    try {
+      result = await invoke(d.git, ['rev-parse', '--verify', candidate], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
+    } catch { continue }
+    if (!commandSucceeded(result)) continue
+    let sha
+    try {
+      sha = shaFrom(commandOutput(result), PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `base ref ${candidate} resolved to a malformed SHA`)
+    } catch { continue }
+    return { baseRef: candidate, baseSha: sha }
+  }
+  refuse(PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, 'no local base ref resolved among origin/HEAD, origin/main, main')
+}
+
+async function resolveLocalMergeBase(baseRef, head, d) {
+  const text = await gitText(d, ['merge-base', baseRef, head], PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `git merge-base could not resolve ${baseRef}`)
+  return shaFrom(text, PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, 'git merge-base returned a malformed review base SHA')
+}
+
+async function resolveLocalSubjects(mergeBase, head, d) {
+  const text = await gitText(d, ['log', '--format=%s', `${mergeBase}..${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git log could not read commit subjects')
+  const stripped = text.endsWith('\n') ? text.slice(0, -1) : text
+  const subjects = stripped === '' ? [] : stripped.split('\n')
+  return { title: subjects[0] ?? '', body: subjects.slice(1).join('\n') }
+}
+
+async function probeWorktreeDirty(d) {
+  try {
+    const result = await invoke(d.git, ['status', '--porcelain', '-z', '--untracked-files=all'], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
+    if (!commandSucceeded(result)) return null
+    return commandOutput(result).length > 0
+  } catch { return null }
+}
+
+async function emitReviewArtifact({ d, config, head, base, mergeBase, dirty, report, error, reviewBody }) {
+  const repo = await safeGitOutput(d, ['rev-parse', '--show-toplevel'])
+  const branch = await safeGitOutput(d, ['rev-parse', '--abbrev-ref', 'HEAD'])
+  const rulesCommit = await safeGitOutput(d, ['rev-parse', '--verify', 'HEAD'])
+  return writeReviewArtifact({ d, artifactDir: config.artifactDir.trim(), repo, branch, head, base, mergeBase, dirty, report: report ?? { outcome: 'findings' }, error: error ?? null, model: config.modelReviewer ?? null, rulesCommit, reviewBody })
+}
+
+async function emitFailureArtifact(emit, primary) {
+  try { await emit() } catch (artifactError) {
+    if (artifactError instanceof PrReviewError && artifactError.reason === PR_REVIEW_REFUSALS.ARTIFACT_WRITE_FAILED) {
+      throw new PrReviewError(PR_REVIEW_REFUSALS.ARTIFACT_WRITE_FAILED, `${artifactError.detail} (primary ${primary.reason}: ${primary.detail})`)
+    }
+    throw primary
+  }
+}
+
+function asReviewError(error) {
+  return error instanceof PrReviewError ? error : new PrReviewError(PR_REVIEW_REFUSALS.CREW_FAILED, errorText(error))
+}
+
+async function runReviewLifecycle({ d, config, task, head, reviewBase, reportBase, extra, title, body, diff, changedFiles, worktreePrefix }) {
   let root = null
   let worktree = null
   let worktreeAttempted = false
@@ -688,7 +827,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   let removalError = null
   let report = null
   try {
-    root = await d.mkdtemp(join(d.tempRoot, 'pr-review-'))
+    root = await d.mkdtemp(join(d.tempRoot, worktreePrefix))
     if (typeof root !== 'string' || root.trim() === '') refuse(PR_REVIEW_REFUSALS.WORKTREE_ADD_FAILED, 'temporary review root was not allocated')
     worktree = join(root, 'worktree')
     const briefPath = join(root, 'brief.md')
@@ -699,30 +838,24 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       skill = await d.readFile(join(d.checkout, 'skills/pr-review/SKILL.md'), 'utf8')
       rubric = await d.readFile(join(d.checkout, 'skills/pr-review/references/rubric.md'), 'utf8')
       falsification = await d.readFile(join(d.checkout, 'skills/pr-review/references/falsification.md'), 'utf8')
-      await d.writeFile(briefPath, buildBrief({ title: metadata.title, body: metadata.body, diff, skill: textOf(skill), rubric: textOf(rubric), falsification: textOf(falsification), base, head: metadata.head_sha, panel: config.panel === true }), 'utf8')
+      await d.writeFile(briefPath, buildBrief({ title, body, diff, skill: textOf(skill), rubric: textOf(rubric), falsification: textOf(falsification), base: reviewBase, head, panel: config.panel === true }), 'utf8')
     } catch (error) {
       refuse(PR_REVIEW_REFUSALS.REVIEW_INPUT_UNREADABLE, `cannot build the review brief: ${errorText(error)}`)
     }
-
     worktreeAttempted = true
     let added
     try {
-      added = await invoke(d.git, ['worktree', 'add', '--detach', worktree, metadata.head_sha], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
+      added = await invoke(d.git, ['worktree', 'add', '--detach', worktree, head], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
     } catch (error) {
       refuse(PR_REVIEW_REFUSALS.WORKTREE_ADD_FAILED, `git worktree add failed: ${errorText(error)}`)
     }
     if (!commandSucceeded(added)) refuse(PR_REVIEW_REFUSALS.WORKTREE_ADD_FAILED, `git worktree add failed: ${commandFailure(added, 'git worktree add failed')}`)
-
-    const task = `pr-review-${pr}`
     bootAttempted = true
-    const bootArgs = config.panel
-      ? ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer,tech-lead,lead', '--profile', 'code_review']
-      : ['boot', '--task', task, '--checkout', worktree, '--roles', 'reviewer', '--profile', 'code_review']
-    if (config.panelDistinctAgents) bootArgs.push('--panel-distinct-agents')
+    const bootArgs = buildBootArgs(config, task, worktree)
     requireCommandSuccess(await crewCommand(d, bootArgs, worktree), 'crew boot')
     const runArgs = config.panel
-      ? ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_panel', '--review-base-sha', base, '--review-head-sha', metadata.head_sha, '--keep']
-      : ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_only', '--review-base-sha', base, '--review-head-sha', metadata.head_sha, '--keep']
+      ? ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_panel', '--review-base-sha', reviewBase, '--review-head-sha', head, '--keep']
+      : ['run', '--task', task, '--checkout', worktree, '--brief-file', briefPath, '--execution', 'review_only', '--review-base-sha', reviewBase, '--review-head-sha', head, '--keep']
     const runResult = await crewCommand(d, runArgs, worktree)
     const terminal = parseTerminalLine(commandOutput(runResult))
     if (terminal.status === 'escalation') {
@@ -735,13 +868,12 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       refuse(PR_REVIEW_REFUSALS.CREW_FAILED, `panel refusal ${escalationReason}${escalationSeat ? ` (${escalationSeat})` : ''}`)
     }
     const pointer = resolve(terminal.task_return)
-    const accepted = await readTaskEnvelope(pointer, { base, head: metadata.head_sha }, d, config.panel === true, changedFiles)
+    const accepted = await readTaskEnvelope(pointer, { base: reviewBase, head }, d, config.panel === true, changedFiles)
     const counts = reportCounts(accepted.values, changedFiles)
     report = {
-      pr: pr,
-      title: metadata.title,
-      base,
-      head: metadata.head_sha,
+      title,
+      base: reportBase,
+      head,
       outcome: accepted.values.outcome,
       findings: accepted.values.findings,
       reviewed_files: accepted.values.reviewed_files,
@@ -752,13 +884,14 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
       terminal_status: terminal.status,
       task_return: pointer,
       brief_file: briefPath,
+      ...extra,
     }
   } catch (error) {
     primaryError = error instanceof PrReviewError ? error : new PrReviewError(PR_REVIEW_REFUSALS.CREW_FAILED, errorText(error))
   } finally {
     if (bootAttempted) {
       try {
-        const teardown = await crewCommand(d, ['teardown', '--task', `pr-review-${pr}`, '--checkout', worktree], worktree)
+        const teardown = await crewCommand(d, ['teardown', '--task', task, '--checkout', worktree], worktree)
         requireCommandSuccess(teardown, 'crew teardown')
       } catch (error) {
         teardownError = error instanceof PrReviewError && error.reason === PR_REVIEW_REFUSALS.CREW_FAILED
@@ -782,7 +915,104 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   if (primaryError) throw primaryError
   if (removalError) throw removalError
   if (teardownError) throw teardownError
-  return postReview(pr, report, config, d)
+  return report
+}
+
+export async function runPrReview(input = {}, maybeDeps = {}) {
+  const config = input && typeof input === 'object' && !Array.isArray(input)
+    ? input
+    : { pr: input, deps: maybeDeps }
+  const pr = positivePr(config.pr)
+  const depConfig = { ...(config.deps || maybeDeps || {}) }
+  if (config.checkout !== undefined) depConfig.checkout = config.checkout
+  if (config.tempRoot !== undefined) depConfig.tempRoot = config.tempRoot
+  const d = normalDeps(depConfig)
+  const wantArtifact = typeof config.artifactDir === 'string' && config.artifactDir.trim() !== ''
+  const metadata = await resolvePullRequest(pr, d)
+  const head = metadata.head_sha
+  let base = null
+  let diff = null
+  let changedFiles = null
+  try {
+    base = await resolveBase(head, d)
+    diff = await gitText(d, ['diff', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the PR')
+    const changedText = await gitText(d, ['diff', '--name-only', '-z', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not list changed files')
+    changedFiles = parseChangedFiles(changedText)
+  } catch (stageError) {
+    const failure = asReviewError(stageError)
+    if (wantArtifact) await emitFailureArtifact(() => emitReviewArtifact({ d, config, head, base: null, mergeBase: null, dirty: null, report: null, error: failure, reviewBody: null }), failure)
+    throw failure
+  }
+  const dirty = wantArtifact ? await probeWorktreeDirty(d) : false
+  const prBaseForArtifact = async () => {
+    const originMain = await safeGitOutput(d, ['rev-parse', '--verify', 'origin/main'])
+    return originMain !== null && SHA.test(originMain) ? originMain : null
+  }
+  let report = null
+  try {
+    report = await runReviewLifecycle({ d, config, task: `pr-review-${pr}`, head, reviewBase: base, reportBase: base, extra: { pr }, title: metadata.title, body: metadata.body, diff, changedFiles, worktreePrefix: 'pr-review-' })
+  } catch (lifecycleError) {
+    if (wantArtifact) await emitFailureArtifact(() => emitReviewArtifact({ d, config, head, base: null, mergeBase: base, dirty, report: null, error: lifecycleError, reviewBody: null }), lifecycleError)
+    throw lifecycleError
+  }
+  let posted
+  try {
+    posted = await postReview(pr, report, config, d)
+  } catch (postError) {
+    const failure = postError instanceof PrReviewError ? postError : new PrReviewError(PR_REVIEW_REFUSALS.POST_FAILED, errorText(postError))
+    if (wantArtifact) await emitFailureArtifact(() => emitReviewArtifact({ d, config, head, base: null, mergeBase: base, dirty, report, error: failure, reviewBody: renderReviewBody(report, config.requestChanges ? 'REQUEST_CHANGES' : 'COMMENT').body }), failure)
+    throw failure
+  }
+  if (wantArtifact) {
+    const artifact = await emitReviewArtifact({ d, config, head, base: await prBaseForArtifact(), mergeBase: base, dirty, report, error: null, reviewBody: posted.review_body })
+    return { ...posted, artifact }
+  }
+  return posted
+}
+
+export async function runLocalReview(input = {}, maybeDeps = {}) {
+  const config = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const depConfig = { ...(config.deps || maybeDeps || {}) }
+  if (typeof config.repo === 'string' && config.repo.trim() !== '') depConfig.checkout = config.repo
+  else if (config.checkout !== undefined) depConfig.checkout = config.checkout
+  if (config.tempRoot !== undefined) depConfig.tempRoot = config.tempRoot
+  const d = normalDeps(depConfig)
+  const wantArtifact = typeof config.artifactDir === 'string' && config.artifactDir.trim() !== ''
+  await checkCleanWorktree(d)
+  const head = await resolveLocalHead(d)
+  let baseRef = null
+  let baseSha = null
+  let mergeBase = null
+  let subjects = null
+  let diff = null
+  let changedFiles = null
+  try {
+    ;({ baseRef, baseSha } = await resolveLocalBaseRef(d, typeof config.base === 'string' ? config.base : null))
+    mergeBase = await resolveLocalMergeBase(baseRef, head, d)
+    subjects = await resolveLocalSubjects(mergeBase, head, d)
+    diff = await gitText(d, ['diff', `${mergeBase}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the local range')
+    const changedText = await gitText(d, ['diff', '--name-only', '-z', `${mergeBase}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not list changed files')
+    changedFiles = parseChangedFiles(changedText)
+  } catch (stageError) {
+    const failure = asReviewError(stageError)
+    if (wantArtifact) await emitFailureArtifact(() => emitReviewArtifact({ d, config, head, base: null, mergeBase: null, dirty: false, report: null, error: failure, reviewBody: null }), failure)
+    throw failure
+  }
+  const task = `pr-review-local-${head.slice(0, 12)}`
+  let report = null
+  try {
+    report = await runReviewLifecycle({ d, config, task, head, reviewBase: mergeBase, reportBase: baseSha, extra: { task, base_ref: baseRef, merge_base: mergeBase }, title: subjects.title, body: subjects.body, diff, changedFiles, worktreePrefix: 'pr-review-local-' })
+  } catch (lifecycleError) {
+    if (wantArtifact) await emitFailureArtifact(() => emitReviewArtifact({ d, config, head, base: baseSha, mergeBase, dirty: false, report: null, error: lifecycleError, reviewBody: null }), lifecycleError)
+    throw lifecycleError
+  }
+  const rendered = renderReviewBody(report, 'COMMENT')
+  const outcome = { ...report, posted: false, reason: 'local', review_body: rendered.body }
+  if (wantArtifact) {
+    const artifact = await emitReviewArtifact({ d, config, head, base: baseSha, mergeBase, dirty: false, report, error: null, reviewBody: rendered.body })
+    return { ...outcome, artifact }
+  }
+  return outcome
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
@@ -793,7 +1023,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   }
   try {
     const config = parseMainArgs(argv)
-    const runner = typeof deps.runPrReview === 'function' ? deps.runPrReview : runPrReview
+    const runner = config.local
+      ? (typeof deps.runLocalReview === 'function' ? deps.runLocalReview : runLocalReview)
+      : (typeof deps.runPrReview === 'function' ? deps.runPrReview : runPrReview)
     const result = await runner({ ...config, deps })
     if (config.noPost) {
       if (typeof result?.review_body !== 'string') refuse(PR_REVIEW_REFUSALS.POST_FAILED, 'render-only review body is unavailable')

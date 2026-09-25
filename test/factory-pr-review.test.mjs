@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { symlinkSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { symlinkSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { scratchDir } from './helpers.mjs'
@@ -14,6 +14,7 @@ import { canonicalWorktreePath,
   reportCounts,
   removeWorktreeDefault,
   runPrReview,
+  runLocalReview,
   main,
 } from '../scripts/factory/pr-review.mjs'
 
@@ -50,6 +51,16 @@ function fixture({
   taskValue = null,
   ghViews = null,
   postResult = { status: 0, stdout: '' },
+  statusOutput = '',
+  statusMode = 'success',
+  headSha = HEAD40,
+  baseRefMap = null,
+  defaultBaseRef = 'origin/main',
+  mergeBase = BASE40,
+  logSubjects = ['local subject one', 'local subject two'],
+  toplevel = null,
+  branch = 'main',
+  escalateRun = false,
 } = {}) {
   const root = scratchDir('pr-review-fixture-')
   const checkout = join(root, 'checkout')
@@ -85,7 +96,29 @@ function fixture({
     },
     git: (args, options) => {
       calls.git.push({ args: [...args], options })
-      if (args[0] === 'merge-base') return { status: 0, stdout: `${BASE40}\n` }
+      if (args[0] === 'status') {
+        if (statusMode === 'fail') return { status: 1, stderr: 'status failed' }
+        if (statusMode === 'unknown') return { error: new Error('status unknown') }
+        return { status: 0, stdout: statusOutput }
+      }
+      if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') return { status: 0, stdout: `${headSha}\n` }
+      if (args[0] === 'rev-parse' && args[1] === '--verify') {
+        const ref = args[2]
+        if (baseRefMap && Object.prototype.hasOwnProperty.call(baseRefMap, ref)) {
+          const sha = baseRefMap[ref]
+          if (sha === null) return { status: 1, stderr: `unknown ref ${ref}` }
+          return { status: 0, stdout: `${sha}\n` }
+        }
+        if (ref === 'origin/main' || ref === 'origin/HEAD' || ref === 'main') {
+          if (ref === defaultBaseRef || (!baseRefMap && ref === 'origin/main')) return { status: 0, stdout: `${BASE40}\n` }
+          return { status: 1, stderr: `unknown ref ${ref}` }
+        }
+        return { status: 0, stdout: `${BASE40}\n` }
+      }
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return { status: 0, stdout: `${toplevel ?? checkout}\n` }
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: `${branch}\n` }
+      if (args[0] === 'merge-base') return { status: 0, stdout: `${mergeBase}\n` }
+      if (args[0] === 'log') return { status: 0, stdout: logSubjects.length === 0 ? '' : `${logSubjects.join('\n')}\n` }
       if (args[0] === 'diff' && args[1] === '--name-only') return { status: 0, stdout: 'src/a.mjs\0src/b.mjs\0' }
       if (args[0] === 'diff') return { status: 0, stdout: 'diff --git a/src/a.mjs b/src/a.mjs\n' }
       if (args[0] === 'worktree' && args[1] === 'add') {
@@ -102,6 +135,7 @@ function fixture({
       if (args[0] === 'run') {
         if (runMode === 'refusal') return { status: 1, stdout: 'crew refused before a terminal envelope\n' }
         if (runMode === 'crash') throw new Error('crew driver crashed')
+        if (escalateRun) return { status: 0, stdout: `progress\n${terminal(pointer, 'escalation')}\n` }
         return { status: 0, stdout: `progress\n${terminal(pointer)}\n` }
       }
       if (args[0] === 'teardown') {
@@ -165,7 +199,7 @@ async function rejectedReason(promise, reason) {
   await assert.rejects(promise, (error) => error instanceof PrReviewError && error.reason === reason)
 }
 
-test('PR_REVIEW_REFUSALS is the closed 14-value vocabulary', () => {
+test('PR_REVIEW_REFUSALS is the closed 17-value vocabulary', () => {
   const expected = [
     'malformed-pr',
     'unknown-pr',
@@ -181,6 +215,9 @@ test('PR_REVIEW_REFUSALS is the closed 14-value vocabulary', () => {
     'teardown-failed',
     'head-moved',
     'post-failed',
+    'dirty-worktree',
+    'local-base-unresolved',
+    'artifact-write-failed',
   ]
   const actual = Object.values(PR_REVIEW_REFUSALS)
   assert.equal(Object.isFrozen(PR_REVIEW_REFUSALS), true)
@@ -642,10 +679,13 @@ test('POST-E1', async () => {
 })
 
 test('POST-cli-refusals', () => {
-  assert.deepEqual(parseMainArgs(['--pr', '48']), { pr: '48', requestChanges: false, noPost: false, panel: false, panelDistinctAgents: false })
-  assert.deepEqual(parseMainArgs(['--request-changes', '--no-post', '--pr', '49']), { pr: '49', requestChanges: true, noPost: true, panel: false, panelDistinctAgents: false })
-  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel']), { pr: '50', requestChanges: false, noPost: false, panel: true, panelDistinctAgents: false })
-  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel', '--panel-distinct-agents']), { pr: '50', requestChanges: false, noPost: false, panel: true, panelDistinctAgents: true })
+  const base48 = { pr: '48', local: false, repo: null, base: null, modelReviewer: null, artifactDir: null, requestChanges: false, noPost: false, panel: false, panelDistinctAgents: false }
+  assert.deepEqual(parseMainArgs(['--pr', '48']), base48)
+  assert.deepEqual(parseMainArgs(['--request-changes', '--no-post', '--pr', '49']), { ...base48, pr: '49', requestChanges: true, noPost: true })
+  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel']), { ...base48, pr: '50', panel: true })
+  assert.deepEqual(parseMainArgs(['--pr', '50', '--panel', '--panel-distinct-agents']), { ...base48, pr: '50', panel: true, panelDistinctAgents: true })
+  assert.deepEqual(parseMainArgs(['--local']), { pr: null, local: true, repo: null, base: null, modelReviewer: null, artifactDir: null, requestChanges: false, noPost: false, panel: false, panelDistinctAgents: false })
+  assert.deepEqual(parseMainArgs(['--local', '--repo', '/tmp/r', '--base', 'main', '--model-reviewer', 'openai/gpt-5', '--artifact-dir', '/tmp/a', '--no-post']), { pr: null, local: true, repo: '/tmp/r', base: 'main', modelReviewer: 'openai/gpt-5', artifactDir: '/tmp/a', requestChanges: false, noPost: true, panel: false, panelDistinctAgents: false })
   for (const args of [
     ['--pr', '48', '--pr', '49'],
     ['--pr', '48', '--request-changes', '--request-changes'],
@@ -654,6 +694,18 @@ test('POST-cli-refusals', () => {
     ['--pr', '48', '--panel-distinct-agents', '--panel-distinct-agents'],
     ['--pr', '48', '--unknown'],
     ['--pr', '48', '--approve'],
+    ['--local', '--pr', '17'],
+    ['--local', '--local'],
+    ['--pr', '48', '--repo', '/tmp/r'],
+    ['--pr', '48', '--base', 'main'],
+    ['--local', '--request-changes'],
+    ['--local', '--repo', '/tmp/a', '--repo', '/tmp/b'],
+    ['--local', '--model-reviewer', 'openai/gpt-5', '--model-reviewer', 'openai/gpt-5'],
+    ['--local', '--artifact-dir', '/tmp/a', '--artifact-dir', '/tmp/b'],
+    ['--local', '--repo'],
+    ['--local', '--model-reviewer', 'blank'],
+    ['--local', '--model-reviewer', ''],
+    ['--local', '--artifact-dir', '   '],
   ]) assert.throws(() => parseMainArgs(args), (error) => error.reason === 'malformed-pr')
 })
 
@@ -1005,5 +1057,199 @@ test('the review brief carries skill, rubric and falsification rules in order', 
   }
   assert.ok(at('## Review skill') < at('## Review rubric') && at('## Review rubric') < at('## Falsification and adjudication'))
   assert.ok(current.calls.reads.some((path) => path.endsWith('/skills/pr-review/references/falsification.md')), 'the falsification reference is read from the checkout')
+  assertCleaned(current)
+})
+
+const LOCAL_HEAD = 'b'.repeat(40)
+const LOCAL_BASEREF = 'f'.repeat(40)
+const LOCAL_MERGE = 'e'.repeat(40)
+
+function localValues(outcome = 'findings') {
+  return outcome === 'no-findings'
+    ? { base: LOCAL_MERGE, head: LOCAL_HEAD, outcome: 'no-findings', findings: [], reviewed_files: ['src/a.mjs'], unreviewable_files: [] }
+    : { ...DEFAULT_VALUES, base: LOCAL_MERGE, head: LOCAL_HEAD }
+}
+
+test('accept-L1', async () => {
+  const current = fixture({
+    headSha: LOCAL_HEAD,
+    baseRefMap: { 'origin/main': LOCAL_BASEREF },
+    mergeBase: LOCAL_MERGE,
+    logSubjects: ['local title one', 'local body one', 'local body two'],
+    values: localValues(),
+  })
+  const report = await runLocalReview({ local: true, base: 'origin/main', modelReviewer: 'test/model-x', deps: current.deps })
+  assert.notEqual(LOCAL_BASEREF, LOCAL_MERGE)
+  const run = current.calls.crew.find(({ args }) => args[0] === 'run')
+  assert.ok(run)
+  assert.equal(run.args[run.args.indexOf('--review-head-sha') + 1], LOCAL_HEAD)
+  assert.equal(run.args[run.args.indexOf('--review-base-sha') + 1], LOCAL_MERGE)
+  assert.equal(report.head, LOCAL_HEAD)
+  assert.equal(report.merge_base, LOCAL_MERGE)
+  assert.equal(report.base, LOCAL_BASEREF)
+  assert.equal(report.title, 'local title one')
+  assert.equal(report.task, `pr-review-local-${LOCAL_HEAD.slice(0, 12)}`)
+  assert.equal(current.calls.gh.length, 0)
+  const mergeCall = current.calls.git.find(({ args }) => args[0] === 'merge-base')
+  assert.deepEqual(mergeCall.args, ['merge-base', 'origin/main', LOCAL_HEAD])
+  assertCleaned(current)
+  const fallback = fixture({
+    headSha: LOCAL_HEAD,
+    baseRefMap: { 'origin/HEAD': null, 'origin/main': LOCAL_BASEREF, main: BASE40 },
+    mergeBase: LOCAL_MERGE,
+    logSubjects: [],
+    values: { ...DEFAULT_VALUES, base: LOCAL_MERGE, head: LOCAL_HEAD },
+  })
+  const fallbackReport = await runLocalReview({ local: true, deps: fallback.deps })
+  assert.equal(fallbackReport.title, '')
+  const fallbackRun = fallback.calls.crew.find(({ args }) => args[0] === 'run')
+  assert.equal(fallbackRun.args[fallbackRun.args.indexOf('--review-base-sha') + 1], LOCAL_MERGE)
+  assert.equal(fallback.calls.gh.length, 0)
+  assertCleaned(fallback)
+})
+
+test('accept-L2', async () => {
+  const current = fixture({ statusOutput: ' M src/dirty.mjs\0', values: localValues() })
+  await assert.rejects(runLocalReview({ local: true, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'dirty-worktree')
+  assert.equal(current.calls.git.filter(({ args }) => args[0] === 'worktree' && args[1] === 'add').length, 0)
+  assert.equal(current.calls.gh.length, 0)
+  assert.equal(current.calls.remove, 0)
+})
+
+test('accept-L3', async () => {
+  assert.throws(() => parseMainArgs(['--local', '--pr', '17']), (error) => error instanceof PrReviewError && error.reason === 'malformed-pr')
+  const current = fixture()
+  const errors = []
+  const code = await main(['--local', '--pr', '17'], { ...current.deps, stderr: (line) => errors.push(String(line)) })
+  assert.equal(code, 2)
+  assert.match(errors.join(''), /malformed-pr/)
+  assert.equal(current.calls.git.length, 0)
+  assert.equal(current.calls.gh.length, 0)
+  assert.equal(current.calls.remove, 0)
+})
+
+test('accept-O1', async () => {
+  const model = 'test/reviewer-1'
+  const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/main': LOCAL_BASEREF }, mergeBase: LOCAL_MERGE, logSubjects: ['t'], values: localValues() })
+  await runLocalReview({ local: true, modelReviewer: model, deps: current.deps })
+  const boot = current.calls.crew.find(({ args }) => args[0] === 'boot')
+  assert.deepEqual(boot.args, ['boot', '--task', `pr-review-local-${LOCAL_HEAD.slice(0, 12)}`, '--checkout', current.worktree, '--roles', 'reviewer', '--profile', 'code_review', '--model-reviewer', model])
+  assertCleaned(current)
+  const control = fixture()
+  await runPrReview({ pr: 17, deps: control.deps })
+  const controlBoot = control.calls.crew.find(({ args }) => args[0] === 'boot')
+  assert.deepEqual(controlBoot.args, ['boot', '--task', 'pr-review-17', '--checkout', control.worktree, '--roles', 'reviewer', '--profile', 'code_review'])
+  assert.equal(controlBoot.args.includes('--model-reviewer'), false)
+  assertCleaned(control)
+})
+
+test('accept-A1', async () => {
+  for (const outcome of ['no-findings', 'findings']) {
+    const dir = join(scratchDir('pr-review-artifact-'), 'out')
+    const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/main': LOCAL_BASEREF }, mergeBase: LOCAL_MERGE, logSubjects: ['t'], values: localValues(outcome), toplevel: '/repo/top', branch: 'feature-x' })
+    const report = await runLocalReview({ local: true, modelReviewer: 'test/model-a', artifactDir: dir, deps: current.deps })
+    const jsonPath = join(dir, `${LOCAL_HEAD}.json`)
+    const mdPath = join(dir, `${LOCAL_HEAD}.md`)
+    assert.equal(existsSync(jsonPath), true)
+    assert.equal(existsSync(mdPath), true)
+    const artifact = JSON.parse(readFileSync(jsonPath, 'utf8'))
+    assert.deepEqual(Object.keys(artifact).sort(), ['base', 'branch', 'created_at', 'dirty', 'head', 'merge_base', 'model', 'repo', 'rules_commit', 'rules_ref', 'verdict', 'verdict_reason'].sort())
+    assert.equal(artifact.repo, '/repo/top')
+    assert.equal(artifact.branch, 'feature-x')
+    assert.equal(artifact.head, LOCAL_HEAD)
+    assert.equal(artifact.base, LOCAL_BASEREF)
+    assert.equal(artifact.merge_base, LOCAL_MERGE)
+    assert.equal(artifact.dirty, false)
+    assert.equal(artifact.model, 'test/model-a')
+    assert.equal(artifact.rules_ref, 'HEAD')
+    assert.equal(artifact.rules_commit, LOCAL_HEAD)
+    assert.match(artifact.created_at, /^\d{4}-\d{2}-\d{2}T/)
+    assert.equal(artifact.verdict, outcome === 'no-findings' ? 'pass' : 'changes')
+    assert.equal(readFileSync(mdPath, 'utf8'), report.review_body)
+    assertCleaned(current)
+  }
+})
+
+test('accept-A2', async () => {
+  const dir = join(scratchDir('pr-review-artifact-'), 'out')
+  const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/main': LOCAL_BASEREF }, mergeBase: LOCAL_MERGE, logSubjects: ['t'], values: localValues(), escalateRun: true, taskValue: { status: 'escalation', details: { reason: 'crew-failed' } } })
+  await assert.rejects(runLocalReview({ local: true, artifactDir: dir, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'crew-failed')
+  const artifact = JSON.parse(readFileSync(join(dir, `${LOCAL_HEAD}.json`), 'utf8'))
+  assert.equal(artifact.verdict, 'unmeasured')
+  assert.notEqual(artifact.verdict, 'pass')
+  assert.equal(artifact.verdict_reason, 'crew-failed')
+  assert.ok(Object.values(PR_REVIEW_REFUSALS).includes(artifact.verdict_reason))
+  assert.deepEqual(Object.keys(artifact).sort(), ['base', 'branch', 'created_at', 'dirty', 'head', 'merge_base', 'model', 'repo', 'rules_commit', 'rules_ref', 'verdict', 'verdict_reason'].sort())
+  assertCleaned(current)
+  const tearDir = join(scratchDir('pr-review-artifact-'), 'out')
+  const tearing = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/main': LOCAL_BASEREF }, mergeBase: LOCAL_MERGE, logSubjects: ['t'], values: localValues('no-findings'), teardownMode: 'reject' })
+  await assert.rejects(runLocalReview({ local: true, artifactDir: tearDir, deps: tearing.deps }), (error) => error instanceof PrReviewError && error.reason === 'teardown-failed')
+  const tearArtifact = JSON.parse(readFileSync(join(tearDir, `${LOCAL_HEAD}.json`), 'utf8'))
+  assert.equal(tearArtifact.verdict, 'unmeasured')
+  assert.notEqual(tearArtifact.verdict, 'pass')
+})
+
+test('local status failure refuses dirty-worktree before any worktree add', async () => {
+  for (const statusMode of ['fail', 'unknown']) {
+    const current = fixture({ statusMode, values: localValues() })
+    await assert.rejects(runLocalReview({ local: true, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'dirty-worktree')
+    assert.equal(current.calls.git.filter(({ args }) => args[0] === 'worktree' && args[1] === 'add').length, 0)
+    assert.equal(current.calls.gh.length, 0)
+    assert.equal(current.calls.remove, 0)
+  }
+})
+
+test('unresolvable explicit base refuses and writes an unmeasured artifact', async () => {
+  const dir = join(scratchDir('pr-review-artifact-'), 'out')
+  const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'bad-ref': null }, values: localValues() })
+  await assert.rejects(runLocalReview({ local: true, base: 'bad-ref', artifactDir: dir, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'local-base-unresolved')
+  const artifact = JSON.parse(readFileSync(join(dir, `${LOCAL_HEAD}.json`), 'utf8'))
+  assert.equal(artifact.verdict, 'unmeasured')
+  assert.equal(artifact.verdict_reason, 'local-base-unresolved')
+  assert.equal(artifact.base, null)
+  assert.equal(artifact.merge_base, null)
+  assert.equal(artifact.head, LOCAL_HEAD)
+  assert.equal(current.calls.git.filter(({ args }) => args[0] === 'worktree' && args[1] === 'add').length, 0)
+})
+
+test('unresolvable default base writes an unmeasured artifact', async () => {
+  const dir = join(scratchDir('pr-review-artifact-'), 'out')
+  const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/HEAD': null, 'origin/main': null, main: null }, values: localValues() })
+  await assert.rejects(runLocalReview({ local: true, artifactDir: dir, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'local-base-unresolved')
+  const artifact = JSON.parse(readFileSync(join(dir, `${LOCAL_HEAD}.json`), 'utf8'))
+  assert.equal(artifact.verdict, 'unmeasured')
+  assert.equal(artifact.verdict_reason, 'local-base-unresolved')
+  assert.equal(artifact.base, null)
+  assert.equal(artifact.merge_base, null)
+})
+
+test('PR artifact records measured provenance', async () => {
+  const checkoutHead = 'c'.repeat(40)
+  const dir = join(scratchDir('pr-review-artifact-'), 'out')
+  const current = fixture({ headSha: checkoutHead, baseRefMap: { 'origin/main': null }, statusOutput: ' M dirty.mjs', toplevel: '/repo/top', branch: 'feature-y', values: DEFAULT_VALUES })
+  const report = await runPrReview({ pr: 17, artifactDir: dir, noPost: true, deps: current.deps })
+  const artifact = JSON.parse(readFileSync(join(dir, `${HEAD40}.json`), 'utf8'))
+  assert.deepEqual(Object.keys(artifact).sort(), ['base', 'branch', 'created_at', 'dirty', 'head', 'merge_base', 'model', 'repo', 'rules_commit', 'rules_ref', 'verdict', 'verdict_reason'].sort())
+  assert.equal(artifact.head, HEAD40)
+  assert.equal(artifact.base, null)
+  assert.equal(artifact.merge_base, BASE40)
+  assert.equal(artifact.dirty, true)
+  assert.equal(artifact.rules_ref, 'HEAD')
+  assert.equal(artifact.rules_commit, checkoutHead)
+  assert.notEqual(artifact.rules_commit, HEAD40)
+  assert.equal(artifact.verdict, 'changes')
+  assert.equal(readFileSync(join(dir, `${HEAD40}.md`), 'utf8'), report.review_body)
+  assertCleaned(current)
+})
+
+test('artifact write failure surfaces artifact-write-failed', async () => {
+  const dir = join(scratchDir('pr-review-artifact-'), 'out')
+  const current = fixture({ headSha: LOCAL_HEAD, baseRefMap: { 'origin/main': LOCAL_BASEREF }, mergeBase: LOCAL_MERGE, logSubjects: ['t'], values: localValues('no-findings') })
+  const realWrite = current.deps.writeFile
+  current.deps.writeFile = (path, ...rest) => {
+    if (String(path).startsWith(dir)) throw new Error('injected write failure')
+    return realWrite(path, ...rest)
+  }
+  await assert.rejects(runLocalReview({ local: true, artifactDir: dir, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'artifact-write-failed')
   assertCleaned(current)
 })

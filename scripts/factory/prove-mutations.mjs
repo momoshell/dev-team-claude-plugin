@@ -91,8 +91,10 @@ function runGateDefault(gateCmd, cwd) {
 // Diff mode runs detached process groups so a timeout can reap the shell and descendants.
 // A descendant that leaves the group (setsid/detached spawn) is tracked by polling the
 // process table for the run's lineage and is signalled by its own verified group.
-// Blind spot: a descendant that detaches AND loses every tracked ancestor within one
-// poll interval is never sampled, so it cannot be reaped here.
+// A descendant that detaches AND loses every tracked ancestor within one poll interval is
+// never sampled. If it still holds the command's pipes the killed run reports it as a
+// survivor and the proof is FATAL (descendant-escaped). Blind spot: one that also closes
+// its pipes is invisible here and cannot be reaped or reported.
 export const DIFF_RUN_TIMEOUT_MS = 120_000
 export const DIFF_TOTAL_DEADLINE_MS = 720_000
 export const DIFF_DESCENDANT_POLL_MS = 250
@@ -968,9 +970,9 @@ export function diffRunnerUnavailable(cause) {
 
 export function normalizeDiffCommandResult(result) {
   if (!result || typeof result !== 'object') return diffRunnerUnavailable('result-not-object')
-  // A timeout whose process groups could not all be proven dead is not a settled
-  // observation: a survivor could still write the tree after the mutant is restored.
-  if (result.error?.code === 'ETIMEDOUT' && Number(result.reap_survivors) > 0) return diffRunnerUnavailable('result-incomplete')
+  // A killed run whose process groups could not all be proven dead is not a skip: a
+  // survivor can still rewrite the tree after the mutant is restored, so the proof is FATAL.
+  if (Number(result.reap_survivors) > 0) return { available: false, escaped: true, why: DIFF_DESCENDANT_ESCAPED, survivors: Number(result.reap_survivors) }
   if (result.error?.code === 'ETIMEDOUT') return { available: true, timeout: true, ok: false, output: String(result.output || '') }
   if (result.error || result.signal || result.completed === false || result.status === null) return diffRunnerUnavailable('result-incomplete')
   if (typeof result.ok !== 'boolean') return diffRunnerUnavailable('ok-missing')
@@ -985,6 +987,13 @@ export async function runDiffCommand(d, command, checkout, timeout = DIFF_RUN_TI
       env: colourNeutralEnv(process.env),
     }))
   } catch { return diffRunnerUnavailable('runner-threw') }
+}
+
+export const DIFF_DESCENDANT_ESCAPED = 'descendant-escaped'
+// The driver's recovery path reads this record when the runner leaves no report: the one
+// mutant that may still be on disk, so recovery can tell it from an unexplained edit.
+export function diffInflightPath(configPath) {
+  return configPath.endsWith('.json') ? configPath.replace(/\.json$/, '.inflight.json') : `${configPath}.inflight.json`
 }
 
 function diffFatal(why, beforeDigest = null, afterDigest = null) {
@@ -1095,6 +1104,7 @@ export async function runDiffMutationProof(config, deps = {}) {
     let restoreFailure = null
     let runtimeSkip = null
     let runtimeSkipCause = null
+    let escapedResult = null
     try {
       if (!inScope(candidate.path)) { runtimeSkip = 'out-of-scope' }
       const guardWrite = runtimeSkip ? { ok: false, reason: runtimeSkip } : diffTargetGuard(config, candidate, d, canonicalCheckout)
@@ -1108,18 +1118,22 @@ export async function runDiffMutationProof(config, deps = {}) {
           if (reapplied.reason) runtimeSkip = reapplied.reason
           else {
             writeAttempted = true
+            if (typeof deps.inflightPath === 'string') {
+              d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
+            }
             d.writeFile(guardWrite.abs, reapplied.bytes)
             const remaining = () => Math.max(0, totalDeadline - now())
             validationResult = remaining() > 0
               ? await runDiffCommand(d, config.validation_lane, config.checkout, Math.min(runTimeoutMs, remaining()))
               : diffRunnerUnavailable('result-incomplete')
-            if (!validationResult.available || !validationResult.timeout) {
+            if (!validationResult.escaped && (!validationResult.available || !validationResult.timeout)) {
               gateResult = remaining() > 0
                 ? await runDiffCommand(d, config.gate_cmd, config.checkout, Math.min(runTimeoutMs, remaining()))
                 : diffRunnerUnavailable('result-incomplete')
             }
+            escapedResult = [validationResult, gateResult].find((result) => result?.escaped) || null
             const firstUnavailable = !validationResult.available ? validationResult : gateResult && !gateResult.available ? gateResult : null
-            if (firstUnavailable) {
+            if (firstUnavailable && !escapedResult) {
               runtimeSkip = firstUnavailable.why
               runtimeSkipCause = firstUnavailable.cause
             }
@@ -1151,6 +1165,11 @@ export async function runDiffMutationProof(config, deps = {}) {
             ? `checkout path inventory changed while proving ${initial}`
             : `checkout digest changed while proving ${initial}`
       fatal = diffFatal(why, before.digest, after?.digest ?? null)
+      if (escapedResult) fatal.cause = DIFF_DESCENDANT_ESCAPED
+      break
+    }
+    if (escapedResult) {
+      fatal = { ...diffFatal(`${DIFF_DESCENDANT_ESCAPED} while proving ${initial}: ${escapedResult.survivors} process group(s) outlived the killed run and can still rewrite the restored tree`, before.digest, after.digest), cause: DIFF_DESCENDANT_ESCAPED }
       break
     }
     if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
@@ -1254,7 +1273,7 @@ export async function main(argv, deps = {}) {
           [diffSkip({ reason: 'malformed-diff' })])
       }
       if (!report) {
-        try { report = await runDiffMutationProof(config, d) }
+        try { report = await runDiffMutationProof(config, { ...d, inflightPath: diffInflightPath(flags.diffConfig) }) }
         catch (err) {
           report = countDiffReport([], 0, 0, config, 0, null, [diffSkip({ reason: 'runner-unavailable', cause: 'runner-threw' })])
           report.runner_unavailable = err?.message ?? String(err)

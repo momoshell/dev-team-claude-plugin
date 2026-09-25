@@ -9012,6 +9012,12 @@ function runTask(ctx, io, crash) {
     diffMutationReport.report_source = reportSource
     if (runnerReportUnavailable && (runner?.ok !== true || Number.isInteger(runner?.status) || runner?.signal)) {
       const restored = []
+      const inflightPath = configPath.replace(/\.json$/, '.inflight.json')
+      let inflight = null
+      try { inflight = JSON.parse(String(io.readFile(inflightPath) ?? 'null')) } catch { inflight = null }
+      const sha = (value) => createHash('sha256').update(Buffer.isBuffer(value) || value instanceof Uint8Array ? value : Buffer.from(String(value))).digest('hex')
+      const diffInflightMatches = (path, live, preProof) => Boolean(inflight) && inflight.generation === gateGeneration && inflight.path === path
+        && inflight.original_sha256 === sha(preProof) && inflight.mutant_sha256 === sha(live)
       try {
         for (const [index, path] of built.changed.entries()) {
           const cell = current.cells.get(path)
@@ -9039,11 +9045,13 @@ function runTask(ctx, io, crash) {
           if (metadata !== null && metadata?.type !== 'file') throw new Error(`unsafe diff target type for ${path}`)
           let live
           try { live = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { throw new Error(`target state is unreadable for ${path}: ${err?.message ?? String(err)}`) }
-          const runnerFailed = (runner?.status !== undefined && runner.status !== 0) || Boolean(runner?.signal)
-          if (runnerFailed || !diffBytesEqual(live, bytes)) {
-            io.writeFile(`${ctx.checkout}/${path}`, bytes)
-            restored.push(path)
-          }
+          if (live === null || live === undefined) throw new Error(`diff target ${path} is missing; neither the pre-proof bytes nor the in-flight mutant, left untouched`)
+          if (diffBytesEqual(live, bytes)) continue
+          // Overwrite ONLY the one mutant the runner recorded before writing it, derived from
+          // these pre-proof bytes. Any other bytes are an unexplained edit: keep them, refuse.
+          if (!diffInflightMatches(path, live, bytes)) throw new Error(`diff target ${path} holds bytes that are neither the pre-proof snapshot nor the in-flight mutant; left untouched`)
+          io.writeFile(`${ctx.checkout}/${path}`, bytes)
+          restored.push(path)
         }
         diffMutationReport.diff_proof_restored = { generation: gateGeneration, files: restored }
         io.log(recordRow({ at: io.now(), diff_proof_restored: diffMutationReport.diff_proof_restored }))

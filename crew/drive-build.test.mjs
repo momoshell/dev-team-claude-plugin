@@ -14,6 +14,7 @@ import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from
 import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
@@ -6484,7 +6485,7 @@ const diffSettlementReport = (generation) => ({
   omitted_reason: DIFF_SETTLEMENT_OMITTED_REASON, blind_spot: null, skip_counts: {}, mutants: [],
 })
 
-function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false, file = DIFF_SETTLEMENT_FILE } = {}) {
+function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false, file = DIFF_SETTLEMENT_FILE, runnerWrites = 'mutated by failed runner\n', inflight = 'match' } = {}) {
   const DIFF_SETTLEMENT_PATH = `${CTX.checkout}/${file}`
   const files = { [DIFF_SETTLEMENT_PATH]: runnerUnavailable ? 'baseline\n' : 'before\n' }
   const snapshotPath = `${TD}/diff-1-0-current-${file.replace(/[^A-Za-z0-9._-]+/g, '_')}`
@@ -6527,7 +6528,12 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
       if (runnerUnavailable) {
         if (snapshotState === 'missing') delete files[snapshotPath]
         if (snapshotState === 'mismatched') files[snapshotPath] = 'untrusted snapshot\n'
-        files[DIFF_SETTLEMENT_PATH] = 'mutated by failed runner\n'
+        files[DIFF_SETTLEMENT_PATH] = runnerWrites
+        // The runner records the one mutant it writes before writing it; 'match' names the
+        // bytes the runner left, 'stale' names a different mutant, 'wrong-original' binds the
+        // right mutant to other pre-proof bytes, 'none' writes no record.
+        const digest = (text) => createHash('sha256').update(Buffer.from(text)).digest('hex')
+        if (inflight !== 'none') files[`${TD}/diff-mutation-${generation}.inflight.json`] = JSON.stringify({ generation, path: file, original_sha256: digest(inflight === 'wrong-original' ? 'another baseline\n' : 'before\n'), mutant_sha256: digest(inflight === 'match' || inflight === 'wrong-original' ? 'mutated by failed runner\n' : 'some other mutant\n') })
         if (contaminate) files[`${CTX.checkout}/untracked.mjs`] = 'unexpected\n'
         return { ok: false, status: 1, stderr: 'runner died', output: '' }
       }
@@ -6605,6 +6611,30 @@ test('T4 unavailable runner restores the current snapshot and journals it', () =
   assert.equal(report.report_source, 'runner-unavailable')
   assert.deepEqual(report.diff_proof_restored, { generation: 1, files: [DIFF_SETTLEMENT_FILE] })
   assert.match(report.why, /exit status 1; stderr: runner died/)
+})
+
+test('RV3-2 recovery restores only the recorded in-flight mutant and keeps any other bytes', () => {
+  // Refusal branch: the runner left bytes that match neither the pre-proof snapshot nor the
+  // in-flight record, so recovery must not overwrite them and must name the file.
+  for (const [label, options] of [
+    ['unexplained edit', { runnerWrites: 'unexplained edit\n' }],
+    ['stale record', { inflight: 'stale' }],
+    ['no record', { inflight: 'none' }],
+    ['record of other pre-proof bytes', { inflight: 'wrong-original' }],
+  ]) {
+    const fixture = diffSettlementIo({ runnerUnavailable: true, ...options })
+    const result = driveTask(CTX, fixture.io)
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(diffSettlementFatal(fixture.io)?.reason, 'tree-not-restored', label)
+    assert.match(diffSettlementFatal(fixture.io)?.why || '', /diff target a\.mjs holds bytes that are neither the pre-proof snapshot nor the in-flight mutant/, label)
+    assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], options.runnerWrites ?? 'mutated by failed runner\n', label)
+    assert.equal(fixture.io.calls.logs.some((row) => row.diff_proof_restored), false, label)
+  }
+  // Restore branch: the bytes ARE the recorded mutant of these pre-proof bytes.
+  const matched = diffSettlementIo({ runnerUnavailable: true })
+  const restored = driveTask(CTX, matched.io)
+  assert.equal(restored.status, 'done')
+  assert.equal(matched.files[DIFF_SETTLEMENT_PATH], 'before\n')
 })
 
 test('T5 unavailable runner recovery still refuses untracked contamination', () => {

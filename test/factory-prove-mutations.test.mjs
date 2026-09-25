@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { scratchDir, git } from './helpers.mjs'
 import * as mod from '../scripts/factory/prove-mutations.mjs'
@@ -989,9 +990,40 @@ test('A3g an untracked pipe holder settles at the timeout as an unproven reap', 
   }
 })
 
-test('A3d a timeout with an unproven reap is runner-unavailable, never a timeout kill', () => {
-  assert.deepEqual(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 1 }), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
+test('A3d a timeout with an unproven reap is an escaped descendant, never a timeout kill or a skip', () => {
+  assert.deepEqual(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 1 }), { available: false, escaped: true, why: 'descendant-escaped', survivors: 1 })
   assert.equal(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 0 }).timeout, true)
+})
+
+test('A5 a grandchild that escapes the poll and rewrites the target makes the proof fatal, restored at report time', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const marker = join(root, 'writer.pid')
+  // The grandchild detaches, keeps the command's pipes, and rewrites the target after the
+  // (disabled) poll window: nothing the runner samples can see it.
+  const writer = `sleep 0.3; printf rewritten > ${JSON.stringify(file)}; sleep 30`
+  const command = `node -e 'const c = require("node:child_process").spawn("sh", ["-c", ${JSON.stringify(writer).replace(/'/g, "'\\\\''")}], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref()'`
+  const inflight = join(root, 'inflight.json')
+  const runCommand = (cmd, cwd, options) => cmd === 'gate'
+    ? { ok: false, output: '', status: 1, completed: true }
+    : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 60_000 })
+  let pid = null
+  try {
+    const result = await mod.runDiffMutationProof({ version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: command, gate_cmd: 'gate', cap: 1, generation: 1 }, { runCommand, runTimeoutMs: 900, inflightPath: inflight })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(readFileSync(file, 'utf8'), after, 'the target was not at its pre-mutation bytes at report time')
+    assert.equal(result.fatal?.reason, 'tree-not-restored')
+    assert.equal(result.fatal?.cause, 'descendant-escaped')
+    assert.equal(result.mutants.some((row) => row.outcome === 'skipped'), false)
+    const record = JSON.parse(readFileSync(inflight, 'utf8'))
+    assert.equal(record.path, 'lib/widget.mjs')
+    assert.equal(record.generation, 1)
+  } finally {
+    if (pid) { try { process.kill(-pid, 'SIGKILL') } catch {} }
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('A2 a hanging diff validation is timed out, killed, and restored', async () => {
@@ -1090,6 +1122,32 @@ test('E2 diff config input stays byte-identical while the sibling report is writ
   const report = JSON.parse(reports.get(reportPath))
   assert.equal(report.mutants.find((row) => row.outcome === 'skipped').runner_unavailable_cause, 'result-not-object')
   assert.match(output.join(''), /^DIFF-MUTATION-SUMMARY /)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('E4 main records the in-flight mutant beside the config, before the mutant is written', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const configPath = join(root, 'diff-mutation-1.json')
+  const inflightPath = join(root, 'diff-mutation-1.inflight.json')
+  assert.equal(mod.diffInflightPath(configPath), inflightPath)
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1 }
+  writeFileSync(configPath, JSON.stringify(config))
+  const order = []
+  const code = await mod.main(['--diff-config', configPath], {
+    writeFile: (path, bytes) => { order.push(path); writeFileSync(path, bytes) },
+    runCommand: () => ({ ok: false, output: '', status: 1, completed: true }),
+    stdout: () => {}, stderr: () => {},
+  })
+  assert.equal(code, 0)
+  assert.ok(order.indexOf(inflightPath) >= 0 && order.indexOf(inflightPath) < order.indexOf(file), JSON.stringify(order))
+  const record = JSON.parse(readFileSync(inflightPath, 'utf8'))
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex')
+  assert.equal(record.path, 'lib/widget.mjs')
+  assert.equal(record.original_sha256, digest(Buffer.from(after)))
+  assert.notEqual(record.mutant_sha256, record.original_sha256)
   rmSync(root, { recursive: true, force: true })
 })
 

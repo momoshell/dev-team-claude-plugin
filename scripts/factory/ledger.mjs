@@ -1493,6 +1493,23 @@ export const TABLES = Object.freeze({
     unique: [['adw_id']],
     indexes: [],
   },
+  advisor_usage: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'consult_id', decl: 'TEXT' },
+      { name: 'run_started_at', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'model', decl: 'TEXT' },
+      { name: 'billed_input_tokens', decl: 'INTEGER' },
+      { name: 'billed_output_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_write_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_read_tokens', decl: 'INTEGER' },
+      { name: 'usage_reason', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'consult_id']],
+    indexes: [],
+  },
   screener_proposals: {
     columns: [
       { name: 'adw_id', decl: 'TEXT' },
@@ -1574,6 +1591,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
   narration: 'recordNarrationMeasurement',
   screener_proposal: 'recordScreenerProposal',
+  advisor_usage: 'recordAdvisorUsage',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1590,7 +1608,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1643,6 +1661,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordExperimentArm: 'experiment_arms',
   recordNarrationMeasurement: 'narration_measurements',
   recordScreenerProposal: 'screener_proposals',
+  recordAdvisorUsage: 'advisor_usage',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -3808,6 +3827,44 @@ export function openLedger({
       const cols = tableColumnNames('screener_proposals')
       const sqlCols = cols.map(quoteSqlIdentifier)
       conn.prepare(`INSERT OR IGNORE INTO screener_proposals (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordAdvisorUsage(input = {}) {
+    requireFields(input, ['adw_id', 'consult_id', 'model', 'usage'], 'recordAdvisorUsage')
+    const consultId = normaliseShortName(input.consult_id, 'recordAdvisorUsage', 'consult_id')
+    const model = normaliseShortName(input.model, 'recordAdvisorUsage', 'model')
+    const billed = input.usage === null ? null : input.usage
+    if (billed !== null) {
+      for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+        if (typeof billed?.[name] !== 'number' || !Number.isSafeInteger(billed[name]) || billed[name] < 0) {
+          refuse(`recordAdvisorUsage: usage requires finite non-negative safe integer ${name}`)
+        }
+      }
+      if (input.usage_reason != null) refuse("recordAdvisorUsage: measured usage requires null usage_reason")
+    } else if (input.usage_reason !== 'usage-unavailable') {
+      refuse("recordAdvisorUsage: absent usage requires usage_reason 'usage-unavailable'")
+    }
+    const args = redact({
+      adw_id: input.adw_id, consult_id: consultId,
+      run_started_at: textOrNull(input.run_started_at, 120),
+      role: textOrNull(input.role, 80), model,
+      billed_input_tokens: billed?.billed_input_tokens ?? null,
+      billed_output_tokens: billed?.billed_output_tokens ?? null,
+      billed_cache_write_tokens: billed?.billed_cache_write_tokens ?? null,
+      billed_cache_read_tokens: billed?.billed_cache_read_tokens ?? null,
+      usage_reason: input.usage_reason ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (typeof args.adw_id !== 'string' || args.adw_id.trim() === '' || !args.consult_id || !args.model) {
+      refuse('recordAdvisorUsage: required identity/model fields were redacted')
+    }
+    appendJsonl('recordAdvisorUsage', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('advisor_usage')
+      conn.prepare(`INSERT OR IGNORE INTO advisor_usage (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
     })
     return args
@@ -6356,7 +6413,7 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
@@ -6472,6 +6529,19 @@ function journalFactArgs(writer, row, adwId) {
       duration_ms: narration.duration_ms ?? null,
       outcome: narration.outcome,
       reason: narration.reason ?? null,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.advisor_usage) {
+    const payload = value('advisor_usage')
+    return {
+      adw_id: rowAdwId,
+      consult_id: payload.consult_id,
+      run_started_at: payload.run_started_at ?? null,
+      role: payload.role ?? null,
+      model: payload.model,
+      usage: payload.usage,
+      usage_reason: payload.usage_reason ?? null,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
@@ -8388,6 +8458,30 @@ export function main(argv) {
           absent,
         }
       })
+      const advisorGroups = new Map()
+      for (const fact of ledger.dumpTable('advisor_usage')) {
+        const at = Date.parse(fact.created_at)
+        if ((since !== null && at < Date.parse(since)) || (until !== null && at >= Date.parse(until))) continue
+        const groupKey = JSON.stringify([fact.adw_id, fact.role, fact.model])
+        const group = advisorGroups.get(groupKey) ?? { adw_id: fact.adw_id, role: fact.role, model: fact.model, consult_count: 0, billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0, absent: [] }
+        group.consult_count += 1
+        for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+          if (fact[name] === null || fact[name] === undefined) group.absent.push(name)
+          else group[name] += Number(fact[name])
+        }
+        advisorGroups.set(groupKey, group)
+      }
+      const advisorSpend = [...advisorGroups.values()].map((group) => {
+        const priceKey = catalog === null ? null : priceKeyForModel(catalog, group.model, 'pi')
+        const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
+        const rates = price && ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((key) => price[key])
+        const missingRates = !rates || rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))
+        const missingTokens = group.absent.length > 0
+        const cost = !missingRates && !missingTokens
+          ? group.billed_input_tokens / 1e6 * rates[0] + group.billed_output_tokens / 1e6 * rates[1] + group.billed_cache_write_tokens / 1e6 * rates[2] + group.billed_cache_read_tokens / 1e6 * rates[3]
+          : null
+        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : missingTokens ? 'usage-unavailable' : 'price-rate-unavailable' } : {} }
+      })
       const priceSource = catalog === null ? null : {
         path: priceSourcePath,
         updated_at: catalog.updated_at ?? null,
@@ -8415,6 +8509,7 @@ export function main(argv) {
         rate_floor: CELL_RATE_FLOOR,
         price_source: priceSource,
         rows: emittedRows,
+        advisor_spend: advisorSpend,
         absent: payloadAbsent,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)

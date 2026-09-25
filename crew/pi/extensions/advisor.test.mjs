@@ -371,6 +371,11 @@ test('A1', async () => {
   const consult = journal.rows.find((row) => row.advisor_consult)?.advisor_consult
   assert.deepEqual(consult.usage, { billed_input_tokens: 9, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
   assert.equal(consult.model, 'provider/model')
+  const advisorUsage = journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
+  assert.equal(advisorUsage.length, 1)
+  assert.deepEqual(advisorUsage[0].usage, { billed_input_tokens: 9, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
+  assert.equal(advisorUsage[0].model, 'provider/model')
+  assert.equal(typeof advisorUsage[0].consult_id, 'string')
   rmSync(f.root, { recursive: true, force: true })
 })
 
@@ -469,6 +474,7 @@ test('A2', async () => {
   const change = { path, edits: [{ oldText: 'x', newText: 'const x = 1' }] }
   a.onToolCall(call('http', 'edit', change), {}); a.onToolResult(result('http', 'edit', change, 'ok'), {}); await a.settled()
   assert.equal(fetchFn.posts.length, 1); assert.equal(fetchFn.posts[0].init.method, 'POST'); assert.equal(spawned, 0)
+  assert.equal(journal.rows.some((row) => row.advisor_usage), false)
   rmSync(f.root, { recursive: true, force: true })
 })
 
@@ -496,6 +502,10 @@ test('A3', async () => {
   assert.equal(deltaText.includes('Guard at lib/widget.mjs:2 misses the null path.'), false)
   const consult = journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
   assert.equal(consult.usage, null); assert.equal(consult.usage_reason, 'usage-unavailable')
+  const advisorUsage = journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
+  assert.equal(advisorUsage.length, 2)
+  assert.equal(advisorUsage.at(-1).usage, null)
+  assert.equal(advisorUsage.at(-1).usage_reason, 'usage-unavailable')
   rmSync(f.root, { recursive: true, force: true })
 })
 

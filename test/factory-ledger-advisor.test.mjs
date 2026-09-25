@@ -1159,6 +1159,87 @@ test('A1 screener proposal journal rows persist model and outcome', { skip: SKIP
     } finally { target.close() }
   } finally { source.close() }
 })
+test('advisor usage journal facts persist measured and absent spend idempotently', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, [
+    { at: '2024-01-01T00:00:00.000Z', advisor_usage: { consult_id: 'measured', run_started_at: 'start', role: 'builder', model: 'model-a', usage: { billed_input_tokens: 17, billed_output_tokens: 5, billed_cache_write_tokens: 3, billed_cache_read_tokens: 2 }, usage_reason: null } },
+    { at: '2024-01-01T00:00:01.000Z', advisor_usage: { consult_id: 'absent', role: 'planner', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const ledger = openTestLedger()
+  try {
+    assert.equal(JOURNAL_FACT_KEYS.advisor_usage, 'recordAdvisorUsage')
+    assert.equal(WRITER_MIRROR_TABLES.recordAdvisorUsage, 'advisor_usage')
+    assert.ok(WRITERS.includes('recordAdvisorUsage'))
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-test' }).applied, 2)
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-test' }).applied, 0)
+    const rows = ledger.dumpTable('advisor_usage')
+    assert.equal(rows.length, 2)
+    const measured = rows.find((row) => row.consult_id === 'measured')
+    const absent = rows.find((row) => row.consult_id === 'absent')
+    assert.deepEqual([measured.billed_input_tokens, measured.billed_output_tokens, measured.billed_cache_write_tokens, measured.billed_cache_read_tokens], [17, 5, 3, 2])
+    assert.deepEqual([absent.billed_input_tokens, absent.billed_output_tokens, absent.billed_cache_write_tokens, absent.billed_cache_read_tokens, absent.usage_reason], [null, null, null, null, 'usage-unavailable'])
+    assert.equal(readFileSync(ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('"kind":"recordAdvisorUsage"')).length, 2)
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-test', consult_id: 'zero', model: 'model-a', usage: null, usage_reason: 'wrong' }))
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-test', consult_id: 'mixed', model: 'model-a', usage: { billed_input_tokens: 0, billed_output_tokens: null, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } }))
+  } finally { ledger.close() }
+})
+test('cells CLI prices advisor spend with all four rates', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({
+    adw_id: 'advisor-priced', consult_id: 'c1', run_started_at: null, role: 'builder', model: 'openai-codex/gpt-5.6-sol',
+    usage: { billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000, billed_cache_write_tokens: 3_000_000, billed_cache_read_tokens: 4_000_000 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const pricePath = join(nextDir(), 'advisor-priced.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  const row = payload.advisor_spend.find((candidate) => candidate.model === 'openai-codex/gpt-5.6-sol')
+  assert.equal(row.price_key, 'openai/gpt-5.6-sol')
+  assert.equal(row.consult_count, 1)
+  assert.equal(row.cost_usd, 4321)
+  assert.deepEqual([row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens], [1_000_000, 2_000_000, 3_000_000, 4_000_000])
+  assert.deepEqual(row.absent, {})
+  assert.equal(payload.rows.find((candidate) => candidate.adw_id === 'advisor-priced'), undefined)
+})
+test('cells CLI leaves advisor spend unpriced when model or usage is absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const measured = (adw_id, consult_id, model) => ledger.recordAdvisorUsage({
+    adw_id, consult_id, role: 'builder', model,
+    usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  measured('advisor-weird', 'c1', 'weird-cli/gpt-5.6-sol')
+  ledger.recordAdvisorUsage({ adw_id: 'advisor-absent', consult_id: 'c2', role: 'builder', model: 'openai-codex/gpt-5.6-sol', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:00.000Z' })
+  measured('advisor-rate-missing', 'c3', 'openai-codex/gpt-5.6-terra')
+  const pricePath = join(nextDir(), 'advisor-incomplete.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: {
+      'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 },
+      'openai/gpt-5.6-terra': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100 },
+    },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout).advisor_spend
+  for (const [adw_id, reason] of [['advisor-weird', 'model-unpriced-or-ambiguous'], ['advisor-absent', 'usage-unavailable'], ['advisor-rate-missing', 'price-rate-unavailable']]) {
+    const row = rows.find((candidate) => candidate.adw_id === adw_id)
+    assert.equal(row.consult_count, 1)
+    assert.equal(row.cost_usd, null)
+    assert.notEqual(row.cost_usd, 0)
+    assert.equal(row.absent.cost_usd, reason)
+  }
+})
 test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const createdAt = '2024-01-01T00:00:00.000Z'

@@ -20,6 +20,7 @@
 // No oh-my-pi source is copied here and no holder-specific licence notice is
 // invented: that checkout is not present in the build environment.
 
+import { randomUUID } from 'node:crypto'
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1010,6 +1011,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     controllers.add(captured.controller)
     // The scrub is a fact, not a silence: one row per consult, always, carrying
     // the per-kind count of what this consult's delta had removed from it.
+    const consultId = randomUUID()
     const consultPayload = {
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
@@ -1167,6 +1169,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         if (foldedUsage === null) consultPayload.usage_reason = 'usage-unavailable'
       }
       appendAdvisorRow('advisor_consult', consultPayload)
+      if (!env?.[ADVISOR_ENDPOINT_ENV]) {
+        appendAdvisorRow('advisor_usage', {
+          consult_id: consultId, run_started_at: consultPayload.run_started_at, role,
+          model: consultPayload.model, usage: foldedUsage,
+          usage_reason: foldedUsage === null ? 'usage-unavailable' : null,
+        })
+      }
       if (!liveGeneration(captured)) return
       if (codes.length || !judgment) {
         const payload = {

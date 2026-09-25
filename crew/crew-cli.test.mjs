@@ -619,7 +619,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -638,9 +638,9 @@ test('the shipped planner pi RPC command pins the complete extension-derived too
   assert.deepEqual(planner.args, [
     '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'medium', '--session-dir', '/tmp/crew-task/sessions',
     '--session-id', 'planner', '--append-system-prompt', '/tmp/crew-task/role-planner.md',
-    '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,lab', '--exclude-tools', 'edit',
+    '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope', '--exclude-tools', 'edit',
     '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', '/repo/crew/pi/extensions/lab.ts',
-    '-e', '/repo/crew/pi/extensions/readgate.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+    '-e', '/repo/crew/pi/extensions/readgate.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
   ])
 })
 
@@ -676,10 +676,10 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
-  assert.equal(builderCommand.split(' -e ').length - 1, 4)
+  assert.equal(builderCommand.split(' -e ').length - 1, 5)
   assert.equal(builderCommand.includes('--skill "/repo/skills/lean-build/SKILL.md"'), true)
   assert.equal(builderCommand.includes('--no-skills'), false)
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/fff.ts"'))
@@ -736,13 +736,13 @@ test('BG2', () => {
     args: [
       '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'max', '--session-dir', '/tmp/crew-task/sessions',
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
-      '--tools', 'read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep', '--no-context-files', '--no-extensions',
+      '--tools', 'read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
-      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/fff.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/fff.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
-  assert.equal(builder.args.filter((value) => value === '-e').length, 4)
+  assert.equal(builder.args.filter((value) => value === '-e').length, 5)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
@@ -3945,6 +3945,7 @@ test('F1 durable seat state records its resolved extensions', async () => {
     join(ROOT, 'crew/pi/extensions/subagent.ts'),
     join(ROOT, 'crew/pi/extensions/lab.ts'),
     join(ROOT, 'crew/pi/extensions/readgate.ts'),
+    join(ROOT, 'crew/pi/extensions/submit.ts'),
   ])
   assert.equal(Object.hasOwn(member, 'config_dir'), false)
 })

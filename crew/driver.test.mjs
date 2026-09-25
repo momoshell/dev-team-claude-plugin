@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { scratchDir } from '../test/helpers.mjs'
 import {
-  assignmentDelivery, assignmentLine, assignmentPrompt, assertSafeLine, briefIngestCommands, confirmDelivery, deliverySentence, pickNeedles, readEventsTail, surfaceProcessTree, sendLine,
+  assignmentDelivery, assignmentLine, assignmentPrompt, parseAssignment, assertSafeLine, briefIngestCommands, confirmDelivery, deliverySentence, pickNeedles, readEventsTail, surfaceProcessTree, sendLine,
   ASSIGNMENT_INLINE_BYTE_LIMIT, ASSIGNMENT_UNMEASURED_REASONS, DELIVERY_CONFIRMED, DELIVERY_MODES, DELIVERY_UNCONFIRMED, DELIVERY_UNKNOWN, DELIVERY_UNKNOWN_REASONS, EVENTS_TAIL_BYTES, SEND_RETRIES, SUBMIT_BLIND_SPOT, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
@@ -27,6 +27,18 @@ test('assignmentLine returns the exact expected string', () => {
     assignmentLine(GOOD),
     'ASSIGNMENT p1: read your brief at /Users/x/.crew/demo/task/brief-planner.md. Task dir: /Users/x/.crew/demo/task. Write your ReturnEnvelope to /Users/x/.crew/demo/returns/planner.json then print exactly: CREW-DONE planner p1'
   )
+})
+
+test('parseAssignment reads only the exact assignment head and refuses unsafe or mismatched input', () => {
+  const scoped = { ...GOOD, returnPath: '/Users/x/.crew/demo/returns/run-1/d1.planner.json' }
+  const expected = { id: 'p1', role: 'planner', returnPath: scoped.returnPath, taskDir: scoped.taskDir, runId: 'run-1' }
+  assert.deepEqual(parseAssignment(assignmentLine(scoped)), expected)
+  const inline = assignmentPrompt({ ...scoped, delivery: 'inline', briefText: 'not a second assignment' })
+  assert.deepEqual(parseAssignment(inline), expected)
+  assert.equal(parseAssignment(assignmentLine(GOOD)).runId, null)
+  assert.equal(parseAssignment(''), null)
+  assert.equal(parseAssignment(assignmentLine(scoped).replace('CREW-DONE planner p1', 'CREW-DONE planner p2')), null)
+  assert.equal(parseAssignment(assignmentLine(scoped).replace('run-1', 'other')), null)
 })
 
 test('assignmentPrompt path delivery is byte-identical and modes are closed', () => {

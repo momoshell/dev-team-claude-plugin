@@ -179,6 +179,20 @@ export function assignmentDelivery({ briefFile, readFileSync }) {
   } catch { return { delivery: 'path', briefText: null, brief_bytes: null, unmeasured_reason: 'brief-unreadable' } }
 }
 
+export function parseAssignment(text) {
+  if (typeof text !== 'string' || !text.length) return null
+  const line = text.split(/\r?\n/, 1)[0]
+  const safePath = (value) => SAFE_PATH_RE.test(value) && value.split('/').every((part) => part !== '.' && part !== '..')
+  const match = line.match(/^ASSIGNMENT ([A-Za-z0-9._-]+): (?:read your brief at ([^ ]+)\.|your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those\.) Task dir: ([^ ]+)\. Write your ReturnEnvelope to ([^ ]+)(?: Add top-level JSON field "run_id":"([A-Za-z0-9._-]+)" to your ReturnEnvelope\.)? then print exactly: CREW-DONE ([A-Za-z0-9._-]+) ([A-Za-z0-9._-]+)$/)
+  if (!match) return null
+  const [, id, briefFile, taskDir, returnPath, instructedRunId, role, tailId] = match
+  if (tailId !== id || !SAFE_RUN_TOKEN_RE.test(id) || DOTS_ONLY_RE.test(id) || DOTS_ONLY_RE.test(role)) return null
+  if ((briefFile && !safePath(briefFile)) || !safePath(taskDir) || !safePath(returnPath)) return null
+  const runId = runTokenFromReturnPath(returnPath)
+  if (instructedRunId && instructedRunId !== runId) return null
+  return { id, role, returnPath, taskDir, runId: instructedRunId ? runId : null }
+}
+
 export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, delivery = 'path', briefText = null }) {
   if (!DELIVERY_MODES.includes(delivery)) {
     throw new Error('assignmentPrompt: delivery must be one of path, inline')

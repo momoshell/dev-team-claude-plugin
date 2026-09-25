@@ -27,12 +27,15 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/skeletonread.ts': ['retrieve'],
     'crew/pi/extensions/subagent.ts': ['agent'],
     'crew/pi/extensions/fff.ts': ['fff_grep', 'fff_find', 'fff_multi_grep'],
+    'crew/pi/extensions/submit.ts': ['submit_envelope'],
   }
   assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS, expected)
   assert.equal(Object.isFrozen(PI_FIRST_PARTY_EXTENSION_TOOLS), true)
   for (const value of Object.values(PI_FIRST_PARTY_EXTENSION_TOOLS)) assert.equal(Object.isFrozen(value), true)
 
   const source = (name) => readFileSync(new URL(`./pi/extensions/${name}.ts`, import.meta.url), 'utf8')
+  const submit = source('submit')
+  assert.match(submit, /name: 'submit_envelope'/)
   const subagent = source('subagent')
   const skeletonread = source('skeletonread')
   const lab = source('lab')
@@ -655,6 +658,7 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
     join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
   ]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
@@ -707,6 +711,7 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
   ]
   const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
@@ -739,7 +744,7 @@ test('GR1', () => {
 
 test('the shipped tech-lead pi overlay resolves its checkout-pinned read gate only', () => {
   const loaded = loadCapabilities()
-  const expected = [join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts')]
+  const expected = [join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'), join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts')]
   const pi = grantsFor(loaded, 'tech-lead', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
   assert.equal(existsSync(expected[0]), true)
@@ -1393,7 +1398,7 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('edit'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('write'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('bash'), false)
-  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts', 'readgate.ts'])
+  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts', 'readgate.ts', 'submit.ts'])
   assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
   assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
 })

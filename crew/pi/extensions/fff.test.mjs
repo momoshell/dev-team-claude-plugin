@@ -263,7 +263,7 @@ test('fff-D1-search', async () => {
   assert.deepEqual(entry.search, { tools: ['grep', 'find'], fff: 'withheld', reason: 'binary-absent' })
   assert.equal(entry.grants.extensions.some((path) => path.endsWith('/crew/pi/extensions/fff.ts')), false)
   const command = piCommand(entry)
-  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve"/)
+  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope"/)
   assert.doesNotMatch(command, /fff_(grep|find|multi_grep)/)
   assert.doesNotMatch(command, /--exclude-tools "find,grep"/)
 })
@@ -491,7 +491,7 @@ test('fff-G1-pi-record', async () => {
     withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
   })
   assert.deepEqual(journal.search.builder, member.search)
-  assert.deepEqual(member.grant_snapshot.grants.extensions.at(-1).split('/').slice(-3), ['pi', 'extensions', 'fff.ts'])
+  assert.equal(member.grant_snapshot.grants.extensions.filter((path) => path.split('/').slice(-3).join('/') === 'pi/extensions/fff.ts').length, 1)
 })
 
 test('fff-G1-claude-record', async () => {

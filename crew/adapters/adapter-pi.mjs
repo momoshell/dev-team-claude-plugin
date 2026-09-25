@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'node:url'
 import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
+import { ACP_TRANSPORT_PROFILE } from '../capabilities.mjs'
 
 // crew/adapters/adapter-pi.mjs — the pi agent adapter.
 //
@@ -54,6 +55,13 @@ const PROFILES = Object.freeze({
     durable_cursor: 'none',
     // #131 — drive.mjs bounce paths reassign a settled pane seat.
     reassign: true,
+  }),
+  acp: Object.freeze({
+    ...ACP_TRANSPORT_PROFILE,
+    // acp-server.ts advertises loadSession: false.
+    session_resume: false,
+    // acp-server.ts forwards tool permission requests.
+    permission_requests: true,
   }),
   'headless-rpc': Object.freeze({
     // ADR-029 §3:52 — pi RPC steer delivers at a tool boundary.
@@ -138,7 +146,7 @@ export function modelString({ provider, id, localProviders }) {
 const PI_TOOL_NAMES = Object.freeze({
   Read: 'read', Write: 'write', Edit: 'edit', Bash: 'bash',
   Glob: 'find', Grep: 'grep',
-  NotebookEdit: null, Task: null, Agent: null,
+  NotebookEdit: null, Task: null, Agent: null, Workflow: null,
 })
 
 // pi's COMPLETE built-in tool set, in pi's own namespace, as literals
@@ -147,6 +155,8 @@ const PI_TOOL_NAMES = Object.freeze({
 // claude-named `tools` allowlist: #146/#147 ratified that that list stays
 // unused, and mapping it here would undo both.
 export const PI_BUILTIN_TOOLS = Object.freeze(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+
+export const PI_ACP_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
 
 // Unknown claude names DROP rather than pass through: passing an unmatched
 // name would be inert inside pi anyway, and a typo must not look enforced.
@@ -242,6 +252,58 @@ export const PI_ADVISOR_EXTENSION = fileURLToPath(new URL('../pi/extensions/advi
 export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
 export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
+
+export function piRpcSeatParts(spec = {}) {
+  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null } = spec
+  const piDeny = translateDeny(deny)
+  const advisor = grants?.advisor === true
+  const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
+  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
+  const skills = grants?.skills || []
+  return {
+    args: [
+      '--model', model, ...(effort ? ['--thinking', effort] : []),
+      '--append-system-prompt', promptFile, '--tools', activatedTools.join(','),
+      ...(piDeny.length ? ['--exclude-tools', piDeny.join(',')] : []),
+      '--no-context-files', '--no-extensions', ...extensions.flatMap((extension) => ['-e', extension]),
+      ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
+    ],
+    env: {
+      ...env,
+      ...(configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}),
+      ...(advisor ? { CREW_ADVISOR: '1',
+        // ALWAYS set, never inherited: an endpoint not admitted by the boot record must not receive the delta.
+        CREW_ADVISOR_ENDPOINT: advisorCell?.endpoint || '',
+        ...(advisorCell?.model !== undefined ? { CREW_ADVISOR_MODEL: advisorCell.model } : {}),
+        ...(advisorCell?.models !== undefined ? { CREW_ADVISOR_MODELS: JSON.stringify(advisorCell.models) } : {}),
+      } : {}),
+      ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
+    },
+  }
+}
+
+export function acpLaunch(spec = {}) {
+  const { bin, cwd, deny } = spec
+  if (!isAbsolute(bin)) throw new Error(`adapter-pi: ACP pi binary must be absolute: ${String(bin)}`)
+  for (const raw of String(deny || '').split(',')) {
+    const name = raw.trim()
+    if (!name) continue
+    if (!Object.hasOwn(PI_TOOL_NAMES, name)) throw new Error(`adapter-pi: unknown ACP deny tool "${name}"`)
+  }
+  const autoDeny = translateDeny(deny)
+  const GATED_TOOLS = PI_ACP_GATED_TOOLS
+  const escalate = GATED_TOOLS.filter((tool) => !autoDeny.includes(tool))
+  const bridge = fileURLToPath(new URL('../pi/acp-bridge.mjs', import.meta.url))
+  const seat = piRpcSeatParts(spec)
+  const seatArgs = seat.args
+  return {
+    bin: process.execPath,
+    args: [bridge, ...seatArgs],
+    env: { ...seat.env, CREW_PI_BIN: bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
+    sessionParams: { cwd, mcpServers: [] },
+    policy: { autoDeny, autoApprove: [], escalate },
+  }
+}
 
 // POSIX single-quoting: a literal apostrophe closes the quote, escapes and
 // reopens. A loopback URL may legally contain one and a model id is a

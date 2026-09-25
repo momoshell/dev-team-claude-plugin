@@ -2118,3 +2118,18 @@ test('ingest-all refuses a store whose JSONL authority was deleted while its mir
   assert.equal(result.code, 1)
   assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
 })
+
+test('ingest-all refuses a store that lost one authority line while its mirror kept the row', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+  const kept = lines.filter((line) => !line.includes('recordPlanAdoption'))
+  assert.equal(kept.length, lines.length - 1, 'exactly one authority line is dropped')
+  writeFileSync(jsonlPath, `${kept.join('\n')}\n`)
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})

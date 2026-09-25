@@ -1185,6 +1185,14 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         try {
           const drift = typeof ledger.jsonlDrift === 'function' ? ledger.jsonlDrift() : null
           consistent = !!drift && drift.measured === true && drift.writers.every((writer) => writer.drift === 0)
+          // jsonlDrift proves every authority key has a mirror row; it does not see
+          // mirror rows the authority lost. A table may hold no more rows than the
+          // distinct keys its writers put in the authority.
+          if (consistent && typeof ledger.dumpTable === 'function') {
+            const authorityKeys = new Map()
+            for (const writer of drift.writers) authorityKeys.set(writer.table, (authorityKeys.get(writer.table) || 0) + (writer.distinct_keys || 0))
+            consistent = Object.keys(LEDGER_TABLES).every((table) => (ledger.dumpTable(table) || []).length <= (authorityKeys.get(table) || 0))
+          }
           // A brand-new store has neither an authority line nor a mirror row yet:
           // that is consistent. A missing authority beside mirror rows is not.
           if (!consistent && !d.existsSync(join(dirname(dbPath), 'ledger.jsonl')) && typeof ledger.dumpTable === 'function') {

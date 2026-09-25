@@ -179,6 +179,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
+  ['recordRow', '', ''],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
   ['operationalRow', '', 'role id'],
@@ -191,11 +192,11 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 34)
+  assert.equal(sites.length, 35)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 27)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 7)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 8)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -1585,7 +1586,7 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second",}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
-function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null, unmeasuredFirst = false, policy = undefined } = {}) {
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, role = 'builder', waits = [], assignFails = [], onWait = null, onLog = null, unmeasuredFirst = false, policy = undefined } = {}) {
   const root = scratchDir(`seat-transport-reask-${transport}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
@@ -1600,11 +1601,11 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
       if (failure) throw failure
       const n = assigns.length
       const id = spec?.reask?.id || (unmeasuredFirst && n === 1 ? null : `d${n}`)
-      const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id || 'unmeasured'}.builder.json`)
+      const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id || 'unmeasured'}.${role}.json`)
       const transportDir = join(paths.taskDir, DESCENDANT_STORE_DIRS[transport])
       mkdirSync(transportDir, { recursive: true })
-      writeFileSync(join(transportDir, '.builder.active.json'), JSON.stringify({
-        key: 'builder', id: `run-${n}`, role: 'builder', reservation_id: `res-${n}`, phase: 'running',
+      writeFileSync(join(transportDir, `.${role}.active.json`), JSON.stringify({
+        key: role, id: `run-${n}`, role, reservation_id: `res-${n}`, phase: 'running',
       }))
       return { id, returnPath }
     },
@@ -1620,20 +1621,20 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
   const crew = {
     checkout: root,
     claude_bin: workerBin,
-    members: { builder: { model: 'sonnet', transport } },
+    members: { [role]: { model: 'sonnet', transport } },
   }
   const deps = {
     now: () => clock,
     sleep: (ms) => { clock += ms },
-    logLine: (_path, row) => logs.push(row),
+    logLine: (_path, row) => { onLog?.(row); logs.push(row) },
     ...(transport === HEADLESS_RPC_TRANSPORT
       ? { headlessRpcIo: ({ deps: transportDeps }) => { transportSleep = transportDeps.sleep; return transportIo } }
       : { headlessIo: ({ deps: transportDeps }) => { transportSleep = transportDeps.sleep; return transportIo } }),
   }
   const io = seatIo(crew, paths, root, null, null, {}, deps)
   io.emit = (event) => events.push(event)
-  const first = io.assign({ role: 'builder', briefFile: '/tmp/brief.md', ...(policy === undefined ? {} : { policy }) })
-  const reaskPath = join(paths.returnsDir, `${first.id}.reask.builder.json`)
+  const first = io.assign({ role, briefFile: '/tmp/brief.md', ...(policy === undefined ? {} : { policy }) })
+  const reaskPath = join(paths.returnsDir, `${first.id}.reask.${role}.json`)
   return { root, paths, crew, io, first, reaskPath, assigns, waitCalls, logs, events, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
@@ -1789,12 +1790,12 @@ test('reaskDecision refuses a settled, absent, indeterminate or non-pane seat an
 })
 
 test('seatRetryDecision keeps the lost-seat cause set and one-per-assignment bound closed', () => {
-  for (const kind of ['no-envelope', 'unusable-envelope', 'seat-died', 'transport-error', undefined]) {
+  for (const kind of ['no-envelope', 'unusable-envelope', 'transport-error', undefined]) {
     const result = seatRetryDecision({ kind, transport: HEADLESS_TRANSPORT, reassignable: true })
     assert.equal(result.retry, false)
     assert.match(result.why, new RegExp(String(kind)))
   }
-  for (const kind of ['timeout', 'aborted']) {
+  for (const kind of ['timeout', 'aborted', 'seat-died']) {
     const result = seatRetryDecision({ kind, transport: HEADLESS_TRANSPORT, reassignable: true })
     assert.equal(result.retry, true)
   }
@@ -1806,9 +1807,86 @@ test('seatRetryDecision keeps the lost-seat cause set and one-per-assignment bou
   const unavailable = seatRetryDecision({ kind: 'timeout', transport: 'future-transport', reassignable: false })
   assert.equal(unavailable.retry, false)
   assert.match(unavailable.why, /future-transport/)
-  assert.deepEqual(SEAT_RETRY_KINDS, ['timeout', 'aborted'])
+  assert.deepEqual(SEAT_RETRY_KINDS, ['timeout', 'aborted', 'seat-died'])
   assert.equal(SEAT_RETRY_MAX, 1)
-  assert.deepEqual(SEAT_RETRY_EVENTS, { timeout: 'seat-timeout-reask', aborted: 'seat-abort-reask' })
+  assert.deepEqual(SEAT_RETRY_EVENTS, { timeout: 'seat-timeout-reask', aborted: 'seat-abort-reask', 'seat-died': 'seat-death-reask' })
+})
+
+test('R1 a proven-dead envelope-less headless-json reviewer is re-asked once', () => {
+  const role = 'reviewer'
+  const id = 'd1'
+  const valid = { assignment_id: id, role, status: 'done', summary: 'recovered', artifacts: [], details: {} }
+  const dead = () => { const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = role; error.reclaim = { root_liveness: 'dead' }; throw error }
+  const harness = makeTransportReaskHarness({ role, transport: HEADLESS_TRANSPORT, waits: [dead, () => valid] })
+  try {
+    const envelope = harness.io.wait(harness.first.returnPath, 37)
+    assert.deepEqual(envelope, valid)
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.assigns[1].reask.id, id)
+    const retryRow = harness.logs.find((row) => row.event === 'seat-death-reask' && row.cause === 'seat-died' && row.outcome === 'recovered')
+    assert.ok(retryRow)
+    assert.equal(retryRow.from_run_id, 'run-1')
+    assert.equal(retryRow.to_run_id, 'run-2')
+    assert.notEqual(retryRow.from_run_id, retryRow.to_run_id)
+    assert.equal(harness.logs.filter((row) => row.seat_died === role).length, 1)
+  } finally { harness.cleanup() }
+})
+
+test('R2 a second dead reviewer worker propagates without a third assignment', () => {
+  const dead = () => { const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = 'reviewer'; error.reclaim = { root_liveness: 'dead' }; throw error }
+  const harness = makeTransportReaskHarness({ role: 'reviewer', waits: [dead, dead, () => ({ status: 'should not run' })] })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => error.stage === SEAT_DIED_STAGE)
+    assert.equal(harness.assigns.length, 2)
+  } finally { harness.cleanup() }
+})
+
+test('a death re-ask that fails without a second death journals the first death once', () => {
+  const dead = () => { const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = 'reviewer'; error.reclaim = { root_liveness: 'dead' }; throw error }
+  const refused = Object.assign(new Error('assign refused'), { stage: 'transport-error' })
+  const harness = makeTransportReaskHarness({ role: 'reviewer', waits: [dead], assignFails: [null, refused] })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => error.stage === SEAT_DIED_STAGE)
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.logs.some((row) => row.event === 'seat-death-reask' && row.outcome === 'undelivered'), true)
+    assert.equal(harness.logs.filter((row) => row.seat_died === 'reviewer').length, 1)
+  } finally { harness.cleanup() }
+})
+
+test('a journal that refuses the first death row never blocks the death re-ask', () => {
+  const role = 'reviewer'
+  const valid = { assignment_id: 'd1', role, status: 'done', summary: 'recovered', artifacts: [], details: {} }
+  const dead = () => { const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = role; error.reclaim = { root_liveness: 'dead' }; throw error }
+  const onLog = (row) => { if (row?.seat_died != null) throw new Error('journal unavailable') }
+  const harness = makeTransportReaskHarness({ role, waits: [dead, () => valid], onLog })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 37), valid)
+    assert.equal(harness.assigns.length, 2)
+  } finally { harness.cleanup() }
+})
+
+test('R3 return bytes prevent retry of a proven-dead worker', () => {
+  const harness = makeTransportReaskHarness({ role: 'reviewer', waits: [(path) => {
+    writeFileSync(path, '{partial}')
+    const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = 'reviewer'; error.reclaim = { root_liveness: 'dead' }; throw error
+  }] })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => error.stage === SEAT_DIED_STAGE)
+    assert.equal(harness.assigns.length, 1)
+    assert.equal(harness.logs.some((row) => row.event === 'seat-death-reask'), false)
+  } finally { harness.cleanup() }
+})
+
+test('R4 missing or unknown reclaim evidence prevents a death retry', () => {
+  for (const reclaim of [undefined, { root_liveness: 'unknown' }]) {
+    const harness = makeTransportReaskHarness({ role: 'reviewer', waits: [() => {
+      const error = stagedReaskFailure(SEAT_DIED_STAGE); error.role = 'reviewer'; if (reclaim) error.reclaim = reclaim; throw error
+    }] })
+    try {
+      assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => error.stage === SEAT_DIED_STAGE)
+      assert.equal(harness.assigns.length, 1)
+    } finally { harness.cleanup() }
+  }
 })
 
 test('a lost headless seat is re-asked on a fresh path with its original id and measured row', () => {

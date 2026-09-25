@@ -472,7 +472,7 @@ export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
 export const PLAN_SCOPE_VERDICTS = Object.freeze([
   'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened',
 ])
-export const SEAT_REASK_EVENTS = Object.freeze(['seat-timeout-reask', 'seat-abort-reask'])
+export const SEAT_REASK_EVENTS = Object.freeze(['seat-timeout-reask', 'seat-abort-reask', 'seat-death-reask'])
 
 // #826 (parent epic #822) — which phase competed for a suite slot. MUST equal
 // crew/drive.mjs SUITE_SLOT_PHASE_NAMES (drive.mjs:5425): the driver is the
@@ -1581,6 +1581,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   boot: 'boot',
   'seat-timeout-reask': 'recordSeatReask',
   'seat-abort-reask': 'recordSeatReask',
+  'seat-death-reask': 'recordSeatReask',
   'plan-adopted': 'recordPlanAdoption',
   'phase-slot-wait': 'recordPhaseSlotWait',
   'experiment-arm': 'recordExperimentArm',
@@ -6618,7 +6619,7 @@ function journalFactArgs(writer, row, adwId) {
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
-  if (writer === JOURNAL_FACT_EVENTS['seat-timeout-reask'] || writer === JOURNAL_FACT_EVENTS['seat-abort-reask']) {
+  if (writer === JOURNAL_FACT_EVENTS['seat-timeout-reask'] || writer === JOURNAL_FACT_EVENTS['seat-abort-reask'] || writer === JOURNAL_FACT_EVENTS['seat-death-reask']) {
     return {
       adw_id: rowAdwId,
       event: source.event,

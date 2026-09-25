@@ -36,10 +36,10 @@
   "crew/pi/extensions/subagent.test.mjs:183": "assert.doesNotMatch(source, /^\\s*namespace",
   "crew/pi/extensions/subagent.test.mjs:476": "usage is a complete pi Usage or absent",
   "crew/pi/extensions/subagent.test.mjs:176": "imports.every((specifier) => specifier.startsWith('node:'))",
-  "scripts/factory/ledger.mjs:7474": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:7440": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:7482": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:8910": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:502": "export const CI_DECISIONS = Object.freeze",
-  "scripts/factory/ledger.mjs:3965": "requireEnum(input.decision, CI_DECISIONS"
+  "scripts/factory/ledger.mjs:7475": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7441": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:7483": "unknown flag --${name}",
+  "scripts/factory/ledger.mjs:8911": "unknown verb: ${verb}",
+  "scripts/factory/ledger.mjs:3966": "requireEnum(input.decision, CI_DECISIONS"
 }

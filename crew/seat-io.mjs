@@ -160,17 +160,17 @@ export const REASK_TIMEOUT_S = 600
 export const REASK_GRACE_POLICY = 'charged-shared-slot'
 
 // The closed set of failure kinds ONE bounded re-ask can recover: a wait that
-// ran out (#838) and a worker that vanished MID-TURN leaving a corpse (the
-// 2026-09-01 amendment, measured on b360). `no-envelope` is deliberately
-// ABSENT: a worker that settled cleanly and wrote nothing failed differently
-// and stays escalating. Nothing here reads an EXIT CODE: every pi rpc seat
+// ran out (#838) and a measured dead worker whose original return file has no
+// bytes. `no-envelope` is deliberately ABSENT: a worker that settled cleanly
+// and wrote nothing failed differently and stays escalating. The corpse is
+// admitted only behind the reclaim and byte checks in wait. Nothing here reads an EXIT CODE: every pi rpc seat
 // exits on the retire SIGTERM including the successful ones
 // (crew/headless-rpc.mjs:539), so an exit code names no cause. Do not write
 // that code's numeric value anywhere in this file — gate check G1 greps for
 // it, and a comment quoting it reddens the check as surely as logic would.
 const RETRY_KIND_TIMEOUT = 'timeout'
 const RETRY_KIND_ABORTED = 'aborted'
-export const SEAT_RETRY_KINDS = Object.freeze([RETRY_KIND_TIMEOUT, RETRY_KIND_ABORTED])
+export const SEAT_RETRY_KINDS = Object.freeze([RETRY_KIND_TIMEOUT, RETRY_KIND_ABORTED, 'seat-died'])
 // One grace per assignment TOTAL, never one per cause: the same bound
 // REASK_MAX names, and the SAME `reasked` set the unusable-envelope re-ask
 // spends from.
@@ -178,6 +178,7 @@ export const SEAT_RETRY_MAX = REASK_MAX
 export const SEAT_RETRY_EVENTS = Object.freeze({
   [RETRY_KIND_TIMEOUT]: 'seat-timeout-reask',
   [RETRY_KIND_ABORTED]: 'seat-abort-reask',
+  'seat-died': 'seat-death-reask',
 })
 
 // A transport re-ask is a fresh ASSIGNMENT, and a headless-json seat's prior
@@ -3153,7 +3154,30 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           }
           if (recovery) failure = recovery.error || err
         }
-        if (SEAT_RETRY_KINDS.includes(cellFailureKind(err))) {
+        const retryKind = cellFailureKind(err)
+        const provenDeath = err?.reclaim?.root_liveness === LIVENESS.DEAD
+        const noEnvelopeBytes = retryKind === SEAT_DIED_STAGE && (() => { try { return fsReadFileSync(returnPath).length === 0 } catch (readError) { return readError?.code === 'ENOENT' } })()
+        const retryTransportName = transport ? (crew.members?.[info?.role || 'unknown']?.transport || 'unknown') : DEFAULT_TRANSPORT
+        const canRetryDeath = retryKind === SEAT_DIED_STAGE && SEAT_RETRY_KINDS.includes(retryKind) && provenDeath && noEnvelopeBytes
+          && typeof info?.id === 'string' && !!info.id.trim()
+          && !!transport && REASK_TRANSPORTS.has(retryTransportName) && typeof transport.assign === 'function' && typeof transport.wait === 'function'
+          && !graceIsSpent(info, returnPath, err) && err?.graceSpent !== true
+        // The first death's evidence is journalled BEFORE the re-ask, so a
+        // recovered retry still says what the corpse wasted (RV1-1). The row is
+        // written once per death: when the re-ask hands back this same error
+        // (undelivered, or a second failure that is not a death), the terminal
+        // row below skips it. The write is instrumentation: a journal that
+        // refuses it never blocks the re-ask, and an unwritten row is left for
+        // the terminal path to try again.
+        let journalledDeath = null
+        if (canRetryDeath) {
+          try {
+            const context = err.waitContext || { returnPath, timeoutS, waitStartedAt }
+            io.log(recordRow(seatDiedRow(info, context.returnPath, err, context.timeoutS, context.waitStartedAt)))
+            journalledDeath = err
+          } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+        }
+        if (SEAT_RETRY_KINDS.includes(retryKind) && (retryKind !== SEAT_DIED_STAGE || (provenDeath && noEnvelopeBytes))) {
           let recovery = null
           try {
             recovery = retryLostSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
@@ -3173,7 +3197,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // it with MEASUREMENTS: what this wait spent, what its budget was, and
         // the wait this death would have wasted had the deadline been run out —
         // b337-fallback burned 64 minutes of it and nothing said so.
-        if (failure.stage === SEAT_DIED_STAGE) {
+        if (failure.stage === SEAT_DIED_STAGE && failure !== journalledDeath) {
           const context = failure.waitContext || { returnPath, timeoutS, waitStartedAt }
           io.log(recordRow(failure.reclaim ? seatDiedRow(info, context.returnPath, failure, context.timeoutS, context.waitStartedAt) : { at: now(), seat_died: info?.role || 'unknown', returnPath }))
         }

@@ -1240,6 +1240,44 @@ test('cells CLI leaves advisor spend unpriced when model or usage is absent', { 
     assert.equal(row.absent.cost_usd, reason)
   }
 })
+// Sol, #1547 hand-finish pass 1: the advisor accepts a model of up to 128 characters
+// (advisor.ts SAFE_MODEL), so the writer must too, or a valid consult's spend never lands.
+// Mutation killed: bounding the model at the 64-character short-name bound again.
+test('advisor usage keeps a model at the advisor bound and refuses one past it', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  const model = `openai-codex/${'m'.repeat(128 - 'openai-codex/'.length)}`
+  assert.equal(model.length, 128)
+  writeFileSync(journalPath, JSON.stringify({ at: '2024-01-01T00:00:00.000Z', advisor_usage: { consult_id: 'long', role: 'builder', model, usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 }, usage_reason: null } }) + '\n')
+  const ledger = openTestLedger()
+  try {
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-long' }).applied, 1)
+    assert.deepEqual(ledger.dumpTable('advisor_usage').map((row) => [row.model, row.billed_input_tokens]), [[model, 1]])
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-long', consult_id: 'too-long', model: `${model}x`, usage: null, usage_reason: 'usage-unavailable' }), /at most 128 characters/)
+  } finally { ledger.close() }
+})
+// Sol, #1547 hand-finish pass 1: finite rates can overflow to Infinity; that cost is null
+// with its own reason, never an unexplained null. Mutation killed: dropping the finite check.
+test('cells CLI names an overflowing advisor cost instead of printing it', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({
+    adw_id: 'advisor-overflow', consult_id: 'c1', role: 'builder', model: 'openai-codex/gpt-5.6-sol',
+    usage: { billed_input_tokens: 2_000_000, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const pricePath = join(nextDir(), 'advisor-overflow.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1e308, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).advisor_spend.find((candidate) => candidate.adw_id === 'advisor-overflow')
+  assert.equal(row.cost_usd, null)
+  assert.deepEqual(row.absent, { cost_usd: 'cost-not-finite' })
+})
 test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const createdAt = '2024-01-01T00:00:00.000Z'

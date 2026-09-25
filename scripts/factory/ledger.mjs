@@ -1802,6 +1802,9 @@ function refuse(message, reason = 'usage') {
 // (null); a non-string, blank or unbounded tier is a CALLER BUG and refuses.
 const TIER_MAX_CHARS = 64
 
+// advisor.ts SAFE_MODEL admits a model of 1 + 127 characters; the advisor_usage writer takes the same bound.
+const ADVISOR_MODEL_MAX_CHARS = 128
+
 function normaliseShortName(value, ctx, field) {
   if (value === undefined || value === null) return null
   if (typeof value !== 'string' || value.trim() === '' || value.length > TIER_MAX_CHARS) {
@@ -3835,7 +3838,12 @@ export function openLedger({
   function recordAdvisorUsage(input = {}) {
     requireFields(input, ['adw_id', 'consult_id', 'model', 'usage'], 'recordAdvisorUsage')
     const consultId = normaliseShortName(input.consult_id, 'recordAdvisorUsage', 'consult_id')
-    const model = normaliseShortName(input.model, 'recordAdvisorUsage', 'model')
+    // The model bound is the advisor's own, not the 64-character short-name bound: a
+    // model the advisor accepts must never be refused here, or its spend never lands.
+    if (typeof input.model !== 'string' || input.model.trim() === '' || input.model.length > ADVISOR_MODEL_MAX_CHARS) {
+      refuse(`recordAdvisorUsage: field 'model' must be a non-blank string of at most ${ADVISOR_MODEL_MAX_CHARS} characters`)
+    }
+    const model = input.model.trim()
     const billed = input.usage === null ? null : input.usage
     if (billed !== null) {
       for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
@@ -8477,10 +8485,13 @@ export function main(argv) {
         const rates = price && ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((key) => price[key])
         const missingRates = !rates || rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))
         const missingTokens = group.absent.length > 0
-        const cost = !missingRates && !missingTokens
+        const computed = !missingRates && !missingTokens
           ? group.billed_input_tokens / 1e6 * rates[0] + group.billed_output_tokens / 1e6 * rates[1] + group.billed_cache_write_tokens / 1e6 * rates[2] + group.billed_cache_read_tokens / 1e6 * rates[3]
           : null
-        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : missingTokens ? 'usage-unavailable' : 'price-rate-unavailable' } : {} }
+        // Finite rates can still overflow to Infinity; that is no price, and it says so.
+        const overflowed = computed !== null && !Number.isFinite(computed)
+        const cost = overflowed ? null : computed
+        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
       })
       const priceSource = catalog === null ? null : {
         path: priceSourcePath,

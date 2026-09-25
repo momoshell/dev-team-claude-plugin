@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -1986,4 +1987,32 @@ test('ingest-all counts a journal that vanishes between discovery and read as in
   assert.equal(result.report.ingested, 0)
   assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1 })
   assert.equal(result.report.incomplete[0].reason, 'journal-vanished')
+})
+
+test('ingest-all refuses a journal row naming another run instead of filing it there', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:01.000Z', adw_id: 'other-lane', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.equal(result.report.incomplete[0].reason, 'adw-id-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).seat_turn_census.filter((row) => row.adw_id === 'other-lane').length, 0)
+})
+
+test('ingest-all reports an unreadable lane dir as unmeasured, never as no journal', { skip: process.getuid?.() === 0 ? 'root reads through mode 000' : false }, () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const laneDir = join(root, 'dt-one', 'lane-a')
+  chmodSync(laneDir, 0o000)
+  try {
+    const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+    assert.equal(result.code, 1)
+    assert.deepEqual(result.report.skipped_by_reason, { lane_unreadable: 1 })
+  } finally {
+    chmodSync(laneDir, 0o755)
+  }
 })

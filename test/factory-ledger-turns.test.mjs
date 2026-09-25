@@ -2902,3 +2902,16 @@ test('dry-run applies a valid fact to nothing real: counted applied, zero rows, 
     assert.deepEqual(existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath) : Buffer.alloc(0), logBefore)
   } finally { ledger.close() }
 })
+
+test('a degraded scratch ledger makes the ingest unmeasured instead of reading empty as duplicates', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'degraded-scratch', dry_run: true, _scratchLedgerForTest: (dbPath) => openLedger({ dbPath, nodeVersion: '20.0.0' }) })
+    assert.equal(result.applied, 0)
+    assert.equal(result.ignored, 0)
+    assert.equal(result.complete, false)
+    assert.deepEqual(result.first_failure, { line: null, reason: 'scratch-ledger-degraded' })
+  } finally { ledger.close() }
+})

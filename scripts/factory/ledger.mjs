@@ -6773,7 +6773,7 @@ function mirrorErrorCount(ledger) {
   try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false } = {}) {
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false, strict_adw_id = false, _scratchLedgerForTest = null } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
   const seen = new Set()
@@ -6790,16 +6790,23 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   // the writer's own checks and yields the stored row the key is built from.
   // Dry-run stops there, so the real ledger is only ever read.
   const scratchDir = mkdtempSync(join(tmpdir(), 'ledger-ingest-'))
-  const scratch = openLedger({ dbPath: join(scratchDir, 'ledger.db') })
+  const scratch = _scratchLedgerForTest ? _scratchLedgerForTest(join(scratchDir, 'ledger.db')) : openLedger({ dbPath: join(scratchDir, 'ledger.db') })
   try {
-    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present })
+    // A degraded scratch mirror reads empty, which would look like dedupe
+    // evidence; the ingest is unmeasured instead. openLedger decides degradation
+    // lazily, so it is read after a first query.
+    scratch.dumpTable('run_seats')
+    if (scratch.degraded || (typeof scratch.stats === 'function' && scratch.stats().degraded)) {
+      return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
+    }
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id })
   } finally {
     try { scratch.close() } catch { /* a throwaway ledger */ }
     try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
   }
 }
 
-function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present }) {
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -6851,6 +6858,14 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     // Fan every eligible row out to (writer, args) pairs first so the
     // idempotency guard below stays a single site: boot roles and fact rows
     // share one natural-key seen-set and one dry-run gate.
+    // By default a row's own adw_id wins (HoldC1). A backfill that resolved the
+    // journal's identity itself (ingest-all) passes strict_adw_id: a row naming
+    // another run is refused rather than filed under that run.
+    if (strict_adw_id && adw_id && typeof source.adw_id === 'string' && source.adw_id !== adw_id) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: 'adw-id-mismatch' }
+      continue
+    }
     const pending = []
     if (writer === JOURNAL_FACT_EVENTS.boot) {
       if (!Array.isArray(source.roles)) {

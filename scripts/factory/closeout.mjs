@@ -1109,7 +1109,15 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
     for (const laneName of lanes) {
       const crewDir = join(crewRoot, batch, laneName)
       const journalPath = join(crewDir, 'journal.jsonl')
-      if (!d.existsSync(journalPath)) continue
+      // existsSync reads an unreachable lane dir as "no journal"; list it instead,
+      // so an inaccessible lane is unmeasured, never a clear.
+      let laneEntries
+      try { laneEntries = d.readdirSync(crewDir) } catch {
+        noteSkip('lane_unreadable')
+        unmeasured = true
+        continue
+      }
+      if (!laneEntries.map((entry) => String(entry?.name ?? entry)).includes('journal.jsonl')) continue
       summary.journals_seen += 1
       // An archived lane dir is renamed <lane>.archive-<iso>; its run.json still
       // names <lane>, so identity is checked against the name before the mark.
@@ -1141,7 +1149,7 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
       }
       let detail = null
       try {
-        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true })
+        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true, strict_adw_id: true })
       } catch (error) {
         noteSkip('ingest_error')
         unmeasured = true

@@ -82,7 +82,8 @@
           "extensions": [
             "crew/pi/extensions/subagent.ts",
             "crew/pi/extensions/lab.ts",
-            "crew/pi/extensions/readgate.ts"
+            "crew/pi/extensions/readgate.ts",
+            "crew/pi/extensions/submit.ts"
           ],
           "skills": [
             "skills/lean-build/SKILL.md"
@@ -115,7 +116,8 @@
             "crew/pi/extensions/builderloop.ts",
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/skeletonread.ts",
-            "crew/pi/extensions/fff.ts"
+            "crew/pi/extensions/fff.ts",
+            "crew/pi/extensions/submit.ts"
           ],
           "skills": [
             "skills/lean-build/SKILL.md"
@@ -172,7 +174,8 @@
       "by_agent": {
         "pi": {
           "extensions": [
-            "crew/pi/extensions/readgate.ts"
+            "crew/pi/extensions/readgate.ts",
+            "crew/pi/extensions/submit.ts"
           ],
           "skills": [
             "skills/lean-build/SKILL.md"

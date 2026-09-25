@@ -658,6 +658,7 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
     join(process.cwd(), 'crew/pi/extensions/subagent.ts'),
     join(process.cwd(), 'crew/pi/extensions/lab.ts'),
     join(process.cwd(), 'crew/pi/extensions/readgate.ts'),
+    join(process.cwd(), 'crew/pi/extensions/submit.ts'),
   ])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })

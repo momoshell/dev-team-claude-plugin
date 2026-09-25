@@ -199,7 +199,8 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
         if (result instanceof Error) throw result
         return result
       }
-      return Object.hasOwn(files, path) ? { type: 'file' } : null
+      if (Object.hasOwn(files, path)) return { type: 'file' }
+      return Object.keys(files).some((key) => key.startsWith(`${path}/`)) ? { type: 'directory' } : null
     },
     run(cmd) {
       const text = String(cmd)

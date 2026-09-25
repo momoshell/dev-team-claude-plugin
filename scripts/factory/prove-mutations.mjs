@@ -21,6 +21,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, writeFi
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
+import { psSnapshot, statIsZombie, verifyGroup } from '../../crew/seat-io.mjs'
 import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
 
 export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
@@ -88,26 +89,121 @@ function runGateDefault(gateCmd, cwd) {
 }
 
 // Diff mode runs detached process groups so a timeout can reap the shell and descendants.
+// A descendant that leaves the group (setsid/detached spawn) is tracked by polling the
+// process table for the run's lineage and is signalled by its own verified group.
+// Blind spot: a descendant that detaches AND loses every tracked ancestor within one
+// poll interval is never sampled, so it cannot be reaped here.
 export const DIFF_RUN_TIMEOUT_MS = 120_000
 export const DIFF_TOTAL_DEADLINE_MS = 720_000
+export const DIFF_DESCENDANT_POLL_MS = 250
+const DIFF_REAP_SETTLE_MS = 1000
+
+// Record every live descendant outside the run's own group, walking from the shell and
+// from every earlier-tracked pid whose start time still matches, so a reparented escapee
+// stays reachable through the lineage sampled while its parent was alive.
+export function trackDiffDescendants(snapshot, rootPid, groups) {
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return false
+  const children = new Map()
+  for (const row of snapshot.rows.values()) {
+    if (!row || !Number.isSafeInteger(row.ppid)) continue
+    const list = children.get(row.ppid) || []
+    list.push(row)
+    children.set(row.ppid, list)
+  }
+  const queue = snapshot.rows.has(rootPid) ? [rootPid] : []
+  for (const anchors of groups.values()) {
+    for (const anchor of anchors) if (snapshot.rows.get(anchor.pid)?.start === anchor.start) queue.push(anchor.pid)
+  }
+  const seen = new Set()
+  while (queue.length) {
+    const pid = queue.shift()
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    for (const row of children.get(pid) || []) {
+      if (Number.isSafeInteger(row.pgid) && row.pgid > 1 && row.pgid !== rootPid && !statIsZombie(row.stat)) {
+        const anchors = groups.get(row.pgid) || []
+        if (!anchors.some((anchor) => anchor.pid === row.pid && anchor.start === row.start)) anchors.push({ pid: row.pid, pgid: row.pgid, start: row.start })
+        groups.set(row.pgid, anchors)
+      }
+      queue.push(row.pid)
+    }
+  }
+  return true
+}
+
 function runCommandDefault(command, cwd, options = {}) {
+  const snapshot = typeof options.snapshot === 'function' ? options.snapshot : () => psSnapshot()
+  const pollMs = Number.isFinite(options.pollMs) ? Math.max(10, options.pollMs) : DIFF_DESCENDANT_POLL_MS
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd, detached: true, env: options.env || colourNeutralEnv(process.env), stdio: ['ignore', 'pipe', 'pipe'],
     })
+    const groups = new Map()
     let stdout = ''
     let stderr = ''
     let size = 0
     let overflow = false
     let timedOut = false
     let escalation
+    let settleTimer
+    let settled = false
+    const sample = () => { try { const table = snapshot(); trackDiffDescendants(table, child.pid, groups); return table } catch { return null } }
+    const poller = setInterval(sample, pollMs)
+    // Signal the run's own group, then every tracked escaped group whose anchor identity
+    // (pid + start time) is re-verified against a fresh table, so a reused pid is never hit.
+    const signalAll = (signal) => {
+      try { process.kill(-child.pid, signal) } catch {}
+      const table = sample()
+      for (const [pgid, anchors] of groups) {
+        if (verifyGroup({ pgid, anchors }, table).signalable) { try { process.kill(-pgid, signal) } catch {} }
+      }
+    }
+    const survivingGroups = () => {
+      const table = sample()
+      let alive = 0
+      try { process.kill(-child.pid, 0); alive += 1 } catch (err) { if (err?.code !== 'ESRCH') alive += 1 }
+      for (const [pgid, anchors] of groups) {
+        const verdict = verifyGroup({ pgid, anchors }, table)
+        if (verdict.liveness !== 'dead') alive += 1
+      }
+      return alive
+    }
+    const terminate = () => {
+      signalAll('SIGTERM')
+      clearTimeout(escalation)
+      escalation = setTimeout(() => signalAll('SIGKILL'), 150)
+    }
+    const finish = async (status, signal, spawnError = null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer); clearTimeout(escalation); clearTimeout(settleTimer); clearInterval(poller)
+      let survivors = 0
+      if (timedOut || overflow) {
+        // Keep the group cleanup active even when the shell closed before a grandchild,
+        // and do not call cleanup complete until no tracked group is still alive.
+        const deadline = Date.now() + DIFF_REAP_SETTLE_MS
+        for (;;) {
+          signalAll('SIGKILL')
+          survivors = survivingGroups()
+          if (survivors === 0 || Date.now() >= deadline) break
+          await new Promise((wake) => setTimeout(wake, 25))
+        }
+        child.stdout.destroy(); child.stderr.destroy()
+      }
+      if (spawnError) {
+        resolve({ ok: false, output: `${stdout}${stderr}`, status: null, signal: null, error: { code: spawnError.code, message: spawnError.message }, completed: false })
+        return
+      }
+      resolve({ ok: !timedOut && !overflow && status === 0, output: `${stdout}${stderr}`,
+        status: timedOut || overflow ? null : status, signal: signal || null,
+        error: timedOut ? { code: 'ETIMEDOUT', message: 'diff command timed out' } : overflow ? { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'diff command exceeded output limit' } : null,
+        completed: !timedOut && !overflow && status !== null,
+        ...(timedOut || overflow ? { reap_survivors: survivors } : {}) })
+    }
     const append = (chunk, target) => {
       size += chunk.length
       if (size > RUN_MAX_BUFFER_BYTES) {
-        overflow = true
-        try { process.kill(-child.pid, 'SIGTERM') } catch {}
-        clearTimeout(timer)
-        escalation = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch {} }, 100)
+        if (!overflow) { overflow = true; clearTimeout(timer); terminate() }
         return
       }
       if (target === 'stdout') stdout += chunk.toString('utf8')
@@ -115,26 +211,14 @@ function runCommandDefault(command, cwd, options = {}) {
     }
     child.stdout.on('data', (chunk) => append(chunk, 'stdout'))
     child.stderr.on('data', (chunk) => append(chunk, 'stderr'))
-    const timer = setTimeout(() => {
-      timedOut = true
-      try { process.kill(-child.pid, 'SIGTERM') } catch {}
-      escalation = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL') } catch {} }, 150)
-    }, options.timeout ?? DIFF_RUN_TIMEOUT_MS)
-    child.on('error', (error) => {
-      clearTimeout(timer); clearTimeout(escalation)
-      resolve({ ok: false, output: `${stdout}${stderr}`, status: null, signal: null, error: { code: error.code, message: error.message }, completed: false })
+    const timer = setTimeout(() => { timedOut = true; terminate() }, options.timeout ?? DIFF_RUN_TIMEOUT_MS)
+    child.on('error', (error) => { finish(null, null, error) })
+    // An escaped descendant holding the pipes would keep `close` from ever firing after a
+    // kill, so a killed run settles from `exit` once the reap window has passed.
+    child.on('exit', (status, signal) => {
+      if (timedOut || overflow) settleTimer = setTimeout(() => finish(status, signal), 300)
     })
-    child.on('close', (status, signal) => {
-      clearTimeout(timer); clearTimeout(escalation)
-      if (timedOut || overflow) {
-        // Keep the group cleanup active even when the shell closed before a grandchild.
-        try { process.kill(-child.pid, 'SIGKILL') } catch {}
-      }
-      resolve({ ok: !timedOut && !overflow && status === 0, output: `${stdout}${stderr}`,
-        status: timedOut || overflow ? null : status, signal: signal || null,
-        error: timedOut ? { code: 'ETIMEDOUT', message: 'diff command timed out' } : overflow ? { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'diff command exceeded output limit' } : null,
-        completed: !timedOut && !overflow && status !== null })
-    })
+    child.on('close', (status, signal) => { finish(status, signal) })
   })
 }
 
@@ -877,6 +961,9 @@ export function diffRunnerUnavailable(cause) {
 
 export function normalizeDiffCommandResult(result) {
   if (!result || typeof result !== 'object') return diffRunnerUnavailable('result-not-object')
+  // A timeout whose process groups could not all be proven dead is not a settled
+  // observation: a survivor could still write the tree after the mutant is restored.
+  if (result.error?.code === 'ETIMEDOUT' && Number(result.reap_survivors) > 0) return diffRunnerUnavailable('result-incomplete')
   if (result.error?.code === 'ETIMEDOUT') return { available: true, timeout: true, ok: false, output: String(result.output || '') }
   if (result.error || result.signal || result.completed === false || result.status === null) return diffRunnerUnavailable('result-incomplete')
   if (typeof result.ok !== 'boolean') return diffRunnerUnavailable('ok-missing')

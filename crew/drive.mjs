@@ -9024,6 +9024,13 @@ function runTask(ctx, io, crash) {
           if (cell.state === 'present' && !diffBytesEqual(bytes, cell.bytes)) throw new Error(`current task snapshot does not match pre-run bytes for ${path}`)
           if (cell.state === 'absent' && Buffer.from(bytes).length !== 0) throw new Error(`absent current task snapshot is not empty for ${path}`)
           if (typeof io.lstat !== 'function') throw new Error(`target type is unverifiable for ${path}`)
+          // A write follows a symlinked parent out of the checkout, so every component
+          // under the checkout must be a real directory before the target's type counts.
+          const components = path.split('/')
+          for (let depth = 1; depth < components.length; depth += 1) {
+            const parent = components.slice(0, depth).join('/')
+            if (io.lstat(`${ctx.checkout}/${parent}`)?.type !== 'directory') throw new Error(`unsafe diff target parent ${parent} for ${path}`)
+          }
           const metadata = io.lstat(`${ctx.checkout}/${path}`)
           if (cell.state === 'absent') {
             if (metadata !== null) throw new Error(`absent diff target unexpectedly exists for ${path}`)
@@ -9094,7 +9101,11 @@ function runTask(ctx, io, crash) {
       gate_cmd: mutant.gate_cmd ?? gateCmd,
     }))
     const lines = ['## Diff-mutant findings', JSON.stringify(bounded)]
-    if (report.timeout_killed > 0) lines.push(`Timeout kills: ${report.timeout_killed} of ${report.killed} kills were per-run timeouts (120s), not red runs; a timeout kill does not prove the gate discriminates.`)
+    // Count over the forwarded mutants: the merged report carries every round's mutants
+    // but only the latest round's tallies.
+    const timeoutKills = report.mutants.filter((mutant) => mutant.outcome === 'killed' && mutant.kill_reason === 'timeout').length
+    const kills = report.mutants.filter((mutant) => mutant.outcome === 'killed').length
+    if (timeoutKills > 0) lines.push(`Timeout kills: ${timeoutKills} of ${kills} kills were per-run timeouts (120s), not red runs; a timeout kill does not prove the gate discriminates.`)
     return lines
   }
   const diffMutationDisposition = (survivors) => survivors.length > 0 ? 'review' : 'continue'

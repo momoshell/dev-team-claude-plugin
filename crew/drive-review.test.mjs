@@ -3310,6 +3310,18 @@ test('RV1-4 reviewer brief discloses timeout kills beside empty findings', () =>
   assert.match(brief, /## Diff-mutant findings\n\[\]\nTimeout kills: 1 of 1 kills were per-run timeouts \(120s\), not red runs; a timeout kill does not prove the gate discriminates\./)
 })
 
+test('RV2-3 timeout kills are counted over the forwarded mutants, not the latest round tally', () => {
+  // The merged brief report takes tallies from the latest round only; an earlier round's
+  // timeout kill reaches the brief as a mutant whose round tally is no longer present.
+  const timeout = { id: 'timed-out', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'killed', kill_reason: 'timeout' }
+  const red = { id: 'red', path: 'a.mjs', line: 2, operator: 'literal', replacement: 'true', outcome: 'killed' }
+  const io = diffDriverIo({ report: diffReport([timeout, red], { timeout_killed: 0 }) })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const brief = io.calls.writes[`${TD}/review-brief-1.md`]
+  assert.match(brief, /Timeout kills: 1 of 2 kills were per-run timeouts/)
+})
+
 test('D1 diff proof leaves declared-anchor proof bytes unchanged', () => {
   const mutation = { check: 'declared', file: 'a.mjs', find: 'true', replace: 'false' }
   const noDiff = diffDriverIo({ mutations: [mutation], report: diffReport([]) })

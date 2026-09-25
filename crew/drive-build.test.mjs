@@ -6484,11 +6484,12 @@ const diffSettlementReport = (generation) => ({
   omitted_reason: DIFF_SETTLEMENT_OMITTED_REASON, blind_spot: null, skip_counts: {}, mutants: [],
 })
 
-function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false } = {}) {
+function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false, file = DIFF_SETTLEMENT_FILE } = {}) {
+  const DIFF_SETTLEMENT_PATH = `${CTX.checkout}/${file}`
   const files = { [DIFF_SETTLEMENT_PATH]: runnerUnavailable ? 'baseline\n' : 'before\n' }
-  const snapshotPath = `${TD}/diff-1-0-current-${DIFF_SETTLEMENT_FILE}`
+  const snapshotPath = `${TD}/diff-1-0-current-${file.replace(/[^A-Za-z0-9._-]+/g, '_')}`
   const plan = planEnv({ details: {
-    ...planEnv().details, files_in_scope: [DIFF_SETTLEMENT_FILE], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
+    ...planEnv().details, files_in_scope: [file], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
   } })
   const envelopes = {
     'planner:1': plan,
@@ -6519,7 +6520,7 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
     cleanRuns: { 'gate-cmd': { ok: false, output: DIFF_SETTLEMENT_RED } },
     files, writeThrough: true, lstats,
     throwWrites: failRestore ? [DIFF_SETTLEMENT_PATH] : [],
-    diffListing: () => `${DIFF_SETTLEMENT_FILE}\0${contaminate && Object.hasOwn(files, `${CTX.checkout}/untracked.mjs`) ? 'untracked.mjs\0' : ''}`, changed: [DIFF_SETTLEMENT_FILE],
+    diffListing: () => `${file}\0${contaminate && Object.hasOwn(files, `${CTX.checkout}/untracked.mjs`) ? 'untracked.mjs\0' : ''}`, changed: [file],
     diffReports: (command, index) => {
       const match = /diff-mutation-(\d+)\.json/.exec(String(command))
       const generation = Number(match?.[1] ?? index + 1)
@@ -6576,6 +6577,23 @@ test('RV1-3 recovery refuses symlink targets and newly present absent cells', ()
   assert.equal(noLstatResult.status, 'escalation')
   assert.match(diffSettlementFatal(noLstat.io)?.why || '', /target type is unverifiable/)
   assert.equal(noLstat.io.calls.logs.some((row) => row.diff_proof_restored), false)
+})
+
+test('RV2-1 recovery refuses a target whose parent directory became a symlink', () => {
+  const file = 'lib/a.mjs'
+  const path = `${CTX.checkout}/${file}`
+  const linked = diffSettlementIo({ runnerUnavailable: true, file, lstats: { [`${CTX.checkout}/lib`]: { type: 'symlink' } } })
+  const result = driveTask(CTX, linked.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(diffSettlementFatal(linked.io)?.reason, 'tree-not-restored')
+  assert.match(diffSettlementFatal(linked.io)?.why || '', /unsafe diff target parent lib for lib\/a\.mjs/)
+  assert.equal(linked.io.calls.writeLog.some((entry) => entry.path === path), false)
+  assert.equal(linked.io.calls.logs.some((row) => row.diff_proof_restored), false)
+  const real = diffSettlementIo({ runnerUnavailable: true, file })
+  const restored = driveTask(CTX, real.io)
+  assert.equal(restored.status, 'done')
+  assert.equal(real.files[path], 'before\n')
+  assert.deepEqual(real.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof?.diff_proof_restored, { generation: 1, files: [file] })
 })
 
 test('T4 unavailable runner restores the current snapshot and journals it', () => {

@@ -875,6 +875,85 @@ test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', asyn
   rmSync(root, { recursive: true, force: true })
 })
 
+const pidDead = (pid) => { try { process.kill(pid, 0); return false } catch (err) { return err?.code === 'ESRCH' } }
+const killQuietly = (pid) => { try { process.kill(pid, 'SIGKILL') } catch {} }
+const detachedSpawner = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: "ignore" }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})' ; sleep 30`
+
+test('A3b a detached descendant outside the timed-out group is reaped before the run settles', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'escaped.pid')
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 30_000), checkout, { timeout: 800, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the escaped detached descendant outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3c an escaped descendant whose parent already exited is reaped through the sampled lineage', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'orphan.pid')
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 400), checkout, { timeout: 1500, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the reparented escapee outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3e a group spawned by an already-orphaned escapee is reaped through the tracked escapee', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'late.pid')
+  const script = join(root, 'late-escape.cjs')
+  // The shell's child starts a detached escapee and exits at once; only AFTER that does the
+  // escapee start its own detached group, so no root-lineage sample can ever see the late one.
+  writeFileSync(script, [
+    'const { spawn } = require("node:child_process")',
+    'const { writeFileSync } = require("node:fs")',
+    'if (process.argv[2] === "escapee") {',
+    '  setTimeout(() => {',
+    '    const late = spawn("sleep", ["30"], { detached: true, stdio: "ignore" })',
+    `    writeFileSync(${JSON.stringify(marker)}, String(late.pid))`,
+    '    late.unref()',
+    '  }, 400)',
+    '  setTimeout(() => {}, 30_000)',
+    '} else {',
+    '  const escapee = spawn(process.execPath, [__filename, "escapee"], { detached: true, stdio: "ignore" })',
+    '  escapee.unref()',
+    '  setTimeout(() => {}, 150)',
+    '}',
+  ].join('\n'))
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(`node ${JSON.stringify(script)} ; sleep 30`, checkout, { timeout: 1500, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the group started by an orphaned escapee outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3d a timeout with an unproven reap is runner-unavailable, never a timeout kill', () => {
+  assert.deepEqual(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 1 }), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
+  assert.equal(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 0 }).timeout, true)
+})
+
 test('A2 a hanging diff validation is timed out, killed, and restored', async () => {
   const { root, checkout, file } = fixture()
   const before = WIDGET

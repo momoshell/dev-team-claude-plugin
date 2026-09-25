@@ -1905,7 +1905,7 @@ test('source text wires synthetic exclusion into exactly twelve ordinary readers
   for (const name of ['getSession', 'dumpTable', 'phantomSessions', 'unattributableCellFailures']) {
     assert.doesNotMatch(block(name), /excludeSynthetic\(/, `${name} must retain its forensic/non-session contract`)
   }
-  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 14, 'one helper declaration plus thirteen ordinary query sites')
+  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 15, 'one helper declaration plus fourteen ordinary query sites')
   const task = block('taskReadout')
   assert.match(task, /SELECT adw_id FROM sessions WHERE adw_id = \?/, 'direct forensic task lookup must remain visible')
   assert.match(task, /SELECT \* FROM sessions WHERE adw_id = \?/, 'resolved forensic task row must remain visible')
@@ -2248,4 +2248,71 @@ test('an agent row recorded with no time replays with no time, while a fresh one
     assert.match(fresh, /^\d{4}-\d\d-\d\dT/)
     assert.notEqual(fresh, new Date(replayClock).toISOString(), 'the fresh row keeps the time it was written, not the replay clock')
   } finally { rebuilt.close() }
+})
+
+test('cellAttempts counts applied swaps as target-cell attempts', () => {
+  const ledger = openTestLedger()
+  try {
+    const seatCell = (adw_id, over = {}) => {
+      ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id })
+      ledger.recordRunSeat({
+        adw_id, role: 'builder', agent: 'pi', provider: 'openai', model_id: 'luna', model: 'luna',
+        effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
+        created_at: '2026-09-25T12:00:00.000Z', ...over,
+      })
+    }
+    const swap = (adw_id, outcome, to, created_at, over = {}) => {
+      ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id })
+      ledger.recordModifierAttempt({
+        adw_id, role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', outcome,
+        from_provider: 'openai', from_model_id: 'luna', from_model: 'luna', from_agent: 'pi', from_effort: 'high',
+        to_provider: 'openai', to_model_id: to, to_model: to, to_agent: 'pi', to_effort: 'high',
+        created_at, ...over,
+      })
+    }
+    const attempts = (model_id, bounds = {}) =>
+      ledger.cellAttempts(bounds).find((row) => row.model_id === model_id)?.attempts ?? 0
+    seatCell('old-seat')
+    swap('swap-applied', 'applied', 'codex-spark', '2026-09-25T12:01:00.000Z')
+    assert.equal(attempts('codex-spark'), 1, 'an applied swap counts with no target seat row')
+    assert.equal(attempts('luna'), 1, 'the old seat still counts once')
+    assert.equal(attempts('codex-spark', { until: '2026-09-25T12:01:00.000Z' }), 0, 'the modifier upper bound is exclusive')
+    assert.equal(attempts('codex-spark', { since: '2026-09-25T12:01:00.000Z' }), 1, 'the modifier lower bound is inclusive')
+    swap('swap-exhausted', 'exhausted', 'refused-target', '2026-09-25T12:02:00.000Z')
+    assert.equal(attempts('refused-target'), 0, 'exhausted targets never count')
+    swap('swap-identical', 'applied', 'luna', '2026-09-25T12:03:00.000Z')
+    assert.equal(attempts('luna'), 1, 'an identical-cell modifier adds no attempt')
+    swap('swap-effort', 'applied', 'luna', '2026-09-25T12:04:00.000Z', { to_effort: 'max' })
+    assert.equal(
+      ledger.cellAttempts().find((row) => row.model_id === 'luna' && row.effort === 'max')?.attempts,
+      1,
+      'an effort-only change counts for the new effort cell',
+    )
+    swap('swap-synthetic', 'applied', 'synthetic-target', '2026-09-25T12:05:00.000Z')
+    const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath)
+    try {
+      db.prepare('UPDATE sessions SET synthetic_reason = ? WHERE adw_id = ?').run('gate_scratch_checkout', 'swap-synthetic')
+    } finally { db.close() }
+    assert.equal(attempts('synthetic-target'), 0, 'synthetic-session modifiers are excluded')
+  } finally { ledger.close() }
+})
+
+test('cellAttempts keys operator overrides by model string', () => {
+  const ledger = openTestLedger()
+  try {
+    const seat = (adw_id, cell) => {
+      ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id })
+      ledger.recordRunSeat({
+        adw_id, role: 'builder', agent: 'pi', effort: 'high', transport: 'pane',
+        policy_state: 'passed', created_at: '2026-09-25T12:00:00.000Z', ...cell,
+      })
+    }
+    seat('roster-seat', { provider: 'openai', model_id: 'luna', model: 'luna', source: 'roster' })
+    seat('override-a', { provider: null, model_id: null, model: 'vendor/override-a', source: 'operator_override' })
+    seat('override-b', { provider: null, model_id: null, model: 'vendor/override-b', source: 'operator_override' })
+    const rows = ledger.cellAttempts()
+    assert.equal(rows.find((row) => row.model_id === 'luna')?.model_key ?? null, null, 'roster rows carry no model key')
+    assert.equal(rows.find((row) => row.model_key === 'vendor/override-a')?.attempts, 1)
+    assert.equal(rows.find((row) => row.model_key === 'vendor/override-b')?.attempts, 1)
+  } finally { ledger.close() }
 })

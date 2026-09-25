@@ -5126,15 +5126,31 @@ export function openLedger({
 
   function cellAttempts({ since = null, until = null } = {}) {
     return queryRows(`
-      SELECT rs.provider, rs.model_id, rs.agent, rs.effort, rs.role,
-        COUNT(*) AS attempts, MIN(rs.created_at) AS first_at, MAX(rs.created_at) AS last_at
-      FROM run_seats rs
-      JOIN sessions s ON s.adw_id = rs.adw_id
-      WHERE ${excludeSynthetic('s.')}
-        AND (? IS NULL OR rs.created_at >= ?) AND (? IS NULL OR rs.created_at < ?)
-      GROUP BY rs.provider, rs.model_id, rs.agent, rs.effort, rs.role
-      ORDER BY rs.provider, rs.model_id, rs.agent, rs.effort, rs.role
-    `, [since, since, until, until])
+      WITH scoped AS (
+        SELECT rs.provider AS provider, rs.model_id AS model_id, rs.model AS model,
+          rs.agent AS agent, rs.effort AS effort, rs.role AS role, rs.created_at AS created_at
+        FROM run_seats rs
+        JOIN sessions s ON s.adw_id = rs.adw_id
+        WHERE ${excludeSynthetic('s.')}
+          AND (? IS NULL OR rs.created_at >= ?) AND (? IS NULL OR rs.created_at < ?)
+        UNION ALL
+        SELECT ma.to_provider AS provider, ma.to_model_id AS model_id, ma.to_model AS model,
+          ma.to_agent AS agent, ma.to_effort AS effort, ma.role AS role, ma.created_at AS created_at
+        FROM modifier_attempts ma
+        JOIN sessions s ON s.adw_id = ma.adw_id
+        WHERE ma.outcome = 'applied'
+          AND (ma.from_provider IS NOT ma.to_provider OR ma.from_model_id IS NOT ma.to_model_id OR ma.from_model IS NOT ma.to_model OR ma.from_agent IS NOT ma.to_agent OR ma.from_effort IS NOT ma.to_effort)
+          AND ${excludeSynthetic('s.')}
+          AND (? IS NULL OR ma.created_at >= ?) AND (? IS NULL OR ma.created_at < ?)
+      )
+      SELECT a.provider, a.model_id,
+        CASE WHEN a.provider IS NULL AND a.model_id IS NULL THEN a.model ELSE NULL END AS model_key,
+        a.agent, a.effort, a.role,
+        COUNT(*) AS attempts, MIN(a.created_at) AS first_at, MAX(a.created_at) AS last_at
+      FROM scoped a
+      GROUP BY a.provider, a.model_id, model_key, a.agent, a.effort, a.role
+      ORDER BY a.provider, a.model_id, model_key, a.agent, a.effort, a.role
+    `, [since, since, until, until, since, since, until, until])
   }
 
   function cellReviews({ since = null, until = null } = {}) {

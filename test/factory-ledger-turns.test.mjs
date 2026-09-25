@@ -128,7 +128,7 @@ test('attempt windows use run seat timestamps rather than agent start timestamps
   try {
     const rows = ledger.cellAttempts({ since, until })
     assert.deepEqual(rows.map((row) => ({ ...row })), [{
-      provider: 'openai', model_id: 'attempt-cell', agent: 'pi', effort: 'high', role: 'builder',
+      provider: 'openai', model_id: 'attempt-cell', model_key: null, agent: 'pi', effort: 'high', role: 'builder',
       attempts: 12, first_at: '2024-01-02T00:00:01.000Z', last_at: '2024-01-02T00:00:12.000Z',
     }])
     assert.equal(rows[0].attempts, 12)

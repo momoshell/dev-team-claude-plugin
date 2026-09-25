@@ -147,6 +147,9 @@ function runCommandDefault(command, cwd, options = {}) {
     let escalation
     let settleTimer
     let settled = false
+    let pipesClosed = false
+    let exitStatus = null
+    let exitSignal = null
     const sample = () => { try { const table = snapshot(); trackDiffDescendants(table, child.pid, groups); return table } catch { return null } }
     const poller = setInterval(sample, pollMs)
     // Signal the run's own group, then every tracked escaped group whose anchor identity
@@ -168,10 +171,15 @@ function runCommandDefault(command, cwd, options = {}) {
       }
       return alive
     }
+    // Settlement is armed HERE, whichever order exit and close arrive in: a shell that
+    // exited before the deadline while a detached child holds its pipes has already
+    // fired `exit` and will never fire `close`.
     const terminate = () => {
       signalAll('SIGTERM')
       clearTimeout(escalation)
       escalation = setTimeout(() => signalAll('SIGKILL'), 150)
+      clearTimeout(settleTimer)
+      settleTimer = setTimeout(() => finish(exitStatus, exitSignal), 450)
     }
     const finish = async (status, signal, spawnError = null) => {
       if (settled) return
@@ -185,9 +193,12 @@ function runCommandDefault(command, cwd, options = {}) {
         for (;;) {
           signalAll('SIGKILL')
           survivors = survivingGroups()
-          if (survivors === 0 || Date.now() >= deadline) break
+          if ((survivors === 0 && pipesClosed) || Date.now() >= deadline) break
           await new Promise((wake) => setTimeout(wake, 25))
         }
+        // A pipe still open after every tracked group is dead is held by a process this
+        // run never sampled: an untracked survivor, so the reap is unproven.
+        if (!pipesClosed) survivors += 1
         child.stdout.destroy(); child.stderr.destroy()
       }
       if (spawnError) {
@@ -213,12 +224,8 @@ function runCommandDefault(command, cwd, options = {}) {
     child.stderr.on('data', (chunk) => append(chunk, 'stderr'))
     const timer = setTimeout(() => { timedOut = true; terminate() }, options.timeout ?? DIFF_RUN_TIMEOUT_MS)
     child.on('error', (error) => { finish(null, null, error) })
-    // An escaped descendant holding the pipes would keep `close` from ever firing after a
-    // kill, so a killed run settles from `exit` once the reap window has passed.
-    child.on('exit', (status, signal) => {
-      if (timedOut || overflow) settleTimer = setTimeout(() => finish(status, signal), 300)
-    })
-    child.on('close', (status, signal) => { finish(status, signal) })
+    child.on('exit', (status, signal) => { exitStatus = status; exitSignal = signal })
+    child.on('close', (status, signal) => { pipesClosed = true; finish(status, signal) })
   })
 }
 

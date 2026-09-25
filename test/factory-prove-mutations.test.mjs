@@ -949,6 +949,46 @@ test('A3e a group spawned by an already-orphaned escapee is reaped through the t
   }
 })
 
+const pipeHolder = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})'`
+
+test('A3f a shell that exited early while a tracked detached child holds its pipes still settles at the timeout', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'holder.pid')
+  let pid = null
+  try {
+    const started = Date.now()
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 250), checkout, { timeout: 800, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the tracked pipe holder outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3g an untracked pipe holder settles at the timeout as an unproven reap', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'untracked.pid')
+  let pid = null
+  try {
+    const started = Date.now()
+    // A poll interval longer than the run means the holder is never sampled.
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 0), checkout, { timeout: 800, pollMs: 60_000 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.ok(result.reap_survivors >= 1, 'an unsampled pipe holder was reported as a proven reap')
+    assert.equal(mod.normalizeDiffCommandResult(result).available, false)
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('A3d a timeout with an unproven reap is runner-unavailable, never a timeout kill', () => {
   assert.deepEqual(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 1 }), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
   assert.equal(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 0 }).timeout, true)

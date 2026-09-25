@@ -348,7 +348,7 @@ test('A1', async () => {
     argv = [bin, ...args]
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
     child.stdin = { end(value) { input = value; setImmediate(() => {
-      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ ...judgment, claim: 'older result' }) }], usage: { input: 2, output: 1 } } }) + '\n')
+      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ ...judgment, claim: 'older result' }) }], usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
       child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(judgment) }], usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 } } }) + '\n')
       child.emit('close', 0)
     }) } }
@@ -505,7 +505,9 @@ test('A3', async () => {
   const advisorUsage = journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
   assert.equal(advisorUsage.length, 2)
   assert.equal(advisorUsage.at(-1).usage, null)
-  assert.equal(advisorUsage.at(-1).usage_reason, 'usage-unavailable')
+  // This child's assistant frame carries no usage: an own-spend frame without usage is
+  // incomplete spend (the #1547 rule), while the consult row keeps its own reason above.
+  assert.equal(advisorUsage.at(-1).usage_reason, 'usage-incomplete')
   rmSync(f.root, { recursive: true, force: true })
 })
 
@@ -726,6 +728,114 @@ function childConsult({ childSpawn, extraDeps = {} }) {
   }
   return { f, journal, run, cleanup: () => rmSync(f.root, { recursive: true, force: true }) }
 }
+
+// The whole false-clean class (Sol, #1547 hand-finish passes 4-5): spend is measured ONLY IF
+// every own-spend frame carries a complete usage. One test per variant; each names the guard
+// in ownSpendIncomplete whose removal turns it red.
+const SPEND_JUDGMENT = { class: 'edge-path', severity: 'medium', claim: 'child found a grounded edge path', evidence: ['outside.mjs:1'] }
+const ownFrame = (usage) => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(SPEND_JUDGMENT) }], ...(usage === undefined ? {} : { usage }) } })
+const COMPLETE_USAGE = { input: 5, output: 3, cacheRead: 0, cacheWrite: 0 }
+// One child per call. `raw` is written after the frames, verbatim; `close` is the exit the
+// child reports ([code, signal]), or null for a child that never closes by itself (a hang);
+// the kill stub never closes it, so a failed consult settles on the advisor's own hard grace.
+async function spendRun(frames, { raw = '', close = [0, null], extraDeps = {} } = {}) {
+  const childSpawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { setImmediate(() => {
+      for (const frame of frames) child.stdout.write(JSON.stringify(frame) + '\n')
+      if (raw) child.stdout.write(raw)
+      if (close !== null) setImmediate(() => child.emit('close', close[0], close[1]))
+    }) } }
+    child.kill = () => true
+    return child
+  }
+  const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5, ...extraDeps } })
+  try {
+    await c.run()
+    const rows = c.journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
+    assert.equal(rows.length, 1)
+    const consult = c.journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
+    return { row: rows[0], consult }
+  } finally { c.cleanup() }
+}
+async function spendRowFor(frames) { return (await spendRun(frames)).row }
+// The consult row keeps the partial fold (#1535), labelled; the priced row is null.
+function assertPartial({ row, consult }, tokens) {
+  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
+  assert.equal(consult.usage?.billed_input_tokens, tokens); assert.equal(consult.usage_partial, true)
+}
+// (a) guard: an own-spend frame with no usage. Sol pass 5's counterexample.
+test('spend class (a): a usage-less own-spend frame before a complete one leaves the spend unmeasured', async () => {
+  const row = await spendRowFor([ownFrame(undefined), ownFrame(COMPLETE_USAGE)])
+  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
+})
+// (b) guard: the same, in the other order; a last-frame-only check would pass it.
+test('spend class (b): a usage-less own-spend frame after a complete one leaves the spend unmeasured', async () => {
+  const row = await spendRowFor([ownFrame(COMPLETE_USAGE), ownFrame(undefined)])
+  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
+})
+// (c) guard: every token class present. Sol pass 4's counterexample.
+test('spend class (c): a child usage frame missing a token class writes an unmeasured spend row, never a zero', async () => {
+  const row = await spendRowFor([ownFrame({ input: 7, output: 3, cacheWrite: 2 })])
+  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
+})
+// (d) guard: each present class a non-negative safe integer. JSON carries a non-finite
+// number as null, so null stands for it beside a negative and a fraction.
+test('spend class (d): a non-finite, negative or fractional token class leaves the spend unmeasured', async () => {
+  for (const bad of [null, -1, 1.5, '4']) {
+    const row = await spendRowFor([ownFrame({ ...COMPLETE_USAGE, cacheRead: bad })])
+    assert.equal(row.usage, null, `cacheRead ${JSON.stringify(bad)}`); assert.equal(row.usage_reason, 'usage-incomplete')
+  }
+})
+// (e) guard: only own-spend frames count. Zero own-spend frames (a nested tool result, which
+// the reducer never counts) keep the reducer's null and usage-unavailable, not incomplete.
+test('spend class (e): zero own-spend frames keep usage-unavailable, and a complete run is measured', async () => {
+  const none = await spendRowFor([{ type: 'message_end', message: { role: 'toolResult', content: [] } }, { type: 'turn_end' }])
+  assert.equal(none.usage, null); assert.equal(none.usage_reason, 'usage-unavailable')
+  const measured = await spendRowFor([ownFrame(COMPLETE_USAGE), ownFrame({ input: 1, output: 1, cacheRead: 2, cacheWrite: 3 })])
+  assert.deepEqual(measured.usage, { billed_input_tokens: 6, billed_output_tokens: 4, billed_cache_write_tokens: 3, billed_cache_read_tokens: 2 })
+  assert.equal(measured.usage_reason, null)
+})
+
+// aggregate guard (aggregateSafe). Sol pass 7: two clean frames whose sum passes MAX_SAFE_INTEGER
+// are not a measured total; the row is unmeasured, and it ingests (the writer never refuses it).
+test('spend class (j): an aggregate past MAX_SAFE_INTEGER leaves the spend unmeasured and ingestible', async () => {
+  const run = await spendRun([ownFrame({ ...COMPLETE_USAGE, input: Number.MAX_SAFE_INTEGER }), ownFrame({ ...COMPLETE_USAGE, input: 1 })])
+  assert.equal(run.row.usage, null); assert.equal(run.row.usage_reason, 'usage-incomplete')
+  assert.equal(run.consult.usage_partial, true)
+  const { openLedger } = await import('../../../scripts/factory/ledger.mjs')
+  const dir = scratchDir('advisor-aggregate-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} } })
+  try {
+    assert.doesNotThrow(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-aggregate', ...run.row }))
+    assert.equal(ledger.dumpTable('advisor_usage').length, 1)
+  } finally { ledger.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Stream conditions of the same invariant: complete usage frames, then the stream does not end
+// cleanly. Each names the guard whose removal turns it red.
+// parse guard (parseFault). Sol pass 6: a complete frame, then invalid JSON: a trailing partial
+// frame at a clean close isolates this guard; the mid-stream case also fails the consult.
+test('spend stream (f): complete frames then an invalid or partial frame leave the spend unmeasured', async () => {
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: '{"type":"message_end","mess' }), 5)
+  const midStream = await spendRun([ownFrame(COMPLETE_USAGE)], { raw: 'not json\n', close: null })
+  assertPartial(midStream, 5)
+})
+// exit guard (uncleanExit): a non-zero exit, or a signal, after complete frames.
+test('spend stream (g): a non-zero exit or a signal after complete frames leaves the spend unmeasured', async () => {
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [1, null] }), 5)
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [null, 'SIGKILL'] }), 5)
+  // The signal clause alone: a close that names a signal is unclean whatever its code says.
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [0, 'SIGTERM'] }), 5)
+})
+// failure guard (consultFailed): the consult timed out and killed the child after complete frames.
+test('spend stream (h): a timed-out, killed consult after complete frames leaves the spend unmeasured', async () => {
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { consultTimeoutMs: 5 } }), 5)
+})
+// failure guard (consultFailed), cap path: a partial frame past RESPONSE_CAP_BYTES after complete frames.
+test('spend stream (i): a stream that hits a cap after complete frames leaves the spend unmeasured', async () => {
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: 'x'.repeat(advisor.RESPONSE_CAP_BYTES + 1), close: null }), 5)
+})
 
 test('a judgment child that ignores SIGTERM is killed and has closed before the consult settles', async () => {
   const signals = []; let closed = false

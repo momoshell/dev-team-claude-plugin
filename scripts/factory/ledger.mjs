@@ -1803,6 +1803,9 @@ function refuse(message, reason = 'usage') {
 const TIER_MAX_CHARS = 64
 
 // advisor.ts SAFE_MODEL admits a model of 1 + 127 characters; the advisor_usage writer takes the same bound.
+// advisor_spend counts advisor_usage rows only. Consults before #1547 carry their usage on the
+// advisor_consult journal row alone, which is never backfilled, and the HTTP channel writes none.
+export const ADVISOR_SPEND_COVERAGE = 'advisor_spend counts only pi-child consults that wrote an advisor_usage row (#1547 onward); an earlier consult keeps its usage on its advisor_consult journal row only and is never backfilled, and the HTTP advisor channel writes none — a missing row is uncounted spend, never zero spend'
 const ADVISOR_MODEL_MAX_CHARS = 128
 
 function normaliseShortName(value, ctx, field) {
@@ -3863,8 +3866,8 @@ export function openLedger({
         }
       }
       if (input.usage_reason != null) refuse("recordAdvisorUsage: measured usage requires null usage_reason")
-    } else if (input.usage_reason !== 'usage-unavailable') {
-      refuse("recordAdvisorUsage: absent usage requires usage_reason 'usage-unavailable'")
+    } else if (input.usage_reason !== 'usage-unavailable' && input.usage_reason !== 'usage-incomplete') {
+      refuse("recordAdvisorUsage: absent usage requires usage_reason 'usage-unavailable' or 'usage-incomplete'")
     }
     const args = redact({
       adw_id: input.adw_id, consult_id: consultId,
@@ -8484,6 +8487,8 @@ export function main(argv) {
       const advisorFacts = ledger.dumpTable('advisor_usage')
       const advisorUnreadable = mirrorErrorCount(ledger) > advisorErrorsBefore
       if (advisorUnreadable) payloadAbsent.advisor_spend = 'the advisor_usage mirror read failed — advisor spend is unanswerable, not empty'
+      // A blind spot is stated, not omitted: no advisor_spend row is not no advisor spend.
+      payloadAbsent.advisor_spend_coverage = ADVISOR_SPEND_COVERAGE
       for (const fact of advisorUnreadable ? [] : advisorFacts) {
         const at = Date.parse(fact.created_at)
         if ((since !== null && at < Date.parse(since)) || (until !== null && at >= Date.parse(until))) continue

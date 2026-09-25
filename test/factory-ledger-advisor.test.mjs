@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -1338,6 +1338,35 @@ test('cells CLI withholds an advisor token total that is not a safe integer', { 
   assert.equal(row.billed_input_tokens, null)
   assert.equal(row.cost_usd, null)
   assert.deepEqual(row.absent, { cost_usd: 'usage-total-unsafe' })
+})
+// Sol, #1547 hand-finish pass 3: pre-#1547 consults carry usage on advisor_consult only and are
+// never backfilled, so an empty advisor_spend must not read as no spend. Mutation killed: dropping
+// the coverage statement from the payload.
+test('cells CLI states the advisor spend coverage gap even when no advisor row exists', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, JSON.stringify({ at: '2024-01-01T00:00:00.000Z', advisor_consult: { tier: 1, role: 'builder', model: 'model-old', usage: { billed_input_tokens: 9, billed_output_tokens: 9, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } } }) + '\n')
+  const ledger = openTestLedger()
+  ingestJournal(journalPath, ledger, { adw_id: 'advisor-old' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.deepEqual(payload.advisor_spend, [])
+  assert.equal(payload.absent.advisor_spend_coverage, ADVISOR_SPEND_COVERAGE)
+  assert.match(payload.absent.advisor_spend_coverage, /never zero spend/)
+})
+// Sol, #1547 hand-finish pass 4: an incomplete child usage frame is recorded as unmeasured with
+// its own reason, and prices as nothing. Mutation killed: refusing the usage-incomplete reason.
+test('advisor usage records an incomplete consult as unmeasured, never priced', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordAdvisorUsage({ adw_id: 'advisor-incomplete', consult_id: 'c1', role: 'builder', model: 'model-i', usage: null, usage_reason: 'usage-incomplete', created_at: '2024-01-01T00:00:00.000Z' })
+    const row = ledger.dumpTable('advisor_usage')[0]
+    assert.deepEqual([row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens, row.usage_reason], [null, null, null, null, 'usage-incomplete'])
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-incomplete', consult_id: 'c2', model: 'model-i', usage: null, usage_reason: 'invented' }))
+  } finally { ledger.close() }
 })
 test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
   const ledger = openTestLedger()

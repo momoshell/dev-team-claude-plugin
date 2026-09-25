@@ -1516,6 +1516,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at gate_stale_artifact"],
   ["recordRow", "", "at gate_check_proof_unproven gate_generation"],
   ["recordRow", "", "at diff_mutation_proof"],
+  ["recordRow", "", "at diff_proof_restored"],
   ["recordRow", "", "at kind diff_mutant_judgment"],
   ["recordRow", "", "at mutation_anchor_bind"],
   ["recordRow", "", "at mutation_anchor_absent"],

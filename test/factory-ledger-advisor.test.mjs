@@ -1278,6 +1278,67 @@ test('cells CLI names an overflowing advisor cost instead of printing it', { ski
   assert.equal(row.cost_usd, null)
   assert.deepEqual(row.absent, { cost_usd: 'cost-not-finite' })
 })
+// Sol, #1547 hand-finish pass 2: the JSONL authority stores the four billed columns flat,
+// so a replay must restore both a measured and an absent consult from that shape.
+// Mutation killed: dropping the flat-shape rebuild (replay then fails on missing usage).
+test('advisor usage replays from its own persisted JSONL', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  let jsonlPath
+  try {
+    source.recordAdvisorUsage({ adw_id: 'advisor-replay', consult_id: 'm', role: 'builder', model: 'model-r', usage: { billed_input_tokens: 7, billed_output_tokens: 6, billed_cache_write_tokens: 5, billed_cache_read_tokens: 4 }, created_at: '2024-01-01T00:00:00.000Z' })
+    source.recordAdvisorUsage({ adw_id: 'advisor-replay', consult_id: 'a', role: 'builder', model: 'model-r', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:01.000Z' })
+    jsonlPath = source._jsonlPath
+  } finally { source.close() }
+  const target = openTestLedger()
+  try {
+    const result = replayJsonl(jsonlPath, target)
+    assert.equal(result.failed, 0, JSON.stringify(result.first_failure))
+    const rows = target.dumpTable('advisor_usage')
+    const pick = (id) => { const r = rows.find((row) => row.consult_id === id); return [r.billed_input_tokens, r.billed_output_tokens, r.billed_cache_write_tokens, r.billed_cache_read_tokens, r.usage_reason] }
+    assert.deepEqual(pick('m'), [7, 6, 5, 4, null])
+    assert.deepEqual(pick('a'), [null, null, null, null, 'usage-unavailable'])
+  } finally { target.close() }
+})
+// Sol, #1547 hand-finish pass 2: an unreadable advisor_usage mirror is an unanswerable
+// readout, never an empty one. Mutation killed: reporting the failed read's [] as advisor_spend.
+test('cells CLI reports an unreadable advisor mirror as absent, not empty', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({ adw_id: 'advisor-unreadable', consult_id: 'c1', role: 'builder', model: 'model-u', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:00.000Z' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const raw = new DatabaseSync(dbPath)
+  // An integer past the JS safe range makes node:sqlite throw on read: this table's read fails, no other.
+  raw.exec("INSERT INTO advisor_usage (adw_id, consult_id, model, billed_input_tokens, created_at) VALUES ('advisor-unreadable', 'c2', 'model-u', 9007199254740993, '2024-01-01T00:00:00.000Z')")
+  raw.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.advisor_spend, null)
+  assert.match(payload.absent.advisor_spend, /unanswerable, not empty/)
+})
+// Sol, #1547 hand-finish pass 2: a token sum past MAX_SAFE_INTEGER is rounded, so it is not
+// published. Mutation killed: dropping the safe-sum check (a rounded total is printed).
+test('cells CLI withholds an advisor token total that is not a safe integer', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  for (const [consult_id, input] of [['c1', Number.MAX_SAFE_INTEGER], ['c2', 1], ['c3', 1]]) {
+    ledger.recordAdvisorUsage({ adw_id: 'advisor-unsafe', consult_id, role: 'builder', model: 'openai-codex/gpt-5.6-sol', usage: { billed_input_tokens: input, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }, created_at: '2024-01-01T00:00:00.000Z' })
+  }
+  const pricePath = join(nextDir(), 'advisor-unsafe.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).advisor_spend.find((candidate) => candidate.adw_id === 'advisor-unsafe')
+  assert.equal(row.consult_count, 3)
+  assert.equal(row.billed_input_tokens, null)
+  assert.equal(row.cost_usd, null)
+  assert.deepEqual(row.absent, { cost_usd: 'usage-total-unsafe' })
+})
 test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const createdAt = '2024-01-01T00:00:00.000Z'

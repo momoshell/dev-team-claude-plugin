@@ -3836,6 +3836,17 @@ export function openLedger({
   }
 
   function recordAdvisorUsage(input = {}) {
+    // The persisted JSONL row is flat (four billed columns, no `usage`), so a replay
+    // hands the writer that shape: rebuild `usage` from it, all-null meaning absent.
+    const tokenClasses = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+    if (input.usage === undefined && tokenClasses.some((name) => Object.prototype.hasOwnProperty.call(input, name))) {
+      input = {
+        ...input,
+        usage: tokenClasses.every((name) => input[name] === null || input[name] === undefined)
+          ? null
+          : Object.fromEntries(tokenClasses.map((name) => [name, input[name]])),
+      }
+    }
     requireFields(input, ['adw_id', 'consult_id', 'model', 'usage'], 'recordAdvisorUsage')
     const consultId = normaliseShortName(input.consult_id, 'recordAdvisorUsage', 'consult_id')
     // The model bound is the advisor's own, not the 64-character short-name bound: a
@@ -8467,14 +8478,21 @@ export function main(argv) {
         }
       })
       const advisorGroups = new Map()
-      for (const fact of ledger.dumpTable('advisor_usage')) {
+      // dumpTable counts a failed read as a mirror error and returns []; that is an
+      // unanswerable advisor readout, never an empty one.
+      const advisorErrorsBefore = mirrorErrorCount(ledger)
+      const advisorFacts = ledger.dumpTable('advisor_usage')
+      const advisorUnreadable = mirrorErrorCount(ledger) > advisorErrorsBefore
+      if (advisorUnreadable) payloadAbsent.advisor_spend = 'the advisor_usage mirror read failed — advisor spend is unanswerable, not empty'
+      for (const fact of advisorUnreadable ? [] : advisorFacts) {
         const at = Date.parse(fact.created_at)
         if ((since !== null && at < Date.parse(since)) || (until !== null && at >= Date.parse(until))) continue
         const groupKey = JSON.stringify([fact.adw_id, fact.role, fact.model])
-        const group = advisorGroups.get(groupKey) ?? { adw_id: fact.adw_id, role: fact.role, model: fact.model, consult_count: 0, billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0, absent: [] }
+        const group = advisorGroups.get(groupKey) ?? { adw_id: fact.adw_id, role: fact.role, model: fact.model, consult_count: 0, billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0, absent: [], unsafe: [] }
         group.consult_count += 1
         for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
           if (fact[name] === null || fact[name] === undefined) group.absent.push(name)
+          else if (!Number.isSafeInteger(group[name] + Number(fact[name]))) group.unsafe.push(name)
           else group[name] += Number(fact[name])
         }
         advisorGroups.set(groupKey, group)
@@ -8484,14 +8502,16 @@ export function main(argv) {
         const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
         const rates = price && ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((key) => price[key])
         const missingRates = !rates || rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))
-        const missingTokens = group.absent.length > 0
+        // A sum past MAX_SAFE_INTEGER is rounded, so it is no measurement either.
+        const unsafeTokens = group.unsafe.length > 0
+        const missingTokens = group.absent.length > 0 || unsafeTokens
         const computed = !missingRates && !missingTokens
           ? group.billed_input_tokens / 1e6 * rates[0] + group.billed_output_tokens / 1e6 * rates[1] + group.billed_cache_write_tokens / 1e6 * rates[2] + group.billed_cache_read_tokens / 1e6 * rates[3]
           : null
         // Finite rates can still overflow to Infinity; that is no price, and it says so.
         const overflowed = computed !== null && !Number.isFinite(computed)
         const cost = overflowed ? null : computed
-        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
+        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : unsafeTokens ? 'usage-total-unsafe' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
       })
       const priceSource = catalog === null ? null : {
         path: priceSourcePath,
@@ -8520,7 +8540,7 @@ export function main(argv) {
         rate_floor: CELL_RATE_FLOOR,
         price_source: priceSource,
         rows: emittedRows,
-        advisor_spend: advisorSpend,
+        advisor_spend: advisorUnreadable ? null : advisorSpend,
         absent: payloadAbsent,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)

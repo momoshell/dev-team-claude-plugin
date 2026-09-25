@@ -1210,6 +1210,8 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         try { ledger.close() } catch { /* skip already recorded */ }
         continue
       }
+      const mirrorErrorsOf = (handle) => { try { return typeof handle?.stats === 'function' ? Number(handle.stats().mirror_errors || 0) : 0 } catch { return 0 } }
+      const mirrorErrorsBefore = mirrorErrorsOf(ledger)
       let detail = null
       try {
         detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true, strict_adw_id: true, lane: identityLane })
@@ -1219,9 +1221,10 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
         try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
         continue
       }
-      // A mirror error means this journal appended authority lines the mirror
-      // lacks: the store is now divergent, so later lanes on it refuse too.
-      if (detail?.first_failure?.reason === 'mirror-error') storeVerdicts.set(dbPath, false)
+      // Any mirror error during this journal (read from the ledger's own counter,
+      // not from first_failure, which an earlier validation failure may own)
+      // means authority lines the mirror lacks: later lanes on the store refuse.
+      if (mirrorErrorsOf(ledger) > mirrorErrorsBefore || detail?.first_failure?.reason === 'mirror-error') storeVerdicts.set(dbPath, false)
       const degradedAfter = degradedMirror(ledger)
       try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
       if (degradedAfter) {

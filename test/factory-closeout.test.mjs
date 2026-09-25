@@ -2176,3 +2176,37 @@ test('ingest-all stops writing to a store after a journal reports a mirror error
   assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
   assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1, store_drift: 1 })
 })
+
+test('ingest-all drops a store on a mirror error even when a validation failure owns first_failure', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  let bump = 0
+  let calls = 0
+  const deps = harness({
+    log: () => {},
+    openLedger: (options) => {
+      const real = openLedger({ dbPath: options.dbPath, readOnly: options.readOnly === true, stderr: { write: () => {} } })
+      return new Proxy(real, {
+        get(target, property) {
+          if (property === 'stats') return () => ({ ...target.stats(), mirror_errors: target.stats().mirror_errors + bump })
+          const value = target[property]
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    },
+    ingestJournal: (journalPath, ledger, options) => {
+      calls += 1
+      if (calls === 1) {
+        bump = 1
+        return { applied: 0, skipped: 0, ignored: 0, failed: 2, complete: false, first_failure: { line: 1, reason: 'ledger: recordX: missing required field' } }
+      }
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps })
+  assert.equal(result.code, 1)
+  assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
+  assert.equal(result.report.skipped_by_reason.store_drift, 1)
+})

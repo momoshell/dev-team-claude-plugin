@@ -15,6 +15,7 @@ import {
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild, specExecution } from './child.mjs'
+import { EMPTY_GRANTS } from './crew.mjs'
 import { DEFAULT_TRANSPORT, emitAdapter, seatIo, settleSeatTeardown } from './seat-io.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
@@ -1921,6 +1922,39 @@ test('runChild copies a declared scope and refuses an inherited spec without one
       }),
       /files_in_scope/,
     )
+  } finally { f.cleanup() }
+})
+
+test('runChild supplies persisted grants to seat IO and preserves injected adapters', () => {
+  const f = fixture({ roles: ['builder'], agent: 'pi' })
+  const crewPath = join(f.crewDir, 'crew.json')
+  const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { ...EMPTY_GRANTS, extensions: ['crew/pi/extensions/gate-builder.ts'] } }
+  writeFileSync(crewPath, JSON.stringify(crew))
+  const setup = { driveTask: () => ({ status: 'done' }), preflight: false, openRun: () => ({ startRun() {}, linkRun() {}, endRun() {}, sidecar: () => null }), checkoutProtectedPaths: () => ({ paths: [], basis: 'test' }) }
+  try {
+    let captured
+    runChild({ crew_dir: f.crewDir, task: 'x' }, { ...setup, seatIo: (...args) => { captured = args[4]; return {} } })
+    assert.deepEqual(captured.builder.grants.extensions, ['crew/pi/extensions/gate-builder.ts'])
+    const injected = { builder: { grants: { marker: true } } }
+    runChild({ crew_dir: f.crewDir, task: 'x' }, { ...setup, adapters: injected, seatIo: (...args) => { captured = args[4]; return {} } })
+    assert.equal(captured, injected)
+  } finally { f.cleanup() }
+})
+
+test('runChild refuses malformed persisted grants before calling seat IO', () => {
+  const f = fixture({ roles: ['builder'], agent: 'pi' })
+  const crewPath = join(f.crewDir, 'crew.json')
+  const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+  crew.members.builder.grant_snapshot = { schema_version: 1, role: 'builder', agent: 'pi', grants: { ...EMPTY_GRANTS, tools: [' '] } }
+  writeFileSync(crewPath, JSON.stringify(crew))
+  let called = false
+  try {
+    assert.throws(() => runChild({ crew_dir: f.crewDir, task: 'x' }, {
+      driveTask: () => ({ status: 'done' }), seatIo: () => { called = true; return {} }, preflight: false,
+      openRun: () => ({ startRun() {}, linkRun() {}, endRun() {}, sidecar: () => null }),
+    }), /invalid-grant-snapshot/)
+    assert.equal(called, false)
   } finally { f.cleanup() }
 })
 

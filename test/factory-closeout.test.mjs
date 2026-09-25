@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
   renameSync,
   statSync,
   utimesSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -38,6 +40,7 @@ import {
   main,
   mergeCheck,
   newestMtime,
+  ingestAll,
   issueTrailersFromPrBody,
   normalDeps,
   parseArgs,
@@ -53,7 +56,7 @@ import {
   refsFromPrBody,
   stripAnsi,
 } from '../scripts/factory/closeout.mjs'
-import { openLedger } from '../scripts/factory/ledger.mjs'
+import { openLedger, TABLES, ingestJournal as realIngestJournal } from '../scripts/factory/ledger.mjs'
 
 const lane = 'b415-closeout'
 const CLOSEOUT_LEDGER_SANDBOX = join(tmpdir(), `factory-closeout-ledger-${process.pid}.db`)
@@ -1739,4 +1742,471 @@ test('a suite whose output could not be read is unmeasured, not red, and the def
   assert.equal(outcome({ status: 1, stdout: '# tests 10\n# pass 9\n# fail 1\n', stderr: '' }).reason, CLOSEOUT_REFUSALS.SUITE_RED)
   // A child killed mid-stream that still printed its counts is judged on the counts it printed.
   assert.equal(outcome({ status: null, signal: 'SIGTERM', stdout: '# tests 5618\n# pass 5611\n# fail 0\n', stderr: '', error: Object.assign(new Error('ENOBUFS'), { code: 'ENOBUFS' }) }).reason, CLOSEOUT_REFUSALS.SUITE_RED)
+})
+
+function ingestAllRoot(prefix = 'factory-ingest-all-') {
+  return scratch(prefix)
+}
+
+function ingestAllLane(root, dbPath, batch, name, { identity = true, taskSlug = name, facts = null } = {}) {
+  const crew = join(root, batch, name)
+  const rows = facts || [
+    { at: '2020-05-01T00:00:00.000Z', role: 'builder', id: 'd-old', headless_outcome: 'budget-refused', provider_failure: { kind: 'rate_limit', status: 429 } },
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: '2030-01-01T00:00:02.000Z', rpc_exit_context: { role: 'builder', dispatch_id: 'd1', outcome: 'exited' } },
+    { at: '2030-01-01T00:00:03.000Z', event: 'seat-timeout-reask', role: 'builder', dispatch_id: 'd1', outcome: 'reasked' },
+    { at: '2030-01-01T00:00:04.000Z', event: 'plan-adopted', lane: name, plan_sha: 'sha1' },
+  ]
+  put(join(crew, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  if (identity) put(join(crew, 'ledger', 'run.json'), JSON.stringify({ adw_id: name, task_slug: taskSlug, db_path: dbPath }))
+  return crew
+}
+
+function ingestAllSnapshot(dbPath) {
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const out = {}
+    for (const table of Object.keys(TABLES)) out[table] = ledger.dumpTable(table).map((row) => ({ ...row }))
+    return out
+  } finally { ledger.close() }
+}
+
+function ingestAllDeps(log) {
+  return harness({ log }).deps
+}
+
+test('ingest-all backfills active and archived journals whole-window and counts the orphan', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  ingestAllLane(root, dbPath, '.archive-dt-two', 'lane-b')
+  ingestAllLane(root, dbPath, 'dt-three', 'lane-c', { identity: false })
+  const lines = []
+  const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
+  assert.equal(result.code, 1, 'an unresolved identity is unmeasured, so the command refuses')
+  assert.deepEqual(result.report, {
+    journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 }, incomplete: [],
+    rows_applied: 10, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
+  })
+  assert.equal(lines.length, 1)
+  assert.deepEqual(JSON.parse(lines[0]), result.report)
+  const snapshot = ingestAllSnapshot(dbPath)
+  assert.equal(snapshot.provider_failures.length, 2)
+  assert.equal(snapshot.seat_turn_census.length, 2)
+  assert.equal(snapshot.rpc_exit_contexts.length, 2)
+  assert.equal(snapshot.seat_reasks.length, 2)
+  assert.equal(snapshot.plan_adoptions.length, 2)
+  assert.deepEqual(snapshot.provider_failures.map((row) => row.adw_id).sort(), ['lane-a', 'lane-b'])
+  assert.ok(snapshot.provider_failures.some((row) => row.outcome === 'budget-refused'))
+})
+
+test('ingest-all replay adds zero rows and zero JSONL bytes', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const first = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(first.code, 0)
+  assert.equal(first.report.rows_applied, 5)
+  const before = ingestAllSnapshot(dbPath)
+  const jsonlPath = join(root, 'ledger.jsonl')
+  const logBefore = readFileSync(jsonlPath)
+  const second = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(second.code, 0)
+  assert.deepEqual(second.report, {
+    journals_seen: 1, ingested: 1, skipped_by_reason: {}, incomplete: [],
+    rows_applied: 0, rows_ignored: 5, rows_skipped: 0, rows_failed: 0,
+  })
+  assert.deepEqual(ingestAllSnapshot(dbPath), before)
+  assert.deepEqual(readFileSync(jsonlPath), logBefore)
+})
+
+test('ingest-all defaults to the operator home .crew root', () => {
+  const home = scratch('factory-ingest-all-home-')
+  const dbPath = join(home, 'backfill.db')
+  ingestAllLane(join(home, '.crew'), dbPath, 'dt-one', 'lane-a')
+  const lines = []
+  const code = main(['ingest-all'], harness({ home, log: (line) => lines.push(line) }).deps)
+  assert.equal(code, 0)
+  assert.equal(lines.length, 1)
+  assert.equal(JSON.parse(lines[0]).journals_seen, 1)
+  assert.equal(JSON.parse(lines[0]).ingested, 1)
+})
+
+test('ingest-all parse errors name usage', () => {
+  assert.throws(() => parseArgs(['reap', 'lane-a', '--root', '/tmp/x']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
+  assert.throws(() => parseArgs(['ingest-all', 'lane-a']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
+  assert.throws(() => parseArgs(['ingest-all', '--checkout', '/tmp/x']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
+  assert.throws(() => parseArgs(['reap', 'lane-a', '--dry-run']), (error) => error.reason === CLOSEOUT_REFUSALS.USAGE)
+  assert.deepEqual(parseArgs(['ingest-all', '--dry-run']), {
+    verb: 'ingest-all', lanes: [], checkout: process.cwd(), checkout_explicit: false, help: false, dry_run: true,
+  })
+  assert.equal(parseArgs(['ingest-all', '--root', '/tmp/r']).root, '/tmp/r')
+})
+
+test('ingest-all on an empty root reports zeros with one JSON line', () => {
+  const root = scratch('factory-ingest-all-empty-')
+  const lines = []
+  const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
+  assert.equal(result.code, 0)
+  assert.deepEqual(result.report, {
+    journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [],
+    rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
+  })
+  assert.equal(lines.length, 1)
+})
+
+test('ingest-all dry-run counts eligible facts without creating or changing anything', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'dry.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(existsSync(dbPath), false)
+  const dryMissing = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+  assert.equal(dryMissing.code, 0)
+  assert.equal(dryMissing.report.journals_seen, 1)
+  assert.equal(dryMissing.report.rows_applied, 5)
+  assert.equal(existsSync(dbPath), false)
+  assert.equal(existsSync(jsonlPath), false)
+  const real = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(real.report.rows_applied, 5)
+  const before = ingestAllSnapshot(dbPath)
+  const logBefore = readFileSync(jsonlPath)
+  const dryAgain = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+  assert.equal(dryAgain.report.rows_applied, 0)
+  assert.deepEqual(ingestAllSnapshot(dbPath), before)
+  assert.deepEqual(readFileSync(jsonlPath), logBefore)
+})
+
+test('ingest-all counts degraded mirrors and failed ingests without ingesting', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const degraded = harness({
+    log: () => {},
+    openLedger: () => ({ degraded: true, close() {}, stats: () => ({ degraded: true }) }),
+  }).deps
+  const refused = ingestAll({ root, deps: degraded })
+  assert.equal(refused.code, 1)
+  assert.deepEqual(refused.report.skipped_by_reason, { ledger_degraded: 1 })
+  assert.equal(refused.report.ingested, 0)
+  assert.equal(refused.report.rows_applied, 0)
+  const failing = harness({
+    log: () => {},
+    ingestJournal: () => { throw Object.assign(new Error('boom'), { code: 'EIO' }) },
+  }).deps
+  const errored = ingestAll({ root, deps: failing })
+  assert.equal(errored.code, 1)
+  assert.deepEqual(errored.report.skipped_by_reason, { ingest_error: 1 })
+  assert.equal(errored.report.ingested, 0)
+})
+
+test('ingest-all refuses an unreadable root and ignores non-journal shapes', () => {
+  const file = put(join(scratch('factory-ingest-all-file-'), 'root-file'), 'x')
+  const rootLines = []
+  const refusedRoot = ingestAll({ root: file, deps: ingestAllDeps((line) => rootLines.push(line)) })
+  assert.equal(refusedRoot.code, 1)
+  assert.equal(refusedRoot.refusal.reason, CLOSEOUT_REFUSALS.CREW_UNREADABLE)
+  assert.equal(rootLines.length, 1, 'a refusal still prints exactly one JSON summary line')
+  assert.deepEqual(JSON.parse(rootLines[0]).skipped_by_reason, { root_unreadable: 1 })
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  mkdirSync(join(root, 'dt-empty', 'lane-x'), { recursive: true })
+  mkdirSync(join(root, 'other'), { recursive: true })
+  const lines = []
+  const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.journals_seen, 2)
+  assert.deepEqual(result.report.skipped_by_reason, {})
+  assert.equal(result.report.ingested, 2)
+  assert.equal(lines.length, 1)
+})
+
+test('ingest-all ingests every lane dir of a batch holding two, each on its own identity', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  const lines = []
+  const result = ingestAll({ root, deps: ingestAllDeps((line) => lines.push(line)) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.journals_seen, 2)
+  assert.equal(result.report.ingested, 2)
+  assert.deepEqual(result.report.skipped_by_reason, {})
+  assert.equal(lines.length, 1)
+})
+
+test('ingest-all resolves an archived lane dir by the name before its .archive- mark', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, '.archive-dt-lane-c', 'lane-c.archive-2026-09-13T08-41-36Z', { taskSlug: 'lane-c', facts: [
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: '2030-01-01T00:00:04.000Z', event: 'plan-adopted', lane: 'lane-c', plan_sha: 'sha1' },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.journals_seen, 1)
+  assert.equal(result.report.ingested, 1)
+  assert.deepEqual(result.report.skipped_by_reason, {})
+})
+
+test('ingest-all counts a mismatched identity without rows', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { taskSlug: 'other-lane' })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { identity_unresolved: 1 })
+  assert.equal(result.report.ingested, 0)
+  assert.ok(Object.values(ingestAllSnapshot(dbPath)).every((rows) => rows.length === 0))
+})
+
+test('ingest-all never counts an incomplete journal as ingested and exposes its first failure', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  writeFileSync(join(root, 'dt-one', 'lane-a', 'journal.jsonl'), 'this is not json\nneither is this\n')
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1 })
+  assert.equal(result.report.incomplete.length, 1)
+  assert.equal(result.report.incomplete[0].reason, 'journal line is not valid JSON')
+  assert.equal(result.report.incomplete[0].line, 1)
+})
+
+test('ingest-all counts a journal that vanishes between discovery and read as incomplete, never ingested', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const vanishing = harness({
+    log: () => {},
+    ingestJournal: (journalPath, ledger, options) => {
+      unlinkSync(journalPath)
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps: vanishing })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1 })
+  assert.equal(result.report.incomplete[0].reason, 'journal-vanished')
+})
+
+test('ingest-all refuses a journal row naming another run instead of filing it there', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:01.000Z', adw_id: 'other-lane', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.ingested, 0)
+  assert.equal(result.report.incomplete[0].reason, 'adw-id-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).seat_turn_census.filter((row) => row.adw_id === 'other-lane').length, 0)
+})
+
+test('ingest-all reports an unreadable lane dir as unmeasured, never as no journal', { skip: process.getuid?.() === 0 ? 'root reads through mode 000' : false }, () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const laneDir = join(root, 'dt-one', 'lane-a')
+  chmodSync(laneDir, 0o000)
+  try {
+    const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+    assert.equal(result.code, 1)
+    assert.deepEqual(result.report.skipped_by_reason, { lane_unreadable: 1 })
+  } finally {
+    chmodSync(laneDir, 0o755)
+  }
+})
+
+test('ingest-all refuses a plan-adopted row naming another lane instead of filing it there', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:04.000Z', event: 'plan-adopted', lane: 'other-lane', plan_sha: 'sha1' },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.incomplete[0].reason, 'lane-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).plan_adoptions.filter((row) => row.lane === 'other-lane').length, 0)
+})
+
+test('ingest-all refuses a numeric adw_id that differs from the resolved string identity', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { at: '2030-01-01T00:00:01.000Z', adw_id: 123, seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.equal(result.report.incomplete[0].reason, 'adw-id-mismatch')
+  assert.equal(ingestAllSnapshot(dbPath).seat_turn_census.length, 0)
+})
+
+test('ingest-all resolves a recovery-copy lane dir by the name before its .recovery-copy mark', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-lane-d', 'lane-d.recovery-copy', { taskSlug: 'lane-d', facts: [
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.ingested, 1)
+})
+
+test('ingest-all keeps malformed journal lines as skipped, distinct from ignored duplicates', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  writeFileSync(join(root, 'dt-one', 'lane-a', 'journal.jsonl'), 'not json\n')
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.report.rows_skipped, 1)
+  assert.equal(result.report.rows_ignored, 0)
+})
+
+test('ingest-all --dry-run refuses a ledger it cannot stat instead of treating it as absent', { skip: process.getuid?.() === 0 ? 'root reads through mode 000' : false }, () => {
+  const root = ingestAllRoot()
+  const lockedDir = join(root, 'locked')
+  mkdirSync(lockedDir, { recursive: true })
+  const dbPath = join(lockedDir, 'ledger.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  const real = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(real.code, 0)
+  chmodSync(lockedDir, 0o000)
+  try {
+    const dry = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+    assert.equal(dry.code, 1)
+    assert.deepEqual(dry.report.skipped_by_reason, { ledger_unreadable: 1 })
+    assert.equal(dry.report.ingested, 0)
+  } finally {
+    chmodSync(lockedDir, 0o755)
+  }
+})
+
+function dropMirror(dbPath) {
+  for (const suffix of ['', '-wal', '-shm']) { try { unlinkSync(`${dbPath}${suffix}`) } catch { /* absent */ } }
+}
+
+test('ingest-all refuses a store whose mirror was deleted while its JSONL authority survives', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const logBefore = readFileSync(jsonlPath)
+  dropMirror(dbPath)
+  const real = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(real.code, 1)
+  assert.deepEqual(real.report.skipped_by_reason, { store_drift: 1 })
+  assert.deepEqual(readFileSync(jsonlPath), logBefore, 'no fact is re-appended to the authority')
+  dropMirror(dbPath)
+  const dry = ingestAll({ root, dryRun: true, deps: ingestAllDeps(() => {}) })
+  assert.equal(dry.code, 1)
+  assert.deepEqual(dry.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all refuses a store whose JSONL authority was deleted while its mirror keeps rows', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  unlinkSync(join(root, 'ledger.jsonl'))
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all refuses a store that lost one authority line while its mirror kept the row', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+  const kept = lines.filter((line) => !line.includes('recordPlanAdoption'))
+  assert.equal(kept.length, lines.length - 1, 'exactly one authority line is dropped')
+  writeFileSync(jsonlPath, `${kept.join('\n')}\n`)
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all counts authority keys as a union per table: writers sharing a key space cannot mask a lost line', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  const jsonlPath = join(root, 'ledger.jsonl')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  assert.equal(ingestAll({ root, deps: ingestAllDeps(() => {}) }).code, 0)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.recordEvent({ adw_id: 'shared', type: 'log', payload: { level: 'info', message: 'one' } })
+  ledger.recordEvent({ adw_id: 'shared', type: 'log', payload: { level: 'info', message: 'two' } })
+  ledger.close()
+  // A second writer names event 1's key in the authority only; then event 2's
+  // authority line is lost. Summed per-writer keys (2) would still cover the
+  // two mirror rows; the union (1) does not.
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+  const kept = lines.filter((line) => !(line.includes('"kind":"recordEvent"') && line.includes('"message":"two"')))
+  assert.equal(kept.length, lines.length - 1)
+  kept.push(JSON.stringify({ v: 1, kind: 'recordSourceError', at: '2030-01-01T00:00:00.000Z', args: { adw_id: 'shared', seq: 1, source_path: '/x', source_kind: 'journal', byte_size: 1, violation_names: [], reason: 'Error', phase_id: null, parent_id: null } }))
+  writeFileSync(jsonlPath, `${kept.join('\n')}\n`)
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 1)
+  assert.deepEqual(result.report.skipped_by_reason, { store_drift: 1 })
+})
+
+test('ingest-all stops writing to a store after a journal reports a mirror error', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  let calls = 0
+  const deps = harness({
+    log: () => {},
+    ingestJournal: (journalPath, ledger, options) => {
+      calls += 1
+      if (calls === 1) return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: 1, reason: 'mirror-error' } }
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps })
+  assert.equal(result.code, 1)
+  assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
+  assert.deepEqual(result.report.skipped_by_reason, { ingest_incomplete: 1, store_drift: 1 })
+})
+
+test('ingest-all drops a store on a mirror error even when a validation failure owns first_failure', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a')
+  ingestAllLane(root, dbPath, 'dt-two', 'lane-b')
+  let bump = 0
+  let calls = 0
+  const deps = harness({
+    log: () => {},
+    openLedger: (options) => {
+      const real = openLedger({ dbPath: options.dbPath, readOnly: options.readOnly === true, stderr: { write: () => {} } })
+      return new Proxy(real, {
+        get(target, property) {
+          if (property === 'stats') return () => ({ ...target.stats(), mirror_errors: target.stats().mirror_errors + bump })
+          const value = target[property]
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    },
+    ingestJournal: (journalPath, ledger, options) => {
+      calls += 1
+      if (calls === 1) {
+        bump = 1
+        return { applied: 0, skipped: 0, ignored: 0, failed: 2, complete: false, first_failure: { line: 1, reason: 'ledger: recordX: missing required field' } }
+      }
+      return realIngestJournal(journalPath, ledger, options)
+    },
+  }).deps
+  const result = ingestAll({ root, deps })
+  assert.equal(result.code, 1)
+  assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
+  assert.equal(result.report.skipped_by_reason.store_drift, 1)
 })

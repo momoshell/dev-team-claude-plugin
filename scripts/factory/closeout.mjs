@@ -29,13 +29,13 @@ import { journalRowsSinceRunStart, parseSuiteCounts, RUN_START_EVENT } from '../
 import { BATCH_DIR_EVENT, batchDirFromBrief, resolveTaskReturn as defaultResolveTaskReturn } from '../../crew/crew.mjs'
 import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
-import { CELL_RATE_FLOOR, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
+import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
 // read is indistinguishable from a failure without it.
 export const SPAWN_MAX_BUFFER = 256 * 1024 * 1024
-export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile'])
+export const CLOSEOUT_VERBS = Object.freeze(['merge-check', 'reap', 'recover', 'reconcile', 'ingest-all'])
 export const EXIT_OK = 0
 export const EXIT_REFUSED = 1
 export const EXIT_USAGE = 2
@@ -112,6 +112,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   RECONCILE_TERMINAL_ENVELOPE: 'reconcile-terminal-envelope',
   RECONCILE_EVIDENCE_UNKNOWN: 'reconcile-evidence-unknown',
   RECONCILE_WRITE_FAILED: 'reconcile-write-failed',
+  INGEST_UNMEASURED: 'ingest-unmeasured',
   INTERNAL: 'internal',
 })
 
@@ -1064,6 +1065,198 @@ function archiveRecoveryCopies({ lane, checkout, deps }) {
   return { archived, root, unknown: false }
 }
 
+// ingest-all (#1527): backfill whole journals under the crew root. Identity
+// comes only from each lane's ledger/run.json via reapIdentity — never
+// guessed. Each discovered journal counts once; a journal whose identity,
+// mirror, or ingest fails is skipped with an honest reason and never counted
+// ingested. Prints ONE JSON summary line; a nonzero code keeps that summary.
+export function ingestAll({ root, dryRun = false, deps } = {}) {
+  const d = normalDeps(deps)
+  const crewRoot = typeof root === 'string' && root.trim() ? root : join(d.home, '.crew')
+  const dry_run = dryRun === true
+  const summary = { journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [], rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0 }
+  const noteSkip = (reason) => {
+    summary.skipped_by_reason[reason] = (summary.skipped_by_reason[reason] || 0) + 1
+  }
+  const degradedMirror = (ledger) => !!ledger && (!!ledger.degraded || (typeof ledger.stats === 'function' && !!ledger.stats().degraded))
+  let unmeasured = false
+  // One store-consistency verdict per ledger path: jsonlDrift compares the JSONL
+  // authority with the SQLite mirror, and it reads the whole authority, so it
+  // runs once per store, not once per journal.
+  const storeVerdicts = new Map()
+  let entries
+  try {
+    entries = d.readdirSync(crewRoot, { withFileTypes: true })
+  } catch (error) {
+    // A refusal still prints the one JSON summary line, so a caller parsing
+    // stdout gets the reason as data, never prose.
+    noteSkip('root_unreadable')
+    d.log(JSON.stringify(summary))
+    const message = `cannot read crew root ${crewRoot}: ${error?.message || String(error)}`
+    return { verb: 'ingest-all', root: crewRoot, report: summary, refusal: { reason: CLOSEOUT_REFUSALS.CREW_UNREADABLE, step: 'ingest-all', message }, code: EXIT_REFUSED }
+  }
+  const batches = entries
+    .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory() && (entry.name.startsWith('dt-') || entry.name.startsWith('.archive-dt-')))
+    .map((entry) => entry.name)
+    .sort()
+  for (const batch of batches) {
+    let children
+    try {
+      children = d.readdirSync(join(crewRoot, batch), { withFileTypes: true })
+    } catch (error) {
+      noteSkip('io_error')
+      unmeasured = true
+      continue
+    }
+    // Every lane directory in the batch that holds a journal is its own lane: a
+    // batch dir can carry several (recovery copies, re-dispatches), and each is
+    // resolved and ingested on its own identity.
+    const lanes = children
+      .filter((entry) => typeof entry?.name === 'string' && typeof entry?.isDirectory === 'function' && entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+    for (const laneName of lanes) {
+      const crewDir = join(crewRoot, batch, laneName)
+      const journalPath = join(crewDir, 'journal.jsonl')
+      // existsSync reads an unreachable lane dir as "no journal"; list it instead,
+      // so an inaccessible lane is unmeasured, never a clear.
+      let laneEntries
+      try { laneEntries = d.readdirSync(crewDir) } catch {
+        noteSkip('lane_unreadable')
+        unmeasured = true
+        continue
+      }
+      if (!laneEntries.map((entry) => String(entry?.name ?? entry)).includes('journal.jsonl')) continue
+      summary.journals_seen += 1
+      // An archived lane dir is renamed <lane>.archive-<iso> and a recovery copy
+      // <lane>.recovery-copy[-rN]; run.json still names <lane> in both, so identity
+      // is checked against the name before the first such mark.
+      const marks = [ARCHIVE_MARK, RECOVERY_COPY_SUFFIX].map((mark) => laneName.indexOf(mark)).filter((at) => at > 0)
+      const identityLane = marks.length ? laneName.slice(0, Math.min(...marks)) : laneName
+      let identity = null
+      try {
+        identity = reapIdentity({ crewDir, lane: identityLane, deps: d })
+      } catch {
+        identity = null
+      }
+      // A discovered journal whose identity cannot be resolved was not measured:
+      // it is counted and the command refuses, never a clean exit.
+      if (!identity) { noteSkip('identity_unresolved'); unmeasured = true }
+      if (!identity) continue
+      const dbPath = identity.db_path
+      let ledger = null
+      // existsSync reads a ledger behind an unreadable dir as absent; stat it, so
+      // only ENOENT is an absent mirror and any other failure is unmeasured.
+      let mirrorPresent = true
+      if (dry_run) {
+        try { d.statSync(dbPath) } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            noteSkip('ledger_unreadable')
+            unmeasured = true
+            continue
+          }
+          mirrorPresent = false
+        }
+        // A missing mirror beside a surviving JSONL authority is a divergent
+        // store, not an empty one: dedupe against it would re-append facts.
+        if (!mirrorPresent && d.existsSync(join(dirname(dbPath), 'ledger.jsonl'))) {
+          noteSkip('store_drift')
+          unmeasured = true
+          continue
+        }
+      }
+      if (!dry_run || mirrorPresent) {
+        try {
+          ledger = dry_run ? d.openLedger({ dbPath, readOnly: true }) : d.openLedger({ dbPath })
+        } catch (error) {
+          noteSkip('open_failed')
+          unmeasured = true
+          continue
+        }
+      }
+      if (degradedMirror(ledger)) {
+        noteSkip('ledger_degraded')
+        unmeasured = true
+        try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      if (ledger && !storeVerdicts.has(dbPath)) {
+        let consistent = false
+        try {
+          const drift = typeof ledger.jsonlDrift === 'function' ? ledger.jsonlDrift() : null
+          consistent = !!drift && drift.measured === true && drift.writers.every((writer) => writer.drift === 0)
+          // jsonlDrift's writers prove every authority key has a mirror row; its
+          // tables prove the other direction, no mirror row whose key the
+          // authority lost. A table no authority line feeds must be empty.
+          if (consistent && typeof ledger.dumpTable === 'function') {
+            const measuredTables = new Map((drift.tables || []).map((one) => [one.table, one]))
+            consistent = Object.keys(LEDGER_TABLES).every((table) => {
+              const measuredTable = measuredTables.get(table)
+              if (measuredTable) return measuredTable.mirror_only_rows === 0
+              return (ledger.dumpTable(table) || []).length === 0
+            })
+          }
+          // A brand-new store has neither an authority line nor a mirror row yet:
+          // that is consistent. A missing authority beside mirror rows is not.
+          if (!consistent && !d.existsSync(join(dirname(dbPath), 'ledger.jsonl')) && typeof ledger.dumpTable === 'function') {
+            consistent = Object.keys(LEDGER_TABLES).every((table) => (ledger.dumpTable(table) || []).length === 0)
+          }
+        } catch { consistent = false }
+        storeVerdicts.set(dbPath, consistent)
+      }
+      if (ledger && storeVerdicts.get(dbPath) === false) {
+        noteSkip('store_drift')
+        unmeasured = true
+        try { ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      const mirrorErrorsOf = (handle) => { try { return typeof handle?.stats === 'function' ? Number(handle.stats().mirror_errors || 0) : 0 } catch { return 0 } }
+      const mirrorErrorsBefore = mirrorErrorsOf(ledger)
+      let detail = null
+      try {
+        detail = d.ingestJournal(journalPath, ledger, { adw_id: identity.adw_id, dry_run: dry_run, require_present: true, strict_adw_id: true, lane: identityLane })
+      } catch (error) {
+        noteSkip('ingest_error')
+        unmeasured = true
+        try { if (ledger) ledger.close() } catch { /* skip already recorded */ }
+        continue
+      }
+      // Any mirror error during this journal (read from the ledger's own counter,
+      // not from first_failure, which an earlier validation failure may own)
+      // means authority lines the mirror lacks: later lanes on the store refuse.
+      if (mirrorErrorsOf(ledger) > mirrorErrorsBefore || detail?.first_failure?.reason === 'mirror-error') storeVerdicts.set(dbPath, false)
+      const degradedAfter = degradedMirror(ledger)
+      try { if (ledger) ledger.close() } catch { /* ingest detail already captured */ }
+      if (degradedAfter) {
+        noteSkip('ledger_degraded')
+        unmeasured = true
+        continue
+      }
+      if (!detail || typeof detail !== 'object') {
+        noteSkip('ingest_error')
+        unmeasured = true
+        continue
+      }
+      summary.rows_applied += detail.applied || 0
+      summary.rows_ignored += detail.ignored || 0
+      summary.rows_skipped += detail.skipped || 0
+      summary.rows_failed += detail.failed || 0
+      // An ingest that skipped or failed rows is not a successful one: it is counted
+      // under ingest_incomplete with its first failure, never under ingested.
+      if (detail.failed > 0 || detail.complete === false) {
+        noteSkip('ingest_incomplete')
+        summary.incomplete.push({ journal: journalPath, reason: detail.first_failure?.reason ?? 'unreported', line: detail.first_failure?.line ?? null })
+        unmeasured = true
+        continue
+      }
+      summary.ingested += 1
+    }
+  }
+  d.log(JSON.stringify(summary))
+  const refusal = unmeasured ? { reason: CLOSEOUT_REFUSALS.INGEST_UNMEASURED, step: 'ingest-all', message: 'ingest-all completed with unmeasured or failed ingests' } : null
+  return { verb: 'ingest-all', root: crewRoot, report: summary, refusal, code: refusal ? EXIT_REFUSED : EXIT_OK }
+}
+
 export function reap({ lanes, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const batch = Array.isArray(lanes) ? lanes : []
@@ -1563,13 +1756,15 @@ export function reconcile({ lane, checkout, crewDir, dbPath, dryRun = false, rea
   return { verb: 'reconcile', lane: name, report, refusal: report.refusal, code: report.refusal ? EXIT_REFUSED : EXIT_OK }
 }
 
-export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane> | reconcile <lane>) [--checkout <dir>] [--dry-run]'
+export const USAGE = 'usage: node scripts/factory/closeout.mjs (merge-check <lane…> | reap <lane…> | recover <lane> | reconcile <lane> | ingest-all [--root <dir>]) [--checkout <dir>] [--dry-run]'
 
 export function parseArgs(argv) {
   if (!Array.isArray(argv)) throw new CloseoutUsageError(USAGE)
   let verb = null
   let checkout = process.cwd()
   let checkout_explicit = false
+  let root = null
+  let root_explicit = false
   let help = false
   let dry_run = false
   let reason = null
@@ -1593,17 +1788,29 @@ export function parseArgs(argv) {
       index += 1
       continue
     }
+    if (argument === '--root') {
+      const value = argv[index + 1]
+      if (typeof value !== 'string' || value.trim() === '' || value.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: --root requires a value`)
+      root = value
+      root_explicit = true
+      index += 1
+      continue
+    }
     if (typeof argument !== 'string' || argument.startsWith('--')) throw new CloseoutUsageError(`${USAGE}: unknown option ${String(argument)}`)
     if (!verb) verb = argument
     else lanes.push(argument)
   }
   if (help) return { verb, lanes, checkout, checkout_explicit, help }
   if (!CLOSEOUT_VERBS.includes(verb)) throw new CloseoutUsageError(`${USAGE}: unknown verb ${String(verb)}`)
-  if (dry_run && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --dry-run is only valid for reconcile`)
+  if (dry_run && verb !== 'reconcile' && verb !== 'ingest-all') throw new CloseoutUsageError(`${USAGE}: --dry-run is only valid for reconcile and ingest-all`)
   if (reason !== null && verb !== 'reconcile') throw new CloseoutUsageError(`${USAGE}: --reason is only valid for reconcile`)
-  if (lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
+  if (root_explicit && verb !== 'ingest-all') throw new CloseoutUsageError(`${USAGE}: --root is only valid for ingest-all`)
+  if (verb === 'ingest-all' && checkout_explicit) throw new CloseoutUsageError(`${USAGE}: --checkout is not valid for ingest-all`)
+  if (verb === 'ingest-all' && lanes.length !== 0) throw new CloseoutUsageError(`${USAGE}: ingest-all takes no lane arguments`)
+  if (verb !== 'ingest-all' && lanes.length === 0) throw new CloseoutUsageError(`${USAGE}: at least one lane is required`)
   if (verb === 'recover' && lanes.length !== 1) throw new CloseoutUsageError(`${USAGE}: recover accepts exactly one lane`)
   const parsed = { verb, lanes, checkout, checkout_explicit, help }
+  if (root_explicit) parsed.root = root
   if (dry_run) parsed.dry_run = true
   if (reason !== null) parsed.reason = reason
   return parsed
@@ -1621,6 +1828,8 @@ export function main(argv, deps = {}) {
         ? reap({ ...options, lanes: parsed.lanes })
         : parsed.verb === 'recover'
           ? recover({ ...options, lane: parsed.lanes[0], checkoutExplicit: parsed.checkout_explicit })
+          : parsed.verb === 'ingest-all'
+          ? ingestAll({ root: parsed.root, dryRun: parsed.dry_run === true, deps: d })
           : reconcile({ ...options, lane: parsed.lanes[0], dryRun: parsed.dry_run === true, reason: parsed.reason })
     if (result.refusal) return EXIT_REFUSED
     return EXIT_OK

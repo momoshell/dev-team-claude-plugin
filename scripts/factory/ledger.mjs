@@ -73,10 +73,10 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync, readdirSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync, readdirSync, mkdtempSync, rmSync,
 } from 'node:fs'
 import { dirname, join, resolve, parse, sep } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
@@ -6257,6 +6257,21 @@ export function openLedger({
       }
       writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present, collapsed_keys: collapsedKeys })
     }
+    // Per table, the other direction: mirror rows whose key no authority line
+    // names (an authority line was lost). Keys are unioned across writers that
+    // share a table, so a shared key space is never double-counted.
+    const tableAuthority = new Map()
+    for (const info of perWriter.values()) {
+      if (!tableAuthority.has(info.table)) tableAuthority.set(info.table, new Set())
+      for (const key of info.keys) tableAuthority.get(info.table).add(key)
+    }
+    const tables = []
+    for (const [table, rowSet] of rowKeysByTable) {
+      const authority = tableAuthority.get(table) || new Set()
+      let mirrorOnly = 0
+      if (rowSet) for (const key of rowSet) if (!authority.has(key)) mirrorOnly += 1
+      tables.push({ table, authority_keys: authority.size, mirror_rows: rowSet ? rowSet.size : null, mirror_only_rows: rowSet ? mirrorOnly : null })
+    }
     const unreadableTables = writers.filter((w) => w.drift === null).map((w) => w.table)
     const measured = unparsed === 0 && unknownKind === 0 && unreadableTables.length === 0
     const causes = []
@@ -6272,6 +6287,7 @@ export function openLedger({
       unparsed_lines: unparsed,
       unknown_kind_lines: unknownKind,
       writers,
+      tables,
       drift_total: driftTotal,
       remedy: driftTotal > 0 ? DRIFT_REMEDY : null,
       collapsed_lines_total: measured ? collapsedLines : null,
@@ -6746,12 +6762,81 @@ function bootSeatArgs(source, role, adwId) {
   }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null } = {}) {
+// Idempotency key for one journal fact, built from the row the writer actually
+// STORED, never from the raw journal arguments: each fact is first written to a
+// throwaway ledger and its new mirror row is read back. The writer's own
+// normalization (truncation, redaction, text/number coercion) and SQLite's
+// column affinity therefore shape the key exactly as they shape the real row,
+// and the real ledger is seeded with the same function over its stored rows.
+// The unique tuple is JSON-encoded, so no component value can impersonate a
+// separator. NULL participates in equality (unlike SQLite's NULL-distinct
+// UNIQUE), so a repeated nullable composite key still collides.
+function journalFactIdentity(writer) {
+  const table = writer === JOURNAL_FACT_EVENTS.boot || writer === 'recordRunSeat' ? 'run_seats' : WRITER_MIRROR_TABLES[writer]
+  if (!table || !TABLES[table] || !Array.isArray(TABLES[table].unique[0])) return null
+  return { table, unique: TABLES[table].unique[0] }
+}
+
+function storedKey(identity, row) {
+  return `${identity.table}::${JSON.stringify(identity.unique.map((column) => row?.[column] ?? null))}`
+}
+
+function storedKeys(ledger, identity) {
+  return new Set((ledger.dumpTable(identity.table) || []).map((row) => storedKey(identity, row)))
+}
+
+function mirrorErrorCount(ledger) {
+  try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
+}
+
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false, strict_adw_id = false, lane = null, _scratchLedgerForTest = null } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
+  // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
+  const seen = new Set()
+  // dumpTable counts a failed read (a missing table, a locked file) as a mirror
+  // error and returns []; an empty seed read that way is not an empty mirror.
+  const seedErrorsBefore = mirrorErrorCount(ledger)
+  if (ledger && typeof ledger.dumpTable === 'function') {
+    const seeded = new Set()
+    for (const writer of [...Object.values(JOURNAL_FACT_KEYS), ...Object.values(JOURNAL_FACT_EVENTS)]) {
+      const identity = journalFactIdentity(writer)
+      if (!identity || seeded.has(identity.table)) continue
+      seeded.add(identity.table)
+      for (const key of storedKeys(ledger, identity)) seen.add(key)
+    }
+  }
+  if (mirrorErrorCount(ledger) > seedErrorsBefore) {
+    return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'seed-read-error' } }
+  }
+  // Every fact runs through a throwaway ledger first: it validates the fact with
+  // the writer's own checks and yields the stored row the key is built from.
+  // Dry-run stops there, so the real ledger is only ever read.
+  const scratchDir = mkdtempSync(join(tmpdir(), 'ledger-ingest-'))
+  const scratch = _scratchLedgerForTest ? _scratchLedgerForTest(join(scratchDir, 'ledger.db')) : openLedger({ dbPath: join(scratchDir, 'ledger.db') })
+  try {
+    // A degraded scratch mirror reads empty, which would look like dedupe
+    // evidence; the ingest is unmeasured instead. openLedger decides degradation
+    // lazily, so it is read after a first query.
+    scratch.dumpTable('run_seats')
+    if (scratch.degraded || (typeof scratch.stats === 'function' && scratch.stats().degraded)) {
+      return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
+    }
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane })
+  } finally {
+    try { scratch.close() } catch { /* a throwaway ledger */ }
+    try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
+  }
+}
+
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
   } catch (err) {
+    // A caller that already discovered the journal (ingest-all) passes
+    // require_present: a journal gone by read time vanished mid-run, which is an
+    // incomplete ingest, never a clean absence.
+    if (err?.code === 'ENOENT' && require_present) return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'journal-vanished' } }
     if (err?.code === 'ENOENT') return { ...INGEST_ABSENT }
     return ingestReadFailure(err)
   }
@@ -6760,6 +6845,7 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   let ignored = 0
   let failed = 0
   let firstFailure = null
+  let mirrorFailed = false
   const lines = String(content).split('\n')
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1
@@ -6791,45 +6877,97 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
       }
     }
     if (!writer) { ignored += 1; continue }
+    // Fan every eligible row out to (writer, args) pairs first so the
+    // idempotency guard below stays a single site: boot roles and fact rows
+    // share one natural-key seen-set and one dry-run gate.
+    // By default a row's own adw_id wins (HoldC1). A backfill that resolved the
+    // journal's identity itself (ingest-all) passes strict_adw_id: a row naming
+    // another run is refused rather than filed under that run.
+    if (strict_adw_id && adw_id && source.adw_id !== undefined && source.adw_id !== null && source.adw_id !== adw_id) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: 'adw-id-mismatch' }
+      continue
+    }
+    // plan-adopted names the ADOPTING lane (journals show lane === task); under
+    // strict identity a row naming another lane is refused the same way.
+    if (strict_adw_id && lane && writer === JOURNAL_FACT_EVENTS['plan-adopted'] && source.lane !== lane) {
+      failed += 1
+      if (firstFailure === null) firstFailure = { line: lineNo, reason: 'lane-mismatch' }
+      continue
+    }
+    const pending = []
     if (writer === JOURNAL_FACT_EVENTS.boot) {
       if (!Array.isArray(source.roles)) {
         ignored += 1
         continue
       }
       for (const role of source.roles) {
-        let args
         try {
-          args = bootSeatArgs(source, role, adw_id)
+          pending.push({ writer: 'recordRunSeat', args: bootSeatArgs(source, role, adw_id) })
         } catch (err) {
           failed += 1
           firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
-          continue
-        }
-        const error = applyJournalFact(ledger, 'recordRunSeat', args)
-        if (error === null) {
-          applied += 1
-        } else {
-          failed += 1
-          firstFailure ??= { line: lineNo, reason: ingestFailureReason(error) }
         }
       }
-      continue
-    }
-    let args
-    try {
-      args = journalFactArgs(writer, source, adw_id)
-    } catch (err) {
-      failed += 1
-      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
-      continue
-    }
-    const error = applyJournalFact(ledger, writer, args)
-    if (error === null) {
-      applied += 1
     } else {
-      failed += 1
-      if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
+      try {
+        pending.push({ writer, args: journalFactArgs(writer, source, adw_id) })
+      } catch (err) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
+        continue
+      }
     }
+    for (const fact of pending) {
+      const identity = journalFactIdentity(fact.writer)
+      const before = identity ? storedKeys(scratch, identity) : null
+      const scratchMirrorBefore = mirrorErrorCount(scratch)
+      const rejected = applyJournalFact(scratch, fact.writer, fact.args)
+      if (rejected !== null) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(rejected) }
+        continue
+      }
+      if (mirrorErrorCount(scratch) > scratchMirrorBefore) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: 'mirror-error' }
+        continue
+      }
+      let key = null
+      if (identity) {
+        const added = [...storedKeys(scratch, identity)].filter((one) => !before.has(one))
+        // No new stored row and no error: INSERT OR IGNORE met the same natural
+        // key earlier in this journal, so the fact is already accounted for.
+        if (added.length === 0) { ignored += 1; continue }
+        key = added[0]
+        if (seen.has(key)) { ignored += 1; continue }
+      }
+      if (target === null) {
+        if (key !== null) seen.add(key)
+        applied += 1
+        continue
+      }
+      const ledger = target
+      const mirrorBefore = mirrorErrorCount(ledger)
+      const error = applyJournalFact(ledger, fact.writer, fact.args)
+      if (error !== null) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(error) }
+        continue
+      }
+      // A writer that appended its JSONL line but could not mirror it reports
+      // success; a re-run would then append the same fact again. Count it as a
+      // failure and stop this journal, so the store's health is looked at first.
+      if (mirrorErrorCount(ledger) > mirrorBefore) {
+        failed += 1
+        if (firstFailure === null) firstFailure = { line: lineNo, reason: 'mirror-error' }
+        mirrorFailed = true
+        break
+      }
+      if (key !== null) seen.add(key)
+      applied += 1
+    }
+    if (mirrorFailed) break
   }
   return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
 }

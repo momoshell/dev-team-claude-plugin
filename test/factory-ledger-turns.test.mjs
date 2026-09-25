@@ -2653,3 +2653,282 @@ test('G1 a populated legacy gate_results table migrates with NULL timing fields'
     assert.equal(row.gate_run_ms_absent_reason, null)
   } finally { ledger.close() }
 })
+test('ingest-all replay contract: every journal-fed table survives a second ingest byte-identical', { skip: SKIP }, () => {
+  const adwId = 'replay-contract'
+  const base = Date.parse('2030-01-01T00:00:00.000Z')
+  const at = (offset) => new Date(base + offset).toISOString()
+  const seat = (agent, provider, id, model, effort) => ({ agent, provider, id, model, effort })
+  const rows = [
+    { at: at(0), role: 'builder', id: 'd1', headless_outcome: 'budget-refused', provider_failure: { kind: 'rate_limit', status: 429 } },
+    { at: at(1000), provider_failure: { kind: 'authentication_failed', status: 401 } },
+    { at: at(2000), plan_scope: { round: 1, verdict: 'plan-scope-same', added: 0, dropped: 0, dispatched: 2, planned: 3 } },
+    { at: at(3000), accept_reask: { where_at: 'accept', reask: 1, errors: 0 } },
+    { at: at(4000), role: 'builder', rpc_exit_context: { role: 'builder', outcome: 'exited' } },
+    { at: at(5000), seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: at(6000), event: 'experiment-arm', role: 'planner', experiment: 'planner-symbols', arm: 'control', fraction: 0.5 },
+    { at: at(7000), mutation_anchor_bind: { generation: 7, declared: 2, exact: 1, normalized: 1, absent: 0, corrected: 0 } },
+    { at: at(8000), mutation_anchor_absent: { generation: 7, check: 'I1', file: 'x.mjs' } },
+    { at: at(9000), narration: { attempted: true, model: 'm', duration_ms: 5, outcome: 'accepted' } },
+    { at: at(10000), screener_proposal: { round: 1, proposal_id: 'p1', axis: 'a', model: 'm', outcome: 'adopted' } },
+    { at: at(11000), event: 'seat-timeout-reask', outcome: 'reasked' },
+    { at: at(12000), event: 'plan-adopted', lane: 'lane-a', plan_sha: 'sha1' },
+    { at: at(13000), event: 'phase-slot-wait', kind: 'gate', waited_ms: 5 },
+    {
+      at: at(14000), event: 'boot', roles: ['planner', 'builder'],
+      seats: {
+        planner: seat('claude', 'anthropic', 'claude-sonnet', 'claude-sonnet', 'high'),
+        builder: seat('pi', 'openai', 'gpt-5', 'openai-codex/gpt-5', 'max'),
+      },
+      transports: { planner: 'pane', builder: 'headless-rpc' },
+    },
+  ]
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  const dumpAll = () => {
+    const out = {}
+    for (const table of Object.keys(TABLES)) out[table] = ledger.dumpTable(table).map((row) => ({ ...row }))
+    return out
+  }
+  try {
+    const first = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(first, { applied: 16, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.equal(ledger.dumpTable('provider_failures').length, 2)
+    assert.equal(ledger.dumpTable('plan_scope_changes').length, 1)
+    assert.equal(ledger.dumpTable('accept_reasks').length, 1)
+    assert.equal(ledger.dumpTable('rpc_exit_contexts').length, 1)
+    assert.equal(ledger.dumpTable('seat_turn_census').length, 1)
+    assert.equal(ledger.dumpTable('experiment_arms').length, 1)
+    assert.equal(ledger.dumpTable('mutation_anchor_binds').length, 1)
+    assert.equal(ledger.dumpTable('mutation_anchor_absences').length, 1)
+    assert.equal(ledger.dumpTable('narration_measurements').length, 1)
+    assert.equal(ledger.dumpTable('screener_proposals').length, 1)
+    assert.equal(ledger.dumpTable('seat_reasks').length, 1)
+    assert.equal(ledger.dumpTable('plan_adoptions').length, 1)
+    assert.equal(ledger.dumpTable('phase_slot_waits').length, 1)
+    assert.equal(ledger.dumpTable('run_seats').length, 2)
+    // The nullable composite keys round-trip as measured nulls, not blanks.
+    const nullable = ledger.dumpTable('provider_failures').find((row) => row.dispatch_id === null)
+    assert.equal(nullable.role, null)
+    assert.equal(nullable.kind, 'authentication_failed')
+    const nullReask = ledger.dumpTable('seat_reasks')[0]
+    assert.equal(nullReask.role, null)
+    assert.equal(nullReask.dispatch_id, null)
+    const before = dumpAll()
+    const logBefore = readFileSync(ledger._jsonlPath)
+    const second = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(second, { applied: 0, skipped: 0, ignored: 16, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(dumpAll(), before)
+    assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
+  } finally { ledger.close() }
+})
+test('ingest-all replay keeps the first physical row and pins malformed lines', { skip: SKIP }, () => {
+  const adwId = 'replay-physical'
+  const lines = [
+    'this is not json',
+    JSON.stringify({ at: '2030-01-01T00:00:00.000Z', event: 'plan-adopted', lane: 'lane-dup', plan_sha: 'sha-dup', source: 'first' }),
+    JSON.stringify({ at: '2030-01-01T00:00:05.000Z', event: 'plan-adopted', lane: 'lane-dup', plan_sha: 'sha-dup', source: 'second' }),
+    JSON.stringify({ at: '2030-01-01T00:00:10.000Z', role: 'builder', id: 'd-dup', provider_failure: { kind: 'rate_limit', status: 429 } }),
+    JSON.stringify({ at: '2030-01-01T00:00:10.000Z', role: 'builder', id: 'd-dup', headless_outcome: 'other', provider_failure: { kind: 'server_error', status: 500 } }),
+    JSON.stringify({ at: '2030-01-01T00:00:11.000Z', event: 'ordinary-log', message: 'not a fact' }),
+  ]
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${lines.join('\n')}\n`)
+  const dumpAll = () => {
+    const out = {}
+    for (const table of Object.keys(TABLES)) out[table] = ledger.dumpTable(table).map((row) => ({ ...row }))
+    return out
+  }
+  try {
+    const first = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(first, { applied: 2, skipped: 1, ignored: 3, failed: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
+    assert.equal(ledger.dumpTable('plan_adoptions')[0].source, 'first')
+    assert.equal(ledger.dumpTable('provider_failures')[0].kind, 'rate_limit')
+    const before = dumpAll()
+    const logBefore = readFileSync(ledger._jsonlPath)
+    const second = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(second, { applied: 0, skipped: 1, ignored: 5, failed: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
+    assert.deepEqual(dumpAll(), before)
+    assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
+  } finally { ledger.close() }
+})
+test('ingest-all dry_run counts eligible facts without invoking writers', { skip: SKIP }, () => {
+  const adwId = 'replay-dry'
+  const rows = [
+    { at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: '2030-01-01T00:00:02.000Z', event: 'plan-adopted', lane: 'lane-dry', plan_sha: 'sha-dry' },
+  ]
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  const ledger = openTestLedger()
+  const dumpAll = () => {
+    const out = {}
+    for (const table of Object.keys(TABLES)) out[table] = ledger.dumpTable(table).map((row) => ({ ...row }))
+    return out
+  }
+  try {
+    const dry = ingestJournal(journalPath, ledger, { adw_id: adwId, dry_run: true })
+    assert.deepEqual(dry, { applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    for (const table of Object.keys(TABLES)) assert.deepEqual(ledger.dumpTable(table), [], table)
+    assert.equal(existsSync(ledger._jsonlPath), false)
+    const withoutLedger = ingestJournal(journalPath, null, { adw_id: adwId, dry_run: true })
+    assert.deepEqual(withoutLedger, dry)
+    const real = ingestJournal(journalPath, ledger, { adw_id: adwId })
+    assert.deepEqual(real, { applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.ok(Object.values(dumpAll()).some((rows) => rows.length > 0))
+    const logBefore = readFileSync(ledger._jsonlPath)
+    const before = dumpAll()
+    const dryAgain = ingestJournal(journalPath, ledger, { adw_id: adwId, dry_run: true })
+    assert.deepEqual(dryAgain, { applied: 0, skipped: 0, ignored: 3, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(dumpAll(), before)
+    assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
+  } finally { ledger.close() }
+})
+
+// Sol review of the b938 hand-finish (2026-09-25): each test pins one finding.
+test('ingest key follows column affinity: TEXT ids 01 and 1 stay two screener proposals', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const row = (proposalId, offset) => ({ at: new Date(Date.parse('2030-01-01T00:00:00.000Z') + offset).toISOString(), screener_proposal: { round: 1, proposal_id: proposalId, axis: 'a', model: 'm', outcome: 'adopted' } })
+  writeFileSync(journalPath, `${[row('01', 0), row('1', 1000)].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'affinity' })
+    assert.equal(result.applied, 2)
+    assert.deepEqual(ledger.dumpTable('screener_proposals').map((one) => one.proposal_id).sort(), ['01', '1'])
+  } finally { ledger.close() }
+})
+
+test('a rejected fact does not claim its key: a valid row sharing it is still written', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const at = '2030-01-01T00:00:00.000Z'
+  writeFileSync(journalPath, `${[
+    { at, role: 'builder', id: 'd1', provider_failure: { kind: 'not-a-kind', status: 429 } },
+    { at, role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'seen-after-write' })
+    assert.equal(result.failed, 1)
+    assert.equal(result.applied, 1)
+    assert.equal(ledger.dumpTable('provider_failures').length, 1)
+    assert.equal(ledger.dumpTable('provider_failures')[0].kind, 'rate_limit')
+  } finally { ledger.close() }
+})
+
+test('dry-run runs writer validation: an invalid fact is failed, not applied, and nothing is written', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'not-a-kind', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'dry-validate', dry_run: true })
+    assert.equal(result.applied, 0)
+    assert.equal(result.failed, 1)
+    assert.equal(result.complete, false)
+    assert.equal(ledger.dumpTable('provider_failures').length, 0)
+  } finally { ledger.close() }
+})
+
+test('a mirror error fails the fact and stops the journal instead of reporting success', () => {
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+    { at: '2030-01-01T00:00:01.000Z', role: 'builder', id: 'd2', provider_failure: { kind: 'rate_limit', status: 429 } },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  let mirrorErrors = 0
+  let writes = 0
+  const ledger = {
+    dumpTable: () => [],
+    recordProviderFailure() { writes += 1; mirrorErrors += 1 },
+    stats: () => ({ mirror_errors: mirrorErrors }),
+  }
+  const result = ingestJournal(journalPath, ledger, { adw_id: 'mirror' })
+  assert.equal(result.applied, 0)
+  assert.equal(result.failed, 1)
+  assert.equal(result.complete, false)
+  assert.deepEqual(result.first_failure, { line: 1, reason: 'mirror-error' })
+  assert.equal(writes, 1, 'the journal stops at the first mirror error')
+})
+
+test('ingest keys encode the unique tuple unambiguously: separator-bearing values stay distinct', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', event: 'plan-adopted', lane: 'a|str:b', plan_sha: 'c' },
+    { at: '2030-01-01T00:00:01.000Z', event: 'plan-adopted', lane: 'a', plan_sha: 'b|str:c' },
+    { at: '2030-01-01T00:00:02.000Z', event: 'plan-adopted', lane: 'x|y', plan_sha: 'z' },
+    { at: '2030-01-01T00:00:03.000Z', event: 'plan-adopted', lane: 'x', plan_sha: 'y|z' },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'encoding' })
+    assert.equal(result.applied, 4)
+    assert.equal(ledger.dumpTable('plan_adoptions').length, 4)
+    const second = ingestJournal(journalPath, ledger, { adw_id: 'encoding' })
+    assert.equal(second.applied, 0)
+    assert.equal(second.ignored, 4)
+  } finally { ledger.close() }
+})
+
+test('ingest keys come from stored values: two lanes the writer truncates to one row are one fact', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  const prefix = 'l'.repeat(200)
+  writeFileSync(journalPath, `${[
+    { at: '2030-01-01T00:00:00.000Z', event: 'plan-adopted', lane: `${prefix}-first`, plan_sha: 'sha' },
+    { at: '2030-01-01T00:00:01.000Z', event: 'plan-adopted', lane: `${prefix}-second`, plan_sha: 'sha' },
+  ].map((one) => JSON.stringify(one)).join('\n')}\n`)
+  try {
+    const first = ingestJournal(journalPath, ledger, { adw_id: 'truncation' })
+    assert.equal(first.applied, 1)
+    assert.equal(first.ignored, 1)
+    assert.equal(ledger.dumpTable('plan_adoptions').length, 1)
+    const logBefore = readFileSync(ledger._jsonlPath)
+    const second = ingestJournal(journalPath, ledger, { adw_id: 'truncation' })
+    assert.equal(second.applied, 0)
+    assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore, 'a replay appends no JSONL bytes')
+  } finally { ledger.close() }
+})
+
+test('dry-run applies a valid fact to nothing real: counted applied, zero rows, zero JSONL bytes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const logBefore = existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath) : Buffer.alloc(0)
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'dry-valid', dry_run: true })
+    assert.equal(result.applied, 1)
+    assert.equal(ledger.dumpTable('provider_failures').length, 0)
+    assert.deepEqual(existsSync(ledger._jsonlPath) ? readFileSync(ledger._jsonlPath) : Buffer.alloc(0), logBefore)
+  } finally { ledger.close() }
+})
+
+test('a degraded scratch ledger makes the ingest unmeasured instead of reading empty as duplicates', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'degraded-scratch', dry_run: true, _scratchLedgerForTest: (dbPath) => openLedger({ dbPath, nodeVersion: '20.0.0' }) })
+    assert.equal(result.applied, 0)
+    assert.equal(result.ignored, 0)
+    assert.equal(result.complete, false)
+    assert.deepEqual(result.first_failure, { line: null, reason: 'scratch-ledger-degraded' })
+  } finally { ledger.close() }
+})
+
+test('a seed read that errors (tables missing from the real ledger) makes the ingest unmeasured, not empty', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'foreign.db')
+  const raw = new (require('node:sqlite').DatabaseSync)(dbPath)
+  raw.exec('CREATE TABLE unrelated (x INTEGER)')
+  raw.close()
+  const ledger = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, `${JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } })}\n`)
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'seed-error', dry_run: true })
+    assert.equal(result.applied, 0)
+    assert.equal(result.complete, false)
+    assert.deepEqual(result.first_failure, { line: null, reason: 'seed-read-error' })
+  } finally { ledger.close() }
+})

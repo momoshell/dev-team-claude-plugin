@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, mkdirpBounded, TABLES, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, ingestJournal,
+  openLedger, replayJsonl, mkdirpBounded, TABLES, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, ingestJournal,
 } from '../scripts/factory/ledger.mjs'
 
 import { nextDir, run, fixture } from './factory-ledger.test.mjs'
@@ -58,6 +58,74 @@ test('RV1-2 turns corpus preserves ledger exclusions beside corpus exclusions', 
   })
   assert.deepEqual(payload.corpus.excluded, [])
   assert.equal(payload.corpus.excluded_rows, 0)
+})
+
+test('shadow-pick JSONL replay preserves the exact mirrored values', () => {
+  const sourceDir = scratchDir('shadow-pick-source-')
+  const targetDir = scratchDir('shadow-pick-replay-')
+  const source = openLedger({ dbPath: join(sourceDir, 'ledger.db') })
+  const target = openLedger({ dbPath: join(targetDir, 'ledger.db') })
+  const args = { adw_id: 'shadow-replay', role: 'builder', tier: 'build', schema_version: 1, outcome: 'not-consulted', seated: { provider: 'openai' }, picked: null, changes_seat: false, why: 'fixture', empty_reason: null, not_consulted_reason: 'policy-disabled', decides: false, exclusions: [{ provider: 'anthropic', id: 'c1', agent: 'claude', effort: 'high', reason: 'breaker-open', detail: 'open' }] }
+  try {
+    source.recordShadowPick(args)
+    const expected = source.dumpTable('shadow_picks')
+    assert.equal(replayJsonl(source._jsonlPath, target).failed, 0)
+    assert.deepEqual(target.dumpTable('shadow_picks'), expected)
+    assert.equal(target.dumpTable('shadow_picks')[0].not_consulted_reason, 'policy-disabled')
+    assert.equal(target.dumpTable('shadow_picks')[0].decides, 0)
+  } finally { source.close(); target.close() }
+})
+
+test('boot shadow picks ingest roles, exclusions, picker errors, no-shadow and duplicate journals', () => {
+  const cell = { provider: 'openai', id: 'gpt-a', agent: 'pi', effort: 'medium' }
+  const pick = (outcome, excluded = false) => ({ outcome, seated: cell, picked: outcome === 'picked' ? cell : null, changes_seat: false, why: 'fixture', empty_reason: null, not_consulted_reason: null, candidates: excluded ? [{ ...cell, excluded_by: { reason: 'breaker-open', detail: 'fixture' } }] : [] })
+  const base = (shadow_pick) => ({ event: 'boot', at: '2026-09-01T00:00:00.000Z', roles: ['planner', 'builder'], seats: { planner: { ...cell, model: cell.id }, builder: { ...cell, model: cell.id } }, transports: { planner: 'headless-json', builder: 'headless-json' }, ...(shadow_pick === undefined ? {} : { shadow_pick }) })
+  const ingest = (tag, record) => {
+    const dir = scratchDir(`shadow-ingest-${tag}-`)
+    const path = join(dir, 'journal.jsonl')
+    writeFileSync(path, `${JSON.stringify(record)}\n`)
+    const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+    return { dir, path, ledger, result: ingestJournal(path, ledger, { adw_id: tag }) }
+  }
+  const normal = ingest('normal', base({ schema_version: 1, tier: 'build', decides: false, seats: { planner: pick('stands'), builder: pick('picked', true) } }))
+  const errored = ingest('errored', base({ schema_version: 1, error: 'picker exploded' }))
+  const absent = ingest('absent', base(undefined))
+  try {
+    assert.equal(normal.result.failed, 0)
+    const rows = normal.ledger.dumpTable('shadow_picks')
+    assert.equal(rows.length, 2)
+    assert.ok(JSON.parse(rows.find((row) => row.role === 'builder').exclusions_json).some((item) => item.reason === 'breaker-open' && item.detail === 'fixture'))
+    assert.equal(errored.result.failed, 0)
+    assert.equal(errored.ledger.dumpTable('shadow_picks').length, 2)
+    assert.ok(errored.ledger.dumpTable('shadow_picks').every((row) => row.outcome === null && row.absent_reason === 'shadow-pick-error' && row.error === 'picker exploded' && row.tier === null))
+    assert.equal(absent.result.failed, 0)
+    assert.equal(absent.ledger.dumpTable('shadow_picks').length, 0)
+    assert.equal(absent.ledger.dumpTable('run_seats').length, 2)
+    const before = readFileSync(normal.ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('"kind":"recordShadowPick"')).length
+    assert.equal(ingestJournal(normal.path, normal.ledger, { adw_id: 'normal' }).failed, 0)
+    const after = readFileSync(normal.ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('"kind":"recordShadowPick"')).length
+    assert.equal(rows.length, 2)
+    assert.equal(before, 2)
+    assert.equal(after, 2)
+  } finally { normal.ledger.close(); errored.ledger.close(); absent.ledger.close() }
+})
+
+test('malformed shadow boot timestamp counts a line failure and later journal facts still ingest', () => {
+  const dir = scratchDir('shadow-bad-boot-')
+  const journalPath = join(dir, 'journal.jsonl')
+  const cell = { provider: 'openai', id: 'gpt-a', agent: 'pi', effort: 'medium', model: 'gpt-a' }
+  const rows = [
+    { event: 'boot', at: 'garbage', roles: ['builder'], seats: { builder: cell }, transports: { builder: 'headless-json' }, shadow_pick: { schema_version: 1, tier: 'build', seats: { builder: { outcome: 'picked', seated: cell, picked: cell, candidates: [] } } } },
+    { at: '2026-09-02T00:00:00.000Z', role: 'builder', id: 'd1', provider_failure: { kind: 'rate_limit', status: 429 } },
+  ]
+  writeFileSync(journalPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const result = ingestJournal(journalPath, ledger, { adw_id: 'bad-shadow-time' })
+    assert.ok(result.failed >= 1)
+    assert.equal(ledger.dumpTable('shadow_picks').length, 0)
+    assert.equal(ledger.dumpTable('provider_failures').length, 1)
+  } finally { ledger.close() }
 })
 
 test('G1 screener journal ingest failure never throws into its caller', () => {

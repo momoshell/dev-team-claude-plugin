@@ -20,12 +20,13 @@
 // No oh-my-pi source is copied here and no holder-specific licence notice is
 // invented: that checkout is not present in the build environment.
 
+import { randomUUID } from 'node:crypto'
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { dirname, join, relative, resolve } from 'node:path'
-import { resolvePiBinary, createStreamReducer, STREAM_CAP_BYTES } from './subagent.ts'
+import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
@@ -85,6 +86,21 @@ export const UNAVAILABLE_REASONS = Object.freeze([
   'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
 ])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
+// A consult's advisor_usage spend is measured ONLY IF every frame the shared reducer
+// counts as the child's own spend carries a complete usage: all four token classes
+// present, each a non-negative safe integer. The shared reducer folds a missing usage
+// or class to 0 (it serves other callers and keeps that contract), so this advisor-local
+// check runs over the raw frames. A frame that is not own spend never counts here: zero
+// own-spend frames keep the reducer's null and its usage-unavailable reason.
+const ADVISOR_TOKEN_CLASSES = Object.freeze(['input', 'output', 'cacheRead', 'cacheWrite'])
+export function ownSpendIncomplete(frame: any): boolean {
+  if (!carriesOwnSpend(frame)) return false
+  const usage = frame.message.usage
+  if (!usage || typeof usage !== 'object') return true
+  if (!ADVISOR_TOKEN_CLASSES.every((key) => Object.prototype.hasOwnProperty.call(usage, key))) return true
+  return !ADVISOR_TOKEN_CLASSES.every((key) => !Object.prototype.hasOwnProperty.call(usage, key) || (Number.isSafeInteger(usage[key]) && usage[key] >= 0))
+}
+
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const JUDGMENT_ERROR_CODES = Object.freeze([
   'transport-failed', 'status-not-ok', 'body-too-large', 'body-unreadable',
@@ -1010,6 +1026,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     controllers.add(captured.controller)
     // The scrub is a fact, not a silence: one row per consult, always, carrying
     // the per-kind count of what this consult's delta had removed from it.
+    const consultId = randomUUID()
     const consultPayload = {
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
@@ -1027,6 +1044,17 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       let codes = []
       let judgment = null
       let foldedUsage = null
+      // The priced spend row (advisor_usage) is measured IFF all hold: the child closed with
+      // exit code 0 and no signal; the consult did not fail, abort, time out or hit a cap; the
+      // whole stdout parsed with no invalid or trailing partial frame; and every own-spend
+      // frame carries complete usage. Each condition has its own flag below, so each is
+      // proven by its own test. Anything else is usage-incomplete (zero own-spend frames keep
+      // usage-unavailable). The consult row keeps the partial fold (#1535) with usage_partial.
+      let usageIncomplete = false // an own-spend frame lacked complete usage
+      let ownSpendFrames = 0 // frames the shared reducer counts as the child's own spend
+      let consultFailed = false // fail(): abort, timeout, cap, stream/stdin error; or spawn error
+      let parseFault = false // an invalid frame, mid-stream or trailing partial at close
+      let childExit = null // { code, signal } from 'close', when the child closed
       try {
         if (env?.[ADVISOR_ENDPOINT_ENV]) {
         const response = await fetchFn(requestUrl(String(env?.[ADVISOR_ENDPOINT_ENV] || '')), {
@@ -1070,6 +1098,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
             const childArgs = ['-p','--mode','json','--no-session','--model',String(env?.[ADVISOR_MODEL_ENV] || ''),'--tools','read,grep,find,ls','--exclude-tools','edit,write,bash','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
+            const pushFrame = (frame: any) => {
+              if (carriesOwnSpend(frame)) ownSpendFrames += 1
+              if (ownSpendIncomplete(frame)) usageIncomplete = true
+              reducer.push(frame)
+            }
             let stdout = '', stderr = '', settled = false, streamBytes = 0
             // Incremental decoding: a UTF-8 character split across two chunks
             // must not be decoded half by half (the shared subagent reader's rule).
@@ -1090,6 +1123,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
               const fail = (error) => {
                 if (settled || failure) return
                 failure = error
+                consultFailed = true
                 try { child.kill('SIGTERM') } catch {}
                 killTimer = setTimeout(() => {
                   try { child.kill('SIGKILL') } catch {}
@@ -1119,27 +1153,28 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                   const frameLine = stdout.slice(0, index); stdout = stdout.slice(index + 1)
                   if (byteLength(frameLine) > RESPONSE_CAP_BYTES) { oversize(); return }
                   if (!frameLine.trim()) continue
-                  try { reducer.push(JSON.parse(frameLine)) } catch { fail(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
+                  try { pushFrame(JSON.parse(frameLine)) } catch { parseFault = true; fail(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
                 }
                 if (byteLength(stdout) > RESPONSE_CAP_BYTES) { oversize(); return }
               })
               child.stderr?.on('data', (chunk) => { if (failure) return; stderr += errDecoder.write(Buffer.from(chunk)); if (byteLength(stderr) > RESPONSE_CAP_BYTES) fail(Object.assign(new Error('oversize'), { code: 'body-too-large' })) })
               if (typeof child.stdout?.on === 'function') child.stdout.on('error', () => fail(new Error('stdout failed')))
               if (typeof child.stderr?.on === 'function') child.stderr.on('error', () => fail(new Error('stderr failed')))
-              child.on('error', () => settle(new Error('spawn failed')))
-              child.on('close', (code) => {
+              child.on('error', () => { consultFailed = true; settle(new Error('spawn failed')) })
+              child.on('close', (code, signal) => {
+                childExit = { code, signal: signal ?? null }
                 if (settled) return
                 if (failure) { settle(failure); return }
                 stdout += outDecoder.end()
-                if (stdout.trim()) { try { reducer.push(JSON.parse(stdout)) } catch { settle(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return } }
-                if (code !== 0) { settle(new Error('child failed')); return }
+                if (stdout.trim()) { try { pushFrame(JSON.parse(stdout)) } catch { parseFault = true; settle(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return } }
+                if (code !== 0 || signal) { settle(new Error('child failed')); return }
                 settle(null, { text: reducer.text(), usage: reducer.usage() })
               })
               // A child that closes stdin before the write lands raises EPIPE
               // ASYNCHRONOUSLY on the stream; unhandled, that 'error' event kills
               // the seat. It takes the consult's failure path instead.
               if (typeof child.stdin?.on === 'function') child.stdin.on('error', () => fail(new Error('stdin failed')))
-              try { child.stdin.end(JSON.stringify({ trigger, delta: captured.snapshot })) } catch { settle(new Error('stdin failed')) }
+              try { child.stdin.end(JSON.stringify({ trigger, delta: captured.snapshot })) } catch { consultFailed = true; settle(new Error('stdin failed')) }
             })
             foldedUsage = childResult.usage
             const content = childResult.text
@@ -1162,11 +1197,27 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       } finally {
         controllers.delete(captured.controller)
       }
+      const uncleanExit = childExit !== null && (childExit.code !== 0 || childExit.signal !== null)
+      // Safe frames can still sum past MAX_SAFE_INTEGER: a rounded aggregate is no measured
+      // total, and the ledger writer would refuse it and lose the fact.
+      const aggregateSafe = foldedUsage !== null && ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+        .every((key) => Number.isSafeInteger(foldedUsage[key]) && foldedUsage[key] >= 0)
+      const spendMeasured = foldedUsage !== null && ownSpendFrames > 0 && !usageIncomplete
+        && !consultFailed && !parseFault && !uncleanExit && aggregateSafe
       if (!env?.[ADVISOR_ENDPOINT_ENV]) {
         consultPayload.usage = foldedUsage
         if (foldedUsage === null) consultPayload.usage_reason = 'usage-unavailable'
+        // #1535 keeps the fold on failure paths; it is labelled, never priced.
+        else if (!spendMeasured) consultPayload.usage_partial = true
       }
       appendAdvisorRow('advisor_consult', consultPayload)
+      if (!env?.[ADVISOR_ENDPOINT_ENV]) {
+        appendAdvisorRow('advisor_usage', {
+          consult_id: consultId, run_started_at: consultPayload.run_started_at, role,
+          model: consultPayload.model, usage: spendMeasured ? foldedUsage : null,
+          usage_reason: spendMeasured ? null : ownSpendFrames === 0 ? 'usage-unavailable' : 'usage-incomplete',
+        })
+      }
       if (!liveGeneration(captured)) return
       if (codes.length || !judgment) {
         const payload = {

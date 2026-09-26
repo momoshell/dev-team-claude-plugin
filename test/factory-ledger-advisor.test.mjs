@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -1158,6 +1158,215 @@ test('A1 screener proposal journal rows persist model and outcome', { skip: SKIP
       assert.equal(replayed[0].outcome, 'adopted')
     } finally { target.close() }
   } finally { source.close() }
+})
+test('advisor usage journal facts persist measured and absent spend idempotently', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, [
+    { at: '2024-01-01T00:00:00.000Z', advisor_usage: { consult_id: 'measured', run_started_at: 'start', role: 'builder', model: 'model-a', usage: { billed_input_tokens: 17, billed_output_tokens: 5, billed_cache_write_tokens: 3, billed_cache_read_tokens: 2 }, usage_reason: null } },
+    { at: '2024-01-01T00:00:01.000Z', advisor_usage: { consult_id: 'absent', role: 'planner', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const ledger = openTestLedger()
+  try {
+    assert.equal(JOURNAL_FACT_KEYS.advisor_usage, 'recordAdvisorUsage')
+    assert.equal(WRITER_MIRROR_TABLES.recordAdvisorUsage, 'advisor_usage')
+    assert.ok(WRITERS.includes('recordAdvisorUsage'))
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-test' }).applied, 2)
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-test' }).applied, 0)
+    const rows = ledger.dumpTable('advisor_usage')
+    assert.equal(rows.length, 2)
+    const measured = rows.find((row) => row.consult_id === 'measured')
+    const absent = rows.find((row) => row.consult_id === 'absent')
+    assert.deepEqual([measured.billed_input_tokens, measured.billed_output_tokens, measured.billed_cache_write_tokens, measured.billed_cache_read_tokens], [17, 5, 3, 2])
+    assert.deepEqual([absent.billed_input_tokens, absent.billed_output_tokens, absent.billed_cache_write_tokens, absent.billed_cache_read_tokens, absent.usage_reason], [null, null, null, null, 'usage-unavailable'])
+    assert.equal(readFileSync(ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('"kind":"recordAdvisorUsage"')).length, 2)
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-test', consult_id: 'zero', model: 'model-a', usage: null, usage_reason: 'wrong' }))
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-test', consult_id: 'mixed', model: 'model-a', usage: { billed_input_tokens: 0, billed_output_tokens: null, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } }))
+  } finally { ledger.close() }
+})
+test('cells CLI prices advisor spend with all four rates', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({
+    adw_id: 'advisor-priced', consult_id: 'c1', run_started_at: null, role: 'builder', model: 'openai-codex/gpt-5.6-sol',
+    usage: { billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000, billed_cache_write_tokens: 3_000_000, billed_cache_read_tokens: 4_000_000 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const pricePath = join(nextDir(), 'advisor-priced.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  const row = payload.advisor_spend.find((candidate) => candidate.model === 'openai-codex/gpt-5.6-sol')
+  assert.equal(row.price_key, 'openai/gpt-5.6-sol')
+  assert.equal(row.consult_count, 1)
+  assert.equal(row.cost_usd, 4321)
+  assert.deepEqual([row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens], [1_000_000, 2_000_000, 3_000_000, 4_000_000])
+  assert.deepEqual(row.absent, {})
+  assert.equal(payload.rows.find((candidate) => candidate.adw_id === 'advisor-priced'), undefined)
+})
+test('cells CLI leaves advisor spend unpriced when model or usage is absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const measured = (adw_id, consult_id, model) => ledger.recordAdvisorUsage({
+    adw_id, consult_id, role: 'builder', model,
+    usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  measured('advisor-weird', 'c1', 'weird-cli/gpt-5.6-sol')
+  ledger.recordAdvisorUsage({ adw_id: 'advisor-absent', consult_id: 'c2', role: 'builder', model: 'openai-codex/gpt-5.6-sol', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:00.000Z' })
+  measured('advisor-rate-missing', 'c3', 'openai-codex/gpt-5.6-terra')
+  const pricePath = join(nextDir(), 'advisor-incomplete.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: {
+      'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 },
+      'openai/gpt-5.6-terra': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100 },
+    },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout).advisor_spend
+  for (const [adw_id, reason] of [['advisor-weird', 'model-unpriced-or-ambiguous'], ['advisor-absent', 'usage-unavailable'], ['advisor-rate-missing', 'price-rate-unavailable']]) {
+    const row = rows.find((candidate) => candidate.adw_id === adw_id)
+    assert.equal(row.consult_count, 1)
+    assert.equal(row.cost_usd, null)
+    assert.notEqual(row.cost_usd, 0)
+    assert.equal(row.absent.cost_usd, reason)
+  }
+})
+// Sol, #1547 hand-finish pass 1: the advisor accepts a model of up to 128 characters
+// (advisor.ts SAFE_MODEL), so the writer must too, or a valid consult's spend never lands.
+// Mutation killed: bounding the model at the 64-character short-name bound again.
+test('advisor usage keeps a model at the advisor bound and refuses one past it', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  const model = `openai-codex/${'m'.repeat(128 - 'openai-codex/'.length)}`
+  assert.equal(model.length, 128)
+  writeFileSync(journalPath, JSON.stringify({ at: '2024-01-01T00:00:00.000Z', advisor_usage: { consult_id: 'long', role: 'builder', model, usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 }, usage_reason: null } }) + '\n')
+  const ledger = openTestLedger()
+  try {
+    assert.equal(ingestJournal(journalPath, ledger, { adw_id: 'advisor-long' }).applied, 1)
+    assert.deepEqual(ledger.dumpTable('advisor_usage').map((row) => [row.model, row.billed_input_tokens]), [[model, 1]])
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-long', consult_id: 'too-long', model: `${model}x`, usage: null, usage_reason: 'usage-unavailable' }), /at most 128 characters/)
+  } finally { ledger.close() }
+})
+// Sol, #1547 hand-finish pass 1: finite rates can overflow to Infinity; that cost is null
+// with its own reason, never an unexplained null. Mutation killed: dropping the finite check.
+test('cells CLI names an overflowing advisor cost instead of printing it', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({
+    adw_id: 'advisor-overflow', consult_id: 'c1', role: 'builder', model: 'openai-codex/gpt-5.6-sol',
+    usage: { billed_input_tokens: 2_000_000, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 },
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const pricePath = join(nextDir(), 'advisor-overflow.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1e308, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).advisor_spend.find((candidate) => candidate.adw_id === 'advisor-overflow')
+  assert.equal(row.cost_usd, null)
+  assert.deepEqual(row.absent, { cost_usd: 'cost-not-finite' })
+})
+// Sol, #1547 hand-finish pass 2: the JSONL authority stores the four billed columns flat,
+// so a replay must restore both a measured and an absent consult from that shape.
+// Mutation killed: dropping the flat-shape rebuild (replay then fails on missing usage).
+test('advisor usage replays from its own persisted JSONL', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  let jsonlPath
+  try {
+    source.recordAdvisorUsage({ adw_id: 'advisor-replay', consult_id: 'm', role: 'builder', model: 'model-r', usage: { billed_input_tokens: 7, billed_output_tokens: 6, billed_cache_write_tokens: 5, billed_cache_read_tokens: 4 }, created_at: '2024-01-01T00:00:00.000Z' })
+    source.recordAdvisorUsage({ adw_id: 'advisor-replay', consult_id: 'a', role: 'builder', model: 'model-r', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:01.000Z' })
+    jsonlPath = source._jsonlPath
+  } finally { source.close() }
+  const target = openTestLedger()
+  try {
+    const result = replayJsonl(jsonlPath, target)
+    assert.equal(result.failed, 0, JSON.stringify(result.first_failure))
+    const rows = target.dumpTable('advisor_usage')
+    const pick = (id) => { const r = rows.find((row) => row.consult_id === id); return [r.billed_input_tokens, r.billed_output_tokens, r.billed_cache_write_tokens, r.billed_cache_read_tokens, r.usage_reason] }
+    assert.deepEqual(pick('m'), [7, 6, 5, 4, null])
+    assert.deepEqual(pick('a'), [null, null, null, null, 'usage-unavailable'])
+  } finally { target.close() }
+})
+// Sol, #1547 hand-finish pass 2: an unreadable advisor_usage mirror is an unanswerable
+// readout, never an empty one. Mutation killed: reporting the failed read's [] as advisor_spend.
+test('cells CLI reports an unreadable advisor mirror as absent, not empty', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordAdvisorUsage({ adw_id: 'advisor-unreadable', consult_id: 'c1', role: 'builder', model: 'model-u', usage: null, usage_reason: 'usage-unavailable', created_at: '2024-01-01T00:00:00.000Z' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const raw = new DatabaseSync(dbPath)
+  // An integer past the JS safe range makes node:sqlite throw on read: this table's read fails, no other.
+  raw.exec("INSERT INTO advisor_usage (adw_id, consult_id, model, billed_input_tokens, created_at) VALUES ('advisor-unreadable', 'c2', 'model-u', 9007199254740993, '2024-01-01T00:00:00.000Z')")
+  raw.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.advisor_spend, null)
+  assert.match(payload.absent.advisor_spend, /unanswerable, not empty/)
+})
+// Sol, #1547 hand-finish pass 2: a token sum past MAX_SAFE_INTEGER is rounded, so it is not
+// published. Mutation killed: dropping the safe-sum check (a rounded total is printed).
+test('cells CLI withholds an advisor token total that is not a safe integer', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  for (const [consult_id, input] of [['c1', Number.MAX_SAFE_INTEGER], ['c2', 1], ['c3', 1]]) {
+    ledger.recordAdvisorUsage({ adw_id: 'advisor-unsafe', consult_id, role: 'builder', model: 'openai-codex/gpt-5.6-sol', usage: { billed_input_tokens: input, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }, created_at: '2024-01-01T00:00:00.000Z' })
+  }
+  const pricePath = join(nextDir(), 'advisor-unsafe.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 1, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).advisor_spend.find((candidate) => candidate.adw_id === 'advisor-unsafe')
+  assert.equal(row.consult_count, 3)
+  assert.equal(row.billed_input_tokens, null)
+  assert.equal(row.cost_usd, null)
+  assert.deepEqual(row.absent, { cost_usd: 'usage-total-unsafe' })
+})
+// Sol, #1547 hand-finish pass 3: pre-#1547 consults carry usage on advisor_consult only and are
+// never backfilled, so an empty advisor_spend must not read as no spend. Mutation killed: dropping
+// the coverage statement from the payload.
+test('cells CLI states the advisor spend coverage gap even when no advisor row exists', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  writeFileSync(journalPath, JSON.stringify({ at: '2024-01-01T00:00:00.000Z', advisor_consult: { tier: 1, role: 'builder', model: 'model-old', usage: { billed_input_tokens: 9, billed_output_tokens: 9, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } } }) + '\n')
+  const ledger = openTestLedger()
+  ingestJournal(journalPath, ledger, { adw_id: 'advisor-old' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.deepEqual(payload.advisor_spend, [])
+  assert.equal(payload.absent.advisor_spend_coverage, ADVISOR_SPEND_COVERAGE)
+  assert.match(payload.absent.advisor_spend_coverage, /never zero spend/)
+})
+// Sol, #1547 hand-finish pass 4: an incomplete child usage frame is recorded as unmeasured with
+// its own reason, and prices as nothing. Mutation killed: refusing the usage-incomplete reason.
+test('advisor usage records an incomplete consult as unmeasured, never priced', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordAdvisorUsage({ adw_id: 'advisor-incomplete', consult_id: 'c1', role: 'builder', model: 'model-i', usage: null, usage_reason: 'usage-incomplete', created_at: '2024-01-01T00:00:00.000Z' })
+    const row = ledger.dumpTable('advisor_usage')[0]
+    assert.deepEqual([row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens, row.usage_reason], [null, null, null, null, 'usage-incomplete'])
+    assert.throws(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-incomplete', consult_id: 'c2', model: 'model-i', usage: null, usage_reason: 'invented' }))
+  } finally { ledger.close() }
 })
 test('B1 screener adoption readout groups rates by model', { skip: SKIP }, () => {
   const ledger = openTestLedger()

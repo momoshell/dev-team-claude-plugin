@@ -1493,6 +1493,23 @@ export const TABLES = Object.freeze({
     unique: [['adw_id']],
     indexes: [],
   },
+  advisor_usage: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'consult_id', decl: 'TEXT' },
+      { name: 'run_started_at', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'model', decl: 'TEXT' },
+      { name: 'billed_input_tokens', decl: 'INTEGER' },
+      { name: 'billed_output_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_write_tokens', decl: 'INTEGER' },
+      { name: 'billed_cache_read_tokens', decl: 'INTEGER' },
+      { name: 'usage_reason', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'consult_id']],
+    indexes: [],
+  },
   screener_proposals: {
     columns: [
       { name: 'adw_id', decl: 'TEXT' },
@@ -1574,6 +1591,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   mutation_anchor_absent: 'recordMutationAnchorAbsence',
   narration: 'recordNarrationMeasurement',
   screener_proposal: 'recordScreenerProposal',
+  advisor_usage: 'recordAdvisorUsage',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1590,7 +1608,7 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1643,6 +1661,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordExperimentArm: 'experiment_arms',
   recordNarrationMeasurement: 'narration_measurements',
   recordScreenerProposal: 'screener_proposals',
+  recordAdvisorUsage: 'advisor_usage',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -1782,6 +1801,12 @@ function refuse(message, reason = 'usage') {
 // a second source of truth for a ratified artifact. An absent tier is a fact
 // (null); a non-string, blank or unbounded tier is a CALLER BUG and refuses.
 const TIER_MAX_CHARS = 64
+
+// advisor.ts SAFE_MODEL admits a model of 1 + 127 characters; the advisor_usage writer takes the same bound.
+// advisor_spend counts advisor_usage rows only. Consults before #1547 carry their usage on the
+// advisor_consult journal row alone, which is never backfilled, and the HTTP channel writes none.
+export const ADVISOR_SPEND_COVERAGE = 'advisor_spend counts only pi-child consults that wrote an advisor_usage row (#1547 onward); an earlier consult keeps its usage on its advisor_consult journal row only and is never backfilled, and the HTTP advisor channel writes none — a missing row is uncounted spend, never zero spend'
+const ADVISOR_MODEL_MAX_CHARS = 128
 
 function normaliseShortName(value, ctx, field) {
   if (value === undefined || value === null) return null
@@ -3808,6 +3833,60 @@ export function openLedger({
       const cols = tableColumnNames('screener_proposals')
       const sqlCols = cols.map(quoteSqlIdentifier)
       conn.prepare(`INSERT OR IGNORE INTO screener_proposals (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordAdvisorUsage(input = {}) {
+    // The persisted JSONL row is flat (four billed columns, no `usage`), so a replay
+    // hands the writer that shape: rebuild `usage` from it, all-null meaning absent.
+    const tokenClasses = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+    if (input.usage === undefined && tokenClasses.some((name) => Object.prototype.hasOwnProperty.call(input, name))) {
+      input = {
+        ...input,
+        usage: tokenClasses.every((name) => input[name] === null || input[name] === undefined)
+          ? null
+          : Object.fromEntries(tokenClasses.map((name) => [name, input[name]])),
+      }
+    }
+    requireFields(input, ['adw_id', 'consult_id', 'model', 'usage'], 'recordAdvisorUsage')
+    const consultId = normaliseShortName(input.consult_id, 'recordAdvisorUsage', 'consult_id')
+    // The model bound is the advisor's own, not the 64-character short-name bound: a
+    // model the advisor accepts must never be refused here, or its spend never lands.
+    if (typeof input.model !== 'string' || input.model.trim() === '' || input.model.length > ADVISOR_MODEL_MAX_CHARS) {
+      refuse(`recordAdvisorUsage: field 'model' must be a non-blank string of at most ${ADVISOR_MODEL_MAX_CHARS} characters`)
+    }
+    const model = input.model.trim()
+    const billed = input.usage === null ? null : input.usage
+    if (billed !== null) {
+      for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+        if (typeof billed?.[name] !== 'number' || !Number.isSafeInteger(billed[name]) || billed[name] < 0) {
+          refuse(`recordAdvisorUsage: usage requires finite non-negative safe integer ${name}`)
+        }
+      }
+      if (input.usage_reason != null) refuse("recordAdvisorUsage: measured usage requires null usage_reason")
+    } else if (input.usage_reason !== 'usage-unavailable' && input.usage_reason !== 'usage-incomplete') {
+      refuse("recordAdvisorUsage: absent usage requires usage_reason 'usage-unavailable' or 'usage-incomplete'")
+    }
+    const args = redact({
+      adw_id: input.adw_id, consult_id: consultId,
+      run_started_at: textOrNull(input.run_started_at, 120),
+      role: textOrNull(input.role, 80), model,
+      billed_input_tokens: billed?.billed_input_tokens ?? null,
+      billed_output_tokens: billed?.billed_output_tokens ?? null,
+      billed_cache_write_tokens: billed?.billed_cache_write_tokens ?? null,
+      billed_cache_read_tokens: billed?.billed_cache_read_tokens ?? null,
+      usage_reason: input.usage_reason ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (typeof args.adw_id !== 'string' || args.adw_id.trim() === '' || !args.consult_id || !args.model) {
+      refuse('recordAdvisorUsage: required identity/model fields were redacted')
+    }
+    appendJsonl('recordAdvisorUsage', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('advisor_usage')
+      conn.prepare(`INSERT OR IGNORE INTO advisor_usage (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
     })
     return args
@@ -6356,7 +6435,7 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
@@ -6472,6 +6551,19 @@ function journalFactArgs(writer, row, adwId) {
       duration_ms: narration.duration_ms ?? null,
       outcome: narration.outcome,
       reason: narration.reason ?? null,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.advisor_usage) {
+    const payload = value('advisor_usage')
+    return {
+      adw_id: rowAdwId,
+      consult_id: payload.consult_id,
+      run_started_at: payload.run_started_at ?? null,
+      role: payload.role ?? null,
+      model: payload.model,
+      usage: payload.usage,
+      usage_reason: payload.usage_reason ?? null,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }
@@ -8388,6 +8480,44 @@ export function main(argv) {
           absent,
         }
       })
+      const advisorGroups = new Map()
+      // dumpTable counts a failed read as a mirror error and returns []; that is an
+      // unanswerable advisor readout, never an empty one.
+      const advisorErrorsBefore = mirrorErrorCount(ledger)
+      const advisorFacts = ledger.dumpTable('advisor_usage')
+      const advisorUnreadable = mirrorErrorCount(ledger) > advisorErrorsBefore
+      if (advisorUnreadable) payloadAbsent.advisor_spend = 'the advisor_usage mirror read failed — advisor spend is unanswerable, not empty'
+      // A blind spot is stated, not omitted: no advisor_spend row is not no advisor spend.
+      payloadAbsent.advisor_spend_coverage = ADVISOR_SPEND_COVERAGE
+      for (const fact of advisorUnreadable ? [] : advisorFacts) {
+        const at = Date.parse(fact.created_at)
+        if ((since !== null && at < Date.parse(since)) || (until !== null && at >= Date.parse(until))) continue
+        const groupKey = JSON.stringify([fact.adw_id, fact.role, fact.model])
+        const group = advisorGroups.get(groupKey) ?? { adw_id: fact.adw_id, role: fact.role, model: fact.model, consult_count: 0, billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0, absent: [], unsafe: [] }
+        group.consult_count += 1
+        for (const name of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+          if (fact[name] === null || fact[name] === undefined) group.absent.push(name)
+          else if (!Number.isSafeInteger(group[name] + Number(fact[name]))) group.unsafe.push(name)
+          else group[name] += Number(fact[name])
+        }
+        advisorGroups.set(groupKey, group)
+      }
+      const advisorSpend = [...advisorGroups.values()].map((group) => {
+        const priceKey = catalog === null ? null : priceKeyForModel(catalog, group.model, 'pi')
+        const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
+        const rates = price && ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((key) => price[key])
+        const missingRates = !rates || rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))
+        // A sum past MAX_SAFE_INTEGER is rounded, so it is no measurement either.
+        const unsafeTokens = group.unsafe.length > 0
+        const missingTokens = group.absent.length > 0 || unsafeTokens
+        const computed = !missingRates && !missingTokens
+          ? group.billed_input_tokens / 1e6 * rates[0] + group.billed_output_tokens / 1e6 * rates[1] + group.billed_cache_write_tokens / 1e6 * rates[2] + group.billed_cache_read_tokens / 1e6 * rates[3]
+          : null
+        // Finite rates can still overflow to Infinity; that is no price, and it says so.
+        const overflowed = computed !== null && !Number.isFinite(computed)
+        const cost = overflowed ? null : computed
+        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : unsafeTokens ? 'usage-total-unsafe' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
+      })
       const priceSource = catalog === null ? null : {
         path: priceSourcePath,
         updated_at: catalog.updated_at ?? null,
@@ -8415,6 +8545,7 @@ export function main(argv) {
         rate_floor: CELL_RATE_FLOOR,
         price_source: priceSource,
         rows: emittedRows,
+        advisor_spend: advisorUnreadable ? null : advisorSpend,
         absent: payloadAbsent,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)

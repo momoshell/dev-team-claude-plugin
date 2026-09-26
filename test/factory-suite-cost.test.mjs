@@ -119,6 +119,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
   const discovered = [...trackedSuites({ checkout: ROOT }), 'test/zz-added-after-measurement.test.mjs'].sort()
   const result = assertDeliveredConstructionSuites(RECORDED_SUITE_COST_REPORT, discovered)
   assert.deepEqual(result.unmeasured, [
+    'crew/acp-permission.test.mjs',
     'crew/batch-report.test.mjs',
     'crew/batch.test.mjs',
     'crew/pi/extensions/acp-server.test.mjs',

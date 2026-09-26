@@ -20,6 +20,7 @@ import {
   SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
+import { acpIo as defaultAcpIo } from './acp-io.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { chunkLedgerChecks, operationalRow, recordRow } from './drive.mjs'
 import { readJsonTri } from './json-leaf.mjs'
@@ -65,6 +66,7 @@ export function headlessReaskSpec(info, { role, briefFile, id, returnPath }) {
 export const TREE_WITNESS_REFUSAL = 'tree-witness'
 export const HEADLESS_TRANSPORT = 'headless-json'
 export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
+export const ACP_TRANSPORT = 'acp'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 // #813: the journal vocabulary for one liveness OBSERVATION. Owned here
@@ -196,13 +198,13 @@ export const REASK_SETTLE_POLLS = 12
 // The two transports' own words for "this seat still has a live turn"
 // (crew/headless.mjs:408, crew/headless-rpc.mjs:477). PRIVATE: this is this
 // module's READING of the other two, not a contract to export.
-const REASK_BUSY_STAGES = new Set(['headless-session-busy', 'rpc-session-busy'])
+const REASK_BUSY_STAGES = new Set(['headless-session-busy', 'rpc-session-busy', 'acp-session-busy'])
 // Only a transport whose re-ask semantics have been deliberately ENROLLED may be
 // re-asked. A transport io can expose `assign` and `wait` and ignore the optional
 // `reask` override entirely, so method existence is not capability (#623): a newly
 // added transport is refused here until someone enrols it on purpose. PRIVATE for
 // the same reason REASK_BUSY_STAGES is.
-const REASK_TRANSPORTS = new Set([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
+const REASK_TRANSPORTS = new Set([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT])
 
 // The canonical transport value is NOT the store directory name. Keep the
 // production paths explicit: deriving a path from `headless-json` would find
@@ -210,6 +212,7 @@ const REASK_TRANSPORTS = new Set([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
 export const DESCENDANT_STORE_DIRS = Object.freeze({
   [HEADLESS_TRANSPORT]: 'headless',
   [HEADLESS_RPC_TRANSPORT]: 'headless-rpc',
+  [ACP_TRANSPORT]: 'acp',
 })
 export const DESCENDANT_DIR = 'descendants'
 export const DESCENDANT_PS_TIMEOUT_MS = 5000
@@ -541,7 +544,7 @@ export function descendantCapture({ taskDir, log, deps = {} } = {}) {
     let captures = 0
     let discoveryFailures = 0
     const knownFor = (dirName) => [...states.values()].filter((state) => {
-      const transport = dirName === DESCENDANT_STORE_DIRS[HEADLESS_TRANSPORT] ? HEADLESS_TRANSPORT : HEADLESS_RPC_TRANSPORT
+      const transport = Object.entries(DESCENDANT_STORE_DIRS).find(([, name]) => name === dirName)?.[0] || HEADLESS_RPC_TRANSPORT
       return state.record.transport === transport && state.record.swept_at == null
     })
     const noteFailure = (dirName) => {
@@ -1280,7 +1283,7 @@ export function cellFailureKind(err) {
   // member of the ledger's closed set available to this lane.
   if (stage === SEAT_REFUSAL_STAGE) return 'transport-error'   // verbatim: mutation C16
   if (stage === 'seat-died') return 'seat-died'
-  const tail = stage.replace(/^(headless|rpc|pane)-/, '')
+  const tail = stage.replace(/^(headless|rpc|pane|acp)-/, '')
   if (tail !== stage) {
     if (tail === 'timeout') return 'timeout'
     if (tail === 'no-envelope') return 'no-envelope'
@@ -1824,6 +1827,7 @@ export function headlessStreamPaths({ taskDir, role, transport, deps = {} } = {}
   const readdir = deps.readdirSync ?? fsReaddirSync
   const files = (dir) => [join(dir, 'stream.jsonl'), join(dir, 'stderr.log')]
   if (!taskDir) return []
+  if (transport === ACP_TRANSPORT) return role ? [join(taskDir, 'acp', String(role), 'stream.jsonl'), join(taskDir, 'acp', String(role), 'stderr')] : []
   if (transport === HEADLESS_RPC_TRANSPORT) return role ? files(join(taskDir, 'headless-rpc', String(role))) : []
   if (transport !== HEADLESS_TRANSPORT) return []
   const root = join(taskDir, 'headless')
@@ -2165,6 +2169,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const transportFactories = {
     [HEADLESS_TRANSPORT]: deps.headlessIo || defaultHeadlessIo,
     [HEADLESS_RPC_TRANSPORT]: deps.headlessRpcIo || defaultHeadlessRpcIo,
+    [ACP_TRANSPORT]: deps.acpIo || defaultAcpIo,
   }
   const transportInstances = new Map()
   const transportArgs = {
@@ -2227,7 +2232,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const seatStreamPaths = () => {
     const info = headlessWatch.info
     if (!info || !info.transport) return []
-    if (info.transport === HEADLESS_RPC_TRANSPORT) {
+    if (info.transport === HEADLESS_RPC_TRANSPORT || info.transport === ACP_TRANSPORT) {
       return headlessStreamPaths({ taskDir: paths.taskDir, role: info.role, transport: info.transport, deps })
     }
     if (info.transport !== HEADLESS_TRANSPORT) return []
@@ -2369,7 +2374,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // explicitly pi --mode rpc and must never inherit crew.claude_bin.
       const factoryArgs = {
         ...transportArgs,
-        bin: name === HEADLESS_RPC_TRANSPORT ? 'pi' : (crew.claude_bin || resolveBin(args)),
+        bin: name === HEADLESS_RPC_TRANSPORT || name === ACP_TRANSPORT ? 'pi' : (crew.claude_bin || resolveBin(args)),
       }
       transportInstances.set(name, transportFactories[name](factoryArgs))
     }
@@ -2414,6 +2419,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const FINAL_TURN_UNMEASURED = Object.freeze({
     [HEADLESS_RPC_TRANSPORT]: 'rpc-turn-not-finished',
     [HEADLESS_TRANSPORT]: 'headless-run-not-recorded',
+    [ACP_TRANSPORT]: 'acp-turn-not-finished',
   })
   const seatDiedRow = (info, returnPath, failure, timeoutS, waitStartedAt) => {
     const at = now()
@@ -2920,7 +2926,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           return { envelope: env, error: err }
         }
         const noEnvelope = new Error(`re-ask wait returned no envelope at ${collectPath}`)
-        noEnvelope.stage = transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope'
+        noEnvelope.stage = transportName === ACP_TRANSPORT ? 'acp-no-envelope' : (transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope')
         secondErr = noEnvelope
       } catch (attemptErr) {
         secondErr = attemptErr
@@ -2930,7 +2936,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     if (!secondErr) {
       secondErr = new Error(`lost-seat re-ask produced no usable envelope at ${collectPath}`)
-      secondErr.stage = transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope'
+      secondErr.stage = transportName === ACP_TRANSPORT ? 'acp-no-envelope' : (transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope')
     }
     const secondKind = cellFailureKind(secondErr)
     note('failed', { failure: secondKind, second: secondErr?.stage || null })
@@ -3394,10 +3400,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
       return { ok, output, path, kept: ok ? null : path }
     },
-    // Only headless-rpc is swept here. headless-json is deliberately not covered:
-    // it spawns one process per assignment which exits on its own and ships no
-    // teardown operation — its absence from this record is honest, not a clean
-    // bill of health.
+    // Reusable headless-rpc and ACP clients are swept here. headless-json is
+    // deliberately not covered: it spawns one process per assignment which exits
+    // on its own and ships no teardown operation — its absence from this record
+    // is honest, not a clean bill of health.
     teardown() {
       const rows = []
       // A DECLARED headless-rpc seat can hold a worker this run never assigned
@@ -3409,6 +3415,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // route, so it lands one explicit unproven row per declared role.
       const declared = Object.entries(crew.members || {})
         .filter(([, member]) => member?.transport === HEADLESS_RPC_TRANSPORT)
+        .map(([role]) => role)
+      const declaredAcp = Object.entries(crew.members || {})
+        .filter(([, member]) => member?.transport === ACP_TRANSPORT)
         .map(([role]) => role)
       const initFailed = []
       if (declared.length) {
@@ -3422,6 +3431,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
               reason: 'teardown-threw', why,
             })
           }
+        }
+      }
+      for (const role of declaredAcp) {
+        try { transportIo(ACP_TRANSPORT, role) }
+        catch (err) {
+          const why = String(err?.message ?? err)
+          initFailed.push({ transport: ACP_TRANSPORT, why })
+          rows.push({ role, transport: ACP_TRANSPORT, outcome: 'unproven', reason: 'teardown-threw', why })
         }
       }
       // A PANE seat is DECLARED in crew.json and is never instantiated through
@@ -3496,6 +3513,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           model: cell?.model ?? null,
         })
         from = snapshot(live)
+        if (m.transport === ACP_TRANSPORT) return { applied: false, reason: 'transport', why: `ACP seat ${roleName} cannot be reseated because its live client cannot change models in-session`, from, to: null }
         const floorTier = typeof options.tier === 'string' && options.tier ? options.tier : null
         let floorTarget = null
         let roster

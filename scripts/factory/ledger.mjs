@@ -1181,6 +1181,17 @@ export const TABLES = Object.freeze({
     unique: [['entry_point', 'tier', 'role', 'measurement_fingerprint', 'created_at']],
     indexes: [{ name: 'routing_choices_entry_idx', cols: ['entry_point', 'tier', 'role', 'created_at'] }],
   },
+  shadow_picks: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' }, { name: 'tier', decl: 'TEXT' },
+      { name: 'schema_version', decl: 'INTEGER' }, { name: 'outcome', decl: 'TEXT' }, { name: 'seated_json', decl: 'TEXT' },
+      { name: 'picked_json', decl: 'TEXT' }, { name: 'changes_seat', decl: 'INTEGER' }, { name: 'why', decl: 'TEXT' },
+      { name: 'empty_reason', decl: 'TEXT' }, { name: 'not_consulted_reason', decl: 'TEXT' }, { name: 'absent_reason', decl: 'TEXT' },
+      { name: 'error', decl: 'TEXT' }, { name: 'decides', decl: 'INTEGER' }, { name: 'exclusions_json', decl: 'TEXT' }, { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role']],
+    indexes: [{ name: 'shadow_picks_tier_created_idx', cols: ['tier', 'created_at'] }],
+  },
   intake_sweeps: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -1637,9 +1648,12 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'seat-suite-policy': 'recordSuiteDecision',
 })
 
+export const SHADOW_PICK_OUTCOMES = Object.freeze(['picked', 'stands', 'abstained', 'no-candidate', 'not-consulted'])
+export const SHADOW_PICK_EXCLUSION_REASONS = Object.freeze(['band-unknown', 'band-below-floor', 'capability-shortfall', 'agent-unresolved', 'breaker-open'])
+
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -1655,6 +1669,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordRunConfiguration: 'run_configurations',
   recordRunObservation: 'run_observations',
   recordRunSeat: 'run_seats',
+  recordShadowPick: 'shadow_picks',
   startPhase: 'phases',
   recordEvent: 'events',
   recordSourceError: 'events',
@@ -3243,6 +3258,19 @@ export function openLedger({
       conn.prepare(`INSERT OR IGNORE INTO run_seats (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((column) => toBindable(args[column])))
     })
+    return args
+  }
+
+  function recordShadowPick(input = {}) {
+    requireFields(input, ['adw_id', 'role', 'tier', 'schema_version'], 'recordShadowPick')
+    const outcome = input.outcome ?? null
+    if (outcome !== null && !SHADOW_PICK_OUTCOMES.includes(outcome)) refuse('recordShadowPick: invalid outcome')
+    if (outcome === null ? typeof input.absent_reason !== 'string' || !input.absent_reason.trim() : input.absent_reason != null) refuse('recordShadowPick: absent_reason must match outcome presence')
+    const exclusions = Array.isArray(input.exclusions) ? input.exclusions : null
+    for (const exclusion of exclusions || []) if (!SHADOW_PICK_EXCLUSION_REASONS.includes(exclusion.reason)) refuse('recordShadowPick: invalid exclusion reason')
+    const args = redact({ adw_id: input.adw_id, role: normaliseShortName(input.role, 'recordShadowPick', 'role'), tier: input.tier == null ? null : normaliseShortName(input.tier, 'recordShadowPick', 'tier'), schema_version: Number(input.schema_version), outcome, seated_json: input.seated_json ?? JSON.stringify(input.seated ?? null), picked_json: input.picked_json ?? JSON.stringify(input.picked ?? null), changes_seat: input.changes_seat == null ? null : Number(Boolean(input.changes_seat)), why: input.why ?? null, empty_reason: input.empty_reason ?? null, not_consulted_reason: input.not_consulted_reason ?? null, absent_reason: input.absent_reason ?? null, error: input.error ?? null, decides: input.decides == null ? null : Number(Boolean(input.decides)), exclusions_json: input.exclusions_json ?? JSON.stringify(exclusions || []), created_at: isoMs(input.created_at ?? now()) }, stats)
+    appendJsonl('recordShadowPick', args)
+    mirror((conn) => { const cols = tableColumnNames('shadow_picks'); conn.prepare(`INSERT OR IGNORE INTO shadow_picks (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((column) => toBindable(args[column]))) })
     return args
   }
 
@@ -5410,6 +5438,16 @@ export function openLedger({
     `, [bench])
   }
 
+  function shadowPicks({ tier = null } = {}) {
+    const rows = dumpTable('shadow_picks').filter((row) => tier === null || row.tier === tier).sort((a, b) => b.created_at.localeCompare(a.created_at) || b.adw_id.localeCompare(a.adw_id))
+    const latest = new Map()
+    for (const row of rows) if (row.tier !== null && !latest.has(row.tier)) latest.set(row.tier, row.adw_id)
+    return [...latest].sort(([a], [b]) => a.localeCompare(b)).map(([name, adw_id]) => {
+      const seats = rows.filter((row) => row.tier === name && row.adw_id === adw_id).sort((a, b) => a.role.localeCompare(b.role)).map((row) => ({ ...row, seated: JSON.parse(row.seated_json), picked: JSON.parse(row.picked_json), exclusions: JSON.parse(row.exclusions_json) }))
+      return { tier: name, adw_id, created_at: seats[0].created_at, seats }
+    })
+  }
+
   function routingChoices({ entry_point = null, tier = null, role = undefined } = {}) {
     const clauses = []
     const params = []
@@ -6551,13 +6589,13 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
     recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordSuiteDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -7040,7 +7078,7 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
   const seedErrorsBefore = mirrorErrorCount(ledger)
   if (ledger && typeof ledger.dumpTable === 'function') {
     const seeded = new Set()
-    for (const writer of [...Object.values(JOURNAL_FACT_KEYS), ...Object.values(JOURNAL_FACT_EVENTS)]) {
+    for (const writer of [...Object.values(JOURNAL_FACT_KEYS), ...Object.values(JOURNAL_FACT_EVENTS), 'recordShadowPick']) {
       const identity = journalFactIdentity(writer)
       if (!identity || seeded.has(identity.table)) continue
       seeded.add(identity.table)
@@ -7205,6 +7243,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     const pending = []
     if (writer === JOURNAL_FACT_EVENTS.boot) {
       if (!Array.isArray(source.roles)) {
+        if (source.shadow_pick) { failed += 1; firstFailure ??= { line: lineNo, reason: 'malformed-shadow-pick-roles' }; continue }
         ignored += 1
         continue
       }
@@ -7214,6 +7253,37 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
         } catch (err) {
           failed += 1
           firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
+        }
+      }
+      if (source.shadow_pick?.seats) {
+        if (typeof source.shadow_pick.seats !== 'object' || Array.isArray(source.shadow_pick.seats) || !Number.isInteger(source.shadow_pick.schema_version) || typeof source.shadow_pick.tier !== 'string') {
+          failed += 1
+          firstFailure ??= { line: lineNo, reason: 'malformed-shadow-pick' }
+        } else {
+          for (const [role, seat] of Object.entries(source.shadow_pick.seats)) {
+            if (!source.roles.includes(role) || !seat || typeof seat !== 'object') { failed += 1; firstFailure ??= { line: lineNo, reason: 'malformed-shadow-pick-role' }; continue }
+            try {
+              const created_at = bootSeatArgs(source, role, adw_id).created_at
+              const exclusions = (Array.isArray(seat.candidates) ? seat.candidates : []).filter((candidate) => candidate?.excluded_by).map((candidate) => ({ provider: candidate.provider ?? null, id: candidate.id ?? null, agent: candidate.agent ?? null, effort: candidate.effort ?? null, reason: candidate.excluded_by.reason, detail: candidate.excluded_by.detail ?? null }))
+              pending.push({ writer: 'recordShadowPick', args: { adw_id, role, tier: source.shadow_pick.tier, schema_version: source.shadow_pick.schema_version, outcome: seat.outcome, seated: seat.seated, picked: seat.picked, changes_seat: seat.changes_seat, why: seat.why, empty_reason: seat.empty_reason, not_consulted_reason: seat.not_consulted_reason, absent_reason: null, decides: source.shadow_pick.decides, exclusions, created_at } })
+            } catch (err) {
+              failed += 1
+              firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
+            }
+          }
+        }
+      }
+      if (source.shadow_pick?.error) {
+        if (typeof source.shadow_pick.error !== 'string' || !Number.isInteger(source.shadow_pick.schema_version)) { failed += 1; firstFailure ??= { line: lineNo, reason: 'malformed-shadow-pick-error' }; continue }
+        for (const role of source.roles) {
+          if (!Object.hasOwn(source.seats || {}, role)) { failed += 1; firstFailure ??= { line: lineNo, reason: 'malformed-shadow-pick-role' }; continue }
+          try {
+            const created_at = bootSeatArgs(source, role, adw_id).created_at
+            pending.push({ writer: 'recordShadowPick', args: { adw_id, role, tier: null, schema_version: source.shadow_pick.schema_version, outcome: null, absent_reason: 'shadow-pick-error', error: source.shadow_pick.error, created_at, exclusions: [] } })
+          } catch (err) {
+            failed += 1
+            firstFailure ??= { line: lineNo, reason: ingestFailureReason(err) }
+          }
         }
       }
     } else {
@@ -7753,6 +7823,7 @@ const VERB_FLAGS = Object.freeze({
   configurations: new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   'suite-refusals': new Set(['since', 'until']),
+  'shadow-picks': new Set(['tier']),
   cells: new Set(['since', 'until', 'prices']),
   evals: new Set(['bench', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
@@ -8556,6 +8627,15 @@ export function main(argv) {
       return 0
     }
 
+    if (verb === 'shadow-picks') {
+      if (positional.length) refuse('shadow-picks: takes no positional arguments')
+      const tier = Object.hasOwn(flags, 'tier') ? String(flags.tier).trim() : null
+      if (tier !== null && !tier) refuse('shadow-picks: --tier must be nonblank')
+      const rows = ledger.shadowPicks({ tier })
+      if (ledger.stats().degraded) refuse('shadow-picks: the ledger mirror is degraded — picks are unanswerable, not empty')
+      stdout.write(`${JSON.stringify({ schema: 1, question: 'What was the newest shadow-picked run per tier?', definition: 'Latest boot-journal shadow pick per tier, ordered by created_at then adw_id; one winning run with role seats.', outcomes: SHADOW_PICK_OUTCOMES, exclusion_reasons: SHADOW_PICK_EXCLUSION_REASONS, tiers: rows.length ? rows : null, ...(rows.length ? {} : { absent: { shadow_picks: 'unmeasured' } })})}\n`)
+      return 0
+    }
     if (verb === 'suite-refusals') {
       if (positional.length) refuse('suite-refusals: takes no positional arguments')
       if (!Object.hasOwn(flags, 'since')) refuse('suite-refusals: --since is required')

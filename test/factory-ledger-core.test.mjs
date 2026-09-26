@@ -27,6 +27,8 @@ import { _resetNoticeGuardsForTest, openRun, parseProposalBrief } from '../scrip
 import { loadDurableEscalationRecord, proposalFromResponse, proposalPrompt, triageEscalation } from '../scripts/factory/escalation-triage.mjs'
 
 import { bootTieredRun } from './factory-ledger.test.mjs'
+import { SHADOW_OUTCOMES, SHADOW_EXCLUSIONS } from '../crew/crew.mjs'
+import { SHADOW_PICK_OUTCOMES, SHADOW_PICK_EXCLUSION_REASONS } from '../scripts/factory/ledger.mjs'
 
 import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse } from './factory-ledger.test.mjs'
 
@@ -2385,6 +2387,20 @@ test('chunk RV1-1 unbooted chunk reports null green with chunk-lane-unbooted and
   }
 })
 
+test('shadow-pick vocabulary matches crew and writer rejects unknown outcome/reason or unexplained absence', () => {
+  assert.deepEqual(SHADOW_PICK_OUTCOMES, SHADOW_OUTCOMES)
+  assert.deepEqual(SHADOW_PICK_EXCLUSION_REASONS, SHADOW_EXCLUSIONS)
+  const ledger = openTestLedger()
+  try {
+    const args = { adw_id: 'shadow', role: 'builder', tier: 'build', schema_version: 1, outcome: 'picked', seated: { provider: 'test' }, picked: { provider: 'test' }, exclusions: [] }
+    assert.throws(() => ledger.recordShadowPick({ ...args, outcome: 'unknown' }))
+    assert.throws(() => ledger.recordShadowPick({ ...args, exclusions: [{ reason: 'unknown' }] }))
+    assert.throws(() => ledger.recordShadowPick({ ...args, outcome: null }))
+    assert.equal(ledger.recordShadowPick(args).adw_id, 'shadow')
+    assert.equal(ledger.dumpTable('shadow_picks').length, 1)
+  } finally { ledger.close() }
+})
+
 test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQL matches docs', () => {
   const ledger = openTestLedger()
   ledger.recordChunkRun({ parentLane: 'p1', chunkId: 'c1', lane: 'p1-c1', wave: 0, checksOwned: ['A1'] })
@@ -2398,7 +2414,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 44)
+    assert.equal(Object.keys(TABLES).length, 45)
   } finally {
     conn.close()
     ledger.close()

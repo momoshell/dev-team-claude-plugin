@@ -33,6 +33,40 @@ import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, 
 
 
 
+test('shadow-picks CLI selects newest run per tier, tie-breaks, filters, and refuses absent/degraded input', { skip: SKIP }, () => {
+  const dir = scratchDir('shadow-picks-cli-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath })
+  const cell = { provider: 'openai', id: 'gpt-a' }
+  const add = (adw_id, tier, created_at, role = 'builder', exclusions = []) => ledger.recordShadowPick({ adw_id, role, tier, schema_version: 1, outcome: 'picked', seated: cell, picked: cell, changes_seat: false, why: 'fixture', exclusions, created_at })
+  try {
+    add('build-old', 'build', '2026-09-01T00:00:00.000Z')
+    add('build-a', 'build', '2026-09-02T00:00:00.000Z')
+    add('build-z', 'build', '2026-09-02T00:00:00.000Z', 'builder', [{ reason: 'breaker-open', detail: 'fixture' }])
+    add('judge-new', 'judge', '2026-09-03T00:00:00.000Z')
+  } finally { ledger.close() }
+  const invoke = (args, env = {}) => run(['shadow-picks', ...args], { DEVTEAM_LEDGER_DB: dbPath, ...env })
+  const all = invoke([])
+  assert.equal(all.status, 0, all.stderr)
+  const payload = JSON.parse(all.stdout)
+  assert.deepEqual(payload.tiers.map((item) => [item.tier, item.adw_id]), [['build', 'build-z'], ['judge', 'judge-new']])
+  assert.ok(payload.tiers.find((item) => item.tier === 'build').seats[0].exclusions.some((item) => item.reason === 'breaker-open'))
+  const filtered = invoke(['--tier', 'build'])
+  assert.deepEqual(JSON.parse(filtered.stdout).tiers.map((item) => item.tier), ['build'])
+  assert.equal(invoke(['extra']).status, 2)
+  assert.equal(invoke(['--tier', '   ']).status, 2)
+  const emptyDb = join(dir, 'empty.db')
+  const empty = run(['shadow-picks'], { DEVTEAM_LEDGER_DB: emptyDb })
+  assert.equal(empty.status, 0, empty.stderr)
+  assert.deepEqual(JSON.parse(empty.stdout).tiers, null)
+  assert.equal(JSON.parse(empty.stdout).absent.shadow_picks, 'unmeasured')
+  const brokenDb = join(dir, 'broken.db')
+  writeFileSync(brokenDb, 'not sqlite')
+  const degraded = run(['shadow-picks'], { DEVTEAM_LEDGER_DB: brokenDb })
+  assert.notEqual(degraded.status, 0)
+  assert.equal(degraded.stdout, '')
+})
+
 test('Q6: suitefacts refusal CLI divides refused dispatches by stamped dispatches per cell and marks thin cells', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const JAN = Date.parse('2024-01-01T00:00:00.000Z')

@@ -20,6 +20,7 @@ import {
   batchSeatsFrom,
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
+  ACP_FLAG,
   COUPLED_SOURCE_UNFENCED,
   ANCHOR_BLIND_SPOT,
   ANCHOR_PIN_POST_MERGE,
@@ -456,4 +457,40 @@ test('parseCliArgs accepts every batch seat flag and preserves generic refusals'
 test('parseCliArgs accepts --wave and refuses its missing value', () => {
   assert.deepEqual(parseCliArgs(['--batch', 'b', '--wave', '2']), { batch: 'b', wave: '2' })
   refusal(() => parseCliArgs(['--batch', 'b', '--wave']), 'batch-unreadable')
+})
+
+test('ACP D1 boots every lane with roles', async () => {
+  assert.equal(ACP_FLAG, 'acp')
+  assert.deepEqual(parseCliArgs(['--acp', 'builder']), { acp: 'builder' })
+  const result = await dispatchFixture({ label: 'acp-d1', names: ['lane-a', 'lane-b'], runFlags: { acp: 'builder' } })
+  const boots = result.spawned.filter(({ args }) => args.includes('--headless-all'))
+  assert.equal(boots.length, 2)
+  for (const { args } of boots) assert.deepEqual(args.slice(args.indexOf('--headless-all'), args.indexOf('--headless-all') + 3), ['--headless-all', '--acp', 'builder'])
+  assert.ok(result.logs.some((line) => line.includes('transport=headless-all acp=builder')))
+})
+
+test('ACP D2 refuses pane conflict before worktrees', async () => {
+  const spawned = []
+  const home = scratchDir('acp-d2-home')
+  await assert.rejects(dispatchFixture({ label: 'acp-d2', names: ['lane-a'], runFlags: { panes: true, acp: 'builder' }, spawnedOut: spawned, home }), (error) => {
+    assert.equal(error.reason, 'transport-conflict')
+    assert.match(error.message, /--panes and --acp/)
+    return true
+  })
+  assert.equal(spawned.length, 0)
+})
+
+test('ACP D3 retains unflagged argv and refuses bare ACP', async () => {
+  const result = await dispatchFixture({ label: 'acp-d3', names: ['lane-a'] })
+  const boot = result.spawned.find(({ args }) => args.includes('--headless-all'))
+  assert.ok(boot)
+  assert.equal(boot.args.includes('--acp'), false)
+  refusal(() => parseCliArgs(['--acp']), 'batch-unreadable')
+})
+
+test('ACP D4 resumes ACP on deferred waves', async () => {
+  const result = await dispatchFixture({ label: 'acp-d4', names: ['lane-a', 'lane-b'], requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) }, runFlags: { acp: 'builder', wave: '1' } })
+  const deferred = result.logs.find((line) => line.includes('deferred lane=lane-b'))
+  assert.ok(deferred)
+  assert.match(deferred, /--acp builder/)
 })

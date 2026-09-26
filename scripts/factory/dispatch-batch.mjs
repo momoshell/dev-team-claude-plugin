@@ -169,6 +169,7 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'e
 // closing line names, so the three cannot drift apart.
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
+export const ACP_FLAG = 'acp'
 import { ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from '../../crew/assurances.mjs'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
@@ -3403,6 +3404,9 @@ export function baseContains({ commit, base, checkout, deps } = {}) {
 export function resolveTransport({ runFlags = {} } = {}) {
   const panes = runFlags[PANE_TRANSPORT] === true || runFlags[PANE_TRANSPORT] === 'true'
   const headless = runFlags[BOOT_TRANSPORT] === true || runFlags[BOOT_TRANSPORT] === 'true'
+  if (panes && runFlags[ACP_FLAG] !== undefined) {
+    refuse(`--${PANE_TRANSPORT} and --${ACP_FLAG} name different transports; pass exactly one`, TRANSPORT_CONFLICT)
+  }
   if (panes && headless) {
     refuse(`--${PANE_TRANSPORT} and --${BOOT_TRANSPORT} name different transports; pass exactly one`, TRANSPORT_CONFLICT)
   }
@@ -3809,6 +3813,7 @@ export function bootCommand({ lane, laneDir, tier, registerPath, transport, seat
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
       ...(transport === BOOT_TRANSPORT ? ['--' + BOOT_TRANSPORT] : []),
+      ...(transport === BOOT_TRANSPORT && typeof runFlags[ACP_FLAG] === 'string' && runFlags[ACP_FLAG] ? ['--' + ACP_FLAG, runFlags[ACP_FLAG]] : []),
     ],
     cwd: laneDir,
   }
@@ -3975,6 +3980,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, ex
   for (const flag of ['no-keep', PANE_TRANSPORT, BOOT_TRANSPORT, 'force']) {
     if (runFlags[flag] === true) args.push(`--${flag}`)
   }
+  add(ACP_FLAG, runFlags[ACP_FLAG])
   add('wave', wave)
   return args.join(' ')
 }
@@ -4579,7 +4585,7 @@ function launchDispatchWave(compiled) {
   const workspaces = runs.map((item) => `${item.lane}=${item.workspaceId}`).join(', ')
   d.log(transport === PANE_TRANSPORT
     ? `dispatch-batch: transport=${PANE_TRANSPORT} — every seat booted into a cmux pane, so each lane HAS a workspace to open: ${workspaces}. Headless is the software-factory mode and the default; panes exist for the interval in which a running lane has no other surface`
-    : `dispatch-batch: transport=${BOOT_TRANSPORT} — every seat booted headless, so this batch created no cmux workspace and no panes (workspace_id is null); headless is the software-factory mode. Follow a lane by the crew dir and journal above, never by a workspace`)
+    : `dispatch-batch: transport=${BOOT_TRANSPORT}${typeof runFlags[ACP_FLAG] === 'string' && runFlags[ACP_FLAG] ? ` acp=${runFlags[ACP_FLAG]}` : ''} — every seat booted headless, so this batch created no cmux workspace and no panes (workspace_id is null); headless is the software-factory mode. Follow a lane by the crew dir and journal above, never by a workspace`)
   d.log(keep
     ? 'dispatch-batch: workspaces keep=true — every lane workspace and crew dir is kept for inspection; pass --no-keep to let a lane that finishes done tear itself down'
     : 'dispatch-batch: workspaces keep=false — a lane that finishes done tears itself down and archives its crew dir; an escalated lane is kept either way')
@@ -4614,7 +4620,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'brief-tripwires-holdout-fraction',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', ACP_FLAG, 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'brief-tripwires-holdout-fraction',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,

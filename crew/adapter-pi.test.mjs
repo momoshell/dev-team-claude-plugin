@@ -90,6 +90,15 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   assert.throws(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', deny: 'Read,NoSuchTool' }), /NoSuchTool/)
 })
 
+test('ACP C4 real submit grant activates submit_envelope', () => {
+  const extension = join(process.cwd(), 'crew/pi/extensions/submit.ts')
+  const launch = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/tmp/prompt.md', cwd: process.cwd(), env: {}, grants: { tools: [], extensions: [extension], agents: [], skills: [], advisor: false } })
+  const extensionIndex = launch.args.indexOf(extension)
+  assert.ok(extensionIndex > 0 && launch.args[extensionIndex - 1] === '-e')
+  const tools = launch.args[launch.args.indexOf('--tools') + 1].split(',')
+  assert.ok(tools.includes('submit_envelope'))
+})
+
 test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete built-in set', () => {
   const expected = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
   const expectedActivator = '--tools "read,bash,edit,write,grep,find,ls"'

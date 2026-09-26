@@ -6,12 +6,16 @@ import { readEnvelopeOrThrow } from './headless.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 import { permissionHandler } from './acp-permission.mjs'
 
+export const ACP_CLOSE_SETTLE_MS = 3000
+const ACP_POLL_INTERVAL_MS = 25
+
 export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi', deps = {} }) {
   const exists = deps.existsSync || fsExistsSync
   const read = deps.readFileSync || fsReadFileSync
   const unlink = deps.unlinkSync || fsUnlinkSync
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
+  const closeWindowMs = deps.closeSettleMs ?? ACP_CLOSE_SETTLE_MS
   const log = deps.log || (() => {})
   const emit = deps.emit || (() => {})
   const clients = new Map()
@@ -97,7 +101,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const text = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery })
     const priorPath = current.get(role)
     const prior = priorPath ? assignments.get(priorPath) : null
-    if (prior) settle(prior, { closing: true })
+    if (prior) settle(prior, { closing: true, windowMs: closeWindowMs })
     const { client, profile } = getClient(role)
     if (spec.reask) {
       if (profile.session_resume) client.resumeSession(client.sessionId)
@@ -128,11 +132,20 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     Object.assign(error, { stage: 'acp-no-envelope', graceSpent: sawUpdate, cause, role })
     return error
   }
-  function settle(assignment, { closing = false, strict = false } = {}) {
+  function settle(assignment, { closing = false, strict = false, windowMs = 0 } = {}) {
     if (assignment.settled) return assignment.lastTurn
     const client = clients.get(assignment.role)?.client
     let turn = null
-    try { turn = client?.pollPrompt(assignment.promptId) ?? null } catch (error) { if (!closing && strict) throw error; turn = null }
+    let polls = 0
+    const start = closing ? now() : 0
+    const deadline = start + windowMs
+    const maxPolls = closing ? Math.ceil((deadline - start) / ACP_POLL_INTERVAL_MS) + 1 : 1
+    try { turn = client?.pollPrompt(assignment.promptId) ?? null; polls += 1 } catch (error) { if (!closing && strict) throw error; turn = null; polls += 1 }
+    while (!turn && closing && polls < maxPolls && now() < deadline) {
+      sleep(ACP_POLL_INTERVAL_MS)
+      try { turn = client?.pollPrompt(assignment.promptId) ?? null } catch { turn = null }
+      polls += 1
+    }
     if (!turn && !closing) return null
     assignment.settled = true
     assignment.lastTurn = turn
@@ -164,27 +177,27 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       catch (cause) { throw noEnvelope(cause, returnPath, assignment) }
       if (lastTurn?.refusal) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
       if (now() >= deadline) throw noEnvelope(null, returnPath, assignment)
-      sleep(25)
+      sleep(ACP_POLL_INTERVAL_MS)
     }
   }
-  function closeRole(role) {
+  function closeRole(role, windowMs = closeWindowMs) {
     const state = clients.get(role)
     if (!state) return { role, transport: 'acp', outcome: 'unproven', reason: 'client-not-created' }
     const activePath = current.get(role)
     const assignment = activePath ? assignments.get(activePath) : null
-    if (assignment) settle(assignment, { closing: true })
+    if (assignment) settle(assignment, { closing: true, windowMs })
     clients.delete(role)
     return { role, transport: 'acp', ...state.client.close() }
   }
   function abort(role) {
     const state = clients.get(role)
     if (state) { const { client } = state; client.cancel() }
-    return closeRole(role)
+    return closeRole(role, 0)
   }
   function steer() { const error = new Error('ACP does not support in-turn interjection'); error.stage = 'acp-steer-unsupported'; throw error }
   function entries() { return { available: false, reason: 'acp-stream-cursor-unavailable', entries: null } }
   function retire(role) { return closeRole(role) }
-  function close() { return [...clients.keys()].map(closeRole) }
+  function close() { return [...clients.keys()].map((role) => closeRole(role)) }
   function teardown() { return close() }
   return { assign, wait, steer, abort, entries, retire, close, teardown }
 }

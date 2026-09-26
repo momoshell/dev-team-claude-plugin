@@ -219,7 +219,7 @@ test('T13 the ACP launch carries the role charter, grants, config dir and seat e
     assert.equal(spec.promptFile, join(f.paths.taskDir, 'role-builder.md'))
     assert.equal(spec.effort, 'high')
     assert.deepEqual(spec.advisorCell, { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
-    assert.equal(spec.grants, advisorGrants)
+    assert.deepEqual(spec.grants, { tools: [], extensions: ['crew/pi/extensions/submit.ts'], agents: [], skills: [], advisor: true })
     assert.equal(spec.configDir, '/cfg')
     assert.equal(spec.role, 'builder')
     assert.deepEqual(spec.env, { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir })

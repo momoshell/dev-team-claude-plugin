@@ -25,7 +25,7 @@ The crew today drives Claude and Pi through two different, hand-built mechanisms
 | the seat should stop | SIGTERM, re-delivered inside a 5 s window because the seat shell swallows it, then SIGKILL (`crew/headless-rpc.mjs:26-33`) | `session/cancel` → `stopReason: cancelled` |
 | the API refused (session limit, quota) | a `"model":"<synthetic>"` assistant message in `stream.jsonl` (2026-08-30, b332/b333) | `stopReason: refusal`, or a typed session-failure extension |
 
-**The envelope stays the record.** ADR-029's rule — the stream is transport and observability, never the record; the envelope is the record; idle ≠ success — is unchanged. ACP replaces how the driver *runs and observes* a seat, not how a seat *answers*. A seat still writes its envelope to `returnPath`; `validEnvelope` and the `assignment_id` anti-replay check (`crew/drive.mjs:624`) are untouched.
+**The envelope stays the record.** ADR-029's rule — the stream is transport and observability, never the record; the envelope is the record; idle ≠ success — is unchanged. ACP replaces how the driver *runs and observes* a seat, not how a seat *answers*. A seat still writes its envelope to `returnPath`; `validEnvelope` and the `assignment_id` anti-replay check (`crew/drive.mjs:1085`) are untouched.
 
 This is additive. `acp` is a fourth transport beside `pane`, `headless-json`, `headless-rpc`. The two bespoke transports are retired only after the ACP transport has driven real lanes and the measured comparison is recorded.
 

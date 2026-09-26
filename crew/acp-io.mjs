@@ -54,13 +54,26 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir } })
     // #797: the launch policy settles what it can; an unsettled request goes to the injected lead, and with
     // no lead it is reject_once. Fail closed: nothing here approves a request the policy did not name.
-    const onPermission = permissionHandler({ policy: launch.policy, lead: deps.permissionLead ?? null,
-      log: (row) => log({ at: now(), acp_permission_policy: { role, ...row } }) })
+    let permissionToolCall = null
+    const decidePermission = permissionHandler({ policy: launch.policy, lead: deps.permissionLead ?? null,
+      log: (row) => { const toolCall = permissionToolCall; log({ at: now(), acp_permission_policy: { role, tool_call_id: toolCall?.toolCallId ?? null, ...row } }) } })
+    const onPermission = (request) => { permissionToolCall = request?.toolCall ?? null; try { return decidePermission(request) } finally { permissionToolCall = null } }
     const clientFactory = deps.clientFactory || defaultClient
     const onUpdate = (update) => {
       const a = assignments.get(current.get(role))
       if (!a) return
       a.sawUpdate = true
+      const frame = update.update ?? update
+      if (frame?.sessionUpdate === 'tool_call' || frame?.sessionUpdate === 'tool_call_update') {
+        const data = frame.toolCall ?? frame
+        const id = data.toolCallId ?? null
+        const previous = a.tools.get(id) ?? {}
+        const locations = Array.isArray(data.locations) ? data.locations.map((item) => item?.path).filter((path) => typeof path === 'string') : previous.locations ?? []
+        const has_diff = Boolean(previous.has_diff || data.content?.some?.((item) => item?.type === 'diff'))
+        const snapshot = { ...(data.kind == null ? { kind: previous.kind } : { kind: data.kind }), status: data.status ?? previous.status ?? null, title: data.title ?? previous.title ?? null, locations, has_diff }
+        a.tools.set(id, snapshot)
+        log({ at: now(), acp_tool_call: { role, assignment_id: a.id, tool_call_id: id, ...snapshot } })
+      }
       emit({ kind: 'heartbeat', at: update.at, role })
     }
     const client = clientFactory({ launch, dir: join(seatTaskDir, 'acp'), cwd: checkout || process.cwd(), role, onPermission,
@@ -81,12 +94,15 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     try { unlink(returnPath) } catch (error) { if (error?.code !== 'ENOENT') throw error }
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const text = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery })
+    const priorPath = current.get(role)
+    const prior = priorPath ? assignments.get(priorPath) : null
+    if (prior) settle(prior, { closing: true })
     const { client, profile } = getClient(role)
     if (spec.reask) {
       if (profile.session_resume) client.resumeSession(client.sessionId)
     }
     const promptId = client.beginPrompt([{ type: 'text', text }])
-    assignments.set(returnPath, { id, role, returnPath, promptId, sawUpdate: false, lastTurn: null, profile })
+    assignments.set(returnPath, { id, role, returnPath, promptId, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false })
     current.set(role, returnPath)
     return { id, returnPath }
   }
@@ -111,25 +127,40 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     Object.assign(error, { stage: 'acp-no-envelope', graceSpent: sawUpdate, cause, role })
     return error
   }
+  function settle(assignment, { closing = false, strict = false } = {}) {
+    if (assignment.settled) return assignment.lastTurn
+    const client = clients.get(assignment.role)?.client
+    let turn = null
+    try { turn = client?.pollPrompt(assignment.promptId) ?? null } catch (error) { if (!closing && strict) throw error; turn = null }
+    if (!turn && !closing) return null
+    assignment.settled = true
+    assignment.lastTurn = turn
+    const refusal = Boolean(turn?.refusal)
+    const usageObject = turn && turn.usage && typeof turn.usage === 'object' && !Array.isArray(turn.usage) ? turn.usage : null
+    const usageReason = !turn || refusal || !usageObject ? 'usage-unavailable' : null
+    let billed = null
+    if (usageObject) {
+      const raw = usageObject
+      const classes = ['inputTokens', 'outputTokens', 'cachedReadTokens', 'cachedWriteTokens']
+      const complete = classes.every((name) => Number.isSafeInteger(raw[name]) && raw[name] >= 0)
+      if (complete) billed = { billed_input_tokens: raw.inputTokens, billed_output_tokens: raw.outputTokens, billed_cache_read_tokens: raw.cachedReadTokens, billed_cache_write_tokens: raw.cachedWriteTokens }
+    }
+    const finalUsageReason = usageReason ?? (usageObject && !billed ? 'usage-incomplete' : null)
+    if (billed) emit({ kind: 'usage', id: assignment.id, role: assignment.role, model: crew.members[assignment.role]?.model ?? null, session_id: client?.sessionId ?? null, transcript_path: join(taskDir || paths.taskDir, 'acp', assignment.role, 'stream.jsonl'), usage: billed })
+    log({ at: now(), acp_turn: { role: assignment.role, assignment_id: assignment.id, returnPath: assignment.returnPath, stopReason: refusal || !turn ? null : turn.stopReason ?? null, stop_reason_absent: refusal ? 'refused' : !turn ? 'response-unread' : null, usage: billed, usage_reason: finalUsageReason } })
+    return turn
+  }
   function wait(returnPath, timeoutS) {
     const assignment = assignments.get(returnPath)
     if (!assignment) throw new Error(`acp assignment not found at ${returnPath}`)
-    const state = clients.get(assignment.role)
-    const { client } = state
-    const role = assignment.role
     let lastTurn = assignment.lastTurn
     const deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
-    let logged = false
     // lean: synchronous one-seat wait; move to an async pump if multi-seat throughput matters
     for (;;) {
       const envelope = readEnvelope(returnPath, assignment.id)
-      if (envelope) return envelope
-      try { lastTurn = assignment.lastTurn = client.pollPrompt(assignment.promptId) }
+      if (envelope) { settle(assignment); return envelope }
+      try { lastTurn = assignment.lastTurn = settle(assignment, { strict: true }) }
       catch (cause) { throw noEnvelope(cause, returnPath, assignment) }
-      if (lastTurn && !logged) {
-        logged = true
-        log({ at: now(), acp_turn: { role, assignment_id: assignment.id, returnPath, stopReason: lastTurn.stopReason } })
-      }
       if (lastTurn?.refusal) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
       if (now() >= deadline) throw noEnvelope(null, returnPath, assignment)
       sleep(25)
@@ -138,6 +169,9 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   function closeRole(role) {
     const state = clients.get(role)
     if (!state) return { role, transport: 'acp', outcome: 'unproven', reason: 'client-not-created' }
+    const activePath = current.get(role)
+    const assignment = activePath ? assignments.get(activePath) : null
+    if (assignment) settle(assignment, { closing: true })
     clients.delete(role)
     return { role, transport: 'acp', ...state.client.close() }
   }

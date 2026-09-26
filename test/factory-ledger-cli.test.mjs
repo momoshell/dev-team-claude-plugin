@@ -811,3 +811,19 @@ test('H1', () => {
   const doc = readFileSync(join(ROOT, 'skills/devops/references/processes.md'), 'utf8')
   assert.ok(doc.includes('After SIGKILL, run `node scripts/factory/ledger.mjs settle <adw-id> --reason <text>`'), 'processes.md must name the post-SIGKILL settle command')
 })
+
+test('ACP L5', () => {
+  const doc = readFileSync(join(ROOT, 'docs/ledger-queries.md'), 'utf8')
+  const section = doc.slice(doc.indexOf('Distinct observed calls by lane and kind:'))
+  const recipes = [...section.matchAll(/```sql\s*([\s\S]*?)```/g)].slice(0, 3).map((m) => m[1])
+  assert.equal(recipes.length, 3)
+  const dir = scratchDir('seat-query-'); const ledger = openLedger({ dbPath: join(dir, 'ledger.db') }); const { DatabaseSync } = require('node:sqlite')
+  try {
+    ledger.recordSeatToolCall({ adw_id: 'lane', role: 'builder', assignment_id: 'd1', tool_call_id: 't1', kind: 'edit', status: 'done', at: 'x' })
+    ledger.recordSeatToolCall({ adw_id: 'lane', role: 'builder', assignment_id: 'd1', tool_call_id: 't2', kind: 'edit', status: 'done', at: 'y' })
+    ledger.recordSeatPermission({ adw_id: 'lane', role: 'builder', option_kind: 'reject_once', option_id: 'r', policy: 'no-lead', at: 'x' })
+    ledger.recordSeatTurn({ adw_id: 'lane', role: 'builder', assignment_id: 'd1', stop_reason: 'end_turn', at: 'x' })
+    const conn = new DatabaseSync(ledger._dbPath)
+    try { assert.equal(conn.prepare(recipes[0]).all()[0].tool_calls, 2); assert.equal(conn.prepare(recipes[1]).all()[0].policy, 'no-lead'); assert.equal(conn.prepare(recipes[2]).all()[0].stop_reason, 'end_turn') } finally { conn.close() }
+  } finally { ledger.close(); rmSync(dir, { recursive: true, force: true }) }
+})

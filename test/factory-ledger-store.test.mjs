@@ -128,6 +128,18 @@ test('malformed shadow boot timestamp counts a line failure and later journal fa
   } finally { ledger.close() }
 })
 
+test('ACP RV1-5 seat turn, tool-call, and null-id permission writers replay idempotently', () => {
+  const sourceDir = scratchDir('seat-facts-source-'); const targetDir = scratchDir('seat-facts-target-')
+  const source = openLedger({ dbPath: join(sourceDir, 'source.db') }); const target = openLedger({ dbPath: join(targetDir, 'target.db') })
+  try {
+    source.recordSeatTurn({ adw_id: 'lane', role: 'builder', assignment_id: 'd1', transport: 'acp', stop_reason: null, stop_reason_absent: 'response-unread', usage_reason: 'usage-unavailable', at: '2026-09-26T00:00:00.000Z' })
+    source.recordSeatToolCall({ adw_id: 'lane', role: 'builder', assignment_id: 'd1', tool_call_id: 'tool-1', kind: 'edit', status: 'done', locations: ['a.mjs'], has_diff: true, at: '2026-09-26T00:00:01.000Z' })
+    source.recordSeatPermission({ adw_id: 'lane', role: 'builder', tool_call_id: null, option_kind: 'reject_once', option_id: 'r', policy: 'no-lead', at: '2026-09-26T00:00:02.000Z' })
+    assert.equal(replayJsonl(source._jsonlPath, target).failed, 0); assert.equal(replayJsonl(source._jsonlPath, target).failed, 0)
+    for (const table of ['seat_turns', 'seat_tool_calls', 'seat_permissions']) assert.equal(target.dumpTable(table).length, 1)
+  } finally { source.close(); target.close() }
+})
+
 test('G1 screener journal ingest failure never throws into its caller', () => {
   const dir = nextDir()
   const journalPath = join(dir, 'journal.jsonl')

@@ -12,10 +12,12 @@ function fixture(options = {}) {
   mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
   const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'brief body')
   const calls = []; const logs = []; const heartbeats = []; let sinks; let launch; let onPermission
+  const pollResults = [...(options.pollResults ?? (Object.hasOwn(options, 'turn') ? [options.turn] : []))]
   const fake = {
+    sessionId: 'session-test',
     start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession() { calls.push('newSession') },
     beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); return 17 },
-    pollPrompt() { calls.push('pollPrompt'); return options.turn || null },
+    pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; return pollResults.length ? pollResults.shift() : null },
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
@@ -43,8 +45,73 @@ test('T2', () => {
   const f = fixture(); try {
     const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id }))
     assert.equal(f.io.wait(out.returnPath, 1).assignment_id, out.id)
-    assert.equal(f.calls.includes('pollPrompt'), false)
+    assert.equal(f.calls.filter((call) => call === 'pollPrompt').length, 1)
   } finally { cleanup(f) }
+})
+test('ACP U1', () => {
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2, cachedReadTokens: 3, cachedWriteTokens: 4 } } }); try {
+    const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id })); f.io.wait(out.returnPath, 1)
+    assert.deepEqual(f.heartbeats.filter((e) => e.kind === 'usage')[0].usage, { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_read_tokens: 3, billed_cache_write_tokens: 4 })
+  } finally { cleanup(f) }
+})
+test('ACP U2', () => {
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2, cachedReadTokens: 3 } } }); try {
+    const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id })); f.io.wait(out.returnPath, 1)
+    assert.equal(f.heartbeats.some((e) => e.kind === 'usage'), false); assert.equal(f.logs[0].acp_turn.usage_reason, 'usage-incomplete')
+  } finally { cleanup(f) }
+})
+test('ACP U3', () => {
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: null } }); try {
+    const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id })); f.io.wait(out.returnPath, 1)
+    assert.equal(f.heartbeats.some((e) => e.kind === 'usage'), false); assert.equal(f.logs[0].acp_turn.usage, null)
+  } finally { cleanup(f) }
+})
+test('ACP S1', () => {
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: null } }); try {
+    const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id })); f.io.wait(out.returnPath, 1)
+    assert.equal(f.logs.filter((e) => e.acp_turn).length, 1)
+    assert.equal(f.logs.find((e) => e.acp_turn)?.acp_turn.stopReason, 'end_turn')
+  } finally { cleanup(f) }
+})
+test('ACP S2', () => {
+  const f = fixture({ pollResults: [null] }); try {
+    assign(f); f.io.close(); assert.equal(f.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'response-unread')
+  } finally { cleanup(f) }
+  for (const close of ['retire', 'abort', 'teardown']) {
+    const g = fixture({ pollResults: [null] }); try { assign(g); g.io[close]('builder'); assert.equal(g.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'response-unread') } finally { cleanup(g) }
+  }
+  const h = fixture({ turn: { stopReason: null, refusal: { message: 'refused' } } }); try { assign(h); h.io.retire('builder'); assert.equal(h.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'refused') } finally { cleanup(h) }
+  const i = fixture({ pollResults: [null, null] }); try {
+    const old = assign(i); assign(i, { reask: { id: 'd2', returnPath: old.returnPath } })
+    assert.equal(i.logs.filter((e) => e.acp_turn?.assignment_id === old.id).length, 1)
+    assert.equal(i.logs.find((e) => e.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
+  } finally { cleanup(i) }
+})
+test('ACP RV1-1 malformed frame errors remain the wait cause', () => {
+  const cause = Object.assign(new Error('bad frame'), { stage: 'acp-malformed-frame' })
+  const f = fixture({ pollError: cause, now: () => Date.now() }); try {
+    const out = assign(f)
+    assert.throws(() => f.io.wait(out.returnPath, 0.05), (error) => error.stage === 'acp-no-envelope' && error.cause === cause)
+    assert.equal(f.calls.filter((call) => call === 'pollPrompt').length, 1)
+  } finally { cleanup(f) }
+})
+test('ACP RV1-2 replacement closes and records the pending prior assignment', () => {
+  const f = fixture({ pollResults: [null, null] }); try {
+    const old = assign(f); assert.throws(() => f.io.wait(old.returnPath, 0), (error) => error.stage === 'acp-no-envelope')
+    assign(f, { id: 'd4', returnPath: join(f.paths.returnsDir, 'd4.builder.json') })
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === old.id).length, 1)
+    assert.equal(f.logs.find((row) => row.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
+  } finally { cleanup(f) }
+})
+test('ACP T1', () => {
+  const f = fixture(); try {
+    const out = assign(f); f.update('tool_call', { update: { sessionUpdate: 'tool_call', toolCallId: 't', kind: 'edit', title: 'x', status: 'running' } });
+    f.update('tool_call_update', { update: { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed' } })
+    const rows = f.logs.filter((e) => e.acp_tool_call).map((e) => e.acp_tool_call); assert.equal(rows[1].kind, 'edit'); assert.equal(rows[1].assignment_id, out.id)
+  } finally { cleanup(f) }
+})
+test('ACP P1', () => {
+  const f = fixture(); try { assign(f); f.onPermission({ toolCall: { toolCallId: 't', title: 'x', kind: 'edit' }, options: [{ optionId: 'r', kind: 'reject_once' }] }); assert.equal(f.logs.find((e) => e.acp_permission_policy)?.acp_permission_policy.tool_call_id, 't') } finally { cleanup(f) }
 })
 test('T3', () => {
   const f = fixture({ turn: { stopReason: 'end_turn', refusal: null } }); try {

@@ -48,6 +48,9 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     // grants (the submit extension delivers the envelope without a gated write), and the seat's env.
     const launch = launchFn({ role, bin: binary, model: member?.model, effort: member?.effort, cwd: checkout || process.cwd(), deny: member?.deny || '',
       promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir,
+      advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
+        ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
+        : null,
       env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir } })
     // #797: the launch policy settles what it can; an unsettled request goes to the injected lead, and with
     // no lead it is reject_once. Fail closed: nothing here approves a request the policy did not name.

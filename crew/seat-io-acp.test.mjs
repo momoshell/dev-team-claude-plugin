@@ -19,7 +19,7 @@ function fixture(options = {}) {
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
-  const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
+  const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep() {} } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
@@ -144,10 +144,14 @@ test('T13 the ACP launch carries the role charter, grants, config dir and seat e
   let spec
   const grants = { tools: [], extensions: ['crew/pi/extensions/submit.ts'], agents: [], skills: [], advisor: false }
   const spy = { grants, configDir: '/cfg', acpLaunch(s) { spec = s; return { bin: '/bin/node', args: [], env: {}, policy: { autoDeny: [], autoApprove: [], escalate: [] } } } }
-  const f = fixture({ adapters: { builder: spy } }); try {
+  const advisor = { granted: ['builder'], endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false }
+  const crew = { members: { builder: { model: 'test', effort: 'high' } }, advisor }
+  const f = fixture({ adapters: { builder: { ...spy, grants: { ...grants, advisor: true } } }, crew }); try {
     assign(f)
     assert.equal(spec.promptFile, join(f.paths.taskDir, 'role-builder.md'))
-    assert.equal(spec.grants, grants)
+    assert.equal(spec.effort, 'high')
+    assert.deepEqual(spec.advisorCell, { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
+    assert.equal(spec.grants.extensions, grants.extensions)
     assert.equal(spec.configDir, '/cfg')
     assert.equal(spec.role, 'builder')
     assert.deepEqual(spec.env, { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir })

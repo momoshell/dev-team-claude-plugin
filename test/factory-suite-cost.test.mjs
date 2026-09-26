@@ -124,6 +124,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'crew/batch.test.mjs',
     'crew/pi/extensions/acp-server.test.mjs',
     'crew/pi/extensions/submit.test.mjs',
+    'crew/seat-io-acp.test.mjs',
     'skills/frontend-svelte/exhibits.test.mjs',
     'skills/lean-build/exhibits.test.mjs',
     'skills/ui-design/exhibits.test.mjs',

@@ -178,7 +178,12 @@ function replay(name, options = {}) {
   }
   out.sessionId = api.newSession({ cwd: firstCwd, mcpServers: [], _meta: firstMeta })
   if (mode) api.setMode(mode)
-  try { out.outcome = api.prompt(firstPrompt) } catch (err) { out.promptError = err }
+  try {
+    if (options.nonblocking === true) {
+      out.promptId = api.beginPrompt(firstPrompt)
+      out.outcome = api.pollPrompt(out.promptId)
+    } else out.outcome = api.prompt(firstPrompt)
+  } catch (err) { out.promptError = err }
   out.teardown = api.close()
   return out
 }
@@ -191,6 +196,15 @@ function runWithCleanup(name, options, check) {
   const run = replay(name, options)
   try { return check(run) } finally { forget(run) }
 }
+
+test('beginPrompt and pollPrompt match the recorded response without blocking', () => {
+  runWithCleanup('pi-turn.ndjson', { nonblocking: true }, (run) => {
+    assert.equal(Number.isSafeInteger(run.promptId), true)
+    assert.equal(run.outcome.stopReason, 'end_turn')
+    assert.deepEqual(run.outcome.refusal, null)
+    assert.equal(run.mismatches.length, 0)
+  })
+})
 
 test('recorded ACP fixtures replay to their hand-written outcomes', () => {
   for (const [name, expected] of OUTCOMES) {

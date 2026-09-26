@@ -9,6 +9,7 @@ import { resolveSeatModels } from './crew.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
+import { acpIo } from './acp-io.mjs'
 import { WAIT_POLL_MS } from './seat-io.mjs'
 import { parseGateSummary } from './drive.mjs'
 import { assignmentLine } from './driver.mjs'
@@ -311,6 +312,20 @@ for (const subject of SUBJECTS) {
     assert.deepEqual(fixture.io.wait(out.returnPath, 600), { status: 'done', subject: subject.name })
   })
 }
+
+test('T12', () => {
+  const paths = dirs()
+  const fake = { start() {}, initialize() {}, newSession() {}, beginPrompt() { return 1 }, pollPrompt() { return null }, cancel() {}, close() { return { outcome: 'proven' } } }
+  const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: paths.dir, bin: '/bin/pi',
+    deps: { existsSync: (path) => path === '/bin/pi' || fsExistsSync(path), clientFactory: () => fake } })
+  for (const method of ['assign', 'wait', 'steer', 'abort', 'entries', 'retire', 'close', 'teardown']) assert.equal(typeof io[method], 'function', method)
+  const briefFile = join(paths.taskDir, 'brief.md'); fsWriteFileSync(briefFile, 'brief')
+  const assigned = io.assign({ role: 'builder', briefFile })
+  assert.equal(typeof assigned.id, 'string')
+  assert.equal(assigned.returnPath.startsWith(paths.returnsDir), true)
+  const rows = io.teardown()
+  assert.deepEqual(rows.map(({ role, transport, outcome }) => ({ role, transport, outcome })), [{ role: 'builder', transport: 'acp', outcome: 'proven' }])
+})
 
 test('seatIo forwards the driver policy by identity and omits it for legacy assignments', () => {
   const paths = dirs(); const specs = []

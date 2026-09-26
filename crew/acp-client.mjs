@@ -238,6 +238,32 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return { stopReason, usage: turnUsage(frame.result), refusal: null }
   }
 
+  const pendingPrompts = new Set()
+  function beginPrompt(blocks) {
+    if (session.cancelled) throw acpRefuse('acp-session-cancelled', `acp session ${session.id} was cancelled and accepts no further prompt`)
+    seq += 1
+    const id = seq
+    pendingPrompts.add(id)
+    send({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: session.id, prompt: blocks } })
+    return id
+  }
+  function pollPrompt(id) {
+    if (!pendingPrompts.has(id)) return null
+    pump()
+    if (!responses.has(id)) return null
+    pendingPrompts.delete(id)
+    const frame = responses.get(id)
+    responses.delete(id)
+    if (frame.error) {
+      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null }
+      log({ at: now(), acp_turn_refused: { role, ...refusal } })
+      return { stopReason: null, usage: null, refusal }
+    }
+    const stopReason = typeof frame.result?.stopReason === 'string' ? frame.result.stopReason : null
+    if (stopReason === 'cancelled') session.cancelled = true
+    return { stopReason, usage: turnUsage(frame.result), refusal: null }
+  }
+
   function cancel() {
     session.cancelled = true
     send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } })
@@ -272,5 +298,5 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return result
   }
 
-  return { start, initialize, newSession, resumeSession, setMode, prompt, cancel, close, get sessionId() { return session.id } }
+  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancel, close, get sessionId() { return session.id } }
 }

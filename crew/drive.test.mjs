@@ -9,9 +9,10 @@ import {
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
-import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
+import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefect } from './drive.mjs'
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
 import { seatIo } from './seat-io.mjs'
+import { acpIo } from './acp-io.mjs'
 
 const A1_FULL_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 const A1_PUBLISH_DISABLED_TRACE = Object.freeze(['commit', 'document', 'suite', 'suite'])
@@ -4565,4 +4566,54 @@ test('chunk resume adjudicates the resumed gate through restored ownership', () 
   })
   const result = resumeTask({ ...CTX, task: 'resume-chunk', files_in_scope: ['crew/a.mjs'] }, io, checkpoint)
   assert.equal(result.status, 'done')
+})
+
+const ACP_PERMISSION_OPTIONS = [{ optionId: 'a', kind: 'allow_once', name: 'Allow' }, { optionId: 'r', kind: 'reject_once', name: 'Reject' }]
+function acpPermissionHarness(role, deps = {}) {
+  const dir = scratchDir('acp-lead-test-')
+  let permission, launch
+  const client = { start() {}, initialize() {}, newSession() {}, beginPrompt() { return 1 }, close() { return { outcome: 'proven' } } }
+  const io = acpIo({ crew: { members: { [role]: { model: 'test' } } }, paths: { taskDir: dir, returnsDir: dir }, taskDir: dir, checkout: dir,
+    bin: '/bin/pi', adapters: { [role]: { acpLaunch: ({ env }) => ({ bin: '/bin/pi', args: [], env, policy: {} }) } },
+    deps: { ...deps, readFileSync: () => 'brief', clientFactory: (arg) => { permission = arg.onPermission; launch = arg.launch; return client } } })
+  try { io.assign({ role, briefFile: join(dir, 'brief.md') }); return { dir, permission: (request) => permission(request), launch } }
+  catch (error) { rmSync(dir, { recursive: true, force: true }); throw error }
+}
+function drivePermissionHarness({ roles = ['lead', 'planner', 'builder'], limit = 4, answer = 'a', from = null, askingRole = 'builder' } = {}) {
+  let lead = null, wired = 0, selected = null, policyRow = null, reviewerDuringPermission = null, leadDuringPermission = null
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'lead:1': leadEnv(answer, 'reason', from ? { from } : {}) } })
+  io.setPermissionLead = (fn) => { wired++; lead = fn }
+  const originalWait = io.wait
+  io.wait = (returnPath, timeout) => {
+    if (returnPath === 'builder:1') {
+      const seat = acpPermissionHarness(askingRole, { permissionLead: lead, permissionTimeoutMs: 900001,
+        log: (row) => { policyRow = row.acp_permission_policy } })
+      try {
+        const before = io.calls.assign.filter((x) => x.role === 'lead').length
+        selected = seat.permission({ toolCall: { title: 'unsettled', kind: 'edit' }, options: ACP_PERMISSION_OPTIONS })
+        leadDuringPermission = io.calls.assign.filter((x) => x.role === 'lead').length - before
+        reviewerDuringPermission = io.calls.assign.filter((x) => x.role === 'reviewer').length
+      } finally { rmSync(seat.dir, { recursive: true, force: true }) }
+      return { assignment_id: 'builder1', role: 'builder', status: 'insufficient', summary: 'stop after permission', artifacts: [], details: {} }
+    }
+    return originalWait(returnPath, timeout)
+  }
+  driveTask({ ...CTX, roles, limits: { lead_consults: limit } }, io)
+  return { wired, selected, policyRow, reviewerDuringPermission, leadDuringPermission }
+}
+test('L1: an ACP permission request synchronously consults and selects an in-set lead answer', () => {
+  const h = drivePermissionHarness()
+  assert.equal(h.wired, 1); assert.equal(h.leadDuringPermission, 1); assert.equal(h.selected, 'a'); assert.equal(h.policyRow?.policy, 'lead')
+})
+test('L2: exhausted lead consult budget fails closed to reject_once', () => {
+  const h = drivePermissionHarness({ limit: 0 })
+  assert.equal(h.selected, 'r'); assert.equal(h.leadDuringPermission, 0)
+})
+test('L3: leadless tiers do not wire a permission callback and reject_once', () => {
+  const h = drivePermissionHarness({ roles: ['planner', 'builder'] })
+  assert.equal(h.wired, 0); assert.equal(h.selected, 'r'); assert.equal(h.policyRow?.policy, 'no-lead')
+})
+test('L7: a reviewer requesting a second opinion is excluded from the perspective assignment', () => {
+  const h = drivePermissionHarness({ roles: ['lead', 'planner', 'builder', 'reviewer'], answer: SECOND_OPINION, from: 'reviewer', askingRole: 'reviewer' })
+  assert.equal(h.selected, 'r'); assert.equal(h.reviewerDuringPermission, 0)
 })

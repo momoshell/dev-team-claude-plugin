@@ -2188,13 +2188,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // never now(), never a fallback clock.
   const headlessWatch = { info: null, last: null, noted: null, waitContext: null, grewAt: null, seatLast: null }
   const withHeadlessWatch = (info, run, waitContext = null) => {
-    headlessWatch.info = info ?? null
+    const previous = { ...headlessWatch }; headlessWatch.info = info ?? null
     headlessWatch.last = null
     headlessWatch.noted = null
     headlessWatch.grewAt = null
     headlessWatch.seatLast = null
     headlessWatch.waitContext = waitContext
-    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.noted = null; headlessWatch.grewAt = null; headlessWatch.seatLast = null; headlessWatch.waitContext = null }
+    try { return run() } finally { Object.assign(headlessWatch, previous) }
   }
   const sampleHeadlessGrowth = () => {
     const info = headlessWatch.info
@@ -3759,6 +3759,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     gateNow() { return typeof deps.gateNow === 'function' ? deps.gateNow() : Number(process.hrtime.bigint()) / 1e6 },
   }
   if (emitter) io.emit = emitAdapter(emitter, crew)
+  io.setPermissionLead = (lead, { timeoutMs } = {}) => {
+    transportArgs.deps.permissionLead = lead
+    transportArgs.deps.permissionTimeoutMs = lead == null ? undefined : timeoutMs
+  }
   return io
 }
 

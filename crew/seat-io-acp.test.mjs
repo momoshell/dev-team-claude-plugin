@@ -22,7 +22,7 @@ function fixture(options = {}) {
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
-    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
+    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep() {} } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
@@ -231,6 +231,23 @@ test('T13 the ACP launch carries the role charter, grants, config dir and seat e
   } finally { cleanup(real) }
 })
 
+test('ACP lead permission wiring is role-scoped and supplies the configured timeout', () => {
+  const options = [{ optionId: 'a', kind: 'allow_once', name: 'Allow' }, { optionId: 'r', kind: 'reject_once', name: 'Reject' }]
+  const asked = []
+  const f = fixture({ permissionTimeoutMs: 1234, permissionLead: (payload) => { asked.push(payload); return { decision: 'a' } } })
+  try {
+    assign(f)
+    assert.equal(f.launch.env.CREW_ACP_PERMISSION_TIMEOUT_MS, '1234')
+    assert.equal(f.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'a')
+    assert.equal(asked[0].role, 'builder')
+  } finally { cleanup(f) }
+  const noLead = fixture()
+  try { assign(noLead); assert.equal(Object.hasOwn(noLead.launch.env, 'CREW_ACP_PERMISSION_TIMEOUT_MS'), false) } finally { cleanup(noLead) }
+  const leadCrew = { members: { lead: { model: 'test' } } }
+  const lead = fixture({ crew: leadCrew, permissionTimeoutMs: 1234, permissionLead: () => ({ decision: 'a' }) })
+  try { lead.io.assign({ role: 'lead', briefFile: lead.briefFile }); assert.equal(lead.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'r') } finally { cleanup(lead) }
+})
+
 test('T14 an ACP permission request is settled by the launch policy, then the lead, else reject_once', () => {
   const options = [{ optionId: 'a', kind: 'allow_once', name: 'Allow' }, { optionId: 'r', kind: 'reject_once', name: 'Reject' }]
   const policy = { autoDeny: ['bash'], autoApprove: ['read'], escalate: ['write'] }
@@ -250,6 +267,25 @@ test('T14 an ACP permission request is settled by the launch policy, then the le
     assert.equal(asked[0].question, 'permit')
     assert.deepEqual(asked[0].options, ['a', 'r'])
   } finally { cleanup(led) }
+})
+
+test('seatIo permission lead setter updates lazy transport deps and clears on null', () => {
+  const f = fixture(); try {
+    let factoryDeps
+    const crew = { claude_bin: '/bin/true', members: { builder: { transport: 'acp' } } }
+    const routed = seatIo(crew, f.paths, f.root, null, {}, {}, {
+      acpIo: (args) => { factoryDeps = args.deps; return { assign: () => ({ id: 'd1', returnPath: join(f.paths.returnsDir, 'x.json') }) } },
+      logLine() {}, now: () => 100,
+    })
+    const consult = () => ({ decision: 'a' })
+    routed.setPermissionLead(consult, { timeoutMs: 987 })
+    routed.assign({ role: 'builder', briefFile: f.briefFile })
+    assert.equal(factoryDeps.permissionLead, consult)
+    assert.equal(factoryDeps.permissionTimeoutMs, 987)
+    routed.setPermissionLead(null)
+    assert.equal(factoryDeps.permissionLead, null)
+    assert.equal(factoryDeps.permissionTimeoutMs, undefined)
+  } finally { cleanup(f) }
 })
 
 test('T15 an empty or relative PATH segment is skipped, never resolved against the cwd', () => {

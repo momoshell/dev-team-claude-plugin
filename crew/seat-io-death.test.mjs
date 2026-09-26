@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { scratchDir } from '../test/helpers.mjs'
@@ -27,6 +27,72 @@ const ROOT_PID = 999001
 const ROOT_START = 'Sun Aug 30 22:16:18 2026'
 const BUDGET_S = 900
 const RETRY_WINDOW_MS = Math.min(BUDGET_S, REASK_TIMEOUT_S) * 1000
+
+test('nested ACP waits restore the outer builder liveness watch', () => {
+  const dir = scratchDir('acp-nested-death-')
+  const paths = { dir, taskDir: dir, returnsDir: join(dir, 'returns') }
+  mkdirSync(paths.returnsDir)
+  const journal = []
+  let seat, tick = 0
+  const clock = Date.now()
+  const crew = { members: { builder: { transport: 'acp', agent: 'pi', model: 'test' }, lead: { transport: 'acp', agent: 'pi', model: 'test' } } }
+  const factory = ({ deps }) => ({
+    assign({ role }) { return { id: role === 'lead' ? 'd2' : 'd1', returnPath: join(paths.returnsDir, `${role}.json`) } },
+    wait(returnPath) {
+      if (returnPath.endsWith('/lead.json')) { deps.sleep(1); return { status: 'done', assignment_id: 'd2' } }
+      deps.sleep(1)
+      seat.wait(join(paths.returnsDir, 'lead.json'), 1)
+      const stream = join(dir, 'acp', 'builder'); mkdirSync(stream, { recursive: true })
+      const path = join(stream, 'stream.jsonl'); writeFileSync(path, 'growth')
+      utimesSync(path, new Date(clock + 90000), new Date(clock + 90000))
+      tick++
+      deps.sleep(1)
+      return { status: 'done', assignment_id: 'd1' }
+    },
+  })
+  try {
+    seat = seatIo(crew, paths, dir, null, {}, {}, { acpIo: factory, logLine: (_path, row) => journal.push(row), now: () => clock + tick * 100000, sleep() {}, resolveWorkerBin: () => '/bin/true', existsSync: () => false })
+    const builder = seat.assign({ role: 'builder', briefFile: join(dir, 'brief.md') })
+    seat.assign({ role: 'lead', briefFile: join(dir, 'brief.md') })
+    seat.wait(builder.returnPath, 3)
+    assert.ok(journal.some((row) => row.event === 'seat-liveness' && row.role === 'builder'))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a top-level ACP wait attributes growth and clears its watch on return', () => {
+  const dir = scratchDir('acp-top-level-death-')
+  const paths = { dir, taskDir: dir, returnsDir: join(dir, 'returns') }
+  mkdirSync(paths.returnsDir)
+  const journal = []
+  let poll = () => {}
+  let streamPath = null
+  const clock = Date.now()
+  const crew = { members: { builder: { transport: 'acp', agent: 'pi', model: 'test' } } }
+  const factory = ({ deps }) => {
+    poll = deps.sleep
+    return {
+      assign() { return { id: 'd1', returnPath: join(paths.returnsDir, 'builder.json') } },
+      wait() {
+        const stream = join(dir, 'acp', 'builder'); mkdirSync(stream, { recursive: true })
+        const path = join(stream, 'stream.jsonl'); writeFileSync(path, 'growth')
+        streamPath = path
+        utimesSync(path, new Date(clock + 90000), new Date(clock + 90000))
+        deps.sleep(1)
+        return { status: 'done', assignment_id: 'd1' }
+      },
+    }
+  }
+  try {
+    const seat = seatIo(crew, paths, dir, null, {}, {}, { acpIo: factory, logLine: (_path, row) => journal.push(row), now: () => clock + 100000, sleep() {}, resolveWorkerBin: () => '/bin/true', existsSync: () => false })
+    const builder = seat.assign({ role: 'builder', briefFile: join(dir, 'brief.md') })
+    seat.wait(builder.returnPath, 3)
+    const before = journal.filter((row) => row.event === 'seat-liveness' && row.role === 'builder').length
+    assert.ok(before > 0)
+    utimesSync(streamPath, new Date(clock + 95000), new Date(clock + 95000))
+    poll(1)
+    assert.equal(journal.filter((row) => row.event === 'seat-liveness' && row.role === 'builder').length, before)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
 
 function recordPath(taskDir, transport, seatId) {
   const dirName = transport === HEADLESS_RPC_TRANSPORT ? 'headless-rpc' : 'headless'

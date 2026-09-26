@@ -6526,7 +6526,7 @@ function runTask(ctx, io, crash) {
     }
     // exclude: a seat whose own output is the thing under judgment cannot be
     // offered as the independent advisor on it.
-    const targets = PERSPECTIVE_TARGETS.filter((r) => ctx.roles.includes(r) && r !== exclude)
+    const targets = PERSPECTIVE_TARGETS.filter((r) => ctx.roles.includes(r) && ![exclude].flat().includes(r))
     const first = askLead(question, options, contextPaths, { round: 1, targets })
     if (first.decision !== SECOND_OPINION) return first
 
@@ -7774,7 +7774,7 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return result
   }
-
+  if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role, tool_call: call }) => (variant === 'review_panel' && ['edit', 'write', 'delete', 'move'].some((k) => k === call?.kind || k === call?.title) ? { decision: null } : { decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
   if (ctx.resume_checkpoint) {
     const checkpoint = ctx.resume_checkpoint
     const resume = runResumeTail(checkpoint, ctx, io)
@@ -7954,7 +7954,7 @@ function runTask(ctx, io, crash) {
   // planCapNote({ … }) from `predecessorChecked` onward, so a text-anchored mutation
   // aimed at that call would rewrite this cap too. Do not collapse it to shorthand.
   const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds }); if (ctx.roles === undefined) ctx = { ...ctx, roles: [] }
-  const planAttempts = () => planRounds() + prescribedPlanApplications; if (ctx.roles.includes('lead')) io.setPermissionLead?.(({ text, options, role }) => ({ decision: consultLead(text, options, [], { exclude: role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
+  const planAttempts = () => planRounds() + prescribedPlanApplications
   io.log(recordRow({ at: io.now(), plan_round_cap: {
     adopted: adoption.adopted, predecessor_checked: predecessorChecked,
     reason: adoption.reason, cap: planRounds(),

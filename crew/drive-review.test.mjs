@@ -5798,3 +5798,101 @@ test('E1 distinguishes sentinel and report-file sources', () => {
   driveTask(CTX, unavailableIo)
   assert.equal(diffProofRow(unavailableIo).report_source, 'runner-unavailable')
 })
+
+test('R1 panel permission lead is registered before panel dispatch', async () => {
+  const { permissionHandler } = await import('./acp-permission.mjs')
+  let lead, wired = 0, selected, callbackAnswer
+  let io
+  const reviewer = () => {
+    selected = permissionHandler({ lead: (payload) => (callbackAnswer = lead(payload)) })({
+      toolCall: { title: 'bash', kind: 'execute' },
+      options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }],
+    })
+    return { ...panelEnvelope({ role: 'reviewer' }), assignment_id: `panel-${io.calls.assign.findLastIndex(({ role }) => role === 'reviewer') + 1}` }
+  }
+  io = strictPanelIo({ reviewer, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  io.setPermissionLead = (callback) => { wired += 1; lead = callback }
+  const baseWait = io.wait.bind(io)
+  let leadWaits = 0
+  io.wait = function (path, timeout) {
+    if (!path.startsWith('lead:')) return baseWait(path, timeout)
+    this.calls.waits.push({ returnPath: path, timeoutS: timeout })
+    const assignedId = `panel-${this.calls.assign.findLastIndex(({ role }) => role === 'lead') + 1}`
+    const env = ++leadWaits === 1
+      ? { ...panelEnvelope({ role: 'lead' }), details: { decision: 'a', reason: 'allow' } }
+      : panelEnvelope({ role: 'lead', details: { adjudications: [] } })
+    return { ...env, role: 'lead', assignment_id: assignedId, run_id: PANEL_RUN_ID }
+  }
+  driveTask(panelContext(), io)
+  assert.equal(wired, 1)
+  assert.equal(callbackAnswer?.decision, 'a')
+  assert.equal(selected, 'a')
+})
+
+test('R2 panel permission second opinions exclude both panel seats and reject', async () => {
+  const { permissionHandler } = await import('./acp-permission.mjs')
+  let lead, wired = 0, selected, during
+  let io
+  const reviewer = () => {
+    selected = permissionHandler({ lead })({
+      toolCall: { title: 'bash', kind: 'execute' },
+      options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }],
+    })
+    during = {
+      reviewer: io.calls.assign.filter(({ role }) => role === 'reviewer').length,
+      techLead: io.calls.assign.filter(({ role }) => role === 'tech-lead').length,
+    }
+    return { ...panelEnvelope({ role: 'reviewer' }), assignment_id: `panel-${io.calls.assign.findLastIndex(({ role }) => role === 'reviewer') + 1}` }
+  }
+  io = strictPanelIo({ reviewer, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  io.setPermissionLead = (callback) => { wired += 1; lead = callback }
+  const baseWait = io.wait.bind(io)
+  let leadWaits = 0
+  io.wait = function (path, timeout) {
+    if (!path.startsWith('lead:')) return baseWait(path, timeout)
+    this.calls.waits.push({ returnPath: path, timeoutS: timeout })
+    const assignedId = `panel-${this.calls.assign.findLastIndex(({ role }) => role === 'lead') + 1}`
+    const env = ++leadWaits === 1
+      ? { ...panelEnvelope({ role: 'lead' }), details: { decision: SECOND_OPINION, from: 'tech-lead', reason: 'seek advice' } }
+      : panelEnvelope({ role: 'lead', details: { adjudications: [] } })
+    return { ...env, role: 'lead', assignment_id: assignedId, run_id: PANEL_RUN_ID }
+  }
+  driveTask(panelContext(), io)
+  assert.equal(wired, 1)
+  assert.deepEqual(during, { reviewer: 1, techLead: 0 })
+  assert.equal(selected, 'r')
+})
+
+test('R3 panel permission registers once in ordinary full runs', () => {
+  const io = fakeIo()
+  let wired = 0
+  io.setPermissionLead = () => { wired += 1 }
+  driveTask(CTX, io)
+  assert.equal(wired, 1)
+})
+
+test('R4 a review_panel seat never gets a checkout-mutating permission, and the lead is not consulted', async () => {
+  const { permissionHandler } = await import('./acp-permission.mjs')
+  let lead
+  let io
+  const selected = []
+  const reviewer = () => {
+    for (const toolCall of [{ title: 'write', kind: 'edit' }, { title: 'edit', kind: 'edit' }, { title: 'write', kind: 'other' }, { title: 'rm', kind: 'delete' }, { title: 'mv', kind: 'move' }]) {
+      selected.push(permissionHandler({ lead })({ toolCall, options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }] }))
+    }
+    return { ...panelEnvelope({ role: 'reviewer' }), assignment_id: `panel-${io.calls.assign.findLastIndex(({ role }) => role === 'reviewer') + 1}` }
+  }
+  io = strictPanelIo({ reviewer, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  io.setPermissionLead = (callback) => { lead = callback }
+  const baseWait = io.wait.bind(io)
+  io.wait = function (path, timeout) {
+    if (!path.startsWith('lead:')) return baseWait(path, timeout)
+    this.calls.waits.push({ returnPath: path, timeoutS: timeout })
+    const assignedId = `panel-${this.calls.assign.findLastIndex(({ role }) => role === 'lead') + 1}`
+    return { ...panelEnvelope({ role: 'lead', details: { adjudications: [] } }), role: 'lead', assignment_id: assignedId, run_id: PANEL_RUN_ID }
+  }
+  const leadAssignsBefore = () => io.calls.assign.filter(({ role }) => role === 'lead').length
+  driveTask(panelContext(), io)
+  assert.deepEqual(selected, ['r', 'r', 'r', 'r', 'r'])
+  assert.equal(leadAssignsBefore(), 1, 'only the adjudication consult reached the lead; no permission consult did')
+})

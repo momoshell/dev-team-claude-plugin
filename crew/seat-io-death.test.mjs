@@ -382,10 +382,10 @@ function runReplacementWait({ transport, current = 'alive', timeoutS = 15, first
   }
 }
 
-test('a dead worker root ends one poll for both headless transports and carries reclaim evidence', () => {
+test('a dead worker root retries once and carries reclaim evidence for both headless transports', () => {
   for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
     withRun({ transport, ps: 'absent' }, (run) => {
-      assert.equal(run.ticks, 1)
+      assert.equal(run.ticks, 2)
       assert.equal(run.elapsedMs, 0)
       assert.equal(run.error?.stage, SEAT_DIED_STAGE)
       assert.equal(run.error?.role, ROLE)
@@ -505,20 +505,28 @@ test('seatRootDeath is inert for pane, absent, corrupt, and missing-root records
   assert.equal(seatRootDeath({ taskDir, transport: HEADLESS_TRANSPORT, snapshot: { ok: true, rows: new Map() } }), null)
 })
 
-test('the seat_died row measures wait budget and leaves final turn usage unknown', () => {
+test('RV1-1 re-asked corpse preserves first and terminal death evidence', () => {
   for (const [transport, reason] of [
     [HEADLESS_TRANSPORT, 'headless-run-not-recorded'],
     [HEADLESS_RPC_TRANSPORT, 'rpc-turn-not-finished'],
   ]) {
     withRun({ transport, ps: 'absent' }, (run) => {
-      const row = run.diedRow
-      assert.ok(row)
-      assert.equal(row.waited_ms, run.elapsedMs)
-      assert.equal(row.budget_ms, run.budgetMs)
-      assert.equal(row.wasted_ms, row.budget_ms - row.waited_ms)
-      assert.ok(row.wasted_ms > 0)
-      assert.equal(row.final_turn_usage, null)
-      assert.equal(row.final_turn_usage_reason, reason)
+      const deathRows = run.rows.filter((row) => row && row.seat_died != null)
+      assert.equal(deathRows.length, 2)
+      const [first, terminal] = deathRows
+      assert.equal(first.waited_ms, 0)
+      assert.equal(first.budget_ms, run.budgetMs)
+      assert.equal(first.wasted_ms, first.budget_ms - first.waited_ms)
+      assert.ok(first.wasted_ms > 0)
+      assert.equal(first.final_turn_usage, null)
+      assert.equal(first.final_turn_usage_reason, reason)
+      assert.equal(terminal.waited_ms, run.elapsedMs)
+      assert.equal(terminal.budget_ms, REASK_TIMEOUT_S * 1000)
+      assert.equal(terminal.wasted_ms, terminal.budget_ms - terminal.waited_ms)
+      assert.ok(terminal.wasted_ms > 0)
+      assert.equal(terminal.final_turn_usage, null)
+      assert.equal(terminal.final_turn_usage_reason, reason)
+      assert.equal(run.rows.some((candidate) => candidate?.event === 'seat-death-reask' && candidate.cause === 'seat-died'), true)
     })
   }
 })

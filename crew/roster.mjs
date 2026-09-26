@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { ASSURANCE_NAMES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
 
 export const ROSTER_SCHEMA_VERSIONS = Object.freeze([1, 2])
-export const ROSTER_TRANSPORTS = Object.freeze(['pane', 'headless-json', 'headless-rpc', 'headless-api'])
+export const ROSTER_TRANSPORTS = Object.freeze(['pane', 'headless-json', 'headless-rpc', 'acp', 'headless-api'])
 export const ROSTER_REFUSALS = Object.freeze([
   'roster-not-object',               // the document is not a JSON object
   'roster-version-unknown',          // schema_version outside ROSTER_SCHEMA_VERSIONS

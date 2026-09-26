@@ -189,7 +189,8 @@
             "enum": [
               "pane",
               "headless-json",
-              "headless-rpc"
+              "headless-rpc",
+              "acp"
             ]
           }
         },

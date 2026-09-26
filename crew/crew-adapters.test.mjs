@@ -270,15 +270,20 @@ test('unshipped capability pairs and absent transports throw naming adapter and 
 test('transportFor selects each named transport and rejects an ambiguous seat', () => {
   assert.equal(transportFor('builder', { headless: 'builder' }), 'headless-json')
   assert.equal(transportFor('builder', { 'headless-rpc': 'builder' }), 'headless-rpc')
+  assert.equal(transportFor('builder', { acp: 'builder' }), 'acp')
   assert.equal(transportFor('lead', { 'headless-rpc': 'builder' }), 'pane')
   assert.equal(transportFor('builder', {}), 'pane')
   assert.throws(() => transportFor('builder', { headless: 'builder', 'headless-rpc': 'builder' }), /builder.*headless.*headless-rpc/)
+  assert.throws(() => transportFor('builder', { acp: 'builder', headless: 'builder' }), /builder.*--acp.*--headless/)
+  assert.throws(() => transportFor('builder', { acp: 'builder', 'headless-rpc': 'builder' }), /builder.*--acp.*--headless-rpc/)
 })
 
 test('seatTransport resolves each real adapter under --headless-all through its capabilities probe', () => {
-  assert.deepEqual([...HEADLESS_TRANSPORTS], ['headless-json', 'headless-rpc'])
+  assert.deepEqual([...HEADLESS_TRANSPORTS], ['headless-json', 'headless-rpc', 'acp'])
   assert.equal(seatTransport({ role: 'lead', args: { 'headless-all': true }, adapter: { capabilitiesFor }, agentName: 'claude' }), 'headless-json')
   assert.equal(seatTransport({ role: 'builder', args: { 'headless-all': 'true' }, adapter: { capabilitiesFor: piCapabilitiesFor }, agentName: 'pi' }), 'headless-rpc')
+  assert.equal(seatTransport({ role: 'builder', args: { acp: 'builder', 'headless-all': true }, adapter: { capabilitiesFor: piCapabilitiesFor }, agentName: 'pi' }), 'acp')
+  assert.throws(() => capabilitiesFor({ transport: 'acp' }), /claude.*acp/)
 })
 
 test('seatTransport keeps explicit transports ahead of --headless-all and defaults to pane', () => {
@@ -293,7 +298,7 @@ test('seatTransport names the seat, agent, and every refusal when no headless pa
   const adapter = { capabilitiesFor({ transport }) { throw new Error(`stub refusal for ${transport}`) } }
   assert.throws(
     () => seatTransport({ role: 'builder', args: { 'headless-all': true }, adapter, agentName: 'stub-agent' }),
-    (err) => ['builder', 'stub-agent', 'headless-json', 'headless-rpc', 'stub refusal for headless-rpc'].every((part) => err.message.includes(part)),
+    (err) => ['builder', 'stub-agent', 'headless-json', 'headless-rpc', 'acp', 'stub refusal for acp'].every((part) => err.message.includes(part)),
   )
 })
 

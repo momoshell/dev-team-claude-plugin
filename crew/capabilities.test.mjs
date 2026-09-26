@@ -59,7 +59,7 @@ function capabilityRegister(overrides = {}) {
     },
     local_providers: {},
     coding_agents: {
-      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
+      pi: { providers: ['openai', 'anthropic', 'llama-swap'], transports: ['pane', 'headless-rpc', 'acp'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'], display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi and ensure the pi binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
       claude: { providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['extensions', 'local_provider'], display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code and ensure the claude binary is on PATH.', availability: 'executable', availability_reason: 'executable' },
     },
   }
@@ -297,7 +297,7 @@ test('D1 genuine local seat provider remains admitted', () => {
 
 test('B1T coding agent transports derive from shipped adapters', () => {
   const shipped = loadCapabilities()
-  const transports = ['pane', 'headless-json', 'headless-rpc']
+  const transports = ['pane', 'headless-json', 'headless-rpc', 'acp']
   const supported = (adapter) => transports.filter((transport) => {
     try { adapter({ transport }); return true } catch { return false }
   })

@@ -51,11 +51,12 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
         ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
         : null,
-      env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir } })
+      env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir,
+        ...(deps.permissionLead ? { CREW_ACP_PERMISSION_TIMEOUT_MS: String(deps.permissionTimeoutMs) } : {}) } })
     // #797: the launch policy settles what it can; an unsettled request goes to the injected lead, and with
     // no lead it is reject_once. Fail closed: nothing here approves a request the policy did not name.
     let permissionToolCall = null
-    const decidePermission = permissionHandler({ policy: launch.policy, lead: deps.permissionLead ?? null,
+    const decidePermission = permissionHandler({ policy: launch.policy, lead: role !== 'lead' && deps.permissionLead ? (payload) => deps.permissionLead({ ...payload, role }) : null,
       log: (row) => { const toolCall = permissionToolCall; log({ at: now(), acp_permission_policy: { role, tool_call_id: toolCall?.toolCallId ?? null, ...row } }) } })
     const onPermission = (request) => { permissionToolCall = request?.toolCall ?? null; try { return decidePermission(request) } finally { permissionToolCall = null } }
     const clientFactory = deps.clientFactory || defaultClient

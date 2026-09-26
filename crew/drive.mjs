@@ -7953,8 +7953,8 @@ function runTask(ctx, io, crash) {
   // #959 — keep the long form: shorthand makes this call textually identical to
   // planCapNote({ … }) from `predecessorChecked` onward, so a text-anchored mutation
   // aimed at that call would rewrite this cap too. Do not collapse it to shorthand.
-  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds })
-  const planAttempts = () => planRounds() + prescribedPlanApplications
+  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds }); if (ctx.roles === undefined) ctx = { ...ctx, roles: [] }
+  const planAttempts = () => planRounds() + prescribedPlanApplications; if (ctx.roles.includes('lead')) io.setPermissionLead?.(({ text, options, role }) => ({ decision: consultLead(text, options, [], { exclude: role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
   io.log(recordRow({ at: io.now(), plan_round_cap: {
     adopted: adoption.adopted, predecessor_checked: predecessorChecked,
     reason: adoption.reason, cap: planRounds(),

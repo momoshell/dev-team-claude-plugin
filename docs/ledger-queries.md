@@ -94,7 +94,32 @@ FROM chunk_runs cr WHERE cr.parent_lane = ? ORDER BY cr.wave ASC, cr.chunk_id AS
 
 A chunk is fully green only when its latest gate has `ok = 1`; the driver records a summary object rather than per-check labels, so failed or empty gate observations report `owned_green: null` with `chunk-checks-unrecorded` or `chunk-checks-empty`. An absent session reports `owned_green: null` with `chunk-lane-unbooted`, and an absent latest gate reports `null` with `chunk-gate-unmeasured`. A running session never makes `done` true: done requires a terminal session and latest gate `ok = 1`. The rates are **owned green / owned total** and **chunks done / chunks total**; every denominator is the parsed `checks_owned_json` length or measured chunk-row count, never a file-path count. An absent parent is `chunks_done: null`, `chunks_total: 0`, `measured: false` with `chunk-parent-absent`.
 
-The ledger declares **45 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The twelve journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, `phase_slot_waits`, and `suite_decisions` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `shadow_picks` stores one boot-journal shadow-pick seat per `(adw_id, role)`, including picker errors as NULL outcomes with a required `absent_reason`; it is populated only from boot records emitted after this writer shipped and is never historically backfilled. `ledger shadow-picks [--tier <tier>]` reports only the newest picked run per tier (timestamp, then `adw_id` tie-break), with each role's decoded seated/picked cells and named exclusions; an empty mirror reports `tiers: null` and `absent.shadow_picks: unmeasured`. `advisor_usage` is a journal-fact table of the same kind (#1547): one row per pi-child advisor consult, ingested from the crew journal's `advisor_usage` row and deduplicated on `(adw_id, consult_id)`, so re-ingesting a journal adds no second row. It is populated only for consults emitted after #1547; the HTTP advisor channel writes none, and a consult whose usage was not measured carries NULL token columns and `usage_reason = 'usage-unavailable'`, never zeros. A consult's spend is measured only if all of these hold: the child closed with exit code 0 and no signal; the consult did not fail, abort, time out or hit a cap; the whole stdout parsed, with no invalid or trailing partial frame; every frame counted as the child's own spend carries a complete usage (all four token classes present, each a non-negative integer); and each summed token class is still a safe integer. Otherwise the row carries NULL token columns and `usage_reason = 'usage-incomplete'`, because partial or missing usage is not a measured total. The `advisor_consult` journal row still keeps the partial fold, labelled `usage_partial: true`, and it is never priced. A consult with no own-spend frame at all keeps `usage-unavailable`. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
+The ledger declares **48 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. The twelve journal-fact tables — `provider_failures`, `plan_scope_changes`, `seat_reasks`, `accept_reasks`, `rpc_exit_contexts`, `seat_turn_census`, `plan_adoptions`, `external_fences`, `mutation_anchor_binds`, `mutation_anchor_absences`, `phase_slot_waits`, `suite_decisions`, `seat_turns`, `seat_tool_calls`, and `seat_permissions` — are populated only for records ingested after this lane; older journal and dispatch-register rows are never backfilled. `shadow_picks` stores one boot-journal shadow-pick seat per `(adw_id, role)`, including picker errors as NULL outcomes with a required `absent_reason`; it is populated only from boot records emitted after this writer shipped and is never historically backfilled. `ledger shadow-picks [--tier <tier>]` reports only the newest picked run per tier (timestamp, then `adw_id` tie-break), with each role's decoded seated/picked cells and named exclusions; an empty mirror reports `tiers: null` and `absent.shadow_picks: unmeasured`. `advisor_usage` is a journal-fact table of the same kind (#1547): one row per pi-child advisor consult, ingested from the crew journal's `advisor_usage` row and deduplicated on `(adw_id, consult_id)`, so re-ingesting a journal adds no second row. It is populated only for consults emitted after #1547; the HTTP advisor channel writes none, and a consult whose usage was not measured carries NULL token columns and `usage_reason = 'usage-unavailable'`, never zeros. A consult's spend is measured only if all of these hold: the child closed with exit code 0 and no signal; the consult did not fail, abort, time out or hit a cap; the whole stdout parsed, with no invalid or trailing partial frame; every frame counted as the child's own spend carries a complete usage (all four token classes present, each a non-negative integer); and each summed token class is still a safe integer. Otherwise the row carries NULL token columns and `usage_reason = 'usage-incomplete'`, because partial or missing usage is not a measured total. The `advisor_consult` journal row still keeps the partial fold, labelled `usage_partial: true`, and it is never priced. A consult with no own-spend frame at all keeps `usage-unavailable`. `seat_turns`, `seat_tool_calls`, and `seat_permissions` are additive ACP journal facts and are never backfilled from older journals. Distinct observed calls by lane and kind:
+
+```sql
+SELECT adw_id, kind, COUNT(DISTINCT tool_call_id) AS tool_calls
+FROM seat_tool_calls
+GROUP BY adw_id, kind
+```
+
+Permission decisions by policy:
+
+```sql
+SELECT policy, COUNT(*) AS decisions
+FROM seat_permissions
+GROUP BY policy
+```
+
+Observed stop reasons by role:
+
+```sql
+SELECT role, stop_reason, COUNT(*) AS turns
+FROM seat_turns
+WHERE stop_reason IS NOT NULL
+GROUP BY role, stop_reason
+```
+
+NULL stop/usage values mean not observed, not zero. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
 
 ## Suite refusal coverage (ADR-046)
 

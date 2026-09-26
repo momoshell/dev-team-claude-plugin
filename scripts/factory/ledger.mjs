@@ -712,6 +712,9 @@ function cellFieldsFrom(input) {
 // The CREATE TABLE / CREATE UNIQUE INDEX / CREATE INDEX DDL below is
 // GENERATED from this constant — a table declared here but missing from the
 // DDL (or vice versa) is impossible by construction.
+export const SEAT_STOP_REASONS = Object.freeze(['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'])
+export const SEAT_PERMISSION_POLICIES = Object.freeze(['roster', 'lead', 'no-lead'])
+
 export const TABLES = Object.freeze({
   sessions: {
     columns: [
@@ -1552,6 +1555,20 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'consult_id']],
     indexes: [],
   },
+  seat_turns: { columns: [
+    { name: 'adw_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' }, { name: 'assignment_id', decl: 'TEXT' }, { name: 'transport', decl: 'TEXT' },
+    { name: 'stop_reason', decl: 'TEXT' }, { name: 'stop_reason_absent', decl: 'TEXT' }, { name: 'usage_reason', decl: 'TEXT' }, { name: 'at', decl: 'TEXT' },
+  ], unique: [['adw_id', 'role', 'assignment_id']], indexes: [] },
+  seat_tool_calls: { columns: [
+    { name: 'adw_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' }, { name: 'assignment_id', decl: 'TEXT' }, { name: 'tool_call_id', decl: 'TEXT' },
+    { name: 'kind', decl: 'TEXT' }, { name: 'status', decl: 'TEXT' }, { name: 'title', decl: 'TEXT' }, { name: 'locations_json', decl: 'TEXT' },
+    { name: 'has_diff', decl: 'INTEGER' }, { name: 'at', decl: 'TEXT' },
+  ], unique: [['adw_id', 'tool_call_id', 'status']], indexes: [] },
+  seat_permissions: { columns: [
+    { name: 'adw_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' }, { name: 'tool_call_id', decl: 'TEXT' }, { name: 'tool', decl: 'TEXT' },
+    { name: 'title', decl: 'TEXT' }, { name: 'option_kind', decl: 'TEXT' }, { name: 'option_id', decl: 'TEXT' }, { name: 'policy', decl: 'TEXT' },
+    { name: 'answered', decl: 'TEXT' }, { name: 'reason', decl: 'TEXT' }, { name: 'at', decl: 'TEXT' },
+  ], unique: [['adw_id', 'role', 'tool_call_id', 'at']], indexes: [] },
   screener_proposals: {
     columns: [
       { name: 'adw_id', decl: 'TEXT' },
@@ -1634,6 +1651,9 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   narration: 'recordNarrationMeasurement',
   screener_proposal: 'recordScreenerProposal',
   advisor_usage: 'recordAdvisorUsage',
+  acp_turn: 'recordSeatTurn',
+  acp_tool_call: 'recordSeatToolCall',
+  acp_permission_policy: 'recordSeatPermission',
 })
 
 // A crew journal row whose `event` is this value is that fact.
@@ -1654,7 +1674,7 @@ export const SHADOW_PICK_EXCLUSION_REASONS = Object.freeze(['band-unknown', 'ban
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1709,6 +1729,9 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordNarrationMeasurement: 'narration_measurements',
   recordScreenerProposal: 'screener_proposals',
   recordAdvisorUsage: 'advisor_usage',
+  recordSeatTurn: 'seat_turns',
+  recordSeatToolCall: 'seat_tool_calls',
+  recordSeatPermission: 'seat_permissions',
   recordSuiteDecision: 'suite_decisions',
 })
 
@@ -3978,6 +4001,42 @@ export function openLedger({
       conn.prepare(`INSERT OR IGNORE INTO advisor_usage (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
     })
+    return args
+  }
+
+  function recordSeatTurn(input = {}) {
+    requireFields(input, ['adw_id', 'role', 'assignment_id', 'at'], 'recordSeatTurn')
+    if (input.transport != null && input.transport !== 'acp') refuse("recordSeatTurn: field 'transport' must be 'acp'")
+    if (input.stop_reason == null && input.stop_reason_absent == null) refuse('recordSeatTurn: stop_reason_absent required')
+    if (input.stop_reason != null && input.stop_reason_absent != null) refuse('recordSeatTurn: stop_reason_absent forbidden with stop_reason')
+    if (input.stop_reason != null) requireEnum(input.stop_reason, SEAT_STOP_REASONS, 'recordSeatTurn', 'stop_reason')
+    if (input.stop_reason_absent != null) requireEnum(input.stop_reason_absent, ['refused', 'response-unread'], 'recordSeatTurn', 'stop_reason_absent')
+    if (input.usage_reason != null) requireEnum(input.usage_reason, ['usage-incomplete', 'usage-unavailable'], 'recordSeatTurn', 'usage_reason')
+    const args = redact({ adw_id: input.adw_id, role: textOrNull(input.role, 80), assignment_id: textOrNull(input.assignment_id, 120), transport: 'acp', stop_reason: input.stop_reason ?? null, stop_reason_absent: input.stop_reason_absent ?? null, usage_reason: input.usage_reason ?? null, at: textOrNull(input.at, 80) }, stats)
+    if (!args.role || !args.assignment_id || !args.at) refuse('recordSeatTurn: required identity fields were redacted')
+    appendJsonl('recordSeatTurn', args)
+    mirror((conn) => { const cols = tableColumnNames('seat_turns'); conn.prepare(`INSERT OR IGNORE INTO seat_turns (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => toBindable(args[c]))) })
+    return args
+  }
+  function recordSeatToolCall(input = {}) {
+    requireFields(input, ['adw_id', 'role', 'assignment_id', 'at'], 'recordSeatToolCall')
+    if (input.has_diff != null && ![true, false, 0, 1].includes(input.has_diff)) refuse("recordSeatToolCall: field 'has_diff' must be boolean or 0/1")
+    if (input.locations != null && (!Array.isArray(input.locations) || input.locations.some((path) => typeof path !== 'string'))) refuse("recordSeatToolCall: field 'locations' must be an array of path strings")
+    const locations = input.locations ?? []
+    const args = redact({ adw_id: input.adw_id, role: textOrNull(input.role, 80), assignment_id: textOrNull(input.assignment_id, 120), tool_call_id: textOrNull(input.tool_call_id, 160), kind: textOrNull(input.kind, 100), status: textOrNull(input.status, 80), title: textOrNull(input.title, 500), locations_json: JSON.stringify(locations), has_diff: input.has_diff === true || input.has_diff === 1 ? 1 : 0, at: textOrNull(input.at, 80) }, stats)
+    if (!args.role || !args.assignment_id || !args.at) refuse('recordSeatToolCall: required identity fields were redacted')
+    appendJsonl('recordSeatToolCall', args)
+    mirror((conn) => { const cols = tableColumnNames('seat_tool_calls'); const insert = `INSERT OR IGNORE INTO seat_tool_calls (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`; conn.prepare(insert).run(...cols.map((c) => toBindable(args[c]))) })
+    return args
+  }
+  function recordSeatPermission(input = {}) {
+    requireFields(input, ['adw_id', 'role', 'at'], 'recordSeatPermission')
+    if (input.reason == null) requireFields(input, ['option_kind', 'option_id', 'policy'], 'recordSeatPermission')
+    if (input.policy != null) requireEnum(input.policy, SEAT_PERMISSION_POLICIES, 'recordSeatPermission', 'policy')
+    const args = redact({ adw_id: input.adw_id, role: textOrNull(input.role, 80), tool_call_id: textOrNull(input.tool_call_id, 160), tool: textOrNull(input.tool, 100), title: textOrNull(input.title, 500), option_kind: textOrNull(input.option_kind, 100), option_id: textOrNull(input.option_id, 160), policy: input.policy, answered: textOrNull(input.answered, 160), reason: textOrNull(input.reason, 500), at: textOrNull(input.at, 80) }, stats)
+    if (!args.role || !args.at || (input.reason == null && (!args.option_kind || !args.option_id || !args.policy))) refuse('recordSeatPermission: required identity fields were redacted')
+    appendJsonl('recordSeatPermission', args)
+    mirror((conn) => { const cols = tableColumnNames('seat_permissions'); const names = cols.map(quoteSqlIdentifier).join(', '); const vals = cols.map(() => '?').join(', '); conn.prepare(`INSERT INTO seat_permissions (${names}) SELECT ${vals} WHERE NOT EXISTS (SELECT 1 FROM seat_permissions WHERE adw_id IS ? AND role IS ? AND tool_call_id IS ? AND at IS ?)`).run(...cols.map((c) => toBindable(args[c])), args.adw_id, args.role, args.tool_call_id, args.at) })
     return args
   }
 
@@ -6591,7 +6650,7 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordSuiteDecision,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
@@ -6748,6 +6807,18 @@ function journalFactArgs(writer, row, adwId, reask = null) {
       usage_reason: payload.usage_reason ?? null,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
+  }
+  if (writer === JOURNAL_FACT_KEYS.acp_turn) {
+    const turn = value('acp_turn')
+    return { adw_id: rowAdwId, role: turn.role ?? source.role ?? null, assignment_id: turn.assignment_id ?? null, transport: 'acp', stop_reason: turn.stopReason ?? null, stop_reason_absent: turn.stop_reason_absent ?? null, usage_reason: turn.usage_reason ?? null, at: source.at ?? null }
+  }
+  if (writer === JOURNAL_FACT_KEYS.acp_tool_call) {
+    const tool = value('acp_tool_call')
+    return { adw_id: rowAdwId, role: tool.role ?? source.role ?? null, assignment_id: tool.assignment_id ?? null, tool_call_id: tool.tool_call_id ?? null, kind: tool.kind ?? null, status: tool.status ?? null, title: tool.title ?? null, locations: tool.locations ?? [], has_diff: tool.has_diff === true, at: source.at ?? null }
+  }
+  if (writer === JOURNAL_FACT_KEYS.acp_permission_policy) {
+    const permission = value('acp_permission_policy')
+    return { adw_id: rowAdwId, role: permission.role ?? source.role ?? null, tool_call_id: permission.tool_call_id ?? null, tool: permission.tool ?? null, title: permission.title ?? null, option_kind: permission.option_kind ?? null, option_id: permission.option ?? null, policy: permission.policy ?? null, answered: permission.answered ?? null, reason: permission.reason ?? null, at: source.at ?? null }
   }
   if (writer === JOURNAL_FACT_KEYS.screener_proposal) {
     const proposal = value('screener_proposal')

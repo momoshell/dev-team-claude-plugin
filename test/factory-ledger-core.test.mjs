@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL,
+  openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -28,6 +28,8 @@ import { loadDurableEscalationRecord, proposalFromResponse, proposalPrompt, tria
 
 import { bootTieredRun } from './factory-ledger.test.mjs'
 import { SHADOW_OUTCOMES, SHADOW_EXCLUSIONS } from '../crew/crew.mjs'
+import { ACP_STOP_REASONS } from '../crew/acp-client.mjs'
+import { PERMISSION_POLICIES } from '../crew/acp-permission.mjs'
 import { SHADOW_PICK_OUTCOMES, SHADOW_PICK_EXCLUSION_REASONS } from '../scripts/factory/ledger.mjs'
 
 import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse } from './factory-ledger.test.mjs'
@@ -35,6 +37,39 @@ import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, 
 
 
 
+test('ACP L1', () => {
+  const ledger = openTestLedger(); try {
+    const now = '2026-09-26T00:00:00.000Z'
+    ledger.recordSeatTurn({ adw_id: 'l1', role: 'builder', assignment_id: 'd1', at: now, stop_reason: null, stop_reason_absent: 'response-unread', usage_reason: 'usage-unavailable' })
+    ledger.recordSeatToolCall({ adw_id: 'l1', role: 'builder', assignment_id: 'd1', tool_call_id: 't1', at: now, status: 'done', locations: [], has_diff: false })
+    const permission = { adw_id: 'l1', role: 'builder', tool_call_id: null, option_kind: 'reject_once', option_id: 'r', policy: 'no-lead', at: now }
+    ledger.recordSeatPermission(permission); ledger.recordSeatPermission(permission)
+    ledger.recordSeatTurn({ adw_id: 'l1', role: 'builder', assignment_id: 'd1', at: now, stop_reason: null, stop_reason_absent: 'response-unread', usage_reason: 'usage-unavailable' })
+    ledger.recordSeatToolCall({ adw_id: 'l1', role: 'builder', assignment_id: 'd1', tool_call_id: 't1', at: now, status: 'done', locations: [], has_diff: false })
+    assert.equal(ledger.dumpTable('seat_turns').length, 1); assert.equal(ledger.dumpTable('seat_tool_calls').length, 1); assert.equal(ledger.dumpTable('seat_permissions').length, 1)
+    const replay = openLedger({ dbPath: join(scratchDir('l1-replay-'), 'replay.db') }); try { assert.equal(replayJsonl(ledger._jsonlPath, replay).failed, 0); assert.equal(replay.dumpTable('seat_permissions').length, 1) } finally { replay.close() }
+  } finally { ledger.close() }
+})
+test('ACP L2', () => {
+  const ledger = openTestLedger(); try { assert.throws(() => ledger.recordSeatTurn({ adw_id: 'l2', role: 'builder', assignment_id: 'd1', at: 'x', stop_reason: null }), /stop_reason_absent required/) } finally { ledger.close() }
+})
+test('ACP L3', () => {
+  assert.deepEqual(SEAT_PERMISSION_POLICIES, PERMISSION_POLICIES)
+  const ledger = openTestLedger(); try { assert.throws(() => ledger.recordSeatPermission({ adw_id: 'l3', role: 'builder', option_kind: 'allow_once', option_id: 'a', policy: 'bogus', at: 'x' }), /policy/) } finally { ledger.close() }
+})
+test('ACP RV1-3 permission refusal rows ingest with their reason and null decision fields', () => {
+  const dir = scratchDir('seat-permission-refusal-'); const journal = join(dir, 'journal.jsonl')
+  writeFileSync(journal, `${JSON.stringify({ at: '2026-09-26T00:00:00.000Z', role: 'builder', acp_permission_policy: { role: 'builder', reason: 'permission-no-reject-option' } })}\n`)
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') }); try {
+    const result = ingestJournal(journal, ledger, { adw_id: 'permission-refusal' })
+    assert.equal(result.failed, 0); const row = ledger.dumpTable('seat_permissions')[0]
+    assert.equal(row.reason, 'permission-no-reject-option'); assert.equal(row.option_kind, null); assert.equal(row.option_id, null); assert.equal(row.policy, null)
+  } finally { ledger.close() }
+})
+test('ACP L4', () => {
+  assert.deepEqual(SEAT_STOP_REASONS, ACP_STOP_REASONS)
+  const ledger = openTestLedger(); try { assert.throws(() => ledger.recordSeatTurn({ adw_id: 'l4', role: 'builder', assignment_id: 'd1', at: 'x', stop_reason: 'bogus' }), /stop_reason/) } finally { ledger.close() }
+})
 test('R5 a seat-death-reask producer event ingests into seat_reasks', () => {
   assert.equal(SEAT_RETRY_EVENTS[SEAT_DIED_STAGE], 'seat-death-reask')
   assert.ok(SEAT_REASK_EVENTS.includes(SEAT_RETRY_EVENTS[SEAT_DIED_STAGE]))
@@ -2414,7 +2449,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 45)
+    assert.equal(Object.keys(TABLES).length, 48)
   } finally {
     conn.close()
     ledger.close()

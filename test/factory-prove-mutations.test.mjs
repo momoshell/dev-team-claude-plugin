@@ -890,10 +890,11 @@ test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', asyn
     const snapshot = gatedSnapshot([() => existsSync(ready) && Number(readFileSync(ready, 'utf8')) > 0 && (probeSent = true, process.kill(Number(readFileSync(ready, 'utf8')), 'SIGTERM'), true), () => existsSync(observed) || pidDead(Number(readFileSync(ready, 'utf8')))])
     const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 350, snapshot })
     assert.equal(existsSync(ready), true, 'descendant never reported its handler installed')
-    if (probeSent) assert.equal(existsSync(observed), true, 'descendant did not acknowledge SIGTERM before timeout')
+    assert.equal(probeSent, true, 'the readiness probe never signalled the descendant')
+    assert.equal(existsSync(observed), true, 'descendant did not acknowledge SIGTERM before timeout')
     assert.equal(existsSync(shellMarker), true, 'child marker was never written')
     assert.equal(result.error?.code, 'ETIMEDOUT')
-    pid = Number(readFileSync(probeSent ? ready : shellMarker, 'utf8').trim())
+    pid = Number(readFileSync(ready, 'utf8').trim())
     assert.equal(await waitDead(pid), true, 'the SIGTERM-ignoring descendant outlived its timed-out group')
   } finally {
     if (!pid) {
@@ -905,15 +906,6 @@ test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', asyn
   }
 })
 
-test('RV1-1 does not signal a non-positive readiness pid', () => {
-  const source = readFileSync(new URL(import.meta.url), 'utf8')
-  assert.match(source, /existsSync\(ready\) && Number\(readFileSync\(ready, 'utf8'\)\) > 0 && \(probeSent = true, process\.kill\(Number\(readFileSync\(ready, 'utf8'\)\), 'SIGTERM'\)/)
-})
-
-test('RV1-2 requires the descendant readiness marker', () => {
-  const source = readFileSync(new URL(import.meta.url), 'utf8')
-  assert.match(source, /assert\.equal\(existsSync\(ready\), true, 'descendant never reported its handler installed'\)/)
-})
 
 const pidDead = (pid) => { try { process.kill(pid, 0); return false } catch (err) { return err?.code === 'ESRCH' } }
 const killQuietly = (pid) => { try { process.kill(pid, 'SIGKILL') } catch {} }

@@ -4,6 +4,7 @@ import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { readEnvelopeOrThrow } from './headless.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
+import { permissionHandler } from './acp-permission.mjs'
 
 export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi', deps = {} }) {
   const exists = deps.existsSync || fsExistsSync
@@ -31,6 +32,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       binary = bin
     } else {
       for (const dir of searchedPath.split(delimiter)) {
+        if (!isAbsolute(dir)) continue
         const candidate = join(dir, bin)
         if (canRead(candidate)) { binary = candidate; break }
       }
@@ -41,7 +43,16 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       throw error
     }
     const launchFn = adapter.acpLaunch || piAcpLaunch
-    const launch = launchFn({ bin: binary, model: member?.model, cwd: checkout || process.cwd(), deny: member?.deny || '' })
+    const seatTaskDir = taskDir || paths.taskDir
+    // The same seat parts headless-rpc hands its command (crew/headless-rpc.mjs): the role charter, the
+    // grants (the submit extension delivers the envelope without a gated write), and the seat's env.
+    const launch = launchFn({ role, bin: binary, model: member?.model, effort: member?.effort, cwd: checkout || process.cwd(), deny: member?.deny || '',
+      promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir,
+      env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir } })
+    // #797: the launch policy settles what it can; an unsettled request goes to the injected lead, and with
+    // no lead it is reject_once. Fail closed: nothing here approves a request the policy did not name.
+    const onPermission = permissionHandler({ policy: launch.policy, lead: deps.permissionLead ?? null,
+      log: (row) => log({ at: now(), acp_permission_policy: { role, ...row } }) })
     const clientFactory = deps.clientFactory || defaultClient
     const onUpdate = (update) => {
       const a = assignments.get(current.get(role))
@@ -49,7 +60,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       a.sawUpdate = true
       emit({ kind: 'heartbeat', at: update.at, role })
     }
-    const client = clientFactory({ launch, dir: join(taskDir || paths.taskDir, 'acp'), cwd: checkout || process.cwd(), role,
+    const client = clientFactory({ launch, dir: join(seatTaskDir, 'acp'), cwd: checkout || process.cwd(), role, onPermission,
       sinks: Object.fromEntries(ACP_UPDATE_KINDS.map((kind) => [kind, onUpdate])),
       deps: { ...deps.clientDeps, log } })
     client.start()

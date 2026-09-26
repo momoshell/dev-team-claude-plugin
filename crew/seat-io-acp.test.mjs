@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync as fsExistsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { acpIo } from './acp-io.mjs'
 import { cellFailureKind, ACP_TRANSPORT, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, seatIo } from './seat-io.mjs'
@@ -11,7 +11,7 @@ function fixture(options = {}) {
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
   const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'brief body')
-  const calls = []; const logs = []; const heartbeats = []; let sinks; let launch
+  const calls = []; const logs = []; const heartbeats = []; let sinks; let launch; let onPermission
   const fake = {
     start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession() { calls.push('newSession') },
     beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); return 17 },
@@ -19,10 +19,10 @@ function fixture(options = {}) {
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
-  const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: {}, bin: '/bin/pi',
-    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; return fake }, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
+  const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
+    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep() {} } })
-  return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
+  return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
@@ -137,5 +137,58 @@ test('T11', () => {
     }
     assert.deepEqual(calls.acp, ['assign', 'wait'])
     assert.equal(calls.rpc.length, 2)
+  } finally { cleanup(f) }
+})
+
+test('T13 the ACP launch carries the role charter, grants, config dir and seat env', () => {
+  let spec
+  const grants = { tools: [], extensions: ['crew/pi/extensions/submit.ts'], agents: [], skills: [], advisor: false }
+  const spy = { grants, configDir: '/cfg', acpLaunch(s) { spec = s; return { bin: '/bin/node', args: [], env: {}, policy: { autoDeny: [], autoApprove: [], escalate: [] } } } }
+  const f = fixture({ adapters: { builder: spy } }); try {
+    assign(f)
+    assert.equal(spec.promptFile, join(f.paths.taskDir, 'role-builder.md'))
+    assert.equal(spec.grants, grants)
+    assert.equal(spec.configDir, '/cfg')
+    assert.equal(spec.role, 'builder')
+    assert.deepEqual(spec.env, { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir })
+  } finally { cleanup(f) }
+  const real = fixture(); try {
+    assign(real)
+    const args = real.launch.args
+    assert.equal(args[args.indexOf('--append-system-prompt') + 1], join(real.paths.taskDir, 'role-builder.md'))
+  } finally { cleanup(real) }
+})
+
+test('T14 an ACP permission request is settled by the launch policy, then the lead, else reject_once', () => {
+  const options = [{ optionId: 'a', kind: 'allow_once', name: 'Allow' }, { optionId: 'r', kind: 'reject_once', name: 'Reject' }]
+  const policy = { autoDeny: ['bash'], autoApprove: ['read'], escalate: ['write'] }
+  const adapters = { builder: { acpLaunch: () => ({ bin: '/bin/node', args: [], env: {}, policy }) } }
+  const bare = fixture({ adapters }); try {
+    assign(bare)
+    assert.equal(typeof bare.onPermission, 'function', 'acpIo handed the client no permission handler')
+    assert.equal(bare.onPermission({ toolCall: { title: 'bash', kind: 'execute' }, options }), 'r')
+    assert.equal(bare.onPermission({ toolCall: { title: 'read', kind: 'read' }, options }), 'a')
+    assert.equal(bare.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'r')
+    assert.equal(bare.logs.find((row) => row.acp_permission_policy?.title === 'write').acp_permission_policy.policy, 'no-lead')
+  } finally { cleanup(bare) }
+  const asked = []
+  const led = fixture({ adapters, permissionLead: (payload) => { asked.push(payload); return { decision: 'a' } } }); try {
+    assign(led)
+    assert.equal(led.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'a')
+    assert.equal(asked.length, 1)
+    assert.equal(asked[0].question, 'permit')
+    assert.deepEqual(asked[0].options, ['a', 'r'])
+  } finally { cleanup(led) }
+})
+
+test('T15 an empty or relative PATH segment is skipped, never resolved against the cwd', () => {
+  const f = fixture(); try {
+    let resolved = null
+    const fake = { start() {}, initialize() {}, newSession() {}, beginPrompt() { return 1 }, close() { return { outcome: 'proven' } } }
+    const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths: f.paths, taskDir: f.paths.taskDir, checkout: f.root, bin: 'pi',
+      deps: { env: { PATH: `:bin${delimiter}/opt/acp` }, existsSync: (path) => path === 'pi' || path === join('bin', 'pi') || path === '/opt/acp/pi',
+        clientFactory: ({ launch }) => { resolved = launch.env.CREW_PI_BIN; return fake } } })
+    io.assign({ role: 'builder', briefFile: f.briefFile })
+    assert.equal(resolved, '/opt/acp/pi')
   } finally { cleanup(f) }
 })

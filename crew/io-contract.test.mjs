@@ -317,7 +317,7 @@ test('T12', () => {
   const paths = dirs()
   const fake = { start() {}, initialize() {}, newSession() {}, beginPrompt() { return 1 }, pollPrompt() { return null }, cancel() {}, close() { return { outcome: 'proven' } } }
   const io = acpIo({ crew: { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: paths.dir, bin: '/bin/pi',
-    deps: { existsSync: (path) => path === '/bin/pi' || fsExistsSync(path), clientFactory: () => fake } })
+    deps: { existsSync: (path) => path === '/bin/pi' || fsExistsSync(path), clientFactory: () => fake, sleep() {} } })
   for (const method of ['assign', 'wait', 'steer', 'abort', 'entries', 'retire', 'close', 'teardown']) assert.equal(typeof io[method], 'function', method)
   const briefFile = join(paths.taskDir, 'brief.md'); fsWriteFileSync(briefFile, 'brief')
   const assigned = io.assign({ role: 'builder', briefFile })

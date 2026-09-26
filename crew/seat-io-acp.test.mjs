@@ -23,7 +23,7 @@ function fixture(options = {}) {
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
-      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep() {} } })
+      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
@@ -64,6 +64,39 @@ test('ACP U3', () => {
   const f = fixture({ turn: { stopReason: 'end_turn', usage: null } }); try {
     const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id })); f.io.wait(out.returnPath, 1)
     assert.equal(f.heartbeats.some((e) => e.kind === 'usage'), false); assert.equal(f.logs[0].acp_turn.usage, null)
+  } finally { cleanup(f) }
+})
+test('ACP C1 close and replacement settle delayed billed turns', () => {
+  const usage = { inputTokens: 1, outputTokens: 2, cachedReadTokens: 3, cachedWriteTokens: 4 }
+  const turn = { stopReason: 'end_turn', usage }
+  const f = fixture({ pollResults: [null, turn], closeSettleMs: 25 }); try {
+    assign(f); f.io.teardown()
+    assert.equal(f.logs.find((row) => row.acp_turn)?.acp_turn.stopReason, 'end_turn')
+    assert.deepEqual(f.heartbeats.filter((row) => row.kind === 'usage')[0].usage, { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_read_tokens: 3, billed_cache_write_tokens: 4 })
+  } finally { cleanup(f) }
+  const g = fixture({ pollResults: [null, turn], closeSettleMs: 25 }); try {
+    const old = assign(g); assign(g, { id: 'next', returnPath: join(g.paths.returnsDir, 'next.builder.json') })
+    assert.equal(g.logs.find((row) => row.acp_turn?.assignment_id === old.id).acp_turn.stopReason, 'end_turn')
+  } finally { cleanup(g) }
+})
+test('ACP C2 closing polls are bounded and report unread usage', () => {
+  let time = 0; let sleeps = 0
+  const f = fixture({ now: () => time, sleep: (ms) => { sleeps++; time += ms } }); try {
+    assign(f); f.io.teardown()
+    const row = f.logs.find((entry) => entry.acp_turn).acp_turn
+    assert.equal(row.stop_reason_absent, 'response-unread'); assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-unavailable')
+    assert.ok(time <= 3025); assert.ok(f.calls.filter((call) => call === 'pollPrompt').length <= 122); assert.ok(sleeps > 0)
+  } finally { cleanup(f) }
+  const frozen = fixture({ now: () => 100, sleep() {} }); try {
+    assign(frozen); frozen.io.teardown()
+    assert.ok(frozen.calls.filter((call) => call === 'pollPrompt').length <= 122)
+  } finally { cleanup(frozen) }
+})
+test('ACP C3 abort cancels before its zero-window poll and does not sleep', () => {
+  let sleeps = 0
+  const f = fixture({ sleep: () => { sleeps++ }, pollResults: [null] }); try {
+    assign(f); f.io.abort('builder')
+    assert.ok(f.calls.indexOf('cancel') < f.calls.indexOf('pollPrompt')); assert.equal(sleeps, 0)
   } finally { cleanup(f) }
 })
 test('ACP S1', () => {

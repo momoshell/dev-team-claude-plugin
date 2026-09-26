@@ -7774,7 +7774,7 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return result
   }
-  if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role }) => ({ decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
+  if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role, tool_call: call }) => (variant === 'review_panel' && ['edit', 'write', 'delete', 'move'].some((k) => k === call?.kind || k === call?.title) ? { decision: null } : { decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
   if (ctx.resume_checkpoint) {
     const checkpoint = ctx.resume_checkpoint
     const resume = runResumeTail(checkpoint, ctx, io)

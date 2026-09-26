@@ -1800,7 +1800,7 @@ test('A1 narration measurements round-trip from journal to queryable ledger', { 
     const journalPath = join(nextDir(), 'narration-journal.jsonl')
     writeFileSync(journalPath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
     assert.deepEqual(ingestJournal(journalPath, ledger), {
-      applied: 4, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+      applied: 4, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
     })
     originalRows = ledger.dumpTable('narration_measurements').map((row) => ({ ...row }))
     assert.deepEqual(originalRows, [
@@ -1865,7 +1865,7 @@ test('b395 T1 the recorded phase-slot-wait row round-trips journal to ledger to 
   const adwId = 'b395-t1'
   const { ledger, result, dbPath } = ingestJournalLine(B395_SLOT_WAIT_GATE_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('phase_slot_waits')[0] }, {
       adw_id: adwId, kind: 'gate', queue_depth: null,
       queue_depth_absent: PHASE_SLOT_WAIT_DEPTH_ABSENT, waited_ms: 1, slotted: 1,
@@ -1886,7 +1886,7 @@ test('b395 T2 all three recorded phase-slot-wait kinds ingest and count by kind'
   ].join('\n')}\n`)
   try {
     assert.deepEqual(ingestJournal(journalPath, ledger, { adw_id: 'b395-t2' }), {
-      applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+      applied: 3, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
     })
     const payload = ledger.journalFacts({})
     assert.deepEqual(payload.phase_slot_waits.by_kind, {
@@ -2011,7 +2011,7 @@ test('b381 F1 the recorded b371 provider_failure row round-trips journal to ledg
   const adwId = 'b381-f1'
   const { ledger, result, dbPath } = ingestJournalLine(B381_PROVIDER_FAILURE_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('provider_failures')[0] }, {
       adw_id: adwId, role: null, dispatch_id: null, kind: 'rate_limit', status: 429,
       outcome: 'budget-refused', at_ms: 1788292622004, created_at: isoMs(1788292622004),
@@ -2026,7 +2026,7 @@ test('b381 F2 the recorded b374 plan_scope row round-trips journal to ledger to 
   const adwId = 'b381-f2'
   const { ledger, result, dbPath } = ingestJournalLine(B381_PLAN_SCOPE_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('plan_scope_changes')[0] }, {
       adw_id: adwId, round: 1, verdict: 'plan-scope-same', added: 0, dropped: 0,
       dispatched: 8, planned: 8, created_at: isoMs(1788293864633),
@@ -2041,7 +2041,7 @@ test('b381 F3 the recorded b374 seat-timeout-reask row round-trips journal to le
   const adwId = 'b381-f3'
   const { ledger, result, dbPath } = ingestJournalLine(B381_TIMEOUT_REASK_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('seat_reasks')[0] }, {
       adw_id: adwId, event: 'seat-timeout-reask', role: 'builder', dispatch_id: 'd6', cause: 'timeout',
       outcome: 'failed', spent_ms: 2828375, ceiling_s: 2400, from_run_id: 'd6', to_run_id: null,
@@ -2060,7 +2060,7 @@ test('b381 F4 a seat-abort-reask row round-trips journal to ledger to query', { 
   const adwId = 'b381-f4'
   const { ledger, result, dbPath } = ingestJournalLine(JSON.stringify(source), adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('seat_reasks')[0] }, {
       adw_id: adwId, event: SEAT_RETRY_EVENTS[SEAT_RETRY_KINDS[1]], role: 'builder', dispatch_id: 'd6',
       cause: SEAT_RETRY_KINDS[1], outcome: 'failed', spent_ms: 2828375, ceiling_s: 2400,
@@ -2075,7 +2075,7 @@ test('b381 F5 the recorded b374 rpc_exit_context row round-trips journal to ledg
   const adwId = 'b381-f5'
   const { ledger, result, dbPath } = ingestJournalLine(B381_RPC_EXIT_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('rpc_exit_contexts')[0] }, {
       adw_id: adwId, role: 'builder', dispatch_id: 'd6', outcome: 'timeout', exit_code: 143,
       exit_signal: 'SIGTERM', attribution: 'driver-retired', driver_signalled: 1,
@@ -2092,7 +2092,7 @@ test('b381 F6 the recorded b368 plan-adopted row round-trips journal to ledger t
   const adwId = 'b381-f6'
   const { ledger, result, dbPath } = ingestJournalLine(B381_PLAN_ADOPTION_LINE, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('plan_adoptions')[0] }, {
       task_slug: 'b368-scopesubset', lane: 'b368-scopesubset',
       archive: '/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset',
@@ -2136,7 +2136,7 @@ test('b385 F1 a mutation_anchor_absent journal row round-trips to the ledger thr
   } })
   const absence = ingestJournalLine(absenceLine, adwId)
   try {
-    assert.deepEqual(absence.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(absence.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...absence.ledger.dumpTable('mutation_anchor_absences')[0] }, {
       adw_id: adwId, gate_generation: 1, check_name: 'B2', file: 'crew/drive.mjs', correction: 'accepted',
       refusal: null, why: 'corrected and killed', at_ms: Date.parse(at), created_at: at,
@@ -2149,7 +2149,7 @@ test('b385 F1 a mutation_anchor_absent journal row round-trips to the ledger thr
   } })
   const bind = ingestJournalLine(bindLine, adwId)
   try {
-    assert.deepEqual(bind.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(bind.result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...bind.ledger.dumpTable('mutation_anchor_binds')[0] }, {
       adw_id: adwId, gate_generation: 1, declared: 2, exact: 1, normalized: 0, absent: 1, corrected: 1,
       at_ms: Date.parse(at), created_at: at,
@@ -2229,7 +2229,7 @@ test('b381 E1 a journal carrying none of these rows leaves the ledger byte-ident
   writeFileSync(journalPath, `${none.map((row) => JSON.stringify(row)).join('\n')}\n`)
   try {
     const result = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(result, { applied: 0, skipped: 0, ignored: none.length, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 0, skipped: 0, ignored: none.length, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual(readFileSync(ledger._jsonlPath), beforeBytes)
     for (const table of Object.keys(TABLES)) assert.deepEqual(ledger.dumpTable(table), beforeRows[table], table)
   } finally { ledger.close() }
@@ -2244,7 +2244,7 @@ test('A2 reap ingests provider failures', { skip: SKIP }, () => {
   })}\n`)
   try {
     assert.deepEqual(ingestJournal(journalPath, ledger, { adw_id: adwId }), {
-      applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+      applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
     })
     assert.deepEqual(ledger.dumpTable('provider_failures').map(({ adw_id, role, dispatch_id, kind, status, outcome }) => ({
       adw_id, role, dispatch_id, kind, status, outcome,
@@ -2328,7 +2328,7 @@ test('A6 malformed journal line reports an unmeasured reason', { skip: SKIP }, (
   try {
     const result = ingestJournal(journalPath, ledger, { adw_id: adwId })
     assert.deepEqual(result, {
-      applied: 1, skipped: 1, ignored: 0, failed: 0, complete: false,
+      applied: 1, skipped: 1, ignored: 0, failed: 0, unstamped: 0, complete: false,
       first_failure: { line: 1, reason: 'journal line is not valid JSON' },
     })
     assert.equal(ledger.dumpTable('seat_turn_census').length, 1)
@@ -2353,7 +2353,7 @@ test('b401 a journalled seat_turn_census row ingests to a seat_turn_census ledge
   })
   const { ledger, result } = ingestJournalLine(line, adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     const row = ledger.dumpTable('seat_turn_census')[0]
     assert.equal(row.turns, 10)
     assert.equal(row.tool_calls, null)
@@ -2692,7 +2692,7 @@ test('ingest-all replay contract: every journal-fed table survives a second inge
   }
   try {
     const first = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(first, { applied: 16, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(first, { applied: 16, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.equal(ledger.dumpTable('provider_failures').length, 2)
     assert.equal(ledger.dumpTable('plan_scope_changes').length, 1)
     assert.equal(ledger.dumpTable('accept_reasks').length, 1)
@@ -2717,7 +2717,7 @@ test('ingest-all replay contract: every journal-fed table survives a second inge
     const before = dumpAll()
     const logBefore = readFileSync(ledger._jsonlPath)
     const second = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(second, { applied: 0, skipped: 0, ignored: 16, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(second, { applied: 0, skipped: 0, ignored: 16, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual(dumpAll(), before)
     assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
   } finally { ledger.close() }
@@ -2742,13 +2742,13 @@ test('ingest-all replay keeps the first physical row and pins malformed lines', 
   }
   try {
     const first = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(first, { applied: 2, skipped: 1, ignored: 3, failed: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
+    assert.deepEqual(first, { applied: 2, skipped: 1, ignored: 3, failed: 0, unstamped: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
     assert.equal(ledger.dumpTable('plan_adoptions')[0].source, 'first')
     assert.equal(ledger.dumpTable('provider_failures')[0].kind, 'rate_limit')
     const before = dumpAll()
     const logBefore = readFileSync(ledger._jsonlPath)
     const second = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(second, { applied: 0, skipped: 1, ignored: 5, failed: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
+    assert.deepEqual(second, { applied: 0, skipped: 1, ignored: 5, failed: 0, unstamped: 0, complete: false, first_failure: { line: 1, reason: 'journal line is not valid JSON' } })
     assert.deepEqual(dumpAll(), before)
     assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
   } finally { ledger.close() }
@@ -2770,18 +2770,18 @@ test('ingest-all dry_run counts eligible facts without invoking writers', { skip
   }
   try {
     const dry = ingestJournal(journalPath, ledger, { adw_id: adwId, dry_run: true })
-    assert.deepEqual(dry, { applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(dry, { applied: 3, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     for (const table of Object.keys(TABLES)) assert.deepEqual(ledger.dumpTable(table), [], table)
     assert.equal(existsSync(ledger._jsonlPath), false)
     const withoutLedger = ingestJournal(journalPath, null, { adw_id: adwId, dry_run: true })
     assert.deepEqual(withoutLedger, dry)
     const real = ingestJournal(journalPath, ledger, { adw_id: adwId })
-    assert.deepEqual(real, { applied: 3, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(real, { applied: 3, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.ok(Object.values(dumpAll()).some((rows) => rows.length > 0))
     const logBefore = readFileSync(ledger._jsonlPath)
     const before = dumpAll()
     const dryAgain = ingestJournal(journalPath, ledger, { adw_id: adwId, dry_run: true })
-    assert.deepEqual(dryAgain, { applied: 0, skipped: 0, ignored: 3, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(dryAgain, { applied: 0, skipped: 0, ignored: 3, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual(dumpAll(), before)
     assert.deepEqual(readFileSync(ledger._jsonlPath), logBefore)
   } finally { ledger.close() }

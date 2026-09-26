@@ -184,7 +184,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', ''],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
-  ['operationalRow', '', 'role id'],
+  ['operationalRow', '', 'role id at run_id cell'],
   ['operationalRow', "event='teardown-transports'", 'at declared transports init_failed seats'],
   ['recordRow', '', 'at reseat'],
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
@@ -3248,6 +3248,9 @@ test('pane wait exception still emits exactly one unmeasured suite-policy row', 
     assert.equal(policyRows.length, 1)
     assert.equal(policyRows[0].suite_policy, null)
     assert.equal(policyRows[0].suite_policy_absent, PANE_NO_INTERCEPT)
+    assert.equal(policyRows[0].dispatch_id, 'd1')
+    assert.equal(Number.isFinite(policyRows[0].at), true)
+    assert.equal(policyRows[0].at, 0)
   })
 })
 
@@ -3286,6 +3289,8 @@ test('b416 D1 pane policy reports a strict unmeasured shape exactly once on an o
   const pure = paneSeatPolicyRow({ role: 'builder', id: 'd1' })
   assert.equal(pure.event, SEAT_SUITE_POLICY_EVENT)
   assert.equal(pure.id, 'd1')
+  assert.equal(pure.dispatch_id, 'd1')
+  assert.equal(Number.isFinite(pure.at), true)
   assert.equal(pure.suite_policy, null)
   assert.equal(pure.suite_policy_absent, PANE_NO_INTERCEPT)
 

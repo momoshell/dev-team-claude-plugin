@@ -17,7 +17,7 @@ import {
 import {
   headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
   UNCLASSIFIED_REFUSAL, recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
-  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow,
+  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
@@ -46,8 +46,8 @@ export function turnCeilingValues(record) {
 // The pane transport runs claude interactively with inherited stdio: there is no
 // seat stream to observe, so NOTHING here was measured. Every unmeasured cell is
 // null with a closed reason; a zero would claim this transport looked.
-export function paneSeatPolicyRow({ role, id = null }) {
-  return { ...suitePolicyRow({ role, transport: DEFAULT_TRANSPORT, counters: null, absentReason: PANE_NO_INTERCEPT }), id }
+export function paneSeatPolicyRow({ role, id = null, at = Date.now(), run_id = null, cell = null }) {
+  return { ...suitePolicyRow({ role, transport: DEFAULT_TRANSPORT, counters: null, absentReason: PANE_NO_INTERCEPT, dispatch_id: id, at, run_id, cell }), id }
 }
 
 // ONE shape for every replacement attempt. A re-ask that drops the policy is a
@@ -3255,7 +3255,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // transport. Measure in finally so a timeout or seat death still
         // records spend already written to the transcript.
         if (!transport && info?.role) emitPaneUsage(info)
-        if (!transport) { try { io.log(operationalRow(paneSeatPolicyRow({ role: info?.role || 'unknown', id: info?.id ?? null }))) } catch { /* never load-bearing */ } }
+        if (!transport) { try { io.log(operationalRow(paneSeatPolicyRow({ role: info?.role || 'unknown', id: info?.id ?? null, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, info?.role) }))) } catch { /* never load-bearing */ } }
         // Transcript refusal frames are durable evidence; no screen run is
         // closed here because liveness no longer reads pane pixels.
       }

@@ -480,7 +480,11 @@ export const RETURNS_INHERITANCE_REASONS = Object.freeze(['run-scoped', 'returns
 export function runScopedPaths(paths, runId) {
   assertRunToken(runId)
   const runReturnsDir = join(paths.returnsDir, runId)
-  return { ...paths, returnsDir: runReturnsDir }
+  const scoped = { ...paths, returnsDir: runReturnsDir }
+  // ADR-046 Amendment 1: the boot identity suite-policy rows stamp as run_id. Not
+  // enumerable, so every consumer that compares or serialises paths sees them unchanged.
+  Object.defineProperty(scoped, 'runId', { value: runId, enumerable: false })
+  return scoped
 }
 
 export function returnsInheritanceRecord(paths, runId, deps = {}) {

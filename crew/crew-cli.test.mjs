@@ -3732,6 +3732,9 @@ test('E1 clean first run has no inheritance side effect', () => {
   const paths = { dir: '/tmp/crew-return-e1', taskDir: '/tmp/crew-return-e1/task', returnsDir: '/tmp/crew-return-e1/returns' }
   assert.equal(returnsInheritanceRecord(paths, 'run-clean', { readdirSync: () => [] }), null)
   assert.deepEqual(runScopedPaths(paths, 'run-clean').returnsDir, join(paths.returnsDir, 'run-clean'))
+  // ADR-046 Amendment 1: the boot id suite-policy rows stamp, carried without changing the paths shape.
+  assert.equal(runScopedPaths(paths, 'run-clean').runId, 'run-clean')
+  assert.equal(Object.keys(runScopedPaths(paths, 'run-clean')).includes('runId'), false)
 })
 
 test('F1 inherited returns are journalled once with a closed reason', async () => {

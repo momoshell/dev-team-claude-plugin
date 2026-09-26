@@ -1859,7 +1859,7 @@ test('ingest-all backfills active and archived journals whole-window and counts 
   assert.equal(result.code, 1, 'an unresolved identity is unmeasured, so the command refuses')
   assert.deepEqual(result.report, {
     journals_seen: 3, ingested: 2, skipped_by_reason: { identity_unresolved: 1 }, incomplete: [],
-    rows_applied: 10, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
+    rows_applied: 10, rows_ignored: 0, rows_skipped: 0, rows_failed: 0, rows_unstamped: 0,
   })
   assert.equal(lines.length, 1)
   assert.deepEqual(JSON.parse(lines[0]), result.report)
@@ -1871,6 +1871,21 @@ test('ingest-all backfills active and archived journals whole-window and counts 
   assert.equal(snapshot.plan_adoptions.length, 2)
   assert.deepEqual(snapshot.provider_failures.map((row) => row.adw_id).sort(), ['lane-a', 'lane-b'])
   assert.ok(snapshot.provider_failures.some((row) => row.outcome === 'budget-refused'))
+})
+
+test('ingest-all reports suite-policy rows without at as rows_unstamped and inserts none (ADR-046)', () => {
+  const root = ingestAllRoot()
+  const dbPath = join(root, 'backfill.db')
+  ingestAllLane(root, dbPath, 'dt-one', 'lane-a', { facts: [
+    { event: 'seat-suite-policy', role: 'builder', transport: 'headless-json', suite_policy: { admitted: 1, refused: 0, unrecognised: 0 } },
+    { event: 'seat-suite-policy', role: 'builder', transport: 'headless-json', refusal: 'suite-run-not-owned', command: 'npm test', kind: 'suite' },
+    { at: '2030-01-01T00:00:01.000Z', event: 'seat-suite-policy', dispatch_id: 'd1', role: 'builder', transport: 'headless-json', suite_policy: { admitted: 1, refused: 0, unrecognised: 0 } },
+  ] })
+  const result = ingestAll({ root, deps: ingestAllDeps(() => {}) })
+  assert.equal(result.code, 0)
+  assert.equal(result.report.rows_unstamped, 2)
+  assert.equal(result.report.rows_applied, 1)
+  assert.deepEqual(ingestAllSnapshot(dbPath).suite_decisions.map((row) => row.dispatch_id), ['d1'])
 })
 
 test('ingest-all replay adds zero rows and zero JSONL bytes', () => {
@@ -1887,7 +1902,7 @@ test('ingest-all replay adds zero rows and zero JSONL bytes', () => {
   assert.equal(second.code, 0)
   assert.deepEqual(second.report, {
     journals_seen: 1, ingested: 1, skipped_by_reason: {}, incomplete: [],
-    rows_applied: 0, rows_ignored: 5, rows_skipped: 0, rows_failed: 0,
+    rows_applied: 0, rows_ignored: 5, rows_skipped: 0, rows_failed: 0, rows_unstamped: 0,
   })
   assert.deepEqual(ingestAllSnapshot(dbPath), before)
   assert.deepEqual(readFileSync(jsonlPath), logBefore)
@@ -1923,7 +1938,7 @@ test('ingest-all on an empty root reports zeros with one JSON line', () => {
   assert.equal(result.code, 0)
   assert.deepEqual(result.report, {
     journals_seen: 0, ingested: 0, skipped_by_reason: {}, incomplete: [],
-    rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0,
+    rows_applied: 0, rows_ignored: 0, rows_skipped: 0, rows_failed: 0, rows_unstamped: 0,
   })
   assert.equal(lines.length, 1)
 })

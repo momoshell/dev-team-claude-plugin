@@ -863,9 +863,10 @@ test('A4 a hanging diff gate is counted as a timeout kill', async () => {
   writeFileSync(file, after)
   const hang = join(root, 'hang.pid')
   const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: hangCommand(hang), cap: 1, generation: 1 }
+  // The runner's first table waits for the hang's own marker, so shell startup can never beat the bound.
   const runCommand = (command, cwd, options) => command === 'lane'
     ? { ok: true, output: '', status: 0, completed: true }
-    : mod.normalDeps().runCommand(command, cwd, options)
+    : mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
   let pid = null
   try {
     const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
@@ -1161,9 +1162,13 @@ test('A2 a hanging diff validation is timed out, killed, and restored', async ()
   writeFileSync(file, after)
   const hang = join(root, 'hang.pid')
   const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: hangCommand(hang), gate_cmd: 'gate', cap: 1, generation: 1 }
+  // The runner's first table waits for the hang's own marker, so shell startup can never beat the bound.
+  const runCommand = (command, cwd, options) => command === config.validation_lane
+    ? mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
+    : mod.normalDeps().runCommand(command, cwd, options)
   let pid = null
   try {
-    const result = await mod.runDiffMutationProof(config, { runTimeoutMs: 350 })
+    const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
     assert.ok(existsSync(hang), 'the hanging validation never started')
     pid = Number(readFileSync(hang, 'utf8'))
     const timedOut = result.mutants.find((row) => row.kill_reason === 'timeout')

@@ -5805,7 +5805,7 @@ test('R1 panel permission lead is registered before panel dispatch', async () =>
   let io
   const reviewer = () => {
     selected = permissionHandler({ lead: (payload) => (callbackAnswer = lead(payload)) })({
-      toolCall: { title: 'bash', kind: 'execute' },
+      toolCall: { title: 'fetch', kind: 'fetch' },
       options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }],
     })
     return { ...panelEnvelope({ role: 'reviewer' }), assignment_id: `panel-${io.calls.assign.findLastIndex(({ role }) => role === 'reviewer') + 1}` }
@@ -5835,7 +5835,7 @@ test('R2 panel permission second opinions exclude both panel seats and reject', 
   let io
   const reviewer = () => {
     selected = permissionHandler({ lead })({
-      toolCall: { title: 'bash', kind: 'execute' },
+      toolCall: { title: 'fetch', kind: 'fetch' },
       options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }],
     })
     during = {
@@ -5895,4 +5895,55 @@ test('R4 a review_panel seat never gets a checkout-mutating permission, and the 
   driveTask(panelContext(), io)
   assert.deepEqual(selected, ['r', 'r', 'r', 'r', 'r'])
   assert.equal(leadAssignsBefore(), 1, 'only the adjudication consult reached the lead; no permission consult did')
+})
+
+test('B3 panel permission allows and refuses execute without consulting lead', async () => {
+  const { permissionHandler } = await import('./acp-permission.mjs')
+  let lead, selected = [], permissionLeadAssignments = null, io
+  const reviewer = () => {
+    const before = io.calls.assign.filter(({ role }) => role === 'lead').length
+    const handler = permissionHandler({ lead })
+    selected = [
+      handler({ toolCall: { title: 'bash', kind: 'execute', rawInput: { command: 'git diff' } }, options: [{ optionId: 'allow', kind: 'allow_once' }, { optionId: 'reject', kind: 'reject_once' }] }),
+      handler({ toolCall: { title: 'bash', kind: 'execute', rawInput: { command: 'git diff > f' } }, options: [{ optionId: 'allow', kind: 'allow_once' }, { optionId: 'reject', kind: 'reject_once' }] }),
+    ]
+    permissionLeadAssignments = io.calls.assign.filter(({ role }) => role === 'lead').length - before
+    return { ...panelEnvelope({ role: 'reviewer' }), assignment_id: `panel-${io.calls.assign.findLastIndex(({ role }) => role === 'reviewer') + 1}` }
+  }
+  io = strictPanelIo({ reviewer, runs: reviewDiffRuns({ ok: true, output: '' }, PANEL_BASE_SHA, PANEL_HEAD_SHA) })
+  io.setPermissionLead = (callback) => { lead = callback }
+  const baseWait = io.wait.bind(io)
+  io.wait = function (path, timeout) {
+    if (!path.startsWith('lead:')) return baseWait(path, timeout)
+    this.calls.waits.push({ returnPath: path, timeoutS: timeout })
+    const assignedId = `panel-${this.calls.assign.findLastIndex(({ role }) => role === 'lead') + 1}`
+    return { ...panelEnvelope({ role: 'lead', details: { adjudications: [] } }), role: 'lead', assignment_id: assignedId, run_id: PANEL_RUN_ID }
+  }
+  driveTask(panelContext(), io)
+  assert.deepEqual(selected, ['allow', 'reject'])
+  assert.equal(permissionLeadAssignments, 0)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1, 'only independent panel adjudication is assigned')
+})
+
+test('B5 panel permission preserves ordinary lead execute consult', async () => {
+  const { permissionHandler } = await import('./acp-permission.mjs')
+  let lead, selected, permissionLeadAssignments = 0
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'lead:1': leadEnv('a') } })
+  io.setPermissionLead = (callback) => { lead = callback }
+  const wait = io.wait.bind(io)
+  io.wait = (path, timeout) => {
+    if (path === 'builder:1') {
+      const before = io.calls.assign.filter(({ role }) => role === 'lead').length
+      selected = permissionHandler({ lead })({
+        toolCall: { title: 'bash', kind: 'execute', rawInput: { command: 'git diff' } },
+        options: [{ optionId: 'a', kind: 'allow_once' }, { optionId: 'r', kind: 'reject_once' }],
+      })
+      permissionLeadAssignments = io.calls.assign.filter(({ role }) => role === 'lead').length - before
+      return { assignment_id: 'builder1', role: 'builder', status: 'insufficient', summary: 'stop after permission', artifacts: [], details: {} }
+    }
+    return wait(path, timeout)
+  }
+  driveTask(CTX, io)
+  assert.equal(permissionLeadAssignments, 1)
+  assert.equal(selected, 'a')
 })

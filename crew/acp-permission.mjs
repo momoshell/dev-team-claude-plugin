@@ -12,6 +12,83 @@ export function permitQuestion({ toolCall, options }) {
   ].join('\n')
 }
 
+export function readOnlyCommand(command) {
+  if (typeof command !== 'string' || command.length === 0) return false
+  const segments = []
+  let argv = []
+  let token = ''
+  let started = false
+  let quote = null
+  const finishToken = () => {
+    if (started) argv.push(token)
+    token = ''
+    started = false
+  }
+  const finishSegment = () => {
+    finishToken()
+    if (argv.length === 0) return false
+    segments.push(argv)
+    argv = []
+    return true
+  }
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]
+    if (char === '\\' || char === '$' || char === '`') return false
+    if (quote) {
+      if (char === quote) quote = null
+      else token += char
+      started = true
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      started = true
+      continue
+    }
+    if (';&><(){}'.includes(char) || char === '\n' || char === '\r') return false
+    if (char === '|') {
+      if (command[index + 1] === '|') return false
+      if (!finishSegment()) return false
+      continue
+    }
+    if (/^[\t\v\f ]$/.test(char)) {
+      finishToken()
+      continue
+    }
+    token += char
+    started = true
+  }
+  if (quote || !finishSegment()) return false
+
+  const safeGitVerbs = new Set(['diff', 'log', 'show', 'status', 'blame', 'rev-parse', 'ls-files', 'grep'])
+  const forbiddenGitArgs = ['--output', '--ext-diff', '-O', '--open-files-in-pager']
+  return segments.every((argv) => {
+    if (argv[0] === 'git') {
+      if (!safeGitVerbs.has(argv[1])) return false
+      return argv.every((arg) => {
+        const name = arg.split('=', 1)[0]
+        return !forbiddenGitArgs.some((prefix) => arg.startsWith(prefix))
+          && !/^-[^-]*O/.test(arg)
+          && !forbiddenGitArgs.some((forbidden) => forbidden.startsWith('--') && name.startsWith('--') && name.length > 2 && forbidden.startsWith(name))
+      })
+    }
+    if (['grep', 'rg'].includes(argv[0]))
+      return !argv.some((arg) => arg.startsWith('--pre') || arg.startsWith('--hostname-bin'))
+    if (['cat', 'head', 'tail', 'wc', 'ls'].includes(argv[0])) return true
+    if (argv[0] === 'sed') return argv.length >= 3 && argv.length <= 4 && argv[1] === '-n' && /^\d+(,\d+)?p$/.test(argv[2])
+    return false
+  })
+}
+
+export function panelPermission(toolCall) {
+  const mutating = ['edit', 'write', 'delete', 'move']
+  if (mutating.some((value) => toolCall?.kind === value || toolCall?.title === value))
+    return { policy: 'roster', verdict: 'reject' }
+  if (toolCall?.kind === 'execute')
+    return { policy: 'roster', verdict: readOnlyCommand(toolCall?.rawInput?.command) ? 'allow' : 'reject' }
+  return null
+}
+
 export function settlePermission({ request, toolCall = request?.toolCall, options = request?.options, policy = {}, lead, log = () => {} }) {
   const reject = options.find((o) => o.kind === 'reject_once') ?? options.find((o) => o.kind === 'reject_always')
   if (!reject) throw Object.assign(new Error('permission-no-reject-option'), { reason: 'permission-no-reject-option' })
@@ -32,13 +109,20 @@ export function settlePermission({ request, toolCall = request?.toolCall, option
     let decision
     try {
       const answer = lead(payload)
-      decision = answer?.decision ?? answer?.details?.decision
+      if (answer?.policy === 'roster' && (answer.verdict === 'allow' || answer.verdict === 'reject')) {
+        source = answer.policy
+        selected = answer.verdict === 'allow' ? options.find((o) => o.kind === 'allow_once') ?? reject : reject
+      } else {
+        decision = answer?.decision ?? answer?.details?.decision
+      }
     } catch {
       decision = null
     }
-    answered = decision ?? null
-    const match = options.find((o) => o.optionId === decision)
-    selected = match ?? reject
+    if (source !== 'roster') {
+      answered = decision ?? null
+      const match = options.find((o) => o.optionId === decision)
+      selected = match ?? reject
+    }
   }
 
   const row = {

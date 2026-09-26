@@ -1450,6 +1450,57 @@ test('--headless-all with a per-seat transport flag still boots — no workspace
   }
 })
 
+test('an explicit ACP builder persists to crew state and boot journal without changing headless fallbacks', async () => {
+  const home = scratchDir('crew-acp-headless-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-acp-headless-checkout-')
+  const task = 'acp-headless'
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath },
+      { cmux, tree, renameTab },
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, crew.members[role].transport])), {
+      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-json',
+    })
+    const boot = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((event) => event.event === 'boot')
+    assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, boot.allocation[role].transport])), {
+      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-json',
+    })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('ACP and headless-rpc for one role refuse before state or workspace creation', async () => {
+  const home = scratchDir('crew-acp-rpc-conflict-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-acp-rpc-conflict-checkout-')
+  const task = 'acp-rpc-conflict'
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, roles: 'lead,builder', acp: 'builder', 'headless-rpc': 'builder', 'claude-bin': process.execPath },
+        { cmux, tree, renameTab },
+      ),
+      /role builder is named by both --acp and --headless-rpc/,
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('a missing memory budget value falls back to the default and records invalid-budget', () => {
   const cfg = memoryConfig({ 'memory-dir': '/tmp/crew-memory-fixture', 'memory-budget-bytes': true })
   assert.equal(cfg.budgetBytes, 8000)

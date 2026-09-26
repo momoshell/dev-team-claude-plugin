@@ -1314,7 +1314,8 @@ test('run configuration flags are admitted only on their owning crew verbs', () 
   assert.deepEqual(FLAG_VALUE_CONTRACT.profile, 'value')
   assert.deepEqual(FLAG_VALUE_CONTRACT.execution, 'value')
   assert.deepEqual(FLAG_VALUE_CONTRACT.assurance, 'value')
-  assert.doesNotThrow(() => assertUsage('boot', { task: 'task', profile: 'investigation', assurance: 'standard' }))
+  assert.deepEqual(FLAG_VALUE_CONTRACT.acp, 'value')
+  assert.doesNotThrow(() => assertUsage('boot', { task: 'task', acp: 'builder', profile: 'investigation', assurance: 'standard' }))
   assert.doesNotThrow(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', execution: 'scout' }))
   assert.throws(() => assertUsage('boot', { task: 'task', execution: 'scout' }), /--execution/)
   assert.throws(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', assurance: 'standard' }), /--assurance/)
@@ -2081,6 +2082,29 @@ test('a mixed boot refuses with mixed-transport before any workspace or state di
   }
 })
 
+test('an ACP role outside the seated crew refuses before state or workspace creation', async () => {
+  const home = scratchDir('crew-acp-unknown-role-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-acp-unknown-role-checkout-')
+  const task = 'acp-unknown-role'
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, roles: 'lead,builder', acp: 'reviewer', 'claude-bin': process.execPath },
+        { cmux, tree, renameTab },
+      ),
+      /transport role reviewer given but crew seats no reviewer/,
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('C1 boot records each seat\'s charter costs within an independent tail budget', async () => {
   const roles = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
   const home = scratchDir('crew-charter-boot-home-')
@@ -2835,6 +2859,10 @@ test('J1 boot retains adapter and transport refusals', async () => {
   let modelProbes = 0
   await assertAdvisorCellLive({ record: modelRecord, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
+    probeEndpoint: async () => { modelProbes += 1; return true },
+  })
+  await assertAdvisorCellLive({ record: modelRecord, models: roster.models,
+    adapters: { builder: { name: 'pi', transport: 'acp', grants: { advisor: true } } },
     probeEndpoint: async () => { modelProbes += 1; return true },
   })
   assert.equal(modelProbes, 0)

@@ -120,7 +120,7 @@
     },
     "transport": {
       "type": "string",
-      "enum": ["pane", "headless-json", "headless-rpc", "headless-api"]
+      "enum": ["pane", "headless-json", "headless-rpc", "acp", "headless-api"]
     },
     "offCriticalStage": {
       "type": "string",

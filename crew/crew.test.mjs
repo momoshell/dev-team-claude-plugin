@@ -619,6 +619,10 @@ test('descendantRefusal applies alive before unknown before mismatch', () => {
 
 test('bootAllocation carries resolved transports alongside tier provenance', () => {
   assert.deepEqual(
+    bootAllocation(['lead', 'builder'], {}, { lead: { model: 'roster' }, builder: { agent: 'roster' } }, { lead: 'headless-json', builder: 'acp' }),
+    { lead: { model: 'roster', transport: 'headless-json' }, builder: { agent: 'roster', transport: 'acp' } },
+  )
+  assert.deepEqual(
     bootAllocation(['lead', 'builder'], {}, { lead: { model: 'roster' }, builder: { agent: 'roster' } }, { lead: 'headless-json', builder: 'headless-rpc' }),
     { lead: { model: 'roster', transport: 'headless-json' }, builder: { agent: 'roster', transport: 'headless-rpc' } },
   )

@@ -11,7 +11,8 @@
       ],
       "transports": [
         "pane",
-        "headless-rpc"
+        "headless-rpc",
+        "acp"
       ],
       "adapter": "crew/adapters/adapter-pi.mjs",
       "refuses": [

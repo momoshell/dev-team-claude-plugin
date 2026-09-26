@@ -55,7 +55,7 @@ import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mj
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  seatIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
+  seatIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT,
 } from './seat-io.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
@@ -100,7 +100,7 @@ const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 const CHARTER_GUIDELINES_DIR = join(HERE, 'guidelines')
 const CHARTER_GUIDELINE_PATH = /crew\/guidelines\/([\w./-]+\.md)/g
 
-export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
+export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT])
 
 export function offCriticalPathStages () {
   return new Set(Object.values(VARIANTS).flatMap((variant) => variant.off_critical_path_stages))
@@ -405,7 +405,7 @@ export async function assertAdvisorCellLive({ record, adapters = {}, models, tas
     if (!ADVISED_ROLES.has(role)) throw advisorRefusal('role-unsupported', role, record)
     const adapter = adapters[role]
     if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
-    if (![DEFAULT_TRANSPORT, HEADLESS_RPC_TRANSPORT].includes(adapter?.transport)) throw advisorRefusal('transport-unsupported', role, record)
+    if (![DEFAULT_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT].includes(adapter?.transport)) throw advisorRefusal('transport-unsupported', role, record)
     const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model, models: models ?? record.models })
     if (cell.reason) throw advisorRefusal(cell.reason, role, record)
     if (!record.endpoint) continue
@@ -917,9 +917,18 @@ export function transportFor(role, args = {}) {
     .split(',').map((s) => s.trim()).filter(Boolean)
   const rpc = String(args['headless-rpc'] === true ? '' : (args['headless-rpc'] || ''))
     .split(',').map((s) => s.trim()).filter(Boolean)
+  const acp = String(args.acp === true ? '' : (args.acp || ''))
+    .split(',').map((s) => s.trim()).filter(Boolean)
   if (headless.includes(role) && rpc.includes(role)) {
     throw new Error(`role ${role} is named by both --headless and --headless-rpc`)
   }
+  if (acp.includes(role) && headless.includes(role)) {
+    throw new Error(`role ${role} is named by both --acp and --headless`)
+  }
+  if (acp.includes(role) && rpc.includes(role)) {
+    throw new Error(`role ${role} is named by both --acp and --headless-rpc`)
+  }
+  if (acp.includes(role)) return ACP_TRANSPORT
   if (rpc.includes(role)) return HEADLESS_RPC_TRANSPORT
   if (headless.includes(role)) return HEADLESS_TRANSPORT
   return DEFAULT_TRANSPORT
@@ -2967,7 +2976,9 @@ export async function bootCmd(args, deps = {}) {
     .split(',').map((r) => r.trim()).filter(Boolean)
   const rpcNames = String(args['headless-rpc'] === true ? '' : (args['headless-rpc'] || ''))
     .split(',').map((r) => r.trim()).filter(Boolean)
-  for (const role of [...headlessNames, ...rpcNames]) if (!roles.includes(role)) {
+  const acpNames = String(args.acp === true ? '' : (args.acp || ''))
+    .split(',').map((r) => r.trim()).filter(Boolean)
+  for (const role of [...headlessNames, ...rpcNames, ...acpNames]) if (!roles.includes(role)) {
     throw new Error(`transport role ${role} given but crew seats no ${role}`)
   }
   for (const role of roles) transportFor(role, args) // detects ambiguous lists before cmux boot
@@ -4768,7 +4779,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'acp', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin', 'chunked', 'chunk']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -4798,9 +4809,9 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value', pid: 'value',
   'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
   'panel-distinct-agents': 'boolean',
-  // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
-  // degrade to an empty list (:470-474) — a silent no-op, not a boolean.
-  headless: 'value', 'headless-rpc': 'value',
+  // --headless, --headless-rpc, and --acp take comma-separated ROLE LISTs; bare,
+  // they degrade to empty lists (:470-474) — a silent no-op, not booleans.
+  headless: 'value', 'headless-rpc': 'value', acp: 'value',
   // --headless-all is a switch: seatTransport (:486-488) already refuses any
   // value but true, because it names no roles — it asks every seat to pick a
   // headless transport.

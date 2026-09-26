@@ -146,12 +146,13 @@ test('T13 the ACP launch carries the role charter, grants, config dir and seat e
   const spy = { grants, configDir: '/cfg', acpLaunch(s) { spec = s; return { bin: '/bin/node', args: [], env: {}, policy: { autoDeny: [], autoApprove: [], escalate: [] } } } }
   const advisor = { granted: ['builder'], endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false }
   const crew = { members: { builder: { model: 'test', effort: 'high' } }, advisor }
-  const f = fixture({ adapters: { builder: { ...spy, grants: { ...grants, advisor: true } } }, crew }); try {
+  const advisorGrants = { ...grants, advisor: true }
+  const f = fixture({ adapters: { builder: { ...spy, grants: advisorGrants } }, crew }); try {
     assign(f)
     assert.equal(spec.promptFile, join(f.paths.taskDir, 'role-builder.md'))
     assert.equal(spec.effort, 'high')
     assert.deepEqual(spec.advisorCell, { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
-    assert.equal(spec.grants.extensions, grants.extensions)
+    assert.equal(spec.grants, advisorGrants)
     assert.equal(spec.configDir, '/cfg')
     assert.equal(spec.role, 'builder')
     assert.deepEqual(spec.env, { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir })

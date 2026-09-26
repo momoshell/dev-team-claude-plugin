@@ -71,7 +71,9 @@ test('Q6: suitefacts refusal CLI divides refused dispatches by stamped dispatche
   const cell = (payload, provider) => payload.rows.find((row) => row.provider === provider)
   const populated = cell(jan, 'openai')
   assert.deepEqual([populated.dispatches, populated.refusals, populated.rate, populated.thin], [12, 2, 2 / 12, false])
-  assert.deepEqual([populated.reasks, populated.recoveries, populated.reasks_unobserved, populated.recoveries_unobserved], [1, 1, 1, 0])
+  // One refusal's re-ask was not observed: the rate stands, the recovery columns do not.
+  assert.deepEqual([populated.reasks, populated.recoveries, populated.reasks_absent_reason, populated.recoveries_absent_reason], [null, null, 'reask-unobserved', 'reask-unobserved'])
+  assert.deepEqual([populated.reasks_unobserved, populated.recoveries_unobserved], [1, 0])
   // (a)
   assert.equal(cell(jan, 'late'), undefined)
   assert.deepEqual([cell(feb, 'late').dispatches, cell(feb, 'late').refusals, cell(feb, 'late').rate], [1, 1, 1])
@@ -142,7 +144,7 @@ test('suitefacts Amendment 1 counts dispatches on the full identity under the ce
   ledger.close()
 })
 
-test('suitefacts a rate is printed only when every dispatch has identity, coverage and a correlated re-ask', { skip: SKIP }, () => {
+test('suitefacts a rate is printed only when every dispatch has identity and coverage; re-ask correlation gates only the recovery columns', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const JAN = Date.parse('2024-01-01T00:00:00.000Z')
   const cell = (provider) => ({ provider, model_id: 'm', agent: 'pi', effort: 'medium' })
@@ -155,17 +157,24 @@ test('suitefacts a rate is printed only when every dispatch has identity, covera
   // (2) coverage: a policy row whose counters were not observed, and a dispatch with no policy row at all.
   policy('c-1', 'coverage', { admitted: null, refused: null, unrecognised: null, policy_absent_reason: 'pane-no-intercept', transport: 'pane' })
   refused('c-2', 'nopolicy')
-  // (3) re-ask: a refusal whose re-ask could not be correlated in its own run.
+  // (3) re-ask: a refusal whose re-ask could not be correlated in its own run, and one whose re-ask was not observed.
   policy('r-1', 'reask'); refused('r-1', 'reask', { reask_absent_reason: 'reask-uncorrelated' })
+  policy('u-1', 'unobserved'); refused('u-1', 'unobserved', { reask_absent_reason: 'reask-unobserved' })
   const result = run(['suite-refusals', '--since', '2024-01-01T00:00:00Z', '--until', '2024-02-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: ledger._dbPath })
   assert.equal(result.status, 0, result.stderr)
   const rows = JSON.parse(result.stdout).rows
   const by = (provider) => rows.find((row) => row.provider === provider)
   assert.deepEqual([by('measured').dispatches, by('measured').refusals, by('measured').rate, by('measured').rate_absent_reason], [2, 1, 1 / 2, null])
+  assert.deepEqual([by('measured').reasks, by('measured').recoveries, by('measured').reasks_absent_reason, by('measured').recoveries_absent_reason], [1, 1, null, null])
   assert.deepEqual([by('pre').dispatches, by('pre').refusals, by('pre').rate, by('pre').rate_absent_reason], [2, 2, null, 'identity-incomplete'])
   assert.deepEqual([by('coverage').dispatches, by('coverage').refusals, by('coverage').rate, by('coverage').rate_absent_reason], [1, 0, null, 'coverage-unavailable'])
   assert.deepEqual([by('nopolicy').dispatches, by('nopolicy').refusals, by('nopolicy').rate, by('nopolicy').rate_absent_reason], [1, 1, null, 'coverage-unavailable'])
-  assert.deepEqual([by('reask').dispatches, by('reask').refusals, by('reask').rate, by('reask').rate_absent_reason], [1, 1, null, 'reask-uncorrelated'])
+  // Re-ask correlation never gates the refusal rate: it stands, and only the recovery
+  // columns are null with the reason, while the gap itself stays counted.
+  assert.deepEqual([by('reask').dispatches, by('reask').refusals, by('reask').rate, by('reask').rate_absent_reason], [1, 1, 1, null])
+  assert.deepEqual([by('reask').reasks, by('reask').recoveries, by('reask').reasks_absent_reason, by('reask').recoveries_absent_reason, by('reask').reask_uncorrelated], [null, null, 'reask-uncorrelated', 'reask-uncorrelated', 1])
+  assert.deepEqual([by('unobserved').rate, by('unobserved').rate_absent_reason], [1, null])
+  assert.deepEqual([by('unobserved').reasks, by('unobserved').recoveries, by('unobserved').reasks_absent_reason, by('unobserved').recoveries_absent_reason, by('unobserved').reasks_unobserved], [null, null, 'reask-unobserved', 'reask-unobserved', 1])
   ledger.close()
 })
 

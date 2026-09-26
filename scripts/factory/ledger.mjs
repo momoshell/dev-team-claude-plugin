@@ -434,9 +434,9 @@ export const SUITE_DECISION_ABSENT = Object.freeze({ pre_amendment: 'pre-amendme
 const suiteIdentityKey = (runId, runIdAbsent, transport, dispatchId) => JSON.stringify([
   runId ?? { absent: runIdAbsent ?? SUITE_DECISION_ABSENT.run_id }, transport ?? null, dispatchId ?? null,
 ])
-export const SUITE_RATE_ABSENT = Object.freeze({ identity: 'identity-incomplete', coverage: 'coverage-unavailable', reask: 'reask-uncorrelated' })
+export const SUITE_RATE_ABSENT = Object.freeze({ identity: 'identity-incomplete', coverage: 'coverage-unavailable' })
 const suiteCellMissing = (row) => ['provider', 'model_id', 'agent', 'effort'].every((key) => row?.[key] === null || row?.[key] === undefined)
-export const SUITE_REFUSAL_DEFINITION = 'window = suite_decisions.at_ms in [since, until) for numerator and denominator; dispatches = distinct (adw_id, run_id, transport, dispatch_id, role) with any suite decision in the window; refusals = those with a refused decision in the window; rate = refusals / dispatches, printed only when every dispatch in the denominator has a complete identity, an observed policy row and, if refused, a re-ask correlated in its own run, else null with identity-incomplete | coverage-unavailable | reask-uncorrelated; the cell is the one each row was written with, never re-joined from run_seats; a row with no cell is grouped under a null cell with cell_absent_reason; reasks = refusals followed by an applied re-ask, recoveries = re-asks whose envelope was done; reasks_unobserved and recoveries_unobserved count refusals ingested before a re-ask or its envelope was journalled, never zeros'
+export const SUITE_REFUSAL_DEFINITION = 'window = suite_decisions.at_ms in [since, until) for numerator and denominator; dispatches = distinct (adw_id, run_id, transport, dispatch_id, role) with any suite decision in the window; refusals = those with a refused decision in the window; rate = refusals / dispatches, printed only when every dispatch in the denominator has a complete identity and an observed policy row, else null with identity-incomplete | coverage-unavailable; the cell is the one each row was written with, never re-joined from run_seats; a row with no cell is grouped under a null cell with cell_absent_reason; reasks = refusals followed by an applied re-ask, recoveries = re-asks whose envelope was done, both printed only when every refusal in the cell has a re-ask correlated in its own run, else null with reask-uncorrelated | reask-unobserved (recoveries also reask-envelope-unobserved); reasks_unobserved, recoveries_unobserved and reask_uncorrelated are always counted, never zeros'
 export const SCREENER_PROPOSAL_OUTCOMES = Object.freeze(['adopted', 'rejected', 'unadjudicated'])
 export const TURN_TRANSPORTS = Object.freeze(['headless-json', 'headless-rpc', 'pane'])
 export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens: input and output at cost_in_per_mtok and cost_out_per_mtok, cache reads at cost_cache_read_per_mtok and cache writes at cost_cache_write_per_mtok, all four ratified per model in the same catalog — a model missing either cache rate leaves the whole row unpriced, never partly priced, and a token class even one member session never measured does the same; billed_cache_write_tokens collapses the 1h and 5m write TTLs into one column, so pricing every write at the ratified 1h rate is an explicit lossy convention (#527)'
@@ -5306,15 +5306,22 @@ export function openLedger({
     FROM per_dispatch pd
     GROUP BY pd.provider, pd.model_id, pd.agent, pd.effort, pd.role, pd.cell_absent_reason
     ORDER BY pd.cell_absent_reason IS NOT NULL, pd.cell_absent_reason, pd.provider, pd.model_id, pd.agent, pd.effort, pd.role`, [sinceMs, sinceMs, untilMs, untilMs])
-    // A rate is printed only when EVERY dispatch in its denominator has a complete
-    // identity, observed refusal coverage and, for a refusal, a re-ask correlated in its
-    // own run; otherwise the counts stand and the rate is null with the first reason.
+    // The refusal RATE is printed only when every dispatch in its denominator has a
+    // complete identity and observed refusal coverage; otherwise the counts stand and the
+    // rate is null with the first reason. Re-ask correlation never gates the rate: it gates
+    // only the recovery columns. A cell with a refusal whose re-ask was not correlated in
+    // its run, or not observed, prints reasks and recoveries as null with that reason (a
+    // recovery also needs the re-ask's envelope), and keeps the unobserved counts.
     const rateAbsent = (row) => row.identity_incomplete > 0 ? SUITE_RATE_ABSENT.identity
-      : row.coverage_unavailable > 0 ? SUITE_RATE_ABSENT.coverage
-        : row.reask_uncorrelated > 0 ? SUITE_RATE_ABSENT.reask : null
-    return rows.map(({ dispatches, refusals, ...row }) => ({
+      : row.coverage_unavailable > 0 ? SUITE_RATE_ABSENT.coverage : null
+    const reasksAbsent = (row) => row.reask_uncorrelated > 0 ? SUITE_REASK_ABSENT.uncorrelated
+      : row.reasks_unobserved > 0 ? SUITE_REASK_ABSENT.unobserved : null
+    const recoveriesAbsent = (row) => reasksAbsent(row) ?? (row.recoveries_unobserved > 0 ? SUITE_REASK_ABSENT.envelope_unobserved : null)
+    return rows.map(({ dispatches, refusals, reasks, recoveries, ...row }) => ({
       ...row,
       dispatches, refusals, rate: rateAbsent(row) === null ? refusals / dispatches : null, rate_absent_reason: rateAbsent(row),
+      reasks: reasksAbsent(row) === null ? reasks : null, reasks_absent_reason: reasksAbsent(row),
+      recoveries: recoveriesAbsent(row) === null ? recoveries : null, recoveries_absent_reason: recoveriesAbsent(row),
       thin: dispatches < CELL_RATE_FLOOR,
     }))
   }

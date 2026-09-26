@@ -1,12 +1,19 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { psSnapshot } from '../crew/seat-io.mjs'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { scratchDir, git } from './helpers.mjs'
 import * as mod from '../scripts/factory/prove-mutations.mjs'
 import { parseDiffMutationReport } from '../crew/drive.mjs'
+
+// Each child side effect below lands after its runner's old fixed bound on purpose: the
+// tests order on the event, so a bigger delay costs time, never a verdict.
+const LATE_SPAWN_DELAY_MS = Number(process.env.REAP_LATE_SPAWN_DELAY_MS ?? 2000)
+const PIPE_LINGER_MS = Number(process.env.REAP_PIPE_LINGER_MS ?? 1200)
+const WRITER_DELAY_MS = Number(process.env.REAP_WRITER_DELAY_MS ?? 1000)
 
 const WIDGET = [
   'export function widget(mode) {',
@@ -854,138 +861,245 @@ test('A4 a hanging diff gate is counted as a timeout kill', async () => {
   const before = WIDGET
   const after = WIDGET.replace(FIND, REPLACE)
   writeFileSync(file, after)
-  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'sleep 5', cap: 1, generation: 1 }
+  const hang = join(root, 'hang.pid')
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: hangCommand(hang), cap: 1, generation: 1 }
   const runCommand = (command, cwd, options) => command === 'lane'
     ? { ok: true, output: '', status: 0, completed: true }
     : mod.normalDeps().runCommand(command, cwd, options)
-  const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
-  assert.equal(result.mutants.find((row) => row.kill_reason === 'timeout')?.outcome, 'killed')
-  assert.equal(readFileSync(file, 'utf8'), after)
-  rmSync(root, { recursive: true, force: true })
+  let pid = null
+  try {
+    const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
+    assert.ok(existsSync(hang), 'the hanging gate never started')
+    pid = Number(readFileSync(hang, 'utf8'))
+    assert.equal(result.mutants.find((row) => row.kill_reason === 'timeout')?.outcome, 'killed')
+    assert.equal(await waitDead(pid), true, 'the hanging gate outlived its timeout')
+    assert.equal(readFileSync(file, 'utf8'), after)
+  } finally { if (pid) killQuietly(pid); rmSync(root, { recursive: true, force: true }) }
 })
 
 test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', async () => {
   const { root, checkout } = fixture()
   const marker = join(root, 'child.pid')
-  const command = `node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)' & echo $! > ${JSON.stringify(marker)}; wait`
-  const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 350 })
-  assert.equal(result.error?.code, 'ETIMEDOUT')
-  const pid = Number(readFileSync(marker, 'utf8').trim())
-  await new Promise((resolve) => setTimeout(resolve, 200))
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
-  rmSync(root, { recursive: true, force: true })
+  let pid = null
+  try {
+    const command = `node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)' & echo $! > ${JSON.stringify(marker)}; wait`
+    const snapshot = gatedSnapshot([() => existsSync(marker)])
+    const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 350, snapshot })
+    assert.equal(existsSync(marker), true, 'child marker was never written')
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(await waitDead(pid), true, 'the SIGTERM-ignoring descendant outlived its timed-out group')
+  } finally { if (pid) killQuietly(pid); rmSync(root, { recursive: true, force: true }) }
 })
 
 const pidDead = (pid) => { try { process.kill(pid, 0); return false } catch (err) { return err?.code === 'ESRCH' } }
 const killQuietly = (pid) => { try { process.kill(pid, 'SIGKILL') } catch {} }
+// Exit and reap evidence is positive: kill(pid, 0) throwing ESRCH. A row missing from one ps
+// table is never taken as an exit, and no assertion rests on a fixed delay. The cap bounds a
+// wait for that event; it is not the event.
+async function waitDead(pid, capMs = 5000) {
+  const deadline = Date.now() + capMs
+  while (!pidDead(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+  return pidDead(pid)
+}
+// A hang that records its own pid and outlives any bound here by far: the kill is proven by
+// ESRCH on that pid, never by how long the run took.
+const hangCommand = (pidFile) => `echo $$ > ${JSON.stringify(pidFile)}; exec sleep 30`
 const detachedSpawner = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: "ignore" }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})' ; sleep 30`
+
+// lean: synchronous wait capped at 20s; upgrade path: a readiness hook in runCommandDefault
+// onRelease runs once, just before the gated table goes to the runner, so a test can record
+// independent evidence of the state the runner is about to act on.
+function gatedSnapshot(stages, onRelease = null) {
+  let first = true
+  return () => {
+    if (!first) return psSnapshot()
+    first = false
+    let captured = psSnapshot()
+    let current = captured
+    const deadline = Date.now() + 20_000
+    for (let index = 0; index < stages.length; index++) {
+      while (!stages[index](current) && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+        current = psSnapshot()
+      }
+      if (!stages[index](current)) break
+      if (index === 0) captured = current
+    }
+    onRelease?.()
+    return captured
+  }
+}
 
 test('A3b a detached descendant outside the timed-out group is reaped before the run settles', async () => {
   const { root, checkout } = fixture()
   const marker = join(root, 'escaped.pid')
   let pid = null
   try {
-    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 30_000), checkout, { timeout: 800, pollMs: 50 })
-    pid = Number(readFileSync(marker, 'utf8').trim())
+    const snapshot = gatedSnapshot([table => {
+      const child = existsSync(marker) ? table.rows.get(Number(readFileSync(marker, 'utf8'))) : null
+      return Boolean(child)
+    }])
+    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 30_000), checkout, { timeout: 800, pollMs: 50, snapshot })
+    assert.ok(pid = Number(readFileSync(marker, 'utf8').trim()), 'detached child marker was never written')
     assert.equal(result.error?.code, 'ETIMEDOUT')
     assert.equal(result.reap_survivors, 0)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    assert.equal(pidDead(pid), true, 'the escaped detached descendant outlived the timed-out run')
-  } finally {
-    if (pid) killQuietly(pid)
-    rmSync(root, { recursive: true, force: true })
-  }
+    assert.equal(await waitDead(pid), true, 'the escaped detached descendant outlived the timed-out run')
+  } finally { if (pid) killQuietly(-pid); rmSync(root, { recursive: true, force: true }) }
 })
 
 test('A3c an escaped descendant whose parent already exited is reaped through the sampled lineage', async () => {
   const { root, checkout } = fixture()
-  const marker = join(root, 'orphan.pid')
-  let pid = null
+  const marker = join(root, 'orphan.pid'), parentFile = join(root, 'parent.pid'), release = join(root, 'release')
+  let pid = null, parentGoneAtRelease = null
   try {
-    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 400), checkout, { timeout: 1500, pollMs: 50 })
-    pid = Number(readFileSync(marker, 'utf8').trim())
+    const parentPid = () => existsSync(parentFile) ? Number(readFileSync(parentFile, 'utf8')) : null
+    const releaseStages = [
+      table => {
+        const child = existsSync(marker) ? table.rows.get(Number(readFileSync(marker, 'utf8'))) : null
+        const parent = existsSync(parentFile) ? Number(readFileSync(parentFile, 'utf8')) : null
+        if (child && child.ppid === parent) { writeFileSync(release, 'go'); return true }
+        return false
+      },
+      () => Boolean(parentPid()) && pidDead(parentPid()),
+    ]
+    const snapshot = gatedSnapshot(releaseStages, () => { parentGoneAtRelease = Boolean(parentPid()) && pidDead(parentPid()) })
+    const command = `node -e 'const fs=require("node:fs"),c=require("node:child_process").spawn("sleep",["30"],{detached:true,stdio:"ignore"});fs.writeFileSync(${JSON.stringify(parentFile)},String(process.pid));fs.writeFileSync(${JSON.stringify(marker)},String(c.pid));c.unref();while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)' ; sleep 30`
+    const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 1500, pollMs: 50, snapshot })
+    assert.ok(pid = Number(readFileSync(marker, 'utf8').trim()), 'child marker was never written')
     assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(parentGoneAtRelease, true, 'the runner was handed its table before the parent had exited')
     assert.equal(result.reap_survivors, 0)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    assert.equal(pidDead(pid), true, 'the reparented escapee outlived the timed-out run')
-  } finally {
-    if (pid) killQuietly(pid)
-    rmSync(root, { recursive: true, force: true })
-  }
+    assert.equal(await waitDead(pid), true, 'the reparented escapee outlived the timed-out run')
+  } finally { if (pid) killQuietly(-pid); rmSync(root, { recursive: true, force: true }) }
 })
 
-test('A3e a group spawned by an already-orphaned escapee is reaped through the tracked escapee', async () => {
+test('A3e a group spawned by an already-orphaned escapee is reaped through the tracked escapee', async t => {
   const { root, checkout } = fixture()
-  const marker = join(root, 'late.pid')
-  const script = join(root, 'late-escape.cjs')
-  // The shell's child starts a detached escapee and exits at once; only AFTER that does the
-  // escapee start its own detached group, so no root-lineage sample can ever see the late one.
+  const marker = join(root, 'late.pid'), script = join(root, 'late-escape.cjs')
+  const parentFile = join(root, 'parent.pid'), escapeeFile = join(root, 'escapee.pid'), seen = join(root, 'seen')
+  let escapeePid = null, latePid = null, parentPid = null, lineageCaptured = false, orphanBeforeLate = false
   writeFileSync(script, [
+    'const fs = require("node:fs")',
     'const { spawn } = require("node:child_process")',
-    'const { writeFileSync } = require("node:fs")',
     'if (process.argv[2] === "escapee") {',
-    '  setTimeout(() => {',
-    '    const late = spawn("sleep", ["30"], { detached: true, stdio: "ignore" })',
-    `    writeFileSync(${JSON.stringify(marker)}, String(late.pid))`,
-    '    late.unref()',
-    '  }, 400)',
+    '  const parentPid = process.ppid',
+    `  fs.writeFileSync(${JSON.stringify(escapeeFile)}, String(process.pid))`,
+    '  while (process.ppid === parentPid) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)',
+    `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${LATE_SPAWN_DELAY_MS})`,
+    '  const late = spawn("sleep", ["30"], { detached: true, stdio: "ignore" })',
+    `  fs.writeFileSync(${JSON.stringify(marker)}, String(late.pid))`,
+    '  late.unref()',
     '  setTimeout(() => {}, 30_000)',
     '} else {',
+    `  fs.writeFileSync(${JSON.stringify(parentFile)}, String(process.pid))`,
     '  const escapee = spawn(process.execPath, [__filename, "escapee"], { detached: true, stdio: "ignore" })',
     '  escapee.unref()',
-    '  setTimeout(() => {}, 150)',
+    `  while (!fs.existsSync(${JSON.stringify(seen)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)`,
     '}',
   ].join('\n'))
-  let pid = null
+  const stages = [
+    table => {
+      const e = existsSync(escapeeFile) ? table.rows.get(Number(readFileSync(escapeeFile, 'utf8'))) : null
+      const p = existsSync(parentFile) ? table.rows.get(Number(readFileSync(parentFile, 'utf8'))) : null
+      if (e && p && e.ppid === p.pid) { lineageCaptured = true; writeFileSync(seen, 'yes'); return true }
+      return false
+    },
+    table => {
+      const escapeePid = existsSync(escapeeFile) ? Number(readFileSync(escapeeFile, 'utf8')) : null
+      const e = escapeePid ? table.rows.get(escapeePid) : null
+      const parent = existsSync(parentFile) ? Number(readFileSync(parentFile, 'utf8')) : null
+      const late = existsSync(marker) ? table.rows.get(Number(readFileSync(marker, 'utf8'))) : null
+      if (e && e.ppid !== parent && late && late.ppid === escapeePid) { orphanBeforeLate = true; return true }
+      return false
+    },
+  ]
+  const snapshot = gatedSnapshot(stages)
   try {
-    const result = await mod.normalDeps().runCommand(`node ${JSON.stringify(script)} ; sleep 30`, checkout, { timeout: 1500, pollMs: 50 })
-    pid = Number(readFileSync(marker, 'utf8').trim())
-    assert.equal(result.error?.code, 'ETIMEDOUT')
-    assert.equal(result.reap_survivors, 0)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    assert.equal(pidDead(pid), true, 'the group started by an orphaned escapee outlived the timed-out run')
+    const command = `node ${JSON.stringify(script)} ; sleep 30`
+    const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 1500, pollMs: 50, snapshot })
+    const lateReady = existsSync(marker)
+    assert.equal(lineageCaptured, true, 'lineage observation never completed')
+    assert.equal(orphanBeforeLate, true, 'escapee was not observed orphaned before late spawn')
+    assert.equal(lateReady, true, 'late child marker was never written')
+    parentPid = Number(readFileSync(parentFile, 'utf8')); escapeePid = Number(readFileSync(escapeeFile, 'utf8')); latePid = Number(readFileSync(marker, 'utf8'))
+    assert.equal(result.error?.code, 'ETIMEDOUT'); assert.equal(result.reap_survivors, 0)
+    const lateDead = await waitDead(latePid)
+    assert.equal(lateDead, true, 'the group started by an orphaned escapee outlived the timed-out run')
+    t.diagnostic('REAP-EVENT ' + JSON.stringify({ test: 'A3e', lateSpawnDelayMs: LATE_SPAWN_DELAY_MS, lineageCaptured, orphanBeforeLate, lateReady, timedOut: true, lateDead }))
   } finally {
-    if (pid) killQuietly(pid)
+    if (existsSync(escapeeFile)) escapeePid = Number(readFileSync(escapeeFile, 'utf8'))
+    if (existsSync(marker)) latePid = Number(readFileSync(marker, 'utf8'))
+    if (existsSync(parentFile)) parentPid = Number(readFileSync(parentFile, 'utf8'))
+    if (escapeePid) killQuietly(-escapeePid)
+    if (latePid) killQuietly(-latePid)
+    if (parentPid) killQuietly(parentPid)
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-const pipeHolder = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})'`
+// With a release path, node does not start its linger until the test has sampled the holder
+// under it, so a slow first sample can never see node already gone. The trailing `; :` keeps
+// the shell from exec'ing node, so the shell reaps it and its exit reads as ESRCH, never as a
+// zombie of this blocked process.
+const pipeHolder = (marker, nodeMarker, lingerMs, release = null) => `node -e 'const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(nodeMarker)},String(process.pid));const c=require("node:child_process").spawn("sleep",["30"],{detached:true,stdio:["ignore","inherit","inherit"]});fs.writeFileSync(${JSON.stringify(marker)},String(c.pid));c.unref();const hold=${JSON.stringify(release)};while(hold&&!fs.existsSync(hold))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);setTimeout(()=>{},${lingerMs})' ; :`
+const pipeSnapshot = (stages, onRelease) => { return gatedSnapshot(stages, onRelease) }
 
-test('A3f a shell that exited early while a tracked detached child holds its pipes still settles at the timeout', async () => {
+test('A3f a shell that exited early while a tracked detached child holds its pipes still settles at the timeout', async t => {
   const { root, checkout } = fixture()
-  const marker = join(root, 'holder.pid')
-  let pid = null
+  const marker = join(root, 'holder.pid'), nodeFile = join(root, 'node.pid'), release = join(root, 'release')
+  let pid = null, nodePid = null, holderReady = false, nodeExited = false, tracked = false, nodeGoneAtRelease = null
   try {
-    const started = Date.now()
-    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 250), checkout, { timeout: 800, pollMs: 50 })
-    pid = Number(readFileSync(marker, 'utf8').trim())
-    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
-    assert.equal(result.error?.code, 'ETIMEDOUT')
-    assert.equal(result.reap_survivors, 0)
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    assert.equal(pidDead(pid), true, 'the tracked pipe holder outlived the timed-out run')
+    const stages = [
+      table => {
+        pid = existsSync(marker) ? Number(readFileSync(marker, 'utf8')) : null
+        nodePid = existsSync(nodeFile) ? Number(readFileSync(nodeFile, 'utf8')) : null
+        const holder = pid ? table.rows.get(pid) : null
+        holderReady = Boolean(holder && nodePid && holder.ppid === nodePid)
+        tracked = holderReady
+        if (holderReady) writeFileSync(release, 'go')
+        return holderReady
+      },
+      () => { nodeExited = pidDead(nodePid); return nodeExited },
+    ]
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, nodeFile, PIPE_LINGER_MS, release), checkout, { timeout: 800, pollMs: 50, snapshot: pipeSnapshot(stages, () => { nodeGoneAtRelease = Boolean(nodePid) && pidDead(nodePid) }) })
+    assert.equal(holderReady, true); assert.equal(nodeExited, true); assert.equal(result.error?.code, 'ETIMEDOUT'); assert.equal(result.reap_survivors, 0)
+    assert.equal(nodeGoneAtRelease, true, 'the runner was handed its table before node had exited')
+    assert.equal(await waitDead(pid), true, 'the tracked pipe holder outlived the timed-out run')
+    t.diagnostic('REAP-EVENT ' + JSON.stringify({ test: 'A3f', lingerMs: PIPE_LINGER_MS, holderReady, nodeExited, tracked, timedOut: true }))
   } finally {
-    if (pid) killQuietly(pid)
+    pid ??= existsSync(marker) ? Number(readFileSync(marker, 'utf8')) : null
+    nodePid ??= existsSync(nodeFile) ? Number(readFileSync(nodeFile, 'utf8')) : null
+    if (pid) killQuietly(-pid)
+    if (nodePid) killQuietly(nodePid)
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('A3g an untracked pipe holder settles at the timeout as an unproven reap', async () => {
+test('A3g an untracked pipe holder settles at the timeout as an unproven reap', async t => {
   const { root, checkout } = fixture()
-  const marker = join(root, 'untracked.pid')
-  let pid = null
+  const marker = join(root, 'untracked.pid'), nodeFile = join(root, 'node.pid')
+  let pid = null, nodePid = null, holderReady = false, nodeExited = false, tracked = true, nodeGoneAtRelease = null
   try {
-    const started = Date.now()
-    // A poll interval longer than the run means the holder is never sampled.
-    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 0), checkout, { timeout: 800, pollMs: 60_000 })
-    pid = Number(readFileSync(marker, 'utf8').trim())
-    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
-    assert.equal(result.error?.code, 'ETIMEDOUT')
-    assert.ok(result.reap_survivors >= 1, 'an unsampled pipe holder was reported as a proven reap')
-    assert.equal(mod.normalizeDiffCommandResult(result).available, false)
+    const stages = [table => {
+      pid = existsSync(marker) ? Number(readFileSync(marker, 'utf8')) : null
+      nodePid = existsSync(nodeFile) ? Number(readFileSync(nodeFile, 'utf8')) : null
+      const holder = pid ? table.rows.get(pid) : null
+      nodeExited = Boolean(nodePid) && pidDead(nodePid)
+      holderReady = Boolean(holder && nodeExited)
+      tracked = Boolean(holder && holder.ppid === nodePid)
+      return holderReady && nodeExited && !tracked
+    }]
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, nodeFile, PIPE_LINGER_MS), checkout, { timeout: 800, pollMs: 50, snapshot: pipeSnapshot(stages, () => { nodeGoneAtRelease = Boolean(nodePid) && pidDead(nodePid) }) })
+    assert.equal(holderReady, true); assert.equal(nodeExited, true); assert.equal(tracked, false); assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(nodeGoneAtRelease, true, 'the runner was handed its table before node had exited')
+    assert.ok(result.reap_survivors >= 1); assert.equal(mod.normalizeDiffCommandResult(result).available, false)
+    t.diagnostic('REAP-EVENT ' + JSON.stringify({ test: 'A3g', lingerMs: PIPE_LINGER_MS, holderReady, nodeExited, tracked, timedOut: true }))
   } finally {
-    if (pid) killQuietly(pid)
+    pid ??= existsSync(marker) ? Number(readFileSync(marker, 'utf8')) : null
+    nodePid ??= existsSync(nodeFile) ? Number(readFileSync(nodeFile, 'utf8')) : null
+    if (pid) killQuietly(-pid)
+    if (nodePid) killQuietly(nodePid)
     rmSync(root, { recursive: true, force: true })
   }
 })
@@ -995,24 +1109,36 @@ test('A3d a timeout with an unproven reap is an escaped descendant, never a time
   assert.equal(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 0 }).timeout, true)
 })
 
-test('A5 a grandchild that escapes the poll and rewrites the target makes the proof fatal, restored at report time', async () => {
+test('A5 a grandchild that escapes the poll and rewrites the target makes the proof fatal, restored at report time', async t => {
   const { root, checkout, file } = fixture()
   const before = WIDGET
   const after = WIDGET.replace(FIND, REPLACE)
   writeFileSync(file, after)
-  const marker = join(root, 'writer.pid')
-  // The grandchild detaches, keeps the command's pipes, and rewrites the target after the
-  // (disabled) poll window: nothing the runner samples can see it.
-  const writer = `sleep 0.3; printf rewritten > ${JSON.stringify(file)}; sleep 30`
-  const command = `node -e 'const c = require("node:child_process").spawn("sh", ["-c", ${JSON.stringify(writer).replace(/'/g, "'\\\\''")}], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref()'`
+  const marker = join(root, 'writer.pid'), ready = join(root, 'writer.ready'), nodeFile = join(root, 'node.pid')
+  // The grandchild detaches, keeps the command's pipes, rewrites the target and only then
+  // writes the ready file. The runner's first table is taken once that file exists AND its
+  // node parent is ESRCH, so nothing the runner samples can reach the writer and its deadline
+  // cannot fire before the rewrite however slowly the children boot. The trailing `; :` keeps
+  // the shell from exec'ing node, so the shell reaps it.
+  const writer = `sleep ${WRITER_DELAY_MS / 1000}; printf rewritten > ${JSON.stringify(file)}; : > ${JSON.stringify(ready)}; sleep 30`
+  const command = `node -e 'require("node:fs").writeFileSync(${JSON.stringify(nodeFile)}, String(process.pid)); const c = require("node:child_process").spawn("sh", ["-c", ${JSON.stringify(writer)}], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref()' ; :`
   const inflight = join(root, 'inflight.json')
+  const nodePid = () => existsSync(nodeFile) ? Number(readFileSync(nodeFile, 'utf8')) : null
+  let readyAtFirstTable = null, nodeGoneAtFirstTable = null
+  const orderedSnapshot = () => gatedSnapshot([() => existsSync(ready) && Boolean(nodePid()) && pidDead(nodePid())], () => {
+    readyAtFirstTable = existsSync(ready)
+    nodeGoneAtFirstTable = Boolean(nodePid()) && pidDead(nodePid())
+  })
   const runCommand = (cmd, cwd, options) => cmd === 'gate'
     ? { ok: false, output: '', status: 1, completed: true }
-    : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 60_000 })
+    : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 50, snapshot: orderedSnapshot() })
   let pid = null
   try {
     const result = await mod.runDiffMutationProof({ version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: command, gate_cmd: 'gate', cap: 1, generation: 1 }, { runCommand, runTimeoutMs: 900, inflightPath: inflight })
-    pid = Number(readFileSync(marker, 'utf8').trim())
+    if (existsSync(marker)) pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(existsSync(ready), true, 'the orphaned writer never reported its rewrite')
+    assert.equal(readyAtFirstTable, true, 'the runner sampled, and could time out, before the orphaned writer rewrote the target')
+    assert.equal(nodeGoneAtFirstTable, true, 'the runner sampled while the writer was still reachable through node')
     assert.equal(readFileSync(file, 'utf8'), after, 'the target was not at its pre-mutation bytes at report time')
     assert.equal(result.fatal?.reason, 'tree-not-restored')
     assert.equal(result.fatal?.cause, 'descendant-escaped')
@@ -1020,7 +1146,9 @@ test('A5 a grandchild that escapes the poll and rewrites the target makes the pr
     const record = JSON.parse(readFileSync(inflight, 'utf8'))
     assert.equal(record.path, 'lib/widget.mjs')
     assert.equal(record.generation, 1)
+    t.diagnostic('REAP-EVENT ' + JSON.stringify({ test: 'A5', writerDelayMs: WRITER_DELAY_MS, readyAtFirstTable, nodeGoneAtFirstTable, fatal: result.fatal.cause }))
   } finally {
+    if (!pid && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8').trim())
     if (pid) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     rmSync(root, { recursive: true, force: true })
   }
@@ -1031,16 +1159,20 @@ test('A2 a hanging diff validation is timed out, killed, and restored', async ()
   const before = WIDGET
   const after = WIDGET.replace(FIND, REPLACE)
   writeFileSync(file, after)
-  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'sleep 5', gate_cmd: 'gate', cap: 1, generation: 1 }
-  const started = Date.now()
-  const result = await mod.runDiffMutationProof(config, { runTimeoutMs: 350 })
-  assert.ok(Date.now() - started < 3000)
-  const timedOut = result.mutants.find((row) => row.kill_reason === 'timeout')
-  assert.ok(timedOut)
-  assert.equal(timedOut.outcome, 'killed')
-  assert.equal(result.timeout_killed, 1)
-  assert.equal(readFileSync(file, 'utf8'), after)
-  rmSync(root, { recursive: true, force: true })
+  const hang = join(root, 'hang.pid')
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: hangCommand(hang), gate_cmd: 'gate', cap: 1, generation: 1 }
+  let pid = null
+  try {
+    const result = await mod.runDiffMutationProof(config, { runTimeoutMs: 350 })
+    assert.ok(existsSync(hang), 'the hanging validation never started')
+    pid = Number(readFileSync(hang, 'utf8'))
+    const timedOut = result.mutants.find((row) => row.kill_reason === 'timeout')
+    assert.ok(timedOut)
+    assert.equal(timedOut.outcome, 'killed')
+    assert.equal(result.timeout_killed, 1)
+    assert.equal(await waitDead(pid), true, 'the hanging validation outlived its timeout')
+    assert.equal(readFileSync(file, 'utf8'), after)
+  } finally { if (pid) killQuietly(pid); rmSync(root, { recursive: true, force: true }) }
 })
 
 test('RV1-2 total deadline skips later mutants without killing them', async () => {

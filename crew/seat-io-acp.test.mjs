@@ -165,7 +165,6 @@ test('T14 an ACP permission request is settled by the launch policy, then the le
   const adapters = { builder: { acpLaunch: () => ({ bin: '/bin/node', args: [], env: {}, policy }) } }
   const bare = fixture({ adapters }); try {
     assign(bare)
-    assert.equal(typeof bare.onPermission, 'function', 'acpIo handed the client no permission handler')
     assert.equal(bare.onPermission({ toolCall: { title: 'bash', kind: 'execute' }, options }), 'r')
     assert.equal(bare.onPermission({ toolCall: { title: 'read', kind: 'read' }, options }), 'a')
     assert.equal(bare.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'r')

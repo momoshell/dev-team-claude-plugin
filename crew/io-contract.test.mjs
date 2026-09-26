@@ -1,7 +1,7 @@
 // Gate-facing shared contract: the same behavioral assertions run against both io subjects.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
+import { mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync, symlinkSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
 
 import { join } from 'node:path'
 import { cellFailureKind, emitAdapter, RUN_MAX_BUFFER_BYTES, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
@@ -14,7 +14,7 @@ import { parseGateSummary } from './drive.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'fingerprintTree', 'commit', 'log', 'now']
-const OPTIONAL = ['runClean', 'stat', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
+const OPTIONAL = ['runClean', 'stat', 'lstat', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
 function dirs() {
@@ -476,6 +476,17 @@ test('seatIo stat reports mtimes and null for a missing path', () => {
   const witnessed = f.io.stat(target)
   assert.equal(typeof witnessed?.mtimeMs, 'number')
   assert.equal(f.io.stat(join(f.paths.taskDir, 'missing.txt')), null)
+})
+
+test('seatIo lstat distinguishes files, links, and absent paths', () => {
+  const f = makeSeatIo()
+  const target = join(f.paths.taskDir, 'entry.txt')
+  const link = join(f.paths.taskDir, 'entry-link')
+  fsWriteFileSync(target, 'entry')
+  symlinkSync(target, link)
+  assert.deepEqual(f.io.lstat(target), { type: 'file' })
+  assert.deepEqual(f.io.lstat(link), { type: 'symlink' })
+  assert.equal(f.io.lstat(join(f.paths.taskDir, 'missing.txt')), null)
 })
 
 test('seatIo commit stages changed files and returns the short hash', () => {

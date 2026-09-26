@@ -16,11 +16,12 @@
 // printed no readable GATE-SUMMARY, or whose checks THREW, is not a kill however loudly
 // it says FAIL — and a declaration SHAPE the driver would reject is never accepted here.
 
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
+import { psSnapshot, statIsZombie, verifyGroup } from '../../crew/seat-io.mjs'
 import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
 
 export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
@@ -87,26 +88,147 @@ function runGateDefault(gateCmd, cwd) {
   return { ok: res.status === 0, output }
 }
 
-// Diff mode deliberately uses the same synchronous child-process primitive as the
-// declared proof, but keeps command execution injectable for its fixture lane. A
-// result with an error or a null status is not a red test: the command was not a
-// completed observation and must remain a typed skip.
-export const DIFF_RUN_TIMEOUT_MS = 900_000
-function runCommandDefault(command, cwd, options = {}) {
-  const res = spawnSync('/bin/sh', ['-c', command], {
-    cwd, encoding: 'utf8', maxBuffer: RUN_MAX_BUFFER_BYTES,
-    timeout: options.timeout ?? DIFF_RUN_TIMEOUT_MS,
-    env: options.env || colourNeutralEnv(process.env),
-  })
-  const output = `${res.stdout || ''}${res.stderr || ''}`
-  return {
-    ok: res.status === 0,
-    output,
-    status: res.status,
-    signal: res.signal || null,
-    error: res.error ? { code: res.error.code, message: res.error.message } : null,
-    completed: !res.error && res.status !== null,
+// Diff mode runs detached process groups so a timeout can reap the shell and descendants.
+// A descendant that leaves the group (setsid/detached spawn) is tracked by polling the
+// process table for the run's lineage and is signalled by its own verified group.
+// A descendant that detaches AND loses every tracked ancestor within one poll interval is
+// never sampled. If it still holds the command's pipes the killed run reports it as a
+// survivor and the proof is FATAL (descendant-escaped). Blind spot: one that also closes
+// its pipes is invisible here and cannot be reaped or reported.
+export const DIFF_RUN_TIMEOUT_MS = 120_000
+export const DIFF_TOTAL_DEADLINE_MS = 720_000
+export const DIFF_DESCENDANT_POLL_MS = 250
+const DIFF_REAP_SETTLE_MS = 1000
+
+// Record every live descendant outside the run's own group, walking from the shell and
+// from every earlier-tracked pid whose start time still matches, so a reparented escapee
+// stays reachable through the lineage sampled while its parent was alive.
+export function trackDiffDescendants(snapshot, rootPid, groups) {
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return false
+  const children = new Map()
+  for (const row of snapshot.rows.values()) {
+    if (!row || !Number.isSafeInteger(row.ppid)) continue
+    const list = children.get(row.ppid) || []
+    list.push(row)
+    children.set(row.ppid, list)
   }
+  const queue = snapshot.rows.has(rootPid) ? [rootPid] : []
+  for (const anchors of groups.values()) {
+    for (const anchor of anchors) if (snapshot.rows.get(anchor.pid)?.start === anchor.start) queue.push(anchor.pid)
+  }
+  const seen = new Set()
+  while (queue.length) {
+    const pid = queue.shift()
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    for (const row of children.get(pid) || []) {
+      if (Number.isSafeInteger(row.pgid) && row.pgid > 1 && row.pgid !== rootPid && !statIsZombie(row.stat)) {
+        const anchors = groups.get(row.pgid) || []
+        if (!anchors.some((anchor) => anchor.pid === row.pid && anchor.start === row.start)) anchors.push({ pid: row.pid, pgid: row.pgid, start: row.start })
+        groups.set(row.pgid, anchors)
+      }
+      queue.push(row.pid)
+    }
+  }
+  return true
+}
+
+function runCommandDefault(command, cwd, options = {}) {
+  const snapshot = typeof options.snapshot === 'function' ? options.snapshot : () => psSnapshot()
+  const pollMs = Number.isFinite(options.pollMs) ? Math.max(10, options.pollMs) : DIFF_DESCENDANT_POLL_MS
+  return new Promise((resolve) => {
+    const child = spawn('/bin/sh', ['-c', command], {
+      cwd, detached: true, env: options.env || colourNeutralEnv(process.env), stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const groups = new Map()
+    let stdout = ''
+    let stderr = ''
+    let size = 0
+    let overflow = false
+    let timedOut = false
+    let escalation
+    let settleTimer
+    let settled = false
+    let pipesClosed = false
+    let exitStatus = null
+    let exitSignal = null
+    const sample = () => { try { const table = snapshot(); trackDiffDescendants(table, child.pid, groups); return table } catch { return null } }
+    const poller = setInterval(sample, pollMs)
+    // Signal the run's own group, then every tracked escaped group whose anchor identity
+    // (pid + start time) is re-verified against a fresh table, so a reused pid is never hit.
+    const signalAll = (signal) => {
+      try { process.kill(-child.pid, signal) } catch {}
+      const table = sample()
+      for (const [pgid, anchors] of groups) {
+        if (verifyGroup({ pgid, anchors }, table).signalable) { try { process.kill(-pgid, signal) } catch {} }
+      }
+    }
+    const survivingGroups = () => {
+      const table = sample()
+      let alive = 0
+      try { process.kill(-child.pid, 0); alive += 1 } catch (err) { if (err?.code !== 'ESRCH') alive += 1 }
+      for (const [pgid, anchors] of groups) {
+        const verdict = verifyGroup({ pgid, anchors }, table)
+        if (verdict.liveness !== 'dead') alive += 1
+      }
+      return alive
+    }
+    // Settlement is armed HERE, whichever order exit and close arrive in: a shell that
+    // exited before the deadline while a detached child holds its pipes has already
+    // fired `exit` and will never fire `close`.
+    const terminate = () => {
+      signalAll('SIGTERM')
+      clearTimeout(escalation)
+      escalation = setTimeout(() => signalAll('SIGKILL'), 150)
+      clearTimeout(settleTimer)
+      settleTimer = setTimeout(() => finish(exitStatus, exitSignal), 450)
+    }
+    const finish = async (status, signal, spawnError = null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer); clearTimeout(escalation); clearTimeout(settleTimer); clearInterval(poller)
+      let survivors = 0
+      if (timedOut || overflow) {
+        // Keep the group cleanup active even when the shell closed before a grandchild,
+        // and do not call cleanup complete until no tracked group is still alive.
+        const deadline = Date.now() + DIFF_REAP_SETTLE_MS
+        for (;;) {
+          signalAll('SIGKILL')
+          survivors = survivingGroups()
+          if ((survivors === 0 && pipesClosed) || Date.now() >= deadline) break
+          await new Promise((wake) => setTimeout(wake, 25))
+        }
+        // A pipe still open after every tracked group is dead is held by a process this
+        // run never sampled: an untracked survivor, so the reap is unproven.
+        if (!pipesClosed) survivors += 1
+        child.stdout.destroy(); child.stderr.destroy()
+      }
+      if (spawnError) {
+        resolve({ ok: false, output: `${stdout}${stderr}`, status: null, signal: null, error: { code: spawnError.code, message: spawnError.message }, completed: false })
+        return
+      }
+      resolve({ ok: !timedOut && !overflow && status === 0, output: `${stdout}${stderr}`,
+        status: timedOut || overflow ? null : status, signal: signal || null,
+        error: timedOut ? { code: 'ETIMEDOUT', message: 'diff command timed out' } : overflow ? { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'diff command exceeded output limit' } : null,
+        completed: !timedOut && !overflow && status !== null,
+        ...(timedOut || overflow ? { reap_survivors: survivors } : {}) })
+    }
+    const append = (chunk, target) => {
+      size += chunk.length
+      if (size > RUN_MAX_BUFFER_BYTES) {
+        if (!overflow) { overflow = true; clearTimeout(timer); terminate() }
+        return
+      }
+      if (target === 'stdout') stdout += chunk.toString('utf8')
+      else stderr += chunk.toString('utf8')
+    }
+    child.stdout.on('data', (chunk) => append(chunk, 'stdout'))
+    child.stderr.on('data', (chunk) => append(chunk, 'stderr'))
+    const timer = setTimeout(() => { timedOut = true; terminate() }, options.timeout ?? DIFF_RUN_TIMEOUT_MS)
+    child.on('error', (error) => { finish(null, null, error) })
+    child.on('exit', (status, signal) => { exitStatus = status; exitSignal = signal })
+    child.on('close', (status, signal) => { pipesClosed = true; finish(status, signal) })
+  })
 }
 
 function makeWorktreeDefault(checkout, ref) {
@@ -848,19 +970,30 @@ export function diffRunnerUnavailable(cause) {
 
 export function normalizeDiffCommandResult(result) {
   if (!result || typeof result !== 'object') return diffRunnerUnavailable('result-not-object')
+  // A killed run whose process groups could not all be proven dead is not a skip: a
+  // survivor can still rewrite the tree after the mutant is restored, so the proof is FATAL.
+  if (Number(result.reap_survivors) > 0) return { available: false, escaped: true, why: DIFF_DESCENDANT_ESCAPED, survivors: Number(result.reap_survivors) }
+  if (result.error?.code === 'ETIMEDOUT') return { available: true, timeout: true, ok: false, output: String(result.output || '') }
   if (result.error || result.signal || result.completed === false || result.status === null) return diffRunnerUnavailable('result-incomplete')
   if (typeof result.ok !== 'boolean') return diffRunnerUnavailable('ok-missing')
   if (Number.isInteger(result.status) && ((result.status === 0) !== result.ok)) return diffRunnerUnavailable('status-ok-mismatch')
   return { available: true, ok: result.ok, output: String(result.output || '') }
 }
 
-export function runDiffCommand(d, command, checkout) {
+export async function runDiffCommand(d, command, checkout, timeout = DIFF_RUN_TIMEOUT_MS) {
   try {
-    return normalizeDiffCommandResult(d.runCommand(command, checkout, {
-      timeout: DIFF_RUN_TIMEOUT_MS,
+    return normalizeDiffCommandResult(await d.runCommand(command, checkout, {
+      timeout,
       env: colourNeutralEnv(process.env),
     }))
   } catch { return diffRunnerUnavailable('runner-threw') }
+}
+
+export const DIFF_DESCENDANT_ESCAPED = 'descendant-escaped'
+// The driver's recovery path reads this record when the runner leaves no report: the one
+// mutant that may still be on disk, so recovery can tell it from an unexplained edit.
+export function diffInflightPath(configPath) {
+  return configPath.endsWith('.json') ? configPath.replace(/\.json$/, '.inflight.json') : `${configPath}.inflight.json`
 }
 
 function diffFatal(why, beforeDigest = null, afterDigest = null) {
@@ -869,6 +1002,7 @@ function diffFatal(why, beforeDigest = null, afterDigest = null) {
 
 function countDiffReport(records, generated, omitted, config, totalCandidates, fatal = null, initialSkips = []) {
   const killed = records.filter((row) => row.outcome === 'killed').length
+  const timeout_killed = records.filter((row) => row.kill_reason === 'timeout').length
   const survived = records.filter((row) => row.outcome === 'survived').length
   const skipped = initialSkips.length + records.filter((row) => row.outcome === 'skipped').length
   const skipCounts = {}
@@ -884,6 +1018,7 @@ function countDiffReport(records, generated, omitted, config, totalCandidates, f
     total_candidates: totalCandidates,
     generated,
     killed,
+    timeout_killed,
     survived,
     skipped,
     omitted,
@@ -911,7 +1046,7 @@ export function validateDiffConfig(config) {
   return errors
 }
 
-export function runDiffMutationProof(config, deps = {}) {
+export async function runDiffMutationProof(config, deps = {}) {
   const d = normalDeps(deps)
   const validation = validateDiffConfig(config)
   if (validation.length > 0) {
@@ -938,6 +1073,10 @@ export function runDiffMutationProof(config, deps = {}) {
     unseenCandidates.push(candidate)
   }
   const mutantCap = config.cap
+  const now = typeof deps.now === 'function' ? deps.now : Date.now
+  const totalDeadlineMs = Number.isFinite(deps.totalDeadlineMs) ? Math.max(1, deps.totalDeadlineMs) : DIFF_TOTAL_DEADLINE_MS
+  const totalDeadline = now() + totalDeadlineMs
+  const runTimeoutMs = Number.isFinite(deps.runTimeoutMs) ? Math.max(1, deps.runTimeoutMs) : DIFF_RUN_TIMEOUT_MS
   const selected = unseenCandidates.slice(0, mutantCap)
   const omitted = Math.max(0, unseenCandidates.length - selected.length)
   let fatal = null
@@ -965,6 +1104,7 @@ export function runDiffMutationProof(config, deps = {}) {
     let restoreFailure = null
     let runtimeSkip = null
     let runtimeSkipCause = null
+    let escapedResult = null
     try {
       if (!inScope(candidate.path)) { runtimeSkip = 'out-of-scope' }
       const guardWrite = runtimeSkip ? { ok: false, reason: runtimeSkip } : diffTargetGuard(config, candidate, d, canonicalCheckout)
@@ -978,11 +1118,22 @@ export function runDiffMutationProof(config, deps = {}) {
           if (reapplied.reason) runtimeSkip = reapplied.reason
           else {
             writeAttempted = true
+            if (typeof deps.inflightPath === 'string') {
+              d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
+            }
             d.writeFile(guardWrite.abs, reapplied.bytes)
-            validationResult = runDiffCommand(d, config.validation_lane, config.checkout)
-            gateResult = runDiffCommand(d, config.gate_cmd, config.checkout)
-            const firstUnavailable = !validationResult.available ? validationResult : !gateResult.available ? gateResult : null
-            if (firstUnavailable) {
+            const remaining = () => Math.max(0, totalDeadline - now())
+            validationResult = remaining() > 0
+              ? await runDiffCommand(d, config.validation_lane, config.checkout, Math.min(runTimeoutMs, remaining()))
+              : diffRunnerUnavailable('result-incomplete')
+            if (!validationResult.escaped && (!validationResult.available || !validationResult.timeout)) {
+              gateResult = remaining() > 0
+                ? await runDiffCommand(d, config.gate_cmd, config.checkout, Math.min(runTimeoutMs, remaining()))
+                : diffRunnerUnavailable('result-incomplete')
+            }
+            escapedResult = [validationResult, gateResult].find((result) => result?.escaped) || null
+            const firstUnavailable = !validationResult.available ? validationResult : gateResult && !gateResult.available ? gateResult : null
+            if (firstUnavailable && !escapedResult) {
               runtimeSkip = firstUnavailable.why
               runtimeSkipCause = firstUnavailable.cause
             }
@@ -1014,19 +1165,26 @@ export function runDiffMutationProof(config, deps = {}) {
             ? `checkout path inventory changed while proving ${initial}`
             : `checkout digest changed while proving ${initial}`
       fatal = diffFatal(why, before.digest, after?.digest ?? null)
+      if (escapedResult) fatal.cause = DIFF_DESCENDANT_ESCAPED
+      break
+    }
+    if (escapedResult) {
+      fatal = { ...diffFatal(`${DIFF_DESCENDANT_ESCAPED} while proving ${initial}: ${escapedResult.survivors} process group(s) outlived the killed run and can still rewrite the restored tree`, before.digest, after.digest), cause: DIFF_DESCENDANT_ESCAPED }
       break
     }
     if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
-    const outcome = validationResult.ok && gateResult.ok ? 'survived' : 'killed'
+    const timedOut = validationResult?.timeout || gateResult?.timeout
+    const outcome = timedOut ? 'killed' : validationResult.ok && gateResult.ok ? 'survived' : 'killed'
     records.push({
       ...candidate, outcome,
+      ...(timedOut ? { kill_reason: 'timeout' } : {}),
       validation_lane: config.validation_lane,
       gate_cmd: config.gate_cmd,
       validation_ok: validationResult.ok,
-      gate_ok: gateResult.ok,
+      gate_ok: gateResult?.ok ?? null,
       validation_output: validationResult.output,
-      gate_output: gateResult.output,
-      why: outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
+      gate_output: gateResult?.output ?? '',
+      why: timedOut ? 'the validation lane or gate timed out under the mutation' : outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
     })
   }
   return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
@@ -1115,7 +1273,7 @@ export async function main(argv, deps = {}) {
           [diffSkip({ reason: 'malformed-diff' })])
       }
       if (!report) {
-        try { report = runDiffMutationProof(config, d) }
+        try { report = await runDiffMutationProof(config, { ...d, inflightPath: diffInflightPath(flags.diffConfig) }) }
         catch (err) {
           report = countDiffReport([], 0, 0, config, 0, null, [diffSkip({ reason: 'runner-unavailable', cause: 'runner-threw' })])
           report.runner_unavailable = err?.message ?? String(err)

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { scratchDir, git } from './helpers.mjs'
 import * as mod from '../scripts/factory/prove-mutations.mjs'
@@ -778,13 +779,13 @@ function diffDeps(results, writes = []) {
   }
 }
 
-test('A1 diff hunk conditional produces an adjudicated flipped mutant', () => {
+test('A1 diff hunk conditional produces an adjudicated flipped mutant', async () => {
   const { root, checkout, file } = fixture()
   const before = 'if (false) return true\n'
   const after = 'if (true) return true\n'
   writeFileSync(file, after)
   const commands = []
-  const result = mod.runDiffMutationProof({
+  const result = await mod.runDiffMutationProof({
     version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
     validation_lane: 'npm run lint -- --color=never', gate_cmd: 'node gate.mjs --strict', cap: 8, generation: 1,
   }, {
@@ -804,7 +805,7 @@ test('A1 diff hunk conditional produces an adjudicated flipped mutant', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
-test('C1 out-of-fence hunks are skipped and never written', () => {
+test('C1 out-of-fence hunks are skipped and never written', async () => {
   const { root, checkout } = fixture()
   const outside = join(checkout, 'other/outside.mjs')
   const linkTarget = join(checkout, 'other/link-target.mjs')
@@ -817,7 +818,7 @@ test('C1 out-of-fence hunks are skipped and never written', () => {
     diffPatch('other/outside.mjs', 'const outside = false\n', 'const outside = true\n'),
     diffPatch('lib/link.mjs', 'const link = false\n', 'const link = true\n'),
   ].join('\n')
-  const result = mod.runDiffMutationProof({
+  const result = await mod.runDiffMutationProof({
     version: 1, checkout, patch, files_in_scope: ['lib/'], validation_lane: 'lane exact', gate_cmd: 'gate exact', cap: 8, generation: 1,
   }, { ...diffDeps([], writes) })
   assert.equal(result.fatal, undefined)
@@ -829,13 +830,13 @@ test('C1 out-of-fence hunks are skipped and never written', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
-test('F1 mutant cap is enforced and prints its blind spot', () => {
+test('F1 mutant cap is enforced and prints its blind spot', async () => {
   const { root, checkout, file } = fixture()
   const before = Array.from({ length: 10 }, (_, index) => `const value${index} = false`).join('\n') + '\n'
   const after = Array.from({ length: 10 }, (_, index) => `const value${index} = true`).join('\n') + '\n'
   writeFileSync(file, after)
   const commands = []
-  const result = mod.runDiffMutationProof({
+  const result = await mod.runDiffMutationProof({
     version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
   }, { ...diffDeps(commands), runCommand(command) { commands.push(command); return { ok: true, output: '', status: 0, completed: true } } })
   assert.equal(result.cap, 8)
@@ -848,16 +849,231 @@ test('F1 mutant cap is enforced and prints its blind spot', () => {
   rmSync(root, { recursive: true, force: true })
 })
 
-test('C1a-e diff runner failures retain five closed causes and stable why', () => {
+test('A4 a hanging diff gate is counted as a timeout kill', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'sleep 5', cap: 1, generation: 1 }
+  const runCommand = (command, cwd, options) => command === 'lane'
+    ? { ok: true, output: '', status: 0, completed: true }
+    : mod.normalDeps().runCommand(command, cwd, options)
+  const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
+  assert.equal(result.mutants.find((row) => row.kill_reason === 'timeout')?.outcome, 'killed')
+  assert.equal(readFileSync(file, 'utf8'), after)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'child.pid')
+  const command = `node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)' & echo $! > ${JSON.stringify(marker)}; wait`
+  const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 350 })
+  assert.equal(result.error?.code, 'ETIMEDOUT')
+  const pid = Number(readFileSync(marker, 'utf8').trim())
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+  rmSync(root, { recursive: true, force: true })
+})
+
+const pidDead = (pid) => { try { process.kill(pid, 0); return false } catch (err) { return err?.code === 'ESRCH' } }
+const killQuietly = (pid) => { try { process.kill(pid, 'SIGKILL') } catch {} }
+const detachedSpawner = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: "ignore" }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})' ; sleep 30`
+
+test('A3b a detached descendant outside the timed-out group is reaped before the run settles', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'escaped.pid')
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 30_000), checkout, { timeout: 800, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the escaped detached descendant outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3c an escaped descendant whose parent already exited is reaped through the sampled lineage', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'orphan.pid')
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(detachedSpawner(marker, 400), checkout, { timeout: 1500, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the reparented escapee outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3e a group spawned by an already-orphaned escapee is reaped through the tracked escapee', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'late.pid')
+  const script = join(root, 'late-escape.cjs')
+  // The shell's child starts a detached escapee and exits at once; only AFTER that does the
+  // escapee start its own detached group, so no root-lineage sample can ever see the late one.
+  writeFileSync(script, [
+    'const { spawn } = require("node:child_process")',
+    'const { writeFileSync } = require("node:fs")',
+    'if (process.argv[2] === "escapee") {',
+    '  setTimeout(() => {',
+    '    const late = spawn("sleep", ["30"], { detached: true, stdio: "ignore" })',
+    `    writeFileSync(${JSON.stringify(marker)}, String(late.pid))`,
+    '    late.unref()',
+    '  }, 400)',
+    '  setTimeout(() => {}, 30_000)',
+    '} else {',
+    '  const escapee = spawn(process.execPath, [__filename, "escapee"], { detached: true, stdio: "ignore" })',
+    '  escapee.unref()',
+    '  setTimeout(() => {}, 150)',
+    '}',
+  ].join('\n'))
+  let pid = null
+  try {
+    const result = await mod.normalDeps().runCommand(`node ${JSON.stringify(script)} ; sleep 30`, checkout, { timeout: 1500, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the group started by an orphaned escapee outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+const pipeHolder = (marker, lingerMs) => `node -e 'const c = require("node:child_process").spawn("sleep", ["30"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref(); setTimeout(() => {}, ${lingerMs})'`
+
+test('A3f a shell that exited early while a tracked detached child holds its pipes still settles at the timeout', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'holder.pid')
+  let pid = null
+  try {
+    const started = Date.now()
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 250), checkout, { timeout: 800, pollMs: 50 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.equal(result.reap_survivors, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(pidDead(pid), true, 'the tracked pipe holder outlived the timed-out run')
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3g an untracked pipe holder settles at the timeout as an unproven reap', async () => {
+  const { root, checkout } = fixture()
+  const marker = join(root, 'untracked.pid')
+  let pid = null
+  try {
+    const started = Date.now()
+    // A poll interval longer than the run means the holder is never sampled.
+    const result = await mod.normalDeps().runCommand(pipeHolder(marker, 0), checkout, { timeout: 800, pollMs: 60_000 })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.ok(Date.now() - started < 3000, 'the run did not settle within its bound')
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    assert.ok(result.reap_survivors >= 1, 'an unsampled pipe holder was reported as a proven reap')
+    assert.equal(mod.normalizeDiffCommandResult(result).available, false)
+  } finally {
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A3d a timeout with an unproven reap is an escaped descendant, never a timeout kill or a skip', () => {
+  assert.deepEqual(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 1 }), { available: false, escaped: true, why: 'descendant-escaped', survivors: 1 })
+  assert.equal(mod.normalizeDiffCommandResult({ ok: false, status: null, error: { code: 'ETIMEDOUT' }, completed: false, reap_survivors: 0 }).timeout, true)
+})
+
+test('A5 a grandchild that escapes the poll and rewrites the target makes the proof fatal, restored at report time', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const marker = join(root, 'writer.pid')
+  // The grandchild detaches, keeps the command's pipes, and rewrites the target after the
+  // (disabled) poll window: nothing the runner samples can see it.
+  const writer = `sleep 0.3; printf rewritten > ${JSON.stringify(file)}; sleep 30`
+  const command = `node -e 'const c = require("node:child_process").spawn("sh", ["-c", ${JSON.stringify(writer).replace(/'/g, "'\\\\''")}], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(marker)}, String(c.pid)); c.unref()'`
+  const inflight = join(root, 'inflight.json')
+  const runCommand = (cmd, cwd, options) => cmd === 'gate'
+    ? { ok: false, output: '', status: 1, completed: true }
+    : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 60_000 })
+  let pid = null
+  try {
+    const result = await mod.runDiffMutationProof({ version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: command, gate_cmd: 'gate', cap: 1, generation: 1 }, { runCommand, runTimeoutMs: 900, inflightPath: inflight })
+    pid = Number(readFileSync(marker, 'utf8').trim())
+    assert.equal(readFileSync(file, 'utf8'), after, 'the target was not at its pre-mutation bytes at report time')
+    assert.equal(result.fatal?.reason, 'tree-not-restored')
+    assert.equal(result.fatal?.cause, 'descendant-escaped')
+    assert.equal(result.mutants.some((row) => row.outcome === 'skipped'), false)
+    const record = JSON.parse(readFileSync(inflight, 'utf8'))
+    assert.equal(record.path, 'lib/widget.mjs')
+    assert.equal(record.generation, 1)
+  } finally {
+    if (pid) { try { process.kill(-pid, 'SIGKILL') } catch {} }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('A2 a hanging diff validation is timed out, killed, and restored', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'sleep 5', gate_cmd: 'gate', cap: 1, generation: 1 }
+  const started = Date.now()
+  const result = await mod.runDiffMutationProof(config, { runTimeoutMs: 350 })
+  assert.ok(Date.now() - started < 3000)
+  const timedOut = result.mutants.find((row) => row.kill_reason === 'timeout')
+  assert.ok(timedOut)
+  assert.equal(timedOut.outcome, 'killed')
+  assert.equal(result.timeout_killed, 1)
+  assert.equal(readFileSync(file, 'utf8'), after)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('RV1-2 total deadline skips later mutants without killing them', async () => {
+  const { root, checkout, file } = fixture()
+  const before = 'const first = false\nconst second = false\n'
+  const after = 'const first = true\nconst second = true\n'
+  writeFileSync(file, after)
+  let clock = 0
+  let calls = 0
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
+  }, {
+    now: () => clock,
+    totalDeadlineMs: 1,
+    runCommand: () => { calls++; clock = 2; return { ok: true, output: '', status: 0, completed: true } },
+  })
+  assert.equal(calls, 1)
+  assert.equal(result.killed, 0)
+  assert.ok(result.mutants.length >= 2)
+  assert.ok(result.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === 'runner-unavailable'))
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('C1a-e diff runner failures retain five closed causes and stable why', async () => {
   const cases = [
     [null, 'result-not-object'],
-    [{ error: { code: 'ETIMEDOUT' } }, 'result-incomplete'],
+    [{ error: { code: 'EIO' } }, 'result-incomplete'],
     [{ ok: 'yes' }, 'ok-missing'],
     [{ ok: false, status: 0 }, 'status-ok-mismatch'],
   ]
   for (const [result, cause] of cases) assert.deepEqual(mod.normalizeDiffCommandResult(result), { available: false, why: 'runner-unavailable', cause })
-  assert.deepEqual(mod.runDiffCommand({ runCommand: () => ({ ok: false, status: null, completed: false }) }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
-  assert.deepEqual(mod.runDiffCommand({ runCommand: () => { throw new Error('interrupted') } }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'runner-threw' })
+  assert.deepEqual(await mod.runDiffCommand({ runCommand: () => ({ ok: false, status: null, completed: false }) }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'result-incomplete' })
+  assert.deepEqual(await mod.runDiffCommand({ runCommand: () => { throw new Error('interrupted') } }, 'lane', '/tmp'), { available: false, why: 'runner-unavailable', cause: 'runner-threw' })
 })
 
 test('D1 diff runner causes are frozen and reject unknown values', () => {
@@ -866,12 +1082,12 @@ test('D1 diff runner causes are frozen and reject unknown values', () => {
   assert.throws(() => mod.diffRunnerUnavailable('unknown-cause'), /unknown diff runner-unavailable cause/)
 })
 
-test('E1 a non-empty diff serializes the runner cause on a skipped mutant', () => {
+test('E1 a non-empty diff serializes the runner cause on a skipped mutant', async () => {
   const { root, checkout, file } = fixture()
   const before = WIDGET
   const after = WIDGET.replace(FIND, REPLACE)
   writeFileSync(file, after)
-  const result = mod.runDiffMutationProof({
+  const result = await mod.runDiffMutationProof({
     version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
   }, { runCommand: () => null, writeFile: (path, bytes) => writeFileSync(path, bytes) })
   const skipped = result.mutants.find((row) => row.outcome === 'skipped')
@@ -906,6 +1122,32 @@ test('E2 diff config input stays byte-identical while the sibling report is writ
   const report = JSON.parse(reports.get(reportPath))
   assert.equal(report.mutants.find((row) => row.outcome === 'skipped').runner_unavailable_cause, 'result-not-object')
   assert.match(output.join(''), /^DIFF-MUTATION-SUMMARY /)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('E4 main records the in-flight mutant beside the config, before the mutant is written', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const configPath = join(root, 'diff-mutation-1.json')
+  const inflightPath = join(root, 'diff-mutation-1.inflight.json')
+  assert.equal(mod.diffInflightPath(configPath), inflightPath)
+  const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1 }
+  writeFileSync(configPath, JSON.stringify(config))
+  const order = []
+  const code = await mod.main(['--diff-config', configPath], {
+    writeFile: (path, bytes) => { order.push(path); writeFileSync(path, bytes) },
+    runCommand: () => ({ ok: false, output: '', status: 1, completed: true }),
+    stdout: () => {}, stderr: () => {},
+  })
+  assert.equal(code, 0)
+  assert.ok(order.indexOf(inflightPath) >= 0 && order.indexOf(inflightPath) < order.indexOf(file), JSON.stringify(order))
+  const record = JSON.parse(readFileSync(inflightPath, 'utf8'))
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex')
+  assert.equal(record.path, 'lib/widget.mjs')
+  assert.equal(record.original_sha256, digest(Buffer.from(after)))
+  assert.notEqual(record.mutant_sha256, record.original_sha256)
   rmSync(root, { recursive: true, force: true })
 })
 

@@ -71,7 +71,7 @@ test('G1 screener journal ingest failure never throws into its caller', () => {
   let result
   assert.doesNotThrow(() => { result = ingestJournal(journalPath, ledger, { adw_id: 'screener-g1' }) })
   assert.deepEqual(result, {
-    applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false,
+    applied: 0, skipped: 0, ignored: 0, failed: 1, unstamped: 0, complete: false,
     first_failure: { line: 1, reason: 'Error' },
   })
 })

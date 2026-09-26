@@ -45,7 +45,7 @@ test('R5 a seat-death-reask producer event ingests into seat_reasks', () => {
   }
   const { ledger, result, dbPath } = ingestJournalLine(JSON.stringify(source), adwId)
   try {
-    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('seat_reasks')[0] }, {
       adw_id: adwId, event: 'seat-death-reask', role: 'reviewer', dispatch_id: 'd5', cause: 'seat-died',
       outcome: 'recovered', spent_ms: 10, ceiling_s: 30, from_run_id: 'run-old', to_run_id: 'run-new',
@@ -55,6 +55,163 @@ test('R5 a seat-death-reask producer event ingests into seat_reasks', () => {
   assert.equal(journalFactsCli(dbPath).seat_reasks.count, 1)
 })
 
+test('Q2: suitefacts persists stamped policy and refusal facts with the cell each row was written with', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-q2-')
+  const ledger = openLedger({ dbPath: join(dir, 'target.db') })
+  const journal = join(dir, 'journal.jsonl')
+  const openai = { provider: 'openai', model_id: 'gpt-test', agent: 'pi', effort: 'medium' }
+  const anthropic = { provider: 'anthropic', model_id: 'claude-test', agent: 'claude', effort: 'high' }
+  const policy = (run_id, cell, dispatch_id, at, transport = 'headless-json') => ({ event: 'seat-suite-policy', dispatch_id, run_id, ...cell, role: 'builder', transport, at, suite_policy: { admitted: 2, refused: 1, unrecognised: 0 } })
+  const refusal = (run_id, cell, dispatch_id, at) => ({ event: 'seat-suite-policy', dispatch_id, run_id, ...cell, role: 'builder', transport: 'headless-json', at, refusal: 'suite-run-not-owned', command: 'npm test', kind: 'test-run', reason: 'not owned' })
+  writeFileSync(journal, [
+    { event: 'boot', at: 100, roles: ['builder'], seats: { builder: { agent: 'pi', provider: 'openai', id: 'gpt-test', model: 'gpt-test', effort: 'medium' } }, transports: { builder: 'headless-json' } },
+    policy('r1', openai, 'd1', 101), refusal('r1', openai, 'd1', 102),
+    // (a) a reboot onto another cell: run_seats keeps the first cell, the rows keep their own.
+    policy('r2', anthropic, 'd1', 201), refusal('r2', anthropic, 'd1', 202),
+    // (b) the pane transport's own d1 in the same run, at the same ms, is a distinct fact.
+    policy('r2', anthropic, 'd1', 201, 'pane'),
+    // A stamped row whose seat had no recorded cell.
+    policy('r2', {}, 'd5', 203),
+    // (c) a row written before Amendment 1: no run_id key and no cell.
+    { event: 'seat-suite-policy', dispatch_id: 'd9', role: 'builder', transport: 'headless-json', at: 300, refusal: 'suite-run-not-owned', command: 'npm test', kind: 'suite' },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const first = ingestJournal(journal, ledger, { adw_id: 'suite-q2' })
+  assert.equal(first.applied, 1 + 7)
+  assert.equal(ledger.dumpTable('run_seats')[0].provider, 'openai')
+  const rows = ledger.dumpTable('suite_decisions')
+  const at = (at_ms, transport = 'headless-json') => rows.find((row) => row.at_ms === at_ms && row.transport === transport)
+  assert.deepEqual([at(101).decision, at(102).decision], ['policy', 'refused'])
+  assert.deepEqual([at(102).run_id, at(102).provider, at(102).model_id, at(102).agent, at(102).effort, at(102).cell_absent_reason, at(102).run_id_absent_reason], ['r1', 'openai', 'gpt-test', 'pi', 'medium', null, null])
+  assert.deepEqual([at(202).run_id, at(202).provider, at(202).model_id, at(202).agent, at(202).effort], ['r2', 'anthropic', 'claude-test', 'claude', 'high'])
+  assert.deepEqual([at(201, 'pane').dispatch_id, at(201, 'pane').decision], ['d1', 'policy'])
+  assert.deepEqual([at(203).provider, at(203).cell_absent_reason, at(203).run_id], [null, 'seat-cell-unavailable', 'r2'])
+  assert.deepEqual([at(300).run_id, at(300).provider, at(300).model_id, at(300).agent, at(300).effort, at(300).cell_absent_reason, at(300).run_id_absent_reason, at(300).decision], [null, null, null, null, null, 'pre-amendment', 'pre-amendment', 'refused'])
+  // Re-ingest adds nothing on the full identity.
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-q2' }).applied, 0)
+  assert.equal(ledger.dumpTable('suite_decisions').length, 7)
+  ledger.close()
+})
+test('Q3: suitefacts refusal command is redacted from persisted columns and ledger JSONL', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-q3-')
+  const ledger = openLedger({ dbPath: join(dir, 'target.db') })
+  const journal = join(dir, 'journal.jsonl')
+  const sentinel = 'SECRET_Q3_TOKEN=/tmp/q3-secret-path npm test'
+  writeFileSync(journal, JSON.stringify({ event: 'seat-suite-policy', adw_id: 'suite-q3', dispatch_id: 'r1', role: 'builder', transport: 'headless-json', at: 400, refusal: 'suite-run-not-owned', command: sentinel, gate_path: sentinel, kind: 'test-run', reason: 'not owned' }) + '\n')
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-q3' }).applied, 1)
+  const rows = ledger.dumpTable('suite_decisions')
+  assert.equal(rows[0].command_class, 'test-run')
+  assert.equal(JSON.stringify(rows).includes(sentinel), false)
+  assert.equal(readFileSync(ledger._jsonlPath, 'utf8').includes(sentinel), false)
+})
+test('Q4: suitefacts ingestion is idempotent on the declared natural key', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-q4-')
+  const ledger = openLedger({ dbPath: join(dir, 'target.db') })
+  const journal = join(dir, 'journal.jsonl')
+  const rows = [
+    { event: 'seat-suite-policy', adw_id: 'suite-q4', dispatch_id: 'p1', role: 'builder', transport: 'headless-json', at: 501, suite_policy: { admitted: 1, refused: 0, unrecognised: 0 } },
+    { event: 'seat-suite-policy', adw_id: 'suite-q4', dispatch_id: 'r1', role: 'builder', transport: 'headless-json', at: 502, refusal: 'suite-run-not-owned', kind: 'test-run', command: 'npm test' },
+  ]
+  writeFileSync(journal, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-q4' }).applied, 2)
+  const before = readFileSync(ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('recordSuiteDecision')).length
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-q4' }).applied, 0)
+  assert.equal(ledger.dumpTable('suite_decisions').length, 2)
+  assert.equal(readFileSync(ledger._jsonlPath, 'utf8').split('\n').filter((line) => line.includes('recordSuiteDecision')).length, before)
+  assert.deepEqual(TABLES.suite_decisions.unique[0], ['adw_id', 'identity_key', 'role', 'decision', 'at_ms'])
+})
+test('Q5: suitefacts counts unstamped rows and never inserts them, with and without since', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-q5-')
+  const journal = join(dir, 'journal.jsonl')
+  const rows = [
+    { event: 'seat-suite-policy', adw_id: 'suite-q5', dispatch_id: 'old', role: 'builder', transport: 'headless-json', suite_policy: { admitted: 1, refused: 0, unrecognised: 0 } },
+    { event: 'seat-suite-policy', adw_id: 'suite-q5', dispatch_id: 'new', role: 'builder', transport: 'headless-json', at: 600, suite_policy: { admitted: 1, refused: 0, unrecognised: 0 } },
+  ]
+  writeFileSync(journal, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  for (const since of [null, 500]) {
+    const ledger = openLedger({ dbPath: join(dir, `target-${since}.db`) })
+    const result = ingestJournal(journal, ledger, { adw_id: 'suite-q5', since })
+    assert.equal(result.unstamped, 1)
+    assert.equal(ledger.dumpTable('suite_decisions').length, 1)
+    assert.equal(readFileSync(ledger._jsonlPath, 'utf8').includes('"dispatch_id":"old"'), false)
+    ledger.close()
+  }
+})
+
+test('suitefacts a refusal stores its applied re-ask and that re-ask envelope status, and a pane row keeps its absence reason', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-reask-')
+  const ledger = openLedger({ dbPath: join(dir, 'target.db') })
+  const journal = join(dir, 'journal.jsonl')
+  const refusal = (dispatch_id, at) => ({ event: 'seat-suite-policy', dispatch_id, run_id: 'r1', role: 'reviewer', transport: 'headless-json', at, refusal: 'suite-run-not-owned', command: 'npm test', kind: 'suite', reason: 'not owned' })
+  const enforcement = (dispatch, applied, at) => ({ at, seat_enforcement: { role: 'reviewer', kind: 'suite-run-not-owned', dispatch, applied }, channel: 'record' })
+  writeFileSync(journal, [
+    { at: 699, event: 'run-start', run_id: 'r1' },
+    refusal('d1', 700), enforcement('d1', false, 701), enforcement('d2', true, 702),
+    { at: 703, envelope: 'd2', role: 'reviewer', status: 'done', channel: 'record' },
+    refusal('d3', 704), enforcement('d4', true, 705),
+    { at: 706, envelope: 'd4', role: 'reviewer', status: 'insufficient', channel: 'record' },
+    refusal('d5', 707),
+    refusal('d6', 710), enforcement('d7', true, 711),
+    { event: 'seat-suite-policy', dispatch_id: 'p2', role: 'builder', transport: 'headless-json', at: 712, suite_policy: { refused: null, admitted: null, unrecognised: null, refused_at_least: 1, admitted_at_least: 0, unrecognised_at_least: 0 }, suite_policy_absent: 'suite-policy-stream-unavailable' },
+    { event: 'seat-suite-policy', dispatch_id: 'p1', id: 'p1', role: 'builder', transport: 'pane', at: 708, suite_policy: null, suite_policy_absent: 'pane-no-intercept' },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-reask' }).applied, 6)
+  const rows = ledger.dumpTable('suite_decisions')
+  const by = (id) => rows.find((row) => row.dispatch_id === id)
+  assert.deepEqual([by('d1').reask_dispatch_id, by('d1').reask_status], ['d2', 'done'])
+  assert.deepEqual([by('d3').reask_dispatch_id, by('d3').reask_status], ['d4', 'insufficient'])
+  assert.equal(by('d1').reask_absent_reason, null)
+  // Not seen is a closed reason, never a refusal that was not re-asked.
+  assert.deepEqual([by('d5').reask_dispatch_id, by('d5').reask_status, by('d5').reask_absent_reason], [null, null, 'reask-unobserved'])
+  assert.deepEqual([by('d6').reask_dispatch_id, by('d6').reask_status, by('d6').reask_absent_reason], ['d7', null, 'reask-envelope-unobserved'])
+  assert.deepEqual([by('p2').admitted, by('p2').refused, by('p2').policy_absent_reason], [null, null, 'suite-policy-stream-unavailable'])
+  assert.deepEqual([by('p1').decision, by('p1').admitted, by('p1').policy_absent_reason], ['policy', null, 'pane-no-intercept'])
+  ledger.close()
+})
+
+test('suitefacts a re-ask is correlated to its envelope in its own run and journal order, never an earlier boot', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-reask-run-')
+  const ledger = openLedger({ dbPath: join(dir, 'target.db') })
+  const journal = join(dir, 'journal.jsonl')
+  const refusal = (run_id, dispatch_id, at) => ({ event: 'seat-suite-policy', dispatch_id, run_id, role: 'reviewer', transport: 'headless-json', at, refusal: 'suite-run-not-owned', command: 'npm test', kind: 'suite' })
+  const enforcement = (dispatch, at) => ({ at, seat_enforcement: { role: 'reviewer', kind: 'suite-run-not-owned', dispatch, applied: true }, channel: 'record' })
+  writeFileSync(journal, [
+    // An earlier boot already recorded an envelope for d2.
+    { at: 1, event: 'run-start', run_id: 'r1' },
+    { at: 2, envelope: 'd2', role: 'reviewer', status: 'insufficient', channel: 'record' },
+    // The later boot refuses d1 and re-asks it as d2, which is done.
+    { at: 10, event: 'run-start', run_id: 'r2' },
+    refusal('r2', 'd1', 11), enforcement('d2', 12),
+    { at: 13, envelope: 'd2', role: 'reviewer', status: 'done', channel: 'record' },
+    // A refusal whose run is not the journal's current run cannot be correlated.
+    refusal('r1', 'd3', 14), enforcement('d4', 15),
+    // A refusal re-asked in a run that ends before the envelope is journalled.
+    refusal('r2', 'd5', 16), enforcement('d6', 17),
+    { at: 18, event: 'run-start', run_id: 'r3' },
+    { at: 19, envelope: 'd6', role: 'reviewer', status: 'done', channel: 'record' },
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'suite-reask-run' }).applied, 3)
+  const by = (id) => ledger.dumpTable('suite_decisions').find((row) => row.dispatch_id === id)
+  assert.deepEqual([by('d1').reask_dispatch_id, by('d1').reask_status, by('d1').reask_absent_reason], ['d2', 'done', null])
+  assert.deepEqual([by('d3').reask_dispatch_id, by('d3').reask_status, by('d3').reask_absent_reason], [null, null, 'reask-uncorrelated'])
+  assert.deepEqual([by('d5').reask_dispatch_id, by('d5').reask_status, by('d5').reask_absent_reason], ['d6', null, 'reask-envelope-unobserved'])
+  ledger.close()
+})
+test('suitefacts replaying identical writes adds no row, even with no run_id', { skip: SKIP }, () => {
+  const dir = scratchDir('suite-replay-')
+  const source = openLedger({ dbPath: join(dir, 'source.db') })
+  const write = (run_id, extra = {}) => source.recordSuiteDecision({ adw_id: 'suite-replay', run_id, dispatch_id: 'd1', role: 'builder', transport: 'headless-json', decision: 'policy', admitted: 1, refused: 0, unrecognised: 0, at_ms: 900, ...extra })
+  write(null, { run_id_absent_reason: 'pre-amendment' })
+  write('r1')
+  write(null, { run_id_absent_reason: 'pre-amendment' })
+  write('r1')
+  assert.equal(source.dumpTable('suite_decisions').length, 2)
+  const replayed = openLedger({ dbPath: join(dir, 'replayed.db') })
+  replayJsonl(source._jsonlPath, replayed)
+  replayJsonl(source._jsonlPath, replayed)
+  assert.equal(replayed.dumpTable('suite_decisions').length, 2)
+  assert.ok(replayed.dumpTable('suite_decisions').every((row) => typeof row.identity_key === 'string'))
+  source.close(); replayed.close()
+})
 test('path-dependent ledger table labels are frozen and cover their two tables', () => {
   assert.equal(Object.isFrozen(PATH_DEPENDENT_TABLES), true)
   assert.deepEqual(Object.keys(PATH_DEPENDENT_TABLES).sort(), ['run_links', 'run_observations'])
@@ -2241,7 +2398,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 43)
+    assert.equal(Object.keys(TABLES).length, 44)
   } finally {
     conn.close()
     ledger.close()

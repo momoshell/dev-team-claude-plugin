@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { piRpcSeatParts } from './adapters/adapter-pi.mjs'
@@ -1603,7 +1603,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
     emitUsage(turn, seat, turn.usage)
     journalTurnCensus(turn, seat)
-    log(suiteRefusalRow({ role: turn.role, transport: 'headless-rpc', verdict: refusal }))
+    log(suiteRefusalRow({ role: turn.role, transport: 'headless-rpc', verdict: refusal, dispatch_id: turn.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, turn.role) }))
     finishTurn(seat)
     // ONE cleanup site for the enforcement arm and timeout drain.
     if (evictSeat) {
@@ -1644,7 +1644,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   function journalSuitePolicy(turn) {
     if (!turn || !turn.policy || turn.policyReported) return
     turn.policyReported = true
-    log(suitePolicyRow({ role: turn.role, transport: 'headless-rpc', counters: suiteCountersFor(turn.role), read: turn.policyRead !== false }))
+    log(suitePolicyRow({ role: turn.role, transport: 'headless-rpc', counters: suiteCountersFor(turn.role), read: turn.policyRead !== false, dispatch_id: turn.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, turn.role) }))
   }
   function wait(returnPath, timeoutS) {
     const seat = [...seats.values()].find((s) => s.turn?.returnPath === returnPath)

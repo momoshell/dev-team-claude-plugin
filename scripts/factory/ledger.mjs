@@ -425,6 +425,18 @@ const PLANNER_SYMBOLS_METRICS = Object.freeze([
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
 export const CELL_RATE_FLOOR = 12
+export const SUITE_REASK_ABSENT = Object.freeze({ unobserved: 'reask-unobserved', envelope_unobserved: 'reask-envelope-unobserved', uncorrelated: 'reask-uncorrelated' })
+export const SUITE_REFUSAL_UNSTAMPED = 'unstamped-counted-at-ingest'
+export const SUITE_DECISION_ABSENT = Object.freeze({ pre_amendment: 'pre-amendment', cell: 'seat-cell-unavailable', run_id: 'run-id-unavailable' })
+// A dispatch's identity as ONE non-null key: an absent run_id is encoded as its closed
+// reason in an object, which no real run_id string can equal, and absent transport or
+// dispatch_id stay JSON null, so an incomplete identity is still a distinct, stable key.
+const suiteIdentityKey = (runId, runIdAbsent, transport, dispatchId) => JSON.stringify([
+  runId ?? { absent: runIdAbsent ?? SUITE_DECISION_ABSENT.run_id }, transport ?? null, dispatchId ?? null,
+])
+export const SUITE_RATE_ABSENT = Object.freeze({ identity: 'identity-incomplete', coverage: 'coverage-unavailable' })
+const suiteCellMissing = (row) => ['provider', 'model_id', 'agent', 'effort'].every((key) => row?.[key] === null || row?.[key] === undefined)
+export const SUITE_REFUSAL_DEFINITION = 'window = suite_decisions.at_ms in [since, until) for numerator and denominator; dispatches = distinct (adw_id, run_id, transport, dispatch_id, role) with any suite decision in the window; refusals = those with a refused decision in the window; rate = refusals / dispatches, printed only when every dispatch in the denominator has a complete identity and an observed policy row, else null with identity-incomplete | coverage-unavailable; the cell is the one each row was written with, never re-joined from run_seats; a row with no cell is grouped under a null cell with cell_absent_reason; reasks = refusals followed by an applied re-ask, recoveries = re-asks whose envelope was done, both printed only when every refusal in the cell has a re-ask correlated in its own run, else null with reask-uncorrelated | reask-unobserved (recoveries also reask-envelope-unobserved); reasks_unobserved, recoveries_unobserved and reask_uncorrelated are always counted, never zeros'
 export const SCREENER_PROPOSAL_OUTCOMES = Object.freeze(['adopted', 'rejected', 'unadjudicated'])
 export const TURN_TRANSPORTS = Object.freeze(['headless-json', 'headless-rpc', 'pane'])
 export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens: input and output at cost_in_per_mtok and cost_out_per_mtok, cache reads at cost_cache_read_per_mtok and cache writes at cost_cache_write_per_mtok, all four ratified per model in the same catalog — a model missing either cache rate leaves the whole row unpriced, never partly priced, and a token class even one member session never measured does the same; billed_cache_write_tokens collapses the 1h and 5m write TTLs into one column, so pricing every write at the ratified 1h rate is an explicit lossy convention (#527)'
@@ -799,6 +811,25 @@ export const TABLES = Object.freeze({
     ],
     unique: [['adw_id']],
     indexes: [],
+  },
+  suite_decisions: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT NOT NULL' }, { name: 'identity_key', decl: 'TEXT NOT NULL' },
+      { name: 'run_id', decl: 'TEXT' }, { name: 'run_id_absent_reason', decl: 'TEXT' },
+      { name: 'dispatch_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' }, { name: 'provider', decl: 'TEXT' }, { name: 'model_id', decl: 'TEXT' },
+      { name: 'agent', decl: 'TEXT' }, { name: 'effort', decl: 'TEXT' }, { name: 'cell_absent_reason', decl: 'TEXT' },
+      { name: 'decision', decl: 'TEXT' }, { name: 'refusal_kind', decl: 'TEXT' }, { name: 'reason', decl: 'TEXT' },
+      { name: 'command_class', decl: 'TEXT' }, { name: 'admitted', decl: 'INTEGER' }, { name: 'refused', decl: 'INTEGER' },
+      { name: 'unrecognised', decl: 'INTEGER' }, { name: 'policy_absent_reason', decl: 'TEXT' },
+      { name: 'reask_dispatch_id', decl: 'TEXT' }, { name: 'reask_status', decl: 'TEXT' }, { name: 'reask_absent_reason', decl: 'TEXT' },
+      { name: 'at_ms', decl: 'INTEGER' }, { name: 'created_at', decl: 'TEXT' },
+    ],
+    // (adw_id, run_id, transport, dispatch_id, role, decision, at_ms) per ADR-046 Amendment 1, with
+    // run_id, transport and dispatch_id folded into identity_key so that no key column is NULL
+    // and SQLite enforces the key itself: replaying a write adds nothing, even for a row
+    // whose run_id is absent.
+    unique: [['adw_id', 'identity_key', 'role', 'decision', 'at_ms']], indexes: [],
   },
   run_seats: {
     columns: [
@@ -1603,12 +1634,13 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'plan-adopted': 'recordPlanAdoption',
   'phase-slot-wait': 'recordPhaseSlotWait',
   'experiment-arm': 'recordExperimentArm',
+  'seat-suite-policy': 'recordSuiteDecision',
 })
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1662,6 +1694,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordNarrationMeasurement: 'narration_measurements',
   recordScreenerProposal: 'screener_proposals',
   recordAdvisorUsage: 'advisor_usage',
+  recordSuiteDecision: 'suite_decisions',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -3588,6 +3621,34 @@ export function openLedger({
     return args
   }
 
+  function recordSuiteDecision(input = {}) {
+    requireFields(input, ['adw_id', 'dispatch_id', 'role', 'transport', 'decision', 'at_ms'], 'recordSuiteDecision')
+    if (!Number.isFinite(epochMsOrNull(input.at_ms))) throw new LedgerUsageError("recordSuiteDecision: field 'at_ms' must be a finite epoch millisecond value")
+    const decision = input.decision
+    if (!['policy', 'refused'].includes(decision)) throw new LedgerUsageError("recordSuiteDecision: field 'decision' must be one of policy|refused")
+    if (typeof input.role !== 'string' || input.role === '') throw new LedgerUsageError("recordSuiteDecision: field 'role' must be a non-empty string")
+    const runIdAbsent = Object.hasOwn(input, 'run_id_absent_reason') ? input.run_id_absent_reason : (input.run_id == null ? SUITE_DECISION_ABSENT.run_id : null)
+    const args = redact({
+      adw_id: input.adw_id, identity_key: suiteIdentityKey(input.run_id, runIdAbsent, input.transport, input.dispatch_id),
+      run_id: input.run_id ?? null, run_id_absent_reason: runIdAbsent,
+      dispatch_id: input.dispatch_id, role: input.role, transport: input.transport,
+      provider: input.provider ?? null, model_id: input.model_id ?? null, agent: input.agent ?? null, effort: input.effort ?? null,
+      cell_absent_reason: Object.hasOwn(input, 'cell_absent_reason') ? input.cell_absent_reason : (suiteCellMissing(input) ? SUITE_DECISION_ABSENT.cell : null), decision,
+      refusal_kind: input.refusal_kind ?? null, reason: input.reason ?? null, command_class: input.command_class ?? null,
+      admitted: input.admitted ?? null, refused: input.refused ?? null, unrecognised: input.unrecognised ?? null,
+      policy_absent_reason: input.policy_absent_reason ?? null,
+      reask_dispatch_id: input.reask_dispatch_id ?? null, reask_status: input.reask_status ?? null,
+      reask_absent_reason: input.reask_absent_reason ?? null,
+      at_ms: epochMsOrNull(input.at_ms), created_at: isoMs(input.created_at ?? input.at_ms),
+    }, stats)
+    appendJsonl('recordSuiteDecision', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('suite_decisions')
+      conn.prepare(`INSERT OR IGNORE INTO suite_decisions (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordSeatReask(input = {}) {
     requireFields(input, ['event', 'outcome'], 'recordSeatReask')
     requireEnum(input.event, SEAT_REASK_EVENTS, 'recordSeatReask', 'event')
@@ -5208,6 +5269,63 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  // ADR-046 read. The WINDOW is the decision time (suite_decisions.at_ms) on both sides
+  // of the rate: a dispatch is a distinct (adw_id, run_id, transport, dispatch_id, role)
+  // with any suite decision, policy or refused, in [since, until); a refusal is a distinct
+  // refused dispatch whose refused row is in the window. The cell is the one the row was
+  // WRITTEN with (Amendment 1), never re-joined from run_seats, so a reboot onto another
+  // cell files its decisions under that cell. A dispatch with no recorded cell keeps its
+  // counts under a null cell with its reason (pre-amendment, seat-cell-unavailable). Rows with no `at` never reach suite_decisions (ingest counts them), so the
+  // readout states that count as unmeasured here rather than printing a zero.
+  function suiteRefusals({ since = null, until = null } = {}) {
+    const toMs = (value) => value === null || value === undefined ? null : (typeof value === 'number' ? value : Date.parse(value))
+    const sinceMs = toMs(since)
+    const untilMs = toMs(until)
+    const rows = queryRows(`WITH windowed AS (
+      SELECT * FROM suite_decisions
+      WHERE at_ms IS NOT NULL AND (? IS NULL OR at_ms >= ?) AND (? IS NULL OR at_ms < ?)
+    ), per_dispatch AS (
+      SELECT adw_id, identity_key, role,
+        MAX(CASE WHEN run_id IS NULL OR transport IS NULL OR dispatch_id IS NULL THEN 1 ELSE 0 END) AS identity_gap,
+        MAX(CASE WHEN decision = 'policy' AND policy_absent_reason IS NULL AND admitted IS NOT NULL AND refused IS NOT NULL AND unrecognised IS NOT NULL THEN 1 ELSE 0 END) AS covered,
+        MAX(CASE WHEN decision = 'refused' AND reask_absent_reason = 'reask-uncorrelated' THEN 1 ELSE 0 END) AS reask_gap,
+        MAX(provider) AS provider, MAX(model_id) AS model_id, MAX(agent) AS agent, MAX(effort) AS effort,
+        MAX(cell_absent_reason) AS cell_absent_reason,
+        MAX(CASE WHEN decision = 'refused' THEN 1 ELSE 0 END) AS refused,
+        MAX(CASE WHEN decision = 'refused' AND reask_dispatch_id IS NOT NULL THEN 1 ELSE 0 END) AS reasked,
+        MAX(CASE WHEN decision = 'refused' AND reask_status = 'done' THEN 1 ELSE 0 END) AS recovered,
+        MAX(CASE WHEN decision = 'refused' AND reask_absent_reason = 'reask-unobserved' THEN 1 ELSE 0 END) AS reask_unobserved,
+        MAX(CASE WHEN decision = 'refused' AND reask_absent_reason = 'reask-envelope-unobserved' THEN 1 ELSE 0 END) AS recovery_unobserved
+      FROM windowed GROUP BY adw_id, identity_key, role
+    )
+    SELECT pd.provider AS provider, pd.model_id AS model_id, pd.agent AS agent, pd.effort AS effort, pd.role AS role,
+      pd.cell_absent_reason AS cell_absent_reason,
+      COUNT(*) AS dispatches, SUM(pd.refused) AS refusals, SUM(pd.reasked) AS reasks, SUM(pd.recovered) AS recoveries,
+      SUM(pd.reask_unobserved) AS reasks_unobserved, SUM(pd.recovery_unobserved) AS recoveries_unobserved,
+      SUM(pd.identity_gap) AS identity_incomplete, SUM(1 - pd.covered) AS coverage_unavailable, SUM(pd.reask_gap) AS reask_uncorrelated
+    FROM per_dispatch pd
+    GROUP BY pd.provider, pd.model_id, pd.agent, pd.effort, pd.role, pd.cell_absent_reason
+    ORDER BY pd.cell_absent_reason IS NOT NULL, pd.cell_absent_reason, pd.provider, pd.model_id, pd.agent, pd.effort, pd.role`, [sinceMs, sinceMs, untilMs, untilMs])
+    // The refusal RATE is printed only when every dispatch in its denominator has a
+    // complete identity and observed refusal coverage; otherwise the counts stand and the
+    // rate is null with the first reason. Re-ask correlation never gates the rate: it gates
+    // only the recovery columns. A cell with a refusal whose re-ask was not correlated in
+    // its run, or not observed, prints reasks and recoveries as null with that reason (a
+    // recovery also needs the re-ask's envelope), and keeps the unobserved counts.
+    const rateAbsent = (row) => row.identity_incomplete > 0 ? SUITE_RATE_ABSENT.identity
+      : row.coverage_unavailable > 0 ? SUITE_RATE_ABSENT.coverage : null
+    const reasksAbsent = (row) => row.reask_uncorrelated > 0 ? SUITE_REASK_ABSENT.uncorrelated
+      : row.reasks_unobserved > 0 ? SUITE_REASK_ABSENT.unobserved : null
+    const recoveriesAbsent = (row) => reasksAbsent(row) ?? (row.recoveries_unobserved > 0 ? SUITE_REASK_ABSENT.envelope_unobserved : null)
+    return rows.map(({ dispatches, refusals, reasks, recoveries, ...row }) => ({
+      ...row,
+      dispatches, refusals, rate: rateAbsent(row) === null ? refusals / dispatches : null, rate_absent_reason: rateAbsent(row),
+      reasks: reasksAbsent(row) === null ? reasks : null, reasks_absent_reason: reasksAbsent(row),
+      recoveries: recoveriesAbsent(row) === null ? recoveries : null, recoveries_absent_reason: recoveriesAbsent(row),
+      thin: dispatches < CELL_RATE_FLOOR,
+    }))
+  }
+
   function cellAttempts({ since = null, until = null } = {}) {
     return queryRows(`
       WITH scoped AS (
@@ -6435,11 +6553,11 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordSuiteDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -6536,12 +6654,38 @@ export function replayJsonl(jsonlPath, ledger) {
   return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
 }
 
-function journalFactArgs(writer, row, adwId) {
+function journalFactArgs(writer, row, adwId, reask = null) {
   const source = row && typeof row === 'object' && !Array.isArray(row) ? row : {}
   const value = (key) => source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) ? source[key] : {}
   const rowAdwId = source.adw_id ?? adwId ?? null
   const atMs = epochMsOrNull(source.at)
   const createdAt = atMs === null ? undefined : atMs
+  if (writer === JOURNAL_FACT_EVENTS['seat-suite-policy']) {
+    // ADR-046 Amendment 1: the cell and run are what the ROW says, never re-joined from
+    // run_seats (unique per lane and role, not per boot). A row with no run_id key was
+    // written before the amendment: both are null with pre-amendment, and it is counted.
+    const amended = Object.hasOwn(source, 'run_id')
+    const cell = amended && !suiteCellMissing(source) ? source : null
+    const refusal = source.refusal === 'suite-run-not-owned'
+    const policy = source.suite_policy && typeof source.suite_policy === 'object' ? source.suite_policy : null
+    return {
+      adw_id: rowAdwId, run_id: amended ? source.run_id ?? null : null,
+      run_id_absent_reason: !amended ? SUITE_DECISION_ABSENT.pre_amendment : (source.run_id == null ? SUITE_DECISION_ABSENT.run_id : null),
+      dispatch_id: source.dispatch_id ?? null, role: source.role ?? null, transport: source.transport ?? null,
+      provider: cell?.provider ?? null, model_id: cell?.model_id ?? null, agent: cell?.agent ?? null, effort: cell?.effort ?? null,
+      cell_absent_reason: !amended ? SUITE_DECISION_ABSENT.pre_amendment : (cell ? null : SUITE_DECISION_ABSENT.cell), decision: refusal ? 'refused' : 'policy',
+      refusal_kind: refusal ? source.refusal : null, reason: refusal ? source.reason ?? null : null,
+      command_class: refusal ? source.kind ?? null : null,
+      admitted: refusal ? null : policy?.admitted ?? null, refused: refusal ? null : policy?.refused ?? null,
+      unrecognised: refusal ? null : policy?.unrecognised ?? null,
+      // Any policy row whose counters are unmeasured keeps the writer's closed reason
+      // (pane-no-intercept, stream unavailable, unrecognised), never a bare null.
+      policy_absent_reason: refusal ? null : source.suite_policy_absent ?? null,
+      reask_dispatch_id: refusal ? reask?.dispatch ?? null : null, reask_status: refusal ? reask?.status ?? null : null,
+      reask_absent_reason: refusal ? suiteReaskAbsentReason(reask) : null,
+      at_ms: atMs, created_at: createdAt,
+    }
+  }
   if (writer === JOURNAL_FACT_KEYS.narration) {
     const narration = value('narration')
     return {
@@ -6776,7 +6920,7 @@ function applyJournalFact(ledger, writer, args) {
 }
 
 const INGEST_ABSENT = Object.freeze({
-  applied: 0, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+  applied: 0, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
 })
 
 function ingestReadFailure(err) {
@@ -6785,6 +6929,7 @@ function ingestReadFailure(err) {
     skipped: 0,
     ignored: 0,
     failed: 0,
+    unstamped: 0,
     complete: false,
     first_failure: { line: null, reason: err?.code || err?.name || 'ReadError' },
   }
@@ -6903,7 +7048,7 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
     }
   }
   if (mirrorErrorCount(ledger) > seedErrorsBefore) {
-    return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'seed-read-error' } }
+    return { applied: 0, skipped: 0, ignored: 0, failed: 1, unstamped: 0, complete: false, first_failure: { line: null, reason: 'seed-read-error' } }
   }
   // Every fact runs through a throwaway ledger first: it validates the fact with
   // the writer's own checks and yields the stored row the key is built from.
@@ -6916,13 +7061,75 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
     // lazily, so it is read after a first query.
     scratch.dumpTable('run_seats')
     if (scratch.degraded || (typeof scratch.stats === 'function' && scratch.stats().degraded)) {
-      return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
+      return { applied: 0, skipped: 0, ignored: 0, failed: 1, unstamped: 0, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
     }
     return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane })
   } finally {
     try { scratch.close() } catch { /* a throwaway ledger */ }
     try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
   }
+}
+
+// ADR-046 re-asks: a suite refusal is followed, in journal order, by the driver's
+// applied seat_enforcement re-ask for the same role and kind, whose own envelope row
+// carries the outcome. Correlated over the WHOLE journal before any row is written,
+// so a refused row is stored with its re-ask dispatch and that dispatch's envelope
+// status; a refusal with no applied re-ask after it stores null for both.
+// A fact is written once (its natural key excludes the re-ask), so a journal read
+// before its re-ask or re-ask envelope was appended freezes the refused row as it was.
+// What was not seen is stored as a closed reason and read back as unobserved, never as
+// a refusal that was not re-asked or a re-ask that did not recover.
+function suiteReaskAbsentReason(reask) {
+  if (reask?.uncorrelated) return SUITE_REASK_ABSENT.uncorrelated
+  if (!reask) return SUITE_REASK_ABSENT.unobserved
+  if (reask.status === null) return SUITE_REASK_ABSENT.envelope_unobserved
+  return null
+}
+
+// Correlation is scoped to ONE run segment of the journal (from a run-start row to the
+// next) and taken in journal order: a refusal is matched to the next applied re-ask for
+// its role in the same run, and that re-ask to the first envelope for its dispatch AFTER
+// it in the same run. A role's transport is fixed for a run, so (adw_id, run_id, role)
+// pins the transport too. A refusal whose run_id is not the journal's current run (a
+// pre-amendment row, or a journal with no run-start) cannot be correlated and says so.
+function suiteReaskIndex(lines) {
+  let run = null
+  const pending = new Map()
+  const awaiting = new Map()
+  const index = new Map()
+  for (const [i, line] of lines.entries()) {
+    if (!line) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    if (row.event === 'run-start') {
+      run = typeof row.run_id === 'string' && row.run_id !== '' ? row.run_id : null
+      pending.clear()
+      awaiting.clear()
+      continue
+    }
+    if (row.event === 'seat-suite-policy' && row.refusal === 'suite-run-not-owned') {
+      if (run === null || row.run_id !== run) { index.set(i + 1, { uncorrelated: true }); continue }
+      pending.set(String(row.role ?? ''), i + 1)
+      continue
+    }
+    const enforcement = row.seat_enforcement
+    if (enforcement && typeof enforcement === 'object' && enforcement.kind === 'suite-run-not-owned' && enforcement.applied === true) {
+      const role = String(enforcement.role ?? '')
+      const refusalLine = pending.get(role)
+      if (refusalLine !== undefined && typeof enforcement.dispatch === 'string') {
+        index.set(refusalLine, { dispatch: enforcement.dispatch, status: null })
+        awaiting.set(enforcement.dispatch, refusalLine)
+        pending.delete(role)
+      }
+      continue
+    }
+    if (typeof row.envelope === 'string' && typeof row.status === 'string' && awaiting.has(row.envelope)) {
+      index.get(awaiting.get(row.envelope)).status = row.status
+      awaiting.delete(row.envelope)
+    }
+  }
+  return index
 }
 
 function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane }) {
@@ -6933,7 +7140,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     // A caller that already discovered the journal (ingest-all) passes
     // require_present: a journal gone by read time vanished mid-run, which is an
     // incomplete ingest, never a clean absence.
-    if (err?.code === 'ENOENT' && require_present) return { applied: 0, skipped: 0, ignored: 0, failed: 1, complete: false, first_failure: { line: null, reason: 'journal-vanished' } }
+    if (err?.code === 'ENOENT' && require_present) return { applied: 0, skipped: 0, ignored: 0, failed: 1, unstamped: 0, complete: false, first_failure: { line: null, reason: 'journal-vanished' } }
     if (err?.code === 'ENOENT') return { ...INGEST_ABSENT }
     return ingestReadFailure(err)
   }
@@ -6941,9 +7148,11 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
   let skipped = 0
   let ignored = 0
   let failed = 0
+  let unstamped = 0
   let firstFailure = null
   let mirrorFailed = false
   const lines = String(content).split('\n')
+  const reasks = suiteReaskIndex(lines)
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1
     if (!line) continue
@@ -6957,6 +7166,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     }
     const source = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
     const rowAtMs = source ? epochMsOrNull(source.at) : null
+    if (source && source.event === 'seat-suite-policy' && rowAtMs === null) { unstamped += 1; continue }
     if (Number.isFinite(sinceMs) && (!Number.isFinite(rowAtMs) || rowAtMs < sinceMs)) {
       ignored += 1
       continue
@@ -7008,7 +7218,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
       }
     } else {
       try {
-        pending.push({ writer, args: journalFactArgs(writer, source, adw_id) })
+        pending.push({ writer, args: journalFactArgs(writer, source, adw_id, reasks.get(lineNo) ?? null) })
       } catch (err) {
         failed += 1
         if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
@@ -7066,7 +7276,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
     }
     if (mirrorFailed) break
   }
-  return { applied, skipped, ignored, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
+  return { applied, skipped, ignored, failed, unstamped, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
 }
 
 export function ingestExternalFenceRegister(registerPath, ledger, { batch_id = null } = {}) {
@@ -7542,6 +7752,7 @@ const VERB_FLAGS = Object.freeze({
   'run-set': new Set(['since', 'until']),
   configurations: new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
+  'suite-refusals': new Set(['since', 'until']),
   cells: new Set(['since', 'until', 'prices']),
   evals: new Set(['bench', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
@@ -8345,6 +8556,17 @@ export function main(argv) {
       return 0
     }
 
+    if (verb === 'suite-refusals') {
+      if (positional.length) refuse('suite-refusals: takes no positional arguments')
+      if (!Object.hasOwn(flags, 'since')) refuse('suite-refusals: --since is required')
+      const since = windowBound(flags.since, 'since', 'suite-refusals')
+      const until = Object.hasOwn(flags, 'until') ? windowBound(flags.until, 'until', 'suite-refusals') : null
+      if (until !== null && until <= since) refuse('suite-refusals: --until must be later than --since')
+      const rows = ledger.suiteRefusals({ since, until })
+      if (ledger.stats().degraded) refuse('suite-refusals: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({ schema: 1, question: 'How often does each seated cell refuse suite commands?', definition: SUITE_REFUSAL_DEFINITION, since, until, floor: CELL_RATE_FLOOR, unstamped: null, unstamped_absent_reason: SUITE_REFUSAL_UNSTAMPED, rows })}\n`)
+      return 0
+    }
     if (verb === 'cell-failures') {
       if (positional.length > 0) refuse('cell-failures: takes no positional arguments')
       const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')

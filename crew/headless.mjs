@@ -891,9 +891,29 @@ export function suiteRefusalEnvelope({ id, role, returnPath, transport, verdict 
   }
 }
 
-export function suiteRefusalRow({ role, transport, verdict }) {
+// ADR-046 Amendment 1: the seat's LIVE cell as the dispatch sees it (crew.seats is the
+// view a budget fallback patches, crew.members the boot view), never re-derived later.
+// A seat with no recorded cell stamps nulls, which ingest stores with a closed reason.
+export function suiteSeatCell(crew, role) {
+  const seat = crew?.seats?.[role] || crew?.members?.[role] || null
+  return { provider: seat?.provider ?? null, model_id: seat?.id ?? null, agent: seat?.agent ?? null, effort: seat?.effort ?? null }
+}
+
+// The dispatch identity every suite-policy row carries: the boot (run_id) and the
+// seat's own cell, beside dispatch_id and transport (ADR-046 Amendment 1).
+function suiteIdentity(run_id, cell) {
   return {
-    event: SEAT_SUITE_POLICY_EVENT, role, transport, refusal: SUITE_RUN_REFUSAL,
+    run_id: run_id ?? null,
+    provider: cell?.provider ?? null, model_id: cell?.model_id ?? null, agent: cell?.agent ?? null, effort: cell?.effort ?? null,
+  }
+}
+
+export function suiteRefusalRow({ role, transport, verdict, dispatch_id, at = Date.now(), run_id = null, cell = null }) {
+  // ADR-046: a clock that is not finite epoch ms stamps null, which ingest counts as
+  // unstamped; instrumentation never throws into the seat loop.
+  return {
+    event: SEAT_SUITE_POLICY_EVENT,
+    at: Number.isFinite(at) ? at : null, dispatch_id: dispatch_id ?? null, ...suiteIdentity(run_id, cell), role, transport, refusal: SUITE_RUN_REFUSAL,
     command: verdict.command, kind: verdict.kind, gate_path: verdict.gate_path, reason: verdict.reason,
   }
 }
@@ -985,9 +1005,9 @@ export function suitePolicyReport(counters, { read = true } = {}) {
   }
 }
 
-export function suitePolicyRow({ role, transport, counters = null, absentReason = null, read = true }) {
+export function suitePolicyRow({ role, transport, counters = null, absentReason = null, read = true, dispatch_id, at = Date.now(), run_id = null, cell = null }) {
   return {
-    event: SEAT_SUITE_POLICY_EVENT, role, transport,
+    event: SEAT_SUITE_POLICY_EVENT, at: Number.isFinite(at) ? at : null, dispatch_id: dispatch_id ?? null, ...suiteIdentity(run_id, cell), role, transport,
     ...(counters ? suitePolicyReport(counters, { read }) : { suite_policy: null, suite_policy_absent: absentReason }),
   }
 }
@@ -1713,7 +1733,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   }
   function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
-    if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
+    if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
     log({
       at: now(), headless_outcome: outcome, exit_code: exitCode, signal,
       terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream,
@@ -2304,7 +2324,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     emitUsage(run, telemetry.usage)
     log(turnCeilingDetail({ at: now(), role: run.role, id: run.id, turns, budget, absentReason }))
     log({ at: now(), seat_turn_census: censusRow(run, 'headless-json', telemetry) })
-    if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false }))
+    if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
     return turnCeilingEnvelope({ id: run.id, role: run.role, returnPath, turns, budget, rejectedStatus: null })
   }
   function enforceTurnCeilingBeforeEnvelope(run, returnPath, { alreadyEnded = false } = {}) {
@@ -2363,7 +2383,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       const stream = telemetryParser(run.stream, read, exists)
       recordOutcome(run, 'suite-run-not-owned', stream, parseExit(run.exit, read, exists))
       emitUsage(run, stream.usage)
-      log(suiteRefusalRow({ role: run.role, transport: 'headless-json', verdict }))
+      log(suiteRefusalRow({ role: run.role, transport: 'headless-json', verdict, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
       return suiteRefusalEnvelope({ id: run.id, role: run.role, returnPath, transport: 'headless-json', verdict })
     }
     return null

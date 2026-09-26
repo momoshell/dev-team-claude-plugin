@@ -17,6 +17,7 @@ import {
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
+  suiteRefusalRow, suitePolicyRow, suiteSeatCell,
 } from './headless.mjs'
 import { KNOWN_FLAGS, main, wakeVerb } from './factoryctl.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
@@ -26,6 +27,19 @@ import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lan
 import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { CTX as DRIVE_CTX, driveTask, fakeIo, reconEnv } from './drive-fixtures.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
+
+test('Q1: suitefacts writers stamp deterministic clocks and dispatch identities', () => {
+  const refusal = suiteRefusalRow({ role: 'builder', transport: 'headless-json', dispatch_id: 'd1', at: 123, verdict: { command: 'npm test', kind: 'test-run', reason: 'refused' } })
+  const policy = suitePolicyRow({ role: 'builder', transport: 'headless-rpc', dispatch_id: 'd2', at: 456 })
+  assert.equal(refusal.at, 123)
+  assert.equal(refusal.dispatch_id, 'd1')
+  assert.equal(policy.at, 456)
+  assert.equal(policy.dispatch_id, 'd2')
+  assert.equal(Number.isFinite(refusal.at), true)
+  const stamped = suitePolicyRow({ role: 'builder', transport: 'pane', dispatch_id: 'd3', at: 789, run_id: 'run-1', cell: suiteSeatCell({ seats: { builder: { provider: 'openai', id: 'gpt-test', agent: 'pi', effort: 'medium' } } }, 'builder') })
+  assert.deepEqual([stamped.run_id, stamped.provider, stamped.model_id, stamped.agent, stamped.effort], ['run-1', 'openai', 'gpt-test', 'pi', 'medium'])
+  assert.deepEqual([policy.run_id, policy.provider], [null, null])
+})
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -2964,16 +2978,18 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, seat = null, runId = null } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
   const rows = []; const kills = []; const state = { clock: 0, sleeps: 0 }
-  const crew = { checkout: dir, members: { [role]: { model: 'sonnet', transport: 'headless-json', ...(fallback ? { fallback } : {}) } } }
+  const crew = { checkout: dir, members: { [role]: { model: 'sonnet', transport: 'headless-json', ...(seat || {}), ...(fallback ? { fallback } : {}) } } }
+  const paths = { dir, taskDir, returnsDir }
+  if (runId) Object.defineProperty(paths, 'runId', { value: runId, enumerable: false })
   const adapter = { headlessCommand: (spec) => ({ bin: '/worker/bin', args: ['-p', spec.prompt], env: {} }) }
   let assigned = null
   const io = headlessIo({
-    crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir,
+    crew, paths, taskDir, checkout: dir,
     adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
       ...(telemetry ? { parseStream: telemetry } : {}),
@@ -3606,13 +3622,21 @@ test('an own-task probe is admitted end to end on headless json from the transpo
 
 test("the builder's declared npm test is refused on headless json: the driver's suite stage owns the full suite", () => {
   const policy = { suiteCommand: 'npm test', gatePath: '/tmp/b502/gate.mjs', fence: ['crew/'] }
-  const f = b416JsonFixture({ role: 'builder', policy })
+  const f = b416JsonFixture({ role: 'builder', policy, seat: { provider: 'anthropic', id: 'claude-test', agent: 'claude', effort: 'high' }, runId: 'run-b956' })
   try {
     f.writeStream(b416ClaudeStream({ turns: 1, command: 'npm test' }))
     writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: 'builder', status: 'done', summary: 'first', artifacts: [], details: {} }))
     const envelope = f.io.wait(f.assigned.returnPath, 60)
     assert.equal(envelope.status, 'insufficient')
     assert.equal(envelope.details.suite_refusal.command, 'npm test')
+    const refusalRow = f.rows.find((row) => row.refusal === SUITE_RUN_REFUSAL)
+    assert.equal(refusalRow.at, f.state.clock)
+    assert.equal(refusalRow.dispatch_id, f.assigned.id)
+    // ADR-046 Amendment 1: the boot and the live seat cell the dispatch ran on.
+    assert.deepEqual([refusalRow.run_id, refusalRow.provider, refusalRow.model_id, refusalRow.agent, refusalRow.effort], ['run-b956', 'anthropic', 'claude-test', 'claude', 'high'])
+    const policyRow = f.rows.find((row) => row.event === 'seat-suite-policy' && !row.refusal)
+    assert.deepEqual([policyRow.run_id, policyRow.provider, policyRow.dispatch_id], ['run-b956', 'anthropic', f.assigned.id])
+    for (const key of ['command', 'kind', 'gate_path', 'reason']) assert.ok(Object.hasOwn(refusalRow, key), key)
   } finally { f.cleanup() }
 })
 

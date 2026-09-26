@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SUITE_REFUSAL_DEFINITION, SUITE_REFUSAL_UNSTAMPED, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -32,6 +32,151 @@ import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, 
 
 
 
+
+test('Q6: suitefacts refusal CLI divides refused dispatches by stamped dispatches per cell and marks thin cells', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const JAN = Date.parse('2024-01-01T00:00:00.000Z')
+  const FEB = Date.parse('2024-02-01T00:00:00.000Z')
+  const seatArgs = (adw_id, provider = 'openai') => ({ adw_id, role: 'builder', agent: 'pi', provider, model_id: 'gpt-test', model: 'gpt-test', effort: 'medium', transport: 'headless-json', source: 'roster', policy_state: 'active', created_at: '2024-01-01T00:00:00.000Z' })
+  // Amendment 1: each decision carries the cell it was written with; the seat map mirrors run_seats here.
+  const cellOf = new Map()
+  const recordRunSeat = ledger.recordRunSeat
+  ledger.recordRunSeat = (args) => { cellOf.set(args.adw_id, { provider: args.provider, model_id: args.model_id, agent: args.agent, effort: args.effort }); return recordRunSeat(args) }
+  const decision = (adw_id, dispatch_id, decision, at_ms, extra = {}) => ledger.recordSuiteDecision({ adw_id, run_id: 'r1', dispatch_id, role: 'builder', transport: 'headless-json', decision, at_ms, ...cellOf.get(adw_id), ...(decision === 'refused' ? { refusal_kind: 'suite-run-not-owned', command_class: 'test-run' } : { admitted: 1, refused: 0, unrecognised: 0 }), ...extra })
+  // January: 12 openai dispatches (two refused, one re-asked and recovered, one unobserved).
+  for (let i = 0; i < 12; i++) { ledger.recordRunSeat(seatArgs(`q6-a-${i}`)); decision(`q6-a-${i}`, 'd1', 'policy', JAN + 1000 + i) }
+  decision('q6-a-0', 'd1', 'refused', JAN + 2000, { reask_dispatch_id: 'd2', reask_status: 'done' })
+  decision('q6-a-1', 'd1', 'refused', JAN + 2001, { reask_absent_reason: 'reask-unobserved' })
+  // (b) a dispatch whose policy row is in January and its refusal a millisecond past the
+  // January bound: January denominator 1, refusals 0.
+  ledger.recordRunSeat(seatArgs('q6-edge', 'edge'))
+  decision('q6-edge', 'd1', 'policy', FEB - 1)
+  decision('q6-edge', 'd1', 'refused', FEB)
+  // (a) a seat booted in January, refused only in February: counts in February, absent from January.
+  ledger.recordRunSeat(seatArgs('q6-late', 'late'))
+  decision('q6-late', 'd1', 'policy', FEB + 4000)
+  decision('q6-late', 'd1', 'refused', FEB + 5000)
+  // (c) a refusal with no run_seats row keeps its counts under a null cell with a reason.
+  ledger.recordSuiteDecision({ adw_id: 'q6-orphan', dispatch_id: 'orphan', role: 'planner', transport: 'headless-rpc', decision: 'refused', refusal_kind: 'suite-run-not-owned', command_class: 'test-run', at_ms: JAN + 3000 })
+  const window = (sinceIso, untilIso) => {
+    const result = run(['suite-refusals', '--since', sinceIso, '--until', untilIso], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+    assert.equal(result.status, 0, result.stderr)
+    return JSON.parse(result.stdout)
+  }
+  const jan = window('2024-01-01T00:00:00Z', '2024-02-01T00:00:00Z')
+  const feb = window('2024-02-01T00:00:00Z', '2024-03-01T00:00:00Z')
+  assert.equal(jan.definition, SUITE_REFUSAL_DEFINITION)
+  assert.equal(jan.floor, CELL_RATE_FLOOR)
+  assert.deepEqual([jan.unstamped, jan.unstamped_absent_reason], [null, SUITE_REFUSAL_UNSTAMPED])
+  const cell = (payload, provider) => payload.rows.find((row) => row.provider === provider)
+  const populated = cell(jan, 'openai')
+  assert.deepEqual([populated.dispatches, populated.refusals, populated.rate, populated.thin], [12, 2, 2 / 12, false])
+  // One refusal's re-ask was not observed: the rate stands, the recovery columns do not.
+  assert.deepEqual([populated.reasks, populated.recoveries, populated.reasks_absent_reason, populated.recoveries_absent_reason], [null, null, 'reask-unobserved', 'reask-unobserved'])
+  assert.deepEqual([populated.reasks_unobserved, populated.recoveries_unobserved], [1, 0])
+  // (a)
+  assert.equal(cell(jan, 'late'), undefined)
+  assert.deepEqual([cell(feb, 'late').dispatches, cell(feb, 'late').refusals, cell(feb, 'late').rate], [1, 1, 1])
+  // (b)
+  assert.deepEqual([cell(jan, 'edge').dispatches, cell(jan, 'edge').refusals, cell(jan, 'edge').rate], [1, 0, 0])
+  assert.deepEqual([cell(feb, 'edge').dispatches, cell(feb, 'edge').refusals], [1, 1])
+  // (c)
+  const orphan = jan.rows.find((row) => row.role === 'planner')
+  assert.deepEqual([orphan.provider, orphan.model_id, orphan.agent, orphan.effort, orphan.cell_absent_reason], [null, null, null, null, 'seat-cell-unavailable'])
+  assert.deepEqual([orphan.dispatches, orphan.refusals], [1, 1])
+  assert.equal(populated.cell_absent_reason, null)
+  // (d) thin keys on the WINDOWED denominator: the same 12-seat cell has no February
+  // decision, so it is absent there, and a 1-dispatch cell is thin.
+  assert.equal(cell(feb, 'openai'), undefined)
+  assert.equal(cell(feb, 'late').thin, true)
+  assert.equal(cell(jan, 'edge').thin, true)
+  assert.equal(run(['suite-refusals'], { DEVTEAM_LEDGER_DB: ledger._dbPath }).status, 2)
+  assert.equal(run(['suite-refusals', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-02T00:00:00Z'], { DEVTEAM_LEDGER_DB: ledger._dbPath }).status, 2)
+  ledger.close()
+})
+
+test('suitefacts thin keys on the windowed dispatch count, not on cell seats', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const JAN = Date.parse('2024-01-01T00:00:00.000Z')
+  // 12 seats in the cell but only 11 have a decision in the window: thin.
+  for (let i = 0; i < 12; i++) {
+    ledger.recordRunSeat({ adw_id: `thin-${i}`, role: 'builder', agent: 'pi', provider: 'openai', model_id: 'gpt-test', model: 'gpt-test', effort: 'medium', transport: 'headless-json', source: 'roster', policy_state: 'active', created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordSuiteDecision({ adw_id: `thin-${i}`, run_id: 'r1', provider: 'openai', model_id: 'gpt-test', agent: 'pi', effort: 'medium', dispatch_id: 'd1', role: 'builder', transport: 'headless-json', decision: 'policy', admitted: 1, refused: 0, unrecognised: 0, at_ms: i === 11 ? JAN - 1 : JAN + i })
+  }
+  const result = run(['suite-refusals', '--since', '2024-01-01T00:00:00Z', '--until', '2024-02-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).rows.find((r) => r.provider === 'openai')
+  assert.deepEqual([row.dispatches, row.thin], [11, true])
+  ledger.close()
+})
+
+test('suitefacts Amendment 1 counts dispatches on the full identity under the cell each row was written with', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const JAN = Date.parse('2024-01-01T00:00:00.000Z')
+  const openai = { provider: 'openai', model_id: 'gpt-test', agent: 'pi', effort: 'medium' }
+  const anthropic = { provider: 'anthropic', model_id: 'claude-test', agent: 'claude', effort: 'high' }
+  // run_seats is unique per (adw_id, role): it keeps the FIRST boot's cell.
+  ledger.recordRunSeat({ adw_id: 'reboot', role: 'builder', ...openai, model: 'gpt-test', transport: 'headless-json', source: 'roster', policy_state: 'active', created_at: '2024-01-01T00:00:00.000Z' })
+  const decision = (run_id, cell, transport, dispatch_id, decision, at_ms, extra = {}) => ledger.recordSuiteDecision({ adw_id: 'reboot', run_id, ...cell, dispatch_id, role: 'builder', transport, decision, at_ms, ...(decision === 'refused' ? { refusal_kind: 'suite-run-not-owned', command_class: 'suite' } : { admitted: 1, refused: 1, unrecognised: 0 }), ...extra })
+  decision('r1', openai, 'headless-json', 'd1', 'policy', JAN + 1)
+  decision('r1', openai, 'headless-json', 'd1', 'refused', JAN + 2)
+  // (a) the lane reboots (same adw_id, new run) onto another cell and is refused there.
+  decision('r2', anthropic, 'headless-json', 'd1', 'policy', JAN + 10)
+  decision('r2', anthropic, 'headless-json', 'd1', 'refused', JAN + 11)
+  // (b) the pane transport issues its own d1 in the same run: a second dispatch.
+  decision('r2', anthropic, 'pane', 'd1', 'policy', JAN + 12, { admitted: null, refused: null, unrecognised: null, policy_absent_reason: 'pane-no-intercept' })
+  // (c) a pre-amendment row: no run and no cell, with the closed reason, counted.
+  ledger.recordSuiteDecision({ adw_id: 'reboot', run_id_absent_reason: 'pre-amendment', cell_absent_reason: 'pre-amendment', dispatch_id: 'd9', role: 'builder', transport: 'headless-json', decision: 'refused', refusal_kind: 'suite-run-not-owned', command_class: 'suite', at_ms: JAN + 20 })
+  const result = run(['suite-refusals', '--since', '2024-01-01T00:00:00Z', '--until', '2024-02-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout).rows
+  const first = rows.find((row) => row.provider === 'openai')
+  const second = rows.find((row) => row.provider === 'anthropic')
+  const legacy = rows.find((row) => row.cell_absent_reason === 'pre-amendment')
+  assert.deepEqual([first.dispatches, first.refusals, first.rate, first.rate_absent_reason], [1, 1, 1, null])
+  // The pane d1 is a second dispatch, but the pane never observed its commands, so the cell's
+  // rate is unmeasured: coverage-unavailable, never 1/2 read as measured nor 0.
+  assert.deepEqual([second.model_id, second.agent, second.effort, second.dispatches, second.refusals, second.coverage_unavailable], ['claude-test', 'claude', 'high', 2, 1, 1])
+  assert.deepEqual([second.rate, second.rate_absent_reason], [null, 'coverage-unavailable'])
+  assert.deepEqual([legacy.provider, legacy.model_id, legacy.agent, legacy.effort, legacy.dispatches, legacy.refusals], [null, null, null, null, 1, 1])
+  assert.deepEqual([legacy.rate, legacy.rate_absent_reason, legacy.identity_incomplete], [null, 'identity-incomplete', 1])
+  assert.equal(rows.length, 3)
+  ledger.close()
+})
+
+test('suitefacts a rate is printed only when every dispatch has identity and coverage; re-ask correlation gates only the recovery columns', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const JAN = Date.parse('2024-01-01T00:00:00.000Z')
+  const cell = (provider) => ({ provider, model_id: 'm', agent: 'pi', effort: 'medium' })
+  const policy = (adw_id, provider, extra = {}) => ledger.recordSuiteDecision({ adw_id, run_id: 'r1', ...cell(provider), dispatch_id: 'd1', role: 'builder', transport: 'headless-json', decision: 'policy', admitted: 1, refused: 0, unrecognised: 0, at_ms: JAN + 1, ...extra })
+  const refused = (adw_id, provider, extra = {}) => ledger.recordSuiteDecision({ adw_id, run_id: 'r1', ...cell(provider), dispatch_id: 'd1', role: 'builder', transport: 'headless-json', decision: 'refused', refusal_kind: 'suite-run-not-owned', command_class: 'suite', at_ms: JAN + 2, ...extra })
+  // measured: every clause holds.
+  policy('m-1', 'measured'); refused('m-1', 'measured', { reask_dispatch_id: 'd2', reask_status: 'done' }); policy('m-2', 'measured')
+  // (1) identity: two pre-amendment d1 dispatches.
+  for (const adw_id of ['p-1', 'p-2']) { policy(adw_id, 'pre', { run_id: null, run_id_absent_reason: 'pre-amendment' }); refused(adw_id, 'pre', { run_id: null, run_id_absent_reason: 'pre-amendment' }) }
+  // (2) coverage: a policy row whose counters were not observed, and a dispatch with no policy row at all.
+  policy('c-1', 'coverage', { admitted: null, refused: null, unrecognised: null, policy_absent_reason: 'pane-no-intercept', transport: 'pane' })
+  refused('c-2', 'nopolicy')
+  // (3) re-ask: a refusal whose re-ask could not be correlated in its own run, and one whose re-ask was not observed.
+  policy('r-1', 'reask'); refused('r-1', 'reask', { reask_absent_reason: 'reask-uncorrelated' })
+  policy('u-1', 'unobserved'); refused('u-1', 'unobserved', { reask_absent_reason: 'reask-unobserved' })
+  const result = run(['suite-refusals', '--since', '2024-01-01T00:00:00Z', '--until', '2024-02-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: ledger._dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout).rows
+  const by = (provider) => rows.find((row) => row.provider === provider)
+  assert.deepEqual([by('measured').dispatches, by('measured').refusals, by('measured').rate, by('measured').rate_absent_reason], [2, 1, 1 / 2, null])
+  assert.deepEqual([by('measured').reasks, by('measured').recoveries, by('measured').reasks_absent_reason, by('measured').recoveries_absent_reason], [1, 1, null, null])
+  assert.deepEqual([by('pre').dispatches, by('pre').refusals, by('pre').rate, by('pre').rate_absent_reason], [2, 2, null, 'identity-incomplete'])
+  assert.deepEqual([by('coverage').dispatches, by('coverage').refusals, by('coverage').rate, by('coverage').rate_absent_reason], [1, 0, null, 'coverage-unavailable'])
+  assert.deepEqual([by('nopolicy').dispatches, by('nopolicy').refusals, by('nopolicy').rate, by('nopolicy').rate_absent_reason], [1, 1, null, 'coverage-unavailable'])
+  // Re-ask correlation never gates the refusal rate: it stands, and only the recovery
+  // columns are null with the reason, while the gap itself stays counted.
+  assert.deepEqual([by('reask').dispatches, by('reask').refusals, by('reask').rate, by('reask').rate_absent_reason], [1, 1, 1, null])
+  assert.deepEqual([by('reask').reasks, by('reask').recoveries, by('reask').reasks_absent_reason, by('reask').recoveries_absent_reason, by('reask').reask_uncorrelated], [null, null, 'reask-uncorrelated', 'reask-uncorrelated', 1])
+  assert.deepEqual([by('unobserved').rate, by('unobserved').rate_absent_reason], [1, null])
+  assert.deepEqual([by('unobserved').reasks, by('unobserved').recoveries, by('unobserved').reasks_absent_reason, by('unobserved').recoveries_absent_reason, by('unobserved').reasks_unobserved], [null, null, 'reask-unobserved', 'reask-unobserved', 1])
+  ledger.close()
+})
 
 test('T3: an out-of-range CLI window is a usage refusal', { skip: SKIP }, () => {
   const result = run(['seat-teardowns', '--since', '+058692-11-03T14:13:20.000Z'])

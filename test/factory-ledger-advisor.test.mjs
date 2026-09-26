@@ -1131,7 +1131,7 @@ test('A1 screener proposal journal rows persist model and outcome', { skip: SKIP
   const source = openTestLedger()
   try {
     assert.deepEqual(ingestJournal(journalPath, source, { adw_id: 'screener-a1' }), {
-      applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true, first_failure: null,
+      applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
     })
     assert.ok(Object.isFrozen(SCREENER_PROPOSAL_OUTCOMES))
     assert.deepEqual([...SCREENER_PROPOSAL_OUTCOMES], ['adopted', 'rejected', 'unadjudicated'])

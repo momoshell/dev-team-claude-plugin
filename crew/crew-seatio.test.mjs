@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seatReadySignal, waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE, seatLiveness } from './crew.mjs'
@@ -40,6 +40,198 @@ test('seatIo status and showDoc make no cmux calls without a workspace and statu
     paned.status('build')
     assert.equal(cmuxPanes.calls.length, 1)
     assert.equal(cmuxPanes.calls[0][0], 'set-status')
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('pane seatIo reasks preserve assignment identity and original envelope bytes', () => {
+  const parent = scratchDir('crew-pane-reask-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const sent = []
+  try {
+    const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      sendLine: (_surface, line) => sent.push(line), assignmentLine: (spec) => JSON.stringify(spec),
+      tree: () => ({ windows: [] }), locate: () => ({ id: 'pane' }),
+    })
+    const original = io.assign({ role: 'builder', briefFile: '/first.md' })
+    writeFileSync(original.returnPath, 'original bytes')
+    const retryPath = join(paths.returnsDir, `${original.id}.shape-reask.builder.json`)
+    writeFileSync(retryPath, 'stale retry bytes')
+    const second = io.assign({ role: 'builder', briefFile: '/second.md', reask: { id: original.id, returnPath: retryPath } })
+    assert.equal(second.id, original.id)
+    assert.equal(second.returnPath, retryPath)
+    assert.equal(existsSync(retryPath), false)
+    assert.equal(readFileSync(original.returnPath, 'utf8'), 'original bytes')
+    assert.equal(sent.length, 2)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('headless io reasks retain policy across one busy refusal and do not retry unrelated errors', () => {
+  const parent = scratchDir('crew-headless-reask-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const policy = { suite: 'validation', max_turns: 4 }
+  const returnPath = join(paths.returnsDir, 'd7.shape-reask.builder.json')
+  const specs = []
+  const sleeps = []
+  const journal = []
+  const busy = Object.assign(new Error('session is settling'), { stage: 'headless-session-busy' })
+  try {
+    const io = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: (ms) => sleeps.push(ms), logLine: (_path, row) => journal.push(row),
+      headlessIo: () => ({ assign(spec) { specs.push(spec); if (specs.length === 1) throw busy; return { id: spec.reask.id, returnPath: spec.reask.returnPath } }, wait: () => null }),
+    })
+    const result = io.assign({ role: 'builder', briefFile: '/retry.md', policy, reask: { id: 'd7', returnPath } })
+    assert.deepEqual(result, { id: 'd7', returnPath })
+    assert.equal(specs.length, 2)
+    assert.deepEqual(specs[1].reask, { id: 'd7', returnPath })
+    assert.deepEqual(specs[1].policy, policy)
+    assert.equal(sleeps.length, 1)
+    assert.equal(journal.some((row) => row.event === 'envelope-reask' && row.outcome === 'busy' && row.attempt === 1), true)
+
+    let attempts = 0
+    const unrelated = Object.assign(new Error('bad transport argument'), { stage: 'invalid-spec' })
+    const other = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: (ms) => sleeps.push(ms), logLine: () => {},
+      headlessIo: () => ({ assign() { attempts += 1; throw unrelated }, wait: () => null }),
+    })
+    assert.throws(() => other.assign({ role: 'builder', briefFile: '/retry.md', policy, reask: { id: 'd7', returnPath: join(paths.returnsDir, 'other.json') } }), (err) => err === unrelated)
+    assert.equal(attempts, 1)
+    assert.equal(sleeps.length, 1)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+for (const stage of ['headless-malformed', 'headless-timeout']) {
+  test(`a caller re-ask spends the assignment's one grace, so a ${stage} correction is never asked a third time`, () => {
+    const parent = scratchDir('crew-reask-grace-')
+    const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+    mkdirSync(paths.returnsDir, { recursive: true })
+    const specs = []
+    try {
+      const io = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+        resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => {},
+        headlessIo: () => ({
+          assign(spec) { specs.push(spec); return spec.reask ? { id: spec.reask.id, returnPath: spec.reask.returnPath } : { id: 'd7', returnPath: join(paths.returnsDir, 'd7.builder.json') } },
+          wait(path) { if (path.includes('shape-reask')) throw Object.assign(new Error('correction unusable'), { stage }); return null },
+        }),
+      })
+      const first = io.assign({ role: 'builder', briefFile: '/first.md' })
+      const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) }
+      io.assign({ role: 'builder', briefFile: '/second.md', reask })
+      assert.throws(() => io.wait(reask.returnPath, 5))
+      assert.equal(specs.length, 2, 'original plus one correction; the correction wait must not dispatch a third ask')
+    } finally { rmSync(parent, { recursive: true, force: true }) }
+  })
+}
+
+test('a pane correction that returns unusable bytes is never asked a third time', () => {
+  const parent = scratchDir('crew-pane-reask-grace-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const sent = []
+  try {
+    const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      sendLine: (_surface, line) => sent.push(line), assignmentLine: (spec) => JSON.stringify(spec), sleep: () => {}, logLine: () => {},
+      tree: () => ({ windows: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }), locate: () => ({ id: 'pane' }),
+    })
+    const first = io.assign({ role: 'builder', briefFile: '/first.md' })
+    const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) }
+    io.assign({ role: 'builder', briefFile: '/second.md', reask })
+    writeFileSync(reask.returnPath, '{not json')
+    assert.throws(() => io.wait(reask.returnPath, 1))
+    assert.equal(sent.length, 2, 'original plus one correction; the correction wait must not send a third ask')
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('a provider rejection on a pane correction is delivery: it is reprompted and the correction still lands', () => {
+  const parent = scratchDir('crew-pane-reask-refusal-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const sent = []
+  const queue = [[{ at: 30_000, member: 'rejected', message: 'prompt_cache_retention is not supported on this model', source: 'pi' }]]
+  let clock = 0
+  try {
+    const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { agent: 'pi', model: 'sonnet', surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      now: () => clock, sleep: (ms) => { clock += ms }, logLine: () => {},
+      sendLine: (_surface, line) => { const spec = JSON.parse(line); sent.push(spec); if (sent.length === 3) writeFileSync(spec.returnPath, JSON.stringify({ assignment_id: spec.id, role: 'builder', status: 'done', summary: 'fixed', artifacts: [], details: {} })) },
+      assignmentLine: (spec) => JSON.stringify(spec), refusalFrames: () => queue.shift() || [],
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
+    })
+    const first = io.assign({ role: 'builder', briefFile: '/first.md' })
+    const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) }
+    io.assign({ role: 'builder', briefFile: '/second.md', reask })
+    assert.equal(io.wait(reask.returnPath, 300)?.status, 'done')
+    assert.equal(sent.length, 3, 'original, correction, and the correction\'s delivery reprompt')
+    assert.equal(io.reaskGraceSpent(first.returnPath), 'caller-reask')
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('a journal that throws never aborts a headless re-ask busy retry', () => {
+  const parent = scratchDir('crew-reask-journal-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const returnPath = join(paths.returnsDir, 'd7.shape-reask.builder.json')
+  const specs = []
+  const busy = Object.assign(new Error('session is settling'), { stage: 'headless-session-busy' })
+  try {
+    const io = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => { throw new Error('journal disk full') },
+      headlessIo: () => ({ assign(spec) { specs.push(spec); if (specs.length === 1) throw busy; return { id: spec.reask.id, returnPath: spec.reask.returnPath } }, wait: () => null }),
+    })
+    assert.deepEqual(io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: 'd7', returnPath } }), { id: 'd7', returnPath })
+    assert.equal(specs.length, 2)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('a journal that throws never replaces an undelivered headless re-ask error', () => {
+  const parent = scratchDir('crew-reask-undelivered-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const unrelated = Object.assign(new Error('bad transport argument'), { stage: 'invalid-spec' })
+  try {
+    const io = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => { throw new Error('journal disk full') },
+      headlessIo: () => ({ assign() { throw unrelated }, wait: () => null }),
+    })
+    assert.throws(() => io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: 'd7', returnPath: join(paths.returnsDir, 'd7.shape-reask.builder.json') } }), (err) => err === unrelated)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+// #1537: a send that throws is no ask, so it charges no grace.
+for (const [label, stage, refuseStage] of [['unusable-envelope re-ask', 'headless-malformed', 'reask'], ['lost-seat retry', 'headless-timeout', 'retry']]) {
+  test(`an undelivered headless ${label} charges no grace`, () => {
+    const parent = scratchDir('crew-undelivered-grace-')
+    const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+    mkdirSync(paths.returnsDir, { recursive: true })
+    const refused = Object.assign(new Error('transport refused the re-ask'), { stage: 'invalid-spec' })
+    try {
+      const io = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { builder: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+        resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => {},
+        headlessIo: () => ({
+          assign(spec) { if (spec.reask && spec.reask.returnPath.includes(`.${refuseStage}.`)) throw refused; return { id: 'd7', returnPath: join(paths.returnsDir, 'd7.builder.json') } },
+          wait() { throw Object.assign(new Error(`first attempt: ${stage}`), { stage, raw: '{bad' }) },
+        }),
+      })
+      const first = io.assign({ role: 'builder', briefFile: '/first.md' })
+      assert.throws(() => io.wait(first.returnPath, 5))
+      assert.equal(io.reaskGraceSpent(first.returnPath), null)
+    } finally { rmSync(parent, { recursive: true, force: true }) }
+  })
+}
+
+test('an undelivered pane correction charges no grace', () => {
+  const parent = scratchDir('crew-undelivered-pane-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  let sends = 0
+  try {
+    const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      sendLine: () => { sends += 1; if (sends === 2) throw new Error('surface refused the keystrokes') }, assignmentLine: (spec) => JSON.stringify(spec),
+      tree: () => ({ windows: [] }), locate: () => ({ id: 'pane' }), logLine: () => {},
+    })
+    const first = io.assign({ role: 'builder', briefFile: '/first.md' })
+    assert.throws(() => io.assign({ role: 'builder', briefFile: '/second.md', reask: { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) } }), /surface refused/)
+    assert.equal(io.reaskGraceSpent(first.returnPath), null)
   } finally { rmSync(parent, { recursive: true, force: true }) }
 })
 

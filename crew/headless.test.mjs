@@ -24,6 +24,7 @@ import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, readEnvelopeFile, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
 import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { CTX as DRIVE_CTX, driveTask, fakeIo, reconEnv } from './drive-fixtures.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
@@ -1903,13 +1904,16 @@ test('a second budget refusal spends no second fallback and escapes as budget', 
   } finally { f.cleanup() }
 })
 
-test('a budget fallback marks the escaped error as spent and a first failure does not', () => {
+// #1537 (operator's rule, 2026-09-26) supersedes #838 (2): a model fallback is
+// DELIVERY of the same ask, so neither a fallback nor a first failure marks the
+// escaped error as grace spent.
+test('a budget fallback is delivery: neither it nor a first failure marks the escaped error as grace spent', () => {
   const spent = fallbackFixture((n, runDir) => writeBudgetRefusal(runDir))
   try {
     const run = spent.io.assign({ role: 'tech-lead', briefFile: join(spent.taskDir, 'brief.md') })
     assert.throws(() => spent.io.wait(run.returnPath, 600), (err) => {
       assert.equal(err.stage, 'headless-budget-refused')
-      assert.equal(err.graceSpent, true)
+      assert.equal(Object.hasOwn(err, 'graceSpent'), false)
       return true
     })
   } finally { spent.cleanup() }
@@ -1925,7 +1929,7 @@ test('a budget fallback marks the escaped error as spent and a first failure doe
   } finally { first.cleanup() }
 })
 
-test('a spent budget fallback marks a structurally unparseable envelope as grace spent', () => {
+test('a spent budget fallback leaves a structurally unparseable envelope re-askable (not grace spent)', () => {
   const f = fallbackFixture((n, runDir, returnsDir) => {
     if (n === 1) return writeBudgetRefusal(runDir)
     writeFileSync(join(returnsDir, 'd1.tech-lead.json'), '{"assignment_id":"d1","role":"tech-lead","status":"done","summary":"second","artifacts":[1,]}')
@@ -1936,7 +1940,7 @@ test('a spent budget fallback marks a structurally unparseable envelope as grace
     const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
     assert.throws(() => f.io.wait(run.returnPath, 600), (err) => {
       assert.equal(err.stage, 'headless-parse-error')
-      assert.equal(err.graceSpent, true)
+      assert.equal(Object.hasOwn(err, 'graceSpent'), false)
       return true
     })
   } finally { f.cleanup() }
@@ -4587,3 +4591,178 @@ test('T4 wrapper-only HUP and INT record signal name and preserve child exit sta
     }
   }
 })
+
+// Operator's rule (#1537): an "ask" is a send the seat ANSWERED. A provider
+// refusal BEFORE any output (429/529/5xx/auth, and the model fallback it
+// triggers) is delivery of the same ask: it neither spends the one grace per
+// assignment nor is blocked by it. Real headlessIo under real seatIo under driveTask.
+const PROVIDER_529 = (runDir) => { writeFileSync(join(runDir, 'stream.jsonl'), withTerminalStatus(B332_D2_TAIL, 529)); writeFileSync(join(runDir, 'exit'), '1') }
+const SHAPE_DEFECTIVE_PLANNER = () => reconEnv({ assignment_id: 'd1', details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+function transportGraceDrive({ script, fallback = null }) {
+  const dir = scratchDir('transport-grace-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const member = { model: 'claude-fable-5', provider: 'anthropic', id: 'claude-fable-5', effort: 'high', transport: HEADLESS_TRANSPORT, agent: 'claude', ...(fallback ? { fallback: fallback.map((entry) => ({ ...entry })) } : {}) }
+  const crew = { claude_bin: '/frozen/worker/bin', checkout: dir, members: { planner: member }, seats: { planner: { ...member, ...(member.fallback ? { fallback: member.fallback.map((entry) => ({ ...entry })) } : {}) } } }
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+  let clock = 1788115200000; let spawns = 0; let pid = 9500
+  const answer = (runDir, name, envelope) => {
+    writeFileSync(join(returnsDir, name), JSON.stringify(envelope))
+    writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+    writeFileSync(join(runDir, 'exit'), '0')
+  }
+  try {
+    const seat = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, {
+      now: () => clock, sleep(ms) { clock += ms }, logLine: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }), kill: () => {}, spawnSync: () => ({ status: 1, stdout: '' }),
+      headlessIo(transportArgs) {
+        return headlessIo({
+          ...transportArgs,
+          deps: {
+            ...transportArgs.deps, now: () => clock, uuid: () => 'transport-grace-session', kill: () => {},
+            delay(ms) { clock += ms },
+            spawn() {
+              spawns += 1
+              const root = join(taskDir, 'headless')
+              const dirs = readdirSync(root).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+              script(spawns, join(root, dirs.at(-1)), answer)
+              return { pid: ++pid, unref() {} }
+            },
+          },
+        })
+      },
+    })
+    const io = fakeIo({ envelopes: {}, changed: [] })
+    Object.assign(io, { assign: seat.assign, wait: seat.wait, reaskGraceSpent: seat.reaskGraceSpent })
+    const result = driveTask({ ...DRIVE_CTX, variant: 'scout' }, io)
+    const shapeRows = io.calls.logs.filter((row) => row.envelope_shape_reask).map((row) => row.envelope_shape_reask.outcome)
+    return { result, spawns, shapeRows, spentBy: seat.reaskGraceSpent(join(returnsDir, 'd1.planner.json')) }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+}
+
+test('a provider refusal on the shape correction is re-delivered by the transport and the corrected envelope is accepted as one extra ask', () => {
+  const run = transportGraceDrive({
+    script: (n, runDir, answer) => {
+      if (n === 1) return answer(runDir, 'd1.planner.json', SHAPE_DEFECTIVE_PLANNER())
+      if (n === 2) return PROVIDER_529(runDir)
+      return answer(runDir, 'd1.shape-reask.planner.json', reconEnv({ assignment_id: 'd1' }))
+    },
+  })
+  assert.equal(run.result.status, 'done')
+  assert.equal(run.spawns, 3, 'original, correction, and its provider re-delivery')
+  assert.deepEqual(run.shapeRows, ['pending', 'accepted'])
+  assert.equal(run.spentBy, 'caller-reask', 'the one extra ask is the correction; its re-delivery spent nothing')
+})
+
+for (const [label, first, fallback] of [
+  ['a model fallback', (runDir) => writeBudgetRefusal(runDir), FALLBACK_TEST_CHAIN],
+  ['a provider retry', PROVIDER_529, null],
+]) {
+  test(`${label} before the first answer is delivery, so a later shape defect is still re-asked once`, () => {
+    const run = transportGraceDrive({
+      fallback,
+      script: (n, runDir, answer) => {
+        if (n === 1) return first(runDir)
+        if (n === 2) return answer(runDir, 'd1.planner.json', SHAPE_DEFECTIVE_PLANNER())
+        return answer(runDir, 'd1.shape-reask.planner.json', reconEnv({ assignment_id: 'd1' }))
+      },
+    })
+    assert.equal(run.result.status, 'done')
+    assert.equal(run.spawns, 3, 'the delivery, its answer, and the one shape re-ask')
+    assert.deepEqual(run.shapeRows, ['pending', 'accepted'])
+    assert.equal(run.spentBy, 'caller-reask')
+  })
+}
+
+// #1537 aligns #838 (2) to the operator's rule: a model fallback is delivery, so
+// the seat-caused re-ask that follows it is still sent — and only once.
+function fallbackGraceSeat(script, { dieOnTimeout = false } = {}) {
+  const dir = scratchDir('fallback-grace-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  writeFileSync(join(taskDir, 'brief.md'), '# brief\n')
+  const member = { model: 'claude-fable-5', provider: 'anthropic', id: 'claude-fable-5', effort: 'high', transport: HEADLESS_TRANSPORT, agent: 'claude', fallback: FALLBACK_TEST_CHAIN.map((entry) => ({ ...entry })) }
+  const crew = { claude_bin: '/frozen/worker/bin', checkout: dir, members: { builder: member }, seats: { builder: { ...member, fallback: member.fallback.map((entry) => ({ ...entry })) } } }
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+  let clock = 1788115200000; let spawns = 0; let pid = 9700
+  const out = {
+    answer(runDir, path, text) {
+      writeFileSync(path, text)
+      writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+      writeFileSync(join(runDir, 'exit'), '0')
+    },
+    abort(runDir) {
+      writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'assistant', message: { content: [] } })}\n`)
+      writeFileSync(join(runDir, 'exit'), '1')
+    },
+    hang() {},
+  }
+  const seat = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, {
+    now: () => clock, sleep(ms) { clock += ms }, logLine: () => {},
+    snapshot: () => ({ ok: true, rows: new Map() }), kill: () => {}, spawnSync: () => ({ status: 1, stdout: '' }),
+    headlessIo(transportArgs) {
+      const real = headlessIo({
+        ...transportArgs,
+        deps: {
+          ...transportArgs.deps, now: () => clock, uuid: () => 'fallback-grace-session', kill: () => {},
+          spawn() {
+            spawns += 1
+            const root = join(taskDir, 'headless')
+            const dirs = readdirSync(root).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+            const runDir = join(root, dirs.at(-1))
+            const cmd = JSON.parse(readFileSync(join(runDir, 'cmd.json'), 'utf8'))
+            if (spawns === 1) writeBudgetRefusal(runDir)
+            else script(spawns, runDir, cmd, out, returnsDir)
+            return { pid: ++pid, unref() {} }
+          },
+        },
+      })
+      if (!dieOnTimeout) return real
+      // A measured worker death stands in for the hung worker: the REAL transport's
+      // error (and whatever grace marking it carries) travels on the death.
+      return {
+        ...real,
+        wait(path, timeoutS) {
+          try { return real.wait(path, timeoutS) }
+          catch (err) {
+            if (err?.stage !== 'headless-timeout') throw err
+            const died = Object.assign(new Error(`seat died: builder — ${err.message}`), { stage: 'seat-died', role: 'builder', reclaim: { root_liveness: 'dead' } })
+            if (Object.hasOwn(err, 'graceSpent')) died.graceSpent = err.graceSpent
+            throw died
+          }
+        },
+      }
+    },
+  })
+  const run = seat.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
+  return { seat, run, returnsDir, spawns: () => spawns, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+const DONE_D1 = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'answered', artifacts: [], details: {} })
+
+for (const [label, lose, collect, options = {}] of [
+  ['an unparseable answer', (runDir, cmd, out, returnsDir, name = 'd1.builder.json') => out.answer(runDir, join(returnsDir, name), '{"assignment_id":"d1",'), 'reask'],
+  ['a timeout', (runDir, cmd, out) => out.hang(runDir), 'retry'],
+  ['an abort', (runDir, cmd, out) => out.abort(runDir), 'retry'],
+  ['a seat death', (runDir, cmd, out) => out.hang(runDir), 'retry', { dieOnTimeout: true }],
+]) {
+  test(`a model fallback then ${label}: the one seat-caused re-ask is still sent and lands`, () => {
+    const f = fallbackGraceSeat((n, runDir, cmd, out, returnsDir) => {
+      if (n === 2) return lose(runDir, cmd, out, returnsDir)
+      out.answer(runDir, join(returnsDir, `d1.${collect}.builder.json`), DONE_D1)
+    }, options)
+    try {
+      assert.equal(f.seat.wait(f.run.returnPath, 600)?.status, 'done')
+      assert.equal(f.spawns(), 3, 'the budget refusal, its fallback delivery, and the one seat-caused re-ask')
+    } finally { f.cleanup() }
+  })
+  test(`a model fallback then ${label} twice: the second seat-caused failure escalates without a third ask`, () => {
+    const f = fallbackGraceSeat((n, runDir, cmd, out, returnsDir) => {
+      if (n === 2) return lose(runDir, cmd, out, returnsDir)
+      lose(runDir, cmd, out, returnsDir, `d1.${collect}.builder.json`)
+    }, options)
+    try {
+      assert.throws(() => f.seat.wait(f.run.returnPath, 600))
+      assert.equal(f.spawns(), 3)
+    } finally { f.cleanup() }
+  })
+}

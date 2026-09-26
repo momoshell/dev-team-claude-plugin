@@ -1721,17 +1721,14 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
     })
   }
-  function graceSpentFor(run) {
-    return (fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX
-  }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
     err.stage = `headless-${outcome === NO_ENVELOPE_REASONS.ZERO_TURN_NON_START ? NO_ENVELOPE_REASONS.NO_ENVELOPE : outcome}`; err.role = run.role
     const condition = capturedCondition(run, read, exists)
     if (condition) err.providerCondition = condition
-    // The grace is per ASSIGNMENT, not per cause: a turn whose budget fallback
-    // was already spent gets no second re-ask from seat-io (#838 (2)).
-    if ((fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX) err.graceSpent = true
+    // A model fallback is DELIVERY of the same ask, never an answered re-ask
+    // (#1537, operator's rule 2026-09-26): it marks no `graceSpent`, so seat-io's
+    // one seat-caused re-ask survives it. This replaces #838 (2)'s marking.
     return err
   }
   function busy(role, sessionId, detail = null) {
@@ -1956,7 +1953,6 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       emitUsage(run, stream.usage)
       const condition = capturedCondition(run, read, exists)
       if (condition) err.providerCondition = condition
-      if (graceSpentFor(run)) err.graceSpent = true
       throw err
     }
   }

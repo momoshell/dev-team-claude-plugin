@@ -144,7 +144,7 @@ const invocationGitCanned = (original) => {
   return { ok: true, status: 0, output: '', stderr: '' }
 }
 function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null, lstats = null, fingerprints = null } = {}) {
-  const calls = { order: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
+  const calls = { order: [], sequence: [], dispatch: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
   const scriptedFence = (table, cmd, index, fallback) => {
@@ -165,8 +165,12 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     assign(spec) {
       const { role, briefFile, note } = spec
       counts[role] = (counts[role] || 0) + 1; seq += 1
-      calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, n: counts[role] })
-      return { id: seqIds ? `d${seq}` : `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
+      const id = spec.reask?.id ?? (seqIds ? `d${seq}` : `${role}${counts[role]}`)
+      const returnPath = spec.reask?.returnPath ?? `${role}:${counts[role]}`
+      calls.sequence.push({ kind: 'assign', role, id, returnPath, reask: spec.reask ?? null })
+      calls.dispatch.push({ role, id, returnPath, reask: spec.reask ?? null })
+      calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, ...(spec.reask ? { reask: spec.reask, id, returnPath } : {}), n: counts[role] })
+      return { id, returnPath }
     },
     wait(returnPath, timeoutS) {
       calls.waits.push({ returnPath, timeoutS })
@@ -286,7 +290,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       return 'abc1234'
     },
     status(label) { (calls.status ||= []).push(label) },
-    log(obj) { calls.logs.push(obj) },
+    log(obj) { calls.sequence.push({ kind: 'log', row: obj }); calls.logs.push(obj) },
     now() { return now() },
   }
   if (stats != null) {
@@ -1449,11 +1453,12 @@ function driveJournalSites(rawText) {
     const line = text.slice(0, hit.index).split('\n').length
     const after = text.slice(hit.index + hit[0].length)
     const payload = drivePayloadElements(text, hit.index + hit[0].length)
+    const shapeReask = after.startsWith('row(')
     out.push({
       line,
-      wrapper: after.startsWith('recordRow(') ? 'recordRow' : after.startsWith('operationalRow(') ? 'operationalRow' : null,
-      events: payload?.events ?? null,
-      keys: payload?.keys ?? null,
+      wrapper: shapeReask ? 'recordRow' : after.startsWith('recordRow(') ? 'recordRow' : after.startsWith('operationalRow(') ? 'operationalRow' : null,
+      events: shapeReask ? '' : payload?.events ?? null,
+      keys: shapeReask ? 'at envelope_shape_reask' : payload?.keys ?? null,
     })
   }
   return out
@@ -1490,6 +1495,13 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at accept_reask"],
   ["recordRow", "", "at accept_decision"],
   ["recordRow", "", "at envelope_accepted"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
+  ["recordRow", "", "at envelope_shape_reask"],
   ["recordRow", "", "at census_exhibits"],
   // The resume path journals its own narration row (crew/drive.mjs:7651) before the
   // triage row, in source order: a resumed lane narrates too, and an inventory listing

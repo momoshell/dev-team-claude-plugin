@@ -11,6 +11,7 @@ import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRI
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, envelopeFieldMetadataDefect } from './drive.mjs'
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
+import { seatIo } from './seat-io.mjs'
 
 const A1_FULL_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 const A1_PUBLISH_DISABLED_TRACE = Object.freeze(['commit', 'document', 'suite', 'suite'])
@@ -2508,6 +2509,270 @@ test('scout seats its declared planner only and never commits', () => {
   assert.deepEqual(result.details.files_committed, [])
 })
 
+test('K1', () => {
+  const first = reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+  const fixed = reconEnv()
+  const io = fakeIo({ envelopes: { 'planner:1': first, 'planner1.shape-reask.planner.json': fixed }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.length, 2)
+  const pendingIndex = io.calls.sequence.findIndex(({ kind, row }) => kind === 'log' && row.envelope_shape_reask?.outcome === 'pending')
+  const retryIndex = io.calls.sequence.findIndex(({ kind, reask }) => kind === 'assign' && reask)
+  const terminalIndex = io.calls.sequence.findIndex(({ kind, row }) => kind === 'log' && row.envelope_shape_reask?.outcome === 'accepted')
+  assert.ok(pendingIndex >= 0 && pendingIndex < retryIndex)
+  assert.ok(retryIndex >= 0 && retryIndex < terminalIndex)
+})
+
+test('K2', () => {
+  const one = reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+  const two = reconEnv({ artifacts: ['/etc/passwd'] })
+  const firstDefect = envelopeDefect(one, VARIANTS.scout, { taskDir: TD })
+  const secondDefect = envelopeDefect(two, VARIANTS.scout, { taskDir: TD })
+  const io = fakeIo({ envelopes: { 'planner:1': one, 'planner1.shape-reask.planner.json': two }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.details.escalation.where, 'envelope')
+  assert.ok(result.details.escalation.why.includes(`[${firstDefect.reason}]: ${firstDefect.why}; [${secondDefect.reason}]: ${secondDefect.why}`))
+  assert.equal(io.calls.assign.length, 2)
+})
+
+test('K3', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv({ status: 'insufficient', details: {} }) }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.details.escalation.where, 'scout')
+  assert.equal(io.calls.assign.length, 1)
+  assert.equal(io.calls.logs.some((row) => row.envelope_shape_reask), false)
+})
+
+test('K4', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv({ details: {} }), 'planner1.shape-reask.planner.json': reconEnv() }, changed: [] })
+  const accepted = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(accepted.status, 'done')
+  assert.equal(io.calls.dispatch[1].id, io.calls.dispatch[0].id)
+  assert.equal(io.calls.dispatch[1].returnPath, `${io.calls.dispatch[0].id}.shape-reask.planner.json`)
+  assert.deepEqual(io.calls.dispatch[1].reask, { id: io.calls.dispatch[0].id, returnPath: io.calls.dispatch[1].returnPath })
+  const wrong = reconEnv({ assignment_id: 'not-the-original-id' })
+  const replay = fakeIo({ envelopes: { 'planner:1': reconEnv({ details: {} }), 'planner1.shape-reask.planner.json': wrong }, changed: [] })
+  const refused = driveTask({ ...CTX, variant: 'scout' }, replay)
+  assert.equal(refused.details.escalation.where, 'scout')
+  assert.match(refused.details.escalation.why, /assignment-id-mismatch/)
+  assert.equal(replay.calls.assign.length, 2)
+})
+
+test('shape re-ask retains failure, scope, and strict-identity refusal behavior', () => {
+  const malformed = reconEnv({ details: {} })
+  const failedIo = fakeIo({ envelopes: { 'planner:1': malformed }, changed: [] })
+  const failed = driveTask({ ...CTX, variant: 'scout' }, failedIo)
+  assert.equal(failed.details.escalation.where, 'scout')
+  assert.match(failed.details.escalation.why, /after a shape re-ask/)
+  assert.ok(failedIo.calls.logs.some((row) => row.envelope_shape_reask?.outcome === 'failed'))
+
+  const scopeIo = fakeIo({ envelopes: { 'planner:1': malformed, 'planner1.shape-reask.planner.json': reconEnv() }, changed: [[], ['shape-reask-write.mjs']] })
+  const scope = driveTask({ ...CTX, variant: 'scout' }, scopeIo)
+  assert.equal(scope.details.escalation.where, 'scope')
+  assert.ok(scopeIo.calls.logs.some((row) => row.envelope_shape_reask?.outcome === 'scope-refused'))
+
+  const review = (assignment_id, reviewed_files) => ({
+    assignment_id, role: 'reviewer', run_id: 'strict-run', status: 'done', summary: 'review complete',
+    artifacts: [`${TD}/review.md`],
+    details: { base: 'base-sha', head: 'head-sha', outcome: 'no-findings', findings: [], ...(reviewed_files === undefined ? {} : { reviewed_files }), unreviewable_files: [] },
+  })
+  const strictIo = fakeIo({ seqIds: true, envelopes: {
+    'reviewer:1': review('d1', undefined),
+    'd1.shape-reask.reviewer.json': review('wrong-id', []),
+  }, changed: [] })
+  const strict = driveTask({ ...CTX, variant: 'review_only', run_id: 'strict-run', roles: ['reviewer'], seatedRoles: ['reviewer'] }, strictIo)
+  assert.equal(strict.details.escalation.where, 'envelope')
+  assert.match(strict.details.escalation.why, /assignment-id-mismatch/)
+  assert.equal(strictIo.calls.assign.length, 2)
+})
+
+test('a zero-turn non-start on the shape correction escalates without a third dispatch', () => {
+  const nonStart = reconEnv({ assignment_id: 'planner1', status: 'insufficient', summary: 'rpc returned no envelope', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null } })
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv({ details: {} }), 'planner1.shape-reask.planner.json': nonStart }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.details.escalation.where, 'scout')
+  assert.match(result.details.escalation.why, /after a shape re-ask .*status=insufficient/)
+  assert.equal(io.calls.assign.length, 2)
+  assert.ok(io.calls.logs.some((row) => row.envelope_shape_reask?.outcome === 'non-done'))
+})
+
+test('a journal that throws on shape re-ask rows never changes the re-ask outcome', () => {
+  const throwingLog = (io) => {
+    const base = io.log
+    io.log = (row) => { if (row?.envelope_shape_reask) throw new Error('journal disk full'); return base(row) }
+    return io
+  }
+  const malformed = () => reconEnv({ details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+  const acceptIo = throwingLog(fakeIo({ envelopes: { 'planner:1': malformed(), 'planner1.shape-reask.planner.json': reconEnv() }, changed: [] }))
+  const accepted = driveTask({ ...CTX, variant: 'scout' }, acceptIo)
+  assert.equal(accepted.status, 'done')
+  assert.equal(acceptIo.calls.assign.length, 2)
+
+  const defectIo = throwingLog(fakeIo({ envelopes: { 'planner:1': malformed(), 'planner1.shape-reask.planner.json': reconEnv({ artifacts: ['/etc/passwd'] }) }, changed: [] }))
+  const refused = driveTask({ ...CTX, variant: 'scout' }, defectIo)
+  assert.equal(refused.details.escalation.where, 'envelope')
+  assert.match(refused.details.escalation.why, /details\.findings\.program requires output.*; \[/)
+  assert.equal(defectIo.calls.assign.length, 2)
+})
+
+test('every shape re-ask row a run emits carries the record channel', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv({ details: {} }), 'planner1.shape-reask.planner.json': reconEnv() }, changed: [] })
+  driveTask({ ...CTX, variant: 'scout' }, io)
+  const rows = io.calls.logs.filter((row) => row.envelope_shape_reask)
+  assert.deepEqual(rows.map((row) => row.envelope_shape_reask.outcome), ['pending', 'accepted'])
+  assert.ok(rows.every((row) => row.channel === JOURNAL_CHANNELS.record))
+})
+
+// Operator's rule (#1537): an "ask" is a send the seat ANSWERED. The one grace per
+// assignment covers re-asks caused by the seat's answer or its absence after
+// starting (unusable envelope, shape defect, seat death, timeout, abort, silence
+// after a started turn); each such path combined with a later shape defect stops
+// at two answered sends. A provider refusal before any output is delivery: it
+// neither spends the grace nor is blocked by it.
+const SHAPE_DEFECTIVE = (id) => reconEnv({ assignment_id: id, details: { findings: [{ summary: 's', evidence: 'e', program: 'node check.mjs' }] } })
+const GRACE_WHY = (cause) => new RegExp(`details\\.findings\\.program requires output.*grace was already spent by a seat re-ask \\(${cause}\\)`)
+
+function headlessGraceRun(stage) {
+  const parent = scratchDir('drive-shape-grace-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const specs = []
+  const transport = {
+    assign(spec) { specs.push(spec); return spec.reask ? { id: spec.reask.id, returnPath: spec.reask.returnPath } : { id: 'd1', returnPath: join(paths.returnsDir, 'd1.planner.json') } },
+    wait(path) {
+      if (path.endsWith('/d1.planner.json')) throw Object.assign(new Error(`first attempt: ${stage}`), { stage, raw: '{bad' })
+      return path.includes('.shape-reask.') ? reconEnv({ assignment_id: 'd1' }) : SHAPE_DEFECTIVE('d1')
+    },
+  }
+  try {
+    const seat = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { planner: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => {}, headlessIo: () => transport,
+    })
+    const io = fakeIo({ envelopes: {}, changed: [] })
+    Object.assign(io, { assign: seat.assign, wait: seat.wait, reaskGraceSpent: seat.reaskGraceSpent })
+    return { result: driveTask({ ...CTX, variant: 'scout' }, io), sends: specs.length, shapeReasked: specs.some((spec) => String(spec.reask?.returnPath ?? '').includes('.shape-reask.')) }
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+}
+
+function paneGraceRun({ frames, transcript = false, failSend = 0 }) {
+  const parent = scratchDir('drive-pane-grace-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const sends = []
+  let clock = 0
+  const queue = [...frames]
+  try {
+    const seat = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { planner: { agent: 'claude', surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      now: () => clock, sleep: (ms) => { clock += ms }, logLine: () => {},
+      assignmentLine: (spec) => JSON.stringify(spec),
+      sendLine: (_surface, line) => {
+        const spec = JSON.parse(line)
+        sends.push(spec)
+        // The re-send is answered with a shape defect; a (forbidden) third ask would be answered cleanly.
+        if (sends.length === 2) writeFileSync(spec.returnPath, JSON.stringify(SHAPE_DEFECTIVE(spec.id)))
+        if (sends.length === 3) writeFileSync(spec.returnPath, JSON.stringify(reconEnv({ assignment_id: spec.id })))
+        if (sends.length === failSend) throw new Error('surface refused the keystrokes')
+      },
+      refusalFrames: () => queue.shift() || [],
+      ...(transcript ? { transcriptPaths: () => ['/x/planner.jsonl'], statSync: () => ({ mtimeMs: 0 }) } : {}),
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
+    })
+    const io = fakeIo({ envelopes: {}, changed: [] })
+    Object.assign(io, { assign: seat.assign, wait: seat.wait, reaskGraceSpent: seat.reaskGraceSpent })
+    return { result: driveTask({ ...CTX, variant: 'scout' }, io), sends: sends.length, shapeReasked: sends.some((spec) => String(spec.returnPath).includes('.shape-reask.')) }
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+}
+
+for (const [stage, cause] of [['headless-malformed', 'unusable-envelope'], ['headless-timeout', 'timeout'], ['headless-aborted', 'aborted']]) {
+  test(`a seat-io ${cause} re-ask that recovers a shape-defective envelope spends the grace, so the driver escalates without a shape re-ask`, () => {
+    const run = headlessGraceRun(stage)
+    assert.equal(run.sends, 2, 'the original plus seat-io\'s one re-ask; no shape re-ask')
+    assert.equal(run.shapeReasked, false)
+    assert.equal(run.result.details.escalation.where, 'envelope')
+    assert.match(run.result.details.escalation.why, GRACE_WHY(cause))
+  })
+}
+
+test('a pane reprompt after a provider rejection is delivery, so a later shape defect is still re-asked once', () => {
+  const run = paneGraceRun({ frames: [[{ at: 30_000, member: 'rejected', message: 'prompt_cache_retention is not supported on this model', source: 'claude' }]] })
+  assert.equal(run.result.status, 'done')
+  assert.equal(run.sends, 3, 'the send, its delivery reprompt, and the one shape re-ask')
+  assert.equal(run.shapeReasked, true)
+})
+
+test('a pane re-send after silence spends the grace, so a later shape defect escalates after two sends', () => {
+  const run = paneGraceRun({ transcript: true, frames: [[{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]] })
+  assert.equal(run.sends, 2)
+  assert.equal(run.shapeReasked, false)
+  assert.equal(run.result.details.escalation.where, 'envelope')
+  assert.match(run.result.details.escalation.why, GRACE_WHY('silence-resend'))
+})
+
+for (const [label, member, transcript, expected] of [['a refusal', 'rejected', false, 3], ['silence', null, true, 2]]) {
+test(`pane ${label} after an unusable-envelope re-ask: ${expected === 2 ? 'a silence re-send is a re-ask and is refused' : 'a provider-rejection reprompt is delivery and still sends'}`, () => {
+  const parent = scratchDir('drive-pane-unusable-grace-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const sends = []
+  let clock = 0
+  let fired = false
+  try {
+    const seat = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { planner: { agent: 'claude', surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
+      now: () => clock, sleep: (ms) => { clock += ms }, logLine: () => {},
+      assignmentLine: (spec) => JSON.stringify(spec),
+      sendLine: (_surface, line) => { const spec = JSON.parse(line); sends.push(spec); if (sends.length === 1) writeFileSync(spec.returnPath, '{bad') },
+      refusalFrames: () => {
+        if (sends.length !== 2 || fired) return []
+        fired = true
+        return [{ at: clock + 1, member, message: 'prompt_cache_retention is not supported on this model', source: 'claude' }]
+      },
+      ...(transcript ? { transcriptPaths: () => ['/x/planner.jsonl'], statSync: () => ({ mtimeMs: 0 }) } : {}),
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
+    })
+    const first = seat.assign({ role: 'planner', briefFile: '/first.md' })
+    assert.throws(() => seat.wait(first.returnPath, 1200))
+    assert.equal(fired, true, 'the refusal frame reached the re-ask wait')
+    assert.equal(sends.length, expected)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+}
+
+test('a pane silence re-send that throws is no ask, so the original seat\'s later shape defect still gets its one correction', () => {
+  const run = paneGraceRun({ transcript: true, failSend: 2, frames: [[{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]] })
+  assert.equal(run.result.status, 'done')
+  assert.equal(run.sends, 3, 'the send, the failed silence re-send, and the one shape correction')
+  assert.equal(run.shapeReasked, true)
+})
+
+test('a caller re-ask is refused by seat-io once another path spent the grace', () => {
+  const parent = scratchDir('drive-caller-grace-')
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const specs = []
+  try {
+    const seat = seatIo({ workspace_id: null, window_id: null, claude_bin: '/bin/true', members: { planner: { surface_id: null, transport: 'headless-json' } } }, paths, parent, null, null, {}, {
+      resolveWorkerBin: () => '/bin/true', sleep: () => {}, logLine: () => {},
+      headlessIo: () => ({
+        assign(spec) { specs.push(spec); return spec.reask ? { id: spec.reask.id, returnPath: spec.reask.returnPath } : { id: 'd1', returnPath: join(paths.returnsDir, 'd1.planner.json') } },
+        wait(path) { if (path.endsWith('/d1.planner.json')) throw Object.assign(new Error('unparseable'), { stage: 'headless-malformed', raw: '{bad' }); return SHAPE_DEFECTIVE('d1') },
+      }),
+    })
+    const first = seat.assign({ role: 'planner', briefFile: '/first.md' })
+    seat.wait(first.returnPath, 5)
+    assert.throws(() => seat.assign({ role: 'planner', briefFile: '/second.md', reask: { id: 'd1', returnPath: join(paths.returnsDir, 'd1.shape-reask.planner.json') } }), /reask grace already spent for planner:d1 \(unusable-envelope\)/)
+    assert.equal(specs.length, 2)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('K5', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  driveTask({ ...CTX, variant: 'scout' }, io)
+  const brief = io.calls.writes[`${TD}/scout-brief.md`]
+  assert.match(brief, /program.*command or script you actually ran/)
+  assert.match(brief, /output.*it produced/)
+  assert.match(brief, /omit both/)
+})
+
 test('scout dispatches a written brief containing its complete envelope contract', () => {
   const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
   driveTask({ ...CTX, variant: 'scout' }, io)
@@ -2965,6 +3230,13 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
   assert.deepEqual(sites.filter(({ wrapper }) => wrapper === 'operationalRow').map(({ events, keys }) => [events, keys]), [
     ['', 'at gate_reap'], ['', 'at event kind queue_depth waited_ms slotted'],
   ])
+})
+
+test('RV1-1 envelope shape re-ask journal emissions are wrapped and inventoried', () => {
+  const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const rows = driveJournalSites(text).filter(({ keys }) => keys === 'at envelope_shape_reask')
+  assert.equal(rows.length, 7)
+  assert.ok(rows.every(({ wrapper }) => wrapper === 'recordRow'))
 })
 
 test('a full drive writes no journal row without a channel', () => {

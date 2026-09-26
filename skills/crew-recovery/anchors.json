@@ -2,7 +2,7 @@
   "scripts/factory/make-brief.mjs:992": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:57": "builder: 2400, reviewer: 1800",
   "scripts/factory/crew-watch.mjs:184": "export function seatLivenessLines(",
-  "crew/drive.mjs:8594": "const completeCheckProof = (label, options = {}) => {",
+  "crew/drive.mjs:8643": "const completeCheckProof = (label, options = {}) => {",
   "crew/seat-io.mjs:127": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/crew.mjs:3826": "escalation -> NEVER teardown",
   "crew/crew.mjs:4483": "seats.proven !== seats.seats || seats.recorded !== seats.seats",

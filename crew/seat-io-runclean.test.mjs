@@ -179,6 +179,8 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
+  ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
+  ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
   ['recordRow', '', ''],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
@@ -192,11 +194,11 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 35)
+  assert.equal(sites.length, 37)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 27)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 8)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 10)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {

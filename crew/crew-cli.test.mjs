@@ -2083,7 +2083,7 @@ test('a mixed boot refuses with mixed-transport before any workspace or state di
 })
 
 test('an ACP role outside the seated crew refuses before state or workspace creation', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'crew-acp-unknown-role-home-'))
+  const home = scratchDir('crew-acp-unknown-role-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-acp-unknown-role-checkout-')
   const task = 'acp-unknown-role'
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()

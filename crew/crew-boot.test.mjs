@@ -1451,7 +1451,7 @@ test('--headless-all with a per-seat transport flag still boots — no workspace
 })
 
 test('an explicit ACP builder persists to crew state and boot journal without changing headless fallbacks', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'crew-acp-headless-home-'))
+  const home = scratchDir('crew-acp-headless-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-acp-headless-checkout-')
   const task = 'acp-headless'
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
@@ -1479,7 +1479,7 @@ test('an explicit ACP builder persists to crew state and boot journal without ch
 })
 
 test('ACP and headless-rpc for one role refuse before state or workspace creation', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'crew-acp-rpc-conflict-home-'))
+  const home = scratchDir('crew-acp-rpc-conflict-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-acp-rpc-conflict-checkout-')
   const task = 'acp-rpc-conflict'
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()

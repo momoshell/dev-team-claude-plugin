@@ -198,7 +198,7 @@ function runHook() {
 if (invokedDirectly()) runHook()
 
 export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injectedSettings, settingsDocument, readSettings, settingsReader } = {}) {
-  const p = PROFILES[transport]
+  const p = transport === 'acp' ? ACP_PROFILE : PROFILES[transport]
   if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
   const settings = hasFffGrant(grants)
     ? loadFffSettings({ settings: injectedSettings, settingsDocument, readSettings, settingsReader })
@@ -394,6 +394,40 @@ export function modelString({ provider, id, localProviders }) {
     )
   }
   return id
+}
+
+const ACP_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', session_resume: true, durable_cursor: 'protocol', reassign: false, permission_requests: true })
+
+export const ACP_BINARY = 'claude-agent-acp'
+
+export function acpLaunch(spec = {}) {
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, grants = NO_GRANTS, configDir, env = {} } = spec
+  assertSupportedGrants(grants)
+  assertNoLocalProvider(configDir)
+  if (typeof bin !== 'string' || !bin || !isAbsolute(bin)) {
+    throw new Error(`adapter-claude.acpLaunch: bin must be a nonempty ABSOLUTE ACP path, got ${JSON.stringify(bin)}`)
+  }
+  if (!claudeBin || !isAbsolute(claudeBin)) {
+    throw new Error(`adapter-claude.acpLaunch: claudeBin must be an ABSOLUTE frozen worker path, got ${JSON.stringify(claudeBin)}`)
+  }
+  return {
+    bin,
+    args: [],
+    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin },
+    mode: 'acceptEdits',
+    sessionParams: {
+      cwd,
+      mcpServers: [],
+      _meta: { claudeCode: { options: {
+        model,
+        allowedTools: allowedTools(tools, grants).split(',').filter(Boolean),
+        disallowedTools: deniedTools(deny, grants).split(',').filter(Boolean),
+        additionalDirectories: spec.writableDirs,
+        extraArgs: { ...(effort ? { effort } : {}), 'append-system-prompt-file': promptFile },
+      } } },
+    },
+    policy: { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] },
+  }
 }
 
 // The headless-json invocation shape. Returns ARGV (never a shell string):

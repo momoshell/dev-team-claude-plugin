@@ -30,7 +30,8 @@
       ],
       "transports": [
         "pane",
-        "headless-json"
+        "headless-json",
+        "acp"
       ],
       "adapter": "crew/adapters/adapter-claude.mjs",
       "refuses": [

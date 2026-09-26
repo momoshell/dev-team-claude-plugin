@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
@@ -20,7 +20,7 @@ import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
+void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, claudeAcpLaunch, ACP_BINARY, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 // Hoisted: tests both above and below this point branch on it. Below the
@@ -283,7 +283,45 @@ test('seatTransport resolves each real adapter under --headless-all through its 
   assert.equal(seatTransport({ role: 'lead', args: { 'headless-all': true }, adapter: { capabilitiesFor }, agentName: 'claude' }), 'headless-json')
   assert.equal(seatTransport({ role: 'builder', args: { 'headless-all': 'true' }, adapter: { capabilitiesFor: piCapabilitiesFor }, agentName: 'pi' }), 'headless-rpc')
   assert.equal(seatTransport({ role: 'builder', args: { acp: 'builder', 'headless-all': true }, adapter: { capabilitiesFor: piCapabilitiesFor }, agentName: 'pi' }), 'acp')
-  assert.throws(() => capabilitiesFor({ transport: 'acp' }), /claude.*acp/)
+  assert.equal(capabilitiesFor({ transport: 'acp' }).session_resume, true)
+})
+
+test('Claude ACP profile is frozen and preserves Claude invariants', () => {
+  const profile = capabilitiesFor({ transport: 'acp' })
+  assert.equal(Object.isFrozen(profile), true)
+  assert.deepEqual({ ...profile }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, mcp_servers: true, interjection: 'turn', abort: 'cancel', session_resume: true, durable_cursor: 'protocol', reassign: false, permission_requests: true })
+})
+
+test('Claude ACP launch carries SDK tools directories and frozen binaries', () => {
+  const launch = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', cwd: '/checkout', model: 'opus', tools: 'Read,Write', deny: 'Edit,Task', grants: { tools: ['Write', 'Bash'], mcp_servers: [] }, effort: 'high', promptFile: '/task/role.md', writableDirs: ['/task', '/returns'], env: { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/inherited' } })
+  assert.equal(ACP_BINARY, 'claude-agent-acp')
+  assert.deepEqual(launch.args, [])
+  assert.equal(launch.mode, 'acceptEdits')
+  assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude' })
+  assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', allowedTools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
+  assert.deepEqual(launch.policy, { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] })
+  assert.equal(Object.hasOwn(launch.sessionParams, 'additionalDirectories'), false)
+  const empty = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', env: {} }).sessionParams._meta.claudeCode.options
+  assert.equal(empty.extraArgs.effort, undefined)
+  assert.deepEqual(empty.allowedTools, [])
+  assert.deepEqual(empty.disallowedTools, ['mcp__*'])
+})
+
+test('Claude ACP empty allowlist retains MCP wildcard denial', () => {
+  const options = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude' }).sessionParams._meta.claudeCode.options
+  assert.deepEqual(options.allowedTools, [])
+  assert.deepEqual(options.disallowedTools, ['mcp__*'])
+})
+
+test('Claude ACP empty allowlist retains MCP wildcard denial', () => {
+  const options = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude' }).sessionParams._meta.claudeCode.options
+  assert.deepEqual(options.allowedTools, [])
+  assert.deepEqual(options.disallowedTools, ['mcp__*'])
+})
+
+test('Claude ACP launch refuses relative binaries and extension grants', () => {
+  assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: 'claude' }), /adapter-claude\.acpLaunch.*claudeBin.*ABSOLUTE/)
+  assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', grants: { extensions: ['x'] } }), (error) => error.reason === 'grant-unsupported')
 })
 
 test('seatTransport keeps explicit transports ahead of --headless-all and defaults to pane', () => {

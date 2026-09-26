@@ -1855,6 +1855,26 @@ test('awaitSeatsReady rejects unknown and absent modes explicitly', () => {
   }
 })
 
+test('Claude ACP reviewer boot persists alongside headless lead', async () => {
+  const root = scratchDir('claude-acp-boot-test-')
+  const home = join(root, 'home'); const checkout = join(root, 'checkout')
+  mkdirSync(home); mkdirSync(checkout)
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => bootCmd({ task: 'claude-acp-reviewer', checkout, roles: 'lead,reviewer', 'agent-reviewer': 'claude', acp: 'reviewer', 'headless-all': true, 'claude-bin': process.execPath }, {
+      cmux() { workspaceCalls += 1; throw new Error('unexpected workspace call') }, tree() { return {} }, renameTab() {},
+    }))
+    const crewDir = testCrewDir(home, checkout, 'claude-acp-reviewer')
+    const crew = JSON.parse(readFileSync(join(crewDir, 'crew.json'), 'utf8'))
+    const journal = readFileSync(join(crewDir, 'journal.jsonl'), 'utf8')
+    assert.equal(crew.members.reviewer.agent, 'claude')
+    assert.equal(crew.members.reviewer.transport, 'acp')
+    assert.equal(crew.members.lead.transport, 'headless-json')
+    assert.match(journal, /"transport":"acp"/)
+    assert.equal(workspaceCalls, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('a tier boot records the handed roster and byte snapshot provenance', async () => {
   const home = scratchDir('crew-roster-boot-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-roster-boot-checkout-')

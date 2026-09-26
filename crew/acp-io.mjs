@@ -27,31 +27,40 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     if (clients.has(role)) return clients.get(role)
     const member = crew?.members?.[role]
     const adapter = adapters?.[role] || {}
-    const profile = (adapter.capabilitiesFor || piCapabilitiesFor)({ transport: 'acp' })
+    const mod = adapter.adapter ?? adapter
+    const adapterName = adapter.name ?? member?.agent
+    const launchFn = mod.acpLaunch || (!adapterName ? piAcpLaunch : null)
+    if (typeof launchFn !== 'function') {
+      const error = new Error(`ACP launch unsupported for adapter ${adapterName ?? 'unknown'} in role ${role}`)
+      error.stage = 'acp-launch-unsupported'
+      throw error
+    }
+    const profile = (mod.capabilitiesFor || piCapabilitiesFor)({ transport: 'acp' })
+    const acpBin = mod.ACP_BINARY ?? bin
     const searchedPath = deps.env?.PATH ?? process.env.PATH ?? ''
     const canRead = (path) => { try { return exists(path) === true } catch { return false } }
     let binary = null
-    if (isAbsolute(bin)) {
+    if (isAbsolute(acpBin)) {
       // crew/pi/acp-bridge.mjs refuses a nonexistent absolute CREW_PI_BIN by name at launch; do not re-check it here.
-      binary = bin
+      binary = acpBin
     } else {
       for (const dir of searchedPath.split(delimiter)) {
         if (!isAbsolute(dir)) continue
-        const candidate = join(dir, bin)
+        const candidate = join(dir, acpBin)
         if (canRead(candidate)) { binary = candidate; break }
       }
     }
     if (!binary) {
-      const error = new Error(`acp binary "${bin}" was not found on PATH "${searchedPath}"`)
+      const error = new Error(`acp binary "${acpBin}" was not found on PATH "${searchedPath}"`)
       error.stage = 'acp-bin-unresolved'
       throw error
     }
-    const launchFn = adapter.acpLaunch || piAcpLaunch
     const seatTaskDir = taskDir || paths.taskDir
     // The same seat parts headless-rpc hands its command (crew/headless-rpc.mjs): the role charter, the
     // grants (the submit extension delivers the envelope without a gated write), and the seat's env.
     const launch = launchFn({ role, bin: binary, model: member?.model, effort: member?.effort, cwd: checkout || process.cwd(), deny: member?.deny || '',
       promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir,
+      tools: member?.tools, claudeBin: crew.claude_bin, writableDirs: [seatTaskDir, paths.returnsDir],
       advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
         ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
         : null,
@@ -86,7 +95,8 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       deps: { ...deps.clientDeps, log } })
     client.start()
     client.initialize()
-    client.newSession({ cwd: checkout || process.cwd(), mcpServers: [] })
+    client.newSession(launch.sessionParams ?? { cwd: checkout || process.cwd(), mcpServers: [] })
+    if (launch.mode) client.setMode(launch.mode)
     const state = { client, profile, role }
     clients.set(role, state)
     return state

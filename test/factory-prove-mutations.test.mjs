@@ -880,19 +880,44 @@ test('A4 a hanging diff gate is counted as a timeout kill', async () => {
 
 test('A3 a SIGTERM-ignoring descendant is killed with its timed-out group', async () => {
   const { root, checkout } = fixture()
-  const marker = join(root, 'child.pid')
+  const shellMarker = join(root, 'child.pid')
+  const ready = join(root, 'child.ready')
+  const observed = join(root, 'child.observed')
   let pid = null
+  let probeSent = false
   try {
-    const command = `node -e 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)' & echo $! > ${JSON.stringify(marker)}; wait`
-    const snapshot = gatedSnapshot([() => existsSync(marker)])
+    const command = `node -e 'const fs = require("node:fs"); const observedPath = ${JSON.stringify(observed)}; process.on("SIGTERM", () => { fs.writeFileSync(observedPath, "observed") }); fs.writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 1000)' & echo $! > ${JSON.stringify(shellMarker)}; wait`
+    const snapshot = gatedSnapshot([() => existsSync(ready) && readyPid(ready) !== null && (probeSent = true, process.kill(readyPid(ready), 'SIGTERM'), true), () => existsSync(observed) || pidDead(Number(readFileSync(ready, 'utf8')))])
     const result = await mod.normalDeps().runCommand(command, checkout, { timeout: 350, snapshot })
-    assert.equal(existsSync(marker), true, 'child marker was never written')
+    assert.equal(existsSync(ready), true, 'descendant never reported its handler installed')
+    assert.equal(probeSent, true, 'the readiness probe never signalled the descendant')
+    assert.equal(existsSync(observed), true, 'descendant did not acknowledge SIGTERM before timeout')
+    assert.equal(existsSync(shellMarker), true, 'child marker was never written')
     assert.equal(result.error?.code, 'ETIMEDOUT')
-    pid = Number(readFileSync(marker, 'utf8').trim())
+    pid = Number(readFileSync(ready, 'utf8').trim())
     assert.equal(await waitDead(pid), true, 'the SIGTERM-ignoring descendant outlived its timed-out group')
-  } finally { if (pid) killQuietly(pid); rmSync(root, { recursive: true, force: true }) }
+  } finally {
+    if (!pid) {
+      const marker = existsSync(ready) ? ready : shellMarker
+      if (existsSync(marker)) pid = Number(readFileSync(marker, 'utf8').trim())
+    }
+    if (pid) killQuietly(pid)
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
+
+test('A3 readiness probe signals only a positive pid, never its own process group', () => {
+  const root = scratchDir('ready-pid-')
+  try {
+    const file = join(root, 'child.ready')
+    for (const text of ['', '0', '-1', 'x']) { writeFileSync(file, text); assert.equal(readyPid(file), null, `readiness text ${JSON.stringify(text)} must not be signalled`) }
+    writeFileSync(file, '4242'); assert.equal(readyPid(file), 4242)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// An empty read between the child's open and write is Number('') === 0, and kill(0) signals our own group.
+const readyPid = (path) => { const pid = Number(readFileSync(path, 'utf8')); return Number.isInteger(pid) && pid > 0 ? pid : null }
 const pidDead = (pid) => { try { process.kill(pid, 0); return false } catch (err) { return err?.code === 'ESRCH' } }
 const killQuietly = (pid) => { try { process.kill(pid, 'SIGKILL') } catch {} }
 // Exit and reap evidence is positive: kill(pid, 0) throwing ESRCH. A row missing from one ps

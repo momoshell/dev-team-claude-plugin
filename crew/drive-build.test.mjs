@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  staleSpawnProof,
+  staleSpawnProof, publicationIo, PUBLISH_WARM_OUTPUT,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
@@ -299,6 +299,61 @@ test('suite anchor A4 rolls back unsafe and refused repair writes, escalating un
   assert.equal(anchorRows(stillMoved.io).at(-1)?.reason, 'still-moved')
 })
 
+function publishingAnchorIo(secondDiff) {
+  const dispatch = 'skills/crew-dispatch/anchors.json'
+  const recovery = 'skills/crew-recovery/anchors.json'
+  const baseManifest = JSON.stringify({ 'crew/drive.mjs:1': 'dispatch' })
+  const files = {
+    [`${CTX.checkout}/${dispatch}`]: baseManifest,
+    [`${CTX.checkout}/${recovery}`]: JSON.stringify({ 'crew/drive.mjs:1': 'recovery' }),
+  }
+  let suiteIndex = 0
+  let checkIndex = 0
+  let diffIndex = 0
+  let repaired = false
+  const gitFiles = ['git', ['ls', 'files'].join('-')].join(' ')
+  const io = publicationIo({ commands: {
+    'suite-cmd': () => ({ ok: true, output: ++suiteIndex === 1 ? suiteRed('a.test.mjs', 1, 'moved-only red') : PUBLISH_WARM_OUTPUT }),
+    "git diff --name-only -z 'base1111'...HEAD": () => {
+      diffIndex++
+      if (diffIndex === 1) return { ok: true, output: `a.mjs\0a.test.mjs\0${dispatch}\0${recovery}\0` }
+      return secondDiff
+    },
+  }})
+  const originalRun = io.run.bind(io)
+  io.run = (command) => {
+    const text = String(command)
+    if (text === 'suite-cmd') {
+      io.calls.run.push(text)
+      const first = ++suiteIndex === 1
+      return { ok: !first, output: first ? suiteRed('a.test.mjs', 1, 'moved-only red') : PUBLISH_WARM_OUTPUT }
+    }
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --check')) {
+      io.calls.run.push(text)
+      return { ok: checkIndex++ === 0, output: checkIndex === 1 ? anchorCheck() : anchorCheck({ moved: 0, lines: 0 }) }
+    }
+    if (text === `${gitFiles} -z -- '*anchors.json'` || text.startsWith(`${gitFiles} -z --cached --`) || text.startsWith(`${gitFiles} -z --others`)) {
+      io.calls.run.push(text)
+      return { ok: true, output: text.includes('--others') ? '' : `${dispatch}\0${recovery}\0` }
+    }
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all')) {
+      io.calls.run.push(text)
+      repaired = true
+      files[`${CTX.checkout}/${dispatch}`] = JSON.stringify({ 'crew/drive.mjs:1': 'repaired dispatch' })
+      files[`${CTX.checkout}/${recovery}`] = JSON.stringify({ 'crew/drive.mjs:1': 'recovery' })
+      return { ok: true, output: '' }
+    }
+    return originalRun(command)
+  }
+  const originalRunCold = io.runCold.bind(io)
+  io.runCold = (command, names) => String(command) === CTX.suite
+    ? (() => { const first = ++suiteIndex === 1; return { ok: !first, output: first ? suiteRed('a.test.mjs', 1, 'moved-only red') : PUBLISH_WARM_OUTPUT } })()
+    : originalRunCold(command, names)
+  io.readFile = (path) => files[path] ?? null
+  io.changedFiles = () => repaired ? [dispatch] : ['a.mjs', 'a.test.mjs']
+  return { io, ctx: { ...CTX, publish: { branch: 'feature/ship' } }, dispatch, get diffCalls() { return diffIndex } }
+}
+
 test('suite anchor A5 caps mechanical repairs at one per drive', () => {
   const red = (line) => ({ ok: false, output: suiteRed('a.test.mjs', line, 'moved-only red') })
   // Every repair writes a valid-JSON manifest whose bytes differ, so a second pass through the
@@ -320,6 +375,23 @@ test('suite anchor A5 caps mechanical repairs at one per drive', () => {
   assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd.includes('--repair-all')).length, 2)
   assert.equal(fixture.io.calls.commits.filter(({ message }) => message === 'chore(anchors): repair pins moved by the lane').length, 1)
   assert.equal(fixture.io.calls.assign.some(({ role, note }) => role === 'builder' && note === 'suite-red-fix'), true)
+})
+
+test('suite anchor A6 re-measures published files after repair', () => {
+  const fixture = publishingAnchorIo({ ok: true, output: 'a.mjs\0a.test.mjs\0skills/crew-dispatch/anchors.json\0' })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done', JSON.stringify({ result, calls: fixture.io.calls.run }))
+  assert.equal(fixture.diffCalls, 2)
+  assert.deepEqual(result.details.files_committed, ['a.mjs', 'a.test.mjs', 'skills/crew-dispatch/anchors.json'])
+  assert.match(result.summary, /\(3 files\)/)
+})
+
+test('suite anchor A7 escalates when the post-repair publication diff is unreadable', () => {
+  const fixture = publishingAnchorIo({ ok: false, output: 'unreadable' })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /publication diff could not be re-read from the verified base after the anchor repair/)
 })
 
 test('A1 proof scope re-proves only changed mutation files', () => {

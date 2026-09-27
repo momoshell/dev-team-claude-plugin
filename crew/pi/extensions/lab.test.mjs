@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync,
 import { dirname, join } from 'node:path'
 import * as mod from './lab.ts'
 import * as capabilities from '../../capabilities.mjs'
-import { ROOT, scratchDir } from '../../../test/helpers.mjs'
+import { ROOT, git, scratchDir } from '../../../test/helpers.mjs'
 
 function temp(prefix = 'lab-test-') {
   return realpathSync(scratchDir(prefix))
@@ -1731,4 +1731,248 @@ test('ledger input (a multibyte parameter larger than one 64 KiB stdin chunk arr
     await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
     assert.deepEqual(run.program.responses[0].value, { columns: ['n'], rows: [[value.length]], row_count: 1, truncated: false }, `pad ${pad.length}`)
   }
+})
+
+// ---- lab gaps (b997): ref-aware scratch, named suite failures, no-return refusal ----
+// A local two-commit repo, never HEAD~1 of the checkout (CI clones shallow). Its
+// red test file is run by the REAL node runner, so the TAP shape is whatever the
+// platform's node prints, not a string written on one OS.
+const GAPS_RED_TEST = [
+  "import { test, describe, it } from 'node:test'",
+  "import assert from 'node:assert/strict'",
+  "test('real red leaf', () => assert.equal(1, 2))",
+  "test('todo red', { todo: true }, () => assert.equal(1, 2))",
+  "test('skip me', { skip: true }, () => {})",
+  "test('nested parent', async (t) => { await t.test('nested child red', () => { throw new Error(\"TODO SKIP type: 'suite'\") }) })",
+  "describe('grp', () => { it('in describe red', () => assert.ok(false)) })",
+  "test('green one', () => {})",
+  '',
+].join('\n')
+const GAPS_RED_FAILURES = [
+  { test: 'real red leaf', file: 'x.test.mjs', line: 3 },
+  { test: 'nested child red', file: 'x.test.mjs', line: 6 },
+  { test: 'nested parent', file: 'x.test.mjs', line: 6 },
+  { test: 'in describe red', file: 'x.test.mjs', line: 7 },
+]
+// Well over the 50 KiB display cap of green TAP, then one red leaf and the summary.
+const GAPS_BIG_TEST = [
+  "import { test } from 'node:test'",
+  `for (let i = 0; i < 400; i += 1) test(\`green \${i} ${'p'.repeat(60)}\`, () => {})`,
+  "test('late red', () => { throw new Error('late') })",
+  '',
+].join('\n')
+
+// A runSuite child that inherits NODE_TEST_CONTEXT reports to THIS test runner
+// instead of printing TAP, so the real-runner checks run it without that variable.
+function gapsEnv() {
+  const taskDir = join(temp('lab-gaps-task-'), 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const env = { ...process.env, CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
+  delete env.NODE_OPTIONS
+  delete env.NODE_TEST_CONTEXT
+  return env
+}
+
+let gapsRepoMemo = null
+function gapsRepo() {
+  if (gapsRepoMemo) return gapsRepoMemo
+  const repo = temp('lab-gaps-repo-')
+  const repoGit = (...args) => git(repo, ...args).trim()
+  repoGit('init', '-q')
+  writeFileSync(join(repo, 'marker.txt'), 'first\n')
+  writeFileSync(join(repo, 'x.test.mjs'), GAPS_RED_TEST)
+  writeFileSync(join(repo, 'big.test.mjs'), GAPS_BIG_TEST)
+  repoGit('add', '.')
+  repoGit('commit', '-qm', 'first')
+  const first = repoGit('rev-parse', 'HEAD')
+  repoGit('branch', 'gaps-old')
+  writeFileSync(join(repo, 'marker.txt'), 'second\n')
+  repoGit('add', '.')
+  repoGit('commit', '-qm', 'second')
+  const second = repoGit('rev-parse', 'HEAD')
+  gapsRepoMemo = { repo, first, second }
+  return gapsRepoMemo
+}
+
+const GAPS_ATTEMPT = 'const attempt = async (...args) => { try { return await lab.scratchCheckout(...args) } catch (e) { return { refused: e.labRefusal } } }'
+
+function gapsLeaf(index, title, cwd, { indent = '', type = 'test', directive = '', location = join(cwd, 'x.test.mjs') } = {}) {
+  return `${indent}not ok ${index} - ${title}${directive}\n${indent}  ---\n${indent}  duration_ms: 0.1\n${indent}  type: '${type}'\n${indent}  location: '${location}:${index + 2}:1'\n${indent}  failureType: 'testCodeFailure'\n${indent}  error: |-\n${indent}    TODO type: 'suite'\n${indent}  ...\n`
+}
+
+// Runs a real program child whose runSuite child is replaced by a fake that prints
+// `stdout(cwd)` (and optional stderr) and exits 1.
+function gapsFakeSuite(stdout, stderr = '') {
+  const { repo } = gapsRepo()
+  const spawn = (command, args, options) => {
+    if (!args.includes('--test')) return nodeSpawn(command, args, options)
+    const child = fakeChild(999999)
+    queueMicrotask(() => {
+      if (stderr) child.stderr.emit('data', Buffer.from(stderr))
+      child.stdout.emit('data', Buffer.from(stdout(options.cwd)))
+      child.emit('close', 1, null)
+    })
+    return child
+  }
+  const kill = (_pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }
+  return realTool("await lab.scratchCheckout(); export default await lab.runSuite(['x.test.mjs'])", repo, { spawn, kill })
+}
+
+test('gaps A1 (scratchCheckout(sha) checks out that commit, detached)', async () => {
+  const { repo, first } = gapsRepo()
+  const run = await realTool(`export default await lab.scratchCheckout(${JSON.stringify(first)})`, repo)
+  assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details))
+  assert.equal(run.details.result.head, first)
+  assert.equal(run.details.result.detached, true)
+})
+
+test('gaps A1.branch (scratchCheckout(branch) resolves the branch, and no ref is still HEAD)', async () => {
+  const { repo, first, second } = gapsRepo()
+  const branch = await realTool("export default await lab.scratchCheckout('gaps-old')", repo)
+  assert.equal(branch.details.result.head, first)
+  const bare = await realTool('export default await lab.scratchCheckout()', repo)
+  assert.equal(bare.details.result.head, second)
+})
+
+test('gaps A2 (the scratch tree holds the named commit, not HEAD)', async () => {
+  const { repo, first } = gapsRepo()
+  const run = await realTool(`await lab.scratchCheckout(${JSON.stringify(first)}); export default await lab.read('marker.txt')`, repo)
+  assert.equal(run.details.result.text, 'first\n')
+})
+
+test('gaps A3 (a ref that names no commit refuses ref-unresolved instead of falling back to HEAD)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool(`${GAPS_ATTEMPT}; export default await attempt('no-such-ref-b997')`, repo)
+  assert.deepEqual(run.details.result, { refused: 'ref-unresolved' })
+})
+
+test('gaps A4 (an option-shaped ref is refused before any git argv carries it)', async () => {
+  const { repo } = gapsRepo()
+  const gitArgs = []
+  const spawnSync = (command, args, options) => {
+    if (command === 'git') gitArgs.push(args)
+    return nodeSpawnSync(command, args, options)
+  }
+  const run = await realTool(`${GAPS_ATTEMPT}; export default await attempt('--upload-pack=x')`, repo, { spawnSync })
+  assert.deepEqual(run.details.result, { refused: 'op-args-invalid' })
+  assert.deepEqual(gitArgs.filter((args) => args.some((arg) => arg.includes('upload-pack'))), [])
+})
+
+test('gaps A4.shape (an empty, non-string or second ref argument is op-args-invalid)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool(`${GAPS_ATTEMPT}; export default [await attempt(''), await attempt(7), await attempt('HEAD', 'HEAD')]`, repo)
+  assert.deepEqual(run.details.result, [{ refused: 'op-args-invalid' }, { refused: 'op-args-invalid' }, { refused: 'op-args-invalid' }])
+})
+
+test('gaps A5 (a second checkout at a different commit refuses rather than returning the first scratch)', async () => {
+  const { repo, first, second } = gapsRepo()
+  const run = await realTool(`${GAPS_ATTEMPT}; await lab.scratchCheckout(${JSON.stringify(first)}); export default await attempt(${JSON.stringify(second)})`, repo)
+  assert.deepEqual(run.details.result, { refused: 'op-args-invalid' })
+})
+
+test('gaps A5.same (the same commit by another name, or no ref, reuses the first scratch)', async () => {
+  const { repo, first } = gapsRepo()
+  const run = await realTool(`const a = await lab.scratchCheckout(${JSON.stringify(first)}); const b = await lab.scratchCheckout('gaps-old'); const c = await lab.scratchCheckout(); export default [a.head, b.head, c.head, a.path === b.path && b.path === c.path]`, repo)
+  assert.deepEqual(run.details.result, [first, first, first, true])
+})
+
+test('gaps B1 (leaf failures are named; a failing suite row and a TODO leaf are not)', async () => {
+  const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'outer red', cwd)
+    + gapsLeaf(2, 'todo red', cwd, { directive: ' # TODO' })
+    + '    # Subtest: group\n' + gapsLeaf(1, 'inner red', cwd, { indent: '    ' }) + '    1..1\n'
+    + gapsLeaf(3, 'group', cwd, { type: 'suite' })
+    + '1..3\n# pass 0\n# fail 2\n# todo 1\n')
+  assert.deepEqual(run.details.result.failures.map((one) => one.test), ['outer red', 'inner red'])
+  assert.equal(run.details.result.failures_complete, true)
+})
+
+test('gaps B1.stderr (a not-ok line on stderr is never read as a failure)', async () => {
+  const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'outer red', cwd) + '# pass 0\n# fail 1\n', 'not ok 9 - bogus\n  ---\n  type: \'test\'\n  ...\n')
+  assert.deepEqual(run.details.result.failures.map((one) => one.test), ['outer red'])
+})
+
+test('gaps B2 (a location inside the scratch is repo-relative; one outside it is null, null)', async () => {
+  const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'inside', cwd) + gapsLeaf(2, 'outside', cwd, { location: join(dirname(cwd), 'elsewhere.test.mjs') }) + '# pass 0\n# fail 2\n')
+  assert.deepEqual(run.details.result.failures, [
+    { test: 'inside', file: 'x.test.mjs', line: 3 },
+    { test: 'outside', file: null, line: null },
+  ])
+})
+
+test('gaps B3 (the failure list is capped at 100 entries)', async () => {
+  assert.equal(mod.LAB_SUITE_FAILURES_MAX, 100)
+  const run = await gapsFakeSuite((cwd) => Array.from({ length: 101 }, (_, i) => gapsLeaf(i + 1, `red ${i}`, cwd)).join('') + '# pass 0\n# fail 101\n')
+  assert.equal(run.details.result.fail, 101)
+  assert.equal(run.details.result.failures.length, 100)
+  assert.equal(run.details.result.failures[99].test, 'red 99')
+})
+
+test('gaps B3.name (a failure name is bounded at 512 UTF-8 bytes without splitting a character)', async () => {
+  const run = await gapsFakeSuite((cwd) => gapsLeaf(1, `x${'€'.repeat(400)}`, cwd) + '# pass 0\n# fail 1\n')
+  const name = run.details.result.failures[0].test
+  assert.equal(name, `x${'€'.repeat(170)}`)
+  assert.equal(Buffer.byteLength(name, 'utf8'), 511)
+})
+
+test('gaps B4 (a summary past the output cap is still read)', async () => {
+  const run = await gapsFakeSuite((cwd) => `# ${'x'.repeat(mod.LAB_OUTPUT_CAP_BYTES + 10)}\n` + gapsLeaf(1, 'outer red', cwd) + '# pass 0\n# fail 1\n')
+  assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details))
+  assert.deepEqual([run.details.result.pass, run.details.result.fail, run.details.result.truncated], [0, 1, true])
+  assert.deepEqual(run.details.result.failures.map((one) => one.test), ['outer red'])
+})
+
+test('gaps B4.real (the real node runner: green output past the cap still yields its summary and late failure)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("await lab.scratchCheckout(); export default await lab.runSuite(['big.test.mjs'])", repo, { env: gapsEnv() })
+  assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details))
+  assert.deepEqual([run.details.result.pass, run.details.result.fail, run.details.result.truncated], [400, 1, true])
+  assert.deepEqual(run.details.result.failures, [{ test: 'late red', file: 'big.test.mjs', line: 3 }])
+  assert.equal(run.details.result.failures_complete, true)
+})
+
+test('gaps B5 (failures_complete is false when the list was capped)', async () => {
+  const run = await gapsFakeSuite((cwd) => Array.from({ length: 101 }, (_, i) => gapsLeaf(i + 1, `red ${i}`, cwd)).join('') + '# pass 0\n# fail 101\n')
+  assert.equal(run.details.result.failures_complete, false)
+})
+
+test('gaps B5.summary (failures_complete is false when the summary counts failures no leaf named)', async () => {
+  const run = await gapsFakeSuite(() => '# pass 1\n# fail 1\n')
+  assert.deepEqual([run.details.result.failures, run.details.result.failures_complete], [[], false])
+})
+
+test('gaps B6 (the real node runner: every red leaf is named with its file and line, TODO and suites left out)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("await lab.scratchCheckout(); export default await lab.runSuite(['x.test.mjs'])", repo, { env: gapsEnv() })
+  assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details))
+  assert.equal(run.details.result.fail, 4)
+  assert.deepEqual(run.details.result.failures, GAPS_RED_FAILURES)
+  assert.equal(run.details.result.failures_complete, true)
+})
+
+test('gaps C1 (a program that prints but exports nothing refuses program-returned-nothing)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool('console.log(JSON.stringify({ rows: [[1]] }))', repo)
+  assert.deepEqual([run.details.outcome, run.details.refused], ['refused', 'program-returned-nothing'])
+  assert.match(run.content[0].text, /^refused: program-returned-nothing\n.*export default <value>/)
+})
+
+test('gaps C2 (the refusal carries what the program printed, with the RPC and done frames removed)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("const s = await lab.scratchCheckout(); console.log('head', s.head.length); console.log(JSON.stringify({ rows: [[1]] }))", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout, 'head 40\n{"rows":[[1]]}\n')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.content[0].text.endsWith('head 40\n{"rows":[[1]]}\n'), true)
+})
+
+test('gaps C3 (export default null is a value, not nothing)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool('export default null', repo)
+  assert.deepEqual([run.details.outcome, run.details.result, run.content[0].text], ['ok', null, 'null'])
+})
+
+test('gaps C4 (the tool description says how a program returns its value)', () => {
+  const tool = mod.createLabTool({ env: {} })
+  assert.match(tool.description, /export default <value>/)
+  assert.match(tool.description, /program-returned-nothing/)
 })

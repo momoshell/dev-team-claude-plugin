@@ -299,9 +299,18 @@ test('suite anchor A4 rolls back unsafe and refused repair writes, escalating un
 
 test('suite anchor A5 caps mechanical repairs at one per drive', () => {
   const red = (line) => ({ ok: false, output: suiteRed('a.test.mjs', line, 'moved-only red') })
+  // Every repair writes a valid-JSON manifest whose bytes differ, so a second pass through the
+  // branch could repair and commit again: only the one-repair bound can stop it.
+  let repairs = 0
   const fixture = anchorSuiteIo({
     suite: [red(1), red(2), red(3), { ok: true, output: 'suite green' }],
     checks: [anchorCheck(), anchorCheck({ moved: 0, lines: 0 }), anchorCheck(), anchorCheck({ moved: 0, lines: 0 })],
+    repair: ({ command, files, dispatch, recovery }) => {
+      repairs += 1
+      const directory = command.includes(dispatch) ? dispatch : recovery
+      files[`${CTX.checkout}/${directory}/anchors.json`] = JSON.stringify({ 'crew/drive.mjs:1': `repaired ${repairs}` })
+      return { ok: true, output: '' }
+    },
   })
   const result = driveTask(fixture.ctx, fixture.io)
   assert.equal(result.status, 'escalation')

@@ -1,4 +1,7 @@
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
@@ -6,7 +9,7 @@ import {
 import { dirname, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import {
-  ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, acpClient, acpSeatPaths,
+  ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, ACP_WRITE_DEADLINE_MS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
 import { seatCommandPath } from './headless-rpc.mjs'
 import { REGISTER_ROOT } from './capabilities.mjs'
@@ -479,6 +482,134 @@ test('E1', () => {
   } finally {
     rmSync(heldRoot, { recursive: true, force: true })
   }
+})
+
+function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {}) {
+  const root = scratchDir('acp-write-')
+  const acpRoot = join(root, 'acp')
+  const seatDir = join(acpRoot, 'builder')
+  mkdirSync(seatDir, { recursive: true })
+  const stream = join(seatDir, 'stream.jsonl')
+  writeFileSync(stream, '')
+  let pending = Buffer.alloc(0)
+  const received = []
+  const journal = []
+  const writeSync = (...args) => writeOverride(args, (buf) => {
+    pending = Buffer.concat([pending, buf])
+    if (!pending.includes(10)) return
+    const frame = JSON.parse(pending.toString('utf8'))
+    pending = Buffer.alloc(0)
+    received.push(frame)
+    const result = frame.method === 'initialize' ? { protocolVersion: 1 } : frame.method === 'session/new' ? { sessionId: 's' } : { stopReason: 'end_turn' }
+    appendFileSync(stream, `${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result })}\n`)
+  })
+  const api = acpClient({ launch: { bin: '/bin/false' }, dir: acpRoot, cwd: root, deps: {
+    pid: 99001, spawn: () => ({ pid: 99002, unref() {} }), openSync: () => 7,
+    writeSync, closeSync: () => {}, existsSync: (p) => existsSync(p) || String(p).endsWith('cmd.fifo'),
+    kill: () => writeFileSync(join(seatDir, 'exit'), '0'), now: clock, sleep, log: (row) => journal.push(row),
+  } })
+  api.start(); api.initialize(); api.newSession()
+  return { api, root, received, journal, prompt(text) { return api.prompt([{ type: 'text', text }]) }, cleanup() { api.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('W1 short writes reassemble one complete 70KB prompt frame', () => {
+  let chunks = 0
+  const f = writeHarness(([fd, buffer, offset, length], receive) => {
+    const count = Math.min(3072, length); chunks++
+    receive(buffer.subarray(offset, offset + count)); return count
+  })
+  try {
+    assert.equal(f.prompt('x'.repeat(70000)).stopReason, 'end_turn')
+    const prompts = f.received.filter((frame) => frame.method === 'session/prompt')
+    assert.equal(prompts.length, 1)
+    assert.equal(prompts[0].params.prompt[0].text.length, 70000)
+    assert.ok(chunks > 20)
+  } finally { f.cleanup() }
+})
+
+test('W2 retries EAGAIN and reports deadline plus partial bytes', () => {
+  let calls = 0, time = 0
+  const f = writeHarness(([fd, buffer, offset, length], receive) => {
+    if (calls++ < 2) throw Object.assign(new Error('full'), { code: 'EAGAIN' })
+    receive(buffer.subarray(offset, offset + length)); return length
+  }, () => time, (ms) => { time += ms })
+  try {
+    assert.equal(f.prompt('retry').stopReason, 'end_turn')
+    assert.equal(calls, 5) // two EAGAINs then the handshake, session/new, and prompt writes
+  } finally { f.cleanup() }
+  let blockedTime = 0
+  const blocked = writeHarness(([fd, buffer], receive) => {
+    if (String(buffer).includes('session/prompt')) throw Object.assign(new Error('full'), { code: 'EAGAIN' })
+    receive(buffer); return buffer.length
+  }, () => blockedTime, (ms) => { blockedTime += ms })
+  try {
+    assert.throws(() => blocked.prompt('blocked'), (error) => error.reason === 'acp-prompt-write-timeout' && error.bytesWritten === 0)
+    assert.ok(blockedTime >= ACP_WRITE_DEADLINE_MS)
+  } finally { blocked.cleanup() }
+})
+
+test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
+  const root = scratchDir('acp-real-fifo-')
+  const acpRoot = join(root, 'acp')
+  const agent = join(root, 'agent.mjs'), client = join(root, 'client.mjs')
+  let out
+  try {
+    writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
+    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
+    assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
+    assert.equal(out.stderr, '')
+  } finally {
+    const pgidFile = join(acpRoot, 'builder', 'pgid')
+    if (existsSync(pgidFile)) { const pgid = Number(readFileSync(pgidFile, 'utf8')); if (pgid > 1) try { process.kill(-pgid, 'SIGKILL') } catch {} }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-1 torn writes poison later frames and skip cancel writes', () => {
+  let time = 0, calls = 0
+  const f = writeHarness(([fd, buffer, offset], receive) => {
+    if (!String(buffer).includes('session/prompt')) { receive(buffer); return buffer.length }
+    calls++
+    if (calls === 1) { receive(buffer.subarray(offset, offset + 4096)); return 4096 }
+    throw Object.assign(new Error('full'), { code: 'EAGAIN' })
+  }, () => time, (ms) => { time += ms })
+  try {
+    assert.throws(() => f.api.beginPrompt([{ type: 'text', text: 'x'.repeat(70000) }]), (error) => error.reason === 'acp-prompt-write-timeout' && error.bytesWritten === 4096)
+    const callsAtTear = calls
+    assert.throws(() => f.api.beginPrompt([{ type: 'text', text: 'later' }]), (error) => error.reason === 'acp-prompt-write-timeout' && error.bytesWritten === 0)
+    f.api.cancel()
+    assert.equal(calls, callsAtTear)
+    assert.equal(f.journal.some((row) => row.acp_cancel_skipped?.reason === 'torn-frame' && row.acp_cancel_skipped.bytesWritten === 4096), true)
+  } finally { f.cleanup() }
+})
+
+test('RV1-1 zero-byte timeout does not poison a subsequent complete frame', () => {
+  let time = 0, blocked = true
+  const f = writeHarness(([fd, buffer, offset = 0, length = buffer.length], receive) => {
+    if (blocked && String(buffer).includes('session/prompt')) throw Object.assign(new Error('full'), { code: 'EAGAIN' })
+    receive(buffer.subarray(offset, offset + length)); return length
+  }, () => time, (ms) => { time += ms })
+  try {
+    assert.throws(() => f.api.beginPrompt([{ type: 'text', text: 'first' }]), (error) => error.reason === 'acp-prompt-write-timeout' && error.bytesWritten === 0)
+    blocked = false
+    const id = f.api.beginPrompt([{ type: 'text', text: 'second' }])
+    assert.equal(f.api.pollPrompt(id).stopReason, 'end_turn')
+    assert.equal(f.received.filter((frame) => frame.method === 'session/prompt').length, 1)
+    assert.equal(f.received.find((frame) => frame.method === 'session/prompt').params.prompt[0].text, 'second')
+  } finally { f.cleanup() }
+})
+
+test('RV1-2 retains EPIPE and the number of partial bytes written', () => {
+  let promptCalls = 0
+  const f = writeHarness(([fd, buffer, offset = 0], receive) => {
+    if (!String(buffer).includes('session/prompt')) { receive(buffer); return buffer.length }
+    if (promptCalls++ === 0) { receive(buffer.subarray(offset, offset + 31)); return 31 }
+    throw Object.assign(new Error('pipe closed'), { code: 'EPIPE' })
+  })
+  try {
+    assert.throws(() => f.api.beginPrompt([{ type: 'text', text: 'partial' }]), (error) => error.code === 'EPIPE' && error.bytesWritten === 31)
+  } finally { f.cleanup() }
 })
 
 test('RV1-1', () => {

@@ -1,9 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync as fsExistsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync as fsExistsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { acpIo } from './acp-io.mjs'
+import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
+import { ACP_BINARY, acpLaunch as claudeAcpLaunch, capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { cellFailureKind, ACP_TRANSPORT, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, seatIo } from './seat-io.mjs'
 
 function fixture(options = {}) {
@@ -15,7 +17,7 @@ function fixture(options = {}) {
   const pollResults = [...(options.pollResults ?? (Object.hasOwn(options, 'turn') ? [options.turn] : []))]
   const fake = {
     sessionId: 'session-test',
-    start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession() { calls.push('newSession') },
+    start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession(params) { calls.push(['newSession', params]) }, setMode(mode) { calls.push(['setMode', mode]) },
     beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); return 17 },
     pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; return pollResults.length ? pollResults.shift() : null },
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
@@ -193,6 +195,101 @@ test('T10', () => {
     assert.throws(() => f.io.wait(out.returnPath, 0), (e) => e.stage === 'acp-no-envelope')
   } finally { cleanup(f) }
 })
+test('Claude ACP nested adapter launches its own binary', () => {
+  const f = fixture({ crew: { claude_bin: '/frozen/claude', members: { builder: { agent: 'claude', model: 'opus', tools: 'Read' } } }, adapters: { builder: { name: 'claude', adapter: { ACP_BINARY: '/bin/claude-agent-acp', capabilitiesFor() { return {} }, acpLaunch(spec) { return { bin: spec.bin, args: [], env: { CLAUDE_CODE_EXECUTABLE: spec.claudeBin } } } } } } })
+  try {
+    assign(f)
+    assert.equal(f.launch.bin, '/bin/claude-agent-acp')
+    assert.equal(f.launch.env.CLAUDE_CODE_EXECUTABLE, '/frozen/claude')
+    assert.equal(f.calls.some((entry) => Array.isArray(entry) && entry[0] === 'newSession'), true)
+  } finally { cleanup(f) }
+})
+
+test('ACP named unsupported adapter refuses without Pi fallback', () => {
+  const f = fixture({ crew: { members: { builder: { agent: 'unsupported-agent' } } }, adapters: { builder: { name: 'unsupported-agent', adapter: { capabilitiesFor() { return {} } } } } })
+  try { assert.throws(() => assign(f), (error) => error.stage === 'acp-launch-unsupported' && /unsupported-agent/.test(error.message)) } finally { cleanup(f) }
+})
+
+function wireFixture({ rejectMode = false } = {}) {
+  const root = scratchDir('acp-wire-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'wire brief')
+  const stream = join(paths.taskDir, 'acp', 'reviewer', 'stream.jsonl')
+  const records = readFileSync(new URL('../test/fixtures/acp/claude-turn.ndjson', import.meta.url), 'utf8').trim().split('\n').map(JSON.parse)
+  const responseFor = (method) => {
+    const req = records.find((row) => row.dir === 'client->agent' && row.frame?.method === method)?.frame
+    return records.find((row) => row.dir === 'agent->client' && row.frame?.id === req?.id && !row.frame?.method)?.frame
+  }
+  const sent = []; const logs = []; const heartbeats = []
+  const clientDeps = {
+    pid: 901, spawn() { return { pid: 902, unref() {} } }, openSync: () => 7, closeSync() {},
+    existsSync: (path) => path.endsWith('cmd.fifo') || fsExistsSync(path),
+    kill() { writeFileSync(join(paths.taskDir, 'acp', 'reviewer', 'exit'), '0') },
+    now: (() => { let n = 0; return () => ++n })(), sleep() {},
+    writeSync(_fd, text) {
+      const frame = JSON.parse(text); sent.push(frame)
+      if (!frame.method || !Object.hasOwn(frame, 'id')) return
+      const answer = rejectMode && frame.method === 'session/set_mode'
+        ? { jsonrpc: '2.0', id: frame.id, error: { code: -32602, message: 'unsupported mode' } }
+        : { ...responseFor(frame.method), id: frame.id }
+      appendFileSync(stream, `${JSON.stringify(answer)}\n`)
+    },
+  }
+  const io = acpIo({ crew: { claude_bin: '/frozen/claude', members: { reviewer: { agent: 'claude', model: 'claude-test', tools: 'Read,Write', deny: 'Edit,NotebookEdit', effort: 'high' } } }, paths, taskDir: paths.taskDir, checkout: root,
+    adapters: { reviewer: { name: 'claude', adapter: { ACP_BINARY, capabilitiesFor: claudeCapabilitiesFor, acpLaunch: claudeAcpLaunch } } },
+    deps: { env: { PATH: '/fake-bin' }, existsSync: (path) => path === '/fake-bin/claude-agent-acp' || fsExistsSync(path), clientDeps, sleep() {}, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row) } })
+  return { root, paths, briefFile, io, sent, logs, heartbeats, close() { io.close(); rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('Claude ACP session options and mode reach the wire', () => {
+  const f = wireFixture()
+  try {
+    const out = f.io.assign({ role: 'reviewer', briefFile: f.briefFile })
+    const methods = f.sent.map((frame) => frame.method)
+    assert.deepEqual(methods, ['initialize', 'session/new', 'session/set_mode', 'session/prompt'])
+    const params = f.sent.find((frame) => frame.method === 'session/new').params
+    assert.deepEqual(params._meta.claudeCode.options.additionalDirectories, [f.paths.taskDir, f.paths.returnsDir])
+    assert.deepEqual(params._meta.claudeCode.options.allowedTools, ['Read', 'Write'])
+    assert.deepEqual(params._meta.claudeCode.options.disallowedTools, ['Edit', 'NotebookEdit', 'mcp__*'])
+    assert.equal(f.sent.find((frame) => frame.method === 'session/set_mode').params.modeId, 'acceptEdits')
+    writeFileSync(out.returnPath, JSON.stringify({ assignment_id: out.id, role: 'reviewer', status: 'done', summary: 'wire envelope', artifacts: [], details: {} }))
+    assert.equal(f.io.wait(out.returnPath, 1).assignment_id, out.id)
+    assert.equal(f.logs.find((row) => row.acp_turn)?.acp_turn.stopReason, 'end_turn')
+    assert.deepEqual(f.heartbeats.find((row) => row.kind === 'usage')?.usage, { billed_input_tokens: 4, billed_output_tokens: 138, billed_cache_read_tokens: 41166, billed_cache_write_tokens: 9001 })
+    assert.equal(f.io.close()[0].transport, 'acp')
+  } finally { f.close() }
+})
+
+test('Claude ACP rejected mode stops before prompt', () => {
+  const denied = wireFixture({ rejectMode: true })
+  try {
+    assert.throws(() => denied.io.assign({ role: 'reviewer', briefFile: denied.briefFile }), (error) => error.reason === 'acp-protocol-mismatch')
+    assert.equal(denied.sent.some((frame) => frame.method === 'session/prompt'), false)
+  } finally { denied.close() }
+})
+
+test('ACP Pi and flat adapters preserve session behavior', () => {
+  for (const adapter of [piAcpLaunch ? { name: 'pi', adapter: { acpLaunch: piAcpLaunch, capabilitiesFor: piCapabilitiesFor } } : {}, { acpLaunch: () => ({ bin: '/bin/flat', args: [], env: {} }) }]) {
+    const f = fixture({ adapters: { builder: adapter } })
+    try { assign(f); assert.deepEqual(f.calls.find((entry) => Array.isArray(entry) && entry[0] === 'newSession')[1], { cwd: f.root, mcpServers: [] }); assert.equal(f.calls.some((entry) => Array.isArray(entry) && entry[0] === 'setMode'), false) } finally { cleanup(f) }
+  }
+})
+
+test('Claude ACP PATH absence refuses by name', () => {
+  const f = fixture({ crew: { claude_bin: '/frozen/claude', members: { builder: { agent: 'claude' } } }, adapters: { builder: { name: 'claude', adapter: { ACP_BINARY, capabilitiesFor: claudeCapabilitiesFor, acpLaunch: claudeAcpLaunch } } }, existsSync: () => false })
+  try { assert.throws(() => assign(f), (error) => error.stage === 'acp-bin-unresolved' && error.message.includes('claude-agent-acp')) } finally { cleanup(f) }
+})
+
+test('Claude ACP outside write rejects without a lead', () => {
+  const f = fixture({ crew: { claude_bin: '/frozen/claude', members: { builder: { agent: 'claude', model: 'opus' } } }, adapters: { builder: { name: 'claude', adapter: { ACP_BINARY: '/bin/claude-agent-acp', capabilitiesFor: claudeCapabilitiesFor, acpLaunch: claudeAcpLaunch } } } })
+  try {
+    assign(f)
+    const options = [{ optionId: 'reject', kind: 'reject_once', name: 'Reject' }, { optionId: 'allow', kind: 'allow_once', name: 'Allow' }]
+    assert.equal(f.onPermission({ toolCall: { kind: 'edit', title: 'Write /elsewhere' }, options }), 'reject')
+  } finally { cleanup(f) }
+})
+
 test('ACP resolves pi through PATH and refuses an unresolved binary', () => {
   const f = fixture()
   try {

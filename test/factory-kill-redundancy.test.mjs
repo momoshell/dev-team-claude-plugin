@@ -21,7 +21,7 @@ import {
   sampleLineNumbers,
   snapshotFile,
 } from '../scripts/factory/kill-redundancy.mjs'
-import { generateDiffCandidates } from '../scripts/factory/prove-mutations.mjs'
+import { applyDiffCandidate, generateDiffCandidates } from '../scripts/factory/prove-mutations.mjs'
 
 // The identity production code builds: [suite, subtest path, occurrence]. Tests name tests
 // the way a reader does and encode here, so a change of encoding is one edit, not thirty.
@@ -403,7 +403,43 @@ test('SIGINT mid-mutant restores the target before the process re-raises the sig
 // disposable worktree, so the CHECKOUT cannot carry a mutant however the run ends. Proven
 // with a real subprocess killed mid-run. Mutation killed: mutating the checkout (the default
 // isolation removed) — the checkout's bytes then differ after the kill.
-test('a SIGKILL mid-run cannot leave the checkout mutated, because the mutations are not in the checkout', async () => {
+function isPlacedMutant(bytes, expectedMutants, original) { return expectedMutants.has(bytes) }
+
+async function waitForMutant({ placed, child, now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), boundMs = 90000 }) {
+  const deadline = now() + boundMs
+  const running = () => child.exitCode === null && child.signalCode == null
+  while (running()) {
+    if (placed()) return
+    if (now() >= deadline) { const state = running() ? 'running' : 'exited'; throw new Error(`hang guard: ${boundMs}ms; child ${state}`) }
+    await sleep(100)
+  }
+  if (!placed()) throw new Error(`child exited before mutant placement: ${child.exitCode ?? child.signalCode}`)
+}
+
+test('B1 clockfree only complete expected mutant bytes count as placed', () => {
+  const original = 'original bytes'; const expected = new Set(['mutant bytes'])
+  assert.equal(isPlacedMutant('', expected, original), false)
+  assert.equal(isPlacedMutant(undefined, expected, original), false)
+  assert.equal(isPlacedMutant(original, expected, original), false)
+})
+
+test('B2 clockfree a strict prefix is not a placed mutant', () => {
+  const original = ['export const a = 1', 'export function f(x) { return x + 1 }', 'export const b = a + 2', 'export const c = b > 1', ''].join('\n')
+  const lines = original.split('\n')
+  const selected = sampleLineNumbers({ lineCount: lines.length, count: 2, seed: 1 })
+  const candidates = mutantsForLines({ target: 'crew/drive.mjs', lines: selected, texts: selected.map((line) => lines[line - 1]) }).candidates
+  const expected = new Set(candidates.flatMap((mutant) => { const applied = applyDiffCandidate(Buffer.from(original), mutant); return applied.reason === null ? [applied.bytes.toString('utf8')] : [] }))
+  assert.ok(expected.size > 0)
+  const mutant = expected.values().next().value
+  assert.equal(isPlacedMutant(mutant.slice(0, -1), expected, original), false)
+  assert.equal(isPlacedMutant(mutant, expected, original), true)
+})
+
+test('B4 clockfree wait guard reports an over-bound running child', async () => {
+  await assert.rejects(waitForMutant({ placed: () => false, child: { exitCode: null }, now: (() => { let calls = 0; return () => calls++ === 0 ? 0 : 90001 })(), sleep: () => { throw new Error('sleep must not run') } }), /hang guard: 90000ms; child running/)
+})
+
+test('B3 clockfree SIGKILL mid-run cannot leave the checkout mutated, because the mutations are not in the checkout', async () => {
   const dir = scratchDir('kr-kill-')
   git(dir, 'init', '-q')
   mkdirSync(join(dir, 'crew'), { recursive: true })
@@ -424,24 +460,33 @@ test('a SIGKILL mid-run cannot leave the checkout mutated, because the mutations
   ].join('\n'))
   git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'base')
   const child = spawn(process.execPath, [join(ROOT, 'scripts/factory/kill-redundancy.mjs'), '--mutants', '2', '--seed', '1', '--suites', 'slow.test.mjs', '--timeout-ms', '600000', '--md', join(dir, 'k.md'), '--checkout', dir], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = new Promise((resolve) => child.once('exit', resolve))
   let say = ''
   for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => { say += chunk })
-  // Wait until a mutant exists ANYWHERE — the disposable worktree, or (if the tool were to
-  // mutate in place) the checkout itself — then kill the way nothing can catch. The
-  // condition holds in both worlds, so the assertion below is what separates them.
-  const mutantAt = (root) => { try { return readFileSync(join(root, 'crew', 'drive.mjs'), 'utf8') !== original } catch { return false } }
   const roots = () => gitResult(dir, 'worktree', 'list').stdout.split('\n').map((line) => line.split(' ')[0]).filter(Boolean)
-  const mutantExists = () => roots().some(mutantAt)
-  const deadline = Date.now() + 90000
-  while (Date.now() < deadline && !mutantExists() && child.exitCode === null) await new Promise((resolve) => setTimeout(resolve, 100))
-  assert.equal(child.exitCode, null, `the run finished before the kill: ${say.slice(0, 300)}`)
-  assert.ok(mutantExists(), `no mutant appeared in ${roots().join(', ')}`)
-  child.kill('SIGKILL')
-  await new Promise((resolve) => child.on('exit', resolve))
-  assert.equal(readFileSync(target, 'utf8'), original, 'the checkout still carries its own bytes')
-  assert.equal(gitResult(dir, 'status', '--porcelain').stdout.trim(), '', 'and nothing else moved in it')
-  gitResult(dir, 'worktree', 'prune')
-})
+  const sourceLines = original.split('\n')
+  const lineNumbers = sampleLineNumbers({ lineCount: sourceLines.length, count: 2, seed: 1 })
+  const generated = mutantsForLines({ target: 'crew/drive.mjs', lines: lineNumbers, texts: lineNumbers.map((line) => sourceLines[line - 1]) })
+  const expected = new Set(generated.candidates.flatMap((mutant) => {
+    const candidate = applyDiffCandidate(Buffer.from(original), mutant)
+    return candidate.reason === null ? [candidate.bytes.toString('utf8')] : []
+  }))
+  const placed = () => roots().some((root) => { try { return isPlacedMutant(readFileSync(join(root, 'crew', 'drive.mjs'), 'utf8'), expected, original) } catch { return false } })
+  try {
+    await waitForMutant({ placed, child })
+    assert.equal(child.exitCode, null, `the run finished before the kill: ${say.slice(0, 300)}`)
+    child.kill('SIGKILL')
+    await exited
+    assert.equal(readFileSync(target, 'utf8'), original, 'the checkout still carries its own bytes')
+    assert.equal(gitResult(dir, 'status', '--porcelain').stdout.trim(), '', 'and nothing else moved in it')
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await exited
+    child.stdout.destroy(); child.stderr.destroy()
+    gitResult(dir, 'worktree', 'prune')
+    for (const root of roots().slice(1)) gitResult(dir, 'worktree', 'remove', '--force', root)
+  }
+}, { timeout: 120000 })
 
 // Without a worktree — a checkout that is not a git repository — the tool REFUSES rather than
 // mutating something a crash could leave broken, and says how to accept that risk.

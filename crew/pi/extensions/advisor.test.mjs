@@ -436,9 +436,9 @@ test('RV1-3 journals stale child consult usage before suppressing stale notes', 
   rmSync(f.root, { recursive: true, force: true })
 })
 
-test('pi-child timeout, oversize output and invalid frames are closed failures', async () => {
+test('A3 clockfree pi-child timeout, oversize output and invalid frames are closed failures', async () => {
   for (const mode of ['timeout', 'oversize', 'invalid']) {
-    const f = fixture(); const journal = sink()
+    const f = fixture(); const journal = sink(); const timers = manualTimers(5)
     const spawn = () => {
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
       child.stdin = { end() { if (mode === 'timeout') return; setImmediate(() => {
@@ -450,12 +450,13 @@ test('pi-child timeout, oversize output and invalid frames are closed failures',
     }
     const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
       cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-      resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn, consultTimeoutMs: 5,
+      resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn, consultTimeoutMs: 5, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
     } })
     const readPath = join(f.tree, 'lib', 'widget.mjs')
     a.onToolResult(result(`${mode}-read`, 'read', { path: readPath, offset: 1 }, 'lib/widget.mjs:2: evidence'), {})
     const target = join(f.tree, `${mode}.mjs`); const change = { path: target, edits: [{ newText: 'x' }] }
     a.onToolCall(call(mode, 'edit', change), {}); a.onToolResult(result(mode, 'edit', change, 'ok'), {})
+    if (mode === 'timeout') { for (let i = 0; i < 20 && !timers.armed.some((entry) => entry.ms === 5); i++) await new Promise((resolve) => setImmediate(resolve)); timers.fireConsult() }
     await a.settled()
     const rejected = journal.rows.find((row) => row.advisor_note?.outcome === 'rejected')?.advisor_note
     assert.ok(rejected, mode)
@@ -713,6 +714,14 @@ test('K1 planner edge-path gloss fits plan and gate', () => {
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
 })
 
+function manualTimers(consultTimeoutMs) {
+  const armed = []
+  const setTimeout = (fn, ms) => { const entry = { fn, ms }; armed.push(entry); if (ms !== consultTimeoutMs) setImmediate(fn); return entry }
+  const clearTimeout = (entry) => { if (armed.includes(entry)) entry.cleared = true; else globalThis.clearTimeout(entry) }
+  const fireConsult = () => { const entries = armed.filter((entry) => entry.ms === consultTimeoutMs); assert.equal(entries.length, 1); entries[0].fn() }
+  return { setTimeout, clearTimeout, armed, fireConsult }
+}
+
 function childConsult({ childSpawn, extraDeps = {} }) {
   const f = fixture(); const journal = sink(); const fetchFn = fetcher()
   const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
@@ -738,13 +747,13 @@ const COMPLETE_USAGE = { input: 5, output: 3, cacheRead: 0, cacheWrite: 0 }
 // One child per call. `raw` is written after the frames, verbatim; `close` is the exit the
 // child reports ([code, signal]), or null for a child that never closes by itself (a hang);
 // the kill stub never closes it, so a failed consult settles on the advisor's own hard grace.
-async function spendRun(frames, { raw = '', close = [0, null], extraDeps = {} } = {}) {
+async function spendRun(frames, { raw = '', close = [0, null], extraDeps = {}, afterFrames } = {}) {
   const childSpawn = () => {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
     child.stdin = { end() { setImmediate(() => {
       for (const frame of frames) child.stdout.write(JSON.stringify(frame) + '\n')
       if (raw) child.stdout.write(raw)
-      if (close !== null) setImmediate(() => child.emit('close', close[0], close[1]))
+      setImmediate(() => { afterFrames?.(); if (close !== null) child.emit('close', close[0], close[1]) })
     }) } }
     child.kill = () => true
     return child
@@ -832,6 +841,37 @@ test('spend stream (g): a non-zero exit or a signal after complete frames leaves
 test('spend stream (h): a timed-out, killed consult after complete frames leaves the spend unmeasured', async () => {
   assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { consultTimeoutMs: 5 } }), 5)
 })
+
+test('A1 clockfree fires consult timeout after complete frames are consumed', async () => {
+  const t = manualTimers(250)
+  const result = await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 }, afterFrames: () => t.fireConsult() })
+  assertPartial(result, 5)
+})
+
+test('A4 clockfree timed-out complete spend remains unmeasured', async () => {
+  const t = manualTimers(250)
+  const result = await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 }, afterFrames: () => t.fireConsult() })
+  assertPartial(result, 5)
+})
+
+test('A2 clockfree consult timeout is injected and explicitly fired', async () => {
+  const t = manualTimers(250)
+  let finish
+  const c = childConsult({ childSpawn: () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { finish = () => child.emit('close', null) } }
+    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
+    return child
+  }, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 } })
+  try {
+    const running = c.run()
+    for (let i = 0; i < 20 && !t.armed.some((entry) => entry.ms === 250); i++) await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(t.armed.filter((entry) => entry.ms === 250).length, 1)
+    t.fireConsult()
+    await running
+  } finally { finish?.(); c.cleanup() }
+})
+
 // failure guard (consultFailed), cap path: a partial frame past RESPONSE_CAP_BYTES after complete frames.
 test('spend stream (i): a stream that hits a cap after complete frames leaves the spend unmeasured', async () => {
   assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: 'x'.repeat(advisor.RESPONSE_CAP_BYTES + 1), close: null }), 5)

@@ -42,7 +42,7 @@
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -94,6 +94,7 @@ export const LAB_RESIDUAL_CAP_BYTES = 1 * 1024 * 1024
 export const LAB_FRAME_QUEUE_MAX = 1024
 export const LAB_GREP_HITS_MAX = 500
 export const LAB_SUITE_PATHS_MAX = 64
+export const LAB_SUITE_FAILURES_MAX = 100
 export const LAB_REFUSALS = Object.freeze([
   'program-invalid', 'program-oversize', 'cwd-invalid',
   'no-scratch', 'scratch-failed',
@@ -103,7 +104,7 @@ export const LAB_REFUSALS = Object.freeze([
   'op-timeout', 'op-oversize', 'unknown-op',
   'skill-grant-invalid', 'op-ungranted',
   'child-denied', 'child-timeout', 'child-unreaped', 'child-failed', 'net-unenforceable',
-  'suite-failed', 'output-oversize',
+  'suite-failed', 'output-oversize', 'ref-unresolved', 'program-returned-nothing',
   'ledger-absent', 'ledger-statement-refused', 'ledger-value-unsupported',
 ])
 
@@ -116,10 +117,10 @@ export interface LabMutateResult { file: string; count: number }
 // BLOB and non-finite cells are unsupported: ledger rows carry only text, finite number and null scalars.
 export type LabLedgerValue = string | number | null
 export interface LabLedgerResult { columns: string[]; rows: LabLedgerValue[][]; row_count: number; truncated: boolean }
-export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[] }
+export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[]; failures: { test: string; file: string | null; line: number | null }[]; failures_complete: boolean }
 export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
-  scratchCheckout(): Promise<LabScratch>
+  scratchCheckout(ref?: string): Promise<LabScratch>
   read(file: string): Promise<LabReadResult>
   grep(pattern: string, opts?: LabGrepOptions): Promise<LabGrepResult>
   mutate(file: string, find: string, replace: string): Promise<LabMutateResult>
@@ -132,7 +133,7 @@ export const LAB_PARAMS = {
   additionalProperties: true,
   properties: {
     program: {
-      description: 'A seat-authored program using scratchCheckout, read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
+      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. Export a default value; top-level await and console output are supported, but console output is warned against. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
     skill: {
       description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
@@ -530,8 +531,8 @@ export function labStructuralFailures(paths: any = []): LabStructuralFailure[] {
 }
 
 // The ONE construction site for the value the seat-authored program reads.
-export function labSuiteResult({ paths, pass, fail, exitCode, truncated }: any): LabSuiteResult {
-  return { paths, pass, fail, exit_code: exitCode, host_authority: true, truncated, structural_failures: labStructuralFailures(paths) }
+export function labSuiteResult({ paths, pass, fail, exitCode, truncated, failures = [] }: any): LabSuiteResult {
+  return { paths, pass, fail, exit_code: exitCode, host_authority: true, truncated, structural_failures: labStructuralFailures(paths), failures, failures_complete: failures.length === fail }
 }
 
 export function parseTapSummary(text: string): any {
@@ -661,7 +662,8 @@ const main = async () => {
   globalThis.lab = Object.freeze(lab)
   try {
     const imported = await import(programUrl)
-    emit({ done: true, result: imported.default === undefined ? null : imported.default })
+    if (imported.default === undefined) emit({ done: true, refused: 'program-returned-nothing' })
+    else emit({ done: true, result: imported.default })
   } catch (err) { report(err) }
 }
 main().catch(report)
@@ -758,6 +760,7 @@ export function createLabTool(deps: any = {}) {
   }
 
   let scratchPromise: Promise<LabScratch> | null = null
+  let scratchHeadSha: string | null = null
   let scratchRoot: string | null = null
   let scratchParent: string | null = null
   let scratchRetained: string | null = null
@@ -765,11 +768,14 @@ export function createLabTool(deps: any = {}) {
   // In-flight ledger query children, cancelled with the program that asked for them.
   const ledgerCancels = new Set<() => void>()
 
-  const makeScratch = async (): Promise<LabScratch> => {
+  const makeScratch = async (ref?: string): Promise<LabScratch> => {
     const repoRoot = currentRepoRoot
     let root: string | null = null
     try {
-      const sourceHeadSha = requiredGitValue(['rev-parse', 'HEAD'], repoRoot)
+      const resolveRef = (name: string) => optionalGitValue(['rev-parse', '--verify', '--quiet', '--end-of-options', `${name}^{commit}`], repoRoot)
+      const sourceHeadSha = ref === undefined ? requiredGitValue(['rev-parse', 'HEAD'], repoRoot) : resolveRef(ref)
+      if (!sourceHeadSha) throw refusalError('ref-unresolved')
+      scratchHeadSha = sourceHeadSha
       root = String(mkTempDir())
       scratchParent = root
       const scratch = join(root, 'wt')
@@ -789,7 +795,19 @@ export function createLabTool(deps: any = {}) {
       throw refusalError(error?.code === 'ETIMEDOUT' ? 'op-timeout' : error?.code === 'ENOBUFS' ? 'op-oversize' : 'scratch-failed', 'scratch checkout failed')
     }
   }
-  const ensureScratch = () => (scratchPromise ??= makeScratch())
+  const ensureScratch = (ref?: string) => {
+    if (ref !== undefined && (typeof ref !== 'string' || !ref.length)) throw refusalError('op-args-invalid')
+    if (ref !== undefined && ref.startsWith('-')) throw refusalError('op-args-invalid')
+    if (scratchPromise) {
+      if (ref !== undefined) {
+        const sha = optionalGitValue(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`], currentRepoRoot)
+        if (!sha) throw refusalError('ref-unresolved')
+        if (scratchHeadSha !== sha) throw refusalError('op-args-invalid')
+      }
+      return scratchPromise
+    }
+    return (scratchPromise = makeScratch(ref))
+  }
 
   const validateOptions = (opts: any): any => {
     if (opts === undefined) return {}
@@ -866,7 +884,10 @@ export function createLabTool(deps: any = {}) {
     }
 
     let suiteText = ''
+    let fullSuiteText = ''
     let suiteTextTruncated = false
+    const failures: { test: string; file: string | null; line: number | null }[] = []
+    let pendingFailure: any = null
     let overflow = false
     let pendingRefusal: string | null = null
     let parentClosed = false
@@ -886,8 +907,34 @@ export function createLabTool(deps: any = {}) {
     let collector: any
     const appendSuite = (line: any, kind: string) => {
       if (overflow) return
+      const rawLine = String(line ?? '')
+      const fullNext = `${fullSuiteText}${rawLine}\n`
+      fullSuiteText = Buffer.byteLength(fullNext, 'utf8') > LAB_STREAM_CAP_BYTES ? Buffer.from(fullNext, 'utf8').subarray(0, LAB_STREAM_CAP_BYTES).toString('utf8') : fullNext
+      const cleanLine = stripAnsi(rawLine)
+      if (pendingFailure && /^\s+\S/.test(cleanLine)) {
+        const location = cleanLine.match(/^\s+location:\s*['\"]?(.+?):(\d+)(?::\d+)?['\"]?\s*$/)
+        if (location && pendingFailure.type === 'test' && !pendingFailure.directive) {
+          const absolute = location[1]
+          const file = relative(scratch.path, absolute)
+          if (file && file !== '..' && !file.startsWith(`..${sep}`) && !file.startsWith(sep) && !file.split(sep).includes('..')) {
+            pendingFailure.file = file.split(sep).join('/')
+            pendingFailure.line = Number(location[2])
+          }
+        }
+        if (/type:\s*['\"]?test['\"]?/.test(cleanLine)) pendingFailure.type = 'test'
+        if (/type:\s*['\"]?(?:suite|child)['\"]?/.test(cleanLine)) pendingFailure.type = 'suite'
+        if (/\b(TODO|SKIP)\b/.test(cleanLine)) pendingFailure.directive = true
+      } else if (pendingFailure) {
+        if (pendingFailure.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
+        pendingFailure = null
+      }
+      const notOk = cleanLine.match(/^\s*not ok \d+ - (.+?)\s*$/)
+      if (notOk) {
+        if (pendingFailure?.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
+        pendingFailure = { test: Buffer.from(notOk[1]).length > 512 ? Buffer.from(notOk[1]).subarray(0, 512).toString('utf8') : notOk[1], type: null, directive: false, file: null, line: null }
+      }
       const before = suiteText
-      const bounded = boundedTextInfo(`${suiteText}${String(line ?? '')}\n`)
+      const bounded = boundedTextInfo(`${suiteText}${rawLine}\n`)
       suiteText = bounded.text
       suiteTextTruncated = suiteTextTruncated || bounded.truncated
       if (suiteText.length === before.length && String(line ?? '').length) suiteTextTruncated = true
@@ -930,9 +977,10 @@ export function createLabTool(deps: any = {}) {
       if (pendingRefusal) { finish({ refused: pendingRefusal, output: '', truncated: suiteTextTruncated, retained: false }); return }
       if (parentSignal || parentCode === null) { finish({ refused: 'suite-failed', output: suiteText, truncated: suiteTextTruncated }); return }
       const stripped = stripAnsi(suiteText)
-      const summary = parseTapSummary(stripped)
+      if (pendingFailure && pendingFailure.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
+      const summary = parseTapSummary(fullSuiteText)
       if (summary.pass === null || summary.fail === null) { finish({ refused: 'suite-failed', message: 'the suite produced no parseable TAP summary', output: suiteText, truncated: suiteTextTruncated }); return }
-      finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated }), output: suiteText, truncated: suiteTextTruncated })
+      finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated, failures }), output: suiteText, truncated: suiteTextTruncated })
     }
     const probeGroup = () => {
       if (settled) return
@@ -1010,8 +1058,9 @@ export function createLabTool(deps: any = {}) {
 
   return {
     name: LAB_TOOL_NAME,
+    description: 'A seat-authored program must export default <value>; top-level await and console output are supported but console output is warned against. scratchCheckout(ref?) selects a commit and runSuite returns named failures. runSuite is the declared host authority carve-out.',
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
+    description: 'Run a seat-authored PROGRAM that must export default <value> in a node --permission child against a clone of the committed HEAD. Top-level await and console output are supported; console output is warned against. scratchCheckout(ref?) selects a commit; runSuite reports named failures. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
@@ -1053,6 +1102,7 @@ export function createLabTool(deps: any = {}) {
           if (denial) details.denial = denial
           if (audit) details.audit = audit
           if (errorText) details.error = boundLabText(errorText, 4096)
+          if (refused === 'program-returned-nothing') details.stdout = childOutput
         }
         const text = outcome === 'ok'
           ? boundLabText(resultValue === undefined ? 'null' : safeJson(resultValue) || 'null')
@@ -1098,8 +1148,10 @@ export function createLabTool(deps: any = {}) {
         const args = Array.isArray(frame.args) ? frame.args : null
         if (!args) throw refusalError('op-args-invalid', 'operation arguments are invalid')
         if (op === 'scratchCheckout') {
-          if (args.length) throw refusalError('op-args-invalid', 'scratchCheckout takes no arguments')
-          return ensureScratch()
+          if (args.length > 1) throw refusalError('op-args-invalid', 'scratchCheckout takes at most one ref')
+          if (args.length && (typeof args[0] !== 'string' || !args[0].length)) throw refusalError('op-args-invalid', 'scratchCheckout ref is invalid')
+          if (typeof args[0] === 'string' && args[0].startsWith('-')) throw refusalError('op-args-invalid')
+          return ensureScratch(args[0])
         }
         if (op === 'ledger') {
           if (args.length < 1 || args.length > 2) throw refusalError('op-args-invalid', 'ledger takes SQL and optional params')

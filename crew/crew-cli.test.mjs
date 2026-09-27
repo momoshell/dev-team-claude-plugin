@@ -358,7 +358,11 @@ function prologueSignalFixture() {
   }))
   writeFileSync(cmuxPath, `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs'
-if (process.argv[2] === 'read-screen') appendFileSync(process.env.CREW_PROLOGUE_READY, 'ready\\n')
+if (process.argv[2] === 'read-screen') {
+  appendFileSync(process.env.CREW_PROLOGUE_READY, 'ready\\n')
+  // 8000 ms exceeds the 3000 ms reaper bound but is less than driver spawn's 10000 ms timeout.
+  await new Promise((resolve) => setTimeout(resolve, 8000))
+}
 process.exit(0)
 `)
   chmodSync(cmuxPath, 0o755)
@@ -395,6 +399,31 @@ async function assertPrologueSurvivesSigterm(child, state) {
 function waitForPrologueChildClose(child, state) {
   if (state.closed) return Promise.resolve(state.closed)
   return new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })))
+}
+
+async function reapProcessGroup(child, { kill = process.kill, ps = () => spawnSync('ps', ['-A', '-o', 'pgid=,pid=,stat='], { encoding: 'utf8' }), sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), boundMs = 3000 } = {}) {
+  if (!Number.isSafeInteger(child?.pid) || child.pid <= 1) throw new Error('invalid process group id')
+  const pgid = child.pid
+  try { kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
+  const started = Date.now()
+  while (true) {
+    const table = ps()
+    if (table.error || table.status !== 0) throw new Error('ps table unreadable')
+    if (typeof table.stdout !== 'string') throw new Error('ps table unreadable')
+    const survivors = []
+    for (const line of table.stdout.split(/\r?\n/).filter((row) => row.trim())) {
+      const fields = line.trim().split(/\s+/)
+      const rowPgid = Number(fields[0])
+      const pid = Number(fields[1])
+      const stat = fields[2]
+      if (fields.length !== 3 || !Number.isSafeInteger(rowPgid) || rowPgid <= 0 || !Number.isSafeInteger(pid) || pid <= 0 || typeof stat !== 'string' || !stat) throw new Error('ps table unreadable')
+      if (rowPgid === pgid && !stat.includes('Z')) survivors.push(pid)
+    }
+    if (survivors.length === 0) return { state: 'dead' }
+    const elapsed = Date.now() - started
+    if (elapsed >= boundMs) throw new Error(`process group ${pgid} still alive: ${survivors.join(', ')}`)
+    await sleep(Math.min(250, boundMs - elapsed))
+  }
 }
 
 
@@ -1867,15 +1896,17 @@ test('D1 operator stop records the closed operator outcome', { skip: !nodeMeetsL
   }
 })
 
-test('RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', async () => {
+test('A1 RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', async () => {
   const fixture = prologueSignalFixture()
   let child
+  let survivedSigterm = false
   const state = { closed: null, error: null }
   try {
     child = spawn(process.execPath, [fileURLToPath(new URL('./crew.mjs', import.meta.url)), 'run', '--task', fixture.task, '--checkout', fixture.checkout, '--brief-file', fixture.brief, '--keep'], {
       cwd: CLI_REPO_ROOT,
       env: { ...CLI_ENV, HOME: fixture.home, CMUX_BIN: fixture.cmuxPath, CREW_PROLOGUE_READY: fixture.readyPath, DEVTEAM_LEDGER_DB: join(fixture.root, 'ledger.db') },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     })
     child.stdout.on('data', () => {})
     child.stderr.on('data', () => {})
@@ -1884,6 +1915,7 @@ test('RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', asyn
     await waitForPrologueReady(fixture, child, state)
     assert.equal(child.kill('SIGTERM'), true)
     await assertPrologueSurvivesSigterm(child, state)
+    survivedSigterm = true
   } finally {
     if (child?.pid) {
       const closed = waitForPrologueChildClose(child, state)
@@ -1891,9 +1923,56 @@ test('RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', asyn
         try { child.kill('SIGKILL') } catch {}
       }
       await closed
+      let observationError
+      let sawLiveDescendant = false
+      try {
+        const table = spawnSync('ps', ['-A', '-o', 'pgid=,pid=,stat='], { encoding: 'utf8' })
+        if (table.error || table.status !== 0 || typeof table.stdout !== 'string') throw new Error('ps table unreadable')
+        for (const line of table.stdout.split(/\r?\n/).filter((row) => row.trim())) {
+          const [rawPgid, rawPid, stat, ...extra] = line.trim().split(/\s+/)
+          const rowPgid = Number(rawPgid)
+          const pid = Number(rawPid)
+          if (extra.length || !Number.isSafeInteger(rowPgid) || rowPgid <= 0 || !Number.isSafeInteger(pid) || pid <= 0 || !stat) throw new Error('ps table unreadable')
+          if (rowPgid === child.pid && pid !== child.pid && !stat.includes('Z')) sawLiveDescendant = true
+        }
+      } catch (error) { observationError = error }
+      const reaped = await reapProcessGroup(child)
+      assert.deepEqual(reaped, { state: 'dead' })
+      if (survivedSigterm) {
+        if (observationError) throw observationError
+        assert.equal(sawLiveDescendant, true, 'a live same-group descendant existed before reaping')
+      }
     }
     rmSync(fixture.root, { recursive: true, force: true })
   }
+})
+
+test('A2 zombie-only group is dead without sleeping', async () => {
+  let probes = 0
+  let sleeps = 0
+  const result = await reapProcessGroup({ pid: 1234 }, {
+    kill: () => {}, ps: () => { probes++; return { status: 0, stdout: '1234 1234 SZ\n' } }, sleep: async () => { sleeps++ },
+  })
+  assert.deepEqual(result, { state: 'dead' })
+  assert.equal(probes, 1)
+  assert.equal(sleeps, 0)
+})
+
+test('A3 live group past bound names surviving pids', async () => {
+  let probes = 0
+  let elapsed = 0
+  await assert.rejects(reapProcessGroup({ pid: 1234 }, {
+    kill: () => {}, ps: () => { probes++; return { status: 0, stdout: '1234 1234 S\n1234 2345 S\n' } },
+    sleep: async (ms) => { elapsed += ms; await new Promise((resolve) => setTimeout(resolve, ms)) }, boundMs: 500,
+  }), /process group 1234 still alive: 1234, 2345/)
+  assert.ok(probes >= 3)
+  assert.ok(elapsed > 0)
+})
+
+test('A4 unreadable ps table is unknown and throws', async () => {
+  await assert.rejects(reapProcessGroup({ pid: 1234 }, {
+    kill: () => {}, ps: () => ({ status: 1, error: new Error('denied'), stdout: '' }), sleep: async () => {},
+  }), /ps table unreadable/)
 })
 
 test('crew CLI usage documents all per-run round budget flags', () => {

@@ -1662,6 +1662,31 @@ test('ledger abort (aborting a program mid-query SIGKILLs its ledger child inste
   assert.equal(child.signalCode, 'SIGKILL', 'the ledger child was killed, not left running')
 })
 
+test('E1 program stdin EPIPE after op response settles through close', async () => {
+  const child = fakeChild()
+  const responses = []
+  child.stdin.write = (value) => {
+    responses.push(JSON.parse(String(value).trim()))
+    setImmediate(() => {
+      child.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+      child.emit('close', null, 'SIGKILL')
+    })
+    return true
+  }
+  const tool = mod.createLabTool({
+    spawn: () => child,
+    env: {},
+    isDirectory: () => true,
+    mkTempDir: () => temp(),
+  })
+  queueMicrotask(() => child.stdout.emit('data', Buffer.from(`${JSON.stringify({ id: 17, op: 'not-an-op' })}\n`)))
+  const result = await tool.execute('epipe', paramsFor(), null, null, { cwd: ROOT })
+  assert.equal(responses.length, 1)
+  assert.equal(responses[0].id, 17)
+  assert.equal(responses[0].refused, 'unknown-op')
+  assert.notEqual(result.details.outcome, 'ok')
+})
+
 test('ledger comments (an unterminated trailing block comment is not a second statement)', async () => {
   const dbPath = ledgerDb([[1, 'alpha', 1.5]], 'lab-ledger-comments-')
   const run = scriptedHarness({

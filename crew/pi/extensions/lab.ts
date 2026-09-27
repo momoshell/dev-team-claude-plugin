@@ -1213,6 +1213,7 @@ export function createLabTool(deps: any = {}) {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: childEnv,
           })
+          child.stdin?.on?.('error', () => { /* a child that died before reading an op response settles through close */ })
         } catch (error: any) {
           resolve({ reason: 'child-failed', code: null, signal: null, terminal: null, output: '', truncated: false, error: 'the child could not be spawned' })
           return

@@ -768,14 +768,24 @@ export function createLabTool(deps: any = {}) {
   // In-flight ledger query children, cancelled with the program that asked for them.
   const ledgerCancels = new Set<() => void>()
 
-  const makeScratch = async (ref?: string): Promise<LabScratch> => {
+  const scratchFailure = (error: any) => error?.labRefusal ? error : refusalError(error?.code === 'ETIMEDOUT' ? 'op-timeout' : error?.code === 'ENOBUFS' ? 'op-oversize' : 'scratch-failed', 'scratch checkout failed')
+  // The ONE place a scratch ref is validated and resolved; every guard below has
+  // exactly one site, so one mutation of it is observable.
+  const resolveScratchRef = (ref: any, repoRoot: string): string => {
+    if (ref === undefined) return requiredGitValue(['rev-parse', 'HEAD'], repoRoot)
+    if (typeof ref !== 'string' || !ref.length) throw refusalError('op-args-invalid', 'scratchCheckout ref is invalid')
+    if (ref.startsWith('-')) throw refusalError('op-args-invalid', 'scratchCheckout ref must not be option-shaped')
+    const run = syncGit(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`], repoRoot)
+    if (run?.error || (run?.status !== 0 && run?.status !== 1)) throw refusalError('scratch-failed', 'git could not resolve the ref')
+    const sha = run.status === 0 ? String(run.stdout || '').trim() : ''
+    if (!sha) throw refusalError('ref-unresolved', 'scratchCheckout ref does not name a commit')
+    return sha
+  }
+
+  const makeScratch = async (sourceHeadSha: string): Promise<LabScratch> => {
     const repoRoot = currentRepoRoot
     let root: string | null = null
     try {
-      const resolveRef = (name: string) => optionalGitValue(['rev-parse', '--verify', '--quiet', '--end-of-options', `${name}^{commit}`], repoRoot)
-      const sourceHeadSha = ref === undefined ? requiredGitValue(['rev-parse', 'HEAD'], repoRoot) : resolveRef(ref)
-      if (!sourceHeadSha) throw refusalError('ref-unresolved')
-      scratchHeadSha = sourceHeadSha
       root = String(mkTempDir())
       scratchParent = root
       const scratch = join(root, 'wt')
@@ -791,22 +801,21 @@ export function createLabTool(deps: any = {}) {
       const attached = optionalGitValue(['symbolic-ref', '-q', 'HEAD'], resolvedScratch)
       return { path: resolvedScratch, head, detached: !attached, origin_url: originUrl, origin_head: originHead }
     } catch (error: any) {
-      if (error?.labRefusal) throw error
-      throw refusalError(error?.code === 'ETIMEDOUT' ? 'op-timeout' : error?.code === 'ENOBUFS' ? 'op-oversize' : 'scratch-failed', 'scratch checkout failed')
+      throw scratchFailure(error)
     }
   }
-  const ensureScratch = (ref?: string) => {
-    if (ref !== undefined && (typeof ref !== 'string' || !ref.length)) throw refusalError('op-args-invalid')
-    if (ref !== undefined && ref.startsWith('-')) throw refusalError('op-args-invalid')
+  // One scratch per program run: a no-ref call after the first reuses it, and an
+  // explicit ref must name the commit already checked out.
+  const ensureScratch = (ref?: any): Promise<LabScratch> => {
+    if (scratchPromise && ref === undefined) return scratchPromise
+    let sha: string
+    try { sha = resolveScratchRef(ref, currentRepoRoot) } catch (error: any) { throw scratchFailure(error) }
     if (scratchPromise) {
-      if (ref !== undefined) {
-        const sha = optionalGitValue(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`], currentRepoRoot)
-        if (!sha) throw refusalError('ref-unresolved')
-        if (scratchHeadSha !== sha) throw refusalError('op-args-invalid')
-      }
+      if (sha !== scratchHeadSha) throw refusalError('op-args-invalid', 'this program already checked out a different commit')
       return scratchPromise
     }
-    return (scratchPromise = makeScratch(ref))
+    scratchHeadSha = sha
+    return (scratchPromise = makeScratch(sha))
   }
 
   const validateOptions = (opts: any): any => {
@@ -1066,6 +1075,7 @@ export function createLabTool(deps: any = {}) {
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
       const spawnId = randomId()
       scratchPromise = null
+      scratchHeadSha = null
       scratchRoot = null
       scratchParent = null
       scratchRetained = null
@@ -1149,9 +1159,7 @@ export function createLabTool(deps: any = {}) {
         if (!args) throw refusalError('op-args-invalid', 'operation arguments are invalid')
         if (op === 'scratchCheckout') {
           if (args.length > 1) throw refusalError('op-args-invalid', 'scratchCheckout takes at most one ref')
-          if (args.length && (typeof args[0] !== 'string' || !args[0].length)) throw refusalError('op-args-invalid', 'scratchCheckout ref is invalid')
-          if (typeof args[0] === 'string' && args[0].startsWith('-')) throw refusalError('op-args-invalid')
-          return ensureScratch(args[0])
+          return ensureScratch(args.length ? args[0] : undefined)
         }
         if (op === 'ledger') {
           if (args.length < 1 || args.length > 2) throw refusalError('op-args-invalid', 'ledger takes SQL and optional params')

@@ -3,10 +3,12 @@ import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { readEnvelopeOrThrow } from './headless.mjs'
-import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
+import * as piAdapter from './adapters/adapter-pi.mjs'
+import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
 
 export const ACP_CLOSE_SETTLE_MS = 3000
+const ACP_ADAPTERS = Object.freeze({ pi: piAdapter, claude: claudeAdapter })
 const ACP_POLL_INTERVAL_MS = 25
 
 export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi', deps = {} }) {
@@ -27,15 +29,16 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     if (clients.has(role)) return clients.get(role)
     const member = crew?.members?.[role]
     const adapter = adapters?.[role] || {}
-    const mod = adapter.adapter ?? adapter
     const adapterName = adapter.name ?? member?.agent
-    const launchFn = mod.acpLaunch || (!adapterName ? piAcpLaunch : null)
+    // Run reconstructs adapters as { grants } only.
+    const mod = adapter.adapter ?? (typeof adapter.acpLaunch === 'function' ? adapter : ACP_ADAPTERS[adapterName] ?? (!adapterName ? piAdapter : {}))
+    const launchFn = mod.acpLaunch
     if (typeof launchFn !== 'function') {
       const error = new Error(`ACP launch unsupported for adapter ${adapterName ?? 'unknown'} in role ${role}`)
       error.stage = 'acp-launch-unsupported'
       throw error
     }
-    const profile = (mod.capabilitiesFor || piCapabilitiesFor)({ transport: 'acp' })
+    const profile = (mod.capabilitiesFor || piAdapter.capabilitiesFor)({ transport: 'acp' })
     const acpBin = mod.ACP_BINARY ?? bin
     const searchedPath = deps.env?.PATH ?? process.env.PATH ?? ''
     const canRead = (path) => { try { return exists(path) === true } catch { return false } }

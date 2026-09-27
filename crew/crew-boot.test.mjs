@@ -1,13 +1,13 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -17,6 +17,7 @@ import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_
 import { LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds } from './limits.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { seatIo } from './seat-io.mjs'
+import { acpIo } from './acp-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
@@ -26,7 +27,7 @@ import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
 
 const SIGNAL_BLOCK_MS = 3000
 
@@ -1465,7 +1466,7 @@ test('--headless-all with a per-seat transport flag still boots — no workspace
   }
 })
 
-test('an explicit ACP builder persists to crew state and boot journal without changing headless fallbacks', async () => {
+test('an explicit ACP builder persists to crew state and boot journal without changing headless fallbacks', async (t) => {
   const home = scratchDir('crew-acp-headless-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-acp-headless-checkout-')
   const task = 'acp-headless'
@@ -1486,6 +1487,18 @@ test('an explicit ACP builder persists to crew state and boot journal without ch
     const boot = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((event) => event.event === 'boot')
     assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, boot.allocation[role].transport])), {
       lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-json',
+    })
+    await t.test('R1 real-boot pi ACP builder launches bridge', () => {
+      const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+      mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
+      const briefFile = join(taskDir, 'role-builder.md'); writeFileSync(briefFile, 'brief')
+      let launch
+      const io = acpIo({ crew, paths: { taskDir, returnsDir }, checkout, adapters: persistedAdapters(crew), bin: process.execPath,
+        deps: { clientFactory(options) { launch = options.launch; return { start() {}, initialize() {}, newSession() {}, beginPrompt() { return 1 } } } } })
+      io.assign({ role: 'builder', briefFile })
+      assert.equal(launch.args[0].endsWith('crew/pi/acp-bridge.mjs'), true)
+      assert.equal(launch.env.CREW_PI_BIN, process.execPath)
+      assert.deepEqual(persistedAdapters(crew).builder, { grants: persistedAdapters(crew).builder.grants })
     })
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -1870,7 +1883,7 @@ test('awaitSeatsReady rejects unknown and absent modes explicitly', () => {
   }
 })
 
-test('Claude ACP reviewer boot persists alongside headless lead', async () => {
+test('Claude ACP reviewer boot persists alongside headless lead', async (t) => {
   const root = scratchDir('claude-acp-boot-test-')
   const home = join(root, 'home'); const checkout = join(root, 'checkout')
   mkdirSync(home); mkdirSync(checkout)
@@ -1887,6 +1900,17 @@ test('Claude ACP reviewer boot persists alongside headless lead', async () => {
     assert.equal(crew.members.lead.transport, 'headless-json')
     assert.match(journal, /"transport":"acp"/)
     assert.equal(workspaceCalls, 0)
+    await t.test('R2 real-boot claude ACP reviewer launches agent', () => {
+      const taskDir = join(crewDir, 'task'); const returnsDir = join(crewDir, 'returns'); const binDir = join(root, 'bin')
+      mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true }); mkdirSync(binDir, { recursive: true })
+      const stub = join(binDir, 'claude-agent-acp'); writeFileSync(stub, '#!/bin/sh\\nexit 0\\n'); chmodSync(stub, 0o755)
+      const briefFile = join(taskDir, 'role-reviewer.md'); writeFileSync(briefFile, 'brief')
+      let launch
+      const io = acpIo({ crew, paths: { taskDir, returnsDir }, checkout, adapters: persistedAdapters(crew), deps: { env: { PATH: binDir }, clientFactory(options) { launch = options.launch; return { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt() { return 1 } } } } })
+      io.assign({ role: 'reviewer', briefFile })
+      assert.equal(launch.bin, stub)
+      assert.equal(launch.env.CLAUDE_CODE_EXECUTABLE, crew.claude_bin)
+    })
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

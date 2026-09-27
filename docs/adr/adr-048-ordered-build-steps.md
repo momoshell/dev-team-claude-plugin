@@ -1,6 +1,6 @@
 # ADR-048 — Ordered build steps: a plan's chunk program can run inside one lane, one builder assignment per step
 
-**Status:** *proposed* 2026-09-27, operator decision pending · **Owner:** operator · **Relates to:** ADR-030 (gate-first
+**Status:** *ratified* 2026-09-27, operator decision (answers in "Operator decisions" below) · **Owner:** operator · **Relates to:** ADR-030 (gate-first
 acceptance), ADR-035 (execution shape is its own axis), ADR-044 (a new executor path is hand-written and named)
 
 The idea comes from Kiro's spec tasks. There, `tasks.md` is a checklist, each task cites the requirements it answers
@@ -59,7 +59,7 @@ check labels (`ACCEPTANCE_ITEM`, `crew/drive.mjs:2331-2337`). Plan-accept escala
 `returns/*.json` (`:47`, `:53-61`). No page renders `plan.md` or `details.chunks`. A journal reader exists
 (`visualizer/server/journal-source.mjs`).
 
-## Decision (proposed)
+## Decision
 
 ### 1. One program, two executors: steps are `details.chunks` run inside a lane
 
@@ -91,8 +91,8 @@ program. On a lane dispatched stepped, after plan-accept and the gate baseline:
     the earlier step);
   - reds owned by later steps are deferred, as `chunkGateVerdict` does today.
 - **Bounce inside the step.** A red step bounces the builder with the failing labels, still inside the step. Bounces
-  spend the lane's existing global builder budget (`builderRemaining`). No per-step budget is minted (open
-  question 4).
+  spend the lane's existing global builder budget (`builderRemaining`). No per-step budget is minted
+  (operator decision 4); the journal records spend per step.
 - **Once all steps are done**, the unchanged pipeline runs once over the whole diff: validation lane, scope
   record, per-check mutation proof, review, full suite, cold suite and commit. Mutation proof stays once per lane.
   Running it per step would multiply gate runs, and gate cost is the lane's wall clock.
@@ -179,15 +179,16 @@ Stepped building means more and smaller builder assignments. The numbers that de
 Parallel builders inside one lane. Per-step review or per-step mutation proof. A per-step builder budget. Changing
 chunks-as-lanes or carve. Ledger ingestion of `step:*` rows. Making stepped the default.
 
-## Open questions for the operator
+## Operator decisions (2026-09-27)
 
-1. **Field:** reuse `details.chunks` (recommended) or mint `details.steps`?
-2. **Switch:** is stepped a dispatch-time choice, like `--chunked`, and a new execution shape in `crew/variants.mjs`
-   (recommended)? Or is it a planner envelope field?
-3. **Per-step check:** the gate's owned checks only (recommended), or the validation lane as well?
-4. **Budget:** do bounces spend the lane's global builder budget (recommended), or does each step get its own cap?
-5. **Measurement:** alternate stepped and single-brief on chunked plans (recommended), or match after the fact? Is
-   N = 12 per arm right?
+1. **Field:** reuse `details.chunks` and `validateChunks`. No `details.steps`.
+2. **Switch:** stepped is chosen by the operator at dispatch, as a new execution shape in `crew/variants.mjs`. The
+   planner emits the chunk program either way and never picks the executor.
+3. **Per-step check:** the gate only (owned checks pass, earlier steps' checks stay green). The validation lane runs
+   once after the last step.
+4. **Budget:** one global builder budget per lane; the journal records spend per step. No per-step cap.
+5. **Measurement:** alternate stepped and single-brief at dispatch on chunked plans, N = 12 per arm. Matching after
+   the fact is not used.
 
 ## Reverses if
 

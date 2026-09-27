@@ -1,6 +1,6 @@
 # ADR-047 — The advisor is a roster seat: its model is picked from the roster and consulted through an adapter
 
-**Status:** *proposed* 2026-09-27, operator decision pending · **Owner:** operator · **Relates to:** ADR-032 (the
+**Status:** *ratified* 2026-09-27, operator decision (answers in "Operator decisions" below) · **Owner:** operator · **Relates to:** ADR-032 (the
 breaker refuses and never reroutes), ADR-035 (seat allocation is its own axis), ADR-037 (local models), ADR-046
 (a cell is stamped as written)
 
@@ -75,7 +75,7 @@ with `cwd` set to the seat's worktree (`advisor.ts:1098-1099`). `redactDelta` th
 *sent*, not what the child can *read*. The boundary a provider advisor would have is the one every seat on that
 provider already has. It is not a new, narrower one.
 
-## Decision (proposed)
+## Decision
 
 ### 1. `advisor` is a roster role, resolved at boot like every seat
 
@@ -99,11 +99,11 @@ answer is asynchronous advice nobody waits on. So latency matters less than iden
 
 - **(a) One-shot adapter print per consult — recommended.** For `agent: pi` this is the existing child
   (`advisor.ts:1098-1099`) with its `--model` taken from the cell's adapter translation, not the raw key. For
-  `agent: claude` it is `claude -p --output-format json` with the same read-only tool set, which is new. Auth,
+  `agent: claude` it is `claude -p --output-format json`, which is new. **The child gets no tools** (operator decision 5): it answers from the scrubbed delta it is sent, so `redactDelta` bounds everything the advisor can see. The existing pi child's `read,grep,find,ls` grant is removed. Auth,
   model spelling and provider selection are whatever the adapter does for a seat. Pricing comes from the stream
   reducer that already produces `advisor_usage` (`advisor.ts:1100`, `:1214-1220`). A llama-swap cell and a provider cell
   differ only in their roster entry. The cost is a process spawn and a cold context per consult (`--no-session`), and
-  the 20 s timeout was sized for a LAN model. It is unmeasured against a provider model (open question 6).
+  the 20 s timeout was sized for a LAN model. It is unmeasured against a provider model; it stays 20 s until the first model-channel lane measures it (operator decision 6).
 - **(b) The adapter hands endpoint and credentials to the extension's HTTP client — rejected.** The builder seat's
   environment would then hold a provider credential that its own `bash` tool can read. The client would
   re-implement per-provider request shapes and usage parsing that the adapters already own. It also cannot use
@@ -165,7 +165,7 @@ place the advisor does not behave like a seat, and it follows from the invariant
 The instrument exists: `docs/advisor-ab-protocol.md` and `node scripts/factory/ledger.mjs advisor-ab`, with a floor of
 12 review dispatches per arm. Ratify-or-delete stays the operator's, taken only from a complete readout.
 
-1. **First lane, tier 0 only** (advisor cell `null`, builder granted). This measures what the deterministic layer
+1. **First lane, tier 0 only** (advisor cell overridden to `null` with `--model-advisor none`, builder granted). This measures what the deterministic layer
    does on its own at zero model cost.
 2. **Then the model channel**, one cell at a time. Changing the cell between arms is a new arm.
 
@@ -185,8 +185,8 @@ not a result.
 
 ## Migration: two lanes
 
-1. **Roster, boot, manifest.** `crew/roster.json` and its schema gain the advisor cell (no tier ships one:
-   `null` everywhere, neutral like the per-stage effort dial). `resolveTier` and the override flags, the ladder floor,
+1. **Roster, boot, manifest.** `crew/roster.json` and its schema gain the advisor cell. The **build tier ships `anthropic/claude-sonnet-5`**; the mechanical and judge tiers ship
+   `null` (operator decision 2). `--model-advisor none` is the explicit override to `null`. `resolveTier` and the override flags, the ladder floor,
    the breaker, `crew.json`/journal/`run_seats`, the manifest writer and the `advisor-env-retired` refusal come with
    it. It touches the protected floor, so it runs rigorous with a kill-mutation on each changed behaviour. The lane
    still writes the environment the extension reads, so nothing breaks between the two lanes.
@@ -200,19 +200,19 @@ Advising a claude seat. An ACP advisor seat. Flipping any grant. The planner gra
 advice. Changing the tier-0 predicates or the system prompts. The ship-by-default decision. The LAN trust boundary for
 local cells, which stays ADR-037's.
 
-## Open questions for the operator
+## Operator decisions (2026-09-27)
 
-1. **Breaker:** should a consult's provider failure count toward opening the advisor cell (recommended), or only be
-   recorded?
-2. **Default cell:** should every tier ship `null` (recommended), or should one tier ship a local cell such as
-   `llama-swap/qwen3.8-27b`?
-3. **Planner:** confirm "not yet".
-4. **Retired variables:** refuse (recommended) or ignore?
-5. **Advisor tools:** should the advisor child keep `read,grep,find,ls` over the checkout, which grounds its
-   evidence, or answer from the delta alone? With a provider cell, keeping them means that provider reads the
-   checkout, just as a seat on it does.
-6. **Timeout:** is the 20 s consult timeout right for a provider model? It is unmeasured. The first model-channel lane
-   should record consult latency before anyone tunes it.
+1. **Breaker:** a consult's provider failure counts toward opening the advisor cell, exactly as a seat's does.
+   The consequence stays advisory: a failed consult ends that consult, never the lane.
+2. **Default cell:** the build tier ships `anthropic/claude-sonnet-5`; mechanical and judge ship `null`.
+3. **Advised seats:** the builder only. The planner is not advised yet; revisit with builder data. Reviewer, lead,
+   tech-lead and scouts are never advised.
+4. **Retired variables:** a boot that sets `CREW_ADVISOR_ENDPOINT` or `CREW_ADVISOR_MODEL` refuses with
+   `advisor-env-retired`, naming the variable. Ignoring them would report a configured advisor while another ran.
+5. **Advisor tools:** none. The child answers from the scrubbed delta only, so a provider cell never reads the
+   checkout. Read tools are reconsidered only if measured advice shows it lacks context.
+6. **Timeout:** stays 20 s. A timed-out consult is recorded as unmeasured, never as advice and never as "no issue".
+   The first model-channel lane records p50/p95 consult latency; any change is taken from that.
 
 ## Reverses if
 

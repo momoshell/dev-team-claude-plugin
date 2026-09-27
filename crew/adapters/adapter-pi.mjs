@@ -288,7 +288,7 @@ export function piRpcSeatParts(spec = {}) {
 }
 
 export function acpLaunch(spec = {}) {
-  const { bin, cwd, deny } = spec
+  const { bin, cwd, deny, role } = spec
   if (!isAbsolute(bin)) throw new Error(`adapter-pi: ACP pi binary must be absolute: ${String(bin)}`)
   for (const raw of String(deny || '').split(',')) {
     const name = raw.trim()
@@ -297,16 +297,16 @@ export function acpLaunch(spec = {}) {
   }
   const autoDeny = translateDeny(deny)
   const GATED_TOOLS = PI_ACP_GATED_TOOLS
-  const escalate = GATED_TOOLS.filter((tool) => !autoDeny.includes(tool))
+  const gated = GATED_TOOLS.filter((tool) => !autoDeny.includes(tool))
   const bridge = fileURLToPath(new URL('../pi/acp-bridge.mjs', import.meta.url))
   const seat = piRpcSeatParts(spec)
   const seatArgs = seat.args
   return {
     bin: process.execPath,
     args: [bridge, ...seatArgs],
-    env: { ...seat.env, CREW_PI_BIN: bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
+    env: { ...seat.env, CREW_PI_BIN: bin, CREW_ACP_GATED_TOOLS: gated.join(',') },
     sessionParams: { cwd, mcpServers: [] },
-    policy: { autoDeny, autoApprove: [], escalate },
+    policy: { autoDeny, autoApprove: role === 'builder' ? gated : [], escalate: role === 'builder' ? [] : gated },
   }
 }
 

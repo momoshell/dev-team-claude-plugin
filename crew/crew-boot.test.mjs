@@ -5,6 +5,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
@@ -810,6 +811,20 @@ test('RV1-1 stopCmd anchors dispatch-batch relative entry to declared checkout',
   assert.deepEqual(foreign.calls.kills, [])
   assert.deepEqual(foreign.calls.ends, [])
   assert.equal(foreign.calls.closed, 1)
+})
+
+test('stop recognizes the running crew module and refuses a foreign entry', async () => {
+  const checkout = '/checkout'
+  const args = { task: 'unit-stop', pid: '42', checkout }
+  const running = fileURLToPath(new URL('./crew.mjs', import.meta.url))
+  const accepted = stopUnitFixture({ command: `${running} run --task unit-stop --checkout ${checkout}`, sessions: [{ status: 'running' }, { status: 'running' }, { status: 'aborted', outcome: 'aborted' }] })
+  accepted.deps.loadCrew = () => ({ checkout })
+  await stopCmd(args, accepted.deps)
+  assert.deepEqual(accepted.calls.kills, [[42, 'SIGTERM']])
+  const foreign = stopUnitFixture({ command: `/elsewhere/crew/crew.mjs run --task unit-stop --checkout ${checkout}` })
+  foreign.deps.loadCrew = () => ({ checkout })
+  await assert.rejects(() => stopCmd(args, foreign.deps), (err) => err instanceof UsageError && /refused/.test(err.message))
+  assert.deepEqual(foreign.calls.kills, [])
 })
 
 test('D1b only the finalizer row this stop CAUSED is superseded', async () => {

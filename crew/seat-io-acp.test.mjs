@@ -371,10 +371,21 @@ test('ACP lead permission wiring is role-scoped and supplies the configured time
     assign(f)
     assert.equal(f.launch.env.CREW_ACP_PERMISSION_TIMEOUT_MS, '1234')
     assert.equal(f.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'a')
-    assert.equal(asked[0].role, 'builder')
+    assert.equal(asked.length, 0)
+    assert.equal(f.logs.find((row) => row.acp_permission_policy?.title === 'write').acp_permission_policy.policy, 'roster')
   } finally { cleanup(f) }
   const noLead = fixture()
   try { assign(noLead); assert.equal(Object.hasOwn(noLead.launch.env, 'CREW_ACP_PERMISSION_TIMEOUT_MS'), false) } finally { cleanup(noLead) }
+  const gatedPolicy = { autoDeny: [], autoApprove: [], escalate: ['write'] }
+  const adapters = { builder: { acpLaunch: () => ({ bin: '/bin/node', args: [], env: {}, policy: gatedPolicy }) } }
+  const escalatedCalls = []
+  const escalated = fixture({ adapters, permissionTimeoutMs: 1234, permissionLead: (payload) => { escalatedCalls.push(payload); return { decision: 'a' } } })
+  try {
+    assign(escalated)
+    assert.equal(escalated.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'a')
+    assert.equal(escalatedCalls.length, 1)
+    assert.equal(escalatedCalls[0].role, 'builder')
+  } finally { cleanup(escalated) }
   const leadCrew = { members: { lead: { model: 'test' } } }
   const lead = fixture({ crew: leadCrew, permissionTimeoutMs: 1234, permissionLead: () => ({ decision: 'a' }) })
   try { lead.io.assign({ role: 'lead', briefFile: lead.briefFile }); assert.equal(lead.onPermission({ toolCall: { title: 'write', kind: 'edit' }, options }), 'r') } finally { cleanup(lead) }

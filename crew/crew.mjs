@@ -4609,7 +4609,7 @@ function stopCommandIsRun(command, { checkout, taskSlug }) {
       else if (commandCheckout) candidate = resolvePath(commandCheckout, words[index])
       else continue
     } catch { continue }
-    if (candidate === entry) return true
+    if (candidate === entry || candidate === resolvePath(fileURLToPath(import.meta.url))) return true
   }
   return false
 }

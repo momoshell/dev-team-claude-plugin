@@ -2,7 +2,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   mkdirSync as fsMkdirSync, openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
-  unlinkSync as fsUnlinkSync,
+  unlinkSync as fsUnlinkSync, constants as fsConstants,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -20,9 +20,10 @@ export const ACP_UPDATE_KINDS = Object.freeze([
 export const ACP_STOP_REASONS = Object.freeze(['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'])
 export const ACP_REFUSALS = Object.freeze([
   'acp-malformed-frame', 'acp-protocol-mismatch', 'acp-spawn-failed', 'acp-session-busy',
-  'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout',
+  'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout', 'acp-prompt-write-timeout',
 ])
 export const ACP_REQUEST_TIMEOUT_MS = 600000
+export const ACP_WRITE_DEADLINE_MS = 30000
 export const ACP_POLL_MS = 25
 const METHOD_NOT_FOUND = -32601
 
@@ -70,6 +71,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
 
   const session = { id: null, cancelled: false }
   const responses = new Map()
+  let torn = 0
   let seq = 0
   let fd = null
   let child = null
@@ -80,7 +82,31 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   let closeResult = null
 
   function log(row) { try { journal(row) } catch { /* instrumentation is never load-bearing */ } }
-  function send(frame) { writeFd(fd, `${JSON.stringify(frame)}\n`) }
+  function writeFrame(frame) {
+    const encoded = Buffer.from(`${JSON.stringify(frame)}\n`)
+    let written = 0
+    const deadline = now() + ACP_WRITE_DEADLINE_MS
+    while (written < encoded.length) {
+      if (now() >= deadline) throw Object.assign(acpRefuse('acp-prompt-write-timeout', `acp seat ${role} could not write a complete prompt frame`), { bytesWritten: written })
+      try {
+        const count = writeFd(fd, encoded, written, encoded.length - written)
+        if (typeof count !== 'number') return
+        if (count > 0) written += count
+        else sleep(ACP_POLL_MS)
+      } catch (error) {
+        if (error?.code === 'EAGAIN' || error?.code === 'EWOULDBLOCK') { sleep(ACP_POLL_MS); continue }
+        if (error && typeof error === 'object') error.bytesWritten = written
+        throw error
+      }
+    }
+  }
+  function send(frame) {
+    if (torn > 0) throw Object.assign(acpRefuse('acp-prompt-write-timeout', `acp seat ${role} holds a torn frame (${torn} bytes); no further frame can be written`), { bytesWritten: 0 })
+    try { return writeFrame(frame) } catch (error) {
+      if (error?.bytesWritten > 0) torn = error.bytesWritten
+      throw error
+    }
+  }
   function streamEnd() {
     try {
       if (!exists(paths.stream)) return 0
@@ -114,7 +140,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     }
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     for (let i = 0; i < 20 && fd == null; i += 1) {
-      try { fd = open(paths.fifo, 'r+') } catch { sleep(ACP_POLL_MS) }
+      try { fd = open(paths.fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch { sleep(ACP_POLL_MS) }
     }
     if (fd == null) throw acpRefuse('acp-spawn-failed', `acp fifo did not appear for seat ${role}`)
     return { pid: child.pid }
@@ -266,7 +292,13 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
 
   function cancel() {
     session.cancelled = true
-    send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } })
+    if (torn > 0) {
+      log({ at: now(), acp_cancel_skipped: { role, reason: 'torn-frame', bytesWritten: torn } })
+      return
+    }
+    try { send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: session.id } }) } catch (error) {
+      log({ at: now(), acp_cancel_failed: { role, reason: error?.reason ?? error?.code ?? null, bytesWritten: error?.bytesWritten ?? null } })
+    }
   }
 
   function proveDead() {

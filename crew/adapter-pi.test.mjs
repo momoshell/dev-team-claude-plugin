@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
 import { seatCommand, acpLaunch, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
@@ -57,7 +58,7 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
     ['tech-lead', 'Edit,NotebookEdit,Task,Agent,Workflow', ['edit'], ['bash', 'write', 'powershell']],
   ]
   for (const [role, deny, autoDeny, escalate] of roles) {
-    const spec = { bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny, cwd: '/tmp', env: { SENTINEL: 'yes' } }
+    const spec = { bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', role, deny, cwd: '/tmp', env: { SENTINEL: 'yes' } }
     const launch = acpLaunch(spec)
     assert.deepEqual(launch, {
       bin: process.execPath,
@@ -65,7 +66,7 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
         ...(autoDeny.length ? ['--exclude-tools', autoDeny.join(',')] : []), '--no-context-files', '--no-extensions', '--no-skills'],
       env: { SENTINEL: 'yes', CREW_PI_BIN: spec.bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
       sessionParams: { cwd: '/tmp', mcpServers: [] },
-      policy: { autoDeny, autoApprove: [], escalate },
+      policy: { autoDeny, autoApprove: role === 'builder' ? escalate : [], escalate: role === 'builder' ? [] : escalate },
     }, role)
   }
 
@@ -88,6 +89,20 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   for (const name of ['Task', 'Agent', 'Workflow']) assert.doesNotThrow(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: name }))
   for (const bin of ['pi', './pi']) assert.throws(() => acpLaunch({ bin }), /absolute/)
   assert.throws(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', deny: 'Read,NoSuchTool' }), /NoSuchTool/)
+})
+
+test('builder ACP roster approvals bypass lead while reviewer gated writes consult lead', () => {
+  const builder = acpLaunch({ bin: '/opt/pi/dist/cli.js', role: 'builder', deny: 'Task' }).policy
+  const reviewer = acpLaunch({ bin: '/opt/pi/dist/cli.js', role: 'reviewer', deny: 'Task' }).policy
+  const options = [{ kind: 'reject_once', optionId: 'reject' }, { kind: 'allow_once', optionId: 'allow' }]
+  let calls = 0
+  for (const title of ['bash', 'edit', 'write']) {
+    const result = settlePermission({ toolCall: { title, kind: 'execute' }, options, policy: builder, lead: () => { calls++; return { decision: 'reject' } } })
+    assert.equal(result.optionId, 'allow')
+    assert.equal(result.row.policy, 'roster')
+  }
+  settlePermission({ toolCall: { title: 'write', kind: 'edit' }, options, policy: reviewer, lead: () => { calls++; return { decision: 'reject' } } })
+  assert.equal(calls, 1)
 })
 
 test('ACP C4 real submit grant activates submit_envelope', () => {

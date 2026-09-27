@@ -3497,8 +3497,8 @@ export function teardownDecision({ status, variant, published, keep }) {
 }
 
 function resumeEnvelope(paths) {
-  const path = join(paths.returnsDir, 'task.json')
-  if (!existsSync(path)) refuseResume(RESUME_REFUSALS.envelopeMissing, path)
+  const path = resolveTaskReturn(paths)
+  if (!path || !existsSync(path)) refuseResume(RESUME_REFUSALS.envelopeMissing, `${path || 'malformed latest run-start row'} (${join(paths.dir, 'journal.jsonl')})`)
   let envelope
   try { envelope = JSON.parse(readFileSync(path, 'utf8')) }
   catch (error) { refuseResume(RESUME_REFUSALS.envelopeUnreadable, `${path}: ${error?.message ?? String(error)}`) }

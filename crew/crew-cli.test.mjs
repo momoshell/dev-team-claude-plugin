@@ -3571,6 +3571,77 @@ test('resume refusal matrix is closed and fails before any side effect', () => {
   }
 })
 
+function addResumeRun(fixture, runId, { envelope = true, suite = 'node --test custom-suite.mjs', locator } = {}) {
+  const relative = locator || `returns/${runId}/task.json`
+  const path = join(fixture.dir, relative)
+  if (envelope) {
+    mkdirSync(dirname(path), { recursive: true })
+    const value = fixture.envelope()
+    value.details.resume_checkpoint.suite.cmd = suite
+    writeFileSync(path, JSON.stringify(value))
+  }
+  writeFileSync(fixture.journal, `${readFileSync(fixture.journal, 'utf8')}\n${JSON.stringify({ event: 'run-start', run_id: runId, task_return: relative })}\n`)
+  return path
+}
+
+test('resumepath A1 run-only escalation reaches the injected driver', () => {
+  const fixture = resumeCommandFixture('crew-resumepath-a1-'); const previousHome = process.env.HOME
+  let calls = 0
+  try {
+    const path = addResumeRun(fixture, 'R')
+    rmSync(fixture.taskReturn)
+    process.env.HOME = fixture.home
+    resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, { openRun: () => ({ startRun() {}, endRun() {} }), seatIo: () => ({}), resume: () => { calls++; return { status: 'done', details: {} } }, writeTerminalLine: () => {} })
+    assert.equal(calls, 1)
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).status, 'done')
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('resumepath A2 successful result replaces run envelope without a flat mirror', () => {
+  const fixture = resumeCommandFixture('crew-resumepath-a2-'); const previousHome = process.env.HOME
+  try {
+    const path = addResumeRun(fixture, 'R')
+    rmSync(fixture.taskReturn)
+    process.env.HOME = fixture.home
+    resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, { openRun: () => ({ startRun() {}, endRun() {} }), seatIo: () => ({}), resume: () => ({ status: 'done', summary: 'resumed', details: {} }), writeTerminalLine: () => {} })
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).summary, 'resumed')
+    assert.equal(existsSync(fixture.taskReturn), false)
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('resumepath A3 latest run suite reaches the injected driver', () => {
+  const fixture = resumeCommandFixture('crew-resumepath-a3-'); const previousHome = process.env.HOME
+  try {
+    addResumeRun(fixture, 'R1', { suite: 'node --test first.mjs' })
+    addResumeRun(fixture, 'R2', { suite: 'node --test latest.mjs' })
+    process.env.HOME = fixture.home
+    let suite
+    resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, { openRun: () => ({ startRun() {}, endRun() {} }), seatIo: () => ({}), resume: (ctx) => { suite = ctx.suite; return { status: 'done', details: {} } }, writeTerminalLine: () => {} })
+    assert.equal(suite, 'node --test latest.mjs')
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('resumepath A4 missing latest envelope refuses without effects and malformed locator is diagnosed', () => {
+  const fixture = resumeCommandFixture('crew-resumepath-a4-')
+  try {
+    const older = addResumeRun(fixture, 'R1')
+    writeFileSync(older, JSON.stringify(fixture.envelope()))
+    addResumeRun(fixture, 'R2', { envelope: false })
+    const beforeFlat = readFileSync(fixture.taskReturn, 'utf8'); const beforeOlder = readFileSync(older, 'utf8'); const beforeJournal = readFileSync(fixture.journal, 'utf8')
+    const previousHome = process.env.HOME; process.env.HOME = fixture.home
+    let effects = 0
+    try {
+      assert.throws(() => resumeCmd({ task: fixture.task, checkout: fixture.checkout }, { openRun: () => { effects++; return {} }, seatIo: () => { effects++; return {} }, resume: () => { effects++; return {} }, writeTerminalLine: () => { effects++ } }), (error) => error.reason === RESUME_REFUSALS.envelopeMissing && error.message.includes('R2') && error.message.includes('journal.jsonl'))
+      writeFileSync(fixture.journal, `${beforeJournal}${JSON.stringify({ event: 'run-start', run_id: 'R3', task_return: 'returns/../bad.json' })}\n`)
+      assert.throws(() => resumeCmd({ task: fixture.task, checkout: fixture.checkout }, {}), (error) => error.reason === RESUME_REFUSALS.envelopeMissing && error.message.includes('malformed latest run-start row') && error.message.includes('journal.jsonl'))
+    } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome }
+    assert.equal(effects, 0)
+    assert.equal(readFileSync(fixture.taskReturn, 'utf8'), beforeFlat)
+    assert.equal(readFileSync(older, 'utf8'), beforeOlder)
+    assert.equal(readFileSync(fixture.journal, 'utf8').startsWith(beforeJournal), true)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
 test('resume admits the persisted custom suite and refuses only a byte-different override', () => {
   const fixture = resumeCommandFixture('crew-resume-custom-suite-')
   try {

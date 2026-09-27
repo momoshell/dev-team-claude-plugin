@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync, chmodSync, existsSync as fsExistsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
-import { acpIo } from './acp-io.mjs'
+import { acpIo, ACP_CENSUS_TURNS_ABSENT } from './acp-io.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 import { ACP_BINARY, acpLaunch as claudeAcpLaunch, capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { cellFailureKind, ACP_TRANSPORT, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, seatIo } from './seat-io.mjs'
@@ -24,13 +24,42 @@ function fixture(options = {}) {
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
-    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row),
+    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
 
+test('C1', () => {
+  const f = fixture(); try {
+    const out = assign(f); f.io.teardown()
+    const rows = f.logs.filter((entry) => entry.seat_turn_census)
+    assert.equal(rows.length, 1)
+    assert.ok(f.logs.indexOf(rows[0]) > f.logs.findIndex((entry) => entry.acp_turn))
+    assert.deepEqual(rows[0].seat_turn_census, { role: 'builder', dispatch_id: out.id, transport: 'acp', turns: null, tool_calls: null, absent_reason: ACP_CENSUS_TURNS_ABSENT })
+  } finally { cleanup(f) }
+})
+test('C2', () => {
+  const f = fixture(); try {
+    assign(f); f.update('tool_call', { update: { sessionUpdate: 'tool_call', toolCallId: 'x' } }); f.io.teardown()
+    assert.equal(f.logs.find((entry) => entry.seat_turn_census).seat_turn_census.turns, null)
+  } finally { cleanup(f) }
+})
+test('C3', () => {
+  const f = fixture(); try {
+    assign(f)
+    for (const id of ['x', 'x', 'y']) f.update('tool_call', { update: { sessionUpdate: 'tool_call', toolCallId: id } })
+    f.io.teardown()
+    assert.equal(f.logs.find((entry) => entry.seat_turn_census).seat_turn_census.tool_calls, 2)
+  } finally { cleanup(f) }
+})
+test('C4', () => {
+  const f = fixture({ log(row) { if (row.seat_turn_census) throw new Error('census unavailable') } }); try {
+    const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: out.id }))
+    assert.equal(f.io.wait(out.returnPath, 1).assignment_id, out.id)
+  } finally { cleanup(f) }
+})
 test('T1', () => {
   const f = fixture(); try {
     assert.equal(ACP_TRANSPORT, 'acp')

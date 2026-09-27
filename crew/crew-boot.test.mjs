@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -1504,6 +1504,41 @@ test('an explicit ACP builder persists to crew state and boot journal without ch
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+async function acpCeilingBoot(task, flags = {}) {
+  const home = scratchDir('crew-acp-ceiling-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-checkout-')
+  try {
+    await withHome(home, () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, ...flags }, {}))
+    return { home, checkoutRoot, checkout, dir: testCrewDir(home, checkout, task) }
+  } catch (error) { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); throw error }
+}
+test('A1', async () => {
+  const f = await acpCeilingBoot('acp-ceiling-a1')
+  try { const c = JSON.parse(readFileSync(join(f.dir, 'crew.json'), 'utf8')).turn_ceilings; assert.equal(c.builder, null); assert.equal(c.source.builder, 'absent') }
+  finally { rmSync(f.home, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+test('A2', async () => {
+  const f = await acpCeilingBoot('acp-ceiling-a2')
+  try { const c = JSON.parse(readFileSync(join(f.dir, 'crew.json'), 'utf8')).turn_ceilings; assert.deepEqual([c.planner, c.reviewer, c.lead], [64, 48, 32]); assert.deepEqual([c.source.planner, c.source.reviewer, c.source.lead], ['default', 'default', 'default']) }
+  finally { rmSync(f.home, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+test('A3', async () => {
+  const home = scratchDir('crew-acp-ceiling-refuse-home-'); const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-refuse-checkout-')
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withHome(home, () => assert.rejects(() => bootCmd({ task: 'acp-ceiling-refuse', checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, 'max-turns-builder': '40' }, { cmux, tree, renameTab }), (error) => error.code === ACP_TURN_CEILING_UNMEASURED && /builder.*40.*acp/i.test(error.message)))
+    assert.equal(existsSync(testCrewDir(home, checkout, 'acp-ceiling-refuse')), false); assert.equal(cmux.calls.length + tree.calls.length + renameTab.calls.length, 0)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+test('A4', async () => {
+  const home = scratchDir('crew-acp-ceiling-rpc-home-'); const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-rpc-checkout-')
+  try {
+    await withHome(home, () => bootCmd({ task: 'acp-ceiling-rpc', checkout, tier: 'build', 'headless-all': true, 'headless-rpc': 'builder', 'claude-bin': process.execPath }, {}))
+    const c = JSON.parse(readFileSync(join(testCrewDir(home, checkout, 'acp-ceiling-rpc'), 'crew.json'), 'utf8')).turn_ceilings
+    assert.equal(c.builder, 200); assert.equal(c.source.builder, 'default')
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 
 test('ACP and headless-rpc for one role refuse before state or workspace creation', async () => {

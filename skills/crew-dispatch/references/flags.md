@@ -35,7 +35,7 @@ value equal to the default, and is recorded as `source: flag`. Tech-lead alone
 remains unbounded with `source: absent` — its measured maximum is 23 turns with
 no tail, and an unmeasured ceiling is a guess. Pane boots have no implicit ceiling because their
 transport emits no census, while an authored pane ceiling still refuses before
-state or cmux effects.
+state or cmux effects. ACP also has no implicit ceiling; an authored ACP ceiling refuses with `acp-turn-ceiling-unmeasured` at boot.
 
 The ceiling is enforced AFTER a seat's envelope returns: over budget, the
 driver journals `seat-turn-ceiling` with the count and the budget and bounces

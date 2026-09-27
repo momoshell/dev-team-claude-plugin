@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -7774,7 +7774,7 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return result
   }
-  if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role, tool_call: call }) => (variant === 'review_panel' && ['edit', 'write', 'delete', 'move'].some((k) => k === call?.kind || k === call?.title) ? { decision: null } : { decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }), { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
+  if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role, tool_call: call }) => (variant === 'review_panel' && panelPermission(call)) || { decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }, { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
   if (ctx.resume_checkpoint) {
     const checkpoint = ctx.resume_checkpoint
     const resume = runResumeTail(checkpoint, ctx, io)

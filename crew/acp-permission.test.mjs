@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PERMISSION_POLICIES, PERMISSION_REFUSALS, permitQuestion, settlePermission, permissionHandler } from './acp-permission.mjs'
+import { PERMISSION_POLICIES, PERMISSION_REFUSALS, permitQuestion, settlePermission, permissionHandler, readOnlyCommand, panelPermission } from './acp-permission.mjs'
 
 const toolCall = { title: 'shell', kind: 'execute', rawInput: { command: 'echo hi' } }
 const options = [
@@ -86,4 +86,47 @@ test('handler refusal logs refusal reason', () => {
   const handler = permissionHandler({ log: (entry) => { row = entry } })
   assert.equal(handler({ toolCall, options: [] }), null)
   assert.deepEqual(row, { kind: 'permission', reason: 'permission-no-reject-option' })
+})
+
+test('B1 read-only command allowlist accepts ten safe commands and pipelines', () => {
+  for (const command of [
+    'git diff', 'git log --oneline', 'git show HEAD', 'git status --short', 'git blame file',
+    'git rev-parse HEAD', 'git ls-files', 'git grep pattern', 'grep -n pattern file', 'rg pattern file',
+    'cat file', 'head -n 2 file', 'tail file', 'wc -l file', 'ls -la', 'sed -n 1,4p file',
+    "cat 'file name' | wc -l", 'git diff | head -n 5',
+  ]) assert.equal(readOnlyCommand(command), true, command)
+})
+
+test('B2 read-only command allowlist rejects unsafe commands and malformed syntax', () => {
+  for (const command of [
+    'git push', 'git diff --output=file', 'git diff --ext-diff', 'git diff -Ofoo', 'git diff --open-files-in-pager=x',
+    'git grep -lOrm foo', 'git grep --open=rm foo', 'git grep --open-files=rm foo',
+    'rg --pre=cmd pattern', 'rg --hostname-bin=./scripts/x foo', 'sh -c true', 'echo hi', 'cat a > b',
+    'cat a; cat b', 'cat a && cat b', 'cat a || cat b', '| cat a', 'cat a |', 'cat a\\| wc',
+    'cat $HOME', 'cat `pwd`', 'cat "unfinished', 'sed -e s/a/b/ file', 'git diff\\ > file',
+    'cat a\ncat b', 'cat a\rcat b', 'cat (a)', 'cat {a}',
+  ]) assert.equal(readOnlyCommand(command), false, String(command))
+  for (const command of [null, undefined, 4, '', ' ', '\n']) assert.equal(readOnlyCommand(command), false)
+})
+
+test('RV1-1 rejects git grep pager option aliases', () => {
+  for (const command of ['git grep -lOrm foo', 'git grep --open=rm foo', 'git grep --open-files=rm foo'])
+    assert.equal(readOnlyCommand(command), false, command)
+})
+
+test('B4 panel execute decisions are roster-attributed and only allow_once can approve', () => {
+  const approve = panelPermission({ kind: 'execute', rawInput: { command: 'git diff' } })
+  const refuse = panelPermission({ kind: 'execute', rawInput: { command: 'git diff > f' } })
+  const mutation = panelPermission({ title: 'write', kind: 'other' })
+  assert.deepEqual(approve, { policy: 'roster', verdict: 'allow' })
+  assert.deepEqual(refuse, { policy: 'roster', verdict: 'reject' })
+  assert.deepEqual(mutation, { policy: 'roster', verdict: 'reject' })
+  for (const answer of [approve, refuse, mutation]) {
+    const result = settlePermission({ toolCall, options, lead: () => answer })
+    assert.equal(result.row.policy, 'roster')
+    assert.equal(Object.hasOwn(result.row, 'answered'), false)
+    assert.equal(result.optionId, answer.verdict === 'allow' ? 'allow' : 'reject')
+  }
+  assert.equal(settlePermission({ toolCall, options: [options[0], options[2]], lead: () => approve }).optionId, 'reject')
+  assert.equal(settlePermission({ toolCall, options, lead: () => ({ decision: 'allow' }) }).row.policy, 'lead')
 })

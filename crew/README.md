@@ -72,13 +72,57 @@ provider — the boot record never guesses one.
 
 ```
 plan -> (tech-lead check when seated) -> gate-baseline(RED required)
-     -> build -> scope-gate(git) -> validation lane -> acceptance gate
-     -> review -> full suite -> commit-on-green(plan subject + builder body)
+     -> build -> scope-gate(context) -> validation lane -> acceptance gate
+     -> review -> commit -> document -> rebase -> full suite -> publish
 ```
 
 Every loop is bounded (`LIMITS`), every verdict is a closed enum, every bounce
 brief is code-composed with failures pasted verbatim, every stage transition
 lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
+
+## Runtime feature map
+| Feature | Where it lives | ADR | Doc |
+|---|---|---|---|
+| Plan and plan checks | `crew/drive.mjs` | - | [Plan check](#plan-check-growth-evidence-and-the-carve-verdict) |
+| Acceptance gate and kill-mutations | `crew/drive.mjs` | ADR-030 ([decision](../docs/adr/adr-030-acceptance-authorship.md)) | [Acceptance gate](#the-acceptance-gate-gate-first) |
+| Build | `crew/drive.mjs` | - | [Model](#the-model) |
+| Pi lab | `crew/pi/extensions/lab.ts` | - | - |
+| Builderloop | `crew/pi/extensions/builderloop.ts` | - | - |
+| Readgate | `crew/pi/extensions/readgate.ts` | - | - |
+| FFF | `crew/pi/extensions/fff.ts` | - | - |
+| Advisor | `crew/pi/extensions/advisor.ts` | ADR-037 ([decision](../docs/adr/adr-037-local-models.md)) | [Local models](../docs/adr/adr-037-local-models.md) |
+| Scope and out-of-context journal | `crew/drive.mjs` | ADR-045 ([decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md)) | [Scope decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md) |
+| Validation | `crew/drive.mjs` | - | [Acceptance gate](#the-acceptance-gate-gate-first) |
+| Review | `crew/drive.mjs` | ADR-038 ([decision](../docs/adr/adr-038-floor-forces-proof-not-rounds.md)) | [Review](../docs/adr/adr-038-floor-forces-proof-not-rounds.md) |
+| Suite | `crew/drive.mjs` | ADR-042 ([decision](../docs/adr/adr-042-split-the-suites-not-the-driver.md)) | [Suite decision](../docs/adr/adr-042-split-the-suites-not-the-driver.md) |
+| Document | `crew/drive.mjs` | - | [Model](#the-model) |
+| Commit | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
+| Rebase and post-rebase proof | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
+| Publish and open PR, never merge | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
+| Resume (`resumeCmd`) | `crew/crew.mjs` | - | [Model](#the-model) |
+| Converge | `crew/converge.mjs` | - | - |
+| Execution shapes: `review_only`, `review_panel`, `directed`, `verify_only`, `scout`, `repair` | `crew/variants.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
+| Turn ceilings | `crew/drive.mjs` | - | [Decisions needed](../docs/decisions-needed.md) |
+| Anchors and pins | `skills/qa-test-writing/anchor-pin.test.mjs` | ADR-040 ([decision](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md)) | [Anchor pins](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md) |
+| Assurance presets and task profiles | `crew/assurances.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
+| Workflows | `crew/workflows.mjs` | ADR-044 ([decision](../docs/adr/adr-044-declared-topologies-name-executor-paths.md)) | [Workflow documentation](../crew/workflows/README.md) |
+| Factory dispatch | `scripts/factory/dispatch-batch.mjs` | - | - |
+| Factory intake | `scripts/factory/intake.mjs` | - | - |
+| Breaker | `crew/breaker.mjs` | ADR-032 ([register](../docs/adr/README.md)) | [Breaker decision](../docs/adr/README.md) |
+| Screener | `crew/screener.mjs` | - | - |
+| Harvest and arms | `crew/harvest.mjs`, `crew/arms.mjs` | - | - |
+| Memory | `crew/memory.mjs` | - | - |
+| Narration | `crew/drive.mjs` | - | [Model](#the-model) |
+| Visualizer | `visualizer/web/src/lib/AssurancePage.svelte` | - | [Visualizer](../visualizer/README.md) |
+| Pane transport | `crew/driver.mjs` | ADR-033 ([register](../docs/adr/README.md)) | [Adapters](#adapters-hot-seats) |
+| Headless daemon | `crew/daemon.mjs` | ADR-029 ([decision](../docs/adr/adr-029-headless-observability-interjection.md)) | [The daemon](#the-daemon) |
+| ACP | `crew/acp-client.mjs` | ADR-036 ([decision](../docs/adr/adr-036-acp-seat-transport.md)) | [ACP decision](../docs/adr/adr-036-acp-seat-transport.md) |
+| Return paths | `crew/crew.mjs`, `crew/daemon.mjs` | - | [Contracts](#contracts) |
+
+The scope list gives context, not enforcement: out-of-context edits are
+journaled; protocol-debris and trust-boundary refusals remain separate. Tests
+are part of building. Only the builder writes repo files, and its work is not
+limited to listed paths.
 
 **The seats** (per-pane Claude sessions, launched as the pane process by the
 boot layout — nothing is ever typed into a spawning shell):
@@ -87,7 +131,7 @@ boot layout — nothing is ever typed into a spawning shell):
 |---|---|---|
 | `lead` | the judge: consulted by code only at genuine judgment points, answers with a closed-enum decision envelope | none |
 | `planner` | domain lead + architect + scout-commander; envelope carries `files_in_scope`, `validation_lane`, optional `gate_cmd` | none (task dir only) |
-| `builder` | the only repo-writing seat; tests are part of building | in-scope files only (git-gated); the only seat allowed `Edit` (tool-denied elsewhere) |
+| `builder` | the only repo-writing seat; tests are part of building | context, not enforcement; the only seat allowed `Edit` (tool-denied elsewhere) |
 | `reviewer` | conformance to plan, then correctness; also gate-defect triage and perspective duty | none |
 | `tech-lead` | optional plan adversary — deliberately a different model/effort | none |
 
@@ -154,9 +198,9 @@ deny list is translated before it reaches pi:
 | builder | `Task,Agent,Workflow` | *(flag omitted — empty translation)* |
 
 A pi builder ends up with no `--exclude-tools` at all, because pi has no
-subagent tool for `Task`/`Agent`/`Workflow` to translate to — that seat's real boundary
-is the git scope gate + commit-in-scope, the same posture `Write` already has
-everywhere.
+subagent tool for `Task`/`Agent`/`Workflow` to translate to. That absent
+subagent exclusion is distinct from recorded scope: scope supplies context and
+out-of-context edits are journaled, not refused.
 
 Capability declarations are enforced, not decorative: charters declare
 `requires` when they depend on a capability. **The planner alone requires
@@ -272,8 +316,8 @@ legible as evidence rather than being mistaken for a scope change.
 The driver records a `plan_scope: { round, verdict, added, dropped }` decision row
 per plan round over the closed verdict set
 `plan-scope-undispatched | plan-scope-same | plan-scope-narrowed | plan-scope-widened`.
-A `widened` verdict BOUNCES the plan with a `plan-bounce-r<n>.md` note; on the
-final round it escalates `plan-scope-widened` instead.
+A `widened` verdict is recorded in that `plan_scope` row (its `added` list);
+it does not bounce or block the write.
 
 `gate_path` must be an absolute path inside the task directory; paths outside it
 are ignored, and the driver never parses `gate_cmd`. Growth is evidence in the
@@ -320,9 +364,9 @@ Everything durable is a FILE; pane chat is never the record.
   the return path named in the assignment line.
 - **Assignment line**: single line, safe charset, composed by
   `assignmentLine()` — content travels in brief files, the line only points.
-- **Task envelope**: a daemon run writes its envelope to
-  `returns/<run_id>.task.json` (continuations use `.a<n>` before `.json`).
-  `returns/task.json` mirrors the most recent run for `wait`/`status`/archive/visualizer readers.
+- **Task envelope**: the normal run path is `returns/<run_id>/task.json`;
+  continuation attempts use `returns/<run_id>/task.a<n>.json`. There is no
+  default flat mirror; an explicit legacy task-return override remains admissible.
 - **Lifecycle** (code as policy): `done` → archive the crew dir + close the
   workspace (`--keep` to inspect); `escalation` → the workspace always
   survives (it IS the context the human needs), and mints a `parked/null` park
@@ -376,8 +420,12 @@ approve). The ENFORCED tool boundary is per-seat `--disallowedTools` — it
 holds even under bypass, and it is what makes builder-only `Edit` and
 builder-never-`Task` real (`--allowedTools` is only an auto-approve list;
 under bypass it restricts nothing). `Write` stays available to every seat
-(envelopes, task-dir artifacts), so the REPO boundary for non-builder seats
-is the git scope gate + in-scope-only commit, not tool denial. Beyond that:
+(envelopes, task-dir artifacts), so non-builder seats have no mechanical
+repo-write boundary beyond their role charter because `Write` is not denied to
+them; worktree isolation separates lanes, not seats within a lane. The scope
+gate journals ordinary out-of-context edits from any seat and never refuses
+them; protocol debris, trust-boundary violations and protected-floor rules
+remain separate refusals. Beyond that:
 the feature-branch blast radius, `DEVTEAM_WORKER=1` anti-recursion, and the
-operator's global deny rules. The driver never pushes; PR/push stays with
-the human's orchestrator.
+operator's global deny rules. The driver pushes and opens a PR after a green
+cold suite, but never merges.

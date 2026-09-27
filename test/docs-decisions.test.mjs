@@ -1,12 +1,13 @@
 // The owner-decision register is a historical, measurement-bearing record.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 
 const REGISTER = 'docs/decisions-needed.md'
 const README = 'README.md'
+const CREW_README = 'crew/README.md'
 const CLAUDE = 'CLAUDE.md'
 const FIELDS = ['question', 'measurement', 'options', 'blocked', 'raised']
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
@@ -14,6 +15,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 const read = (relativePath) => readFileSync(join(ROOT, relativePath), 'utf8')
 const register = read(REGISTER)
 const readme = read(README)
+const crewReadme = read(CREW_README)
 const claude = read(CLAUDE)
 
 const VISUALIZER_COMMAND = 'npm run viz:build     # release-time check: operator runs it on main before tagging'
@@ -164,6 +166,28 @@ test('entry fields do not mark a decision closed', () => {
 
 test('README exposes the open owner-decision register', () => {
   assert.ok(readme.includes('[`docs/decisions-needed.md`](docs/decisions-needed.md)'))
+})
+
+test('runtime feature map has concrete paths and pins ACP', () => {
+  const heading = '## Runtime feature map'
+  const start = crewReadme.indexOf(heading)
+  assert.notEqual(start, -1, 'missing runtime feature map heading')
+  const section = crewReadme.slice(start + heading.length).split('\n\n**The seats**', 1)[0]
+  const lines = section.split('\n')
+  assert.equal(lines[1], '| Feature | Where it lives | ADR | Doc |')
+  assert.equal(lines[2], '|---|---|---|---|')
+  const rows = lines.slice(3).filter((line) => line.startsWith('|') && line.endsWith('|'))
+  assert.ok(rows.length >= 20, `expected at least 20 feature rows, got ${rows.length}`)
+
+  for (const row of rows) {
+    const paths = [...row.matchAll(/`([^`]+)`/g)].map(([, value]) => value).filter((value) => value.includes('/'))
+    assert.ok(paths.length > 0, `feature row has no backticked repo path: ${row}`)
+    for (const path of paths) {
+      assert.ok(!/[!*?{}]/.test(path), `feature path must not be a glob: ${path}`)
+      assert.ok(existsSync(join(ROOT, path)), `feature path does not exist: ${path}`)
+    }
+  }
+  assert.ok(rows.some((row) => row.startsWith('| ACP |') && row.includes('`crew/acp-client.mjs`')))
 })
 
 test("A1/B1: visualizer build is a release-time check, not a lane gate", () => {

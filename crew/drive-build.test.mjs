@@ -236,6 +236,8 @@ test('suite anchor A1 repairs all matching manifest directories before rerunning
   assert.deepEqual(anchorRows(fixture.io), [{ outcome: 'repaired', moved: 1, directories: ['skills/crew-dispatch', 'skills/crew-recovery'], files: ['skills/crew-dispatch/anchors.json'], commit: 'abc1234' }])
   assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length, 2)
   assert.equal(fixture.io.calls.assign.filter(({ role, n }) => role === 'builder' && n === 2).length, 0)
+  assert.ok(result.details.files_committed.includes('skills/crew-dispatch/anchors.json'), 'the reported commit files omit the repaired manifest')
+  assert.match(result.summary, new RegExp(`\\(${result.details.files_committed.length} files\\)`))
 })
 
 test('suite anchor A2 retains the repair commit when repaired warm suite remains red', () => {

@@ -11725,7 +11725,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('suite', 'anchor repair was verified but its standalone commit failed')
         }
-        S.commit = commit
+        S.commit = commit; committing = [...new Set([...committing, ...changedCarriers])]; if (Array.isArray(publishFiles)) publishFiles = [...new Set([...publishFiles, ...changedCarriers])]
         io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'repaired', moved: parsed.moved, directories: dirs, files: changedCarriers, commit } }) })
         S.suiteAnchorRepairs = (S.suiteAnchorRepairs ?? 0) + 1
         const repairedSuiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))

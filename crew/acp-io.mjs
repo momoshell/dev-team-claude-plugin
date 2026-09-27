@@ -7,6 +7,8 @@ import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
 
+export const ACP_CENSUS_TURNS_ABSENT = 'ACP has no model-turn boundary; deriving turns from prompts or tool activity would be a guess.'
+
 export const ACP_CLOSE_SETTLE_MS = 3000
 const ACP_ADAPTERS = Object.freeze({ pi: piAdapter, claude: claudeAdapter })
 const ACP_POLL_INTERVAL_MS = 25
@@ -175,6 +177,10 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const finalUsageReason = usageReason ?? (usageObject && !billed ? 'usage-incomplete' : null)
     if (billed) emit({ kind: 'usage', id: assignment.id, role: assignment.role, model: crew.members[assignment.role]?.model ?? null, session_id: client?.sessionId ?? null, transcript_path: join(taskDir || paths.taskDir, 'acp', assignment.role, 'stream.jsonl'), usage: billed })
     log({ at: now(), acp_turn: { role: assignment.role, assignment_id: assignment.id, returnPath: assignment.returnPath, stopReason: refusal || !turn ? null : turn.stopReason ?? null, stop_reason_absent: refusal ? 'refused' : !turn ? 'response-unread' : null, usage: billed, usage_reason: finalUsageReason } })
+    try {
+      const tool_calls = assignment.sawUpdate ? assignment.tools.size : null
+      log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', turns: null, tool_calls, absent_reason: ACP_CENSUS_TURNS_ABSENT } })
+    } catch { /* census is best-effort */ }
     return turn
   }
   function wait(returnPath, timeoutS) {

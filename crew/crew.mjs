@@ -3110,10 +3110,12 @@ export async function bootCmd(args, deps = {}) {
   }
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
-  const turnCeilingsResolved = headlessOnly
-    ? turnCeilingsDefaulted
-    : resolveTurnCeilings(turnCeilingRaw, { applyDefaults: false })
-  const turnCeilingRecord = turnCeilingsRecord(turnCeilingsResolved, turnCeilingRaw)
+  const acpRoles = roles.filter((role) => adapters[role].transport === ACP_TRANSPORT)
+  const explicitTurnCeilings = resolveTurnCeilings(turnCeilingRaw, { applyDefaults: false })
+  const turnCeilingsResolved = {
+    ...(headlessOnly ? turnCeilingsDefaulted : explicitTurnCeilings),
+    ...Object.fromEntries(acpRoles.map((role) => [role, NO_TURN_CEILING])),
+  }
   const unmeasurable = paneTurnCeilingRefusals(paneRoles, turnCeilingsResolved)
   if (unmeasurable.length) {
     const named = unmeasurable.map((u) => `${u.role} (--max-turns-${u.role} ${u.budget}, ${u.transport})`).join(', ')
@@ -3125,6 +3127,14 @@ export async function bootCmd(args, deps = {}) {
     err.code = PANE_TURN_CEILING_UNMEASURED
     throw err
   }
+  const acpUnmeasurable = acpTurnCeilingRefusals(acpRoles, explicitTurnCeilings)
+  if (acpUnmeasurable.length) {
+    const named = acpUnmeasurable.map((u) => `${u.role} (--max-turns-${u.role} ${u.budget}, ${u.transport})`).join(', ')
+    const err = new Error(`${ACP_TURN_CEILING_UNMEASURED}: ${named}. ACP has no model-turn boundary; prompt/tool-derived turns would be guessed.`)
+    err.code = ACP_TURN_CEILING_UNMEASURED
+    throw err
+  }
+  const turnCeilingRecord = turnCeilingsRecord(turnCeilingsResolved, turnCeilingRaw)
   // #249 / ADR-033: transport follows the MODE, never the seat. A cmux workspace
   // exists so a human can inspect every seat in it, so a piped seat inside one is
   // a mode error, not a configuration. Refuse HERE: after resolveAdapters
@@ -4844,6 +4854,13 @@ export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane', ...TURN_CEILING_
 // exported HERE and not in drive.mjs's turn-ceiling vocabulary: an imported
 // binding is not re-exported, and D3 requires crew.mjs itself to export it.
 export const PANE_TURN_CEILING_UNMEASURED = 'pane-turn-ceiling-unmeasured'
+export const ACP_TURN_CEILING_UNMEASURED = 'acp-turn-ceiling-unmeasured'
+
+export function acpTurnCeilingRefusals(acpRoles, resolved) {
+  return acpRoles
+    .filter((role) => (resolved?.[role] ?? NO_TURN_CEILING) !== NO_TURN_CEILING)
+    .map((role) => ({ role, budget: resolved[role], transport: ACP_TRANSPORT }))
+}
 
 // Which PANE-seated roles carry a ceiling the pane transport cannot measure.
 // Exported because the boot refusal it drives is otherwise only reachable through

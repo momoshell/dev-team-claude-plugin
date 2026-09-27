@@ -136,7 +136,7 @@ export const LAB_PARAMS = {
   additionalProperties: true,
   properties: {
     program: {
-      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. Export a default value; top-level await and console output are supported, but console output is warned against. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
+      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. It returns its value with export default <value>; console.log output is not the result. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
     skill: {
       description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
@@ -548,6 +548,12 @@ export function parseTapSummary(text: string): any {
     if (failMatch) fail = Number(failMatch[1])
   }
   return { pass, fail }
+}
+
+// A line the runner itself wrote: an RPC request ({id, op, args}) or the terminal
+// {done: true} frame. Anything else on stdout is the program's own output.
+function isProtocolFrame(frame: any): boolean {
+  return Boolean(frame) && typeof frame === 'object' && (Boolean(frame.done) || typeof frame.op === 'string')
 }
 
 function stripAnsi(text: string): string {
@@ -1088,9 +1094,8 @@ export function createLabTool(deps: any = {}) {
 
   return {
     name: LAB_TOOL_NAME,
-    description: 'A seat-authored program must export default <value>; top-level await and console output are supported but console output is warned against. scratchCheckout(ref?) selects a commit and runSuite returns named failures. runSuite is the declared host authority carve-out.',
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM that must export default <value> in a node --permission child against a clone of the committed HEAD. Top-level await and console output are supported; console output is warned against. scratchCheckout(ref?) selects a commit; runSuite reports named failures. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
+    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. A program returns its value with export default <value> (top-level await works); console.log output is not the result, and a program that exports nothing is refused program-returned-nothing with its stdout. scratchCheckout(ref?) checks out HEAD or the named commit or branch; runSuite reports named failures with scratch-relative file and line. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
@@ -1113,6 +1118,8 @@ export function createLabTool(deps: any = {}) {
       let resultValue: any = null
       let childOutput = ''
       let childOutputTruncated = false
+      let programStdout = ''
+      let programStdoutTruncated = false
       let errorText = ''
       let dir: string | null = null
       let programPath = ''
@@ -1133,11 +1140,17 @@ export function createLabTool(deps: any = {}) {
           if (denial) details.denial = denial
           if (audit) details.audit = audit
           if (errorText) details.error = boundLabText(errorText, 4096)
-          if (refused === 'program-returned-nothing') details.stdout = childOutput
+          if (refused === 'program-returned-nothing') {
+            details.stdout = programStdout
+            details.stdout_truncated = programStdoutTruncated
+          }
         }
-        const text = outcome === 'ok'
+        let text = outcome === 'ok'
           ? boundLabText(resultValue === undefined ? 'null' : safeJson(resultValue) || 'null')
           : `refused: ${refused || 'child-failed'}`
+        // details never reach the model, so the seat is told here how to return a value
+        // and shown what it printed instead.
+        if (refused === 'program-returned-nothing') text = `${text}\nThe program exported no default value; end it with export default <value>. Its stdout${programStdoutTruncated ? ' (truncated)' : ''}:\n${programStdout}`
         return { content: [{ type: 'text', text }], details }
       }
       const refuseEarly = (code: string) => {
@@ -1318,11 +1331,21 @@ export function createLabTool(deps: any = {}) {
         let childError = ''
         let outputText = ''
         let outputTruncated = false
+        // What the program printed to stdout, with the RPC request and terminal frames
+        // taken out: this is what a program that exports nothing is shown.
+        let stdoutText = ''
+        let stdoutTruncated = false
         const appendOutput = (line: any, kind: string) => {
           if (pendingReason === 'output-oversize') return
           const bounded = boundedTextInfo(`${outputText}${String(line ?? '')}\n`)
           outputText = bounded.text
           outputTruncated = outputTruncated || bounded.truncated
+        }
+        const appendStdout = (line: any) => {
+          if (pendingReason === 'output-oversize' || stdoutTruncated) return
+          const bounded = boundedTextInfo(`${stdoutText}${String(line ?? '')}\n`)
+          stdoutText = bounded.text
+          stdoutTruncated = bounded.truncated
         }
         const send = (frame: any) => {
           if (!child?.stdin || child.stdin.destroyed) return
@@ -1348,7 +1371,7 @@ export function createLabTool(deps: any = {}) {
           if (signal && abortHandler) signal.removeEventListener?.('abort', abortHandler)
           const synthetic = reason === 'child-failed' || reason === 'child-unreaped'
           if (synthetic) disarm()
-          resolve({ reason, code, signal: signalValue, terminal, output: outputText, truncated: outputTruncated, bytes: collector?.bytesSeen?.() || 0, error: childError })
+          resolve({ reason, code, signal: signalValue, terminal, output: outputText, truncated: outputTruncated, stdout: stdoutText, stdoutTruncated, bytes: collector?.bytesSeen?.() || 0, error: childError })
         }
         const settle = (reason: string, code: any = null, signalValue: any = null) => {
           acceptingOps = false
@@ -1422,7 +1445,8 @@ export function createLabTool(deps: any = {}) {
           appendOutput(line, kind)
           if (kind !== 'stdout') return
           let frame: any
-          try { frame = JSON.parse(String(line).trim()) } catch { collector.served(); return }
+          try { frame = JSON.parse(String(line).trim()) } catch { appendStdout(line); collector.served(); return }
+          if (!isProtocolFrame(frame)) appendStdout(line)
           if (!frame || frame.done) {
             collector.served()
             if (frame?.done) {
@@ -1440,6 +1464,8 @@ export function createLabTool(deps: any = {}) {
         const onOverflow = () => {
           outputText = ''
           outputTruncated = true
+          stdoutText = ''
+          stdoutTruncated = true
           requestTermination('output-oversize')
         }
         collector = createStreamCollector({ capBytes: streamCapBytes, residualCapBytes, frameQueueMax, onLine, onOverflow })
@@ -1481,6 +1507,8 @@ export function createLabTool(deps: any = {}) {
         const child = await runProgramChild()
         childOutput = child.output
         childOutputTruncated = child.truncated
+        programStdout = child.stdout || ''
+        programStdoutTruncated = child.stdoutTruncated === true
         errorText = child.error || ''
         if (child.reason === 'output-oversize') refused = 'output-oversize'
         else if (child.terminal?.refused) {

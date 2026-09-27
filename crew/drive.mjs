@@ -11361,46 +11361,13 @@ function runTask(ctx, io, crash) {
         // `--cached`, ordinary `--others`, and ignored `--others` are separate Git
         // queries because --ignored changes the meaning of --others rather than adding
         // a third category to one listing.
-        const carrierInventory = (directories) => {
-          const quoted = [...directories].sort().map((directory) => shellArg(directory)).join(' ')
-          const list = (command) => {
-            let result
-            try { result = io.run(command) } catch { return null }
-            if (result?.ok !== true || typeof result.output !== 'string') return null
-            return result.output.split('\0').filter((path) => path.length > 0)
-          }
-          const tracked = list(`git ls-files -z --cached -- ${quoted}`)
-          const ordinary = list(`git ls-files -z --others --exclude-standard -- ${quoted}`)
-          const ignored = list(`git ls-files -z --others --ignored --exclude-standard -- ${quoted}`)
-          if (!tracked || !ordinary || !ignored) return { ok: false, why: 'anchor resolver carrier inventory was unreadable' }
-          const all = new Set([...tracked, ...ordinary, ...ignored])
-          const trackedSet = new Set(tracked)
-          const carriers = new Set()
-          for (const directory of directories) {
-            const manifest = `${directory}/anchors.json`
-            if (!all.has(manifest)) return { ok: false, why: `anchor manifest ${manifest} was not found` }
-            carriers.add(manifest)
-            const skill = `${directory}/SKILL.md`
-            const refs = [...all].filter((path) => referenceCitation(path, directory))
-            if (all.has(skill)) carriers.add(skill)
-            if (refs.length > 0) {
-              for (const path of refs) carriers.add(path)
-            } else if (!all.has(skill)) {
-              for (const path of all) if (directCitation(path, directory)) carriers.add(path)
-            }
-          }
-          const untracked = [...carriers].filter((path) => !trackedSet.has(path)).sort()
-          if (untracked.length > 0) return { ok: false, why: `anchor resolver carrier is not tracked: ${untracked.join(', ')}` }
-          return { ok: true, carriers: [...carriers].sort(), tracked: trackedSet }
-        }
-
         const anchorResolution = () => {
           if (!evidenceMeasured || !anchorConflictMechanical(conflicted)) return { ok: false, why: 'conflict is not mechanically anchor-resolvable' }
           const stagesReadable = conflicted.every((path) => canonicalAnchorContent(path, stageBytes.get(`2:${path}`)) !== null
             && canonicalAnchorContent(path, stageBytes.get(`3:${path}`)) !== null)
           if (!stagesReadable) return { ok: false, why: 'anchor conflict stages were malformed or unreadable' }
           const directories = new Set(conflicted.map(manifestDirectory).filter(Boolean))
-          const inventory = carrierInventory(directories)
+          const inventory = carrierInventory(io, directories)
           if (!inventory.ok) return inventory
           const checkout = `git checkout --ours -- ${conflicted.map((path) => shellArg(path)).join(' ')}`
           let checkedOut
@@ -11654,7 +11621,119 @@ function runTask(ctx, io, crash) {
   }
 
   stage('suite')
-  const suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+  let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+  if (!suiteRes?.ok && (S.suiteAnchorRepairs ?? 0) < ANCHOR_SUITE_REPAIR_MAX) {
+    let decline = null
+    let before = new Map()
+    let changedCarriers = []
+    let unrecoverable = null
+    const checkCommand = `node skills/qa-test-writing/anchor-pin.mjs --check . --root ${shellArg(ctx.checkout)}`
+    let check
+    try { check = io.run(checkCommand) } catch (error) { check = { ok: false, output: error?.message ?? String(error) } }
+    const output = String(check?.output ?? '')
+    const parsed = parseAnchorCheck(output)
+    if (/^\s*refused\b/m.test(output)) decline = 'refused'
+    else if (!parsed) decline = 'check-unparseable'
+    else if (!(parsed.rot === 0 && parsed.ambiguous === 0 && parsed.unverified === 0 && parsed.moved > 0)) decline = 'not-anchor-only'
+    let dirs = []
+    let inventory = null
+    if (!decline) {
+      let manifestListing
+      try { manifestListing = io.run("git ls-files -z -- '*anchors.json'") } catch { manifestListing = null }
+      if (manifestListing?.ok !== true || typeof manifestListing.output !== 'string') decline = 'check-unparseable'
+      else {
+        const matching = new Set()
+        const covered = new Set()
+        for (const path of manifestListing.output.split('\0').filter(Boolean)) {
+          const directory = manifestDirectory(path)
+          if (!directory) continue
+          let text
+          try { text = io.readFile(`${ctx.checkout}/${path}`) } catch { text = null }
+          let manifest
+          try { manifest = typeof text === 'string' ? JSON.parse(text) : null } catch { manifest = null }
+          if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) { decline = 'check-unparseable'; break }
+          for (const key of parsed.movedKeys) {
+            if (!Object.hasOwn(manifest, key)) continue
+            matching.add(directory)
+            covered.add(key)
+          }
+        }
+        if (!decline && !parsed.movedKeys.every((key) => covered.has(key))) decline = 'check-unparseable'
+        dirs = [...matching].sort()
+        if (!decline && dirs.length === 0) decline = 'check-unparseable'
+      }
+    }
+    if (!decline) {
+      inventory = carrierInventory(io, dirs)
+      if (!inventory.ok) decline = 'check-unparseable'
+      else {
+        for (const path of inventory.tracked) {
+          let bytes
+          try { bytes = io.readFile(`${ctx.checkout}/${path}`) } catch { bytes = null }
+          if (typeof bytes !== 'string') { decline = 'check-unparseable'; break }
+          before.set(path, bytes)
+        }
+      }
+    }
+    if (!decline) {
+      let statusBefore
+      try { statusBefore = io.changedFiles() } catch { statusBefore = null }
+      if (!Array.isArray(statusBefore)) decline = 'check-unparseable'
+      else {
+        for (const directory of dirs) {
+          let repair
+          try { repair = io.run(`node skills/qa-test-writing/anchor-pin.mjs --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`) } catch (error) { repair = { ok: false, output: error?.message ?? String(error) } }
+          if (repair?.ok !== true || /^\s*refused\b/m.test(String(repair?.output ?? ''))) { decline = 'refused'; break }
+        }
+        let afterPaths
+        try { afterPaths = io.changedFiles() } catch { afterPaths = null }
+        if (!Array.isArray(afterPaths)) decline = 'check-unparseable'
+        else {
+          const changed = [...new Set(afterPaths)].filter((path) => !statusBefore.includes(path) || before.has(path) && (() => {
+            try { return io.readFile(`${ctx.checkout}/${path}`) !== before.get(path) } catch { return true }
+          })())
+          const recognized = new Set(inventory.carriers)
+          unrecoverable = changed.find((path) => !recognized.has(path) && !before.has(path)) ?? null
+          if (unrecoverable) decline = 'unsafe-write'
+          else if (!changed.every((path) => recognized.has(path))) decline = 'unsafe-write'
+          changedCarriers = changed.filter((path) => recognized.has(path)).sort()
+        }
+        if (!decline) {
+          let verified
+          try { verified = io.run(checkCommand) } catch { verified = null }
+          const rechecked = parseAnchorCheck(String(verified?.output ?? ''))
+          if (!rechecked || rechecked.rot !== 0 || rechecked.ambiguous !== 0 || rechecked.moved !== 0 || rechecked.unverified !== 0) decline = 'still-moved'
+        }
+      }
+    }
+    if (decline) {
+      let restoreFailed = false
+      for (const [path, bytes] of before) {
+        try { if (io.readFile(`${ctx.checkout}/${path}`) !== bytes) io.writeFile(`${ctx.checkout}/${path}`, bytes) } catch { restoreFailed = true }
+      }
+      if (restoreFailed || unrecoverable) {
+        stageComplete()
+        return escalate('suite', `anchor repair could not be safely rolled back${unrecoverable ? `; unrecoverable path: ${unrecoverable}` : ''}`)
+      }
+      io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }) })
+    } else {
+      if (changedCarriers.length === 0) decline = 'still-moved'
+      else {
+        let commit
+        try { commit = io.commit(changedCarriers, 'chore(anchors): repair pins moved by the lane') } catch { commit = null }
+        if (typeof commit !== 'string' || !commit.trim()) {
+          stageComplete()
+          return escalate('suite', 'anchor repair was verified but its standalone commit failed')
+        }
+        S.commit = commit
+        io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'repaired', moved: parsed.moved, directories: dirs, files: changedCarriers, commit } }) })
+        S.suiteAnchorRepairs = (S.suiteAnchorRepairs ?? 0) + 1
+        const repairedSuiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+        suiteRes = repairedSuiteRes
+      }
+      if (decline) io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }) })
+    }
+  }
   const warmCounts = parseSuiteCounts(suiteRes?.output)
   resumeWarmCounts = warmCounts
   if (!suiteRes?.ok) {
@@ -14326,4 +14405,54 @@ function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, d
     fatal = dirtyAfterFailure(active, err)
     return { row: row('unproven', `the hardening proof was interrupted: ${why}`), fatal }
   }
+}
+
+const ANCHOR_SUITE_REPAIR_MAX = 1
+
+function parseAnchorCheck(output) {
+  if (typeof output !== 'string' || /^\s*refused\b/m.test(output)) return null
+  const summaries = output.split(/\r?\n/).filter((line) => /^checked \d+ pins across \d+ manifests: rot \d+, ambiguous \d+, moved \d+, unverified \d+$/.test(line))
+  if (summaries.length !== 1) return null
+  const match = /^checked (\d+) pins across (\d+) manifests: rot (\d+), ambiguous (\d+), moved (\d+), unverified (\d+)$/.exec(summaries[0])
+  if (!match) return null
+  const movedLines = []
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.startsWith('moved ')) continue
+    const move = /^moved (.+:\d+) -> (.+:\d+)$/.exec(line)
+    if (!move || !ANCHOR_LINE_KEY.test(move[1]) || !ANCHOR_LINE_KEY.test(move[2])) return null
+    movedLines.push(move[1])
+  }
+  const [scanned, manifests, rot, ambiguous, moved, unverified] = match.slice(1).map(Number)
+  if (moved !== movedLines.length) return null
+  return { scanned, manifests, rot, ambiguous, moved, unverified, movedKeys: [...new Set(movedLines)] }
+}
+
+function carrierInventory(io, directories) {
+  const quoted = [...directories].sort().map((directory) => shellArg(directory)).join(' ')
+  const list = (command) => {
+    let result
+    try { result = io.run(command) } catch { return null }
+    if (result?.ok !== true || typeof result.output !== 'string') return null
+    return result.output.split('\0').filter((path) => path.length > 0)
+  }
+  const tracked = list(`git ls-files -z --cached -- ${quoted}`)
+  const ordinary = list(`git ls-files -z --others --exclude-standard -- ${quoted}`)
+  const ignored = list(`git ls-files -z --others --ignored --exclude-standard -- ${quoted}`)
+  if (!tracked || !ordinary || !ignored) return { ok: false, why: 'anchor resolver carrier inventory was unreadable' }
+  const all = new Set([...tracked, ...ordinary, ...ignored])
+  const trackedSet = new Set(tracked)
+  const carriers = new Set()
+  for (const directory of directories) {
+    const manifest = `${directory}/anchors.json`
+    if (!all.has(manifest)) return { ok: false, why: `anchor manifest ${manifest} was not found` }
+    carriers.add(manifest)
+    const skill = `${directory}/SKILL.md`
+    const refs = [...all].filter((path) => referenceCitation(path, directory))
+    if (all.has(skill)) carriers.add(skill)
+    if (refs.length > 0) for (const path of refs) carriers.add(path)
+    else if (!all.has(skill)) for (const path of all) if (directCitation(path, directory)) carriers.add(path)
+  }
+  const untracked = [...carriers].filter((path) => !trackedSet.has(path)).sort()
+  if (untracked.length > 0) return { ok: false, why: `anchor resolver carrier is not tracked: ${untracked.join(', ')}` }
+  return { ok: true, carriers: [...carriers].sort(), tracked: trackedSet }
 }

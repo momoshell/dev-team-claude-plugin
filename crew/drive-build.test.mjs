@@ -183,6 +183,134 @@ function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed
   return { ctx: dynamic, io }
 }
 
+const anchorCheck = ({ rot = 0, ambiguous = 0, moved = 1, unverified = 0, lines = moved } = {}) => [
+  ...Array.from({ length: lines }, (_, index) => `moved crew/drive.mjs:${index + 1} -> crew/drive.mjs:${index + 2}`),
+  `checked 4 pins across 2 manifests: rot ${rot}, ambiguous ${ambiguous}, moved ${moved}, unverified ${unverified}`,
+].join('\n')
+
+function anchorSuiteIo({ suite, checks = [anchorCheck(), anchorCheck({ moved: 0, lines: 0 })], changedAfter = ['skills/crew-dispatch/anchors.json'], repair = null } = {}) {
+  const fixture = suiteCycleIo({ suite, changed: Array.from({ length: 20 }, () => ['a.mjs', 'a.test.mjs']) })
+  const dispatch = 'skills/crew-dispatch'
+  const recovery = 'skills/crew-recovery'
+  const key = 'crew/drive.mjs:1'
+  const files = fixture.io.calls.files
+  files[`${CTX.checkout}/${dispatch}/anchors.json`] = JSON.stringify({ [key]: 'dispatch' })
+  files[`${CTX.checkout}/${recovery}/anchors.json`] = JSON.stringify({ [key]: 'recovery' })
+  const originalRun = fixture.io.run.bind(fixture.io)
+  const originalChanged = fixture.io.changedFiles.bind(fixture.io)
+  const gitFiles = ['git', ['ls', 'files'].join('-')].join(' ')
+  let repairStarted = false
+  let checkIndex = 0
+  fixture.io.run = (command) => {
+    const text = String(command)
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --check')) {
+      fixture.io.calls.run.push({ cmd: text, n: 0 })
+      return { ok: false, output: checks[checkIndex++] ?? anchorCheck({ moved: 0, lines: 0 }) }
+    }
+    if (text === `${gitFiles} -z -- '*anchors.json'`) return { ok: true, output: `${dispatch}/anchors.json\0${recovery}/anchors.json\0` }
+    if (text.startsWith(`${gitFiles} -z --cached --`)) return { ok: true, output: `${dispatch}/anchors.json\0${recovery}/anchors.json\0` }
+    if (text.startsWith(`${gitFiles} -z --others`)) return { ok: true, output: '' }
+    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all')) {
+      fixture.io.calls.run.push({ cmd: text, n: 0 })
+      repairStarted = true
+      if (repair) return repair({ command: text, files, dispatch, recovery })
+      const directory = text.includes(dispatch) ? dispatch : recovery
+      files[`${CTX.checkout}/${directory}/anchors.json`] = `repaired ${directory}`
+      return { ok: true, output: '' }
+    }
+    return originalRun(command)
+  }
+  fixture.io.changedFiles = () => repairStarted ? changedAfter : originalChanged()
+  return fixture
+}
+
+const anchorRows = (io) => io.calls.logs.map((row) => row.suite_anchor_repair).filter(Boolean)
+
+test('suite anchor A1 repairs all matching manifest directories before rerunning warm suite', () => {
+  const red = suiteRed('a.test.mjs', 1, 'anchor pins moved')
+  const fixture = anchorSuiteIo({ suite: [{ ok: false, output: red }, { ok: true, output: 'suite green' }] })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(fixture.io.calls.run.filter(({ cmd }) => cmd.includes('--repair-all')).map(({ cmd }) => cmd.match(/--repair-all '([^']+)'/)?.[1]), ['skills/crew-dispatch', 'skills/crew-recovery'])
+  assert.deepEqual(fixture.io.calls.commits.filter(({ message }) => message === 'chore(anchors): repair pins moved by the lane'), [{ files: ['skills/crew-dispatch/anchors.json'], message: 'chore(anchors): repair pins moved by the lane' }])
+  assert.deepEqual(anchorRows(fixture.io), [{ outcome: 'repaired', moved: 1, directories: ['skills/crew-dispatch', 'skills/crew-recovery'], files: ['skills/crew-dispatch/anchors.json'], commit: 'abc1234' }])
+  assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length, 2)
+  assert.equal(fixture.io.calls.assign.filter(({ role, n }) => role === 'builder' && n === 2).length, 0)
+})
+
+test('suite anchor A2 retains the repair commit when repaired warm suite remains red', () => {
+  const fixture = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1, 'moved') }, { ok: false, output: suiteRed('a.test.mjs', 2, 'ordinary post-repair failure') }, { ok: true, output: 'suite green' }] })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(anchorRows(fixture.io)[0]?.outcome, 'repaired')
+  assert.equal(fixture.io.calls.commits.some(({ message }) => message === 'chore(anchors): repair pins moved by the lane'), true)
+  assert.equal(fixture.io.calls.assign.some(({ role, note }) => role === 'builder' && note === 'suite-red-fix'), true)
+  assert.match(fixture.io.calls.writes[`${TD}/suite-red-bounce-r1.md`], /ordinary post-repair failure/)
+})
+
+test('suite anchor A3 declines only non-anchor-only and unparseable check outcomes', () => {
+  const cases = [
+    [anchorCheck({ rot: 1 }), 'not-anchor-only'], [anchorCheck({ ambiguous: 1 }), 'not-anchor-only'],
+    [anchorCheck({ unverified: 1 }), 'not-anchor-only'], ['refused pin', 'refused'], ['', 'check-unparseable'],
+    ['checked bad summary', 'check-unparseable'], [anchorCheck({ moved: 2, lines: 1 }), 'check-unparseable'],
+  ]
+  for (const [check, reason] of cases) {
+    const fixture = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1) }, { ok: true, output: 'suite green' }], checks: [check] })
+    assert.equal(driveTask(fixture.ctx, fixture.io).status, 'done')
+    assert.equal(fixture.io.calls.run.some(({ cmd }) => cmd.includes('--repair-all')), false)
+    assert.equal(fixture.io.calls.commits.some(({ message }) => message === 'chore(anchors): repair pins moved by the lane'), false)
+    assert.deepEqual(anchorRows(fixture.io), [{ outcome: 'declined', reason }])
+  }
+})
+
+test('suite anchor A4 rolls back unsafe and refused repair writes, escalating unrecoverable writes', () => {
+  const carrier = 'skills/crew-dispatch/anchors.json'
+  const trackedNoncarrier = 'skills/crew-dispatch/other.mjs'
+  const unsafe = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1) }, { ok: true, output: 'suite green' }], changedAfter: [carrier, trackedNoncarrier] })
+  unsafe.io.calls.files[`${CTX.checkout}/${trackedNoncarrier}`] = 'before noncarrier'
+  const unsafeRun = unsafe.io.run.bind(unsafe.io)
+  unsafe.io.run = (command) => {
+    const result = unsafeRun(command)
+    if (String(command).includes('--repair-all')) unsafe.io.calls.files[`${CTX.checkout}/${trackedNoncarrier}`] = 'unsafe changed'
+    if (String(command).startsWith(['git', ['ls', 'files'].join('-')].join(' ') + ' -z --cached --')) return { ok: true, output: `skills/crew-dispatch/anchors.json\0skills/crew-recovery/anchors.json\0${trackedNoncarrier}\0` }
+    return result
+  }
+  const unsafeWrite = unsafe.io.writeFile.bind(unsafe.io)
+  unsafe.io.writeFile = (path, content) => { unsafeWrite(path, content); if (path.startsWith(`${CTX.checkout}/`)) unsafe.io.calls.files[path] = content }
+  assert.equal(driveTask(unsafe.ctx, unsafe.io).status, 'done')
+  assert.equal(unsafe.io.calls.files[`${CTX.checkout}/${trackedNoncarrier}`], 'before noncarrier')
+  assert.equal(anchorRows(unsafe.io).at(-1)?.reason, 'unsafe-write')
+
+  const untracked = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1) }], changedAfter: [carrier, 'unsafe-new.mjs'] })
+  const untrackedResult = driveTask(untracked.ctx, untracked.io)
+  assert.equal(untrackedResult.status, 'escalation')
+  assert.equal(untrackedResult.details.escalation.where, 'suite')
+  assert.match(untrackedResult.details.escalation.why, /unsafe-new\.mjs/)
+  assert.equal(anchorRows(untracked.io).length, 0)
+
+  const refused = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1) }, { ok: true, output: 'suite green' }], repair: () => ({ ok: false, output: 'refused pin' }) })
+  assert.equal(driveTask(refused.ctx, refused.io).status, 'done')
+  assert.equal(anchorRows(refused.io).at(-1)?.reason, 'refused')
+
+  const stillMoved = anchorSuiteIo({ suite: [{ ok: false, output: suiteRed('a.test.mjs', 1) }, { ok: true, output: 'suite green' }], checks: [anchorCheck(), anchorCheck()] })
+  assert.equal(driveTask(stillMoved.ctx, stillMoved.io).status, 'done')
+  assert.equal(anchorRows(stillMoved.io).at(-1)?.reason, 'still-moved')
+})
+
+test('suite anchor A5 caps mechanical repairs at one per drive', () => {
+  const red = (line) => ({ ok: false, output: suiteRed('a.test.mjs', line, 'moved-only red') })
+  const fixture = anchorSuiteIo({
+    suite: [red(1), red(2), red(3), { ok: true, output: 'suite green' }],
+    checks: [anchorCheck(), anchorCheck({ moved: 0, lines: 0 }), anchorCheck(), anchorCheck({ moved: 0, lines: 0 })],
+  })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd.includes('--repair-all')).length, 2)
+  assert.equal(fixture.io.calls.commits.filter(({ message }) => message === 'chore(anchors): repair pins moved by the lane').length, 1)
+  assert.equal(fixture.io.calls.assign.some(({ role, note }) => role === 'builder' && note === 'suite-red-fix'), true)
+})
+
 test('A1 proof scope re-proves only changed mutation files', () => {
   const mutations = proofScopeMutations()
   const result = mutationProofScope({

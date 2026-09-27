@@ -416,7 +416,8 @@ async function reapProcessGroup(child, { kill = process.kill, ps = () => spawnSy
       const rowPgid = Number(fields[0])
       const pid = Number(fields[1])
       const stat = fields[2]
-      if (fields.length !== 3 || !Number.isSafeInteger(rowPgid) || rowPgid <= 0 || !Number.isSafeInteger(pid) || pid <= 0 || typeof stat !== 'string' || !stat) throw new Error('ps table unreadable')
+      // Linux lists kernel threads (kthreadd, pid 2) with pgid 0; a zero is a real row, not an unreadable table.
+      if (fields.length !== 3 || !Number.isSafeInteger(rowPgid) || rowPgid < 0 || !Number.isSafeInteger(pid) || pid < 0 || typeof stat !== 'string' || !stat) throw new Error('ps table unreadable')
       if (rowPgid === pgid && !stat.includes('Z')) survivors.push(pid)
     }
     if (survivors.length === 0) return { state: 'dead' }
@@ -1932,7 +1933,7 @@ test('A1 RV1-1 run survives SIGTERM while awaitSeatsReady holds the prologue', a
           const [rawPgid, rawPid, stat, ...extra] = line.trim().split(/\s+/)
           const rowPgid = Number(rawPgid)
           const pid = Number(rawPid)
-          if (extra.length || !Number.isSafeInteger(rowPgid) || rowPgid <= 0 || !Number.isSafeInteger(pid) || pid <= 0 || !stat) throw new Error('ps table unreadable')
+          if (extra.length || !Number.isSafeInteger(rowPgid) || rowPgid < 0 || !Number.isSafeInteger(pid) || pid < 0 || !stat) throw new Error('ps table unreadable')
           if (rowPgid === child.pid && pid !== child.pid && !stat.includes('Z')) sawLiveDescendant = true
         }
       } catch (error) { observationError = error }
@@ -1972,6 +1973,18 @@ test('A3 live group past bound names surviving pids', async () => {
 test('A4 unreadable ps table is unknown and throws', async () => {
   await assert.rejects(reapProcessGroup({ pid: 1234 }, {
     kill: () => {}, ps: () => ({ status: 1, error: new Error('denied'), stdout: '' }), sleep: async () => {},
+  }), /ps table unreadable/)
+})
+
+test('A5 a Linux kernel-thread row with pgid 0 is a readable table, not unknown', async () => {
+  let probes = 0
+  const reaped = await reapProcessGroup({ pid: 1234 }, {
+    kill: () => {}, ps: () => { probes++; return { status: 0, stdout: '    0     2 S\n    0     3 I<\n    1     1 Ss\n 1234  1234 Z\n' } }, sleep: async () => {},
+  })
+  assert.deepEqual(reaped, { state: 'dead' })
+  assert.equal(probes, 1)
+  await assert.rejects(reapProcessGroup({ pid: 1234 }, {
+    kill: () => {}, ps: () => ({ status: 0, stdout: '   -1     2 S\n' }), sleep: async () => {},
   }), /ps table unreadable/)
 })
 

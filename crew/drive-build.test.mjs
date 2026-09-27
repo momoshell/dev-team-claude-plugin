@@ -312,11 +312,14 @@ function publishingAnchorIo(secondDiff) {
   let diffIndex = 0
   let repaired = false
   const gitFiles = ['git', ['ls', 'files'].join('-')].join(' ')
+  // The post-repair listing is served only once HEAD carries the repair commit: before it, a real
+  // `git diff base...HEAD` still lists the restored recovery manifest, so a re-measure taken ahead
+  // of the commit must see that stale listing and fail A6/A7.
   const io = publicationIo({ commands: {
-    'suite-cmd': () => ({ ok: true, output: ++suiteIndex === 1 ? suiteRed('a.test.mjs', 1, 'moved-only red') : PUBLISH_WARM_OUTPUT }),
     "git diff --name-only -z 'base1111'...HEAD": () => {
       diffIndex++
-      if (diffIndex === 1) return { ok: true, output: `a.mjs\0a.test.mjs\0${dispatch}\0${recovery}\0` }
+      const repairCommitted = io.calls.commits.some(({ files: committed }) => committed.includes(dispatch))
+      if (!repairCommitted) return { ok: true, output: `a.mjs\0a.test.mjs\0${dispatch}\0${recovery}\0` }
       return secondDiff
     },
   }})

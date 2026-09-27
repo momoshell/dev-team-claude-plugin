@@ -205,6 +205,11 @@ test('Claude ACP nested adapter launches its own binary', () => {
   } finally { cleanup(f) }
 })
 
+test('R3 unregistered ACP agent refuses by name', () => {
+  const f = fixture({ crew: { members: { builder: { agent: 'codex' } } }, adapters: { builder: { grants: {} } } })
+  try { assert.throws(() => assign(f), (error) => error.stage === 'acp-launch-unsupported' && /codex/.test(error.message)) } finally { cleanup(f) }
+})
+
 test('ACP named unsupported adapter refuses without Pi fallback', () => {
   const f = fixture({ crew: { members: { builder: { agent: 'unsupported-agent' } } }, adapters: { builder: { name: 'unsupported-agent', adapter: { capabilitiesFor() { return {} } } } } })
   try { assert.throws(() => assign(f), (error) => error.stage === 'acp-launch-unsupported' && /unsupported-agent/.test(error.message)) } finally { cleanup(f) }

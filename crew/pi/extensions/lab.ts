@@ -42,7 +42,7 @@
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -95,6 +95,7 @@ export const LAB_FRAME_QUEUE_MAX = 1024
 export const LAB_GREP_HITS_MAX = 500
 export const LAB_SUITE_PATHS_MAX = 64
 export const LAB_SUITE_FAILURES_MAX = 100
+export const LAB_SUITE_FAILURE_NAME_BYTES = 512
 export const LAB_REFUSALS = Object.freeze([
   'program-invalid', 'program-oversize', 'cwd-invalid',
   'no-scratch', 'scratch-failed',
@@ -117,7 +118,9 @@ export interface LabMutateResult { file: string; count: number }
 // BLOB and non-finite cells are unsupported: ledger rows carry only text, finite number and null scalars.
 export type LabLedgerValue = string | number | null
 export interface LabLedgerResult { columns: string[]; rows: LabLedgerValue[][]; row_count: number; truncated: boolean }
-export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[]; failures: { test: string; file: string | null; line: number | null }[]; failures_complete: boolean }
+// A named TAP leaf failure; file and line are null unless the location lies inside the scratch.
+export interface LabSuiteFailure { test: string; file: string | null; line: number | null }
+export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[]; failures: LabSuiteFailure[]; failures_complete: boolean }
 export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
   scratchCheckout(ref?: string): Promise<LabScratch>
@@ -893,10 +896,48 @@ export function createLabTool(deps: any = {}) {
     }
 
     let suiteText = ''
-    let fullSuiteText = ''
     let suiteTextTruncated = false
-    const failures: { test: string; file: string | null; line: number | null }[] = []
-    let pendingFailure: any = null
+    // The summary is read line by line from the WHOLE stream, so a summary past the
+    // display cap still counts; it holds two numbers, never a second copy of the text.
+    let summaryPass: number | null = null
+    let summaryFail: number | null = null
+    const failures: LabSuiteFailure[] = []
+    // A `not ok` leaf whose YAML block is still open. Its keys sit at exactly
+    // indent + 2, so an error body that quotes `type:` or `TODO` is never read as one.
+    let pendingFailure: { test: string; indent: number; type: string | null; file: string | null; line: number | null } | null = null
+    const scratchFile = (absolute: string): string | null => {
+      const file = relative(scratch.path, absolute)
+      if (!file || isAbsolute(file) || file === '..' || file.startsWith(`..${sep}`)) return null
+      return file.split(sep).join('/')
+    }
+    const recordFailure = () => {
+      const leaf = pendingFailure
+      pendingFailure = null
+      if (!leaf || leaf.type !== 'test') return
+      if (failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: leaf.test, file: leaf.file, line: leaf.line })
+    }
+    const readFailureLine = (text: string) => {
+      const indent = text.length - text.trimStart().length
+      if (pendingFailure && indent <= pendingFailure.indent) recordFailure()
+      if (pendingFailure && indent === pendingFailure.indent + 2) {
+        const key = text.trim()
+        if (key === '...') { recordFailure(); return }
+        const type = key.match(/^type: '(\w+)'$/)
+        if (type) pendingFailure.type = type[1]
+        const location = key.match(/^location: '(.+?):(\d+)(?::\d+)?'$/)
+        if (location) {
+          pendingFailure.file = scratchFile(location[1])
+          pendingFailure.line = pendingFailure.file === null ? null : Number(location[2])
+        }
+        return
+      }
+      const notOk = text.match(/^(\s*)not ok \d+ - (.*?)(\s+#\s*(?:TODO|SKIP)\b.*)?$/i)
+      if (!notOk) return
+      recordFailure()
+      // A TODO or SKIP directive is not counted in `# fail`, so it is not a failure.
+      if (notOk[3]) return
+      pendingFailure = { test: boundLabText(notOk[2].replace(/\\([\\#])/g, '$1'), LAB_SUITE_FAILURE_NAME_BYTES), indent: notOk[1].length, type: null, file: null, line: null }
+    }
     let overflow = false
     let pendingRefusal: string | null = null
     let parentClosed = false
@@ -917,31 +958,12 @@ export function createLabTool(deps: any = {}) {
     const appendSuite = (line: any, kind: string) => {
       if (overflow) return
       const rawLine = String(line ?? '')
-      const fullNext = `${fullSuiteText}${rawLine}\n`
-      fullSuiteText = Buffer.byteLength(fullNext, 'utf8') > LAB_STREAM_CAP_BYTES ? Buffer.from(fullNext, 'utf8').subarray(0, LAB_STREAM_CAP_BYTES).toString('utf8') : fullNext
-      const cleanLine = stripAnsi(rawLine)
-      if (pendingFailure && /^\s+\S/.test(cleanLine)) {
-        const location = cleanLine.match(/^\s+location:\s*['\"]?(.+?):(\d+)(?::\d+)?['\"]?\s*$/)
-        if (location && pendingFailure.type === 'test' && !pendingFailure.directive) {
-          const absolute = location[1]
-          const file = relative(scratch.path, absolute)
-          if (file && file !== '..' && !file.startsWith(`..${sep}`) && !file.startsWith(sep) && !file.split(sep).includes('..')) {
-            pendingFailure.file = file.split(sep).join('/')
-            pendingFailure.line = Number(location[2])
-          }
-        }
-        if (/type:\s*['\"]?test['\"]?/.test(cleanLine)) pendingFailure.type = 'test'
-        if (/type:\s*['\"]?(?:suite|child)['\"]?/.test(cleanLine)) pendingFailure.type = 'suite'
-        if (/\b(TODO|SKIP)\b/.test(cleanLine)) pendingFailure.directive = true
-      } else if (pendingFailure) {
-        if (pendingFailure.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
-        pendingFailure = null
-      }
-      const notOk = cleanLine.match(/^\s*not ok \d+ - (.+?)\s*$/)
-      if (notOk) {
-        if (pendingFailure?.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
-        pendingFailure = { test: Buffer.from(notOk[1]).length > 512 ? Buffer.from(notOk[1]).subarray(0, 512).toString('utf8') : notOk[1], type: null, directive: false, file: null, line: null }
-      }
+      const cleanLine = stripAnsi(rawLine).replace(/\r$/, '')
+      const lineSummary = parseTapSummary(cleanLine)
+      if (lineSummary.pass !== null) summaryPass = lineSummary.pass
+      if (lineSummary.fail !== null) summaryFail = lineSummary.fail
+      // node --test writes its TAP to stdout; stderr lines never open or close a leaf.
+      if (kind === 'stdout') readFailureLine(cleanLine)
       const before = suiteText
       const bounded = boundedTextInfo(`${suiteText}${rawLine}\n`)
       suiteText = bounded.text
@@ -985,9 +1007,8 @@ export function createLabTool(deps: any = {}) {
       if (!parentClosed || settled) return
       if (pendingRefusal) { finish({ refused: pendingRefusal, output: '', truncated: suiteTextTruncated, retained: false }); return }
       if (parentSignal || parentCode === null) { finish({ refused: 'suite-failed', output: suiteText, truncated: suiteTextTruncated }); return }
-      const stripped = stripAnsi(suiteText)
-      if (pendingFailure && pendingFailure.type === 'test' && !pendingFailure.directive && failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: pendingFailure.test, file: pendingFailure.file, line: pendingFailure.line })
-      const summary = parseTapSummary(fullSuiteText)
+      recordFailure()
+      const summary = { pass: summaryPass, fail: summaryFail }
       if (summary.pass === null || summary.fail === null) { finish({ refused: 'suite-failed', message: 'the suite produced no parseable TAP summary', output: suiteText, truncated: suiteTextTruncated }); return }
       finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated, failures }), output: suiteText, truncated: suiteTextTruncated })
     }

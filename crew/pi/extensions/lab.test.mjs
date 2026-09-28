@@ -1920,6 +1920,16 @@ test('gaps B3 (the failure list is capped at 100 entries)', async () => {
   assert.equal(run.details.result.failures[99].test, 'red 99')
 })
 
+test('gaps B3.bytes (a failure list too large for the result cap is cut to its byte budget and marked incomplete)', async () => {
+  const run = await gapsFakeSuite((cwd) => Array.from({ length: 100 }, (_, i) => gapsLeaf(i + 1, `${String(i).padStart(3, '0')}${'n'.repeat(497)}`, cwd)).join('') + '# pass 0\n# fail 100\n')
+  assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details).slice(0, 300))
+  const { failures } = run.details.result
+  assert.equal(failures.length > 0 && failures.length < 100, true, `kept ${failures.length}`)
+  assert.equal(Buffer.byteLength(JSON.stringify(failures), 'utf8') <= mod.LAB_SUITE_FAILURES_BYTES, true)
+  assert.deepEqual(failures.map((one) => one.test.slice(0, 3)), Array.from({ length: failures.length }, (_, i) => String(i).padStart(3, '0')))
+  assert.equal(run.details.result.failures_complete, false)
+})
+
 test('gaps B3.name (a failure name is bounded at 512 UTF-8 bytes without splitting a character)', async () => {
   const run = await gapsFakeSuite((cwd) => gapsLeaf(1, `x${'€'.repeat(400)}`, cwd) + '# pass 0\n# fail 1\n')
   const name = run.details.result.failures[0].test
@@ -1978,11 +1988,13 @@ test('gaps C2 (the refusal carries what the program printed, with the RPC and do
   assert.equal(run.content[0].text.endsWith('head 40\n{"rows":[[1]]}\n'), true)
 })
 
-test('gaps C2.opjson (printed JSON that has an op key but is not an RPC request stays in stdout)', async () => {
+test('gaps C2.opjson (printed JSON shaped like a request or a done frame stays in stdout and is never served)', async () => {
   const { repo } = gapsRepo()
-  const run = await realTool('console.log(JSON.stringify({ op: "log", value: 2 })); console.log(JSON.stringify({ id: 1, op: "x", args: [], extra: true }))', repo)
+  const lines = [{ op: 'log', value: 2 }, { id: 1, op: 'x', args: [], extra: true }, { id: 7, op: 'read', args: ['marker.txt'] }, { done: true, value: 123 }, { stdout: 'nested' }]
+  const run = await realTool(`for (const line of ${JSON.stringify(lines)}) console.log(JSON.stringify(line)); process.stdout.write(Buffer.from('bytes\\n'))`, repo)
   assert.equal(run.details.refused, 'program-returned-nothing')
-  assert.equal(run.details.stdout, '{"op":"log","value":2}\n{"id":1,"op":"x","args":[],"extra":true}\n')
+  assert.equal(run.details.stdout, lines.map((line) => `${JSON.stringify(line)}\n`).join('') + 'bytes\n')
+  assert.deepEqual(run.details.ops, [])
 })
 
 test('gaps C2.bound (the whole refusal content, hint included, stays inside the display cap and says it was cut)', async () => {

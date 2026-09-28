@@ -96,6 +96,9 @@ export const LAB_GREP_HITS_MAX = 500
 export const LAB_SUITE_PATHS_MAX = 64
 export const LAB_SUITE_FAILURES_MAX = 100
 export const LAB_SUITE_FAILURE_NAME_BYTES = 512
+// The serialized failure list's own budget, well inside the 50 KiB result cap:
+// 100 names at 512 bytes would not fit, and the list is cut (incomplete) instead.
+export const LAB_SUITE_FAILURES_BYTES = 16 * 1024
 export const LAB_REFUSALS = Object.freeze([
   'program-invalid', 'program-oversize', 'cwd-invalid',
   'no-scratch', 'scratch-failed',
@@ -550,9 +553,15 @@ export function parseTapSummary(text: string): any {
   return { pass, fail }
 }
 
-// A line the runner itself wrote: an RPC request, exactly {id, op, args} as rpc()
-// writes it, or a {done} frame the host takes as terminal. Anything else on stdout,
-// JSON with an `op` key included, is the program's own output.
+// What the program printed, as the runner wraps it: exactly {stdout: string}.
+function isProgramStdout(frame: any): boolean {
+  return Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame) && Object.keys(frame).length === 1 && typeof frame.stdout === 'string'
+}
+
+// A raw line (one the runner did not wrap, so written past process.stdout.write,
+// e.g. straight to fd 1) that is shaped like a runner frame: an exact {id, op, args}
+// request or a {done} frame. The host cannot tell such a line from the runner's own,
+// so it is not shown as program output; every other raw line is.
 function isProtocolFrame(frame: any): boolean {
   if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false
   if (frame.done) return true
@@ -612,11 +621,22 @@ const classifyDenial = (err) => {
   return null
 }
 const shortError = (err) => String(err && (err.stack || err.message) || err || '').slice(0, 4096)
+// The program's own stdout travels as {stdout} frames, so nothing it prints can be
+// taken for a protocol frame; the runner writes its own frames through rawWrite.
+const rawWrite = process.stdout.write.bind(process.stdout)
+const outDecoder = new StringDecoder('utf8')
+process.stdout.write = (chunk, encoding, callback) => {
+  const done = typeof encoding === 'function' ? encoding : callback
+  const text = typeof chunk === 'string' ? chunk : outDecoder.write(Buffer.from(chunk))
+  try { if (text) rawWrite(JSON.stringify({ stdout: text }) + '\\n') } catch { /* stdout may already be closed */ }
+  if (typeof done === 'function') queueMicrotask(() => done())
+  return true
+}
 let terminal = false
 const emit = (frame) => {
   if (terminal) return
   terminal = true
-  try { process.stdout.write(JSON.stringify(frame) + '\\n') } catch { /* stdout may already be closed */ }
+  try { rawWrite(JSON.stringify(frame) + '\\n') } catch { /* stdout may already be closed */ }
   process.exitCode = 0
   try { process.stdin.destroy() } catch { /* no stdin to destroy */ }
 }
@@ -635,7 +655,7 @@ const pending = new Map()
 const rpc = (op, args) => new Promise((resolve, reject) => {
   const id = nextId++
   pending.set(id, { resolve, reject })
-  try { process.stdout.write(JSON.stringify({ id, op, args }) + '\\n') }
+  try { rawWrite(JSON.stringify({ id, op, args }) + '\\n') }
   catch (err) { pending.delete(id); reject(err) }
 })
 const handleLine = (line) => {
@@ -912,6 +932,8 @@ export function createLabTool(deps: any = {}) {
     let summaryPass: number | null = null
     let summaryFail: number | null = null
     const failures: LabSuiteFailure[] = []
+    let failuresBytes = 0
+    let failuresCut = false
     // The test line whose YAML block is still open, and the leaf it names when it is
     // a counted failure (null for ok, TODO and SKIP lines). Every line deeper than the
     // test line belongs to its block, so an error body quoting `not ok`, `type:` or
@@ -925,8 +947,12 @@ export function createLabTool(deps: any = {}) {
     const recordFailure = () => {
       const leaf = openBlock?.leaf
       openBlock = null
-      if (!leaf || leaf.type !== 'test') return
-      if (failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: leaf.test, file: leaf.file, line: leaf.line })
+      if (!leaf || leaf.type !== 'test' || failuresCut) return
+      const entry = { test: leaf.test, file: leaf.file, line: leaf.line }
+      const bytes = Buffer.byteLength(JSON.stringify(entry), 'utf8') + 1
+      // The list is a prefix: once one entry does not fit, none after it is added.
+      if (failures.length < LAB_SUITE_FAILURES_MAX && failuresBytes + bytes <= LAB_SUITE_FAILURES_BYTES) { failures.push(entry); failuresBytes += bytes }
+      else failuresCut = true
     }
     const readFailureLine = (text: string) => {
       if (!text.trim()) return
@@ -1356,9 +1382,9 @@ export function createLabTool(deps: any = {}) {
           outputText = bounded.text
           outputTruncated = outputTruncated || bounded.truncated
         }
-        const appendStdout = (line: any) => {
+        const appendStdout = (text: any) => {
           if (pendingReason === 'output-oversize' || stdoutTruncated) return
-          const bounded = boundedTextInfo(`${stdoutText}${String(line ?? '')}\n`)
+          const bounded = boundedTextInfo(`${stdoutText}${String(text ?? '')}`)
           stdoutText = bounded.text
           stdoutTruncated = bounded.truncated
         }
@@ -1460,8 +1486,9 @@ export function createLabTool(deps: any = {}) {
           appendOutput(line, kind)
           if (kind !== 'stdout') return
           let frame: any
-          try { frame = JSON.parse(String(line).trim()) } catch { appendStdout(line); collector.served(); return }
-          if (!isProtocolFrame(frame)) appendStdout(line)
+          try { frame = JSON.parse(String(line).trim()) } catch { appendStdout(`${line}\n`); collector.served(); return }
+          if (isProgramStdout(frame)) { appendStdout(frame.stdout); collector.served(); return }
+          if (!isProtocolFrame(frame)) appendStdout(`${line}\n`)
           if (!frame || frame.done) {
             collector.served()
             if (frame?.done) {

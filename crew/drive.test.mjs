@@ -2182,7 +2182,7 @@ test('coded shape topology is measured against every successful executor family'
       strictEnvelopeIo(verifyOnlyEnvelope, 'reviewer', 'run-verify-783'),
     ),
   }
-  const measured = Object.entries(VARIANTS).map(([name, shape]) => {
+  const measured = Object.keys(EXECUTOR_TOPOLOGIES).map((name) => [name, VARIANTS[name]]).map(([name, shape]) => {
     const result = fixtures[name]()
     assert.equal(result.status, 'done', name)
     const row = {
@@ -2197,10 +2197,11 @@ test('coded shape topology is measured against every successful executor family'
     assert.deepEqual(row.coded, { defect: null, detail: null }, name)
     return row
   })
-  assert.deepEqual(measured.map(({ name }) => name), Object.keys(VARIANTS))
-  assert.equal(measured.length, 7)
+  assert.deepEqual(measured.map(({ name }) => name), Object.keys(EXECUTOR_TOPOLOGIES))
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
+  assert.equal(measured.length, Object.keys(EXECUTOR_TOPOLOGIES).length)
 
-  const allHeads = [...new Set(Object.values(VARIANTS).flatMap(({ stages }) => stages))]
+  const allHeads = [...new Set(Object.values(EXECUTOR_TOPOLOGIES).flatMap(({ stages }) => stages))]
   for (const row of measured) {
     const shape = VARIANTS[row.name]
     const expected = EXECUTOR_TOPOLOGIES[row.name].stages
@@ -2362,7 +2363,16 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
     return true
   }
   deeplyFrozen(EXECUTOR_TOPOLOGIES)
-  for (const [name, shape] of Object.entries(VARIANTS)) assert.deepEqual(shapeValidationDefect(shape, name), { defect: null, detail: null })
+  for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.deepEqual(shapeValidationDefect(VARIANTS[name], name), { defect: null, detail: null })
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
+  assert.deepEqual(VARIANTS.stepped.stages, VARIANTS.full.stages)
+  assert.notStrictEqual(VARIANTS.stepped.stages, VARIANTS.full.stages)
+  assert.equal(Object.isFrozen(VARIANTS.stepped.stages), true)
+  assert.equal(shapeValidationDefect({ ...VARIANTS.stepped, required_seats: ['planner'] }, 'stepped').defect, 'seats-mismatch')
+  assert.equal(shapeValidationDefect({ ...VARIANTS.stepped, stages: VARIANTS.stepped.stages.slice(1) }, 'stepped').defect, 'sources-invalid')
+  assert.deepEqual(shapeValidationDefect(VARIANTS.stepped, 'stepped'), {
+    defect: 'stage-unimplemented', detail: 'the stepped executor is not built (ADR-048)',
+  })
   const legacy = [
     [null, undefined, 'no declaration'],
     [{ ...VARIANTS.full, execution: 'unknown' }, 'full', 'execution must be one of reviewed, envelope'],

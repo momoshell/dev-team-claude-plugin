@@ -12,7 +12,8 @@ lane from the checkout.
   "review_panel": { "trigger": "a read-only three-seat base/head code review", "ctx": [] },
   "repair":   { "trigger": "CI red",                        "ctx": ["--validation-lane"] },
   "directed": { "trigger": "an orchestrator-authored plan", "ctx": ["--validation-lane"] },
-  "verify_only": { "trigger": "a declared behavior to verify", "ctx": [] }
+  "verify_only": { "trigger": "a declared behavior to verify", "ctx": [] },
+  "stepped": { "trigger": "declared but refused until the ADR-048 executor exists", "ctx": [] }
 }
 ```
 
@@ -23,6 +24,7 @@ lane from the checkout.
 | `review_only` | A declared base/head change set needs a structured code review. | The `reviewer` seat only; an optional tech-lead may be booted for rigorous assurance. | `none`. | Read-only validation; no checkout writes. |
 | `review_panel` | A declared base/head change set needs an independent three-seat code review. | `reviewer`, `tech-lead`, and `lead`; reviewer and tech-lead are blind, then lead adjudicates fused divergences. | `none`. | Immutable base/head identity, separate per-seat coverage, one shared changed-files denominator, fused actionable findings, and retained dismissed provenance; no checkout writes or commit. |
 | `verify_only` | A declared behavior needs independent verification evidence. | The `reviewer` seat only. | `none`. | Read-only validation; no lane context and no checkout writes. |
+| `stepped` | Declared but refused until the ADR-048 executor exists; do not dispatch. | None. | None. | No context required. |
 | `repair` | CI is red and the failing run already supplies the bounded scope and validation lane. | The requested tier's seats. | `planned`. | Inherited scope plus `--validation-lane`; its lane source is `ctx`. |
 | `directed` | An orchestrator-authored plan already declares the gate and write surface. | `builder` and `reviewer`. | `planned`. | The brief supplies scope and gate; `--validation-lane` supplies the `ctx` lane. |
 

@@ -3229,7 +3229,7 @@ test('A1-directed: directed preserves its baseline-before-build trace', () => {
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
   assert.equal(Object.isFrozen(VARIANTS), true)
-  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'verify_only'])
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'verify_only', 'stepped'])
   assert.deepEqual(ENVELOPE_FIELD_KINDS, ['text', 'records', 'paths', 'object'])
   assert.equal(VARIANTS.full.required_seats, 'tier')
   assert.match(VARIANTS.full.accepted_by, /review.*pass/)

@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
+import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
@@ -3902,6 +3902,9 @@ function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
     const where = lane ? ` for lane ${lane}` : ''
     if (selected !== undefined && selected !== null && !VARIANT_NAMES.includes(String(selected))) {
       refuse(`unknown run variant${where}: ${selected}`, RUN_FAILED)
+    }
+    if (shapeDefect(VARIANTS[String(selected ?? 'full')], String(selected ?? 'full'))) {
+      refuse(`run variant ${selected}${where}: ${shapeDefect(VARIANTS[String(selected ?? 'full')], String(selected ?? 'full'))}`, RUN_FAILED)
     }
     if (VARIANTS[String(selected ?? 'full')]?.sources?.lane === 'ctx'
         && (typeof validationLane !== 'string' || validationLane.trim() === '')) {

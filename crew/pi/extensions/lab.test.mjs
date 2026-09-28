@@ -1991,10 +1991,12 @@ test('gaps C2 (the refusal carries what the program printed, with the RPC and do
 test('gaps C2.opjson (printed JSON shaped like a request or a done frame stays in stdout and is never served)', async () => {
   const { repo } = gapsRepo()
   const lines = [{ op: 'log', value: 2 }, { id: 1, op: 'x', args: [], extra: true }, { id: 7, op: 'read', args: ['marker.txt'] }, { done: true, value: 123 }, { stdout: 'nested' }]
-  const run = await realTool(`for (const line of ${JSON.stringify(lines)}) console.log(JSON.stringify(line)); process.stdout.write(Buffer.from('bytes\\n'))`, repo)
+  const run = await realTool(`for (const line of ${JSON.stringify(lines)}) console.log(JSON.stringify(line)); process.stdout.write(Buffer.from('bytes\\n')); (await import('node:fs')).writeSync(1, '{\"op\":\"raw\"}\\n')`, repo)
   assert.equal(run.details.refused, 'program-returned-nothing')
-  assert.equal(run.details.stdout, lines.map((line) => `${JSON.stringify(line)}\n`).join('') + 'bytes\n')
-  assert.deepEqual(run.details.ops, [])
+  // The last line bypasses process.stdout.write (straight to fd 1): not frame-shaped, so still shown.
+  assert.equal(run.details.stdout, lines.map((line) => `${JSON.stringify(line)}\n`).join('') + 'bytes\n{"op":"raw"}\n')
+  // No console-printed line reached the host's request handling; only the raw fd-1 line can.
+  assert.deepEqual(run.details.ops.filter((op) => op !== 'raw'), [])
 })
 
 test('gaps C2.bound (the whole refusal content, hint included, stays inside the display cap and says it was cut)', async () => {

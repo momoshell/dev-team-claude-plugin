@@ -46,6 +46,13 @@ test('ADR047 B1 none clears advisor and noncanonical values refuse', () => {
   assert.equal(resolveTier(shippedRoster(), 'build', { 'model-advisor': 'none' }).advisor, null)
   assert.throws(() => resolveTier(shippedRoster(), 'build', { 'model-advisor': 'sonnet' }), /canonical roster model/)
 })
+test('ADR047 Q1 none refuses an agent or effort flag it would silently discard', () => {
+  for (const extra of [{ 'agent-advisor': 'claude' }, { 'effort-advisor': 'high' }]) {
+    assert.throws(() => resolveTier(shippedRoster(), 'build', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
+    assert.throws(() => resolveTier(shippedRoster(), 'judge', { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
+  }
+  assert.equal(resolveTier(shippedRoster(), 'build', { 'effort-advisor': 'high' }).advisor.effort, 'high')
+})
 
 // Focused test-local schema evaluator for the fallback fixtures. The production
 // refresh validator intentionally supports a smaller keyword set, so these

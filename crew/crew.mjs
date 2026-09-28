@@ -1131,6 +1131,9 @@ export function resolveTier(roster, tier, args = {}) {
     let id = cell.id
     advisor = args['model-advisor'] === 'none' ? null : cell
     if (advisor) {
+    // --model-advisor none takes the cell away; an agent or effort flag beside it names intent
+    // that cannot take effect, so it refuses rather than being dropped.
+    if (args['model-advisor'] === 'none' && (agentOverride || effortOverride)) throw new Error('--agent-advisor/--effort-advisor given with --model-advisor none: there is no advisor cell to apply them to')
       if (modelOverride) {
         if (!Object.hasOwn(roster.models || {}, modelOverride)) throw new Error(`--model-advisor must name a canonical roster model key or none: ${modelOverride}`)
         ;[provider, id] = modelOverride.split('/')

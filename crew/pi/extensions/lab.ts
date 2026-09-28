@@ -42,7 +42,7 @@
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -94,6 +94,11 @@ export const LAB_RESIDUAL_CAP_BYTES = 1 * 1024 * 1024
 export const LAB_FRAME_QUEUE_MAX = 1024
 export const LAB_GREP_HITS_MAX = 500
 export const LAB_SUITE_PATHS_MAX = 64
+export const LAB_SUITE_FAILURES_MAX = 100
+export const LAB_SUITE_FAILURE_NAME_BYTES = 512
+// The serialized failure list's own budget, well inside the 50 KiB result cap:
+// 100 names at 512 bytes would not fit, and the list is cut (incomplete) instead.
+export const LAB_SUITE_FAILURES_BYTES = 16 * 1024
 export const LAB_REFUSALS = Object.freeze([
   'program-invalid', 'program-oversize', 'cwd-invalid',
   'no-scratch', 'scratch-failed',
@@ -103,7 +108,7 @@ export const LAB_REFUSALS = Object.freeze([
   'op-timeout', 'op-oversize', 'unknown-op',
   'skill-grant-invalid', 'op-ungranted',
   'child-denied', 'child-timeout', 'child-unreaped', 'child-failed', 'net-unenforceable',
-  'suite-failed', 'output-oversize',
+  'suite-failed', 'output-oversize', 'ref-unresolved', 'program-returned-nothing',
   'ledger-absent', 'ledger-statement-refused', 'ledger-value-unsupported',
 ])
 
@@ -116,10 +121,12 @@ export interface LabMutateResult { file: string; count: number }
 // BLOB and non-finite cells are unsupported: ledger rows carry only text, finite number and null scalars.
 export type LabLedgerValue = string | number | null
 export interface LabLedgerResult { columns: string[]; rows: LabLedgerValue[][]; row_count: number; truncated: boolean }
-export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[] }
+// A named TAP leaf failure; file and line are null unless the location lies inside the scratch.
+export interface LabSuiteFailure { test: string; file: string | null; line: number | null }
+export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[]; failures: LabSuiteFailure[]; failures_complete: boolean }
 export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
-  scratchCheckout(): Promise<LabScratch>
+  scratchCheckout(ref?: string): Promise<LabScratch>
   read(file: string): Promise<LabReadResult>
   grep(pattern: string, opts?: LabGrepOptions): Promise<LabGrepResult>
   mutate(file: string, find: string, replace: string): Promise<LabMutateResult>
@@ -132,7 +139,7 @@ export const LAB_PARAMS = {
   additionalProperties: true,
   properties: {
     program: {
-      description: 'A seat-authored program using scratchCheckout, read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
+      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. It returns its value with export default <value>; console.log output is not the result. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
     skill: {
       description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
@@ -530,8 +537,8 @@ export function labStructuralFailures(paths: any = []): LabStructuralFailure[] {
 }
 
 // The ONE construction site for the value the seat-authored program reads.
-export function labSuiteResult({ paths, pass, fail, exitCode, truncated }: any): LabSuiteResult {
-  return { paths, pass, fail, exit_code: exitCode, host_authority: true, truncated, structural_failures: labStructuralFailures(paths) }
+export function labSuiteResult({ paths, pass, fail, exitCode, truncated, failures = [] }: any): LabSuiteResult {
+  return { paths, pass, fail, exit_code: exitCode, host_authority: true, truncated, structural_failures: labStructuralFailures(paths), failures, failures_complete: failures.length === fail }
 }
 
 export function parseTapSummary(text: string): any {
@@ -544,6 +551,22 @@ export function parseTapSummary(text: string): any {
     if (failMatch) fail = Number(failMatch[1])
   }
   return { pass, fail }
+}
+
+// What the program printed, as the runner wraps it: exactly {stdout: string}.
+function isProgramStdout(frame: any): boolean {
+  return Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame) && Object.keys(frame).length === 1 && typeof frame.stdout === 'string'
+}
+
+// A raw line (one the runner did not wrap, so written past process.stdout.write,
+// e.g. straight to fd 1) that is shaped like a runner frame: an exact {id, op, args}
+// request or a {done} frame. The host cannot tell such a line from the runner's own,
+// so it is not shown as program output; every other raw line is.
+function isProtocolFrame(frame: any): boolean {
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false
+  if (frame.done) return true
+  const keys = Object.keys(frame)
+  return keys.length === 3 && Number.isInteger(frame.id) && typeof frame.op === 'string' && Array.isArray(frame.args)
 }
 
 function stripAnsi(text: string): string {
@@ -598,11 +621,22 @@ const classifyDenial = (err) => {
   return null
 }
 const shortError = (err) => String(err && (err.stack || err.message) || err || '').slice(0, 4096)
+// The program's own stdout travels as {stdout} frames, so nothing it prints can be
+// taken for a protocol frame; the runner writes its own frames through rawWrite.
+const rawWrite = process.stdout.write.bind(process.stdout)
+const outDecoder = new StringDecoder('utf8')
+process.stdout.write = (chunk, encoding, callback) => {
+  const done = typeof encoding === 'function' ? encoding : callback
+  const text = typeof chunk === 'string' ? chunk : outDecoder.write(Buffer.from(chunk))
+  try { if (text) rawWrite(JSON.stringify({ stdout: text }) + '\\n') } catch { /* stdout may already be closed */ }
+  if (typeof done === 'function') queueMicrotask(() => done())
+  return true
+}
 let terminal = false
 const emit = (frame) => {
   if (terminal) return
   terminal = true
-  try { process.stdout.write(JSON.stringify(frame) + '\\n') } catch { /* stdout may already be closed */ }
+  try { rawWrite(JSON.stringify(frame) + '\\n') } catch { /* stdout may already be closed */ }
   process.exitCode = 0
   try { process.stdin.destroy() } catch { /* no stdin to destroy */ }
 }
@@ -621,7 +655,7 @@ const pending = new Map()
 const rpc = (op, args) => new Promise((resolve, reject) => {
   const id = nextId++
   pending.set(id, { resolve, reject })
-  try { process.stdout.write(JSON.stringify({ id, op, args }) + '\\n') }
+  try { rawWrite(JSON.stringify({ id, op, args }) + '\\n') }
   catch (err) { pending.delete(id); reject(err) }
 })
 const handleLine = (line) => {
@@ -661,7 +695,8 @@ const main = async () => {
   globalThis.lab = Object.freeze(lab)
   try {
     const imported = await import(programUrl)
-    emit({ done: true, result: imported.default === undefined ? null : imported.default })
+    if (imported.default === undefined) emit({ done: true, refused: 'program-returned-nothing' })
+    else emit({ done: true, result: imported.default })
   } catch (err) { report(err) }
 }
 main().catch(report)
@@ -758,6 +793,7 @@ export function createLabTool(deps: any = {}) {
   }
 
   let scratchPromise: Promise<LabScratch> | null = null
+  let scratchHeadSha: string | null = null
   let scratchRoot: string | null = null
   let scratchParent: string | null = null
   let scratchRetained: string | null = null
@@ -765,11 +801,24 @@ export function createLabTool(deps: any = {}) {
   // In-flight ledger query children, cancelled with the program that asked for them.
   const ledgerCancels = new Set<() => void>()
 
-  const makeScratch = async (): Promise<LabScratch> => {
+  const scratchFailure = (error: any) => error?.labRefusal ? error : refusalError(error?.code === 'ETIMEDOUT' ? 'op-timeout' : error?.code === 'ENOBUFS' ? 'op-oversize' : 'scratch-failed', 'scratch checkout failed')
+  // The ONE place a scratch ref is validated and resolved; every guard below has
+  // exactly one site, so one mutation of it is observable.
+  const resolveScratchRef = (ref: any, repoRoot: string): string => {
+    if (ref === undefined) return requiredGitValue(['rev-parse', 'HEAD'], repoRoot)
+    if (typeof ref !== 'string' || !ref.length) throw refusalError('op-args-invalid', 'scratchCheckout ref is invalid')
+    if (ref.startsWith('-')) throw refusalError('op-args-invalid', 'scratchCheckout ref must not be option-shaped')
+    const run = syncGit(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`], repoRoot)
+    if (run?.error || (run?.status !== 0 && run?.status !== 1)) throw refusalError('scratch-failed', 'git could not resolve the ref')
+    const sha = run.status === 0 ? String(run.stdout || '').trim() : ''
+    if (!sha) throw refusalError('ref-unresolved', 'scratchCheckout ref does not name a commit')
+    return sha
+  }
+
+  const makeScratch = async (sourceHeadSha: string): Promise<LabScratch> => {
     const repoRoot = currentRepoRoot
     let root: string | null = null
     try {
-      const sourceHeadSha = requiredGitValue(['rev-parse', 'HEAD'], repoRoot)
       root = String(mkTempDir())
       scratchParent = root
       const scratch = join(root, 'wt')
@@ -785,11 +834,22 @@ export function createLabTool(deps: any = {}) {
       const attached = optionalGitValue(['symbolic-ref', '-q', 'HEAD'], resolvedScratch)
       return { path: resolvedScratch, head, detached: !attached, origin_url: originUrl, origin_head: originHead }
     } catch (error: any) {
-      if (error?.labRefusal) throw error
-      throw refusalError(error?.code === 'ETIMEDOUT' ? 'op-timeout' : error?.code === 'ENOBUFS' ? 'op-oversize' : 'scratch-failed', 'scratch checkout failed')
+      throw scratchFailure(error)
     }
   }
-  const ensureScratch = () => (scratchPromise ??= makeScratch())
+  // One scratch per program run: a no-ref call after the first reuses it, and an
+  // explicit ref must name the commit already checked out.
+  const ensureScratch = (ref?: any): Promise<LabScratch> => {
+    if (scratchPromise && ref === undefined) return scratchPromise
+    let sha: string
+    try { sha = resolveScratchRef(ref, currentRepoRoot) } catch (error: any) { throw scratchFailure(error) }
+    if (scratchPromise) {
+      if (sha !== scratchHeadSha) throw refusalError('op-args-invalid', 'this program already checked out a different commit')
+      return scratchPromise
+    }
+    scratchHeadSha = sha
+    return (scratchPromise = makeScratch(sha))
+  }
 
   const validateOptions = (opts: any): any => {
     if (opts === undefined) return {}
@@ -867,6 +927,59 @@ export function createLabTool(deps: any = {}) {
 
     let suiteText = ''
     let suiteTextTruncated = false
+    // The summary is read line by line from the WHOLE stream, so a summary past the
+    // display cap still counts; it holds two numbers, never a second copy of the text.
+    let summaryPass: number | null = null
+    let summaryFail: number | null = null
+    const failures: LabSuiteFailure[] = []
+    let failuresBytes = 0
+    let failuresCut = false
+    // The test line whose YAML block is still open, and the leaf it names when it is
+    // a counted failure (null for ok, TODO and SKIP lines). Every line deeper than the
+    // test line belongs to its block, so an error body quoting `not ok`, `type:` or
+    // `TODO` is never read as TAP; only keys at exactly indent + 2 are read.
+    let openBlock: { indent: number; leaf: { test: string; type: string | null; file: string | null; line: number | null } | null } | null = null
+    const scratchFile = (absolute: string): string | null => {
+      const file = relative(scratch.path, absolute)
+      if (!file || isAbsolute(file) || file === '..' || file.startsWith(`..${sep}`)) return null
+      return file.split(sep).join('/')
+    }
+    const recordFailure = () => {
+      const leaf = openBlock?.leaf
+      openBlock = null
+      if (!leaf || leaf.type !== 'test' || failuresCut) return
+      const entry = { test: leaf.test, file: leaf.file, line: leaf.line }
+      const bytes = Buffer.byteLength(JSON.stringify(entry), 'utf8') + 1
+      // The list is a prefix: once one entry does not fit, none after it is added.
+      if (failures.length < LAB_SUITE_FAILURES_MAX && failuresBytes + bytes <= LAB_SUITE_FAILURES_BYTES) { failures.push(entry); failuresBytes += bytes }
+      else failuresCut = true
+    }
+    const readFailureLine = (text: string) => {
+      if (!text.trim()) return
+      const indent = text.length - text.trimStart().length
+      if (openBlock && indent > openBlock.indent) {
+        const leaf = openBlock.leaf
+        if (indent !== openBlock.indent + 2) return
+        const key = text.trim()
+        if (key === '...') { recordFailure(); return }
+        if (!leaf) return
+        const type = key.match(/^type: '(\w+)'$/)
+        if (type) leaf.type = type[1]
+        const location = key.match(/^location: '(.+?):(\d+)(?::\d+)?'$/)
+        if (location) {
+          leaf.file = scratchFile(location[1])
+          leaf.line = leaf.file === null ? null : Number(location[2])
+        }
+        return
+      }
+      recordFailure()
+      const testLine = text.match(/^(\s*)(not )?ok \d+(?: - (.*?))?(\s+#\s*(?:TODO|SKIP)\b.*)?$/i)
+      if (!testLine) return
+      // An ok line, or a TODO or SKIP directive (not counted in `# fail`), still opens
+      // a block whose body must be skipped, but names no failure.
+      const failed = Boolean(testLine[2]) && !testLine[4]
+      openBlock = { indent: testLine[1].length, leaf: failed ? { test: boundLabText(String(testLine[3] ?? '').replace(/\\([\\#])/g, '$1'), LAB_SUITE_FAILURE_NAME_BYTES), type: null, file: null, line: null } : null }
+    }
     let overflow = false
     let pendingRefusal: string | null = null
     let parentClosed = false
@@ -886,8 +999,15 @@ export function createLabTool(deps: any = {}) {
     let collector: any
     const appendSuite = (line: any, kind: string) => {
       if (overflow) return
+      const rawLine = String(line ?? '')
+      const cleanLine = stripAnsi(rawLine).replace(/\r$/, '')
+      const lineSummary = parseTapSummary(cleanLine)
+      if (lineSummary.pass !== null) summaryPass = lineSummary.pass
+      if (lineSummary.fail !== null) summaryFail = lineSummary.fail
+      // node --test writes its TAP to stdout; stderr lines never open or close a leaf.
+      if (kind === 'stdout') readFailureLine(cleanLine)
       const before = suiteText
-      const bounded = boundedTextInfo(`${suiteText}${String(line ?? '')}\n`)
+      const bounded = boundedTextInfo(`${suiteText}${rawLine}\n`)
       suiteText = bounded.text
       suiteTextTruncated = suiteTextTruncated || bounded.truncated
       if (suiteText.length === before.length && String(line ?? '').length) suiteTextTruncated = true
@@ -929,10 +1049,10 @@ export function createLabTool(deps: any = {}) {
       if (!parentClosed || settled) return
       if (pendingRefusal) { finish({ refused: pendingRefusal, output: '', truncated: suiteTextTruncated, retained: false }); return }
       if (parentSignal || parentCode === null) { finish({ refused: 'suite-failed', output: suiteText, truncated: suiteTextTruncated }); return }
-      const stripped = stripAnsi(suiteText)
-      const summary = parseTapSummary(stripped)
+      recordFailure()
+      const summary = { pass: summaryPass, fail: summaryFail }
       if (summary.pass === null || summary.fail === null) { finish({ refused: 'suite-failed', message: 'the suite produced no parseable TAP summary', output: suiteText, truncated: suiteTextTruncated }); return }
-      finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated }), output: suiteText, truncated: suiteTextTruncated })
+      finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated, failures }), output: suiteText, truncated: suiteTextTruncated })
     }
     const probeGroup = () => {
       if (settled) return
@@ -1011,12 +1131,13 @@ export function createLabTool(deps: any = {}) {
   return {
     name: LAB_TOOL_NAME,
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
+    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. A program returns its value with export default <value> (top-level await works); console.log output is not the result, and a program that exports nothing is refused program-returned-nothing with its stdout. scratchCheckout(ref?) checks out HEAD or the named commit or branch; runSuite reports named failures with scratch-relative file and line. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
       const spawnId = randomId()
       scratchPromise = null
+      scratchHeadSha = null
       scratchRoot = null
       scratchParent = null
       scratchRetained = null
@@ -1033,6 +1154,8 @@ export function createLabTool(deps: any = {}) {
       let resultValue: any = null
       let childOutput = ''
       let childOutputTruncated = false
+      let programStdout = ''
+      let programStdoutTruncated = false
       let errorText = ''
       let dir: string | null = null
       let programPath = ''
@@ -1053,10 +1176,22 @@ export function createLabTool(deps: any = {}) {
           if (denial) details.denial = denial
           if (audit) details.audit = audit
           if (errorText) details.error = boundLabText(errorText, 4096)
+          if (refused === 'program-returned-nothing') {
+            details.stdout = programStdout
+            details.stdout_truncated = programStdoutTruncated
+          }
         }
-        const text = outcome === 'ok'
+        let text = outcome === 'ok'
           ? boundLabText(resultValue === undefined ? 'null' : safeJson(resultValue) || 'null')
           : `refused: ${refused || 'child-failed'}`
+        // details never reach the model, so the seat is told here how to return a value
+        // and shown what it printed instead.
+        if (refused === 'program-returned-nothing') {
+          // The whole content, hint included, stays inside the display cap.
+          const hint = (truncated: boolean) => `${text}\nThe program exported no default value; end it with export default <value>. Its stdout${truncated ? ' (truncated)' : ''}:\n`
+          const shown = boundLabText(programStdout, LAB_OUTPUT_CAP_BYTES - Buffer.byteLength(hint(true), 'utf8'))
+          text = `${hint(programStdoutTruncated || shown.length < programStdout.length)}${shown}`
+        }
         return { content: [{ type: 'text', text }], details }
       }
       const refuseEarly = (code: string) => {
@@ -1098,8 +1233,8 @@ export function createLabTool(deps: any = {}) {
         const args = Array.isArray(frame.args) ? frame.args : null
         if (!args) throw refusalError('op-args-invalid', 'operation arguments are invalid')
         if (op === 'scratchCheckout') {
-          if (args.length) throw refusalError('op-args-invalid', 'scratchCheckout takes no arguments')
-          return ensureScratch()
+          if (args.length > 1) throw refusalError('op-args-invalid', 'scratchCheckout takes at most one ref')
+          return ensureScratch(args.length ? args[0] : undefined)
         }
         if (op === 'ledger') {
           if (args.length < 1 || args.length > 2) throw refusalError('op-args-invalid', 'ledger takes SQL and optional params')
@@ -1237,11 +1372,21 @@ export function createLabTool(deps: any = {}) {
         let childError = ''
         let outputText = ''
         let outputTruncated = false
+        // What the program printed to stdout, with the RPC request and terminal frames
+        // taken out: this is what a program that exports nothing is shown.
+        let stdoutText = ''
+        let stdoutTruncated = false
         const appendOutput = (line: any, kind: string) => {
           if (pendingReason === 'output-oversize') return
           const bounded = boundedTextInfo(`${outputText}${String(line ?? '')}\n`)
           outputText = bounded.text
           outputTruncated = outputTruncated || bounded.truncated
+        }
+        const appendStdout = (text: any) => {
+          if (pendingReason === 'output-oversize' || stdoutTruncated) return
+          const bounded = boundedTextInfo(`${stdoutText}${String(text ?? '')}`)
+          stdoutText = bounded.text
+          stdoutTruncated = bounded.truncated
         }
         const send = (frame: any) => {
           if (!child?.stdin || child.stdin.destroyed) return
@@ -1267,7 +1412,7 @@ export function createLabTool(deps: any = {}) {
           if (signal && abortHandler) signal.removeEventListener?.('abort', abortHandler)
           const synthetic = reason === 'child-failed' || reason === 'child-unreaped'
           if (synthetic) disarm()
-          resolve({ reason, code, signal: signalValue, terminal, output: outputText, truncated: outputTruncated, bytes: collector?.bytesSeen?.() || 0, error: childError })
+          resolve({ reason, code, signal: signalValue, terminal, output: outputText, truncated: outputTruncated, stdout: stdoutText, stdoutTruncated, bytes: collector?.bytesSeen?.() || 0, error: childError })
         }
         const settle = (reason: string, code: any = null, signalValue: any = null) => {
           acceptingOps = false
@@ -1341,7 +1486,9 @@ export function createLabTool(deps: any = {}) {
           appendOutput(line, kind)
           if (kind !== 'stdout') return
           let frame: any
-          try { frame = JSON.parse(String(line).trim()) } catch { collector.served(); return }
+          try { frame = JSON.parse(String(line).trim()) } catch { appendStdout(`${line}\n`); collector.served(); return }
+          if (isProgramStdout(frame)) { appendStdout(frame.stdout); collector.served(); return }
+          if (!isProtocolFrame(frame)) appendStdout(`${line}\n`)
           if (!frame || frame.done) {
             collector.served()
             if (frame?.done) {
@@ -1359,6 +1506,8 @@ export function createLabTool(deps: any = {}) {
         const onOverflow = () => {
           outputText = ''
           outputTruncated = true
+          stdoutText = ''
+          stdoutTruncated = true
           requestTermination('output-oversize')
         }
         collector = createStreamCollector({ capBytes: streamCapBytes, residualCapBytes, frameQueueMax, onLine, onOverflow })
@@ -1400,6 +1549,8 @@ export function createLabTool(deps: any = {}) {
         const child = await runProgramChild()
         childOutput = child.output
         childOutputTruncated = child.truncated
+        programStdout = child.stdout || ''
+        programStdoutTruncated = child.stdoutTruncated === true
         errorText = child.error || ''
         if (child.reason === 'output-oversize') refused = 'output-oversize'
         else if (child.terminal?.refused) {

@@ -2970,8 +2970,10 @@ export async function bootCmd(args, deps = {}) {
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
   const bootEnv = { ...(deps.env ?? process.env) }
   const inheritedAdvisorEnv = bootEnv.DEVTEAM_WORKER === '1' && bootEnv.CREW_ADVISOR_PROVENANCE === 'seat-transitional'
-  if (bootEnv.CREW_ADVISOR_MODEL && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_MODEL is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
-  if (bootEnv.CREW_ADVISOR_ENDPOINT && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_ENDPOINT is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
+  // ADR-047 decision 4 refuses a boot that SETS either variable: an exported empty string is
+  // still a stale operator configuration the boot would otherwise ignore, so presence refuses.
+  if (bootEnv.CREW_ADVISOR_MODEL !== undefined && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_MODEL is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
+  if (bootEnv.CREW_ADVISOR_ENDPOINT !== undefined && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_ENDPOINT is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
   const charterArm = args['charter-arm'] ?? 'control'
   if (!CHARTER_ARMS.includes(charterArm)) {
     throw new Error(`invalid --charter-arm ${JSON.stringify(charterArm)}; expected one of ${CHARTER_ARMS.join('|')}`)

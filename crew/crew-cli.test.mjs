@@ -45,6 +45,14 @@ test('ADR047 D2 retired endpoint env refuses independently', async () => {
   assert.equal(result.stateDir, false)
   assert.equal(result.workspaceCalls, 0)
 })
+test('ADR047 D4 an exported empty retired variable still refuses', async () => {
+  for (const name of ['CREW_ADVISOR_MODEL', 'CREW_ADVISOR_ENDPOINT']) {
+    const result = await bootAdvisor({ task: `adr047-d4-${name.toLowerCase()}`, deps: { env: { [name]: '' } } })
+    assert.equal(result.error?.reason, 'advisor-env-retired', name)
+    assert.match(result.error.message, new RegExp(`^${name} is retired;`))
+    assert.equal(result.stateDir, false)
+  }
+})
 test('ADR047 D3 exact worker provenance distinguishes composed child env', async () => {
   // The env a pi seat is launched with (adapter-composed) boots a nested crew; either half
   // of the provenance alone does not qualify an operator export.

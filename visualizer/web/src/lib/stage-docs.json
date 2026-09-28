@@ -1,6 +1,6 @@
 {
   "build": {
-    "description": "The driver opens the builder execution stage for the current build round before it waits for the builder return.",
+    "description": "The driver opens the builder execution stage for the current build round, or for one step of a stepped plan, before it waits for the builder return.",
     "charter": "Builder seat: implement the accepted plan within the declared scope and return the structured build evidence.",
     "source": {
       "file": "crew/drive.mjs",
@@ -8,6 +8,11 @@
         {
           "callee": "stage",
           "label": "build:r${round}",
+          "occurrence": 1
+        },
+        {
+          "callee": "stage",
+          "label": "build:${step.id}:r${stepRound}",
           "occurrence": 1
         }
       ]
@@ -179,7 +184,7 @@
     }
   },
   "gate": {
-    "description": "The driver opens the acceptance-gate stage for the built tree and records the gate result before deciding what follows.",
+    "description": "The driver opens the acceptance-gate stage for the built tree, or for one completed step of a stepped plan, and records the gate result before deciding what follows.",
     "charter": null,
     "source": {
       "file": "crew/drive.mjs",
@@ -198,6 +203,11 @@
           "callee": "stage",
           "label": "gate:r${round}",
           "occurrence": 2
+        },
+        {
+          "callee": "stage",
+          "label": "gate:${step.id}:r${stepRound}",
+          "occurrence": 1
         }
       ]
     }

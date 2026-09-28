@@ -119,7 +119,8 @@ const ADVISOR_LEDGER_KEY = { provider: 'anthropic', model_id: 'claude-sonnet-5',
 
 test('ADR047 C1 an open advisor cell refuses the boot before any state dir or workspace', async () => {
   const openLedger = fakeBreakerLedger([breakerRow({ ...ADVISOR_LEDGER_KEY, failures: 6 })], {
-    attemptRows: [...BUILD_SEAT_ATTEMPTS, breakerAttempt({ ...ADVISOR_LEDGER_KEY, attempts: 12 })],
+    // Seat history on the advisor's key is what measures the cell; advisor-role rows never do.
+    attemptRows: [...BUILD_SEAT_ATTEMPTS, breakerAttempt({ ...ADVISOR_LEDGER_KEY, role: 'reviewer', attempts: 12 })],
   })
   const result = await bootAdvisor({ task: 'adr047-c1', deps: { openLedger },
     env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-c1.db' } })

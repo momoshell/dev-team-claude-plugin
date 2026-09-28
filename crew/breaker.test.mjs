@@ -134,6 +134,37 @@ test('cellHealth marks a roles-only boot not-applicable without opening the ledg
   assert.equal(openLedger.calls.length, 0)
 })
 
+// ADR-047: boots write one run_seats row per resolved advisor cell. Such a row is not a consult.
+function advisorHealth(attemptRows, failureRows = []) {
+  return cellHealth({
+    policy: { threshold_rate: 0.1, window_ms: 3600000 }, seats: SEATS, advisor: { ...CELL },
+    dbPath: '/tmp/fake-ledger.db', now: () => NOW, openLedger: fakeLedger(failureRows, { attemptRows }),
+    existsSync: () => true, nodeVersion: '26.0.0', stderr: { write() {} },
+  })
+}
+
+test('ADR047 N2 advisor-role boot rows never measure the advisor cell', () => {
+  // Twelve boots that resolved the advisor, no consult recorded: the row stays unmeasured,
+  // never a boot-derived closed 0/12.
+  const record = advisorHealth([attempt({ role: 'advisor', attempts: 12 })])
+  assert.equal(record.advisor.verdict, 'unmeasured')
+  assert.equal(record.advisor.denominator, 0)
+  assert.equal(record.advisor.measured, false)
+  // Seat history on the same key does measure it.
+  const seated = advisorHealth([attempt({ role: 'builder', attempts: 12 }), attempt({ role: 'advisor', attempts: 12 })])
+  assert.equal(seated.advisor.denominator, 12)
+  assert.equal(seated.advisor.verdict, 'closed')
+})
+
+test('ADR047 N3 advisor-role boot rows never inflate a same-key seat denominator', () => {
+  const record = advisorHealth([attempt({ role: 'builder', attempts: 12 }), attempt({ role: 'advisor', attempts: 12 })], [row({ failures: 2 })])
+  assert.equal(record.cells.length, 1)
+  assert.equal(record.cells[0].denominator, 12)
+  assert.equal(record.cells[0].numerator, 2)
+  assert.equal(record.cells[0].verdict, 'open')
+  assert.equal(record.verdict, 'open')
+})
+
 test('cellHealth uses the rate edge: one short is closed and the threshold rate is open', () => {
   const under = health([row({ failures: 1 })], { threshold_rate: 0.1 }).record
   assert.equal(under.verdict, 'closed')

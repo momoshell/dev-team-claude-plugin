@@ -222,6 +222,11 @@ export function cellHealth({
 
   for (const row of Array.isArray(attemptRows) ? attemptRows : []) {
     if (!row) continue
+    // A run_seats row with role advisor records that a boot RESOLVED the advisor cell, not
+    // that anything consulted it: lane 1 records no consult. Counted, it would turn the
+    // advisor row into a boot-derived closed 0/N and inflate the denominator of a seat that
+    // shares its key, so it is never an attempt (ADR-047 operator decision 7).
+    if (row.role === 'advisor') continue
     for (const cell of cellsFor(row)) cell.attemptsRaw += numberValue(row.attempts)
   }
 

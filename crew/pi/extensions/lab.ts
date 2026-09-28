@@ -550,10 +550,14 @@ export function parseTapSummary(text: string): any {
   return { pass, fail }
 }
 
-// A line the runner itself wrote: an RPC request ({id, op, args}) or the terminal
-// {done: true} frame. Anything else on stdout is the program's own output.
+// A line the runner itself wrote: an RPC request, exactly {id, op, args} as rpc()
+// writes it, or a {done} frame the host takes as terminal. Anything else on stdout,
+// JSON with an `op` key included, is the program's own output.
 function isProtocolFrame(frame: any): boolean {
-  return Boolean(frame) && typeof frame === 'object' && (Boolean(frame.done) || typeof frame.op === 'string')
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false
+  if (frame.done) return true
+  const keys = Object.keys(frame)
+  return keys.length === 3 && Number.isInteger(frame.id) && typeof frame.op === 'string' && Array.isArray(frame.args)
 }
 
 function stripAnsi(text: string): string {
@@ -908,41 +912,47 @@ export function createLabTool(deps: any = {}) {
     let summaryPass: number | null = null
     let summaryFail: number | null = null
     const failures: LabSuiteFailure[] = []
-    // A `not ok` leaf whose YAML block is still open. Its keys sit at exactly
-    // indent + 2, so an error body that quotes `type:` or `TODO` is never read as one.
-    let pendingFailure: { test: string; indent: number; type: string | null; file: string | null; line: number | null } | null = null
+    // The test line whose YAML block is still open, and the leaf it names when it is
+    // a counted failure (null for ok, TODO and SKIP lines). Every line deeper than the
+    // test line belongs to its block, so an error body quoting `not ok`, `type:` or
+    // `TODO` is never read as TAP; only keys at exactly indent + 2 are read.
+    let openBlock: { indent: number; leaf: { test: string; type: string | null; file: string | null; line: number | null } | null } | null = null
     const scratchFile = (absolute: string): string | null => {
       const file = relative(scratch.path, absolute)
       if (!file || isAbsolute(file) || file === '..' || file.startsWith(`..${sep}`)) return null
       return file.split(sep).join('/')
     }
     const recordFailure = () => {
-      const leaf = pendingFailure
-      pendingFailure = null
+      const leaf = openBlock?.leaf
+      openBlock = null
       if (!leaf || leaf.type !== 'test') return
       if (failures.length < LAB_SUITE_FAILURES_MAX) failures.push({ test: leaf.test, file: leaf.file, line: leaf.line })
     }
     const readFailureLine = (text: string) => {
+      if (!text.trim()) return
       const indent = text.length - text.trimStart().length
-      if (pendingFailure && indent <= pendingFailure.indent) recordFailure()
-      if (pendingFailure && indent === pendingFailure.indent + 2) {
+      if (openBlock && indent > openBlock.indent) {
+        const leaf = openBlock.leaf
+        if (indent !== openBlock.indent + 2) return
         const key = text.trim()
         if (key === '...') { recordFailure(); return }
+        if (!leaf) return
         const type = key.match(/^type: '(\w+)'$/)
-        if (type) pendingFailure.type = type[1]
+        if (type) leaf.type = type[1]
         const location = key.match(/^location: '(.+?):(\d+)(?::\d+)?'$/)
         if (location) {
-          pendingFailure.file = scratchFile(location[1])
-          pendingFailure.line = pendingFailure.file === null ? null : Number(location[2])
+          leaf.file = scratchFile(location[1])
+          leaf.line = leaf.file === null ? null : Number(location[2])
         }
         return
       }
-      const notOk = text.match(/^(\s*)not ok \d+ - (.*?)(\s+#\s*(?:TODO|SKIP)\b.*)?$/i)
-      if (!notOk) return
       recordFailure()
-      // A TODO or SKIP directive is not counted in `# fail`, so it is not a failure.
-      if (notOk[3]) return
-      pendingFailure = { test: boundLabText(notOk[2].replace(/\\([\\#])/g, '$1'), LAB_SUITE_FAILURE_NAME_BYTES), indent: notOk[1].length, type: null, file: null, line: null }
+      const testLine = text.match(/^(\s*)(not )?ok \d+(?: - (.*?))?(\s+#\s*(?:TODO|SKIP)\b.*)?$/i)
+      if (!testLine) return
+      // An ok line, or a TODO or SKIP directive (not counted in `# fail`), still opens
+      // a block whose body must be skipped, but names no failure.
+      const failed = Boolean(testLine[2]) && !testLine[4]
+      openBlock = { indent: testLine[1].length, leaf: failed ? { test: boundLabText(String(testLine[3] ?? '').replace(/\\([\\#])/g, '$1'), LAB_SUITE_FAILURE_NAME_BYTES), type: null, file: null, line: null } : null }
     }
     let overflow = false
     let pendingRefusal: string | null = null
@@ -1150,7 +1160,12 @@ export function createLabTool(deps: any = {}) {
           : `refused: ${refused || 'child-failed'}`
         // details never reach the model, so the seat is told here how to return a value
         // and shown what it printed instead.
-        if (refused === 'program-returned-nothing') text = `${text}\nThe program exported no default value; end it with export default <value>. Its stdout${programStdoutTruncated ? ' (truncated)' : ''}:\n${programStdout}`
+        if (refused === 'program-returned-nothing') {
+          // The whole content, hint included, stays inside the display cap.
+          const hint = (truncated: boolean) => `${text}\nThe program exported no default value; end it with export default <value>. Its stdout${truncated ? ' (truncated)' : ''}:\n`
+          const shown = boundLabText(programStdout, LAB_OUTPUT_CAP_BYTES - Buffer.byteLength(hint(true), 'utf8'))
+          text = `${hint(programStdoutTruncated || shown.length < programStdout.length)}${shown}`
+        }
         return { content: [{ type: 'text', text }], details }
       }
       const refuseEarly = (code: string) => {

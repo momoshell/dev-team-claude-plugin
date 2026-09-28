@@ -1746,6 +1746,8 @@ const GAPS_RED_TEST = [
   "test('nested parent', async (t) => { await t.test('nested child red', () => { throw new Error(\"TODO SKIP type: 'suite'\") }) })",
   "describe('grp', () => { it('in describe red', () => assert.ok(false)) })",
   "test('green one', () => {})",
+  "test('body quotes tap', () => { throw new Error('x\\nnot ok 9 - phantom\\n  ---\\n  type: \\'test\\'') })",
+  "test('todo quotes tap', { todo: true }, () => { throw new Error('y\\nnot ok 8 - ghost') })",
   '',
 ].join('\n')
 const GAPS_RED_FAILURES = [
@@ -1753,6 +1755,7 @@ const GAPS_RED_FAILURES = [
   { test: 'nested child red', file: 'x.test.mjs', line: 6 },
   { test: 'nested parent', file: 'x.test.mjs', line: 6 },
   { test: 'in describe red', file: 'x.test.mjs', line: 7 },
+  { test: 'body quotes tap', file: 'x.test.mjs', line: 9 },
 ]
 // Well over the 50 KiB display cap of green TAP, then one red leaf and the summary.
 const GAPS_BIG_TEST = [
@@ -1886,6 +1889,15 @@ test('gaps B1 (leaf failures are named; a failing suite row and a TODO leaf are 
   assert.equal(run.details.result.failures_complete, true)
 })
 
+test('gaps B1.body (a not-ok line inside a YAML error body, of a failure or of a TODO, is never a failure)', async () => {
+  const body = (indent) => `${indent}  error: |-\n${indent}    not ok 7 - phantom\n${indent}    ---\n${indent}    type: 'test'\n`
+  const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'todo red', cwd, { directive: ' # TODO' }).replace("  ...\n", `${body('')}  ...\n`)
+    + gapsLeaf(2, 'outer red', cwd).replace("  ...\n", `${body('')}  ...\n`)
+    + '# pass 0\n# fail 1\n# todo 1\n')
+  assert.deepEqual(run.details.result.failures.map((one) => one.test), ['outer red'])
+  assert.equal(run.details.result.failures_complete, true)
+})
+
 test('gaps B1.stderr (a not-ok line on stderr is never read as a failure)', async () => {
   const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'outer red', cwd) + '# pass 0\n# fail 1\n', 'not ok 9 - bogus\n  ---\n  type: \'test\'\n  ...\n')
   assert.deepEqual(run.details.result.failures.map((one) => one.test), ['outer red'])
@@ -1944,7 +1956,7 @@ test('gaps B6 (the real node runner: every red leaf is named with its file and l
   const { repo } = gapsRepo()
   const run = await realTool("await lab.scratchCheckout(); export default await lab.runSuite(['x.test.mjs'])", repo, { env: gapsEnv() })
   assert.equal(run.details.outcome, 'ok', JSON.stringify(run.details))
-  assert.equal(run.details.result.fail, 4)
+  assert.equal(run.details.result.fail, 5)
   assert.deepEqual(run.details.result.failures, GAPS_RED_FAILURES)
   assert.equal(run.details.result.failures_complete, true)
 })
@@ -1963,6 +1975,23 @@ test('gaps C2 (the refusal carries what the program printed, with the RPC and do
   assert.equal(run.details.stdout, 'head 40\n{"rows":[[1]]}\n')
   assert.equal(run.details.stdout_truncated, false)
   assert.equal(run.content[0].text.endsWith('head 40\n{"rows":[[1]]}\n'), true)
+})
+
+test('gaps C2.opjson (printed JSON that has an op key but is not an RPC request stays in stdout)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool('console.log(JSON.stringify({ op: "log", value: 2 })); console.log(JSON.stringify({ id: 1, op: "x", args: [], extra: true }))', repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout, '{"op":"log","value":2}\n{"id":1,"op":"x","args":[],"extra":true}\n')
+})
+
+test('gaps C2.bound (the whole refusal content, hint included, stays inside the display cap and says it was cut)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool(`process.stdout.write('z'.repeat(${mod.LAB_OUTPUT_CAP_BYTES + 100}) + '\\n')`, repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, true)
+  const text = run.content[0].text
+  assert.equal(Buffer.byteLength(text, 'utf8') <= mod.LAB_OUTPUT_CAP_BYTES, true, `content is ${Buffer.byteLength(text, 'utf8')} bytes`)
+  assert.match(text, /Its stdout \(truncated\):\nzzz/)
 })
 
 test('gaps C3 (export default null is a value, not nothing)', async () => {

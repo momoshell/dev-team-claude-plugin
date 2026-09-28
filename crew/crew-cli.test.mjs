@@ -15,7 +15,7 @@ import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
 import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import { seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -28,16 +28,38 @@ import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, cal
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
 test('ADR047 D1 retired model env refuses before boot side effects', async () => {
-  await assert.rejects(bootCmd({}, { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } }), (error) => error.reason === 'advisor-env-retired' && /CREW_ADVISOR_MODEL.*--model-advisor/.test(error.message))
+  const result = await bootAdvisor({ task: 'adr047-d1', deps: { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } } })
+  assert.equal(result.error?.reason, 'advisor-env-retired')
+  assert.match(result.error.message, /CREW_ADVISOR_MODEL.*--model-advisor/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
 })
 test('ADR047 D2 retired endpoint env refuses independently', async () => {
-  await assert.rejects(bootCmd({}, { env: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:8080' } }), (error) => error.reason === 'advisor-env-retired' && /CREW_ADVISOR_ENDPOINT.*--model-advisor/.test(error.message))
+  const result = await bootAdvisor({ task: 'adr047-d2', deps: { env: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:8080' } } })
+  assert.equal(result.error?.reason, 'advisor-env-retired')
+  assert.match(result.error.message, /CREW_ADVISOR_ENDPOINT.*--model-advisor/)
+  assert.doesNotMatch(result.error.message, /CREW_ADVISOR_MODEL/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
 })
 test('ADR047 D3 exact worker provenance distinguishes composed child env', async () => {
-  await assert.rejects(bootCmd({}, { env: { DEVTEAM_WORKER: '1', CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } }), (error) => error.reason !== 'advisor-env-retired')
+  // The env a pi seat is launched with (adapter-composed) boots a nested crew; either half
+  // of the provenance alone does not qualify an operator export.
+  const composed = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true },
+    advisorCell: { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } } }).env
+  const child = { DEVTEAM_WORKER: '1', ...Object.fromEntries(Object.entries(composed).filter(([key]) => key.startsWith('CREW_ADVISOR'))) }
+  assert.equal(child.CREW_ADVISOR_PROVENANCE, 'seat-transitional')
+  assert.equal(child.CREW_ADVISOR_MODEL, 'anthropic/claude-sonnet-5')
+  const nested = await bootAdvisor({ task: 'adr047-d3', deps: { env: child } })
+  assert.equal(nested.error, null)
+  assert.ok(nested.crew)
+  const bare = await bootAdvisor({ task: 'adr047-d3-bare', deps: { env: { ...child, DEVTEAM_WORKER: undefined } } })
+  assert.equal(bare.error?.reason, 'advisor-env-retired')
+  const spoof = await bootAdvisor({ task: 'adr047-d3-spoof', deps: { env: { ...child, CREW_ADVISOR_PROVENANCE: 'operator' } } })
+  assert.equal(spoof.error?.reason, 'advisor-env-retired')
 })
 test('advisor boot record carries canonical model and empty resolved endpoint', () => {
   const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {}, models: { 'anthropic/claude-sonnet-5': {} }, advisor: { agent: 'pi', provider: 'anthropic', id: 'claude-sonnet-5', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
@@ -132,22 +154,51 @@ test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the
   assert.equal(Object.hasOwn(bare.boot.breaker, 'advisor'), false)
 })
 
-test('ADR047 C2 band floors evaluate the advisor cell before state creation', () => {
-  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  assert.ok(source.includes('assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName'))
+test('ADR047 C2 a below-floor advisor cell refuses the boot before any state dir or workspace', async () => {
+  const result = await bootAdvisor({ task: 'adr047-c2', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(result.error?.reason, 'band-below-floor')
+  assert.match(result.error.message, /advisor/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
 })
-test('ADR047 E1 translated advisor model is recorded rather than canonical provider key', () => {
-  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  assert.ok(source.includes('model: adapter.modelString({ provider: advisor.provider, id: advisor.id, localProviders: registry.local_providers })'))
+
+test('ADR047 E1 crew.json records the adapter-translated advisor model beside the canonical key', async () => {
+  const result = await bootAdvisor({ task: 'adr047-e1', args: { 'model-advisor': 'openai/gpt-6-sol' } })
+  assert.equal(result.error, null)
+  assert.equal(result.crew.seats.advisor.model, 'openai-codex/gpt-6-sol')
+  assert.equal(result.crew.seats.advisor.provider, 'openai')
+  assert.equal(result.crew.seats.advisor.id, 'gpt-6-sol')
+  // The legacy extension record keeps the canonical catalog key until lane 2.
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
 })
-test('ADR047 F1 a non-null advisor emits one effective seat row', () => {
-  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  assert.match(source, /if \(advisor\) rows\.push\(\{/)
-  assert.match(source, /transport: members\.builder\.transport/)
+
+test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the builder transport', async () => {
+  if (!nodeMeetsLedgerFloor) return
+  const rows = await bootSeatRows({ task: 'adr047-f1', rosterValue: advisorRoster() })
+  const advisorRows = rows.filter((row) => row.role === 'advisor')
+  assert.equal(advisorRows.length, 1)
+  assert.equal(rows.length, rows.crew.roles.length + 1)
+  assert.equal(rows.crew.roles.includes('advisor'), false)
+  const [row] = advisorRows
+  assert.equal(row.provider, 'anthropic')
+  assert.equal(row.model_id, 'claude-sonnet-5')
+  assert.equal(row.agent, 'pi')
+  assert.equal(row.effort, 'medium')
+  assert.equal(row.model, rows.crew.seats.advisor.model)
+  assert.equal(row.transport, rows.crew.members.builder.transport)
+  assert.equal(row.source, 'roster')
+  const none = await bootSeatRows({ task: 'adr047-f1-none', rosterValue: advisorRoster(), args: { 'model-advisor': 'none' } })
+  assert.equal(none.some((candidate) => candidate.role === 'advisor'), false)
 })
-test('ADR047 H1 boot journal includes resolved advisor configuration', () => {
-  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  assert.match(source, /run_configuration: \{ \.\.\.bootConfigRecord, advisor \},/)
+
+test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
+  const result = await bootAdvisor({ task: 'adr047-h1' })
+  assert.equal(result.error, null)
+  assert.deepEqual(result.boot.run_configuration.advisor, {
+    agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5', model: result.crew.seats.advisor.model,
+  })
+  assert.deepEqual(result.boot.seats.advisor, result.crew.seats.advisor)
+  assert.equal(Object.hasOwn(result.crew.run_configuration, 'advisor'), false)
 })
 
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300 * 1000

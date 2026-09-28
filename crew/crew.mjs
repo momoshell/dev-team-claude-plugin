@@ -351,15 +351,17 @@ export function advisorEndpointLabel(endpoint) {
   return origin ? `${origin.host}:${origin.port ?? 'unknown-port'}` : 'an unset or unparseable endpoint'
 }
 
-export function advisorBootRecord({ adapters = {}, env = process.env, models, advisor = null } = {}) {
+// ADR-047: the record is built from the RESOLVED roster cell, never from the boot
+// environment. CREW_ADVISOR_ENDPOINT/CREW_ADVISOR_MODEL are retired (bootCmd refuses them
+// with advisor-env-retired), so a null cell grants nothing and no endpoint is ever carried:
+// the model channel has none, and the legacy HTTP channel is lane 2's to delete.
+export function advisorBootRecord({ adapters = {}, models, advisor = null } = {}) {
   const granted = advisor ? Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort() : []
-  const endpoint = advisor ? '' : env?.CREW_ADVISOR_ENDPOINT
-  const origin = advisor ? null : advisorEndpointOrigin(endpoint)
   return {
     granted,
-    endpoint,
-    endpoint_host: origin?.host ?? null,
-    endpoint_port: origin?.port ?? null,
+    endpoint: '',
+    endpoint_host: null,
+    endpoint_port: null,
     model: advisor ? `${advisor.provider}/${advisor.id}` : undefined,
     models,
     model_only: true,
@@ -389,7 +391,7 @@ function advisorRefusal(reason, role, record) {
     : reason === 'transport-unsupported'
       ? 'use a pane transport'
       : reason.startsWith('model-') && !record?.endpoint
-        ? 'set CREW_ADVISOR_MODEL to a safe provider/id declared in the runtime roster models catalog'
+        ? 'pass --model-advisor a provider/id declared in the runtime roster models catalog, or --model-advisor none'
         : reason.startsWith('endpoint-') || reason.startsWith('model-')
         ? `point CREW_ADVISOR_ENDPOINT at an http(s) endpoint reachable from this machine (this boot reached for ${where}) and CREW_ADVISOR_MODEL at a safe model id`
         : 'use a register-granted builder or planner advisor seat'
@@ -3111,17 +3113,9 @@ export async function bootCmd(args, deps = {}) {
     } : {}),
   })
   assertCellsClosed(breaker)
-  if (!roster && Object.values(adapters).some((adapter) => adapter?.grants?.advisor === true)
-    && !bootEnv.CREW_ADVISOR_ENDPOINT) {
-    const rosterPath = rosterSourcePath(args)
-    try {
-      roster = loadRosterSource(rosterPath, args, { readFile: readRosterFileDep }).roster
-    } catch (err) {
-      if (err?.reason) throw err
-      throw new Error(`advisor model-only boot needs a readable runtime roster at ${rosterPath}: ${err.message}`)
-    }
-  }
-  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv, models: roster?.models, advisor })
+  // A non-null advisor cell exists only on a tier boot, which has already read the roster;
+  // a --roles boot has no cell, so it grants nothing and needs no catalog (ADR-047).
+  const advisorRecord = advisorBootRecord({ adapters, models: roster?.models, advisor })
   await assertAdvisorCellLive({ record: advisorRecord, adapters, models: roster?.models, taskSlug,
     probeEndpoint: probeEndpointDep || probeLocalEndpoint,
     note: noteRunlessCellFailure })
@@ -3352,7 +3346,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workflow ? { workflow: workflow.name } : {}),
     ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256, snapshot: rosterSnapshot } } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
-    advisor: advisor ? advisorRecord : { ...advisorRecord, granted: [] },
+    advisor: advisorRecord,
   }
   // crew/daemon.mjs paneSeat() is the consumer: daemon run refuses pane transport.
   if (headlessOnly) {

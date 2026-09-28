@@ -2714,7 +2714,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].skills, [])
     assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
     assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
-    assert.equal(register.roles[role].advisor, false)
+    // ADR-047 decision 3: the builder is the one advised seat.
+    assert.equal(register.roles[role].advisor, role === 'builder')
   }
   for (const tier of Object.keys(roster.tiers)) {
     const { roles, seats } = resolveTier(roster, tier, {})
@@ -2956,18 +2957,35 @@ test('#809 a LAN advisor endpoint is admitted and only http(s), userinfo and uns
   assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://192.168.1.42/v1', model: 'not safe' }), { reason: 'model-unsafe' })
 })
 
+// ADR-047: a boot record is built from the RESOLVED roster cell. The retired environment
+// never reaches it, so these helpers state the cell (and, for the legacy HTTP-channel
+// checks assertAdvisorCellLive still carries until lane 2 deletes it, the endpoint record).
+const ADVISOR_MODELS = Object.freeze({ 'anthropic/claude-sonnet-5': {}, 'provider/model': {} })
+function cellRecord(roles, { cell = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' }, models = ADVISOR_MODELS } = {}) {
+  return advisorBootRecord({ adapters: Object.fromEntries(roles.map((role) => [role, { grants: { advisor: true } }])), models, advisor: cell })
+}
+function legacyEndpointRecord(roles, endpoint, model = 'qwen3-coder') {
+  const origin = advisorEndpointOrigin(endpoint)
+  return { ...cellRecord(roles), endpoint, endpoint_host: origin?.host ?? null, endpoint_port: origin?.port ?? null, model }
+}
+
 test('#809 the advisor boot record carries host and port and the journal projection carries nothing else', () => {
-  const record = advisorBootRecord({
+  // The retired environment cannot put an endpoint (or its credential) into a boot record.
+  const fromEnv = advisorBootRecord({
     adapters: { builder: { grants: { advisor: true } } },
     env: { CREW_ADVISOR_ENDPOINT: 'http://user:sekrit@192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' },
   })
+  assert.deepEqual(fromEnv.granted, [])
+  assert.equal(fromEnv.endpoint, '')
+  assert.doesNotMatch(JSON.stringify(fromEnv), /sekrit|192\.168|qwen3-coder/)
+  const record = legacyEndpointRecord(['builder'], 'http://user:sekrit@192.168.1.42:8080/v1')
   assert.equal(record.endpoint_host, '192.168.1.42')
   assert.equal(record.endpoint_port, 8080)
   assert.deepEqual(advisorEndpointOrigin('http://desktop2.lan/v1'), { host: 'desktop2.lan', port: 80 })
   assert.deepEqual(advisorEndpointOrigin('https://desktop2.lan/v1'), { host: 'desktop2.lan', port: 443 })
   assert.equal(advisorEndpointOrigin('not a url'), null)
   assert.equal(advisorEndpointOrigin('http:///v1'), null)
-  const unset = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {} })
+  const unset = cellRecord(['builder'])
   assert.equal(unset.endpoint_host, null)
   assert.equal(unset.endpoint_port, null)
   const row = advisorJournalRecord(record)
@@ -2978,13 +2996,12 @@ test('#809 the advisor boot record carries host and port and the journal project
   // because paneCommand's advisorCell is built from it in the same process.
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   assert.equal(source.split('advisor: advisorJournalRecord(advisorRecord)').length - 1, 1)
-  assert.equal(source.split('advisor: advisorRecord }').length - 1, 1)
+  assert.equal(source.split('    advisor: advisorRecord,\n').length - 1, 1)
 })
 
 test('#809 an authority-less advisor endpoint refuses before a probe on the boot path', async () => {
   const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_ENDPOINT: 'http:///v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  const record = legacyEndpointRecord(['builder'], 'http:///v1')
   assert.equal(record.endpoint_host, null)
   assert.equal(record.endpoint_port, null)
   let probes = 0
@@ -3003,8 +3020,7 @@ test('#809 an authority-less advisor endpoint refuses before a probe on the boot
 
 test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, never a path or a credential', async () => {
   const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_ENDPOINT: 'http://192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  const record = legacyEndpointRecord(['builder'], 'http://192.168.1.42:8080/v1')
   const notes = []
   let probes = 0
   await assert.rejects(
@@ -3029,25 +3045,28 @@ test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, ne
 })
 
 test('H1 planner advisor grant is admitted at boot', async () => {
-  const endpoint = 'http://127.0.0.1:11434/v1'
-  const env = { CREW_ADVISOR_ENDPOINT: endpoint, CREW_ADVISOR_MODEL: 'qwen3-coder' }
-  const record = advisorBootRecord({
-    adapters: { planner: { grants: { advisor: true } } }, env,
-  })
+  // ADR-047 decision 3 leaves planner ADMISSION in code (ungranted in the register).
+  const record = cellRecord(['planner'])
+  assert.deepEqual(record.granted, ['planner'])
   const adapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
   let probes = 0
   await assertAdvisorCellLive({ record, adapters,
-    probeEndpoint: async (url) => { probes += 1; assert.equal(url, endpoint); return true },
+    probeEndpoint: async () => { probes += 1; return true },
     note: () => { throw new Error('no refusal note belongs on the accepting path') },
   })
-  assert.equal(probes, 1)
+  // The model channel has no endpoint, so admission probes nothing.
+  assert.equal(probes, 0)
+  // The legacy endpoint record is still probed exactly once on admission.
+  let legacyProbes = 0
+  await assertAdvisorCellLive({ record: legacyEndpointRecord(['planner'], 'http://127.0.0.1:11434/v1'), adapters,
+    probeEndpoint: async (url) => { legacyProbes += 1; assert.equal(url, 'http://127.0.0.1:11434/v1'); return true },
+    note: () => { throw new Error('no refusal note belongs on the accepting path') },
+  })
+  assert.equal(legacyProbes, 1)
 })
 
 test('J1 boot retains adapter and transport refusals', async () => {
-  const env = { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:11434/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' }
-  const record = advisorBootRecord({
-    adapters: { planner: { grants: { advisor: true } } }, env,
-  })
+  const record = cellRecord(['planner'])
   let probes = 0
   await assert.rejects(
     () => assertAdvisorCellLive({ record,
@@ -3071,8 +3090,7 @@ test('J1 boot retains adapter and transport refusals', async () => {
   }), (err) => { assert.equal(err.reason, 'transport-unsupported'); return true })
   assert.equal(probes, 0)
   const roster = { models: { 'provider/model': {} } }
-  const modelRecord = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const modelRecord = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
   let modelProbes = 0
   await assertAdvisorCellLive({ record: modelRecord, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
@@ -3083,12 +3101,22 @@ test('J1 boot retains adapter and transport refusals', async () => {
     probeEndpoint: async () => { modelProbes += 1; return true },
   })
   assert.equal(modelProbes, 0)
+  // On the real boot path: the shipped builder grant plus a non-null cell refuses a
+  // claude builder; --model-advisor none takes the cell away and the same boot proceeds.
+  const claudeBuilder = { 'agent-builder': 'claude', 'model-builder': 'claude-opus-5-5' }
+  const refused = await bootAdvisor({ task: 'j1-claude-builder', args: claudeBuilder })
+  assert.equal(refused.error?.reason, 'adapter-unsupported')
+  assert.equal(refused.error?.role, 'builder')
+  assert.equal(refused.stateDir, false)
+  const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' } })
+  assert.equal(unadvised.error, null)
+  assert.equal(unadvised.crew.members.builder.agent, 'claude')
 })
 
 test('A4', async () => {
   const roster = { models: { 'provider/model': {} } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const record = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
+  assert.deepEqual(record.granted, ['builder'])
   let probes = 0
   await assertAdvisorCellLive({ record, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
@@ -3099,8 +3127,8 @@ test('A4', async () => {
 
 test('A5', async () => {
   const roster = { models: { 'provider/other': {} } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const record = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
+  assert.deepEqual(record.granted, ['builder'])
   let probes = 0
   await assert.rejects(() => assertAdvisorCellLive({ record, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },

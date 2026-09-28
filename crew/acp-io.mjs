@@ -70,7 +70,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir,
       tools: member?.tools, claudeBin: crew.claude_bin, writableDirs: [seatTaskDir, paths.returnsDir],
       advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
-        ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
+        ? piAdapter.advisorLaunchCell(crew.advisor)
         : null,
       env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir,
         ...(deps.permissionLead ? { CREW_ACP_PERMISSION_TIMEOUT_MS: String(deps.permissionTimeoutMs) } : {}) } })

@@ -15,7 +15,7 @@ import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
 import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import { seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -28,7 +28,7 @@ import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, cal
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
 test('ADR047 D1 retired model env refuses before boot side effects', async () => {
   const result = await bootAdvisor({ task: 'adr047-d1', deps: { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } } })
@@ -98,7 +98,7 @@ async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue =
     const dir = testCrewDir(home, checkout, task)
     const wrote = existsSync(join(dir, 'crew.json'))
     return {
-      error, stateDir: existsSync(dir), workspaceCalls: cmux.calls.length,
+      error, stateDir: existsSync(dir), workspaceCalls: cmux.calls.length, cmuxCalls: cmux.calls,
       crew: wrote ? JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) : null,
       boot: wrote ? bootRecord(dir) : null,
     }
@@ -170,6 +170,33 @@ test('ADR047 E1 crew.json records the adapter-translated advisor model beside th
   assert.equal(result.crew.seats.advisor.id, 'gpt-6-sol')
   // The legacy extension record keeps the canonical catalog key until lane 2.
   assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
+})
+
+test('ADR047 R1 a consult is launched with the adapter spelling while the record keeps the catalog key', async () => {
+  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6-sol' } })
+  assert.equal(result.error, null)
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
+  assert.equal(result.crew.advisor.consult_model, 'openai-codex/gpt-6-sol')
+  const launch = advisorLaunchCell(result.crew.advisor)
+  assert.deepEqual(Object.keys(launch.models), ['openai-codex/gpt-6-sol'])
+  assert.deepEqual(launch.models['openai-codex/gpt-6-sol'], roster.models['openai/gpt-6-sol'])
+  // The extension's own model check (the same classifier) admits what it is handed.
+  assert.deepEqual(classifyAdvisorCell(launch), { model: 'openai-codex/gpt-6-sol' })
+  const env = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: launch }).env
+  assert.equal(env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
+  assert.deepEqual(Object.keys(JSON.parse(env.CREW_ADVISOR_MODELS)), ['openai-codex/gpt-6-sol'])
+  // A provider the adapter spells as-is keeps the whole catalog, as before.
+  const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet' })
+  assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5')
+  assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
+  // The pane launch (composed at boot, not from crew.json) carries the same spelling. The stub
+  // cmux never reports a workspace, so the boot stops after composing the layout.
+  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined } })
+  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
+  assert.deepEqual(layout.match(/CREW_ADVISOR_MODEL='[^']*'/g), ["CREW_ADVISOR_MODEL='openai-codex/gpt-6-sol'"])
+  // A legacy record without consult_model keeps its exact shape.
+  assert.deepEqual(advisorLaunchCell({ endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false, models: { x: {} } }),
+    { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
 })
 
 test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the builder transport', async () => {

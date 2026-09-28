@@ -791,6 +791,26 @@ test('RV1-1 an agents grant with no extension registering the agent tool refuses
   assert.equal(ok.args[ok.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
 })
 
+test('ADR047 R2 an rpc launch spells the consult with the adapter and the real extension attaches to it', async () => {
+  const f = fixture({ grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
+  const entry = { cost_in_per_mtok: 4, cost_out_per_mtok: 20 }
+  f.crew.advisor = { granted: ['builder'], endpoint: '', model: 'openai/gpt-6-sol', consult_model: 'openai-codex/gpt-6-sol',
+    models: { 'openai/gpt-6-sol': entry, 'anthropic/claude-sonnet-5': {} }, model_only: true }
+  const rows = []
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.equal(command.env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
+    assert.deepEqual(JSON.parse(command.env.CREW_ADVISOR_MODELS), { 'openai-codex/gpt-6-sol': entry })
+    await attachAdvisor({ on() {}, sendMessage() {} }, {
+      env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
+      deps: { appendFile: (_path, line) => rows.push(JSON.parse(line)), fetchFn: () => { throw new Error('model-only advisor must not probe') } },
+    })
+    assert.equal(rows.at(-1).advisor_boot.outcome, 'attached')
+    assert.equal(rows.at(-1).advisor_boot.model, 'openai-codex/gpt-6-sol')
+  } finally { f.cleanup() }
+})
+
 test('RV2-1 rpc advisor grant emits attachable model-only extension and catalog without probes', async () => {
   const f = fixture({ grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
   const models = { 'provider/model': { provider: 'provider', id: 'model' } }

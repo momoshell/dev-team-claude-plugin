@@ -258,6 +258,22 @@ export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
 export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
 
+// ADR-047 §1: a consult is spelled by the advisor agent's adapter, never passed raw. The
+// boot record keeps the canonical catalog key as its identity (`model`) and carries this
+// adapter's spelling in `consult_model`; the extension checks its model against the catalog
+// it is handed and passes the same string to `pi --model`, so the catalog handed down is
+// keyed by the spelling. A record without `consult_model` (written before ADR-047) keeps
+// its legacy shape exactly.
+export function advisorLaunchCell(record) {
+  if (!record) return null
+  const models = record.model_only ? record.models : undefined
+  if (typeof record.consult_model !== 'string' || record.consult_model === record.model) {
+    return { endpoint: record.endpoint, model: record.model, models }
+  }
+  const entry = models && Object.hasOwn(models, record.model) ? models[record.model] : undefined
+  return { endpoint: record.endpoint, model: record.consult_model, models: entry === undefined ? {} : { [record.consult_model]: entry } }
+}
+
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null } = spec
   const piDeny = translateDeny(deny)

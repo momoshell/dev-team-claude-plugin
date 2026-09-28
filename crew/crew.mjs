@@ -363,6 +363,8 @@ export function advisorBootRecord({ adapters = {}, models, advisor = null } = {}
     endpoint_host: null,
     endpoint_port: null,
     model: advisor ? `${advisor.provider}/${advisor.id}` : undefined,
+    // The adapter-translated spelling the consult is launched with (advisorLaunchCell).
+    consult_model: advisor ? advisor.model : undefined,
     models,
     model_only: true,
     cell: advisor ? { provider: advisor.provider, id: advisor.id, agent: advisor.agent, effort: advisor.effort, model: advisor.model } : null,
@@ -1129,11 +1131,11 @@ export function resolveTier(roster, tier, args = {}) {
     const effortOverride = args['effort-advisor']
     let provider = cell.provider
     let id = cell.id
-    advisor = args['model-advisor'] === 'none' ? null : cell
-    if (advisor) {
     // --model-advisor none takes the cell away; an agent or effort flag beside it names intent
     // that cannot take effect, so it refuses rather than being dropped.
     if (args['model-advisor'] === 'none' && (agentOverride || effortOverride)) throw new Error('--agent-advisor/--effort-advisor given with --model-advisor none: there is no advisor cell to apply them to')
+    advisor = args['model-advisor'] === 'none' ? null : cell
+    if (advisor) {
       if (modelOverride) {
         if (!Object.hasOwn(roster.models || {}, modelOverride)) throw new Error(`--model-advisor must name a canonical roster model key or none: ${modelOverride}`)
         ;[provider, id] = modelOverride.split('/')
@@ -3283,8 +3285,7 @@ export async function bootCmd(args, deps = {}) {
     const mk = (role) => paneCommand(role, args, {
       taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
       grants: adapters[role].grants, search: adapters[role].search, configDir: adapters[role].configDir,
-      advisorCell: adapters[role].grants?.advisor === true
-        ? { endpoint: advisorRecord.endpoint, model: advisorRecord.model, models: advisorRecord.model_only ? advisorRecord.models : undefined } : null,
+      advisorCell: adapters[role].grants?.advisor === true ? piAdapter.advisorLaunchCell(advisorRecord) : null,
     })
     const layout = composeLayout(paneRoles, mk)
 

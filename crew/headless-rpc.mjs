@@ -16,7 +16,7 @@ import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { piRpcSeatParts } from './adapters/adapter-pi.mjs'
+import { piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 export const RPC_PROMPT_DELIVERY_WINDOW_MS = 30_000
@@ -1251,7 +1251,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       grants: adapters?.[role]?.grants,
       configDir: adapters?.[role]?.configDir,
       advisorCell: adapters?.[role]?.grants?.advisor === true && crew.advisor?.granted?.includes(role)
-        ? { endpoint: crew.advisor.endpoint, model: crew.advisor.model, models: crew.advisor.model_only ? crew.advisor.models : undefined }
+        ? advisorLaunchCell(crew.advisor)
         : null,
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })

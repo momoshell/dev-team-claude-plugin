@@ -1890,7 +1890,8 @@ test('gaps B1 (leaf failures are named; a failing suite row and a TODO leaf are 
 })
 
 test('gaps B1.body (a not-ok line inside a YAML error body, of a failure or of a TODO, is never a failure)', async () => {
-  const body = (indent) => `${indent}  error: |-\n${indent}    not ok 7 - phantom\n${indent}    ---\n${indent}    type: 'test'\n`
+  // The body keeps TAP's relative indentation, as node's real error bodies do.
+  const body = (indent) => `${indent}  error: |-\n${indent}    not ok 7 - phantom\n${indent}      ---\n${indent}      type: 'test'\n${indent}      location: '/x.test.mjs:1:1'\n${indent}      ...\n`
   const run = await gapsFakeSuite((cwd) => gapsLeaf(1, 'todo red', cwd, { directive: ' # TODO' }).replace("  ...\n", `${body('')}  ...\n`)
     + gapsLeaf(2, 'outer red', cwd).replace("  ...\n", `${body('')}  ...\n`)
     + '# pass 0\n# fail 1\n# todo 1\n')

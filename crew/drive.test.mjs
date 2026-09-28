@@ -2477,6 +2477,17 @@ test('an unknown variant refuses before assignments or journal lines', () => {
   assert.equal(io.calls.logs.length, 0)
 })
 
+test('B1 B2 a stepped lane refuses as unbuilt before any seat assignment or journal line', () => {
+  const io = fakeIo()
+  assert.throws(() => driveTask({ ...CTX, variant: 'stepped' }, io), (err) => {
+    assert.equal(err.stage, 'variant')
+    assert.match(err.message, /the stepped executor is not built \(ADR-048\)/)
+    return true
+  })
+  assert.equal(io.calls.assign.length, 0)
+  assert.equal(io.calls.logs.length, 0)
+})
+
 test('shapeDefect refuses declarations the driver cannot honour', () => {
   assert.equal(shapeDefect(VARIANTS.full), null)
   assert.equal(shapeDefect(VARIANTS.scout), null)

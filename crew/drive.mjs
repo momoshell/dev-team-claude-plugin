@@ -2629,7 +2629,9 @@ export function chunkGateVerdict(output, ownership) {
   return { ok: ownedFailed.length === 0, ownedFailed, deferred: chunkDeferredRows(output, ownership) }
 }
 
-export function steppedGateVerdict(output, step, done, chunks, exempt = []) {
+// `exitOk` is the gate run's own verdict. A nonzero exit is explained only by deferred FAIL rows
+// owned by later steps; with none, the step cannot complete however green the summary reads.
+export function steppedGateVerdict(output, step, done, chunks, exempt = [], exitOk = true) {
   if (!Array.isArray(chunks) || !Array.isArray(done) || done.some((entry) => !Array.isArray(entry?.checks_owned))
     || !Array.isArray(step?.checks_owned)) {
     return { ok: false, failed: [], regressed: [], defect: 'stepped-ownership-malformed' }
@@ -2644,7 +2646,11 @@ export function steppedGateVerdict(output, step, done, chunks, exempt = []) {
   const verdict = chunkGateVerdict(output, { chunk: step.id, owned: watched, owners, exempt })
   const regressed = done.flatMap(({ checks_owned }) => checks_owned).filter((id) => checkFailureLine(output, id))
   const currentFailed = step.checks_owned.filter((id) => checkFailureLine(output, id))
-  return { ok: verdict?.ok === true, failed: [...new Set([...currentFailed, ...regressed])], regressed, defect: verdict?.defect ?? null }
+  const failed = [...new Set([...currentFailed, ...regressed])]
+  if (verdict?.ok === true && exitOk === false && !(verdict.deferred?.length > 0)) {
+    return { ok: false, failed, regressed, defect: 'step-gate-exit-unattributed' }
+  }
+  return { ok: verdict?.ok === true, failed, regressed, defect: verdict?.defect ?? null }
 }
 
 export function adjudicateOwnedProof(output, check) {
@@ -8530,6 +8536,9 @@ function runTask(ctx, io, crash) {
     if (steppedProgram) {
       if (validatedChunks.length === 0) return escalate('plan-chunks', 'stepped plan declares no chunks')
       if (!gateCmd) return escalate('plan-chunks', 'stepped requires a gate_cmd to adjudicate step ownership')
+      // One global builder budget (ADR-048): every step costs at least one assignment, so a
+      // program longer than the budget can never finish and is refused before any is spent.
+      if (validatedChunks.length > builderRemaining()) return escalate('plan-chunks', `stepped plan declares ${validatedChunks.length} steps but the builder budget is ${builderRemaining()}`)
     }
     const selectedChunk = steppedProgram ? null : selectActiveChunk(ctx, validatedChunks)
     if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}` , planEnv.artifacts || [])
@@ -9846,9 +9855,10 @@ function runTask(ctx, io, crash) {
       stepEnvelopes.push(env)
       stepEnv = env
       stage(`gate:${step.id}:r${stepRound}`)
-      const output = runGate(`gate:${step.id}:r${stepRound}`, gateCmd).output
+      const stepGate = runGate(`gate:${step.id}:r${stepRound}`, gateCmd)
+      const output = stepGate.output
       stageComplete()
-      const verdict = steppedGateVerdict(output, step, done, steppedChunks, validatedExemptLabels)
+      const verdict = steppedGateVerdict(output, step, done, steppedChunks, validatedExemptLabels, stepGate.ok === true)
       if (verdict.ok) io.log(recordRow({ at: io.now(), event: 'step:done', step: step.id, round: stepRound, passed: step.checks_owned }))
       if (verdict.ok) done.push(step)
       if (verdict.ok) break

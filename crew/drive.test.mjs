@@ -4275,6 +4275,22 @@ test('stepped gate verdict defers future reds and reports current failures plus 
   assert.equal(steppedGateVerdict('no summary', current, [], chunks).ok, false)
 })
 
+// Kills: dropping the exitOk clause (a nonzero gate exit behind a green summary completes the
+// step), and treating ANY nonzero exit as red (a deferred later-step FAIL is the expected exit).
+test('stepped gate verdict refuses a nonzero exit that no later step owns', () => {
+  const chunks = [
+    { id: 'c1', checks_owned: ['A1'] },
+    { id: 'c2', checks_owned: ['A2'] },
+  ]
+  const green = 'GATE-SUMMARY {"total":2,"failed":0,"errored":0}'
+  assert.deepEqual(steppedGateVerdict(green, chunks[0], [], chunks, [], false),
+    { ok: false, failed: [], regressed: [], defect: 'step-gate-exit-unattributed' })
+  assert.equal(steppedGateVerdict(green, chunks[0], [], chunks, [], true).ok, true)
+  const deferred = `FAIL A2: later\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}`
+  assert.deepEqual(steppedGateVerdict(deferred, chunks[0], [], chunks, [], false),
+    { ok: true, failed: [], regressed: [], defect: null })
+})
+
 test('chunk verdict counts an exempt third bucket but refuses its FAILs', () => {
   const ownership = { chunk: 'c1', owned: ['a'], owners: { f: 'c9' }, exempt: ['x1'] }
   const green = chunkGateVerdict(`FAIL f: other red\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}`, ownership)

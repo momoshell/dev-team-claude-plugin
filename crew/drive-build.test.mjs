@@ -8121,7 +8121,7 @@ const steppedMutations = [
   { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
   { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
 ]
-function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], empty = false, omitChunks = false, corrected = false } = {}) {
+function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false } = {}) {
   const checks = mutations.map(({ check }) => check)
   const plan = planEnv({ details: {
     ...planEnv().details,
@@ -8148,7 +8148,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
       return { ok: true, output: steppedGreen(checks.length) }
     }
     const output = outputs[index - 1] || steppedGreen(checks.length)
-    return { ok: !/\"failed\":(?!0)/.test(output), output }
+    return { ok: exits[index - 1] ?? !/\"failed\":(?!0)/.test(output), output }
   }
   const io = fakeIo({
     files, writeThrough: true,
@@ -8288,4 +8288,23 @@ test('W4 stepped-executor acceptance', () => {
   assert.ok(io.calls.logs.some((row) => row.gate_check_discriminations?.some((check) => check.check === 'A1' && check.correction === 'accepted')))
   assert.deepEqual(result.details.files_committed, ['a.mjs', 'b.mjs', 'a.test.mjs'])
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'b.mjs', 'a.test.mjs'])
+})
+
+// Kills: runGate's ok dropped from the step verdict. Step c1's gate exits nonzero behind a green
+// summary with no later-step FAIL to explain it, so c1 must go red and be re-assigned, never done.
+test('a stepped gate that exits nonzero with a green summary does not complete its step', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen()], exits: [false] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  const steps = io.calls.logs.filter(({ event }) => event?.startsWith('step:')).map(({ event, step, round }) => `${event} ${step} r${round}`)
+  assert.deepEqual(steps.slice(0, 4), ['step:start c1 r1', 'step:red c1 r1', 'step:start c1 r2', 'step:done c1 r2'])
+})
+
+// Kills: the plan-acceptance budget check deleted. Two steps cannot fit a one-assignment budget,
+// so the plan is refused before any builder is assigned rather than stranded after step one.
+test('a stepped plan with more steps than the builder budget is refused before any assignment', () => {
+  const { io } = steppedAcceptanceIo()
+  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 1 } }, io)
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /declares 2 steps but the builder budget is 1/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 })

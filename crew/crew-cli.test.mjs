@@ -15,7 +15,7 @@ import { composeRolePrompt } from './crew.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
 import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import { seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -28,7 +28,310 @@ import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, cal
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+
+test('ADR047 D1 retired model env refuses before boot side effects', async () => {
+  const result = await bootAdvisor({ task: 'adr047-d1', deps: { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } } })
+  assert.equal(result.error?.reason, 'advisor-env-retired')
+  assert.match(result.error.message, /CREW_ADVISOR_MODEL.*--model-advisor/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
+})
+test('ADR047 D2 retired endpoint env refuses independently', async () => {
+  const result = await bootAdvisor({ task: 'adr047-d2', deps: { env: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:8080' } } })
+  assert.equal(result.error?.reason, 'advisor-env-retired')
+  assert.match(result.error.message, /CREW_ADVISOR_ENDPOINT.*--model-advisor/)
+  assert.match(result.error.message, /^CREW_ADVISOR_ENDPOINT is retired;/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
+})
+test('ADR047 D4 an exported empty retired variable still refuses', async () => {
+  for (const name of ['CREW_ADVISOR_MODEL', 'CREW_ADVISOR_ENDPOINT']) {
+    const result = await bootAdvisor({ task: `adr047-d4-${name.toLowerCase()}`, deps: { env: { [name]: '' } } })
+    assert.equal(result.error?.reason, 'advisor-env-retired', name)
+    assert.match(result.error.message, new RegExp(`^${name} is retired;`))
+    assert.equal(result.stateDir, false)
+  }
+})
+test('ADR047 D3 exact worker provenance distinguishes composed child env', async () => {
+  // The env a pi seat is launched with (adapter-composed) boots a nested crew; either half
+  // of the provenance alone does not qualify an operator export.
+  const composed = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true },
+    advisorCell: { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } } }).env
+  const child = { DEVTEAM_WORKER: '1', ...Object.fromEntries(Object.entries(composed).filter(([key]) => key.startsWith('CREW_ADVISOR'))) }
+  assert.equal(child.CREW_ADVISOR_PROVENANCE, 'seat-transitional')
+  assert.equal(child.CREW_ADVISOR_MODEL, 'anthropic/claude-sonnet-5')
+  const nested = await bootAdvisor({ task: 'adr047-d3', deps: { env: child } })
+  assert.equal(nested.error, null)
+  assert.equal(nested.crew.task, 'adr047-d3')
+  const bare = await bootAdvisor({ task: 'adr047-d3-bare', deps: { env: { ...child, DEVTEAM_WORKER: undefined } } })
+  assert.equal(bare.error?.reason, 'advisor-env-retired')
+  const spoof = await bootAdvisor({ task: 'adr047-d3-spoof', deps: { env: { ...child, CREW_ADVISOR_PROVENANCE: 'operator' } } })
+  assert.equal(spoof.error?.reason, 'advisor-env-retired')
+})
+test('advisor boot record carries canonical model and empty resolved endpoint', () => {
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {}, models: { 'anthropic/claude-sonnet-5': {} }, advisor: { agent: 'pi', provider: 'anthropic', id: 'claude-sonnet-5', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
+  assert.equal(record.model, 'anthropic/claude-sonnet-5')
+  assert.deepEqual(record.granted, ['builder'])
+  assert.equal(record.endpoint, '')
+})
+
+// ADR-047 lane 1: a roster whose build tier carries an advisor cell. The shared fixture
+// roster has none, so every advisor boot below states its cell explicitly.
+const ADVISOR_CELL = Object.freeze({ provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium' })
+function advisorRoster(cell = ADVISOR_CELL) {
+  const value = structuredClone(roster)
+  value.tiers.build = { advisor: cell === null ? null : { ...cell }, ...value.tiers.build }
+  return value
+}
+
+// One build-tier boot against advisorRoster(); returns what it wrote, or the refusal and
+// whether any state dir or workspace was created before it.
+async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue = advisorRoster() }) {
+  const home = scratchDir(`crew-adr047-${task}-home-`)
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-adr047-${task}-checkout-`)
+  const rosterPath = join(home, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify(rosterValue, null, 2))
+  const cmux = callCounter()
+  const previousStdoutWrite = process.stdout.write
+  try {
+    process.stdout.write = () => true
+    let error = null
+    try {
+      await withBreakerEnv(env, () => withHome(home, () => bootCmd(
+        { task, checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath, ...args },
+        { cmux, tree: callCounter(), renameTab: callCounter(), ...deps },
+      )))
+    } catch (err) { error = err }
+    const dir = testCrewDir(home, checkout, task)
+    const wrote = existsSync(join(dir, 'crew.json'))
+    return {
+      error, stateDir: existsSync(dir), workspaceCalls: cmux.calls.length, cmuxCalls: cmux.calls,
+      crew: wrote ? JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) : null,
+      boot: wrote ? bootRecord(dir) : null,
+    }
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+}
+
+// ADR-047 operator decision 9: the shipped register grants no seat the advisor in lane 1.
+// Tests of the granted path switch the builder grant on HERE, never in crew/capabilities.json.
+function builderGrantedRegister() {
+  const register = structuredClone(loadCapabilities())
+  register.roles.builder.advisor = true
+  return register
+}
+const GRANTED = Object.freeze({ register: builderGrantedRegister() })
+
+// Attempt rows for every seat of the fixture build tier, so the SEATS' aggregate is measured.
+const BUILD_SEAT_ATTEMPTS = [
+  breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'medium', role: 'lead' }),
+  breakerAttempt({ provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder' }),
+  breakerAttempt({ provider: 'openai', model_id: 'gpt-6-sol', agent: 'pi', effort: 'high', role: 'reviewer' }),
+]
+const ADVISOR_LEDGER_KEY = { provider: 'anthropic', model_id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', role: 'advisor' }
+
+test('ADR047 C1 an open advisor cell refuses the boot before any state dir or workspace', async () => {
+  const openLedger = fakeBreakerLedger([breakerRow({ ...ADVISOR_LEDGER_KEY, failures: 6 })], {
+    // Seat history on the advisor's key is what measures the cell; advisor-role rows never do.
+    attemptRows: [...BUILD_SEAT_ATTEMPTS, breakerAttempt({ ...ADVISOR_LEDGER_KEY, role: 'reviewer', attempts: 12 })],
+  })
+  const result = await bootAdvisor({ task: 'adr047-c1', deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-c1.db' } })
+  assert.equal(result.error?.code, 'breaker-open')
+  assert.match(result.error.message, /anthropic\/claude-sonnet-5 agent=pi effort=medium roles=advisor rate=0\.5/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
+})
+
+test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the seats verdict closed', async () => {
+  // Operator decision 7 (2026-09-28): no advisor history reads unmeasured on the advisor's
+  // own row, never a guessed closed, and the seats' aggregate is computed exactly as before.
+  const openLedger = fakeBreakerLedger([], { attemptRows: BUILD_SEAT_ATTEMPTS })
+  const result = await bootAdvisor({ task: 'adr047-n1', deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-n1.db' } })
+  assert.equal(result.error, null)
+  const breaker = result.boot.breaker
+  assert.equal(breaker.verdict, 'closed')
+  assert.equal(breaker.cells.some((cell) => cell.roles.includes('advisor')), false)
+  assert.equal(breaker.advisor.verdict, 'unmeasured')
+  assert.equal(breaker.advisor.measured, false)
+  assert.equal(breaker.advisor.rate, null)
+  assert.equal(breaker.advisor.denominator, 0)
+  assert.deepEqual(breaker.advisor.roles, ['advisor'])
+  assert.deepEqual([breaker.advisor.provider, breaker.advisor.model_id, breaker.advisor.agent, breaker.advisor.effort],
+    ['anthropic', 'claude-sonnet-5', 'pi', 'medium'])
+  // A null advisor adds no row at all: the record is exactly the seats-only shape.
+  const bare = await bootAdvisor({ task: 'adr047-n1-null', args: { 'model-advisor': 'none' }, deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-n1.db' } })
+  assert.equal(bare.error, null)
+  assert.equal(bare.boot.breaker.verdict, 'closed')
+  assert.equal(Object.hasOwn(bare.boot.breaker, 'advisor'), false)
+})
+
+test('ADR047 C2 a below-floor advisor cell refuses the boot before any state dir or workspace', async () => {
+  const result = await bootAdvisor({ task: 'adr047-c2', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(result.error?.reason, 'band-below-floor')
+  assert.match(result.error.message, /advisor/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
+})
+
+test('ADR047 E1 crew.json records the adapter-translated advisor model beside the canonical key', async () => {
+  const result = await bootAdvisor({ task: 'adr047-e1', args: { 'model-advisor': 'openai/gpt-6-sol' } })
+  assert.equal(result.error, null)
+  assert.equal(result.crew.seats.advisor.model, 'openai-codex/gpt-6-sol')
+  assert.equal(result.crew.seats.advisor.provider, 'openai')
+  assert.equal(result.crew.seats.advisor.id, 'gpt-6-sol')
+  // The legacy extension record keeps the canonical catalog key until lane 2.
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
+})
+
+test('ADR047 R1 a consult is launched with the adapter spelling while the record keeps the catalog key', async () => {
+  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6-sol' }, deps: GRANTED })
+  assert.equal(result.error, null)
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
+  assert.equal(result.crew.advisor.consult_model, 'openai-codex/gpt-6-sol')
+  const launch = advisorLaunchCell(result.crew.advisor)
+  assert.deepEqual(Object.keys(launch.models), ['openai-codex/gpt-6-sol'])
+  assert.deepEqual(launch.models['openai-codex/gpt-6-sol'], roster.models['openai/gpt-6-sol'])
+  // The extension's own model check (the same classifier) admits what it is handed.
+  assert.deepEqual(classifyAdvisorCell(launch), { model: 'openai-codex/gpt-6-sol' })
+  const env = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: launch }).env
+  assert.equal(env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
+  assert.deepEqual(Object.keys(JSON.parse(env.CREW_ADVISOR_MODELS)), ['openai-codex/gpt-6-sol'])
+  // A provider the adapter spells as-is keeps the whole catalog, as before.
+  const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet', deps: GRANTED })
+  assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5')
+  assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
+  // The pane launch (composed at boot, not from crew.json) carries the same spelling. The stub
+  // cmux never reports a workspace, so the boot stops after composing the layout.
+  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED })
+  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
+  assert.deepEqual(layout.match(/CREW_ADVISOR_MODEL='[^']*'/g), ["CREW_ADVISOR_MODEL='openai-codex/gpt-6-sol'"])
+  // A legacy record without consult_model keeps its exact shape.
+  assert.deepEqual(advisorLaunchCell({ endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false, models: { x: {} } }),
+    { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
+})
+
+test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the builder transport', async () => {
+  if (!nodeMeetsLedgerFloor) return
+  const rows = await bootSeatRows({ task: 'adr047-f1', rosterValue: advisorRoster() })
+  const advisorRows = rows.filter((row) => row.role === 'advisor')
+  assert.equal(advisorRows.length, 1)
+  assert.equal(rows.length, rows.crew.roles.length + 1)
+  assert.equal(rows.crew.roles.includes('advisor'), false)
+  const [row] = advisorRows
+  assert.equal(row.provider, 'anthropic')
+  assert.equal(row.model_id, 'claude-sonnet-5')
+  assert.equal(row.agent, 'pi')
+  assert.equal(row.effort, 'medium')
+  assert.equal(row.model, rows.crew.seats.advisor.model)
+  assert.equal(row.transport, rows.crew.members.builder.transport)
+  assert.equal(row.source, 'roster')
+  const none = await bootSeatRows({ task: 'adr047-f1-none', rosterValue: advisorRoster(), args: { 'model-advisor': 'none' } })
+  assert.equal(none.some((candidate) => candidate.role === 'advisor'), false)
+})
+
+test('ADR047 S1 an advisor cell on a crew that seats no builder boots and reports a null transport', async () => {
+  if (!nodeMeetsLedgerFloor) return
+  const value = advisorRoster()
+  delete value.tiers.build.builder
+  const rows = await bootSeatRows({ task: 'adr047-s1', rosterValue: value })
+  assert.equal(rows.crew.roles.includes('builder'), false)
+  const advisorRows = rows.filter((row) => row.role === 'advisor')
+  assert.equal(advisorRows.length, 1)
+  assert.equal(advisorRows[0].transport, null)
+})
+
+test('ADR047 S2 a --roles boot refuses advisor flags it has no cell to apply', async () => {
+  for (const flag of [{ 'model-advisor': 'anthropic/claude-sonnet-5' }, { 'agent-advisor': 'pi' }, { 'effort-advisor': 'high' }]) {
+    const result = await bootAdvisor({ task: `adr047-s2-${Object.keys(flag)[0]}`, args: { tier: undefined, roles: 'builder', ...flag } })
+    assert.match(String(result.error?.message), new RegExp(`--${Object.keys(flag)[0]} needs --assurance or --tier`))
+    assert.equal(result.stateDir, false)
+    assert.equal(result.workspaceCalls, 0)
+  }
+  const none = await bootAdvisor({ task: 'adr047-s2-none', args: { tier: undefined, roles: 'builder', 'model-advisor': 'none' } })
+  assert.equal(none.error, null)
+  assert.deepEqual(none.crew.advisor.granted, [])
+})
+
+test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its legacy contract', async () => {
+  const home = scratchDir('crew-adr047-s3-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-adr047-s3-checkout-')
+  const rosterPath = join(home, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify(advisorRoster(), null, 2))
+  const bare = join(home, 'bare.md')
+  const tripwired = join(home, 'tripwired.md')
+  writeFileSync(bare, '# no tripwires here\n')
+  writeFileSync(tripwired, '# brief\ntripwire tests:\n- crew/crew.mjs · bootCmd\n')
+  execSync('git init -q', { cwd: checkout })
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  const previousStdoutWrite = process.stdout.write
+  const run = (task, brief) => runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
+    drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
+  })
+  try {
+    process.stdout.write = () => true
+    await withHome(home, async () => {
+      await withBreakerEnv({}, () => bootCmd({ task: 'adr047-s3', checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), ...GRANTED }))
+      const dir = testCrewDir(home, checkout, 'adr047-s3')
+      const crewPath = join(dir, 'crew.json')
+      const manifestPath = join(dir, 'task', 'advisor-manifest.json')
+      const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+      assert.deepEqual(crew.advisor.granted, ['builder'])
+      // ADR-047: an empty tripwire list is a valid manifest once it carries the cell.
+      run('adr047-s3', bare)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      assert.deepEqual(manifest.tripwires, [])
+      assert.deepEqual(manifest.cell, crew.advisor.cell)
+      // A record written before ADR-047 has no cell: it runs on its tripwire surface as before...
+      const legacy = { ...crew.advisor }
+      delete legacy.cell
+      delete legacy.consult_model
+      writeFileSync(crewPath, JSON.stringify({ ...crew, advisor: legacy }))
+      run('adr047-s3', tripwired)
+      const legacyManifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      assert.deepEqual(legacyManifest.tripwires, ['crew/crew.mjs'])
+      assert.equal(legacyManifest.cell, null)
+      // ...and still refuses without one, exactly as it did.
+      assert.throws(() => run('adr047-s3', bare), (error) => error.reason === 'advisor-manifest-unavailable')
+    })
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('ADR047 K2 the shipped default boots a build crew that loads and consults no advisor', async () => {
+  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
+  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
+  assert.equal(layout.includes('CREW_ADVISOR'), false)
+  assert.equal(layout.includes('advisor.ts'), false)
+  const headless = await bootAdvisor({ task: 'adr047-k2' })
+  assert.equal(headless.error, null)
+  assert.deepEqual(headless.crew.advisor.granted, [])
+  // The cell is still resolved and recorded: only the grant is off.
+  assert.equal(headless.crew.seats.advisor.id, 'claude-sonnet-5')
+  // Switched on inside the test, the same boot grants the builder.
+  const granted = await bootAdvisor({ task: 'adr047-k2-granted', deps: GRANTED })
+  assert.deepEqual(granted.crew.advisor.granted, ['builder'])
+})
+
+test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
+  const result = await bootAdvisor({ task: 'adr047-h1' })
+  assert.equal(result.error, null)
+  assert.deepEqual(result.boot.run_configuration.advisor, {
+    agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5', model: result.crew.seats.advisor.model,
+  })
+  assert.deepEqual(result.boot.seats.advisor, result.crew.seats.advisor)
+  assert.equal(Object.hasOwn(result.crew.run_configuration, 'advisor'), false)
+})
 
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300 * 1000
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
@@ -1373,12 +1676,17 @@ test('B1 boot crew record remains profile and assurance only', async () => {
         assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
       })
       const bootConfiguration = bootRecord(dir).run_configuration
+      // ADR-047 (TL7): the boot JOURNAL's record carries the resolved advisor cell (null on
+      // judge); crew.json keeps profile and assurance only, because seats.advisor records it there.
       assert.deepEqual(bootConfiguration, {
         profile: crew.run_configuration.profile,
         assurance: crew.run_configuration.assurance,
+        advisor: null,
       })
       assert.equal(Object.hasOwn(bootConfiguration, 'execution'), false)
-      assert.deepEqual(bootConfiguration, crew.run_configuration)
+      assert.deepEqual(bootConfiguration, { ...crew.run_configuration, advisor: null })
+      assert.equal(Object.hasOwn(crew.run_configuration, 'advisor'), false)
+      assert.equal(crew.seats.advisor, null)
       runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
         drive: (ctx) => { seen = ctx; return done }, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
       })
@@ -2589,6 +2897,7 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].skills, [])
     assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
     assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
+    // ADR-047 decision 9: no seat is granted the advisor until lane 2 flips the builder.
     assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {
@@ -2831,18 +3140,35 @@ test('#809 a LAN advisor endpoint is admitted and only http(s), userinfo and uns
   assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://192.168.1.42/v1', model: 'not safe' }), { reason: 'model-unsafe' })
 })
 
+// ADR-047: a boot record is built from the RESOLVED roster cell. The retired environment
+// never reaches it, so these helpers state the cell (and, for the legacy HTTP-channel
+// checks assertAdvisorCellLive still carries until lane 2 deletes it, the endpoint record).
+const ADVISOR_MODELS = Object.freeze({ 'anthropic/claude-sonnet-5': {}, 'provider/model': {} })
+function cellRecord(roles, { cell = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' }, models = ADVISOR_MODELS } = {}) {
+  return advisorBootRecord({ adapters: Object.fromEntries(roles.map((role) => [role, { grants: { advisor: true } }])), models, advisor: cell })
+}
+function legacyEndpointRecord(roles, endpoint, model = 'qwen3-coder') {
+  const origin = advisorEndpointOrigin(endpoint)
+  return { ...cellRecord(roles), endpoint, endpoint_host: origin?.host ?? null, endpoint_port: origin?.port ?? null, model }
+}
+
 test('#809 the advisor boot record carries host and port and the journal projection carries nothing else', () => {
-  const record = advisorBootRecord({
+  // The retired environment cannot put an endpoint (or its credential) into a boot record.
+  const fromEnv = advisorBootRecord({
     adapters: { builder: { grants: { advisor: true } } },
     env: { CREW_ADVISOR_ENDPOINT: 'http://user:sekrit@192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' },
   })
+  assert.deepEqual(fromEnv.granted, [])
+  assert.equal(fromEnv.endpoint, '')
+  assert.doesNotMatch(JSON.stringify(fromEnv), /sekrit|192\.168|qwen3-coder/)
+  const record = legacyEndpointRecord(['builder'], 'http://user:sekrit@192.168.1.42:8080/v1')
   assert.equal(record.endpoint_host, '192.168.1.42')
   assert.equal(record.endpoint_port, 8080)
   assert.deepEqual(advisorEndpointOrigin('http://desktop2.lan/v1'), { host: 'desktop2.lan', port: 80 })
   assert.deepEqual(advisorEndpointOrigin('https://desktop2.lan/v1'), { host: 'desktop2.lan', port: 443 })
   assert.equal(advisorEndpointOrigin('not a url'), null)
   assert.equal(advisorEndpointOrigin('http:///v1'), null)
-  const unset = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {} })
+  const unset = cellRecord(['builder'])
   assert.equal(unset.endpoint_host, null)
   assert.equal(unset.endpoint_port, null)
   const row = advisorJournalRecord(record)
@@ -2853,13 +3179,12 @@ test('#809 the advisor boot record carries host and port and the journal project
   // because paneCommand's advisorCell is built from it in the same process.
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   assert.equal(source.split('advisor: advisorJournalRecord(advisorRecord)').length - 1, 1)
-  assert.equal(source.split('advisor: advisorRecord }').length - 1, 1)
+  assert.equal(source.split('    advisor: advisorRecord,\n').length - 1, 1)
 })
 
 test('#809 an authority-less advisor endpoint refuses before a probe on the boot path', async () => {
   const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_ENDPOINT: 'http:///v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  const record = legacyEndpointRecord(['builder'], 'http:///v1')
   assert.equal(record.endpoint_host, null)
   assert.equal(record.endpoint_port, null)
   let probes = 0
@@ -2878,8 +3203,7 @@ test('#809 an authority-less advisor endpoint refuses before a probe on the boot
 
 test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, never a path or a credential', async () => {
   const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_ENDPOINT: 'http://192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  const record = legacyEndpointRecord(['builder'], 'http://192.168.1.42:8080/v1')
   const notes = []
   let probes = 0
   await assert.rejects(
@@ -2904,25 +3228,28 @@ test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, ne
 })
 
 test('H1 planner advisor grant is admitted at boot', async () => {
-  const endpoint = 'http://127.0.0.1:11434/v1'
-  const env = { CREW_ADVISOR_ENDPOINT: endpoint, CREW_ADVISOR_MODEL: 'qwen3-coder' }
-  const record = advisorBootRecord({
-    adapters: { planner: { grants: { advisor: true } } }, env,
-  })
+  // ADR-047 decision 3 leaves planner ADMISSION in code (ungranted in the register).
+  const record = cellRecord(['planner'])
+  assert.deepEqual(record.granted, ['planner'])
   const adapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
   let probes = 0
   await assertAdvisorCellLive({ record, adapters,
-    probeEndpoint: async (url) => { probes += 1; assert.equal(url, endpoint); return true },
+    probeEndpoint: async () => { probes += 1; return true },
     note: () => { throw new Error('no refusal note belongs on the accepting path') },
   })
-  assert.equal(probes, 1)
+  // The model channel has no endpoint, so admission probes nothing.
+  assert.equal(probes, 0)
+  // The legacy endpoint record is still probed exactly once on admission.
+  let legacyProbes = 0
+  await assertAdvisorCellLive({ record: legacyEndpointRecord(['planner'], 'http://127.0.0.1:11434/v1'), adapters,
+    probeEndpoint: async (url) => { legacyProbes += 1; assert.equal(url, 'http://127.0.0.1:11434/v1'); return true },
+    note: () => { throw new Error('no refusal note belongs on the accepting path') },
+  })
+  assert.equal(legacyProbes, 1)
 })
 
 test('J1 boot retains adapter and transport refusals', async () => {
-  const env = { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:11434/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' }
-  const record = advisorBootRecord({
-    adapters: { planner: { grants: { advisor: true } } }, env,
-  })
+  const record = cellRecord(['planner'])
   let probes = 0
   await assert.rejects(
     () => assertAdvisorCellLive({ record,
@@ -2946,8 +3273,7 @@ test('J1 boot retains adapter and transport refusals', async () => {
   }), (err) => { assert.equal(err.reason, 'transport-unsupported'); return true })
   assert.equal(probes, 0)
   const roster = { models: { 'provider/model': {} } }
-  const modelRecord = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const modelRecord = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
   let modelProbes = 0
   await assertAdvisorCellLive({ record: modelRecord, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
@@ -2958,12 +3284,22 @@ test('J1 boot retains adapter and transport refusals', async () => {
     probeEndpoint: async () => { modelProbes += 1; return true },
   })
   assert.equal(modelProbes, 0)
+  // On the real boot path: the shipped builder grant plus a non-null cell refuses a
+  // claude builder; --model-advisor none takes the cell away and the same boot proceeds.
+  const claudeBuilder = { 'agent-builder': 'claude', 'model-builder': 'claude-opus-5-5' }
+  const refused = await bootAdvisor({ task: 'j1-claude-builder', args: claudeBuilder, deps: GRANTED })
+  assert.equal(refused.error?.reason, 'adapter-unsupported')
+  assert.equal(refused.error?.role, 'builder')
+  assert.equal(refused.stateDir, false)
+  const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' }, deps: GRANTED })
+  assert.equal(unadvised.error, null)
+  assert.equal(unadvised.crew.members.builder.agent, 'claude')
 })
 
 test('A4', async () => {
   const roster = { models: { 'provider/model': {} } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const record = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
+  assert.deepEqual(record.granted, ['builder'])
   let probes = 0
   await assertAdvisorCellLive({ record, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },
@@ -2974,8 +3310,8 @@ test('A4', async () => {
 
 test('A5', async () => {
   const roster = { models: { 'provider/other': {} } }
-  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
-    env: { CREW_ADVISOR_MODEL: 'provider/model' }, models: roster.models })
+  const record = cellRecord(['builder'], { cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, models: roster.models })
+  assert.deepEqual(record.granted, ['builder'])
   let probes = 0
   await assert.rejects(() => assertAdvisorCellLive({ record, models: roster.models,
     adapters: { builder: { name: 'pi', transport: 'headless-rpc', grants: { advisor: true } } },

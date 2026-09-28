@@ -151,7 +151,7 @@ test('D1 extension and boot refusal vocabularies retain exact frozen ordered val
   assert.deepEqual(bootAdvisorRefusals, [
     'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
     'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead',
+    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
   ])
 })
 
@@ -615,24 +615,31 @@ test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   assert.deepEqual(bootAdvisorRefusals, [
     'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
     'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead',
+    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
   ])
+})
+
+// The resolved roster cell a boot admits grants against (ADR-047); the retired env never grants.
+const BOOT_CELL = Object.freeze({
+  models: { 'anthropic/claude-sonnet-5': {} },
+  advisor: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' },
 })
 
 test('G1 boot-admitted planner receives plan and gate judgment context', async () => {
   const f = fixture()
   assert.equal(existsSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)), true)
   assert.equal(existsSync(join(f.root, 'returns')), true)
-  const endpoint = 'http://127.0.0.1:11434/v1'
   const plannerEnv = env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir })
   const bootAdapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  const record = advisorBootRecord({ adapters: bootAdapters, env: plannerEnv })
+  // ADR-047: boot admits a planner grant against the RESOLVED roster cell.
+  const record = advisorBootRecord({ adapters: bootAdapters, ...BOOT_CELL })
+  assert.deepEqual(record.granted, ['planner'])
   let probes = 0
   await assertAdvisorCellLive({ record, adapters: bootAdapters,
     probeEndpoint: async () => { probes += 1; return true },
     note: () => { throw new Error('planner boot should be admitted') },
   })
-  assert.equal(probes, 1)
+  assert.equal(probes, 0)
 
   const planPath = join(f.taskDir, 'plan.md')
   const gatePath = join(f.taskDir, 'gate.mjs')
@@ -691,7 +698,8 @@ test('I1 extension and boot role gates agree', async () => {
       extension.push(false)
     }
     const adapters = { [role]: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-    const record = advisorBootRecord({ adapters, env: values })
+    const record = advisorBootRecord({ adapters, ...BOOT_CELL })
+    assert.deepEqual(record.granted, [role])
     try {
       await assertAdvisorCellLive({ record, adapters, probeEndpoint: async () => true })
       boot.push(true)

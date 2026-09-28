@@ -213,6 +213,15 @@ local cells, which stays ADR-037's.
    checkout. Read tools are reconsidered only if measured advice shows it lacks context.
 6. **Timeout:** stays 20 s. A timed-out consult is recorded as unmeasured, never as advice and never as "no issue".
    The first model-channel lane records p50/p95 consult latency; any change is taken from that.
+7. **Breaker row (2026-09-28):** the advisor cell gets its OWN breaker row and verdict. With no history it reads
+   `unmeasured`, never a guessed `closed`. The seats' aggregate verdict is computed exactly as before, over the seats
+   alone, so an unmeasured advisor never changes it. An OPEN advisor row still refuses the boot (decision 1).
+8. **Availability (2026-09-28):** the boot refuses an unavailable advisor agent ONLY when some seat is granted
+   `advisor: true` AND the cell is non-null, that is, when a consult will actually happen. A null cell,
+   `--model-advisor none`, or no granted seat never blocks a boot.
+9. **Default grant (2026-09-28):** lane 1 ships the builder's `advisor` grant OFF in `crew/capabilities.json`, so no
+   lane loads or consults the advisor after lane 1 merges. Lane 2 lands delta-only consults and recorded consult
+   failures; then the grant is flipped, and the tier-0 arm (measurement step 1) runs first.
 
 ## Reverses if
 

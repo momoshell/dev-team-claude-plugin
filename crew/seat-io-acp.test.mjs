@@ -442,6 +442,18 @@ test('T11', () => {
   } finally { cleanup(f) }
 })
 
+test('ADR047 R3 the ACP launch spells the consult with the adapter', () => {
+  let spec
+  const grants = { tools: [], extensions: [], agents: [], skills: [], advisor: true }
+  const spy = { grants, configDir: '/cfg', acpLaunch(s) { spec = s; return { bin: '/bin/node', args: [], env: {}, policy: { autoDeny: [], autoApprove: [], escalate: [] } } } }
+  const advisor = { granted: ['builder'], endpoint: '', model: 'openai/gpt-6-sol', consult_model: 'openai-codex/gpt-6-sol', models: { 'openai/gpt-6-sol': { tag: 1 } }, model_only: true }
+  const crew = { members: { builder: { model: 'test', effort: 'high' } }, advisor }
+  const f = fixture({ adapters: { builder: spy }, crew }); try {
+    assign(f)
+    assert.deepEqual(spec.advisorCell, { endpoint: '', model: 'openai-codex/gpt-6-sol', models: { 'openai-codex/gpt-6-sol': { tag: 1 } } })
+  } finally { cleanup(f) }
+})
+
 test('T13 the ACP launch carries the role charter, grants, config dir and seat env', () => {
   let spec
   const grants = { tools: [], extensions: ['crew/pi/extensions/submit.ts'], agents: [], skills: [], advisor: false }

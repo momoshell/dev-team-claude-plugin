@@ -71,9 +71,26 @@
         "reviewer": {
           "$ref": "#/$defs/seat"
         },
+        "advisor": {
+          "$ref": "#/$defs/advisor"
+        },
         "tech-lead": {
           "$ref": "#/$defs/seat"
         }
+      }
+    },
+    "advisor": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": ["provider", "id", "agent", "effort"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "agent": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "effort": { "enum": ["low", "medium", "high", "xhigh", "max"] }
       }
     },
     "seat": {

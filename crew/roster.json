@@ -3,6 +3,7 @@
   "updated_at": "2026-09-25",
   "tiers": {
     "mechanical": {
+      "advisor": null,
       "lead": null,
       "planner": {
         "provider": "openai",
@@ -24,6 +25,12 @@
       }
     },
     "build": {
+      "advisor": {
+        "provider": "anthropic",
+        "id": "claude-sonnet-5",
+        "agent": "pi",
+        "effort": "medium"
+      },
       "lead": {
         "provider": "anthropic",
         "id": "claude-opus-5-5",
@@ -50,6 +57,7 @@
       }
     },
     "judge": {
+      "advisor": null,
       "lead": {
         "provider": "anthropic",
         "id": "claude-opus-5-5",

@@ -7,7 +7,7 @@ import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync,
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
@@ -15,6 +15,20 @@ import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
+
+test('ADR047 M1 advisor grant without a cell loads no extension and strips inherited rpc env', () => {
+  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: null, env: { CREW_ADVISOR_MODEL: 'inherited' } })
+  assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), false)
+  assert.equal(Object.hasOwn(rpc.env, 'CREW_ADVISOR_MODEL'), false)
+  assert.equal(seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: '/tmp', bootBrief: 'brief', grants: { advisor: true }, advisorCell: null }).includes(PI_ADVISOR_EXTENSION), false)
+})
+test('ADR047 M2 advisor cell transports canonical model and provenance', () => {
+  const cell = { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } }
+  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: cell })
+  assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)
+  assert.equal(rpc.env.CREW_ADVISOR_MODEL, 'anthropic/claude-sonnet-5')
+  assert.equal(rpc.env.CREW_ADVISOR_PROVENANCE, 'seat-transitional')
+})
 
 const SKELETONREAD_EXTENSION = join(process.cwd(), 'crew/pi/extensions/skeletonread.ts')
 const RETRIEVE_TOOL = PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/skeletonread.ts'][0]
@@ -78,8 +92,10 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
   const advisorExtension = join(process.cwd(), 'crew/pi/extensions/advisor.ts')
   assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
-  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
-  assert.equal(acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } }).env.CREW_ADVISOR_ENDPOINT, '')
+  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor', CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
+  const unseatedAdvisor = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } })
+  for (const key of ['CREW_ADVISOR', 'CREW_ADVISOR_ENDPOINT', 'CREW_ADVISOR_MODEL', 'CREW_ADVISOR_PROVENANCE']) assert.equal(Object.hasOwn(unseatedAdvisor.env, key), false)
+  assert.equal(unseatedAdvisor.args.includes(advisorExtension), false)
 
   // No Claude deny name maps to pi's ACP-only powershell gate; it remains gated.
   const allDenied = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: 'Bash,Edit,Write' })

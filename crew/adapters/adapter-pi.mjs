@@ -258,10 +258,26 @@ export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
 export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
 export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
 
+// ADR-047 §1: a consult is spelled by the advisor agent's adapter, never passed raw. The
+// boot record keeps the canonical catalog key as its identity (`model`) and carries this
+// adapter's spelling in `consult_model`; the extension checks its model against the catalog
+// it is handed and passes the same string to `pi --model`, so the catalog handed down is
+// keyed by the spelling. A record without `consult_model` (written before ADR-047) keeps
+// its legacy shape exactly.
+export function advisorLaunchCell(record) {
+  if (!record) return null
+  const models = record.model_only ? record.models : undefined
+  if (typeof record.consult_model !== 'string' || record.consult_model === record.model) {
+    return { endpoint: record.endpoint, model: record.model, models }
+  }
+  const entry = models && Object.hasOwn(models, record.model) ? models[record.model] : undefined
+  return { endpoint: record.endpoint, model: record.consult_model, models: entry === undefined ? {} : { [record.consult_model]: entry } }
+}
+
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null } = spec
   const piDeny = translateDeny(deny)
-  const advisor = grants?.advisor === true
+  const advisor = grants?.advisor === true && advisorCell?.model !== undefined
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
@@ -274,13 +290,14 @@ export function piRpcSeatParts(spec = {}) {
       ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
     ],
     env: {
-      ...env,
+      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR'))),
       ...(configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1',
         // ALWAYS set, never inherited: an endpoint not admitted by the boot record must not receive the delta.
         CREW_ADVISOR_ENDPOINT: advisorCell?.endpoint || '',
         ...(advisorCell?.model !== undefined ? { CREW_ADVISOR_MODEL: advisorCell.model } : {}),
         ...(advisorCell?.models !== undefined ? { CREW_ADVISOR_MODELS: JSON.stringify(advisorCell.models) } : {}),
+        CREW_ADVISOR_PROVENANCE: 'seat-transitional',
       } : {}),
       ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
     },
@@ -408,7 +425,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // callable. Extension tools are active by default ONLY when --tools is
   // absent (:2003-2007) — this adapter always passes it, so activation is
   // mandatory here, not merely additive.
-  const advisor = grants?.advisor === true
+  const advisor = grants?.advisor === true && advisorCell?.model !== undefined
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
@@ -424,6 +441,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
       `${PI_ADVISOR_ENDPOINT_ENV}=${shellSingleQuote(advisorCell?.endpoint || '')}`,
       ...(advisorCell?.model !== undefined ? [`${PI_ADVISOR_MODEL_ENV}=${shellSingleQuote(advisorCell.model)}`] : []),
       ...(advisorCell?.models !== undefined ? [`CREW_ADVISOR_MODELS=${shellSingleQuote(JSON.stringify(advisorCell.models))}`] : []),
+      'CREW_ADVISOR_PROVENANCE=seat-transitional',
     ] : []),
     // The register-resolved allowlist, transported to the extension. Emitted
     // ONLY when an agent is granted, so every ungranted command is unchanged.

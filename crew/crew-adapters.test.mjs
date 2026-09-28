@@ -670,6 +670,62 @@ test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster 
   }
 })
 
+test('ADR047 P1 an unavailable advisor agent refuses only when a granted seat will consult a non-null cell', async () => {
+  // Operator decision 8 (2026-09-28): the advisor agent's availability is admitted only
+  // when a consult will actually happen. A null cell, --model-advisor none, or no granted
+  // seat never blocks a boot; a granted seat with a non-null cell does.
+  const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const claudeSeated = (advisor) => {
+    const value = structuredClone(shipped)
+    for (const role of ['planner', 'builder']) {
+      value.tiers.build[role] = { ...value.tiers.build[role], provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
+    }
+    value.tiers.build.advisor = advisor
+    return value
+  }
+  const base = capabilityRegister()
+  const piUnavailable = { pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' } }
+  const granted = capabilityRegister({ coding_agents: piUnavailable, roles: { builder: { ...base.roles.builder, advisor: true } } })
+  const ungranted = capabilityRegister({ coding_agents: piUnavailable })
+  const boot = async (task, { register, rosterValue, args = {} }) => {
+    const home = scratchDir(`crew-adr047-p1-${task}-home-`)
+    const { root: checkoutRoot, checkout } = testCheckout(`crew-adr047-p1-${task}-checkout-`)
+    let workspaceCalls = 0
+    try {
+      let error = null
+      try {
+        await withHome(home, () => bootCmd(
+          { task, checkout, tier: 'build', 'headless-all': true, 'allow-shortfall-planner': 'subagents', 'claude-bin': process.execPath, ...args },
+          { register, readRosterFile: () => JSON.stringify(rosterValue), cmux: () => { workspaceCalls += 1 }, awaitSeatsReady: async () => {} },
+        ))
+      } catch (err) { error = err }
+      return { error, workspaceCalls, wrote: existsSync(join(testCrewDir(home, checkout, task), 'crew.json')) }
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(checkoutRoot, { recursive: true, force: true })
+    }
+  }
+  const cell = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium' }
+
+  const consults = await boot('consults', { register: granted, rosterValue: claudeSeated(cell) })
+  assert.equal(consults.error?.reason, 'agent-unavailable')
+  assert.match(consults.error.message, /seat advisor coding agent "pi" unavailable/)
+  assert.equal(consults.wrote, false)
+  assert.equal(consults.workspaceCalls, 0)
+
+  const none = await boot('none', { register: granted, rosterValue: claudeSeated(cell), args: { 'model-advisor': 'none' } })
+  assert.equal(none.error, null)
+  assert.equal(none.wrote, true)
+
+  const nullCell = await boot('null-cell', { register: granted, rosterValue: claudeSeated(null) })
+  assert.equal(nullCell.error, null)
+  assert.equal(nullCell.wrote, true)
+
+  const noGrant = await boot('no-grant', { register: ungranted, rosterValue: claudeSeated(cell) })
+  assert.equal(noGrant.error, null)
+  assert.equal(noGrant.wrote, true)
+})
+
 test('resolveAdapters tags a refusal with the role and roster cell it rejected', async () => {
   const cell = { agent: 'nope', provider: 'vendor', id: 'model-id', effort: 'high', model: null }
   await assert.rejects(

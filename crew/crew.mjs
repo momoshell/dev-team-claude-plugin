@@ -3339,7 +3339,7 @@ export async function bootCmd(args, deps = {}) {
     schema_version: 3, task: taskSlug, checkout, charter_arm: charterArm,
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
-    run_configuration: { ...bootConfigRecord, advisor },
+    run_configuration: bootConfigRecord,
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),

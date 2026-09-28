@@ -1411,12 +1411,17 @@ test('B1 boot crew record remains profile and assurance only', async () => {
         assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
       })
       const bootConfiguration = bootRecord(dir).run_configuration
+      // ADR-047 (TL7): the boot JOURNAL's record carries the resolved advisor cell (null on
+      // judge); crew.json keeps profile and assurance only, because seats.advisor records it there.
       assert.deepEqual(bootConfiguration, {
         profile: crew.run_configuration.profile,
         assurance: crew.run_configuration.assurance,
+        advisor: null,
       })
       assert.equal(Object.hasOwn(bootConfiguration, 'execution'), false)
-      assert.deepEqual(bootConfiguration, crew.run_configuration)
+      assert.deepEqual(bootConfiguration, { ...crew.run_configuration, advisor: null })
+      assert.equal(Object.hasOwn(crew.run_configuration, 'advisor'), false)
+      assert.equal(crew.seats.advisor, null)
       runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
         drive: (ctx) => { seen = ctx; return done }, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
       })

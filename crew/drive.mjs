@@ -6250,9 +6250,11 @@ function runTask(ctx, io, crash) {
         frozenEntries.push({ kind, path: snapshotPath, livePath, bytes: text, sha })
       }
     }
+    // A planner names plan_path; restoring a checkout file would revert the builder's edits to it.
+    const taskLocal = typeof planPath === 'string' && planPath.startsWith(`${ctx.taskDir}/`) && !planPath.split('/').includes('..')
     let planText = null
-    try { const value = io.readFile(planPath); if (typeof value === 'string') planText = value } catch { /* unavailable */ }
-    snapshot('plan', planPath, planText, art('plan.accepted.md'), 'read-unavailable')
+    if (taskLocal) try { const value = io.readFile(planPath); if (typeof value === 'string') planText = value } catch { /* unavailable */ }
+    snapshot('plan', planPath, planText, art('plan.accepted.md'), taskLocal ? 'read-unavailable' : 'plan-outside-task-dir')
     if (plannerReturn) snapshot('envelope', plannerReturn.path, plannerReturn.text, art('plan.accepted.envelope.json'), 'planner-return-unavailable')
     else frozen.envelope_absent = variant === DIRECTED_STAGE_HEAD ? 'directed-no-seat' : 'triage-derived-plan'
     try { io.log(recordRow({ at: io.now(), plan_frozen: frozen })) } catch { /* journal failures are nonfatal */ }
@@ -6273,6 +6275,10 @@ function runTask(ctx, io, crash) {
       const liveSha = typeof liveBytes === 'string' ? createHash('sha256').update(Buffer.from(liveBytes, 'utf8')).digest('hex') : null
       if (liveSha === entry.sha) continue
       if (typeof liveBytes === 'string') {
+        // Never overwrite a capture an earlier run in this task dir left behind.
+        const captureExt = entry.kind === 'plan' ? 'md' : 'json'
+        const captureTaken = (n) => { try { return typeof io.readFile(art(`plan.accepted.rewrite-${n}.${captureExt}`)) === 'string' } catch { return false } }
+        while (captureTaken(rewriteOrdinal + 1)) rewriteOrdinal += 1
         try { io.writeFile(art(`plan.accepted.rewrite-${++rewriteOrdinal}.${entry.kind === 'plan' ? 'md' : 'json'}`), liveBytes) }
         catch { logRewrite(entry, liveSha, 'capture-failed', 'snapshot-write-failed'); continue }
       }
@@ -8476,7 +8482,7 @@ function runTask(ctx, io, crash) {
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
   freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
-  restoreAcceptedPlan(planAdversary !== null ? 'plan-check' : 'plan')
+  restoreAcceptedPlan(S.stages.some((stage) => stage.startsWith('check:')) ? 'plan-check' : 'plan')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const plannedScopeFiles = planEnv.details?.files_in_scope
   if (!Array.isArray(plannedScopeFiles) || plannedScopeFiles.length === 0) {

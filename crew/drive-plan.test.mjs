@@ -3560,3 +3560,50 @@ test('N3 envelopefreeze unverified snapshot is absent once, never restored from'
   assert.equal(row.plan_absent, 'snapshot-unverified')
   assert.equal(efRewriteRows(io).filter(({ path }) => path === `${TD}/plan.md`).length, 0)
 })
+
+// Kills: dropping the task-dir test on plan_path, which restores a checkout file over the builder's edit.
+test('N4 envelopefreeze plan path outside the task dir is never restored', () => {
+  const outside = '/tmp/fake-repo/a.mjs'
+  let io
+  const env = planEnv()
+  io = efIo({
+    files: { [outside]: 'before\n' },
+    envelopes: {
+      'planner:1': { ...env, details: { ...env.details, plan_path: outside } },
+      'builder:1': () => { io.calls.files[outside] = 'built\n'; return buildEnv() },
+    },
+  })
+  assert.equal(driveTask(CTX, io).status, 'done')
+  assert.equal(efFrozenRows(io)[0].plan_absent, 'plan-outside-task-dir')
+  assert.equal(io.calls.files[outside], 'built\n')
+  assert.equal(efRewriteRows(io).length, 0)
+})
+
+// Kills: dropping the taken-capture scan, which overwrites an earlier run's rewrite-1 capture.
+test('R5 envelopefreeze rewrite capture never overwrites an earlier capture', () => {
+  let io
+  io = efIo({
+    files: { [`${TD}/plan.accepted.rewrite-1.md`]: 'prior capture\n' },
+    envelopes: { 'builder:1': () => { io.calls.files[`${TD}/plan.md`] = '# later\n'; return buildEnv() } },
+  })
+  assert.equal(driveTask(CTX, io).status, 'done')
+  assert.equal(io.calls.files[`${TD}/plan.accepted.rewrite-1.md`], 'prior capture\n')
+  assert.equal(io.calls.files[`${TD}/plan.accepted.rewrite-2.md`], '# later\n')
+})
+
+// Kills: labelling the acceptance restore from planAdversary, which names `plan-check` in a run with no check stage.
+test('L1 envelopefreeze acceptance restore without a check stage is labelled plan', () => {
+  const io = efIo()
+  const readFile = io.readFile.bind(io)
+  let captured = false
+  io.readFile = (path) => {
+    const text = readFile(path)
+    if (path === 'planner:1' && !captured) { captured = true; io.calls.files['planner:1'] = '{"rewritten":true}\n' }
+    return text
+  }
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.stages.some((stage) => stage.startsWith('check:')), false)
+  const row = efRewriteRows(io).find(({ path }) => path === 'planner:1')
+  assert.equal(row?.stage, 'plan', JSON.stringify(efRewriteRows(io)))
+})

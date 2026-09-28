@@ -833,6 +833,111 @@ test('red lane bounces the builder with the failure output, then green -> done',
   assert.equal(res.details.consults, 0) // mechanical bounce, no lead needed
 })
 
+test('A1 lane-red final consult contains failing output inline', () => {
+  const marker = 'DISTINCTIVE_FINAL_LANE_FAILURE_A1'
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'lead:1': leadEnv('escalate') },
+    runs: { 'lane-cmd': { ok: false, output: marker } },
+    changed: ['a.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  const leadAssign = io.calls.assign.find((a) => a.role === 'lead')
+  const brief = io.calls.writes[leadAssign.briefFile]
+  const artifactPath = `${CTX.taskDir}/lane-red-r3.md`
+  assert.ok(brief.includes(artifactPath))
+  assert.ok(brief.includes(`# Red validation lane (round 3)`))
+  assert.ok(brief.includes(marker))
+  const laneLogIndex = io.calls.sequence.findIndex((event) => event.kind === 'log' && event.row.lane_red?.artifact === artifactPath)
+  const leadAssignIndex = io.calls.sequence.findIndex((event) => event.kind === 'assign' && event.role === 'lead')
+  assert.ok(laneLogIndex >= 0 && laneLogIndex < leadAssignIndex)
+  const artifactWriteIndex = io.calls.writeLog.findIndex((event) => event.path === artifactPath)
+  const briefWriteIndex = io.calls.writeLog.findIndex((event) => event.path === leadAssign.briefFile)
+  assert.ok(artifactWriteIndex >= 0 && artifactWriteIndex < briefWriteIndex)
+})
+
+test('A2 lane-red long output retains last line inline after cap', () => {
+  const firstLine = 'DISTINCTIVE_FIRST_LINE_A2'
+  const lastLine = 'DISTINCTIVE_LAST_LINE_A2'
+  const output = `${firstLine}\n${'x'.repeat(200_000)}\n${lastLine}`
+  const planPath = `${CTX.taskDir}/plan.md`
+  const io = fakeIo({
+    writeThrough: true,
+    files: { [planPath]: 'large plan\n'.repeat(10_000) },
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'lead:1': leadEnv('escalate') },
+    runs: { 'lane-cmd': { ok: false, output } },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const artifactPath = `${CTX.taskDir}/lane-red-r3.md`
+  const leadAssign = io.calls.assign.find((a) => a.role === 'lead')
+  const brief = io.calls.writes[leadAssign.briefFile]
+  assert.ok(brief.includes(lastLine))
+  assert.ok(!brief.includes(firstLine))
+  const context = io.calls.logs.find((row) => row.lead_consult_context)?.lead_consult_context
+  assert.equal(context.sources.find((source) => source.path === artifactPath).mode, 'inline')
+  const row = io.calls.logs.find((entry) => entry.lane_red?.artifact === artifactPath).lane_red
+  assert.ok(row.tail.length <= 4000)
+  assert.equal(row.truncated, true)
+})
+
+test('B1 lane-red journals exactly one row per red round', () => {
+  const outputs = ['round one 🙂\nLAST_LINE_ROUND_1', 'round two\nLAST_LINE_ROUND_2']
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: outputs[0] }, 'lane-cmd:2': { ok: false, output: outputs[1] },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const rows = io.calls.logs.filter((entry) => entry.lane_red).map((entry) => entry.lane_red)
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map((row) => row.round), [1, 2])
+  assert.equal(new Set(rows.map((row) => row.artifact)).size, 2)
+  rows.forEach((row, index) => {
+    assert.ok(row.tail.endsWith(outputs[index].split('\n').at(-1)))
+    assert.equal(row.output_bytes, Buffer.byteLength(outputs[index], 'utf8'))
+    assert.equal(row.truncated, false)
+    assert.ok(io.calls.writes[row.artifact])
+  })
+  assert.equal(Object.keys(io.calls.writes).filter((path) => path.startsWith(`${CTX.taskDir}/lane-red-r`)).length, 2)
+})
+
+test('B2 lane-red empty output journals zero bytes and explanatory artifact', () => {
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() },
+    runs: { 'lane-cmd:1': { ok: false, output: '' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const row = io.calls.logs.find((entry) => entry.lane_red)?.lane_red
+  assert.deepEqual({ output_bytes: row.output_bytes, tail: row.tail, truncated: row.truncated }, { output_bytes: 0, tail: '', truncated: false })
+  const artifact = io.calls.files[row.artifact]
+  assert.match(artifact, /the lane produced no output/)
+  assert.match(artifact, /lane-cmd/)
+})
+
+test('C1 lane-red escalation carries the artifact', () => {
+  const marker = 'DISTINCTIVE_ESCALATED_LANE_FAILURE_C1'
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'lead:1': leadEnv('escalate') },
+    runs: { 'lane-cmd': { ok: false, output: marker } },
+    changed: ['a.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  const artifactPath = `${CTX.taskDir}/lane-red-r3.md`
+  assert.equal(res.status, 'escalation')
+  assert.ok(res.artifacts.includes(artifactPath))
+  assert.match(io.calls.files[artifactPath], new RegExp(marker))
+})
+
 test('a lane bounce records an applied failure-upgrade on the envelope and journal', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },

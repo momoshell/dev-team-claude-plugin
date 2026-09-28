@@ -1545,6 +1545,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at screener_proposal"],
   ["recordRow", "", "at member_questions"],
   ["recordRow", "", "at question_answers"],
+  ["recordRow", "", "at lane_red"],
   ["recordRow", "", "at screener_panel"],
   ["recordRow", "", "at review_round"],
   ["recordRow", "", "at auto_fix"],

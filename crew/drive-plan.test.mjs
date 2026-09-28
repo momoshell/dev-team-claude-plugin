@@ -3607,3 +3607,26 @@ test('L1 envelopefreeze acceptance restore without a check stage is labelled pla
   const row = efRewriteRows(io).find(({ path }) => path === 'planner:1')
   assert.equal(row?.stage, 'plan', JSON.stringify(efRewriteRows(io)))
 })
+
+// Kills: labelling from ANY earlier check stage, which names `plan-check` when the accepted round ran none.
+test('L2 envelopefreeze acceptance label follows the accepted round, not an earlier check', () => {
+  let io
+  const envelopes = {
+    'planner:1': adversarialPlanEnv(),
+    'tech-lead:1': checkEnv('revise'),
+    'planner:2': planEnv(),
+  }
+  io = efIo({ files: { 'planner:2': EF_ENV2 }, envelopes, ctx: CTX_TL })
+  const readFile = io.readFile.bind(io)
+  let captured = false
+  io.readFile = (path) => {
+    const text = readFile(path)
+    if (path === 'planner:2' && !captured) { captured = true; io.calls.files['planner:2'] = '{"rewritten":true}\n' }
+    return text
+  }
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages.filter((stage) => /^(plan|check):/.test(stage)), ['plan:r1', 'check:r1', 'plan:r2'])
+  const row = efRewriteRows(io).find(({ path }) => path === 'planner:2')
+  assert.equal(row?.stage, 'plan', JSON.stringify(efRewriteRows(io)))
+})

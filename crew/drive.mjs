@@ -8482,7 +8482,7 @@ function runTask(ctx, io, crash) {
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
   freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
-  restoreAcceptedPlan(S.stages.some((stage) => stage.startsWith('check:')) ? 'plan-check' : 'plan')
+  restoreAcceptedPlan(S.stages.at(-1)?.startsWith('check:') ? 'plan-check' : 'plan')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const plannedScopeFiles = planEnv.details?.files_in_scope
   if (!Array.isArray(plannedScopeFiles) || plannedScopeFiles.length === 0) {

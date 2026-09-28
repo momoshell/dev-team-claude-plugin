@@ -881,7 +881,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   ])
   assert.deepEqual(completeGrant.env, {
     X: '1', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor',
-    CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
+    CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
   })
 
   const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }

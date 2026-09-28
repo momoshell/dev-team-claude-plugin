@@ -18,6 +18,12 @@ import { NARRATION_BACKSTOP_SECONDS, NARRATION_CONNECT_TIMEOUT_SECONDS, NARRATIO
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
+test('ADR047 K1 builder alone is granted the shipped advisor capability', () => {
+  const roles = loadCapabilities().roles
+  assert.equal(roles.builder.advisor, true)
+  for (const [role, grants] of Object.entries(roles)) if (role !== 'builder') assert.equal(grants.advisor, false)
+})
+
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
   const expected = {
     'crew/pi/extensions/advisor.ts': [],

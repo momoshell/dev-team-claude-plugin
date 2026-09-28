@@ -28,6 +28,25 @@ void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync
 
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
+test('ADR047 A1 build roster resolves its canonical nullable advisor cell without seating it', () => {
+  const resolved = resolveTier(shippedRoster(), 'build')
+  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5', model: null })
+  assert.equal(resolved.roles.includes('advisor'), false)
+})
+test('ADR047 A2 judge roster keeps advisor explicitly null', () => {
+  assert.equal(resolveTier(shippedRoster(), 'judge').advisor, null)
+})
+test('ADR047 A3 advisor is not a process role and canonical override is honored', () => {
+  const resolved = resolveTier(shippedRoster(), 'build', { 'model-advisor': 'openai/gpt-6-sol' })
+  assert.equal(resolved.roles.includes('advisor'), false)
+  assert.equal(resolved.advisor.provider, 'openai')
+  assert.equal(resolved.advisor.id, 'gpt-6-sol')
+})
+test('ADR047 B1 none clears advisor and noncanonical values refuse', () => {
+  assert.equal(resolveTier(shippedRoster(), 'build', { 'model-advisor': 'none' }).advisor, null)
+  assert.throws(() => resolveTier(shippedRoster(), 'build', { 'model-advisor': 'sonnet' }), /canonical roster model/)
+})
+
 // Focused test-local schema evaluator for the fallback fixtures. The production
 // refresh validator intentionally supports a smaller keyword set, so these
 // tests exercise the shipped $ref chain, minItems and closed entry objects.
@@ -1083,7 +1102,7 @@ test('crew CLI reads the closed variant set from drive.mjs without quoted shape 
 
 test('boot wiring places the definition band check before the breaker', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  const seatFloors = source.indexOf('assertBandFloors(seats, tierName,')
+  const seatFloors = source.indexOf('assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName,')
   const breaker = source.indexOf('assertCellsClosed(breaker)')
   assert.ok(seatFloors >= 0)
   assert.ok(breaker > seatFloors)
@@ -2298,9 +2317,9 @@ test('a raw --model override resolving to a local ratified member is refused fro
 
 test('boot passes the roster model catalog into the seat band floor check', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  const match = source.match(/assertBandFloors\(seats, tierName,[^\n]*/)
-  assert.ok(match)
-  assert.ok(match[0].includes('models: roster?.models'))
+  const line = source.split('\n').find((entry) => entry.includes('assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName'))
+  assert.ok(line)
+  assert.ok(line.includes('models: roster?.models'))
 })
 
 test('a tier with no ratified floor refuses floor-unratified', () => {

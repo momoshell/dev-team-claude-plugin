@@ -151,7 +151,7 @@ test('D1 extension and boot refusal vocabularies retain exact frozen ordered val
   assert.deepEqual(bootAdvisorRefusals, [
     'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
     'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead',
+    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
   ])
 })
 
@@ -615,7 +615,7 @@ test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   assert.deepEqual(bootAdvisorRefusals, [
     'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
     'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead',
+    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
   ])
 })
 

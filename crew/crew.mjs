@@ -50,6 +50,7 @@ import { driveTask, resumeTask, resumeCheckpointDefect, resumeCheckpointFamily, 
 import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
 import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies } from './roster.mjs'
+import * as piAdapter from './adapters/adapter-pi.mjs'
 export { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies }
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
@@ -289,7 +290,7 @@ export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_BOOT_REFUSALS = Object.freeze([
   'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
   'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-  'model-unset', 'model-unsafe', 'endpoint-dead',
+  'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
 ])
 const ADVISED_ROLES = Object.freeze(new Set(['builder', 'planner']))
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
@@ -350,21 +351,19 @@ export function advisorEndpointLabel(endpoint) {
   return origin ? `${origin.host}:${origin.port ?? 'unknown-port'}` : 'an unset or unparseable endpoint'
 }
 
-export function advisorBootRecord({ adapters = {}, env = process.env, models } = {}) {
-  const granted = Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort()
-  const rawEndpoint = env?.CREW_ADVISOR_ENDPOINT
-  const origin = advisorEndpointOrigin(rawEndpoint)
-  let endpoint = rawEndpoint
-  // Do not normalize an authority-less raw input into a host before preflight sees it.
-  try { if (origin) endpoint = new URL(String(rawEndpoint || '')).href } catch { /* assertAdvisorCellLive gives the refusal */ }
+export function advisorBootRecord({ adapters = {}, env = process.env, models, advisor = null } = {}) {
+  const granted = advisor ? Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort() : []
+  const endpoint = advisor ? '' : env?.CREW_ADVISOR_ENDPOINT
+  const origin = advisor ? null : advisorEndpointOrigin(endpoint)
   return {
     granted,
     endpoint,
     endpoint_host: origin?.host ?? null,
     endpoint_port: origin?.port ?? null,
-    model: env?.CREW_ADVISOR_MODEL,
+    model: advisor ? `${advisor.provider}/${advisor.id}` : undefined,
     models,
-    model_only: !rawEndpoint,
+    model_only: true,
+    cell: advisor ? { provider: advisor.provider, id: advisor.id, agent: advisor.agent, effort: advisor.effort, model: advisor.model } : null,
     config_version: ADVISOR_CONFIG_VERSION,
   }
 }
@@ -424,30 +423,29 @@ export async function assertAdvisorCellLive({ record, adapters = {}, models, tas
   }
 }
 
-export function advisorManifest({ briefText, task, runStartedAt }) {
+export function advisorManifest({ briefText, task, runStartedAt, cell = null }) {
   const lines = String(briefText || '').split(/\r?\n/)
   const marker = lines.findIndex((line) => line.trim().toLowerCase() === 'tripwire tests:')
-  if (marker < 0) return null
   const tripwires = []
-  for (let i = marker + 1; i < lines.length; i += 1) {
+  if (marker >= 0) for (let i = marker + 1; i < lines.length; i += 1) {
     const line = lines[i].trim()
     if (/^broad keys\b/i.test(line)) break
     const match = /^-\s+(.+?)\s+·/.exec(line)
     if (match && match[1].trim()) tripwires.push(match[1].trim())
   }
-  if (!tripwires.length) return null
   return {
     schema_version: 1,
     generated_at: new Date().toISOString(),
     task: String(task || ''),
     run_started_at: runStartedAt,
     tripwires,
+    cell,
   }
 }
 
 export function assertAdvisorManifest({ granted = [], manifest, written } = {}) {
   if (!granted.length) return
-  if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !manifest.tripwires.length || written !== true) {
+  if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !manifest.cell || written !== true) {
     const err = new Error(`advisor manifest is unavailable for a granted run — refusing to start seats without the declared tripwire surface`)
     err.reason = 'advisor-manifest-unavailable'
     throw err
@@ -1006,9 +1004,9 @@ export function bootAllocation(roles, args = {}, sources = null, transports = nu
   return Object.keys(out).length ? out : null
 }
 
-function effectiveSeatRecords(roles, seats, members, sources, adapters) {
+function effectiveSeatRecords(roles, seats, members, sources, adapters, advisor = null) {
   if (seats === null) return []
-  return roles.map((role) => {
+  const rows = roles.map((role) => {
     const seat = seats[role]
     const source = Object.values(sources?.[role] || {}).some((value) => value === 'override') ? 'operator_override' : 'roster'
     const warnings = (Array.isArray(adapters[role]?.grants?.vendor_withheld) ? adapters[role].grants.vendor_withheld : [])
@@ -1027,6 +1025,13 @@ function effectiveSeatRecords(roles, seats, members, sources, adapters) {
       warnings,
     }
   })
+  if (advisor) rows.push({
+    role: 'advisor', agent: advisor.agent, provider: advisor.provider, model_id: advisor.id,
+    model: advisor.model, effort: advisor.effort, transport: members.builder.transport,
+    source: Object.values(sources?.advisor || {}).includes('override') ? 'operator_override' : 'roster',
+    policy_state: 'passed', warnings: [],
+  })
+  return rows
 }
 
 // A seat's declared BUDGET fallback chain: the cells to try, in order, when the
@@ -1072,7 +1077,7 @@ export function resolveTier(roster, tier, args = {}) {
   // Canonical order first, then any roster-typo keys ROLE_ORDER doesn't know
   // about — a typo must surface at boot's SEAT_DEFAULTS check, never be
   // silently dropped.
-  const order = [...ROLE_ORDER.filter((r) => r in cells), ...Object.keys(cells).filter((r) => !ROLE_ORDER.includes(r))]
+  const order = [...ROLE_ORDER.filter((r) => r in cells), ...Object.keys(cells).filter((r) => !ROLE_ORDER.includes(r) && r !== 'advisor')]
   const roles = []
   const seats = {}
   const sources = {}
@@ -1114,15 +1119,42 @@ export function resolveTier(roster, tier, args = {}) {
       effort: effortOverride ? 'override' : 'roster',
     }
   }
+  let advisor = null
+  if (Object.hasOwn(cells, 'advisor') && cells.advisor) {
+    const cell = cells.advisor
+    const modelOverride = args['model-advisor']
+    const agentOverride = args['agent-advisor']
+    const effortOverride = args['effort-advisor']
+    let provider = cell.provider
+    let id = cell.id
+    advisor = args['model-advisor'] === 'none' ? null : cell
+    if (advisor) {
+      if (modelOverride) {
+        if (!Object.hasOwn(roster.models || {}, modelOverride)) throw new Error(`--model-advisor must name a canonical roster model key or none: ${modelOverride}`)
+        ;[provider, id] = modelOverride.split('/')
+      }
+      advisor = { agent: agentOverride || cell.agent, effort: effortOverride || cell.effort, provider, id, model: null }
+    }
+    if (advisor && advisor.agent !== 'pi') throw Object.assign(new Error(`advisor agent ${advisor.agent} is not supported until lane 2 adds adapter-print configuration`), { reason: 'adapter-unsupported' })
+    sources.advisor = { agent: agentOverride ? 'override' : 'roster', model: modelOverride ? 'override' : 'roster', effort: effortOverride ? 'override' : 'roster' }
+  } else if (args['model-advisor'] && args['model-advisor'] !== 'none') {
+    if (!Object.hasOwn(roster.models || {}, args['model-advisor'])) throw new Error(`--model-advisor must name a canonical roster model key or none: ${args['model-advisor']}`)
+    // lean: pi/medium null-tier override defaults; lane 2 owns adapter-print configuration
+    advisor = { agent: args['agent-advisor'] || 'pi', effort: args['effort-advisor'] || 'medium', ...Object.fromEntries(args['model-advisor'].split('/').map((part, i) => [i ? 'id' : 'provider', part])), model: null }
+    if (advisor.agent !== 'pi') throw Object.assign(new Error(`advisor agent ${advisor.agent} is not supported until lane 2 adds adapter-print configuration`), { reason: 'adapter-unsupported' })
+    sources.advisor = { agent: args['agent-advisor'] ? 'override' : 'roster', model: 'override', effort: args['effort-advisor'] ? 'override' : 'roster' }
+  } else if (args['agent-advisor'] || args['effort-advisor']) {
+    throw new Error(`--agent-advisor/--effort-advisor given but tier ${tier} has no advisor cell`)
+  }
   // A flag naming a role the tier does not seat is a loud throw — silently
   // dropping operator intent is the worse failure.
   for (const key of Object.keys(args)) {
     const m = /^(model|agent|effort)-(.+)$/.exec(key)
-    if (m && !roles.includes(m[2])) {
+    if (m && m[2] !== 'advisor' && !roles.includes(m[2])) {
       throw new Error(`--${m[1]}-${m[2]} given but tier ${tier} seats no ${m[2]}`)
     }
   }
-  return { roles, seats, sources }
+  return { roles, seats, sources, advisor }
 }
 
 // The per-adapter translation step, kept out of the pure resolver: a roster
@@ -2923,7 +2955,10 @@ export async function bootCmd(args, deps = {}) {
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
-  const bootEnv = { ...process.env }
+  const bootEnv = { ...(deps.env ?? process.env) }
+  const inheritedAdvisorEnv = bootEnv.DEVTEAM_WORKER === '1' && bootEnv.CREW_ADVISOR_PROVENANCE === 'seat-transitional'
+  if (bootEnv.CREW_ADVISOR_MODEL && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_MODEL is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
+  if (bootEnv.CREW_ADVISOR_ENDPOINT && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_ENDPOINT is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
   const charterArm = args['charter-arm'] ?? 'control'
   if (!CHARTER_ARMS.includes(charterArm)) {
     throw new Error(`invalid --charter-arm ${JSON.stringify(charterArm)}; expected one of ${CHARTER_ARMS.join('|')}`)
@@ -2943,7 +2978,7 @@ export async function bootCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const laneFence = resolveLaneFence(args)
-  let roles, tierName = null, tierSeats = null, sources = null, roster = null
+  let roles, tierName = null, tierSeats = null, sources = null, advisor = null, roster = null
   let rosterRecord = null
   let workflow = null
   const seatingTier = args.tier !== undefined || args.assurance !== undefined ? assuranceTier(configuration.assurance.effective) : null
@@ -2965,7 +3000,7 @@ export async function bootCmd(args, deps = {}) {
       if (err?.reason) throw err
       throw new Error(`--tier needs a readable roster at ${rosterPath} (the runtime's own, or the one --roster names): ${err.message}`)
     }
-    ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(seatingTier), args))
+    ;({ roles, seats: tierSeats, sources, advisor } = resolveTier(roster, String(seatingTier), args))
     tierName = seatingTier
   } else {
     roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
@@ -3011,7 +3046,11 @@ export async function bootCmd(args, deps = {}) {
   }
   if (roles.includes('reviewer') && roles.includes('tech-lead')) assertPanelAgentsDistinct({ reviewerAgent: adapters.reviewer?.name ?? null, techLeadAgent: adapters['tech-lead']?.name ?? null, distinct: args['panel-distinct-agents'] === true });
   const registry = adapters.registry || loadCapabilities()
+  if (advisor) assertAgentProvider(registry, advisor.agent, advisor.provider, { role: 'advisor' })
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters, registry.local_providers) : null
+  // Non-pi advisor agents are refused in resolveTier until lane 2 adds another print adapter.
+  const adapter = piAdapter
+  if (advisor) advisor = { ...advisor, model: adapter.modelString({ provider: advisor.provider, id: advisor.id, localProviders: registry.local_providers }) }
   // #291: enforce the RATIFIED tier band floors. A below-floor seat is an
   // operator/roster decision, not evidence against a cell, so — like the breaker
   // and host-load refusals — it is NOT recorded as a cell failure, and it fires
@@ -3024,7 +3063,7 @@ export async function bootCmd(args, deps = {}) {
   let ladder = null
   if (seats && tierName) {
     ladder = loadLadder()
-    assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers, models: roster?.models })
+    assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName, ladder, { adapters, localProviders: registry.local_providers, models: roster?.models })
     // #377: the same floor over the models granted agent DEFINITIONS pin.
     assertDefBandFloors(grantedDefModels(adapters, { localProviders: registry.local_providers }), tierName, ladder, { adapters, localProviders: registry.local_providers })
   }
@@ -3059,7 +3098,8 @@ export async function bootCmd(args, deps = {}) {
   // as a side effect of the breaker check. Callers can still pin the precheck
   // explicitly through existsSync for a fake or custom ledger.
   const breaker = cellHealth({
-    policy: breakerPolicy(bootEnv), seats, dbPath: ledgerDbPath(),
+    policy: breakerPolicy(bootEnv), seats: { ...seats, ...(advisor ? { advisor } : {}) }, dbPath: ledgerDbPath(),
+    ...(seats === null ? { seats: null } : {}),
     ...(openLedgerDep ? {
       openLedger: openLedgerDep,
       existsSync: existsSyncDep ?? (() => true),
@@ -3076,7 +3116,7 @@ export async function bootCmd(args, deps = {}) {
       throw new Error(`advisor model-only boot needs a readable runtime roster at ${rosterPath}: ${err.message}`)
     }
   }
-  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv, models: roster?.models })
+  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv, models: roster?.models, advisor })
   await assertAdvisorCellLive({ record: advisorRecord, adapters, models: roster?.models, taskSlug,
     probeEndpoint: probeEndpointDep || probeLocalEndpoint,
     note: noteRunlessCellFailure })
@@ -3299,15 +3339,15 @@ export async function bootCmd(args, deps = {}) {
     schema_version: 3, task: taskSlug, checkout, charter_arm: charterArm,
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
-    run_configuration: bootConfigRecord,
+    run_configuration: { ...bootConfigRecord, advisor },
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
-    ...(tierName ? { tier: tierName, seats } : {}),
+    ...(tierName ? { tier: tierName, seats: { ...seats, advisor } } : {}),
     ...(workflow ? { workflow: workflow.name } : {}),
     ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256, snapshot: rosterSnapshot } } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
-    ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
+    advisor: advisor ? advisorRecord : { ...advisorRecord, granted: [] },
   }
   // crew/daemon.mjs paneSeat() is the consumer: daemon run refuses pane transport.
   if (headlessOnly) {
@@ -3321,7 +3361,7 @@ export async function bootCmd(args, deps = {}) {
     : null
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm,
-    run_configuration: bootConfigRecord,
+    run_configuration: { ...bootConfigRecord, advisor },
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
@@ -3334,7 +3374,7 @@ export async function bootCmd(args, deps = {}) {
     charter_memory_bytes: charter.memory_bytes,
     ...(charter.unmeasured ? { charter_unmeasured: charter.unmeasured } : {}),
     ...(workerBin ? { claude_bin: workerBin } : {}),
-    ...(tierName ? { tier: tierName, seats } : {}),
+    ...(tierName ? { tier: tierName, seats: { ...seats, advisor } } : {}),
     ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256 } } : {}),
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
@@ -3351,7 +3391,8 @@ export async function bootCmd(args, deps = {}) {
   // after crew.json is on disk: a boot killed at this line leaves a workspace a
   // `crew teardown --task` can still find and close.
   awaitSeatsReadyDep(crew, 'fresh', join(paths.dir, 'journal.jsonl'))
-  const effectiveSeats = effectiveSeatRecords(roles, seats, members, sources, adapters)
+  // lean: advisor uses the builder transport; lane 2 owns a separate print-command consult transport if introduced
+  const effectiveSeats = effectiveSeatRecords(roles, seats, members, sources, adapters, advisor)
   try {
     const emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
     emitter.recordSeats(effectiveSeats)
@@ -3713,7 +3754,7 @@ export function runCmd(args, deps = {}) {
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
     const briefText = readFileSync(briefFile, 'utf8')
-    const manifest = advisorManifest({ briefText, task: taskSlug, runStartedAt })
+    const manifest = advisorManifest({ briefText, task: taskSlug, runStartedAt, cell: crew.advisor.cell })
     const manifestPath = join(paths.taskDir, 'advisor-manifest.json')
     const temporaryPath = `${manifestPath}.tmp`
     let written = false
@@ -3726,11 +3767,6 @@ export function runCmd(args, deps = {}) {
       } catch (err) {
         writeReason = 'write-failed'
       }
-    } else {
-      try { unlinkSync(manifestPath) } catch (err) {
-        if (err?.code !== 'ENOENT') writeReason = 'remove-failed'
-      }
-      writeReason ||= 'tripwire-tests-absent'
     }
     logLine(journal, { at: new Date().toISOString(), event: 'advisor-manifest',
       written, count: manifest?.tripwires?.length || 0, reason: writeReason })

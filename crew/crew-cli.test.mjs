@@ -30,6 +30,44 @@ delete process.env.CREW_ROUTER_ATTEMPT_URL
 // Keep lexical import reach visible before byte-pinned regex test bodies.
 void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
+test('ADR047 D1 retired model env refuses before boot side effects', async () => {
+  await assert.rejects(bootCmd({}, { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } }), (error) => error.reason === 'advisor-env-retired' && /CREW_ADVISOR_MODEL.*--model-advisor/.test(error.message))
+})
+test('ADR047 D2 retired endpoint env refuses independently', async () => {
+  await assert.rejects(bootCmd({}, { env: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:8080' } }), (error) => error.reason === 'advisor-env-retired' && /CREW_ADVISOR_ENDPOINT.*--model-advisor/.test(error.message))
+})
+test('ADR047 D3 exact worker provenance distinguishes composed child env', async () => {
+  await assert.rejects(bootCmd({}, { env: { DEVTEAM_WORKER: '1', CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } }), (error) => error.reason !== 'advisor-env-retired')
+})
+test('advisor boot record carries canonical model and empty resolved endpoint', () => {
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {}, models: { 'anthropic/claude-sonnet-5': {} }, advisor: { agent: 'pi', provider: 'anthropic', id: 'claude-sonnet-5', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
+  assert.equal(record.model, 'anthropic/claude-sonnet-5')
+  assert.deepEqual(record.granted, ['builder'])
+  assert.equal(record.endpoint, '')
+})
+
+test('ADR047 C1 breaker evaluates the advisor cell before state creation', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes('seats: { ...seats, ...(advisor ? { advisor } : {}) }, dbPath:'))
+})
+test('ADR047 C2 band floors evaluate the advisor cell before state creation', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes('assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName'))
+})
+test('ADR047 E1 translated advisor model is recorded rather than canonical provider key', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes('model: adapter.modelString({ provider: advisor.provider, id: advisor.id, localProviders: registry.local_providers })'))
+})
+test('ADR047 F1 a non-null advisor emits one effective seat row', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.match(source, /if \(advisor\) rows\.push\(\{/)
+  assert.match(source, /transport: members\.builder\.transport/)
+})
+test('ADR047 H1 boot journal includes resolved advisor configuration', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.match(source, /run_configuration: \{ \.\.\.bootConfigRecord, advisor \},/)
+})
+
 const KEEPALIVE_LIFETIME_DEFAULT_MS = 300 * 1000
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 

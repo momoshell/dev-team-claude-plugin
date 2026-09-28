@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -28,6 +28,12 @@ delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
 void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+
+test('ADR047 J1 manifest records empty tripwires and resolved advisor cell', () => {
+  const manifest = advisorManifest({ briefText: '- unrelated · item', task: 'task', runStartedAt: 1, cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
+  assert.deepEqual(manifest.tripwires, [])
+  assert.equal(manifest.cell.id, 'claude-sonnet-5')
+})
 
 const SIGNAL_BLOCK_MS = 3000
 

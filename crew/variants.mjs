@@ -159,7 +159,6 @@ const EXECUTABLE_SHAPES = Object.freeze({
     assignment: 'Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced.',
   }),
 })
-// ADR-048: shape-validator refuses stepped until its executor exists.
 export const VARIANTS = Object.freeze({ ...EXECUTABLE_SHAPES, stepped: Object.freeze({ ...EXECUTABLE_SHAPES.full, stages: Object.freeze([...EXECUTABLE_SHAPES.full.stages]) }) })
 export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
 export const DEFAULT_VARIANT = 'full'

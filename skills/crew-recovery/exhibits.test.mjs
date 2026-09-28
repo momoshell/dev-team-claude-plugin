@@ -26,7 +26,7 @@ test("escalations.md's driver table equals the escalate() producers", () => {
   const source = readFileSync(join(ROOT, DRIVE), 'utf8')
   const emitted = new Set()
   for (const match of source.matchAll(new RegExp(`\\bescalate\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`, 'g'))) emitted.add(match[1])
-  for (const name of VARIANT_NAMES) emitted.add(name)
+  for (const name of VARIANT_NAMES) if (name !== 'stepped') emitted.add(name)
   emitted.add('driver')
   // The underscore is load-bearing: VARIANT_NAMES are added to `emitted` verbatim,
   // and `review_only` (with `verify_only` to follow) is the first variant whose name

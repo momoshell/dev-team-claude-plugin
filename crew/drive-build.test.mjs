@@ -8110,3 +8110,182 @@ test('b869 hardening acceptance', async (t) => {
     ])
   })
 })
+
+const steppedGreen = (total = 2) => `GATE-SUMMARY {"total":${total},"failed":0,"errored":0}`
+const steppedRed = (id, total = 2, failed = 1) => `FAIL ${id}: mutation witness\nGATE-SUMMARY {"total":${total},"failed":${failed},"errored":0}`
+const steppedChunks = [
+  { id: 'c1', files_in_scope: ['a.mjs'], checks_owned: ['A1'] },
+  { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] },
+]
+const steppedMutations = [
+  { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
+  { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
+]
+function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], empty = false, omitChunks = false, corrected = false } = {}) {
+  const checks = mutations.map(({ check }) => check)
+  const plan = planEnv({ details: {
+    ...planEnv().details,
+    files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'stepped-gate',
+    mutations, ...(omitChunks ? {} : { chunks: empty ? [] : chunks }),
+  } })
+  const red = checks.map((id) => `FAIL ${id}: pristine red`).join('\n')
+  const baseline = `${red}\nGATE-SUMMARY {"total":${checks.length},"failed":${checks.length},"errored":0}`
+  const files = {
+    [`${CTX.checkout}/a.mjs`]: 'alpha\n',
+    [`${CTX.checkout}/b.mjs`]: 'beta\n',
+  }
+  const correction = { check: 'A1', find: 'alpha', replace: 'ALPHA' }
+  if (corrected) mutations[0] = { ...mutations[0], find: 'alpha-removed' }
+  const runs = { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }
+  let gateCalls = 0
+  runs['stepped-gate'] = () => {
+    const index = gateCalls++
+    if (index === 0) return { ok: false, output: baseline }
+    if (corrected) {
+      if (files[`${CTX.checkout}/a.mjs`].includes('ALPHA')) return { ok: false, output: steppedRed('A1') }
+      if (files[`${CTX.checkout}/b.mjs`].includes('BETA')) return { ok: false, output: steppedRed('A2') }
+      if (index === 1) return { ok: false, output: steppedRed('A2') }
+      return { ok: true, output: steppedGreen(checks.length) }
+    }
+    const output = outputs[index - 1] || steppedGreen(checks.length)
+    return { ok: !/\"failed\":(?!0)/.test(output), output }
+  }
+  const io = fakeIo({
+    files, writeThrough: true,
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv({ artifacts: [`${TD}/step-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], ...(corrected ? { mutation_corrections: [correction] } : {}) } }),
+      'builder:2': buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs,
+    cleanRuns: { 'stepped-gate': { ok: false, output: baseline } },
+    changed: ['a.mjs', 'b.mjs', 'a.test.mjs'],
+  })
+  return { io, plan, files }
+}
+
+test('P1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ empty: true, mutations: [] })
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  const absent = steppedAcceptanceIo({ omitChunks: true, mutations: [] })
+  const absentResult = driveTask({ ...CTX, variant: 'stepped' }, absent.io)
+  assert.equal(absentResult.details.escalation.where, 'plan-chunks')
+  assert.match(absentResult.details.escalation.why, /chunks-not-array/)
+})
+
+test('P2 stepped-executor acceptance', () => {
+  const mutations = [...steppedMutations, { check: 'A3', file: 'a.mjs', find: 'gamma', replace: 'GAMMA' }]
+  const { io } = steppedAcceptanceIo({ mutations })
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(result.details.escalation.where, 'plan-chunks')
+  assert.match(result.details.escalation.why, /chunk-check-unowned/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('P3 stepped-executor acceptance', () => {
+  const io = fakeIo()
+  assert.throws(() => driveTask({ ...CTX, variant: 'stepped', chunked: true }, io), /stepped cannot combine with --chunked/)
+  assert.throws(() => driveTask({ ...CTX, variant: 'stepped', chunk: 'c1' }, io), /stepped cannot combine with --chunk/)
+  assert.equal(io.calls.assign.length, 0)
+})
+
+test('F1 stepped-executor acceptance', () => {
+  const plan = planEnv({ details: { ...planEnv().details, chunks: steppedChunks } })
+  const { io, ctx } = suiteCycleIo({ envelopes: { 'planner:1': plan } })
+  driveTask(ctx, io)
+  assert.ok(io.calls.logs.some((row) => row.stage === 'build:r1'))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+})
+
+test('S1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')] })
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  const starts = io.calls.logs.map(({ stage }) => stage).filter((stage) => stage?.startsWith('build:'))
+  assert.deepEqual(starts.slice(0, 2), ['build:c1:r1', 'build:c2:r1'], JSON.stringify({ result, assigns: io.calls.assign, logs: io.calls.logs }))
+  assert.ok(['done', 'escalation'].includes(result.status))
+})
+
+test('S2 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  const events = io.calls.logs.map((row) => row.event).filter((event) => event?.startsWith('step:'))
+  assert.ok(events.indexOf('step:done') < events.lastIndexOf('step:start'))
+})
+
+test('S3 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  const brief = io.calls.writeLog.find(({ path }) => path.endsWith('/step-c2-r1.md'))?.content || ''
+  assert.match(brief, /checks_owned: \["A2"\]/)
+})
+
+test('G1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedGreen()] })
+  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
+  assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c1-r2.md')))
+  assert.ok(['done', 'escalation'].includes(result.status))
+})
+
+test('G2 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedRed('A1'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'step:red' && row.step === 'c2' && row.regressed.includes('A1')))
+})
+
+test('G3 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'step:done' && row.step === 'c1'))
+})
+
+test('B1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
+  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+test('J1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'step:start' && row.step === 'c1' && row.owned.includes('A1')))
+})
+
+test('J2 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'step:red' && row.step === 'c1' && Array.isArray(row.regressed)))
+})
+
+test('W1 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+test('W2 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  const laneStages = io.calls.logs.filter(({ stage }) => stage === 'lane:r1')
+  assert.equal(laneStages.length, 1)
+})
+
+test('W3 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A2'), steppedGreen(), steppedRed('A1'), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.ok(io.calls.logs.some(({ stage }) => stage === 'build:r2'))
+})
+
+test('W4 stepped-executor acceptance', () => {
+  const { io } = steppedAcceptanceIo({ corrected: true, mutations: steppedMutations.map((mutation) => ({ ...mutation })) })
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
+  const proof = io.calls.logs.flatMap((row) => row.gate_check_discriminations || []).find((row) => row.check === 'A1')
+  assert.equal(proof?.correction, 'accepted')
+  assert.ok(io.calls.logs.some((row) => row.gate_check_discriminations?.some((check) => check.check === 'A1' && check.correction === 'accepted')))
+  assert.deepEqual(result.details.files_committed, ['a.mjs', 'b.mjs', 'a.test.mjs'])
+  assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'b.mjs', 'a.test.mjs'])
+})

@@ -537,7 +537,7 @@ test('A1', () => {
 
 test('B1', () => {
   const charter = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
-  const rule = "- The plan's cited ranges are your working set; read outside them only when an edit fails to bind or a test names another line."
+  const rule = '- Use cited ranges; read outside them only when an edit fails to bind or test names another line.'
   assert.equal(charter.split(rule).length - 1, 1)
 })
 

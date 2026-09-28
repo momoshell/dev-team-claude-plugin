@@ -41,6 +41,13 @@ export const EXECUTOR_TOPOLOGIES = deepFreeze({
       'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
       'commit', 'document', 'rebase', 'suite', 'publish', 'converge']),
   },
+  stepped: {
+    execution: 'reviewed',
+    required_seats: 'tier',
+    stages: Object.freeze(['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
+      'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
+      'commit', 'document', 'rebase', 'suite', 'publish', 'converge']),
+  },
   scout: {
     execution: 'envelope',
     required_seats: Object.freeze(['planner']),
@@ -284,9 +291,9 @@ export function shapeValidationDefect(shape, variantName = 'full') {
       }
     }
 
+    if (Object.hasOwn(UNBUILT_EXECUTOR_SHAPES, variantName)) return verdict('stage-unimplemented', UNBUILT_EXECUTOR_SHAPES[variantName])
     const unknownIndex = shape.stages.findIndex((head) => !ALL_STAGE_HEADS.has(head))
     if (unknownIndex !== -1) return verdict('stage-unimplemented', `stage ${JSON.stringify(shape.stages[unknownIndex])} is not implemented by the executor`)
-    if (!topology && Object.hasOwn(UNBUILT_EXECUTOR_SHAPES, variantName)) return verdict('stage-unimplemented', UNBUILT_EXECUTOR_SHAPES[variantName])
     if (!topology || topology.execution !== 'reviewed') return verdict('stage-unimplemented', partialTopologyDetail(variantName))
     return topologyDefect(topology, shape.stages, verdict)
   }
@@ -313,4 +320,4 @@ export function shapeValidationDefect(shape, variantName = 'full') {
   return topologyDefect(topology, shape.stages, verdict)
 }
 
-const UNBUILT_EXECUTOR_SHAPES = Object.freeze({ stepped: 'the stepped executor is not built (ADR-048)' })
+const UNBUILT_EXECUTOR_SHAPES = Object.freeze({})

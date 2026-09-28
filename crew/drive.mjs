@@ -2629,6 +2629,24 @@ export function chunkGateVerdict(output, ownership) {
   return { ok: ownedFailed.length === 0, ownedFailed, deferred: chunkDeferredRows(output, ownership) }
 }
 
+export function steppedGateVerdict(output, step, done, chunks, exempt = []) {
+  if (!Array.isArray(chunks) || !Array.isArray(done) || done.some((entry) => !Array.isArray(entry?.checks_owned))
+    || !Array.isArray(step?.checks_owned)) {
+    return { ok: false, failed: [], regressed: [], defect: 'stepped-ownership-malformed' }
+  }
+  const index = chunks.findIndex((candidate) => candidate?.id === step?.id)
+  if (index < 0) {
+    return { ok: false, failed: [], regressed: [], defect: 'stepped-ownership-malformed' }
+  }
+  const watched = [...done.flatMap(({ checks_owned }) => checks_owned), ...step.checks_owned]
+  const later = chunks.slice(index + 1)
+  const owners = Object.fromEntries(later.flatMap((chunk) => (Array.isArray(chunk?.checks_owned) ? chunk.checks_owned : []).map((id) => [id, chunk.id])))
+  const verdict = chunkGateVerdict(output, { chunk: step.id, owned: watched, owners, exempt })
+  const regressed = done.flatMap(({ checks_owned }) => checks_owned).filter((id) => checkFailureLine(output, id))
+  const currentFailed = step.checks_owned.filter((id) => checkFailureLine(output, id))
+  return { ok: verdict?.ok === true, failed: [...new Set([...currentFailed, ...regressed])], regressed, defect: verdict?.defect ?? null }
+}
+
 export function adjudicateOwnedProof(output, check) {
   if (checkFailureLine(output, check)) return 'killed'
   return 'survived'
@@ -5913,6 +5931,8 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
 // runTask span report: before=4039/8440 after=3458/8460
 function runTask(ctx, io, crash) {
   const variant = ctx.variant ?? DEFAULT_VARIANT
+  if (variant === 'stepped' && ctx.chunked === true) throw fail('variant', 'stepped cannot combine with --chunked')
+  if (variant === 'stepped' && ctx.chunk != null) throw fail('variant', 'stepped cannot combine with --chunk')
   if (!VARIANT_NAMES.includes(variant)) {
     throw fail('variant', `unknown variant ${JSON.stringify(variant)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
   }
@@ -8498,17 +8518,22 @@ function runTask(ctx, io, crash) {
   const chunkPlanDetails = planEnv.details && typeof planEnv.details === 'object' ? planEnv.details : {}
   let validatedChunks = []
   let validatedExemptLabels = []
-  if (ctx.chunked === true || ctx.chunk != null) {
-    const chunkGuard = refuseChunkWithoutChunked(ctx, chunkPlanDetails.chunks ?? null)
+  const steppedProgram = variant === 'stepped'
+  if (steppedProgram || ctx.chunked === true || ctx.chunk != null) {
+    const chunkGuard = steppedProgram ? null : refuseChunkWithoutChunked(ctx, chunkPlanDetails.chunks ?? null)
     if (chunkGuard) return escalate('plan-chunks', `chunk selection refused (${chunkGuard.defect}): ${chunkGuard.why}`, planEnv.artifacts || [])
     const chunkLabels = allMutations.map((mutation) => mutation?.check).filter((label) => typeof label === 'string')
     const validated = validateChunks(chunkPlanDetails, { scope: scopeFiles, checkLabels: chunkLabels, mutations: allMutations })
     if (validated.defect) return escalate('plan-chunks', `chunk plan validation refused (${validated.defect}): ${validated.why}`, planEnv.artifacts || [])
     validatedChunks = validated.chunks
     validatedExemptLabels = validated.exemptLabels
-    const selectedChunk = selectActiveChunk(ctx, validatedChunks)
-    if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}`, planEnv.artifacts || [])
-    if (selectedChunk) {
+    if (steppedProgram) {
+      if (validatedChunks.length === 0) return escalate('plan-chunks', 'stepped plan declares no chunks')
+      if (!gateCmd) return escalate('plan-chunks', 'stepped requires a gate_cmd to adjudicate step ownership')
+    }
+    const selectedChunk = steppedProgram ? null : selectActiveChunk(ctx, validatedChunks)
+    if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}` , planEnv.artifacts || [])
+    if (selectedChunk && ctx.chunked === true) {
       scopeFiles = [...selectedChunk.files_in_scope]
       acceptedScope = scopeFiles
       inScope = scopeMatcher(scopeFiles)
@@ -9773,6 +9798,83 @@ function runTask(ctx, io, crash) {
     }
   }
 
+  const builderAssignmentBrief = (briefPath) => {
+    if (promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
+    const wrapperPath = art('builder-assignment.md')
+    io.writeFile(wrapperPath, [
+      '# Builder assignment wrapper', '',
+      `Read the current builder brief at ${briefPath}.`,
+      `Builder source brief: ${briefPath}.`, '',
+      'The commit message must carry a prompt measurement claim.',
+      'Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).',
+      'unmeasured — n insufficient; reason: <why>; re-measure after N seats.',
+      'Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.',
+      '`<name>`, `<sample>`, `<why>`, and `N` are placeholders to substitute, never literals; every `n=` and the `re-measure after N seats` count must be a positive integer.',
+      'The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.',
+      '`<why>` must contain at least one non-whitespace character; empty or all-space reasons do not match.',
+      'Put the claim on its own whole line in the commit message body, not the subject line: nothing may precede it on that line or follow its final period; a trailing ` Closes #123.` breaks the match.',
+      '`<sample>` must be followed by whitespace and then the literal parenthesised `(n=N)` shape, exactly as the template line shows.',
+      'Put the claim in details.commit_message.',
+    ].join('\n'))
+    return wrapperPath
+  }
+  const steppedChunks = variant === 'stepped' ? validatedChunks : null
+  const stepEnvelopes = []
+  let lastStepEnv = null
+  let mergedStepEnv = null
+  let seededStepEnv = null
+  let wholeBuildRound = 1
+  const done = []
+  if (steppedChunks) for (const step of steppedChunks) {
+    let stepRound = 0
+    let stepEnv = null
+    let priorStepFailure = null
+    for (;;) {
+      if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted before ${step.id} completed`)
+      stepRound += 1
+      io.log(recordRow({ at: io.now(), event: 'step:start', step: step.id, round: stepRound, files: [...step.files_in_scope], owned: [...step.checks_owned], builder_attempt: builderAttempts + 1 }))
+      const stepBrief = art(`step-${step.id}-r${stepRound}.md`)
+      io.writeFile(stepBrief, `# Stepped build ${step.id} (round ${stepRound})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\nRead the whole plan at ${planPath} before editing. Work only on this step's files and own checks.${priorStepFailure ? `\n\nGate failure from prior attempt:\n${priorStepFailure}` : ''}\n`)
+      stage(`build:${step.id}:r${stepRound}`)
+      builderAttempts = builderAttempts + 1
+      const env = assignAndWait('builder', builderAssignmentBrief(stepBrief), 'step-build')
+      if (env?.status !== 'done' || handledEnvelopeRefusalWhy(env)) {
+        stageComplete()
+        return escalate('build', `stepped builder ${step.id} returned ${env?.status || 'no envelope'}: ${env?.summary || handledEnvelopeRefusalWhy(env) || 'invalid builder result'}`, env?.artifacts || [])
+      }
+      stageComplete()
+      stepEnvelopes.push(env)
+      stepEnv = env
+      stage(`gate:${step.id}:r${stepRound}`)
+      const output = runGate(`gate:${step.id}:r${stepRound}`, gateCmd).output
+      stageComplete()
+      const verdict = steppedGateVerdict(output, step, done, steppedChunks, validatedExemptLabels)
+      if (verdict.ok) io.log(recordRow({ at: io.now(), event: 'step:done', step: step.id, round: stepRound, passed: step.checks_owned }))
+      if (verdict.ok) done.push(step)
+      if (verdict.ok) break
+      io.log(recordRow({ at: io.now(), event: 'step:red', step: step.id, round: stepRound, failed: verdict.failed, regressed: verdict.regressed }))
+      priorStepFailure = `failed: ${verdict.failed.join(', ') || '(unattributed)'}${verdict.defect ? `; defect: ${verdict.defect}` : ''}\n${String(output || '').slice(-2000)}`
+      if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted after red gate for ${step.id}: ${verdict.failed.join(', ')}`)
+    }
+    lastStepEnv = stepEnv
+  }
+  if (steppedChunks) {
+    const corrections = new Map()
+    for (const env of stepEnvelopes) for (const correction of env.details?.mutation_corrections || []) {
+      if (correction && typeof correction.check === 'string') corrections.set(correction.check, correction)
+    }
+    mergedStepEnv = {
+      ...lastStepEnv,
+      artifacts: [...new Set(stepEnvelopes.flatMap((env) => Array.isArray(env.artifacts) ? env.artifacts : []))],
+      details: {
+        ...lastStepEnv.details,
+        files_changed: [...new Set(stepEnvelopes.flatMap((env) => Array.isArray(env.details?.files_changed) ? env.details.files_changed : []))],
+        mutation_corrections: [...corrections.values()],
+      },
+    }
+    seededStepEnv = mergedStepEnv
+  }
+
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
   let postCommitCensusBounces = 0
   // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
@@ -9891,28 +9993,6 @@ function runTask(ctx, io, crash) {
     suiteBuildBrief = bounce
     suiteBuildNote = 'rebase-conflict-fix'
     return { ok: true, bounce }
-  }
-  const builderAssignmentBrief = (briefPath) => {
-    // Plan-scope hits: .md documents on the surface or a directory that intersects it — never a concrete
-    // non-Markdown file — so an anchor-only lane is not told to carry a claim it cannot make.
-    if (promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
-    const wrapperPath = art('builder-assignment.md')
-    io.writeFile(wrapperPath, [
-      '# Builder assignment wrapper', '',
-      `Read the current builder brief at ${briefPath}.`,
-      `Builder source brief: ${briefPath}.`, '',
-      'The commit message must carry a prompt measurement claim.',
-      'Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).',
-      'unmeasured — n insufficient; reason: <why>; re-measure after N seats.',
-      'Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.',
-      '`<name>`, `<sample>`, `<why>`, and `N` are placeholders to substitute, never literals; every `n=` and the `re-measure after N seats` count must be a positive integer.',
-      'The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.',
-      '`<why>` must contain at least one non-whitespace character; empty or all-space reasons do not match.',
-      'Put the claim on its own whole line in the commit message body, not the subject line: nothing may precede it on that line or follow its final period; a trailing ` Closes #123.` breaks the match.',
-      '`<sample>` must be followed by whitespace and then the literal parenthesised `(n=N)` shape, exactly as the template line shows.',
-      'Put the claim in details.commit_message.',
-    ].join('\n'))
-    return wrapperPath
   }
   const censusFiles = (census) => {
     const rows = Array.isArray(census?.failures) ? census.failures : []
@@ -10446,12 +10526,17 @@ function runTask(ctx, io, crash) {
   }
   build:
   for (;;) {
-    if (builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
-    const round = builderAttempts + 1
+    const seededBuild = variant === 'stepped' && seededStepEnv !== null
+    if (!seededBuild && builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
+    const round = seededStepEnv ? 1 : wholeBuildRound
     const finalRound = () => builderRemaining() <= 0
-    stage(`build:r${round}`)
-    builderAttempts += 1
-    const env = assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)
+    if (!seededBuild) {
+      stage(`build:r${round}`)
+      builderAttempts += 1
+      wholeBuildRound += 1
+    }
+    const env = seededBuild ? seededStepEnv : assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)
+    if (seededBuild) { seededStepEnv = null; wholeBuildRound = 2 }
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {
       stageComplete()
@@ -10542,7 +10627,7 @@ function runTask(ctx, io, crash) {
       continue
     }
     builderEnv = env
-    stageComplete()
+    if (!seededBuild) stageComplete()
 
     const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })
     if (scoped.escalation) return scoped.escalation

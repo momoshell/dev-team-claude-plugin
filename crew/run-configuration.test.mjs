@@ -29,7 +29,6 @@ const SHAPE_STATUS = Object.freeze({
   review_only: 'existing',
   review_panel: 'existing',
   verify_only: 'existing',
-  // lean: status is derived from VARIANT_NAMES and cannot see an unbuilt executor; teach the resolver executor readiness in a follow-up lane
   stepped: 'existing',
 })
 const ALIAS_PAIRS = Object.freeze([

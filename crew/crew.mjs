@@ -3046,7 +3046,11 @@ export async function bootCmd(args, deps = {}) {
   }
   if (roles.includes('reviewer') && roles.includes('tech-lead')) assertPanelAgentsDistinct({ reviewerAgent: adapters.reviewer?.name ?? null, techLeadAgent: adapters['tech-lead']?.name ?? null, distinct: args['panel-distinct-agents'] === true });
   const registry = adapters.registry || loadCapabilities()
-  if (advisor) assertAgentProvider(registry, advisor.agent, advisor.provider, { role: 'advisor' })
+  // ADR-047 operator decision 8 (2026-09-28): the advisor's agent is admitted only when a
+  // consult will actually happen, i.e. the cell is non-null AND some seat is granted
+  // advisor. A null cell, --model-advisor none, or no granted seat never blocks a boot.
+  const advisorConsults = advisor !== null && roles.some((role) => adapters[role]?.grants?.advisor === true)
+  if (advisorConsults) assertAgentProvider(registry, advisor.agent, advisor.provider, { role: 'advisor' })
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters, registry.local_providers) : null
   // Non-pi advisor agents are refused in resolveTier until lane 2 adds another print adapter.
   const adapter = piAdapter

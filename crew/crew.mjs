@@ -3098,8 +3098,9 @@ export async function bootCmd(args, deps = {}) {
   // as a side effect of the breaker check. Callers can still pin the precheck
   // explicitly through existsSync for a fake or custom ledger.
   const breaker = cellHealth({
-    policy: breakerPolicy(bootEnv), seats: { ...seats, ...(advisor ? { advisor } : {}) }, dbPath: ledgerDbPath(),
-    ...(seats === null ? { seats: null } : {}),
+    // ADR-047 decision 7: the advisor is breaker-checked as its own row; the seats'
+    // aggregate verdict is computed over the seats alone, exactly as before.
+    policy: breakerPolicy(bootEnv), seats, advisor, dbPath: ledgerDbPath(),
     ...(openLedgerDep ? {
       openLedger: openLedgerDep,
       existsSync: existsSyncDep ?? (() => true),

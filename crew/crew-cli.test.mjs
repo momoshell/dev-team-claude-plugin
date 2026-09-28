@@ -46,10 +46,92 @@ test('advisor boot record carries canonical model and empty resolved endpoint', 
   assert.equal(record.endpoint, '')
 })
 
-test('ADR047 C1 breaker evaluates the advisor cell before state creation', () => {
-  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
-  assert.ok(source.includes('seats: { ...seats, ...(advisor ? { advisor } : {}) }, dbPath:'))
+// ADR-047 lane 1: a roster whose build tier carries an advisor cell. The shared fixture
+// roster has none, so every advisor boot below states its cell explicitly.
+const ADVISOR_CELL = Object.freeze({ provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium' })
+function advisorRoster(cell = ADVISOR_CELL) {
+  const value = structuredClone(roster)
+  value.tiers.build = { advisor: cell === null ? null : { ...cell }, ...value.tiers.build }
+  return value
+}
+
+// One build-tier boot against advisorRoster(); returns what it wrote, or the refusal and
+// whether any state dir or workspace was created before it.
+async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue = advisorRoster() }) {
+  const home = scratchDir(`crew-adr047-${task}-home-`)
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-adr047-${task}-checkout-`)
+  const rosterPath = join(home, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify(rosterValue, null, 2))
+  const cmux = callCounter()
+  const previousStdoutWrite = process.stdout.write
+  try {
+    process.stdout.write = () => true
+    let error = null
+    try {
+      await withBreakerEnv(env, () => withHome(home, () => bootCmd(
+        { task, checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath, ...args },
+        { cmux, tree: callCounter(), renameTab: callCounter(), ...deps },
+      )))
+    } catch (err) { error = err }
+    const dir = testCrewDir(home, checkout, task)
+    const wrote = existsSync(join(dir, 'crew.json'))
+    return {
+      error, stateDir: existsSync(dir), workspaceCalls: cmux.calls.length,
+      crew: wrote ? JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) : null,
+      boot: wrote ? bootRecord(dir) : null,
+    }
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+}
+
+// Attempt rows for every seat of the fixture build tier, so the SEATS' aggregate is measured.
+const BUILD_SEAT_ATTEMPTS = [
+  breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'medium', role: 'lead' }),
+  breakerAttempt({ provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder' }),
+  breakerAttempt({ provider: 'openai', model_id: 'gpt-6-sol', agent: 'pi', effort: 'high', role: 'reviewer' }),
+]
+const ADVISOR_LEDGER_KEY = { provider: 'anthropic', model_id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', role: 'advisor' }
+
+test('ADR047 C1 an open advisor cell refuses the boot before any state dir or workspace', async () => {
+  const openLedger = fakeBreakerLedger([breakerRow({ ...ADVISOR_LEDGER_KEY, failures: 6 })], {
+    attemptRows: [...BUILD_SEAT_ATTEMPTS, breakerAttempt({ ...ADVISOR_LEDGER_KEY, attempts: 12 })],
+  })
+  const result = await bootAdvisor({ task: 'adr047-c1', deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-c1.db' } })
+  assert.equal(result.error?.code, 'breaker-open')
+  assert.match(result.error.message, /anthropic\/claude-sonnet-5 agent=pi effort=medium roles=advisor rate=0\.5/)
+  assert.equal(result.stateDir, false)
+  assert.equal(result.workspaceCalls, 0)
 })
+
+test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the seats verdict closed', async () => {
+  // Operator decision 7 (2026-09-28): no advisor history reads unmeasured on the advisor's
+  // own row, never a guessed closed, and the seats' aggregate is computed exactly as before.
+  const openLedger = fakeBreakerLedger([], { attemptRows: BUILD_SEAT_ATTEMPTS })
+  const result = await bootAdvisor({ task: 'adr047-n1', deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-n1.db' } })
+  assert.equal(result.error, null)
+  const breaker = result.boot.breaker
+  assert.equal(breaker.verdict, 'closed')
+  assert.equal(breaker.cells.some((cell) => cell.roles.includes('advisor')), false)
+  assert.equal(breaker.advisor.verdict, 'unmeasured')
+  assert.equal(breaker.advisor.measured, false)
+  assert.equal(breaker.advisor.rate, null)
+  assert.equal(breaker.advisor.denominator, 0)
+  assert.deepEqual(breaker.advisor.roles, ['advisor'])
+  assert.deepEqual([breaker.advisor.provider, breaker.advisor.model_id, breaker.advisor.agent, breaker.advisor.effort],
+    ['anthropic', 'claude-sonnet-5', 'pi', 'medium'])
+  // A null advisor adds no row at all: the record is exactly the seats-only shape.
+  const bare = await bootAdvisor({ task: 'adr047-n1-null', args: { 'model-advisor': 'none' }, deps: { openLedger },
+    env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-n1.db' } })
+  assert.equal(bare.error, null)
+  assert.equal(bare.boot.breaker.verdict, 'closed')
+  assert.equal(Object.hasOwn(bare.boot.breaker, 'advisor'), false)
+})
+
 test('ADR047 C2 band floors evaluate the advisor cell before state creation', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   assert.ok(source.includes('assertBandFloors({ ...seats, ...(advisor ? { advisor } : {}) }, tierName'))

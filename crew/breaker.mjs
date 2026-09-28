@@ -124,6 +124,7 @@ function finishCell(cell, thresholdRate) {
 export function cellHealth({
   policy,
   seats,
+  advisor = null,
   dbPath,
   now = Date.now,
   openLedger = realOpenLedger,
@@ -142,21 +143,36 @@ export function cellHealth({
       `node ${nodeVersion} is below NODE_FLOOR ${NODE_FLOOR}`)
   }
 
+  const emptyCell = (seat) => ({
+    roles: [], provider: seat.provider, model_id: seat.id,
+    agent: seat.agent, effort: seat.effort,
+    failures: 0, run_less: 0, host_attributed: 0, synthetic: 0, countedRaw: 0, attemptsRaw: 0, byKind: {},
+  })
   const seated = new Map()
   for (const [role, seat] of Object.entries(seats)) {
     if (seat?.provider == null || seat?.id == null) continue
     const key = cellKey(seat.provider, seat.id, seat.agent, seat.effort)
     let cell = seated.get(key)
     if (!cell) {
-      cell = {
-        roles: [], provider: seat.provider, model_id: seat.id,
-        agent: seat.agent, effort: seat.effort,
-        failures: 0, run_less: 0, host_attributed: 0, synthetic: 0, countedRaw: 0, attemptsRaw: 0, byKind: {},
-      }
+      cell = emptyCell(seat)
       seated.set(key, cell)
     }
     cell.roles.push(role)
   }
+  // ADR-047 operator decision 7 (2026-09-28): the advisor cell is its OWN row with its
+  // own verdict, never merged into a seat's cell and never part of the seats' aggregate
+  // verdict below. With no history it reads unmeasured, never a guessed closed.
+  const advisorCell = advisor?.provider != null && advisor?.id != null
+    ? { ...emptyCell(advisor), roles: ['advisor'] }
+    : null
+  const advisorKey = advisorCell ? cellKey(advisor.provider, advisor.id, advisor.agent, advisor.effort) : null
+  const cellsFor = (row) => {
+    const key = cellKey(row.provider, row.model_id, row.agent, row.effort)
+    return [seated.get(key), key === advisorKey ? advisorCell : null].filter(Boolean)
+  }
+  const withAdvisor = (record) => advisor === null
+    ? record
+    : { ...record, advisor: advisorCell ? finishCell(advisorCell, policy.threshold_rate) : null }
 
   const seatedCells = () => [...seated.values()]
     .map((cell) => finishCell(cell, policy.threshold_rate))
@@ -173,7 +189,7 @@ export function cellHealth({
   }
   if (!present) {
     const cells = seatedCells()
-    return baseRecord(policy, since, overallVerdict(cells), null, cells)
+    return withAdvisor(baseRecord(policy, since, overallVerdict(cells), null, cells))
   }
 
   let handle = null
@@ -201,33 +217,33 @@ export function cellHealth({
 
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row) continue
-    const cell = seated.get(cellKey(row.provider, row.model_id, row.agent, row.effort))
-    if (!cell) continue
-    const failures = numberValue(row.failures)
-    const runLess = numberValue(row.run_less)
-    const hostAttributed = numberValue(row.host_attributed)
-    const synthetic = numberValue(row.synthetic)
-    // The aggregate makes run-less, host-attributed, and synthetic-session rows
-    // disjoint, so subtracting them cannot double-count a row.
-    const counted = failures - runLess - hostAttributed - synthetic
-    cell.failures += failures
-    cell.run_less += runLess
-    cell.host_attributed += hostAttributed
-    cell.synthetic += synthetic
-    cell.countedRaw += counted
-    const kind = String(row.kind)
-    cell.byKind[kind] = (cell.byKind[kind] || 0) + counted
+    for (const cell of cellsFor(row)) countFailures(cell, row)
   }
 
   for (const row of Array.isArray(attemptRows) ? attemptRows : []) {
     if (!row) continue
-    const cell = seated.get(cellKey(row.provider, row.model_id, row.agent, row.effort))
-    if (!cell) continue
-    cell.attemptsRaw += numberValue(row.attempts)
+    for (const cell of cellsFor(row)) cell.attemptsRaw += numberValue(row.attempts)
   }
 
   const cells = seatedCells()
-  return baseRecord(policy, since, overallVerdict(cells), null, cells)
+  return withAdvisor(baseRecord(policy, since, overallVerdict(cells), null, cells))
+}
+
+function countFailures(cell, row) {
+  const failures = numberValue(row.failures)
+  const runLess = numberValue(row.run_less)
+  const hostAttributed = numberValue(row.host_attributed)
+  const synthetic = numberValue(row.synthetic)
+  // The aggregate makes run-less, host-attributed, and synthetic-session rows
+  // disjoint, so subtracting them cannot double-count a row.
+  const counted = failures - runLess - hostAttributed - synthetic
+  cell.failures += failures
+  cell.run_less += runLess
+  cell.host_attributed += hostAttributed
+  cell.synthetic += synthetic
+  cell.countedRaw += counted
+  const kind = String(row.kind)
+  cell.byKind[kind] = (cell.byKind[kind] || 0) + counted
 }
 
 function breakerError(code, message) {
@@ -247,6 +263,11 @@ function windowLabel(windowMs) {
 // Null and non-open verdicts are deliberately no-ops. The caller invokes this
 // after every boot health read, including unconfigured and not-applicable ones.
 export function assertCellsClosed(record) {
+  // ADR-047 decision 1: an OPEN advisor cell refuses the boot like an open seat cell,
+  // whatever the seats' own aggregate verdict says.
+  if (record?.advisor?.verdict === 'open' && record.verdict !== 'unmeasurable') {
+    record = { ...record, verdict: 'open', cells: [...(record.cells || []), record.advisor] }
+  }
   if (!record || record.verdict === 'closed' || record.verdict === 'unmeasured' || record.verdict === 'not-applicable') return
 
   if (record.verdict === 'unmeasurable') {

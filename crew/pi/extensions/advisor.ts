@@ -698,6 +698,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const resolveBinary = deps.resolveBinary || resolvePiBinary
   const consultTimeoutMs = deps.consultTimeoutMs ?? CONSULT_TIMEOUT_MS
   const childKillGraceMs = deps.childKillGraceMs ?? CHILD_KILL_GRACE_MS
+  const scheduleTimeout = deps.setTimeout || setTimeout
+  const cancelTimeout = deps.clearTimeout || clearTimeout
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
   const journalPath = journalPathFrom(taskDir)
@@ -1113,7 +1115,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
               // cost is never erased because a LATER frame went wrong.
               const settle = (error, value) => {
                 if (settled) return; settled = true
-                clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(hardTimer)
+                cancelTimeout(timeout); cancelTimeout(killTimer); cancelTimeout(hardTimer)
                 captured.controller.signal.removeEventListener('abort', abort)
                 if (error) { error.usage = reducer.usage(); rejectChild(error) } else resolveChild(value)
               }
@@ -1125,13 +1127,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                 failure = error
                 consultFailed = true
                 try { child.kill('SIGTERM') } catch {}
-                killTimer = setTimeout(() => {
+                killTimer = scheduleTimeout(() => {
                   try { child.kill('SIGKILL') } catch {}
-                  hardTimer = setTimeout(() => settle(failure), childKillGraceMs)
+                  hardTimer = scheduleTimeout(() => settle(failure), childKillGraceMs)
                 }, childKillGraceMs)
               }
               const abort = () => fail(new Error('aborted'))
-              timeout = setTimeout(abort, consultTimeoutMs)
+              timeout = scheduleTimeout(abort, consultTimeoutMs)
               captured.controller.signal.addEventListener('abort', abort, { once: true })
               // Two bounds, as the subagent reader keeps them. The TOTAL raw bytes
               // the child wrote are capped at STREAM_CAP_BYTES: pi's JSON mode

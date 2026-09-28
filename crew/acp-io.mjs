@@ -2,7 +2,7 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync 
 import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
-import { readEnvelopeOrThrow } from './headless.mjs'
+import { readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
@@ -19,6 +19,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   const read = deps.readFileSync || fsReadFileSync
   const unlink = deps.unlinkSync || fsUnlinkSync
   const now = deps.now || (() => Date.now())
+  const monotonic = deps.monotonic || (() => Number(process.hrtime.bigint()) / 1e6)
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
   const closeWindowMs = deps.closeSettleMs ?? ACP_CLOSE_SETTLE_MS
   const cancelWindowMs = deps.cancelSettleMs ?? ACP_CANCEL_SETTLE_MS
@@ -214,7 +215,9 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const assignment = assignments.get(returnPath)
     if (!assignment) throw new Error(`acp assignment not found at ${returnPath}`)
     let lastTurn = assignment.lastTurn
-    const deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
+    let deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
+    let priorWall = now(), priorMono
+    try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
     // lean: synchronous one-seat wait; move to an async pump if multi-seat throughput matters
     for (;;) {
       const envelope = readEnvelope(returnPath, assignment.id)
@@ -222,7 +225,17 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       try { lastTurn = assignment.lastTurn = settle(assignment, { strict: true }) }
       catch (cause) { throw noEnvelope(cause, returnPath, assignment) }
       if (lastTurn?.refusal) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
-      if (now() >= deadline) throw noEnvelope(null, returnPath, assignment)
+      const wall = now(); let mono
+      try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }
+      if (priorMono === undefined || mono === undefined) { priorWall = wall; priorMono = mono }
+      else {
+        const wallDelta = wall - priorWall, monoDelta = mono - priorMono
+        const slept = sleptMilliseconds(wallDelta, monoDelta)
+        deadline += slept
+        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: assignment.role, transport: 'acp', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        priorWall = wall; priorMono = mono
+      }
+      if (wall >= deadline) throw noEnvelope(null, returnPath, assignment)
       sleep(ACP_POLL_INTERVAL_MS)
     }
   }

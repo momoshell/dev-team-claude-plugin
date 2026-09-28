@@ -61,6 +61,7 @@ function fixture(options = {}) {
     readdirSync: options.readdirSync || readdirSync,
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.monotonic ? { monotonic: options.monotonic } : {}),
     ...(Object.hasOwn(options, 'promptDeliveryWindowMs') ? { promptDeliveryWindowMs: options.promptDeliveryWindowMs } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
     ...(options.telemetry ? { censusReducer: options.telemetry } : {}),
@@ -1236,6 +1237,21 @@ test('a malformed session.json starts a fresh session rather than throwing', () 
     assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }))
     assert.equal(f.specs.at(-1).resume, false)
     assert.equal(f.specs.at(-1).sessionId, 'session-1')
+  } finally { f.cleanup() }
+})
+
+test('R1 sleepdeadline', () => {
+  let wall = 0, mono = 0, polls = 0
+  const f = fixture({ now: () => wall, monotonic: () => mono, promptDeliveryWindowMs: 10000000, onSleep: ({ ms }) => {
+    polls++
+    if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    if (polls === 5) writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+  } })
+  let run
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(run.returnPath, 900).status, 'done')
   } finally { f.cleanup() }
 })
 

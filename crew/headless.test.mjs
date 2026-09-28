@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawn as realSpawn } from 'node:child_process'
 import {
-  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow,
+  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
@@ -865,6 +865,67 @@ test('transport and RPC-shaped stage rows are ignored by the journal replay', ()
       assert.equal(err.stageAbsent, 'no-open-stage')
       return true
     })
+  } finally { f.cleanup() }
+})
+
+test('S1 sleepdeadline', () => {
+  assert.strictEqual(sleptMilliseconds(1200000, 5000), 1195000)
+})
+test('S2 sleepdeadline', () => {
+  assert.strictEqual(sleptMilliseconds(50000, 5000), 0)
+})
+test('S3 sleepdeadline', () => {
+  assert.strictEqual(sleptMilliseconds(1200000, NaN), 0)
+})
+
+test('H1 sleepdeadline', () => {
+  let wall = 0, mono = 0, polls = 0, ended = false
+  const f = fixture({ now: () => wall, monotonic: () => mono, kill: () => { ended = true }, existsSync: (path) => (run && path === run.returnPath && polls >= 5 && !ended) || existsSync(path), readFileSync: (path, ...args) => run && path === run.returnPath && polls >= 5 && !ended ? JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }) : readFileSync(path, ...args), sleep: (ms) => {
+    if (ms === WAIT_POLL_MS) {
+      polls++
+      if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    } else { wall += ms; mono += ms }
+  } })
+  let run
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(run.returnPath, 900).status, 'done')
+    assert.equal(polls, 5)
+  } finally { f.cleanup() }
+})
+test('H2 sleepdeadline', () => {
+  let wall = 0, mono = 0, polls = 0, ended = false
+  const logs = []
+  let run
+  const f = fixture({ now: () => wall, monotonic: () => mono, log: (row) => logs.push(row), kill: () => { ended = true }, existsSync: (path) => (run && path === run.returnPath && polls >= 5 && !ended) || existsSync(path), readFileSync: (path, ...args) => run && path === run.returnPath && polls >= 5 && !ended ? JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }) : readFileSync(path, ...args), sleep: (ms) => {
+    if (ms === WAIT_POLL_MS) {
+      polls++
+      if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    } else { wall += ms; mono += ms }
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(run.returnPath, 900).status, 'done')
+    const rows = logs.filter((row) => row.event === 'host_suspended')
+    assert.equal(rows.length, 1)
+    assert.deepEqual({ role: rows[0].role, transport: rows[0].transport, slept_ms: rows[0].slept_ms, wall_ms: rows[0].wall_ms, mono_ms: rows[0].mono_ms }, { role: 'builder', transport: 'headless-json', slept_ms: 1195000, wall_ms: 1200000, mono_ms: 5000 })
+    assert.ok(Object.hasOwn(rows[0], 'at'))
+    assert.equal(polls, 5)
+  } finally { f.cleanup() }
+})
+test('N1 sleepdeadline', () => {
+  let wall = 0, mono = 0, polls = 0
+  const logs = []
+  const f = fixture({ now: () => wall, monotonic: () => mono, log: (row) => logs.push(row), sleep: (ms) => {
+    if (++polls > 2000) throw new Error('poll bound exceeded')
+    if (polls === 3) { wall += 1200000; mono += 1200000 } else { wall += ms; mono += ms }
+  } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => f.io.wait(run.returnPath, 900), (error) => error.stage === 'headless-timeout')
+    assert.equal(logs.filter((row) => row.event === 'host_suspended').length, 0)
   } finally { f.cleanup() }
 })
 

@@ -17,7 +17,7 @@ import {
 import {
   headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
   UNCLASSIFIED_REFUSAL, recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
-  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell,
+  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell, sleptMilliseconds,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { acpIo as defaultAcpIo } from './acp-io.mjs'
@@ -1837,9 +1837,11 @@ export function headlessStreamPaths({ taskDir, role, transport, deps = {} } = {}
   return names.filter((name) => /^d\d+$/.test(String(name))).flatMap((name) => files(join(root, String(name))))
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, classifyExpiry, onExtend, now, sleep }) {
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, classifyExpiry, onExtend, now, sleep, monotonic = () => Number(process.hrtime.bigint()) / 1e6, onSuspend }) {
   const started = now()
   let deadline = started + timeoutS * 1000
+  let priorWall = started, priorMono
+  try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
   let lastProbeAt = started
   let misses = 0
   let substrateMisses = 0
@@ -1872,7 +1874,18 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     if (onExtend) { try { onExtend({ at, extensionS: timeoutS }) } catch { /* the journal is never load-bearing for a wait */ } }
     return true
   }
-  while (now() < deadline || atDeadline()) {
+  for (;;) {
+    const wall = now(); let mono
+    try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }
+    if (priorMono === undefined || mono === undefined) { priorWall = wall; priorMono = mono }
+    else {
+      const wallDelta = wall - priorWall, monoDelta = mono - priorMono
+      const slept = sleptMilliseconds(wallDelta, monoDelta)
+      deadline += slept
+      if (slept > 0 && onSuspend) { try { onSuspend({ role, transport: 'pane', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+      priorWall = wall; priorMono = mono
+    }
+    if (!(wall < deadline || atDeadline())) break
     const env = readEnvelope()
     if (env != null) return env
 
@@ -3162,6 +3175,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             },
             classifyExpiry: info ? (at) => diagnoseExpiry(info, returnPath, at, timeoutS) : null,
             onExtend: (record) => noteWaitExtended(info, returnPath, record),
+            monotonic: deps.monotonic,
+            onSuspend: (record) => { try { io.log?.({ at: now(), event: 'host_suspended', ...record }) } catch { /* diagnostics only */ } },
             now, sleep,
           })
         if (env == null) {

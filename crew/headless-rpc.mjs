@@ -13,6 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
+import { sleptMilliseconds } from './headless.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
@@ -1650,8 +1651,22 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const seat = [...seats.values()].find((s) => s.turn?.returnPath === returnPath)
     if (!seat) throw staged('rpc-no-envelope', `no rpc turn for ${returnPath}`)
     const turn = seat.turn
-    const deadline = now() + Number(timeoutS) * 1000
-    waitLoop: while (now() < deadline) {
+    let deadline = now() + Number(timeoutS) * 1000
+    const monotonic = deps.monotonic || (() => Number(process.hrtime.bigint()) / 1e6)
+    let priorWall = now(), priorMono
+    try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
+    waitLoop: for (;;) {
+      const wall = now(); let mono
+      try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }
+      if (priorMono === undefined || mono === undefined) { priorWall = wall; priorMono = mono }
+      else {
+        const wallDelta = wall - priorWall, monoDelta = mono - priorMono
+        const slept = sleptMilliseconds(wallDelta, monoDelta)
+        deadline += slept
+        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: turn.role, transport: 'headless-rpc', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        priorWall = wall; priorMono = mono
+      }
+      if (wall >= deadline) break
       const { frames, enforced } = pollAndEnforce(seat, turn, returnPath)
       if (enforced) return enforced
       const acknowledged = session(turn.role).lastAssignmentId === turn.runId

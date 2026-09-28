@@ -6228,6 +6228,55 @@ function runTask(ctx, io, crash) {
   let pendingReversion = null
   let pendingRebaseConflict = null
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
+  let acceptedPlannerReturn = null
+  let frozenEntries = []
+  let rewriteOrdinal = 0
+  function freezeAcceptedPlan(planPath, plannerReturn) {
+    frozenEntries = []
+    const frozen = { plan_path: planPath, plan_sha256: null, envelope_path: plannerReturn?.path ?? null, envelope_sha256: null }
+    const snapshot = (kind, livePath, text, snapshotPath, absentReason) => {
+      if (typeof text !== 'string') { frozen[`${kind}_absent`] = absentReason; return }
+      const bytes = Buffer.from(text, 'utf8')
+      const sha = createHash('sha256').update(bytes).digest('hex')
+      let reason = null
+      try { io.writeFile(snapshotPath, text) } catch (err) { reason = 'snapshot-write-failed' }
+      if (reason) {
+        frozen[`${kind}_sha256`] = null
+        frozen[`${kind}_absent`] = reason
+      } else {
+        frozen[`${kind}_sha256`] = sha
+        frozenEntries.push({ kind, path: snapshotPath, livePath, bytes: text, sha })
+      }
+    }
+    let planText = null
+    try { const value = io.readFile(planPath); if (typeof value === 'string') planText = value } catch { /* unavailable */ }
+    snapshot('plan', planPath, planText, art('plan.accepted.md'), 'read-unavailable')
+    if (plannerReturn) snapshot('envelope', plannerReturn.path, plannerReturn.text, art('plan.accepted.envelope.json'), 'planner-return-unavailable')
+    else frozen.envelope_absent = variant === DIRECTED_STAGE_HEAD ? 'directed-no-seat' : 'triage-derived-plan'
+    try { io.log(recordRow({ at: io.now(), plan_frozen: frozen })) } catch { /* journal failures are nonfatal */ }
+  }
+  function restoreAcceptedPlan(stageName) {
+    for (const entry of frozenEntries) {
+      let frozenBytes
+      try { frozenBytes = io.readFile(entry.path) } catch { frozenBytes = null }
+      if (typeof frozenBytes !== 'string' || createHash('sha256').update(Buffer.from(frozenBytes, 'utf8')).digest('hex') !== entry.sha) {
+        try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: null, action: 'snapshot-unavailable' } })) } catch { /* nonfatal */ }
+        continue
+      }
+      let liveBytes
+      try { liveBytes = io.readFile(entry.livePath) } catch { liveBytes = null }
+      const liveSha = typeof liveBytes === 'string' ? createHash('sha256').update(Buffer.from(liveBytes, 'utf8')).digest('hex') : null
+      if (liveSha === entry.sha) continue
+      if (typeof liveBytes === 'string') {
+        try { io.writeFile(art(`plan.accepted.rewrite-${++rewriteOrdinal}.${entry.kind === 'plan' ? 'md' : 'json'}`), liveBytes) }
+        catch { try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'capture-failed', reason: 'snapshot-write-failed' } })) } catch { /* nonfatal */ }; continue }
+      }
+      try {
+        io.writeFile(entry.livePath, entry.bytes)
+        io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'restored' } }))
+      } catch { try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'restore-failed', reason: 'write-failed' } })) } catch { /* nonfatal */ } }
+    }
+  }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
   // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
   // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
@@ -6238,6 +6287,7 @@ function runTask(ctx, io, crash) {
   // implementations: every other io call site in this file is a method call,
   // and this keeps that true for runners too.
   const runGate = (name, cmd, runner = io.run, pristine = false, isProofRun = false) => {
+    restoreAcceptedPlan(`gate:${name}`)
     gateAttempt += 1
     // The task dir, never the checkout: runClean stashes --include-untracked
     // around this call (crew/seat-io.mjs:1741-1753) and an untracked file in
@@ -6434,6 +6484,7 @@ function runTask(ctx, io, crash) {
         `Original brief: ${briefFile}`, '',
       ].join('\n'))
     }
+    restoreAcceptedPlan(S.stages.at(-1)?.split(':')[0] ?? note)
     const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}) })
     onDispatch?.({ id, returnPath })
     const dispatchRunId = typeof ctx.run_id === 'string' && /\/returns\/[^/]+\/[^/]+\.json$/.test(String(returnPath))
@@ -8015,7 +8066,9 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('plan', `planner assignment wrapper could not be written: ${err?.message || String(err)}`)
     }
-    const env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
+    let plannerReturnPath = null
+    const env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'), { onDispatch: ({ returnPath }) => { plannerReturnPath = returnPath } })
+    acceptedPlannerReturn = { path: plannerReturnPath, text: readOrNull(plannerReturnPath) }
     planNote = null
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {
@@ -8418,6 +8471,8 @@ function runTask(ctx, io, crash) {
   }
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
+  freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
+  restoreAcceptedPlan(planAdversary !== null ? 'plan-check' : 'plan')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const plannedScopeFiles = planEnv.details?.files_in_scope
   if (!Array.isArray(plannedScopeFiles) || plannedScopeFiles.length === 0) {

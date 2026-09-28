@@ -8308,3 +8308,104 @@ test('a stepped plan with more steps than the builder budget is refused before a
   assert.match(result.details.escalation.why, /declares 2 steps but the builder budget is 1/)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 })
+
+const EF_BUILD_PLAN = '# accepted build plan π\n'
+const EF_BUILD_ENV = '{"status":"done","round":1}\n'
+const efBuildSha = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex')
+const efBuildRows = (io) => io.calls.logs.filter((row) => row.accepted_rewrite).map((row) => row.accepted_rewrite)
+const efBuildIo = ({ files = {}, envelopes = {}, runs = {}, showDoc = true, onRun = null } = {}) => fakeIo({
+  files: { [`${TD}/plan.md`]: EF_BUILD_PLAN, 'planner:1': EF_BUILD_ENV, ...files }, writeThrough: true, showDoc,
+  envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopes },
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
+  cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } }, changed: ['a.mjs', 'a.test.mjs'], onRun,
+})
+const efBuilderGuard = (io, onBuilder) => {
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => {
+    if (spec.role === 'builder') onBuilder()
+    return assign(spec)
+  }
+}
+
+test('R1 envelopefreeze restore plan before builder', () => {
+  const files = { [`${TD}/plan.md`]: EF_BUILD_PLAN, 'planner:1': EF_BUILD_ENV }
+  const io = efBuildIo({ files })
+  io.showDoc = () => { io.calls.files[`${TD}/plan.md`] = '# later plan rewrite\n' }
+  efBuilderGuard(io, () => assert.equal(io.calls.files[`${TD}/plan.md`], EF_BUILD_PLAN))
+  const runResult = driveTask(CTX, io)
+  assert.equal(runResult.status, 'done', JSON.stringify(runResult.details?.escalation))
+  const row = efBuildRows(io).find((entry) => entry.path === `${TD}/plan.md`)
+  assert.deepEqual(row, { path: `${TD}/plan.md`, stage: 'build', accepted_sha256: efBuildSha(EF_BUILD_PLAN), live_sha256: efBuildSha('# later plan rewrite\n'), action: 'restored' })
+
+  const missing = efBuildIo()
+  missing.showDoc = () => { delete missing.calls.files[`${TD}/plan.md`] }
+  efBuilderGuard(missing, () => assert.equal(missing.calls.files[`${TD}/plan.md`], EF_BUILD_PLAN))
+  assert.equal(driveTask(CTX, missing).status, 'done')
+  const missingRow = efBuildRows(missing).find((entry) => entry.path === `${TD}/plan.md`)
+  assert.equal(missingRow.live_sha256, null)
+  assert.equal(missingRow.action, 'restored')
+  assert.equal(missing.calls.files[`${TD}/plan.accepted.rewrite-1.md`], undefined)
+
+  const corrupt = efBuildIo()
+  corrupt.showDoc = () => { corrupt.calls.files[`${TD}/plan.accepted.md`] = 'corrupt'; corrupt.calls.files[`${TD}/plan.md`] = 'untrusted live' }
+  assert.equal(driveTask(CTX, corrupt).status, 'done')
+  const corruptRows = efBuildRows(corrupt).filter((entry) => entry.path === `${TD}/plan.md`)
+  assert.ok(corruptRows.some((entry) => entry.action === 'snapshot-unavailable'))
+  assert.equal(corruptRows.some((entry) => entry.action === 'restored'), false)
+})
+
+test('R2 envelopefreeze restore envelope before builder', () => {
+  const files = { [`${TD}/plan.md`]: EF_BUILD_PLAN, 'planner:1': EF_BUILD_ENV }
+  const io = efBuildIo({ files })
+  io.showDoc = () => { io.calls.files['planner:1'] = '{"rewritten":true}\n' }
+  efBuilderGuard(io, () => assert.equal(io.calls.files['planner:1'], EF_BUILD_ENV))
+  assert.equal(driveTask(CTX, io).status, 'done')
+  const row = efBuildRows(io).find((entry) => entry.path === 'planner:1')
+  assert.deepEqual(row, { path: 'planner:1', stage: 'build', accepted_sha256: efBuildSha(EF_BUILD_ENV), live_sha256: efBuildSha('{"rewritten":true}\n'), action: 'restored' })
+
+  const missing = efBuildIo()
+  missing.showDoc = () => { delete missing.calls.files['planner:1'] }
+  efBuilderGuard(missing, () => assert.equal(missing.calls.files['planner:1'], EF_BUILD_ENV))
+  assert.equal(driveTask(CTX, missing).status, 'done')
+  const absentRow = efBuildRows(missing).find((entry) => entry.path === 'planner:1')
+  assert.equal(absentRow.live_sha256, null)
+  assert.equal(absentRow.action, 'restored')
+
+  const corrupt = efBuildIo()
+  corrupt.showDoc = () => { corrupt.calls.files[`${TD}/plan.accepted.envelope.json`] = 'corrupt'; corrupt.calls.files['planner:1'] = 'untrusted envelope' }
+  assert.equal(driveTask(CTX, corrupt).status, 'done')
+  const corruptRows = efBuildRows(corrupt).filter((entry) => entry.path === 'planner:1')
+  assert.ok(corruptRows.some((entry) => entry.action === 'snapshot-unavailable'))
+  assert.equal(corruptRows.some((entry) => entry.action === 'restored'), false)
+})
+
+test('R3 envelopefreeze preserve rewritten bytes', () => {
+  const files = { [`${TD}/plan.md`]: EF_BUILD_PLAN, 'planner:1': EF_BUILD_ENV }
+  const io = efBuildIo({ files })
+  io.showDoc = () => { io.calls.files[`${TD}/plan.md`] = '# captured later bytes\n' }
+  assert.equal(driveTask(CTX, io).status, 'done')
+  assert.equal(io.calls.files[`${TD}/plan.accepted.rewrite-1.md`], '# captured later bytes\n')
+})
+
+test('R4 envelopefreeze restore plan before gate', () => {
+  const files = { [`${TD}/plan.md`]: EF_BUILD_PLAN, 'planner:1': EF_BUILD_ENV }
+  let gateObserved = false
+  const plan = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } })
+  let io
+  io = efBuildIo({
+    files, envelopes: {
+      'planner:1': plan,
+      'builder:1': () => { io.calls.files[`${TD}/plan.md`] = '# after builder dispatch\n'; return buildEnv() },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': () => { gateObserved = true; assert.equal(files[`${TD}/plan.md`], EF_BUILD_PLAN); return { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` } },
+    },
+  })
+  assert.equal(driveTask(CTX, io).status, 'done')
+  assert.equal(gateObserved, true)
+  const row = efBuildRows(io).find((entry) => entry.path === `${TD}/plan.md`)
+  assert.ok(row)
+  assert.match(row.stage, /^gate:/)
+  assert.equal(row.action, 'restored')
+})

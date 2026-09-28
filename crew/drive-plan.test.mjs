@@ -2,6 +2,7 @@
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
@@ -3442,4 +3443,107 @@ test('G1 directed scope remains brief-authored despite journal admissions', () =
   assert.equal(result.status, 'done')
   const builder = io.calls.assign.find(({ role }) => role === 'builder')
   assert.deepEqual(builder.policy.fence, ['a.mjs', 'a.test.mjs'])
+})
+
+const EF_PLAN = '# accepted plan π\n'
+const EF_ENV1 = '{"status":"done","round":1}\n'
+const EF_ENV2 = '{"status":"done","round":2}\n'
+const efSha = (text) => createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex')
+const efFrozenRows = (io) => io.calls.logs.filter((row) => row.plan_frozen).map((row) => row.plan_frozen)
+const efRewriteRows = (io) => io.calls.logs.filter((row) => row.accepted_rewrite).map((row) => row.accepted_rewrite)
+const efIo = ({ files = {}, envelopes = {}, throwWrites = [], ctx = CTX } = {}) => fakeIo({
+  files: { [`${TD}/plan.md`]: EF_PLAN, 'planner:1': EF_ENV1, ...files }, writeThrough: true, throwWrites,
+  envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopes },
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  changed: ['a.mjs', 'a.test.mjs'],
+})
+
+test('F1 envelopefreeze accepted plan digest', () => {
+  const io = efIo()
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  const rows = efFrozenRows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].plan_sha256, efSha(EF_PLAN))
+})
+
+test('F2 envelopefreeze accepted planner return', () => {
+  const files = { [`${TD}/plan.md`]: EF_PLAN, 'planner:1': EF_ENV1, 'planner:2': EF_ENV2 }
+  let io
+  const envelopes = {
+    'planner:1': adversarialPlanEnv(),
+    'tech-lead:1': checkEnv('revise'),
+    'planner:2': adversarialPlanEnv(),
+    'tech-lead:2': () => { io.calls.files['planner:2'] = '{"rewritten":true}\n'; return checkEnv('approve') },
+  }
+  io = efIo({ files, envelopes, ctx: CTX_TL })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  const frozen = efFrozenRows(io)
+  assert.equal(frozen.length, 1)
+  assert.equal(frozen[0].envelope_path, 'planner:2')
+  assert.equal(frozen[0].envelope_sha256, efSha(EF_ENV2))
+  assert.equal(io.calls.files[`${TD}/plan.accepted.envelope.json`], EF_ENV2)
+  assert.ok(efRewriteRows(io).some((row) => row.path === 'planner:2' && row.stage === 'plan-check' && row.action === 'restored'), JSON.stringify({ rows: efRewriteRows(io), waits: io.calls.waits, files: files['planner:2'], snapshots: io.calls.writes[`${TD}/plan.accepted.envelope.json`] }))
+
+  const noReturn = efIo({ files: { [`${TD}/plan.md`]: EF_PLAN, 'planner:1': null } })
+  assert.equal(driveTask(CTX, noReturn).status, 'done')
+  const absent = efFrozenRows(noReturn)[0]
+  assert.equal(absent.envelope_path, 'planner:1')
+  assert.equal(absent.envelope_sha256, null)
+  assert.equal(absent.envelope_absent, 'planner-return-unavailable')
+})
+
+test('F3 envelopefreeze snapshot before assignment', () => {
+  const io = efIo()
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => {
+    if (spec.role === 'builder') assert.equal(io.calls.files[`${TD}/plan.accepted.md`], EF_PLAN)
+    return assign(spec)
+  }
+  assert.equal(driveTask(CTX, io).status, 'done')
+})
+
+test('P1 envelopefreeze revision unfrozen', () => {
+  const files = { [`${TD}/plan.md`]: EF_PLAN, 'planner:1': EF_ENV1, 'planner:2': EF_ENV2 }
+  let io
+  io = efIo({ files, ctx: CTX_TL, envelopes: {
+    'planner:1': adversarialPlanEnv(),
+    'tech-lead:1': () => { io.calls.files[`${TD}/plan.md`] = '# revised plan\n'; return checkEnv('revise') },
+    'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('approve'),
+  } })
+  assert.equal(driveTask(CTX_TL, io).status, 'done')
+  assert.equal(efRewriteRows(io).length, 0)
+  assert.equal(efFrozenRows(io)[0].plan_sha256, efSha('# revised plan\n'), JSON.stringify({ frozen: efFrozenRows(io), waits: io.calls.waits, assigns: io.calls.assign.map(({ role, note }) => [role, note]), plan: files[`${TD}/plan.md`] }))
+})
+
+test('N1 envelopefreeze unchanged files silent', () => {
+  const io = efIo()
+  assert.equal(driveTask(CTX, io).status, 'done')
+  assert.equal(efRewriteRows(io).length, 0)
+})
+
+test('N2 envelopefreeze frozen write failure nonfatal', () => {
+  const io = efIo({ throwWrites: [`${TD}/plan.accepted.md`] })
+  assert.equal(driveTask(CTX, io).status, 'done')
+  const row = efFrozenRows(io)[0]
+  assert.equal(row.plan_sha256, null)
+  assert.equal(row.plan_absent, 'snapshot-write-failed')
+  assert.ok(io.calls.sequence.some(({ kind, role }) => kind === 'assign' && role === 'builder'))
+})
+
+test('T1 envelopefreeze named tests cover every case', () => {
+  const planSource = readFileSync(new URL('./drive-plan.test.mjs', import.meta.url), 'utf8')
+  const buildSource = readFileSync(new URL('./drive-build.test.mjs', import.meta.url), 'utf8')
+  const titles = [
+    'F1 envelopefreeze accepted plan digest', 'F2 envelopefreeze accepted planner return',
+    'F3 envelopefreeze snapshot before assignment', 'P1 envelopefreeze revision unfrozen',
+    'N1 envelopefreeze unchanged files silent', 'N2 envelopefreeze frozen write failure nonfatal',
+    'R1 envelopefreeze restore plan before builder', 'R2 envelopefreeze restore envelope before builder',
+    'R3 envelopefreeze preserve rewritten bytes', 'R4 envelopefreeze restore plan before gate',
+  ]
+  for (const title of titles) {
+    const source = title.startsWith('R') ? buildSource : planSource
+    assert.equal(source.split(`test('${title}',`).length - 1, 1, title)
+  }
 })

@@ -319,7 +319,7 @@ export function classifyAdvisorCell({ endpoint, model, models } = {}) {
   // closed is WHAT may be reached: http(s) only, no credentials in the URL, a
   // SAFE_MODEL id — and the authority has to exist at all. The reason token stays
   // `endpoint-not-local` because ADVISOR_BOOT_REFUSALS is a frozen closed
-  // vocabulary and crew/pi/extensions/advisor.ts:538 keeps its own copy of this
+  // vocabulary and crew/pi/extensions/advisor.ts:583 keeps its own copy of this
   // classifier; renaming it here would split the two.
   if (!['http:', 'https:'].includes(parsed.protocol) || rawHost === '') {
     return { reason: 'endpoint-not-local' }
@@ -1397,7 +1397,7 @@ export function bandForMember(ladder, member) {
 
 // A RAW --model-<role> string is the ACTIVE ADAPTER's CLI namespace, not a
 // ladder key: pi deliberately spells canonical provider "openai" as
-// "openai-codex" (crew/adapters/adapter-pi.mjs:81), so textual equality with a
+// "openai-codex" (crew/adapters/adapter-pi.mjs:105), so textual equality with a
 // ladder key is coincidence, not provenance. Resolution therefore runs the
 // adapter's OWN existing contract in the only direction it is defined:
 // translate every ratified member with modelString and accept the raw value

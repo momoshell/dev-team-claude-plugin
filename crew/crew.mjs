@@ -447,9 +447,13 @@ export function advisorManifest({ briefText, task, runStartedAt, cell = null }) 
   }
 }
 
-export function assertAdvisorManifest({ granted = [], manifest, written } = {}) {
+// `legacy` is a crew booted before ADR-047, whose advisor record carries no `cell`: its
+// extension still reads the environment, so its manifest keeps the pre-ADR-047 contract
+// (a non-empty tripwire surface) instead of requiring a cell it never had.
+export function assertAdvisorManifest({ granted = [], manifest, written, legacy = false } = {}) {
   if (!granted.length) return
-  if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !manifest.cell || written !== true) {
+  const surface = legacy ? manifest?.tripwires?.length > 0 : Boolean(manifest?.cell)
+  if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !surface || written !== true) {
     const err = new Error(`advisor manifest is unavailable for a granted run — refusing to start seats without the declared tripwire surface`)
     err.reason = 'advisor-manifest-unavailable'
     throw err
@@ -1031,7 +1035,9 @@ function effectiveSeatRecords(roles, seats, members, sources, adapters, advisor 
   })
   if (advisor) rows.push({
     role: 'advisor', agent: advisor.agent, provider: advisor.provider, model_id: advisor.id,
-    model: advisor.model, effort: advisor.effort, transport: members.builder.transport,
+    // The consult runs inside the advised builder's process, so its transport is the builder's;
+    // a crew that seats no builder has none to report, and says so with null.
+    model: advisor.model, effort: advisor.effort, transport: members.builder?.transport ?? null,
     source: Object.values(sources?.advisor || {}).includes('override') ? 'operator_override' : 'roster',
     policy_state: 'passed', warnings: [],
   })
@@ -3010,6 +3016,11 @@ export async function bootCmd(args, deps = {}) {
     ;({ roles, seats: tierSeats, sources, advisor } = resolveTier(roster, String(seatingTier), args))
     tierName = seatingTier
   } else {
+    // A --roles boot resolves no roster tier, so it has no advisor cell (ADR-047): an advisor
+    // flag would name intent that cannot take effect, so it refuses rather than being dropped.
+    const advisorFlags = ['model-advisor', 'agent-advisor', 'effort-advisor']
+      .filter((flag) => args[flag] !== undefined && !(flag === 'model-advisor' && args[flag] === 'none'))
+    if (advisorFlags.length) throw new Error(`--${advisorFlags[0]} needs --assurance or --tier: a --roles boot has no advisor cell to resolve`)
     roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
     if (!roles.includes('lead')) roles = ['lead', ...roles]
   }
@@ -3757,7 +3768,8 @@ export function runCmd(args, deps = {}) {
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
     const briefText = readFileSync(briefFile, 'utf8')
-    const manifest = advisorManifest({ briefText, task: taskSlug, runStartedAt, cell: crew.advisor.cell })
+    const legacyRecord = !Object.hasOwn(crew.advisor, 'cell')
+    const manifest = advisorManifest({ briefText, task: taskSlug, runStartedAt, cell: crew.advisor.cell ?? null })
     const manifestPath = join(paths.taskDir, 'advisor-manifest.json')
     const temporaryPath = `${manifestPath}.tmp`
     let written = false
@@ -3773,7 +3785,7 @@ export function runCmd(args, deps = {}) {
     }
     logLine(journal, { at: new Date().toISOString(), event: 'advisor-manifest',
       written, count: manifest?.tripwires?.length || 0, reason: writeReason })
-    assertAdvisorManifest({ granted: crew.advisor.granted, manifest, written })
+    assertAdvisorManifest({ granted: crew.advisor.granted, manifest, written, legacy: legacyRecord })
   }
   const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
   if (laneFence) {

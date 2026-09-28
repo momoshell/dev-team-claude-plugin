@@ -218,6 +218,78 @@ test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the build
   assert.equal(none.some((candidate) => candidate.role === 'advisor'), false)
 })
 
+test('ADR047 S1 an advisor cell on a crew that seats no builder boots and reports a null transport', async () => {
+  if (!nodeMeetsLedgerFloor) return
+  const value = advisorRoster()
+  delete value.tiers.build.builder
+  const rows = await bootSeatRows({ task: 'adr047-s1', rosterValue: value })
+  assert.equal(rows.crew.roles.includes('builder'), false)
+  const advisorRows = rows.filter((row) => row.role === 'advisor')
+  assert.equal(advisorRows.length, 1)
+  assert.equal(advisorRows[0].transport, null)
+})
+
+test('ADR047 S2 a --roles boot refuses advisor flags it has no cell to apply', async () => {
+  for (const flag of [{ 'model-advisor': 'anthropic/claude-sonnet-5' }, { 'agent-advisor': 'pi' }, { 'effort-advisor': 'high' }]) {
+    const result = await bootAdvisor({ task: `adr047-s2-${Object.keys(flag)[0]}`, args: { tier: undefined, roles: 'builder', ...flag } })
+    assert.match(String(result.error?.message), new RegExp(`--${Object.keys(flag)[0]} needs --assurance or --tier`))
+    assert.equal(result.stateDir, false)
+    assert.equal(result.workspaceCalls, 0)
+  }
+  const none = await bootAdvisor({ task: 'adr047-s2-none', args: { tier: undefined, roles: 'builder', 'model-advisor': 'none' } })
+  assert.equal(none.error, null)
+  assert.deepEqual(none.crew.advisor.granted, [])
+})
+
+test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its legacy contract', async () => {
+  const home = scratchDir('crew-adr047-s3-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-adr047-s3-checkout-')
+  const rosterPath = join(home, 'roster.json')
+  writeFileSync(rosterPath, JSON.stringify(advisorRoster(), null, 2))
+  const bare = join(home, 'bare.md')
+  const tripwired = join(home, 'tripwired.md')
+  writeFileSync(bare, '# no tripwires here\n')
+  writeFileSync(tripwired, '# brief\ntripwire tests:\n- crew/crew.mjs · bootCmd\n')
+  execSync('git init -q', { cwd: checkout })
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  const previousStdoutWrite = process.stdout.write
+  const run = (task, brief) => runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
+    drive: () => done, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
+  })
+  try {
+    process.stdout.write = () => true
+    await withHome(home, async () => {
+      await withBreakerEnv({}, () => bootCmd({ task: 'adr047-s3', checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() }))
+      const dir = testCrewDir(home, checkout, 'adr047-s3')
+      const crewPath = join(dir, 'crew.json')
+      const manifestPath = join(dir, 'task', 'advisor-manifest.json')
+      const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+      assert.deepEqual(crew.advisor.granted, ['builder'])
+      // ADR-047: an empty tripwire list is a valid manifest once it carries the cell.
+      run('adr047-s3', bare)
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      assert.deepEqual(manifest.tripwires, [])
+      assert.deepEqual(manifest.cell, crew.advisor.cell)
+      // A record written before ADR-047 has no cell: it runs on its tripwire surface as before...
+      const legacy = { ...crew.advisor }
+      delete legacy.cell
+      delete legacy.consult_model
+      writeFileSync(crewPath, JSON.stringify({ ...crew, advisor: legacy }))
+      run('adr047-s3', tripwired)
+      const legacyManifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      assert.deepEqual(legacyManifest.tripwires, ['crew/crew.mjs'])
+      assert.equal(legacyManifest.cell, null)
+      // ...and still refuses without one, exactly as it did.
+      assert.throws(() => run('adr047-s3', bare), (error) => error.reason === 'advisor-manifest-unavailable')
+    })
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
   const result = await bootAdvisor({ task: 'adr047-h1' })
   assert.equal(result.error, null)

@@ -15,21 +15,88 @@ function fixture(options = {}) {
   const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'brief body')
   const calls = []; const logs = []; const heartbeats = []; let sinks; let launch; let onPermission
   const pollResults = [...(options.pollResults ?? (Object.hasOwn(options, 'turn') ? [options.turn] : []))]
+  let promptSeq = 16; let pending = false; let cancelledTurn = null; let cancelPollsRemaining = 0
   const fake = {
     sessionId: 'session-test',
     start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession(params) { calls.push(['newSession', params]) }, setMode(mode) { calls.push(['setMode', mode]) },
-    beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); return 17 },
-    pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; return pollResults.length ? pollResults.shift() : null },
+    beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); if (options.guardPending && pending) throw new Error('overlapping prompt'); pending = true; return ++promptSeq },
+    pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; if (cancelledTurn && cancelPollsRemaining > 0) { cancelPollsRemaining -= 1; return null }; const turn = pollResults.length ? pollResults.shift() : cancelledTurn; if (turn) { pending = false; cancelledTurn = null }; return turn || null },
+    cancelPrompt(id) { calls.push(['cancelPrompt', id]); if (!options.cancelNoReply) { cancelledTurn = options.cancelTurn || { stopReason: 'cancelled', usage: null }; cancelPollsRemaining = options.cancelPollsRemaining || 0 } },
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
     close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
-      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs } })
-  return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
+      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
+  return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
+
+test('A1', () => {
+  const f = fixture({ guardPending: true }); try {
+    assign(f); assign(f, { id: 'next' })
+    assert.equal(f.calls.filter((call) => Array.isArray(call) && call[0] === 'cancelPrompt').length, 1)
+    assert.equal(f.calls.filter((call) => Array.isArray(call) && call[0] === 'beginPrompt').length, 2)
+  } finally { cleanup(f) }
+})
+test('A2', () => {
+  const late = { stopReason: 'end_turn', usage: null }
+  const f = fixture({ guardPending: true, cancelTurn: late, cancelPollsRemaining: 1 }); try {
+    assign(f); assign(f, { id: 'next' })
+    assert.equal(f.logs.find((row) => row.acp_turn)?.acp_turn.stopReason, 'end_turn')
+    assert.equal(f.calls.filter((call) => Array.isArray(call) && call[0] === 'beginPrompt').length, 2)
+  } finally { cleanup(f) }
+})
+test('A3', () => {
+  const f = fixture({ cancelNoReply: true, guardPending: true, cancelSettleMs: 50 }); try {
+    assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(f.calls.filter((call) => Array.isArray(call) && call[0] === 'beginPrompt').length, 1)
+  } finally { cleanup(f) }
+})
+test('A4', () => {
+  const f = fixture({ cancelNoReply: true, cancelSettleMs: 0 }); try {
+    const prior = assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    assert.deepEqual(f.logs.filter((row) => row.acp_turn_refused).map((row) => row.acp_turn_refused), [{ role: 'builder', reason: 'acp-session-busy', prior_assignment_id: prior.id, assignment_id: 'next' }])
+  } finally { cleanup(f) }
+})
+test('A5', () => {
+  const late = { stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 3, cachedReadTokens: 0, cachedWriteTokens: 0 } }
+  const f = fixture({ cancelNoReply: true, cancelSettleMs: 0 }); try {
+    const prior = assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).length, 0, 'a busy refusal leaves the prior open')
+    f.queueTurn(late)
+    assign(f, { id: 'next' })
+    assert.deepEqual(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).map((row) => [row.acp_turn.stopReason, row.acp_turn.stop_reason_absent]), [['end_turn', null]])
+    assert.equal(f.logs.filter((row) => row.seat_turn_census?.dispatch_id === prior.id).length, 1)
+    assert.equal(f.heartbeats.filter((row) => row.kind === 'usage' && row.id === prior.id).length, 1)
+  } finally { cleanup(f) }
+})
+test('A5 a prior still unanswered at close is recorded unread exactly once', () => {
+  const f = fixture({ cancelNoReply: true, cancelSettleMs: 0, closeSettleMs: 0 }); try {
+    const prior = assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    f.io.close()
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id && row.acp_turn.stop_reason_absent === 'response-unread').length, 1)
+    assert.equal(f.logs.filter((row) => row.seat_turn_census?.dispatch_id === prior.id).length, 1)
+  } finally { cleanup(f) }
+})
+test('A6', () => {
+  let time = 0
+  const f = fixture({ cancelNoReply: true, closeSettleMs: 50, cancelSettleMs: 100, now: () => time, sleep: (ms) => { time += ms } }); try {
+    assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(time, 150)
+  } finally { cleanup(f) }
+})
+test('A7', () => {
+  const f = fixture({ cancelNoReply: false, adapters: { builder: { acpLaunch: () => ({ bin: '/bin/pi', args: [], env: {} }), capabilitiesFor: () => ({ session_resume: true }) } } }); try {
+    const prior = assign(f); assign(f, { reask: { id: 'next', returnPath: join(f.paths.returnsDir, 'next.json') } })
+    const cancelAt = f.calls.findIndex((call) => Array.isArray(call) && call[0] === 'cancelPrompt')
+    const resumeAt = f.calls.indexOf('resumeSession')
+    const beginAt = f.calls.findIndex((call, index) => index > cancelAt && Array.isArray(call) && call[0] === 'beginPrompt')
+    assert.ok(cancelAt >= 0 && cancelAt < resumeAt && resumeAt < beginAt)
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).length, 1)
+  } finally { cleanup(f) }
+})
 
 test('C1', () => {
   const f = fixture(); try {
@@ -145,8 +212,10 @@ test('ACP S2', () => {
     const g = fixture({ pollResults: [null] }); try { assign(g); g.io[close]('builder'); assert.equal(g.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'response-unread') } finally { cleanup(g) }
   }
   const h = fixture({ turn: { stopReason: null, refusal: { message: 'refused' } } }); try { assign(h); h.io.retire('builder'); assert.equal(h.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'refused') } finally { cleanup(h) }
-  const i = fixture({ pollResults: [null, null] }); try {
-    const old = assign(i); assign(i, { reask: { id: 'd2', returnPath: old.returnPath } })
+  const i = fixture({ pollResults: [null, null], cancelNoReply: true }); try {
+    const old = assign(i); assert.throws(() => assign(i, { reask: { id: 'd2', returnPath: old.returnPath } }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(i.logs.filter((e) => e.acp_turn?.assignment_id === old.id).length, 0)
+    i.io.close()
     assert.equal(i.logs.filter((e) => e.acp_turn?.assignment_id === old.id).length, 1)
     assert.equal(i.logs.find((e) => e.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
   } finally { cleanup(i) }
@@ -160,9 +229,11 @@ test('ACP RV1-1 malformed frame errors remain the wait cause', () => {
   } finally { cleanup(f) }
 })
 test('ACP RV1-2 replacement closes and records the pending prior assignment', () => {
-  const f = fixture({ pollResults: [null, null] }); try {
+  const f = fixture({ pollResults: [null, null], cancelNoReply: true }); try {
     const old = assign(f); assert.throws(() => f.io.wait(old.returnPath, 0), (error) => error.stage === 'acp-no-envelope')
-    assign(f, { id: 'd4', returnPath: join(f.paths.returnsDir, 'd4.builder.json') })
+    assert.throws(() => assign(f, { id: 'd4', returnPath: join(f.paths.returnsDir, 'd4.builder.json') }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === old.id).length, 0)
+    f.io.close()
     assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === old.id).length, 1)
     assert.equal(f.logs.find((row) => row.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
   } finally { cleanup(f) }

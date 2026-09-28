@@ -134,9 +134,10 @@ function replay(name, options = {}) {
 
   const makeSink = (kind) => (payload) => {
     delivered.push({ kind, payload })
-    if (options.cancelOnFirstUpdate === true && !cancelledBySink) {
+    if ((options.cancelOnFirstUpdate === true || options.cancelOnFirstUpdate === 'prompt') && !cancelledBySink) {
       cancelledBySink = true
-      api.cancel()
+      if (options.cancelOnFirstUpdate === 'prompt') api.cancelPrompt(out.promptId)
+      else api.cancel()
     }
   }
   const sinks = Object.fromEntries([...ACP_UPDATE_KINDS, 'unknown'].map((kind) => [kind, makeSink(kind)]))
@@ -187,7 +188,7 @@ function replay(name, options = {}) {
       out.outcome = api.pollPrompt(out.promptId)
     } else out.outcome = api.prompt(firstPrompt)
   } catch (err) { out.promptError = err }
-  out.teardown = api.close()
+  if (!options.keepOpen) out.teardown = api.close()
   return out
 }
 
@@ -253,6 +254,25 @@ test('a cancelled session refuses another prompt without sending a frame', () =>
     assert.throws(() => run.api.prompt([{ type: 'text', text: 'again' }]), (err) => err.reason === 'acp-session-cancelled')
     assert.equal(run.sent.length, before)
   } finally { forget(run) }
+})
+
+test('B1', () => {
+  const run = replay('pi-cancel.ndjson', { nonblocking: true, cancelOnFirstUpdate: 'prompt', keepOpen: true })
+  try {
+    let cancelledTurn = null
+    for (let polls = 0; polls < 10 && !cancelledTurn; polls += 1) cancelledTurn = run.api.pollPrompt(run.promptId)
+    assert.equal(cancelledTurn?.stopReason, 'cancelled')
+    run.api.beginPrompt([{ type: 'text', text: 'next' }])
+    assert.ok(run.sent.some((frame) => frame.method === 'session/prompt' && frame.params.prompt[0].text === 'next'))
+  } finally { run.api.close(); forget(run) }
+})
+test('B2', () => {
+  const run = replay('pi-cancel.ndjson', { nonblocking: true, cancelOnFirstUpdate: 'prompt', keepOpen: true })
+  try {
+    const cancel = run.sent.find((frame) => frame.method === 'session/cancel')
+    assert.deepEqual(cancel, { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: run.sessionId } })
+    assert.equal(Object.hasOwn(cancel, 'id'), false)
+  } finally { run.api.close(); forget(run) }
 })
 
 test('a malformed frame refuses by name and delivers no part of its batch', () => {

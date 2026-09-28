@@ -17,9 +17,9 @@
 //   session replacement invalidates this extension instance and its socket.
 // - pi swallows a sendUserMessage that fails before the run starts (no model,
 //   no key) into its extension error channel; no agent_settled follows, so
-//   that prompt stays unanswered until the client times out or cancels, and
-//   after such a cancel no further prompt is accepted (acp-client sends none
-//   after a cancel either).
+//   that prompt stays unanswered until the client times out or cancels. A
+//   preflight cancellation with no run-start/settled signal remains unanswered
+//   and busy; a cancellation with a run is answered only at agent_settled.
 // - The default gated set adds powershell to the specified bash,edit,write:
 //   it executes commands exactly as bash does, and an ungated executor is a
 //   hole in the gate.
@@ -57,7 +57,7 @@ const SESSION_BUSY = -32000
 // ACP_STOP_REASONS. A session/cancel answers `cancelled` directly.
 //   completed, last assistant stopReason 'length' -> max_tokens
 //   completed, any other stopReason               -> end_turn
-//   aborted                                       -> cancelled
+//   aborted                                       -> cancelled (at agent_settled)
 //   error, or an outcome pi never reported        -> NO stop reason: the prompt
 //     is answered with a JSON-RPC error (data.errorKind 'pi-agent-error'),
 //     because a provider failure is not a refusal and must not read as one.
@@ -148,8 +148,10 @@ export default function acpServerExtension(pi: any) {
     return reply(id, { stopReason: reason, ...(usage ? { usage } : {}) })
   }
   function settlePrompt() {
-    if (cancelledRun) { cancelledRun = false; return }
-    finishPrompt(null)
+    const wasCancelled = cancelledRun
+    cancelledRun = false
+    if (wasCancelled) finishPrompt('cancelled')
+    else finishPrompt(null)
   }
 
   // A permission waiter resolves to { optionId } or to { failed: reason } for
@@ -178,7 +180,6 @@ export default function acpServerExtension(pi: any) {
     dropPermissions('ACP permission cancelled')
     cancelledRun = true
     if (ctx) ctx.abort()
-    finishPrompt('cancelled')
   }
 
   function handleRequest(frame: any) {

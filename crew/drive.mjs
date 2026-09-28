@@ -6240,6 +6240,8 @@ function runTask(ctx, io, crash) {
       const sha = createHash('sha256').update(bytes).digest('hex')
       let reason = null
       try { io.writeFile(snapshotPath, text) } catch (err) { reason = 'snapshot-write-failed' }
+      // A snapshot restore cannot read back is no snapshot: record it absent once here rather than on every later restore.
+      if (!reason) { let back = null; try { back = io.readFile(snapshotPath) } catch { /* unreadable */ } if (back !== text) reason = 'snapshot-unverified' }
       if (reason) {
         frozen[`${kind}_sha256`] = null
         frozen[`${kind}_absent`] = reason
@@ -6256,11 +6258,14 @@ function runTask(ctx, io, crash) {
     try { io.log(recordRow({ at: io.now(), plan_frozen: frozen })) } catch { /* journal failures are nonfatal */ }
   }
   function restoreAcceptedPlan(stageName) {
+    const logRewrite = (entry, liveSha, action, reason) => {
+      try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action, ...(reason ? { reason } : {}) } })) } catch { /* journal failures are nonfatal */ }
+    }
     for (const entry of frozenEntries) {
       let frozenBytes
       try { frozenBytes = io.readFile(entry.path) } catch { frozenBytes = null }
       if (typeof frozenBytes !== 'string' || createHash('sha256').update(Buffer.from(frozenBytes, 'utf8')).digest('hex') !== entry.sha) {
-        try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: null, action: 'snapshot-unavailable' } })) } catch { /* nonfatal */ }
+        logRewrite(entry, null, 'snapshot-unavailable')
         continue
       }
       let liveBytes
@@ -6269,12 +6274,11 @@ function runTask(ctx, io, crash) {
       if (liveSha === entry.sha) continue
       if (typeof liveBytes === 'string') {
         try { io.writeFile(art(`plan.accepted.rewrite-${++rewriteOrdinal}.${entry.kind === 'plan' ? 'md' : 'json'}`), liveBytes) }
-        catch { try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'capture-failed', reason: 'snapshot-write-failed' } })) } catch { /* nonfatal */ }; continue }
+        catch { logRewrite(entry, liveSha, 'capture-failed', 'snapshot-write-failed'); continue }
       }
-      try {
-        io.writeFile(entry.livePath, entry.bytes)
-        io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'restored' } }))
-      } catch { try { io.log(recordRow({ at: io.now(), accepted_rewrite: { path: entry.livePath, stage: stageName, accepted_sha256: entry.sha, live_sha256: liveSha, action: 'restore-failed', reason: 'write-failed' } })) } catch { /* nonfatal */ } }
+      let restored = true
+      try { io.writeFile(entry.livePath, entry.bytes) } catch { restored = false }
+      logRewrite(entry, liveSha, restored ? 'restored' : 'restore-failed', restored ? null : 'write-failed')
     }
   }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`

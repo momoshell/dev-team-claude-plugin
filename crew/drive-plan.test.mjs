@@ -3547,3 +3547,16 @@ test('T1 envelopefreeze named tests cover every case', () => {
     assert.equal(source.split(`test('${title}',`).length - 1, 1, title)
   }
 })
+
+// Kills: deleting the freeze-time readback, which leaves an unreadable snapshot frozen and
+// journals `snapshot-unavailable` on every later assignment and gate run instead of once.
+test('N3 envelopefreeze unverified snapshot is absent once, never restored from', () => {
+  const io = efIo()
+  const readFile = io.readFile.bind(io)
+  io.readFile = (path) => (path === `${TD}/plan.accepted.md` ? 'corrupt\n' : readFile(path))
+  assert.equal(driveTask(CTX, io).status, 'done')
+  const row = efFrozenRows(io)[0]
+  assert.equal(row.plan_sha256, null)
+  assert.equal(row.plan_absent, 'snapshot-unverified')
+  assert.equal(efRewriteRows(io).filter(({ path }) => path === `${TD}/plan.md`).length, 0)
+})

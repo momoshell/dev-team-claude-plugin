@@ -14,13 +14,13 @@ const EXPECTED = {
     name: 'Implementation',
     outcome: 'A requested behavior or product change',
     recommended_execution: 'full',
-    allowed_executions: ['directed'],
+    allowed_executions: ['directed', 'stepped'],
   },
   bug_fix: {
     name: 'Bug fix',
     outcome: 'A reproduced defect is removed without regression',
     recommended_execution: 'full',
-    allowed_executions: ['directed', 'repair'],
+    allowed_executions: ['directed', 'repair', 'stepped'],
   },
   investigation: {
     name: 'Investigation',
@@ -44,7 +44,7 @@ const EXPECTED = {
     name: 'Test authoring',
     outcome: 'Tests materially discriminate the intended behavior',
     recommended_execution: 'full',
-    allowed_executions: ['directed'],
+    allowed_executions: ['directed', 'stepped'],
   },
 }
 

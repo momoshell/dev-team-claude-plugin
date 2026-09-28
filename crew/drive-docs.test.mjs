@@ -440,6 +440,21 @@ test('the planner charter documents how to discover files_in_scope', () => {
   assert.match(charter, /grep/i)
 })
 
+test('J1 J2 J3 J4 the planner charter declares chunks and leaves the executor to the operator', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  // Each rule is pinned by its OWN complete clause, bounded by the punctuation that
+  // opens and closes it, so a weakened rule cannot hide behind words another passage
+  // supplies and a negation spliced into it ("not every ...") cannot stay green.
+  for (const clause of [
+    'For multi-step work declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]`:',
+    '`: every provable check is owned by exactly one chunk;',
+    '; depends_on names only earlier chunks;',
+    '. The operator picks the executor at dispatch, lanes or in-lane steps, and the planner never does.',
+  ]) assert.ok(charter.includes(clause), clause)
+  // The enforcement sentence names the driver's escalation and its condition.
+  assert.ok(charter.includes('A chunked run escalates `validateChunks` defects as `plan-chunks`.'))
+})
+
 test('charter scope writes are recorded, not bounced', () => {
   const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')

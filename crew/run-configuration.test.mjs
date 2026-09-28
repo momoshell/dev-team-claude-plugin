@@ -12,14 +12,14 @@ import {
 const PROFILE_KEYS = Object.freeze([
   'implementation', 'bug_fix', 'investigation', 'code_review', 'qa_verification', 'test_authoring',
 ])
-const SHAPE_KEYS = Object.freeze(['full', 'directed', 'scout', 'repair', 'review_only', 'review_panel', 'verify_only'])
+const SHAPE_KEYS = Object.freeze(['full', 'directed', 'scout', 'repair', 'review_only', 'review_panel', 'verify_only', 'stepped'])
 const COMPATIBLE = Object.freeze({
-  implementation: Object.freeze(['full', 'directed']),
-  bug_fix: Object.freeze(['full', 'directed', 'repair']),
+  implementation: Object.freeze(['full', 'directed', 'stepped']),
+  bug_fix: Object.freeze(['full', 'directed', 'repair', 'stepped']),
   investigation: Object.freeze(['scout']),
   code_review: Object.freeze(['review_only', 'review_panel']),
   qa_verification: Object.freeze(['verify_only']),
-  test_authoring: Object.freeze(['full', 'directed']),
+  test_authoring: Object.freeze(['full', 'directed', 'stepped']),
 })
 const SHAPE_STATUS = Object.freeze({
   full: 'existing',
@@ -29,6 +29,8 @@ const SHAPE_STATUS = Object.freeze({
   review_only: 'existing',
   review_panel: 'existing',
   verify_only: 'existing',
+  // lean: status is derived from VARIANT_NAMES and cannot see an unbuilt executor; teach the resolver executor readiness in a follow-up lane
+  stepped: 'existing',
 })
 const ALIAS_PAIRS = Object.freeze([
   ['mechanical', 'quick'], ['build', 'standard'], ['judge', 'rigorous'],
@@ -86,14 +88,14 @@ test('the complete §3.3 compatibility matrix resolves valid pairs explicitly', 
       })
     }
   }
-  assert.equal(pairs, 11)
+  assert.equal(pairs, 14)
 })
 
 test('every incompatible matrix pair refuses with selected values and all allowed shapes', () => {
   const invalidPairs = PROFILE_KEYS.flatMap((profile) => SHAPE_KEYS
     .filter((execution) => !COMPATIBLE[profile].includes(execution))
     .map((execution) => [profile, execution]))
-  assert.equal(invalidPairs.length, 31)
+  assert.equal(invalidPairs.length, 34)
   for (const [profile, execution] of invalidPairs) {
     const error = assertRefusal({ profile, execution }, 'incompatible_execution')
     const message = String(error.message)

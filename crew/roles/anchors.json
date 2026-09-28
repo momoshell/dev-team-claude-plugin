@@ -6,7 +6,7 @@
   "crew/drive.mjs:5335": "Revise plan.md per the check at ${checkPath}",
   "crew/drive.mjs:6926": "function settleAccept(c, where, contextPaths = []) {",
   "crew/drive.mjs:6564": "lead requested a second second-opinion",
-  "crew/drive.mjs:8459": "let gateCmd = planEnv.details?.gate_cmd || null",
+  "crew/drive.mjs:8396": "const plannedScopeFiles = planEnv.details?.files_in_scope",
   "crew/drive.mjs:8237": "if (planAdversary.trigger === 'none') {",
   "crew/drive.mjs:8275": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
   "crew/drive.mjs:8276": "const v = verdictOf(check)",

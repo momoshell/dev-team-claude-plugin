@@ -286,6 +286,7 @@ export function shapeValidationDefect(shape, variantName = 'full') {
 
     const unknownIndex = shape.stages.findIndex((head) => !ALL_STAGE_HEADS.has(head))
     if (unknownIndex !== -1) return verdict('stage-unimplemented', `stage ${JSON.stringify(shape.stages[unknownIndex])} is not implemented by the executor`)
+    if (!topology && Object.hasOwn(UNBUILT_EXECUTOR_SHAPES, variantName)) return verdict('stage-unimplemented', UNBUILT_EXECUTOR_SHAPES[variantName])
     if (!topology || topology.execution !== 'reviewed') return verdict('stage-unimplemented', partialTopologyDetail(variantName))
     return topologyDefect(topology, shape.stages, verdict)
   }
@@ -311,3 +312,5 @@ export function shapeValidationDefect(shape, variantName = 'full') {
 
   return topologyDefect(topology, shape.stages, verdict)
 }
+
+const UNBUILT_EXECUTOR_SHAPES = Object.freeze({ stepped: 'the stepped executor is not built (ADR-048)' })

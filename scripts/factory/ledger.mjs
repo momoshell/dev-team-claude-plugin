@@ -581,7 +581,7 @@ export const MODIFIER_KINDS = Object.freeze([
 // VARIANT_NAMES — the driver is the source of truth and this file never imports
 // it; test/factory-ledger.test.mjs pins the two lists equal, the same convention
 // MODIFIER_KINDS uses above.
-export const RUN_VARIANTS = Object.freeze(['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'verify_only'])
+export const RUN_VARIANTS = Object.freeze(['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'verify_only', 'stepped'])
 // The stage-label head that identifies each shape: `full` opens with `plan:r1`,
 // every other shape with its own name (crew/drive.mjs driveEnvelopeShape).
 export const RUN_VARIANT_MARKERS = Object.freeze({ plan: 'full', scout: 'scout', review_only: 'review_only', review_panel: 'review_panel', repair: 'repair', directed: 'directed', verify_only: 'verify_only' })
@@ -9431,3 +9431,6 @@ if (invokedDirectly) {
   // synchronous teardown.
   process.exitCode = main(process.argv.slice(2))
 }
+
+// lean: stepped has no distinct opening marker; add an executor discriminator before the first stepped run
+export const RUN_VARIANTS_WITHOUT_MARKER = Object.freeze(['stepped'])

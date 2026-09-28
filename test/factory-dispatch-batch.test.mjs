@@ -1889,6 +1889,30 @@ test('surface movement without an on-disk fence surface is unmeasured, never cle
   assert.equal(summary.includes('surface-moved=unmeasured'), true)
 })
 
+test('C1 stepped preflight refuses before createWorktrees', async () => {
+  const batch = makeBatch(['c1-lane'])
+  put(join(batch, 'c1-lane.request.json'), JSON.stringify(requestFor('c1-lane', { execution: 'stepped' })))
+  const spawned = []
+  const error = await dispatchBatch({
+    batchDir: batch,
+    fences: [entry('c1-lane', ['crew/drive.mjs'])],
+    checkout: repoRoot,
+    parentDir: root,
+    outDir: join(root, 'c1-stepped-out'),
+    tier: 'mechanical',
+    deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
+      spawn: (call) => { spawned.push(call); return { status: 0, stdout: '', stderr: '' } },
+      log: () => {},
+    },
+  }).then(() => null, (err) => err)
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'run-failed')
+  assert.match(error.message, /the stepped executor is not built \(ADR-048\)/)
+  assert.deepEqual(spawned, [])
+})
+
 test('G1 run option preflight precedes surface movement git probes', async () => {
   const batch = makeBatch(['g1-lane'])
   const spawned = []

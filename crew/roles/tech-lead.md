@@ -47,7 +47,7 @@ that it could not put one there, and spent the run's escalation saying so.
 
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
-  binds them once, from the accepted plan envelope (`crew/drive.mjs:8459`,
+  binds them once, from the accepted plan envelope (`crew/drive.mjs:8396`,
   `crew/drive.mjs:8461`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.

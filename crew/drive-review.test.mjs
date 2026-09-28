@@ -2129,6 +2129,7 @@ test('F2 permits optional_item_fields only on records', () => {
 
 test('G1 leaves every legacy non-scout variant envelope contract unchanged', () => {
   const expected = JSON.parse(`{"full":{"execution":"reviewed","required_seats":"tier","stages":["plan","check","build","scope-gate","lane","gate","gate-baseline","gate-repair","gate-reverify","gate-proof","review","commit","document","rebase","suite","publish","converge"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null},"review_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["review_only","scope-gate","envelope-accept"],"off_critical_path_stages":[],"writes":"none","accepted_by":"structured envelope plus zero-write proof; no commit","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"base","kind":"text"},{"name":"head","kind":"text"},{"name":"outcome","kind":"text","values":["findings","no-findings"]},{"name":"findings","kind":"records","allow_empty":true,"item_fields":["id","severity","location","summary","evidence","disposition"],"item_values":{"severity":["must-fix","should-fix","consider"],"disposition":["auto-fix","ask-user","no-op"]},"item_patterns":{"id":"^[A-Za-z0-9_-]{1,64}$"},"cardinality":{"discriminator":"outcome","empty":"no-findings","nonempty":"findings"}}, {"name":"reviewed_files","kind":"paths","allow_empty":true},{"name":"unreviewable_files","kind":"records","allow_empty":true,"item_fields":["path","reason"],"item_values":{"reason":["binary","generated","too-large","out-of-context"]}}],"assignment":"Review the returned base/head identity and the declared change set as a read-only code review. This assignment supersedes the ordinary reviewer deliverable: do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted. Return the complete structured envelope with non-empty base and head, outcome findings or no-findings, reviewed_files as an array of paths, and unreviewable_files as records with path and reason; every unreviewable reason must be binary, generated, too-large, or out-of-context, every listed path must belong to the base/head change set, and reviewed_files and unreviewable_files must be disjoint. Return findings records containing id, severity, location, summary, evidence, and disposition; findings must be empty exactly when outcome is no-findings and non-empty when outcome is findings."},"repair":{"execution":"reviewed","required_seats":"tier","stages":["repair","build","scope-gate","lane","review","commit","document","rebase","suite","publish"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":"Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.","sources":{"scope":"inherited","lane":"ctx","gate":"none"}},"directed":{"execution":"reviewed","required_seats":["builder","reviewer"],"stages":["directed","build","scope-gate","lane","gate","gate-baseline","gate-proof","review","commit","document","rebase","suite","publish","converge"],"off_critical_path_stages":[],"writes":"planned","accepted_by":"a review verdict of pass, or a lead accept at review or build exhaustion","envelope_fields":[],"assignment":null,"sources":{"scope":"brief","lane":"ctx","gate":"brief"}},"verify_only":{"execution":"envelope","required_seats":["reviewer"],"stages":["verify_only","scope-gate","envelope-accept"],"off_critical_path_stages":[],"writes":"none","accepted_by":"complete structured verification report plus zero-write proof; no commit, regardless of product verdict","strict_identity":true,"report_values":true,"envelope_fields":[{"name":"verification_targets","kind":"records","item_fields":["id","target"]},{"name":"environment_assumptions","kind":"records","item_fields":["name","assumption"]},{"name":"product_verdict","kind":"text","values":["passing","failing"]},{"name":"check_matrix","kind":"records","allow_empty":true,"item_fields":["id","status","command","result","evidence"],"item_values":{"status":["passed","failed","blocked","not run"]},"covers":{"field":"verification_targets","key":"id"}},{"name":"environment","kind":"records","item_fields":["name","observed"]},{"name":"environmental_blockers","kind":"records","allow_empty":true,"item_fields":["target","reason"]}],"assignment":"Read-only verification. Return a complete structured verification report with details.verification_targets as non-empty records with id,target; details.environment_assumptions as non-empty records with name,assumption; details.product_verdict as passing or failing; details.check_matrix as records with id,status,command,result,evidence and one row for each verification target; details.environment as non-empty records with name,observed; and details.environmental_blockers as records with target,reason. Ephemeral build/test artifacts may exist only while checks run and must be removed before return; the final checkout must be clean. No tester role is introduced."}}`)
+  expected.stepped = { ...expected.full, stages: [...expected.full.stages] }
   const actual = Object.fromEntries(Object.entries(VARIANTS).filter(([name]) => name !== 'scout' && name !== 'review_panel'))
   assert.deepEqual(actual, expected)
 })
@@ -2308,7 +2309,9 @@ test('an envelope refusal escalates naming the reason the validator produced', (
 })
 
 test('shapeDefect still judges the DECLARATION alone, unchanged', () => {
-  for (const [name, shape] of Object.entries(VARIANTS)) assert.equal(shapeDefect(shape, name), null)
+  for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.equal(shapeDefect(VARIANTS[name], name), null)
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
+  assert.notEqual(shapeDefect(VARIANTS.stepped, 'stepped'), null)
   const unknown = shapeDefect({ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout')
   assert.equal(typeof unknown, 'string')
   assert.match(unknown, /kind/)
@@ -4270,7 +4273,8 @@ test('D1 accepted review coverage is carried in envelope values', () => {
 })
 
 test('E1 review coverage preserves every other shipped shape contract', () => {
-  for (const [name, shape] of Object.entries(VARIANTS)) assert.equal(shapeDefect(shape, name), null, name)
+  for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.equal(shapeDefect(VARIANTS[name], name), null, name)
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
   const expected = {
     execution: 'envelope',
     required_seats: ['reviewer'],
@@ -4544,7 +4548,7 @@ test('RV1-2 envelope enforcement brief survives generated identity refresh', () 
 })
 
 test('A1 verify_only declares the reviewer seat and envelope lifecycle', () => {
-  assert.equal(Object.keys(VARIANTS).at(-1), 'verify_only')
+  assert.equal(Object.keys(VARIANTS).at(-1), 'stepped')
   assert.deepEqual(VARIANTS.verify_only.required_seats, ['reviewer'])
   assert.deepEqual(VARIANTS.verify_only.stages, ['verify_only', 'scope-gate', 'envelope-accept'])
   assert.equal(shapeDefect(VARIANTS.verify_only, 'verify_only'), null)
@@ -5947,3 +5951,5 @@ test('B5 panel permission preserves ordinary lead execute consult', async () => 
   assert.equal(permissionLeadAssignments, 1)
   assert.equal(selected, 'a')
 })
+
+const { EXECUTOR_TOPOLOGIES } = await import('./shape-validator.mjs')

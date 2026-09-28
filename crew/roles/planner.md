@@ -13,6 +13,8 @@ Run your own acceptance gate at baseline, exactly once. Run nothing else — the
 *Your role turn ceiling is read from your seat's turn census AFTER your dispatch returns: an envelope returned over the role budget is REJECTED, the count and the budget are journaled, and the count reaches you at the head of your next brief. A census that cannot be read is a measurement failure and is rejected the same way, naming the reason.*
 
 
+For multi-step work declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]`: every provable check is owned by exactly one chunk; depends_on names only earlier chunks; files stay inside plan scope; checks_owned SHOULD name acceptance ids. Declare chunks for 2+ independently checkable steps. A chunked run escalates `validateChunks` defects as `plan-chunks`. The operator picks the executor at dispatch, lanes or in-lane steps, and the planner never does.
+
 ## The plan (your deliverable)
 
 Write `plan.md` in the task dir with EXACTLY these sections:
@@ -77,20 +79,7 @@ asserts on all count — grep the repo for that file's own repo-relative path,
 and, when it is a code module, also for its exported symbols, its error codes,
 and the paths and filenames it writes; every test file that hits belongs in
 scope too. A doc carrying an `## Implementation files` header is a coupled artifact of the files it names, so a change to one of those files puts that doc in scope.
-The path key is the one that works on a file that exports nothing:
-any test that reads a file by path pins that file. A slice changing
-`.github/workflows/test.yml` went to `escalate:scope` for want of it — grepping
-that literal path finds `test/factory-ledger-floor.test.mjs`, which reads the
-workflow and asserts the Node floor against it. A `crew/daemon.mjs` admission
-or settle change pulls in `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`
-— the latter settles a run by writing the well-known `returns/task.json`. An
-adapter change pulls in the matching `crew/adapter-*.test.mjs` files, listed
-literally (scope takes no globs). Twice — #222 and #232 — a scope fixed without
-that grep sent the run to `escalate:scope`: the builder needed a test file the
-plan had never looked for, and the gate was right to refuse it. The record is
-those two issues, not #193 and #199, which are unrelated (a daemon-batching epic
-and a per-crew-dir envelope issue); they are named here only because
-`crew/drive.test.mjs` still pins the old numbers.
+Any test reading a file by path pins it, even when a file exports nothing. `.github/workflows/test.yml` is pinned by `test/factory-ledger-floor.test.mjs`; `crew/daemon.mjs` needs `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`; adapters need `crew/adapter-*.test.mjs`. #193 and #199 are unrelated stale numbers. Grep scoped paths, symbols, error codes, and written paths; include each test found. Scope uses literal paths, never globs. Tests inspecting manifests, fixtures, configuration, workflows, or prose belong in scope.
 
 `gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
 path inside the task dir. The driver measures gate bytes from that path and
@@ -179,7 +168,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:8459-8461`) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:8396` (scope) and `crew/drive.mjs:8461` (mutations)) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say

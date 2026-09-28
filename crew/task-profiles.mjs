@@ -26,7 +26,7 @@ export const TASK_PROFILES = Object.freeze({
     outcome: 'A requested behavior or product change',
     evidence: Object.freeze(['scoped_diff', 'validation', 'review', 'terminal_result']),
     recommended_execution: 'full',
-    allowed_executions: Object.freeze(['directed']),
+    allowed_executions: Object.freeze(['directed', 'stepped']),
     execution_conditions: Object.freeze({}),
   }),
   bug_fix: Object.freeze({
@@ -34,7 +34,7 @@ export const TASK_PROFILES = Object.freeze({
     outcome: 'A reproduced defect is removed without regression',
     evidence: Object.freeze(['reproduction_or_cited_failure', 'fix_validation', 'regression_evidence']),
     recommended_execution: 'full',
-    allowed_executions: Object.freeze(['directed', 'repair']),
+    allowed_executions: Object.freeze(['directed', 'repair', 'stepped']),
     execution_conditions: Object.freeze({ repair: 'a failing run supplies inherited scope' }),
   }),
   investigation: Object.freeze({
@@ -66,7 +66,7 @@ export const TASK_PROFILES = Object.freeze({
     outcome: 'Tests materially discriminate the intended behavior',
     evidence: Object.freeze(['changed_tests', 'mutation_or_negative_control', 'suite_result']),
     recommended_execution: 'full',
-    allowed_executions: Object.freeze(['directed']),
+    allowed_executions: Object.freeze(['directed', 'stepped']),
     execution_conditions: Object.freeze({}),
   }),
 })

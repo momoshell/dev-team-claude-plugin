@@ -265,6 +265,14 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   }
 
   const pendingPrompts = new Set()
+  const cancelledPrompts = new Set()
+  function cancelPrompt(id) {
+    if (!pendingPrompts.has(id)) return false
+    const sessionId = session.id
+    send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
+    cancelledPrompts.add(id)
+    return true
+  }
   function beginPrompt(blocks) {
     if (session.cancelled) throw acpRefuse('acp-session-cancelled', `acp session ${session.id} was cancelled and accepts no further prompt`)
     seq += 1
@@ -278,6 +286,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     pump()
     if (!responses.has(id)) return null
     pendingPrompts.delete(id)
+    const wasPromptCancelled = cancelledPrompts.delete(id)
     const frame = responses.get(id)
     responses.delete(id)
     if (frame.error) {
@@ -286,7 +295,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
       return { stopReason: null, usage: null, refusal }
     }
     const stopReason = typeof frame.result?.stopReason === 'string' ? frame.result.stopReason : null
-    if (stopReason === 'cancelled') session.cancelled = true
+    if (stopReason === 'cancelled' && !wasPromptCancelled) session.cancelled = true
     return { stopReason, usage: turnUsage(frame.result), refusal: null }
   }
 
@@ -330,5 +339,5 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return result
   }
 
-  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancel, close, get sessionId() { return session.id } }
+  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, get sessionId() { return session.id } }
 }

@@ -144,11 +144,13 @@ test('P3', async () => {
     for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
     // Exactly the frame crew/acp-client.mjs cancel() writes: a notification, no id.
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
+    await sleep(20)
+    assert.equal(h.frames.some((f) => f.id === 5), false, 'cancellation is answered only after settlement')
     assert.equal(h.ctx.aborts, 1, 'session/cancel must call ctx.abort once')
-    assert.equal(done.result.stopReason, 'cancelled')
     h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
+    const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
+    assert.equal(done.result.stopReason, 'cancelled')
     await sleep(100)
     assert.equal(h.frames.filter((f) => f.id === 5).length, 1, 'the aborted run settling must not answer twice')
     assert.equal(h.frames.some((f) => f.error && f.id === null), false, 'the notification must not be answered as an invalid request')
@@ -161,8 +163,8 @@ test('a cancel that lands during pi prompt preflight still stops the run and blo
     h.ctx.idle = true
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'x' }] } })
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
-    assert.equal(done.result.stopReason, 'cancelled')
+    await sleep(20)
+    assert.equal(h.frames.some((f) => f.id === 5), false, 'preflight cancellation remains unanswered without agent_settled')
     h.ctx.idle = false
     h.emit('agent_start')
     assert.equal(h.ctx.aborts, 2, 'the run that starts after the cancel is aborted on start')
@@ -171,7 +173,10 @@ test('a cancel that lands during pi prompt preflight still stops the run and blo
     assert.equal(h.permissionRequests().length, 0)
     const busy = await h.request(6, 'session/prompt', { sessionId: SESSION, prompt: [{ type: 'text', text: 'y' }] })
     assert.equal(busy.error.code, -32000)
+    h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
+    const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
+    assert.equal(done.result.stopReason, 'cancelled')
     await sleep(50)
     assert.equal(h.frames.filter((f) => f.id === 5).length, 1)
     h.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'z' }] } })
@@ -191,6 +196,38 @@ test('the default gate covers bash, edit, write and powershell, and a blank list
     assert.equal(req.params.toolCall.kind, 'execute')
     h.answer(req, 'reject_once')
     assert.equal((await settle(pending))?.block, true)
+  } finally { h.close() }
+})
+
+test('C1', async () => {
+  const h = await withSession()
+  try {
+    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
+    await h.wait(() => h.prompts.length === 1, 'first prompt')
+    h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
+    await sleep(20)
+    assert.equal(h.frames.some((frame) => frame.id === 5), false)
+    h.emit('agent_before_settle', { outcome: 'aborted' })
+    h.emit('agent_settled')
+    const answer = await h.wait((frame) => frame.id === 5, 'cancelled response')
+    assert.equal(answer.result.stopReason, 'cancelled')
+    h.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'next' }] } })
+    await h.wait(() => h.prompts.length === 2, 'accepted follow-up prompt')
+    assert.equal(h.frames.some((frame) => frame.id === 6 && frame.error), false)
+  } finally { h.close() }
+})
+test('C2', async () => {
+  const h = await withSession()
+  try {
+    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
+    await h.wait(() => h.prompts.length === 1, 'first prompt')
+    h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
+    h.emit('agent_before_settle', { outcome: 'aborted' })
+    h.emit('agent_settled')
+    await h.wait((frame) => frame.id === 5, 'cancelled response')
+    h.emit('agent_settled')
+    await sleep(30)
+    assert.equal(h.frames.filter((frame) => frame.id === 5).length, 1)
   } finally { h.close() }
 })
 

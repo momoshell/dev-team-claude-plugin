@@ -10,6 +10,7 @@ import { permissionHandler } from './acp-permission.mjs'
 export const ACP_CENSUS_TURNS_ABSENT = 'ACP has no model-turn boundary; deriving turns from prompts or tool activity would be a guess.'
 
 export const ACP_CLOSE_SETTLE_MS = 3000
+export const ACP_CANCEL_SETTLE_MS = 1000
 const ACP_ADAPTERS = Object.freeze({ pi: piAdapter, claude: claudeAdapter })
 const ACP_POLL_INTERVAL_MS = 25
 
@@ -20,6 +21,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
   const closeWindowMs = deps.closeSettleMs ?? ACP_CLOSE_SETTLE_MS
+  const cancelWindowMs = deps.cancelSettleMs ?? ACP_CANCEL_SETTLE_MS
   const log = deps.log || (() => {})
   const emit = deps.emit || (() => {})
   const clients = new Map()
@@ -27,6 +29,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   const current = new Map()
   const parseLogged = new Set()
   let seq = 0
+  let cancelWriteFailed = false
   function getClient(role) {
     if (clients.has(role)) return clients.get(role)
     const member = crew?.members?.[role]
@@ -116,8 +119,8 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const text = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery })
     const priorPath = current.get(role)
     const prior = priorPath ? assignments.get(priorPath) : null
-    if (prior) settle(prior, { closing: true, windowMs: closeWindowMs })
     const { client, profile } = getClient(role)
+    if (prior) settlePriorBeforePrompt(prior, id, client)
     if (spec.reask) {
       if (profile.session_resume) client.resumeSession(client.sessionId)
     }
@@ -147,7 +150,32 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     Object.assign(error, { stage: 'acp-no-envelope', graceSpent: sawUpdate, cause, role })
     return error
   }
-  function settle(assignment, { closing = false, strict = false, windowMs = 0 } = {}) {
+  function waitForCancelledPrompt(prior, client) {
+    if (cancelWriteFailed) { cancelWriteFailed = false; return null }
+    const deadline = now() + cancelWindowMs
+    const maxPolls = Math.ceil(cancelWindowMs / ACP_POLL_INTERVAL_MS) + 1
+    for (let poll = 0; poll < maxPolls && now() < deadline; poll += 1) {
+      sleep(ACP_POLL_INTERVAL_MS)
+      try { const turn = client.pollPrompt(prior.promptId); if (turn) return turn } catch { return null }
+    }
+    return null
+  }
+  function settlePriorBeforePrompt(prior, nextId, client) {
+    let priorTurn = null
+    try { priorTurn = settle(prior, { closing: true, windowMs: closeWindowMs, finalizeUnread: false }) } catch { priorTurn = null }
+    if (priorTurn) return
+    cancelWriteFailed = false
+    try { client.cancelPrompt(prior.promptId) } catch { cancelWriteFailed = true }
+    const turn = waitForCancelledPrompt(prior, client)
+    if (!turn) {
+      if (!prior.settled) settle(prior, { closing: true, windowMs: 0 })
+      if (prior.lastTurn) return
+      log({ at: now(), acp_turn_refused: { role: prior.role, reason: 'acp-session-busy', prior_assignment_id: prior.id, assignment_id: nextId } })
+      throw Object.assign(new Error(`ACP session busy for role ${prior.role}`), { stage: 'acp-session-busy', role: prior.role })
+    }
+    settle(prior, { turn })
+  }
+  function settle(assignment, { closing = false, strict = false, windowMs = 0, finalizeUnread = true, turn: suppliedTurn } = {}) {
     if (assignment.settled) return assignment.lastTurn
     const client = clients.get(assignment.role)?.client
     let turn = null
@@ -155,13 +183,13 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const start = closing ? now() : 0
     const deadline = start + windowMs
     const maxPolls = closing ? Math.ceil((deadline - start) / ACP_POLL_INTERVAL_MS) + 1 : 1
-    try { turn = client?.pollPrompt(assignment.promptId) ?? null; polls += 1 } catch (error) { if (!closing && strict) throw error; turn = null; polls += 1 }
+    try { turn = suppliedTurn ?? client?.pollPrompt(assignment.promptId) ?? null; polls += 1 } catch (error) { if (!closing && strict) throw error; turn = null; polls += 1 }
     while (!turn && closing && polls < maxPolls && now() < deadline) {
       sleep(ACP_POLL_INTERVAL_MS)
       try { turn = client?.pollPrompt(assignment.promptId) ?? null } catch { turn = null }
       polls += 1
     }
-    if (!turn && !closing) return null
+    if (!turn && (!closing || !finalizeUnread)) return null
     assignment.settled = true
     assignment.lastTurn = turn
     const refusal = Boolean(turn?.refusal)

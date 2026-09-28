@@ -28,7 +28,7 @@ function fixture(options = {}) {
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
-  return { root, paths, briefFile, io, calls, logs, heartbeats, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
+  return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
@@ -61,8 +61,21 @@ test('A4', () => {
   } finally { cleanup(f) }
 })
 test('A5', () => {
+  const late = { stopReason: 'end_turn', usage: { inputTokens: 7, outputTokens: 3, cachedReadTokens: 0, cachedWriteTokens: 0 } }
   const f = fixture({ cancelNoReply: true, cancelSettleMs: 0 }); try {
     const prior = assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).length, 0, 'a busy refusal leaves the prior open')
+    f.queueTurn(late)
+    assign(f, { id: 'next' })
+    assert.deepEqual(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).map((row) => [row.acp_turn.stopReason, row.acp_turn.stop_reason_absent]), [['end_turn', null]])
+    assert.equal(f.logs.filter((row) => row.seat_turn_census?.dispatch_id === prior.id).length, 1)
+    assert.equal(f.heartbeats.filter((row) => row.kind === 'usage' && row.id === prior.id).length, 1)
+  } finally { cleanup(f) }
+})
+test('A5 a prior still unanswered at close is recorded unread exactly once', () => {
+  const f = fixture({ cancelNoReply: true, cancelSettleMs: 0, closeSettleMs: 0 }); try {
+    const prior = assign(f); assert.throws(() => assign(f, { id: 'next' }), (error) => error.stage === 'acp-session-busy')
+    f.io.close()
     assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id && row.acp_turn.stop_reason_absent === 'response-unread').length, 1)
     assert.equal(f.logs.filter((row) => row.seat_turn_census?.dispatch_id === prior.id).length, 1)
   } finally { cleanup(f) }
@@ -201,6 +214,8 @@ test('ACP S2', () => {
   const h = fixture({ turn: { stopReason: null, refusal: { message: 'refused' } } }); try { assign(h); h.io.retire('builder'); assert.equal(h.logs.find((e) => e.acp_turn)?.acp_turn.stop_reason_absent, 'refused') } finally { cleanup(h) }
   const i = fixture({ pollResults: [null, null], cancelNoReply: true }); try {
     const old = assign(i); assert.throws(() => assign(i, { reask: { id: 'd2', returnPath: old.returnPath } }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(i.logs.filter((e) => e.acp_turn?.assignment_id === old.id).length, 0)
+    i.io.close()
     assert.equal(i.logs.filter((e) => e.acp_turn?.assignment_id === old.id).length, 1)
     assert.equal(i.logs.find((e) => e.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
   } finally { cleanup(i) }
@@ -217,6 +232,8 @@ test('ACP RV1-2 replacement closes and records the pending prior assignment', ()
   const f = fixture({ pollResults: [null, null], cancelNoReply: true }); try {
     const old = assign(f); assert.throws(() => f.io.wait(old.returnPath, 0), (error) => error.stage === 'acp-no-envelope')
     assert.throws(() => assign(f, { id: 'd4', returnPath: join(f.paths.returnsDir, 'd4.builder.json') }), (error) => error.stage === 'acp-session-busy')
+    assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === old.id).length, 0)
+    f.io.close()
     assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === old.id).length, 1)
     assert.equal(f.logs.find((row) => row.acp_turn?.assignment_id === old.id).acp_turn.stop_reason_absent, 'response-unread')
   } finally { cleanup(f) }

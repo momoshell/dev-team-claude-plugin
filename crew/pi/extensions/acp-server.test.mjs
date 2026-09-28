@@ -222,6 +222,8 @@ test('C2', async () => {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
     await h.wait(() => h.prompts.length === 1, 'first prompt')
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
+    await sleep(20)
+    assert.equal(h.frames.filter((frame) => frame.id === 5).length, 0, 'no answer before the aborted run settles')
     h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
     await h.wait((frame) => frame.id === 5, 'cancelled response')

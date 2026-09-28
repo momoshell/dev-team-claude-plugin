@@ -168,8 +168,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     try { client.cancelPrompt(prior.promptId) } catch { cancelWriteFailed = true }
     const turn = waitForCancelledPrompt(prior, client)
     if (!turn) {
-      if (!prior.settled) settle(prior, { closing: true, windowMs: 0 })
-      if (prior.lastTurn) return
+      // The prior stays unsettled: a later assign or closeRole still records its real response once.
       log({ at: now(), acp_turn_refused: { role: prior.role, reason: 'acp-session-busy', prior_assignment_id: prior.id, assignment_id: nextId } })
       throw Object.assign(new Error(`ACP session busy for role ${prior.role}`), { stage: 'acp-session-busy', role: prior.role })
     }

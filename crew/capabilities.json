@@ -109,7 +109,7 @@
       "extensions": [],
       "agents": [],
       "skills": [],
-      "advisor": true,
+      "advisor": false,
       "requires": [],
       "mcp_servers": [],
       "by_agent": {

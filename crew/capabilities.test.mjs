@@ -18,10 +18,12 @@ import { NARRATION_BACKSTOP_SECONDS, NARRATION_CONNECT_TIMEOUT_SECONDS, NARRATIO
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
-test('ADR047 K1 builder alone is granted the shipped advisor capability', () => {
+test('ADR047 K1 the shipped register grants no seat the advisor in lane 1', () => {
+  // Operator decision 9 (2026-09-28): the builder grant ships off until lane 2 lands
+  // delta-only consults and recorded consult failures; then it is flipped.
   const roles = loadCapabilities().roles
-  assert.equal(roles.builder.advisor, true)
-  for (const [role, grants] of Object.entries(roles)) if (role !== 'builder') assert.equal(grants.advisor, false)
+  assert.equal(roles.builder.advisor, false)
+  for (const [role, grants] of Object.entries(roles)) assert.equal(grants.advisor, false, role)
 })
 
 test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {

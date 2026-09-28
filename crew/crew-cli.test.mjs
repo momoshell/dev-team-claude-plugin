@@ -117,6 +117,15 @@ async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue =
   }
 }
 
+// ADR-047 operator decision 9: the shipped register grants no seat the advisor in lane 1.
+// Tests of the granted path switch the builder grant on HERE, never in crew/capabilities.json.
+function builderGrantedRegister() {
+  const register = structuredClone(loadCapabilities())
+  register.roles.builder.advisor = true
+  return register
+}
+const GRANTED = Object.freeze({ register: builderGrantedRegister() })
+
 // Attempt rows for every seat of the fixture build tier, so the SEATS' aggregate is measured.
 const BUILD_SEAT_ATTEMPTS = [
   breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'medium', role: 'lead' }),
@@ -182,7 +191,7 @@ test('ADR047 E1 crew.json records the adapter-translated advisor model beside th
 })
 
 test('ADR047 R1 a consult is launched with the adapter spelling while the record keeps the catalog key', async () => {
-  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6-sol' } })
+  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6-sol' }, deps: GRANTED })
   assert.equal(result.error, null)
   assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
   assert.equal(result.crew.advisor.consult_model, 'openai-codex/gpt-6-sol')
@@ -195,12 +204,12 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
   assert.equal(env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
   assert.deepEqual(Object.keys(JSON.parse(env.CREW_ADVISOR_MODELS)), ['openai-codex/gpt-6-sol'])
   // A provider the adapter spells as-is keeps the whole catalog, as before.
-  const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet' })
+  const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet', deps: GRANTED })
   assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5')
   assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
   // The pane launch (composed at boot, not from crew.json) carries the same spelling. The stub
   // cmux never reports a workspace, so the boot stops after composing the layout.
-  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined } })
+  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED })
   const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
   assert.deepEqual(layout.match(/CREW_ADVISOR_MODEL='[^']*'/g), ["CREW_ADVISOR_MODEL='openai-codex/gpt-6-sol'"])
   // A legacy record without consult_model keeps its exact shape.
@@ -269,7 +278,7 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
     process.stdout.write = () => true
     await withHome(home, async () => {
       await withBreakerEnv({}, () => bootCmd({ task: 'adr047-s3', checkout, tier: 'build', roster: rosterPath, 'headless-all': true, 'claude-bin': process.execPath },
-        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() }))
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), ...GRANTED }))
       const dir = testCrewDir(home, checkout, 'adr047-s3')
       const crewPath = join(dir, 'crew.json')
       const manifestPath = join(dir, 'task', 'advisor-manifest.json')
@@ -297,6 +306,21 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+test('ADR047 K2 the shipped default boots a build crew that loads and consults no advisor', async () => {
+  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
+  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
+  assert.equal(layout.includes('CREW_ADVISOR'), false)
+  assert.equal(layout.includes('advisor.ts'), false)
+  const headless = await bootAdvisor({ task: 'adr047-k2' })
+  assert.equal(headless.error, null)
+  assert.deepEqual(headless.crew.advisor.granted, [])
+  // The cell is still resolved and recorded: only the grant is off.
+  assert.equal(headless.crew.seats.advisor.id, 'claude-sonnet-5')
+  // Switched on inside the test, the same boot grants the builder.
+  const granted = await bootAdvisor({ task: 'adr047-k2-granted', deps: GRANTED })
+  assert.deepEqual(granted.crew.advisor.granted, ['builder'])
 })
 
 test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
@@ -2873,8 +2897,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].skills, [])
     assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
     assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
-    // ADR-047 decision 3: the builder is the one advised seat.
-    assert.equal(register.roles[role].advisor, role === 'builder')
+    // ADR-047 decision 9: no seat is granted the advisor until lane 2 flips the builder.
+    assert.equal(register.roles[role].advisor, false)
   }
   for (const tier of Object.keys(roster.tiers)) {
     const { roles, seats } = resolveTier(roster, tier, {})
@@ -3263,11 +3287,11 @@ test('J1 boot retains adapter and transport refusals', async () => {
   // On the real boot path: the shipped builder grant plus a non-null cell refuses a
   // claude builder; --model-advisor none takes the cell away and the same boot proceeds.
   const claudeBuilder = { 'agent-builder': 'claude', 'model-builder': 'claude-opus-5-5' }
-  const refused = await bootAdvisor({ task: 'j1-claude-builder', args: claudeBuilder })
+  const refused = await bootAdvisor({ task: 'j1-claude-builder', args: claudeBuilder, deps: GRANTED })
   assert.equal(refused.error?.reason, 'adapter-unsupported')
   assert.equal(refused.error?.role, 'builder')
   assert.equal(refused.stateDir, false)
-  const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' } })
+  const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' }, deps: GRANTED })
   assert.equal(unadvised.error, null)
   assert.equal(unadvised.crew.members.builder.agent, 'claude')
 })

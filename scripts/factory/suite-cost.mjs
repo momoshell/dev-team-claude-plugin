@@ -544,6 +544,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/seat-io-runclean.test.mjs",17.292546541005372,146,null],
   ["crew/task-profiles.test.mjs",0.06882466700673104,6,null],
   ["crew/tree-fingerprint.test.mjs",1.4667583329975604,16,null],
+  ["hooks/skill-gate.test.mjs",2.5905724580287934,19,null],
   ["skills/backend-node/exhibits.test.mjs",0.16193800002336503,4,null],
   ["skills/crew-dispatch/cli-contract.test.mjs",0.09375316700339317,5,null],
   ["skills/crew-dispatch/exhibits.test.mjs",0.15712683302164077,20,null],

@@ -357,9 +357,12 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['visualizer/web/src/lib/WorkflowGraph.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
     ['skills/lean-build/SKILL.md', ['crew/drive-docs.test.mjs']],
+    ['hooks/skill-gate.mjs', ['hooks/skill-gate.test.mjs']],
+    ['hooks/hooks.json', ['hooks/skill-gate.test.mjs']],
+    ['skills/skill-map.json', ['hooks/skill-gate.test.mjs']],
     [MUTANT_CENSUS_OWNER, [MUTANT_CENSUS_TEST_FILE]],
   ]
-  const addedTests = ['test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs', MUTANT_CENSUS_TEST_FILE]
+  const addedTests = ['hooks/skill-gate.test.mjs', 'test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs', MUTANT_CENSUS_TEST_FILE]
   const currentReach = collectTestReach({ checkout: ROOT })
   const addedPaths = addedOwners.map(([owner]) => owner)
   const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths, ...addedTests])]

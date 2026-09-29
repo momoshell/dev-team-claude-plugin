@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "exempt": ["**/anchors.json", "docs/audits/**"],
+  "rules": [
+    {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs","test/**/*.mjs","skills/**/*.mjs","visualizer/**/*.mjs","visualizer/**/*.js","visualizer/**/*.svelte"]},"skills":["dev-team:lean-build"]},
+    {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs"]},"skills":["dev-team:backend-node"]},
+    {"when":{"paths":["**/*.test.mjs"]},"skills":["dev-team:qa-test-writing"]},
+    {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.js","visualizer/**/*.mjs","visualizer/**/*.css"]},"skills":["dev-team:frontend-svelte"]},
+    {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.css"]},"skills":["dev-team:ui-design","dev-team:ux"]}
+  ]
+}

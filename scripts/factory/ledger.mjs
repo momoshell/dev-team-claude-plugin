@@ -5010,7 +5010,7 @@ export function openLedger({
     }
   }
 
-  // adw_id -> the shape derived from that run's FIRST log row (or null).
+  // adw_id -> configured stepped, otherwise the shape derived from the FIRST log row (or null).
   function variantsFor(adwIds) {
     const ids = [...new Set((adwIds || []).filter(Boolean))]
     const out = new Map()
@@ -5027,6 +5027,12 @@ export function openLedger({
         let message = null
         try { message = JSON.parse(row.payload_json)?.message ?? null } catch { /* an unparseable payload is no evidence */ }
         out.set(row.adw_id, variantFromFirstMessage(message))
+      }
+      const configurations = queryRows(`
+        SELECT adw_id, effective_execution FROM run_configurations WHERE adw_id IN (${holes})
+      `, slice)
+      for (const row of configurations) {
+        if (row.effective_execution === 'stepped') out.set(row.adw_id, 'stepped')
       }
     }
     return out
@@ -9432,5 +9438,4 @@ if (invokedDirectly) {
   process.exitCode = main(process.argv.slice(2))
 }
 
-// lean: stepped has no distinct opening marker; add an executor discriminator before the first stepped run
 export const RUN_VARIANTS_WITHOUT_MARKER = Object.freeze(['stepped'])

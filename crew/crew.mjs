@@ -2948,9 +2948,14 @@ function workflowSeatFields(seat) {
   return { agent: seat?.agent, provider: seat?.provider, id: seat?.id, effort: seat?.effort }
 }
 
+export const BOOT_WORKSPACE_DEADLINE_MS = 60_000
+export const BOOT_WORKSPACE_POLL_MS = 250
+
 export async function bootCmd(args, deps = {}) {
   const {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
+    sleep: sleepDep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+    now: nowDep = Date.now,
     openLedger: openLedgerDep = null, openRun: openRunDep = openRun, existsSync: existsSyncDep = null,
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
@@ -3305,23 +3310,34 @@ export async function bootCmd(args, deps = {}) {
     const before = treeFn()
     const res = cmuxFn('new-workspace', ['--name', `crew-${taskSlug}`, '--cwd', checkout, '--layout', JSON.stringify(layout), '--focus', 'true'])
     if (!res.ok) throw new Error(`new-workspace --layout failed: ${res.error.message}`)
-    const after = treeFn()
-
-    // Identify OUR workspace by the name we just set, never positionally —
-    // "the last unseen id" mis-targets the moment two boots race. Name plus
-    // new-since-before must yield exactly one workspace.
+    // Identify OUR workspace by its explicit title and new-since-before id.
     const beforeWs = new Set()
     for (const w of before.windows || []) for (const ws of w.workspaces || []) beforeWs.add(ws.id)
-    const candidates = []
-    for (const w of after.windows || []) for (const ws of w.workspaces || []) {
-      if (!beforeWs.has(ws.id) && (ws.name === undefined || ws.name === `crew-${taskSlug}`)) candidates.push({ ws, windowId: w.id })
+    const workspaceName = `crew-${taskSlug}`
+    const start = nowDep()
+    const deadline = start + BOOT_WORKSPACE_DEADLINE_MS
+    let candidates = []
+    let panes = []
+    for (;;) {
+      const after = treeFn()
+      candidates = []
+      for (const w of after.windows || []) for (const ws of w.workspaces || []) {
+        if (!beforeWs.has(ws.id) && (ws.title === workspaceName || ws.name === workspaceName)) candidates.push({ ws, windowId: w.id })
+      }
+      if (candidates.length > 1) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found ${candidates.length}`)
+      if (candidates.length === 1) {
+        workspace = candidates[0].ws
+        windowId = candidates[0].windowId
+        panes = workspace.panes || []
+        if (panes.length === paneRoles.length) break
+      }
+      if (nowDep() >= deadline) {
+        const elapsed = nowDep() - start
+        if (candidates.length === 0) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found 0 (elapsed ${elapsed}ms)`)
+        throw new Error(`boot: expected ${paneRoles.length} panes, found ${panes.length} (elapsed ${elapsed}ms)`)
+      }
+      sleepDep(Math.min(BOOT_WORKSPACE_POLL_MS, deadline - nowDep()))
     }
-    if (candidates.length !== 1) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found ${candidates.length}`)
-    const found = candidates[0]
-    workspace = found.ws
-    windowId = found.windowId
-    const panes = workspace.panes || []
-    if (panes.length !== paneRoles.length) throw new Error(`boot: expected ${paneRoles.length} panes, found ${panes.length}`)
 
     // Seat every role by its SURFACE NAME (set in the layout) — positional
     // mapping mis-seats every role silently if the tree's pane order ever

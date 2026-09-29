@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -27,7 +27,7 @@ import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
 
 test('ADR047 J1 manifest records empty tripwires and resolved advisor cell', () => {
   const manifest = advisorManifest({ briefText: '- unrelated · item', task: 'task', runStartedAt: 1, cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
@@ -2151,4 +2151,104 @@ test('panel boots record both resolved agents with and without the flag', async 
       rmSync(checkoutRoot, { recursive: true, force: true })
     }
   }
+})
+
+async function bootPoll(task, snapshots) {
+  const home = scratchDir(`crew-${task}-home-`)
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-${task}-checkout-`)
+  let t = 0
+  let poll = 0
+  const sleeps = []
+  const tree = () => snapshots[Math.min(poll++, snapshots.length - 1)]
+  const now = () => t
+  const sleep = (ms) => {
+    sleeps.push(ms)
+    t += ms
+    if (sleeps.length > 1000) throw new Error('sleep guard')
+  }
+  let error = null
+  let crew = null
+  try {
+    writeFileSync(join(checkout, 'seed.txt'), 'seed\n')
+    execSync('git init -q && git add -A && git -c user.email=fixture@test -c user.name=fixture commit -q -m seed', { cwd: checkout })
+    await withHome(home, async () => {
+      try {
+        await bootCmd({ task, checkout, tier: 'build', 'claude-bin': process.execPath }, {
+          cmux: () => ({ ok: true }), tree, renameTab: callCounter(), awaitSeatsReady: () => {}, now, sleep,
+        })
+        crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
+      } catch (err) { error = err }
+    })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+  return { error, crew, sleeps, t, tree }
+}
+
+const paneWorkspace = (id, task, titleKey = 'name', panes = ['lead', 'planner', 'builder', 'reviewer']) => ({
+  id, [titleKey]: `crew-${task}`,
+  panes: panes.map((role) => ({ id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, name: role }] })),
+})
+const treeOf = (...workspaces) => ({ windows: [{ id: 'window-1', workspaces }] })
+const assertCrewPanes = (crew, id) => {
+  assert.equal(crew.workspace_id, id)
+  for (const role of ['lead', 'planner', 'builder', 'reviewer']) assert.equal(crew.members[role].surface_id, `surface-${role}`)
+}
+
+test('W1 delayed workspace boot', async () => {
+  const task = 'w1-delayed'
+  const result = await bootPoll(task, [treeOf(), treeOf(), treeOf(), treeOf(), treeOf(paneWorkspace('ours', task))])
+  assert.equal(result.error, null)
+  assertCrewPanes(result.crew, 'ours')
+  assert.equal(result.sleeps.length, 3)
+})
+
+test('W2 missing workspace deadline', async () => {
+  const task = 'w2-missing'
+  const result = await bootPoll(task, [treeOf(), treeOf()])
+  assert.match(result.error.message, new RegExp(`^boot: expected exactly one new crew-${task} workspace, found 0`))
+  assert.match(result.error.message, /\(elapsed \d+ms\)$/)
+  assert.ok(result.t >= BOOT_WORKSPACE_DEADLINE_MS)
+  assert.ok(result.t <= BOOT_WORKSPACE_DEADLINE_MS + BOOT_WORKSPACE_POLL_MS)
+})
+
+test('W3 duplicate workspace refusal', async () => {
+  const task = 'w3-duplicate'
+  const result = await bootPoll(task, [treeOf(), treeOf(paneWorkspace('one', task), paneWorkspace('two', task))])
+  assert.match(result.error.message, new RegExp(`^boot: expected exactly one new crew-${task} workspace, found 2`))
+  assert.equal(result.sleeps.length, 0)
+})
+
+test('T1 foreign titled workspace ignored', async () => {
+  const task = 't1-foreign'
+  const foreign = { ...paneWorkspace('foreign', task), title: 'crew-other' }
+  delete foreign.name
+  const result = await bootPoll(task, [treeOf(), treeOf(foreign), treeOf(foreign, paneWorkspace('ours', task, 'title'))])
+  assert.equal(result.error, null)
+  assertCrewPanes(result.crew, 'ours')
+})
+
+test('T2 title-only workspace accepted', async () => {
+  const task = 't2-title'
+  const result = await bootPoll(task, [treeOf(), treeOf(paneWorkspace('ours', task, 'title'))])
+  assert.equal(result.error, null)
+  assertCrewPanes(result.crew, 'ours')
+})
+
+test('P1 panes arrive after workspace', async () => {
+  const task = 'p1-panes'
+  const result = await bootPoll(task, [treeOf(), treeOf(paneWorkspace('ours', task, 'name', [])), treeOf(paneWorkspace('ours', task))])
+  assert.equal(result.error, null)
+  assert.ok(result.sleeps.length > 0)
+  assertCrewPanes(result.crew, 'ours')
+})
+
+test('P2 incomplete panes deadline', async () => {
+  const task = 'p2-incomplete'
+  const result = await bootPoll(task, [treeOf(), treeOf(paneWorkspace('ours', task, 'name', []))])
+  assert.match(result.error.message, /^boot: expected 4 panes, found 0 \(elapsed \d+ms\)$/)
+  assert.ok(result.t >= BOOT_WORKSPACE_DEADLINE_MS)
+  assert.ok(result.t <= BOOT_WORKSPACE_DEADLINE_MS + BOOT_WORKSPACE_POLL_MS)
+  assert.equal(result.crew, null)
 })

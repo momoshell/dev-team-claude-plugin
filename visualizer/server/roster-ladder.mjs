@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
 import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from '../../crew/roster.mjs'
 import { breakerPolicy, cellHealth } from '../../crew/breaker.mjs'
-import { materialiseRoutingChoice } from '../../crew/crew.mjs'
+import { ADVISOR_FLOOR_BAND, materialiseRoutingChoice } from '../../crew/crew.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 export const LADDER_PATH = resolve(SERVER_DIR, '..', '..', 'crew', 'model-ladder.json')
@@ -754,7 +754,8 @@ function bandFloorCheck(moves, ladder) {
   const failures = []
   for (const move of seatedMoves) {
     const key = moveKey(move)
-    const floorName = ladder.tier_floors[move?.tier]
+    // ADR-047 decision 10: the advisor cell is held to its own floor, the same one boot applies.
+    const floorName = move?.role === 'advisor' && byName.has(ADVISOR_FLOOR_BAND) ? ADVISOR_FLOOR_BAND : ladder.tier_floors[move?.tier]
     const floor = byName.get(floorName)
     if (!floor) {
       failures.push(`no ratified floor band for tiers.${move?.tier}.${move?.role} at crew/model-ladder.json tier_floors.${move?.tier}`)

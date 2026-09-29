@@ -469,6 +469,13 @@ test('stageMoves validates all four checks and produces an applyable multi-move 
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// Kills: the advisor floor dropped from bandFloorCheck (a basement advisor refuses again), and the
+// advisor floor applied to every role (a basement builder stops refusing; the test below pins that).
+test('stageMoves holds a basement advisor cell to the advisor floor, as boot does', async () => {
+  const advisor = await stageLadder([{ tier: 'build', role: 'advisor', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'pi', effort: 'medium' } }])
+  assert.equal(advisor.checks.find((entry) => entry.check === 'band_floor').ok, true)
+})
+
 test('stageMoves names floor and cost refusals and reports vendor pairing', async () => {
   const floor = await stageLadder([{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }])
   assert.equal(floor.ok, false); assert.equal(floor.diff, null); assert.equal(floor.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.match(floor.checks.find((entry) => entry.check === 'band_floor').message, /utility.*build.*builder.*claude-haiku-4-5/)

@@ -174,7 +174,7 @@ function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone =
 const VACUITY_EXEMPT = new Map([
   ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-18: the fingerprintTree method-presence site at crew/io-contract.test.mjs:482 is a precondition for the behavioral call below it; the runClean, reseat and teardown presence sites beside it were removed as standalone assertions')],
   ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-18: the seven namespace and handle method-presence sites removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
-  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:262; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
+  ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:291; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
   ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/pi/extensions/subagent.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/subagent.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/reclaim-descendants.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/reclaim-descendants.test.mjs'], 'by-design', 'audited 2026-09-09: the injected sleep precondition is at crew/reclaim-descendants.test.mjs:820 and is called on the next line, which makes the record assertion below it meaningful; the source alias exclusion at crew/reclaim-descendants.test.mjs:832 proves the second direct settleSeatTeardown call is not hidden behind a resume alias.')],
@@ -203,7 +203,7 @@ const VACUITY_EXEMPT = new Map([
 const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/io-contract.test.mjs': '5ef3fd47d6444bcaffa62f0d77529612fe93276d83c1bb5751ae2d98f2c73b76',
   'crew/memory.test.mjs': 'ce555debdb4cfef489a40434f8bc661e88b8b73de123c1b1a29cedd59a3a8fce',
-  'crew/pi/extensions/advisor.test.mjs': '1312f7ca02ce520d2f907b440ef27d76456bcb2def9291f45ad1bfe2988d8be7',
+  'crew/pi/extensions/advisor.test.mjs': '04083e6acbadf8e1baf42f6c7968ddbcc36bfe66f66def3acfb225654e255d60',
   'crew/pi/extensions/lab.test.mjs': '103e8a9259002962fb0094fcef011a3d99a5e1fa89f6c59007a9caef33ea440c',
   'crew/pi/extensions/subagent.test.mjs': 'd17c9cc3cae62362a8f3ed93713b53a1cd6b201f77b9c1271816adf9c5c3c6c6',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',

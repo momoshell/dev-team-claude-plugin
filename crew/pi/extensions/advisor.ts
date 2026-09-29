@@ -1191,7 +1191,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const aggregateSafe = foldedUsage !== null && ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
         .every((key) => Number.isSafeInteger(foldedUsage[key]) && foldedUsage[key] >= 0)
       const spendMeasured = foldedUsage !== null && ownSpendFrames > 0 && !usageIncomplete
-        && !consultFailed && !parseFault && !uncleanExit && aggregateSafe
+        && !consultFailed && !epochAborted && !parseFault && !uncleanExit && aggregateSafe
       {
         consultPayload.usage = foldedUsage
         if (foldedUsage === null) consultPayload.usage_reason = 'usage-unavailable'

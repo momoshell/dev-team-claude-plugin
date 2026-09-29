@@ -234,6 +234,35 @@ test('a pre-spawn pi resolution failure writes exactly one transport-error cell-
   assert.equal(failures[0].kind, 'transport-error')
   rmSync(r.f.root, { recursive: true, force: true })
 })
+// Kills: `&& !epochAborted` dropped from spendMeasured. A consult aborted by a manifest epoch
+// change after a usage frame arrived is not the cell's failure, and its partial fold is never
+// priced: the usage row carries null with a reason, and no cell-failure row is written.
+test('an epoch-aborted consult writes no cell failure and never prices its partial usage', async () => {
+  const callbacks = []; const f = fixture(); const journal = sink()
+  const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
+  const m = JSON.parse(readFileSync(manifestPath, 'utf8')); m.cell = { provider: 'local', id: 'advisor-v1', agent: 'pi', effort: 'high', model: 'local/advisor-v1' }
+  writeFileSync(manifestPath, JSON.stringify(m))
+  const child = () => {
+    const c = new EventEmitter(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => true
+    c.stdin = { end() { setImmediate(() => c.stdout.write(`${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'partial', usage: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 } } })}\n`)) } }
+    return c
+  }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: { cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (p) => readFileSync(p, 'utf8'), fileMtime: () => 2, resolveBinary: () => ({ command: '/fake/pi' }), spawn: child, setTimeout(fn) { callbacks.push(fn); return callbacks.length }, clearTimeout() {}, consultTimeoutMs: 5, childKillGraceMs: 1 } })
+  const source = join(f.tree, 'lib/widget.mjs'); const path = join(f.tree, 'lib/widget.test.mjs')
+  a.onToolResult(result('g', 'read', { path: source }, 'lib/widget.mjs:2: grounded'), {})
+  a.onToolCall(call('f', 'write', { path, content: 'x' }), {}); a.onToolResult(result('f', 'write', { path, content: 'x' }, 'ok'), {})
+  for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r))
+  writeFileSync(manifestPath, JSON.stringify({ ...m, run_started_at: 2 }))
+  a.onToolResult(result('g2', 'read', { path: source }, 'lib/widget.mjs:2: grounded'), {})
+  for (let i = 0; i < 8; i++) { callbacks.splice(1, 1)[0]?.(); await new Promise((r) => setImmediate(r)) }
+  await a.settled()
+  const usage = journal.rows.find((row) => row.advisor_usage)?.advisor_usage
+  assert.ok(usage, 'the aborted consult still journals its usage row')
+  assert.equal(usage.usage, null)
+  assert.equal(usage.usage_reason, 'usage-incomplete')
+  assert.equal(journal.rows.filter((row) => row.advisor_cell_failure).length, 0)
+  rmSync(f.root, { recursive: true, force: true })
+})
 
 test('ADR47-L2 F4 invalid clean judgment is rejected without transport failure', async () => { const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.TRIPWIRE_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.TRIPWIRE_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const child=new EventEmitter(); child.stdout=new PassThrough(); child.stderr=new PassThrough(); child.stdin={end(){setImmediate(()=>{child.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:JSON.stringify({class:'bogus',severity:'low',claim:'bad judgment',evidence:['lib/widget.mjs:2']})}})+'\n');child.emit('close',0)})}}; child.kill=()=>true; const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>child}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'lib/widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); await a.settled(); assert.ok(journal.rows.find(x=>x.advisor_note?.outcome==='rejected')); assert.equal(journal.rows.some(x=>x.advisor_cell_failure),false); rmSync(f.root,{recursive:true,force:true}) })
 

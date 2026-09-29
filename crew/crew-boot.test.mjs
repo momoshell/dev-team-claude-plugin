@@ -1,13 +1,13 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, statSync, symlinkSync, lstatSync } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -15,7 +15,7 @@ import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds } from './limits.mjs'
-import { modelString as piModelString } from './adapters/adapter-pi.mjs'
+import { modelString as piModelString, seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -2195,6 +2195,162 @@ const assertCrewPanes = (crew, id) => {
   assert.equal(crew.workspace_id, id)
   for (const role of ['lead', 'planner', 'builder', 'reviewer']) assert.equal(crew.members[role].surface_id, `surface-${role}`)
 }
+
+async function bootPaneLaunchFixture(task, options = {}) {
+  const scratch = scratchDir(`crew-${task}-`)
+  const home = options.home || join(scratch, 'home')
+  mkdirSync(home, { recursive: true })
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-${task}-checkout-`)
+  writeFileSync(join(checkout, 'seed.txt'), 'seed\\n')
+  execSync('git init -q && git add -A && git -c user.email=fixture@test -c user.name=fixture commit -q -m seed', { cwd: checkout })
+  const calls = []
+  const paneRoles = ['lead', 'planner', 'builder', 'reviewer']
+  let trees = 0
+  const tree = () => {
+    trees += 1
+    if (trees === 1) return { windows: [] }
+    return treeOf({ id: 'workspace-test', title: `crew-${task}`, panes: paneRoles.map((role) => ({
+      id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, title: role }],
+    })) })
+  }
+  let error = null
+  try {
+    options.before?.({ scratch, taskDir: join(testCrewDir(home, checkout, task), 'task') })
+    await withHome(home, async () => {
+      try {
+        await bootCmd({ task, checkout, tier: 'build', 'claude-bin': process.execPath, ...options.args }, {
+          cmux: (verb, args) => { calls.push([verb, args]); return { ok: true } },
+          tree, renameTab: () => {}, awaitSeatsReady: () => {},
+        })
+      } catch (err) { error = err }
+    })
+    return { scratch, home, checkoutRoot, checkout, calls, error, taskDir: join(testCrewDir(home, checkout, task), 'task'), crewDir: testCrewDir(home, checkout, task) }
+  } catch (err) {
+    rmSync(scratch, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+    throw err
+  }
+}
+
+function layoutFromCalls(calls) {
+  const args = calls.find(([verb]) => verb === 'new-workspace')?.[1] || []
+  return JSON.parse(args[args.indexOf('--layout') + 1])
+}
+function layoutCommands(node, commands = []) {
+  if (node?.pane?.surfaces) for (const surface of node.pane.surfaces) if (surface.command) commands.push(surface.command)
+  for (const child of node?.children || []) layoutCommands(child, commands)
+  return commands
+}
+
+// Kills: writing the launcher in place (writeFileSync(launcher, …)) — boot would follow a planted
+// launch-lead.sh symlink and overwrite its target. The target must keep its bytes, and the
+// launcher path must end as a regular file boot wrote.
+test('a planted launcher symlink is replaced, never written through', async () => {
+  let target = null
+  const f = await bootPaneLaunchFixture('l4-symlink', {
+    before: ({ scratch, taskDir }) => {
+      target = join(scratch, 'precious.txt')
+      writeFileSync(target, 'precious\n')
+      mkdirSync(taskDir, { recursive: true })
+      symlinkSync(target, join(taskDir, 'launch-lead.sh'))
+    },
+  })
+  try {
+    assert.equal(f.error, null)
+    assert.equal(readFileSync(target, 'utf8'), 'precious\n')
+    const launcher = join(f.taskDir, 'launch-lead.sh')
+    assert.equal(lstatSync(launcher).isSymbolicLink(), false)
+    assert.match(readFileSync(launcher, 'utf8'), /^#!\/bin\/sh\nexec /)
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+// Kills: the temporary's exclusive-create flag relaxed ('wx' → 'w') — boot would follow a planted
+// launch-lead.sh.tmp-<pid> symlink and overwrite its target. Boot must refuse, target untouched.
+test('a planted launcher temporary symlink refuses the boot, never written through', async () => {
+  let target = null
+  const f = await bootPaneLaunchFixture('l5-tmpsymlink', {
+    before: ({ scratch, taskDir }) => {
+      target = join(scratch, 'precious.txt')
+      writeFileSync(target, 'precious\n')
+      mkdirSync(taskDir, { recursive: true })
+      symlinkSync(target, join(taskDir, `launch-lead.sh.tmp-${process.pid}`))
+    },
+  })
+  try {
+    assert.equal(f.error?.code, 'EEXIST')
+    assert.equal(readFileSync(target, 'utf8'), 'precious\n')
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('L1', async () => {
+  const f = await bootPaneLaunchFixture('l1-launch')
+  try {
+    assert.equal(f.error, null)
+    const commands = layoutCommands(layoutFromCalls(f.calls))
+    assert.ok(commands.length >= 2)
+    for (const command of commands) {
+      assert.ok(Buffer.byteLength(command) <= PANE_LAUNCH_MAX_BYTES)
+      const launcher = command.match(/^\/bin\/sh '(.+)'$/)?.[1]
+      assert.ok(launcher?.startsWith(f.taskDir))
+      assert.ok(statSync(launcher).mode & 0o100)
+    }
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('L2', async () => {
+  const f = await bootPaneLaunchFixture('l2-launch', { args: { 'agent-planner': 'pi' } })
+  try {
+    assert.equal(f.error, null)
+    const crew = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8'))
+    const command = layoutCommands(layoutFromCalls(f.calls)).find((item) => item.includes('launch-planner.sh'))
+    const launcherPath = command.match(/^\/bin\/sh '(.+)'$/)?.[1]
+    const actual = readFileSync(launcherPath, 'utf8')
+    const bootBrief = `Crew for task l2-launch. Task dir ${f.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
+    const grants = persistedAdapters(crew).planner.grants
+    const expected = piSeatCommand({
+      role: 'planner', model: crew.members.planner.model, promptFile: join(f.taskDir, 'role-planner.md'),
+      tools: crew.members.planner.tools, deny: crew.members.planner.deny, taskDir: f.taskDir,
+      bootBrief, effort: crew.members.planner.effort, grants,
+    })
+    assert.equal(actual, `#!/bin/sh\nexec ${expected}\n`)
+    assert.match(actual, /CREW_ROLE=planner/)
+    for (const extension of grants.extensions) assert.ok(actual.includes(extension))
+    assert.ok(actual.trimEnd().replace(/[\"']$/, '').endsWith(bootBrief))
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('L3', async () => {
+  const root = scratchDir('crew-l3-deep-')
+  const home = join(root, ...Array.from({ length: 9 }, (_, i) => `${i}${'x'.repeat(58)}`))
+  const f = await bootPaneLaunchFixture('l3-long', { home })
+  try {
+    const bytes = Buffer.byteLength(`/bin/sh '${join(f.taskDir, 'launch-lead.sh')}'`, 'utf8')
+    assert.ok(bytes > PANE_LAUNCH_MAX_BYTES)
+    assert.equal(f.error?.reason, 'pane-launch-too-long')
+    assert.match(f.error.message, new RegExp(`lead: ${bytes} bytes`))
+    assert.equal(f.calls.filter(([verb]) => verb === 'new-workspace').length, 0)
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('R1', () => {
+  const calls = []
+  awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, 'fresh', null, {
+    cmux: (command, args) => { calls.push([command, args]); return { ok: true, stdout: 'ready: planner\n' } },
+  })
+  assert.deepEqual(calls, [['read-screen', ['--surface', 'surface-planner']]])
+})
+
+test('R2', () => {
+  const rows = []
+  let clock = 0
+  awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, 'fresh', '/journal.jsonl', {
+    cmux: () => ({ ok: true, stdout: 'ready: planner\n' + '\n'.repeat(41) }),
+    logLine: (_path, row) => rows.push(row), now: () => clock, sleep: () => { clock = 181_000 },
+  })
+  assert.deepEqual(rows.map(({ role, signal, mode, accepted }) => ({ role, signal, mode, accepted })), [
+    { role: 'planner', signal: 'ready-reply', mode: 'fresh', accepted: true },
+  ])
+})
 
 test('W1 delayed workspace boot', async () => {
   const task = 'w1-delayed'

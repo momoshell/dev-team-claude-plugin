@@ -86,9 +86,29 @@ function advisorRoster(cell = ADVISOR_CELL) {
   return value
 }
 
+// A pane boot's layout carries only `/bin/sh '<launcher>'` per seat; the seat commands live in
+// `launch-<role>.sh`. Returns { role: launcher text } from a `preserve: true` boot, so a grant
+// is asserted on the seat that holds it, not somewhere in the crew.
+function paneLaunchers(boot) {
+  const layoutArgs = boot.cmuxCalls.find(([verb]) => verb === 'new-workspace')?.[1] || []
+  const commands = []
+  const walk = (node) => {
+    for (const surface of node?.pane?.surfaces || []) if (surface.command) commands.push(surface.command)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(JSON.parse(layoutArgs[layoutArgs.indexOf('--layout') + 1]))
+  const byRole = {}
+  for (const command of commands) {
+    const launcher = command.match(/^\/bin\/sh '(.+\/launch-([a-z-]+)\.sh)'$/)
+    assert.ok(launcher, command)
+    byRole[launcher[2]] = readFileSync(launcher[1], 'utf8')
+  }
+  return byRole
+}
+
 // One build-tier boot against advisorRoster(); returns what it wrote, or the refusal and
 // whether any state dir or workspace was created before it.
-async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue = advisorRoster() }) {
+async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue = advisorRoster(), preserve = false }) {
   const home = scratchDir(`crew-adr047-${task}-home-`)
   const { root: checkoutRoot, checkout } = testCheckout(`crew-adr047-${task}-checkout-`)
   const rosterPath = join(home, 'roster.json')
@@ -110,11 +130,14 @@ async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue =
       error, stateDir: existsSync(dir), workspaceCalls: cmux.calls.length, cmuxCalls: cmux.calls,
       crew: wrote ? JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) : null,
       boot: wrote ? bootRecord(dir) : null,
+      ...(preserve ? { cleanup: () => { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) } } : {}),
     }
   } finally {
     process.stdout.write = previousStdoutWrite
-    rmSync(home, { recursive: true, force: true })
-    rmSync(checkoutRoot, { recursive: true, force: true })
+    if (!preserve) {
+      rmSync(home, { recursive: true, force: true })
+      rmSync(checkoutRoot, { recursive: true, force: true })
+    }
   }
 }
 
@@ -223,10 +246,14 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
   assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
   // The pane launch carries activation only; the manifest owns the model identity. The stub
   // cmux never reports a workspace, so the boot stops after composing the layout.
-  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED })
-  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.match(layout, /CREW_ADVISOR=1/)
-  assert.doesNotMatch(layout, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
+  // Pane seat commands live in launcher files (the layout carries only `/bin/sh '<launcher>'`),
+  // so the activation-only rule is asserted over the launchers the layout points at.
+  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED, preserve: true })
+  try {
+    const launchers = paneLaunchers(pane)
+    assert.match(launchers.builder, /CREW_ADVISOR=1/)
+    for (const text of Object.values(launchers)) assert.doesNotMatch(text, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
+  } finally { pane.cleanup() }
   // A legacy record without consult_model keeps its exact shape.
   assert.deepEqual(advisorLaunchCell({ endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false, models: { x: {} } }),
     { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
@@ -346,10 +373,20 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
 // advisor.ts), and a grant leaking to a second role (granted stops being exactly ['builder']).
 test('ADR047 K2 the shipped default boots a build crew whose builder loads the advisor', async () => {
   // Operator decision 9: the grant shipped off until lane 2 (PR #1614); it is now on.
-  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
-  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.match(layout, /CREW_ADVISOR=1/)
-  assert.equal(layout.includes('advisor.ts'), true)
+  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined }, preserve: true })
+  try {
+    // Kills: the pane grant moved off the builder — the advisor must be in the builder's launcher
+    // and in no other seat's.
+    const launchers = paneLaunchers(pane)
+    assert.ok(launchers.builder)
+    assert.match(launchers.builder, /CREW_ADVISOR=1/)
+    assert.equal(launchers.builder.includes('advisor.ts'), true)
+    for (const [role, text] of Object.entries(launchers)) {
+      if (role === 'builder') continue
+      assert.doesNotMatch(text, /CREW_ADVISOR=1/, role)
+      assert.equal(text.includes('advisor.ts'), false, role)
+    }
+  } finally { pane.cleanup() }
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)
   assert.deepEqual(headless.crew.advisor.granted, ['builder'])
@@ -4553,10 +4590,15 @@ test('D1 pane and RPC transports receive the same granted extensions', async () 
       for (const child of node?.children || []) walk(child)
     }
     walk(layout)
-    const pane = leaves.find((command) => command.includes(' CREW_ROLE=planner '))
+    const pane = leaves.find((command) => command.includes('launch-planner.sh'))
     assert.ok(pane)
+    const launcherPath = pane.match(/^\/bin\/sh '(.+)'$/)?.[1]
+    assert.ok(launcherPath)
+    const launcher = readFileSync(launcherPath, 'utf8')
+    assert.match(launcher, /CREW_ROLE=planner/)
+    assert.match(launcher, /Crew for task grant-pane-d1/)
     const rpc = grantRuntimeRpcCommand(crew.members.planner, persistedAdapters(crew).planner.grants)
-    assert.deepEqual(paneExtensionOperands(pane), rpcExtensionOperands(rpc.args))
+    assert.deepEqual(paneExtensionOperands(launcher), rpcExtensionOperands(rpc.args))
   } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })

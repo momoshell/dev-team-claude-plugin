@@ -1027,10 +1027,10 @@ function shellTokens(text) {
   return [...String(text ?? '').matchAll(SHELL_TOKEN_RE)].map((match) => match[0].replace(/["']/g, ''))
 }
 // SHELL-WORD decoding for the fence path (issue 1406). Mirrors drive.mjs#shellWords
-// (crew/drive.mjs:11804-11827) — headless.mjs must not import the driver, so the
+// (crew/drive.mjs:12754-12777) — headless.mjs must not import the driver, so the
 // scanner is mirrored rather than imported, exactly as fenceCovers mirrors
 // scopeMatcher below. A trailing `\` is accumulated LITERALLY, matching
-// drive.mjs:11821: the decoded word then fails concreteTestFile (it does not end
+// drive.mjs:12772: the decoded word then fails concreteTestFile (it does not end
 // in .test.mjs) so testTargets still returns null, while isNodeTestInvocation stays
 // TRUE and the segment classifies `suite` and refuses. The null-returning alternative
 // looks fail-closed but is fail-open because `unrecognised` is not enforced —

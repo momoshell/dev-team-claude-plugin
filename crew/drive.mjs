@@ -704,6 +704,7 @@ export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhaust
 // existing panel-skipped path runs the single-reviewer round.
 export const SECOND_OPINION = 'second-opinion'
 const LEAD_CONTEXT_BRIEF_BYTES = 50 * 1024
+const LANE_RED_TAIL_CHARS = 4000
 const absentLeadContext = (path, reason) => ({ path, mode: 'path', state: 'absent', bytes: null, reason })
 export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead'])
 export const PANEL_PARTNERS = Object.freeze(['tech-lead'])
@@ -712,7 +713,6 @@ export const PANEL_PARTNERS = Object.freeze(['tech-lead'])
 // code still re-proves every repaired gate, so a bad repair cannot bless itself.
 export const GATE_CUSTODIAN = 'lead'
 export const PANEL_ADJUDICATORS = Object.freeze(['lead', 'tech-lead'])
-
 export function panelSeats(seated) {
   if (!Array.isArray(seated)) return null
   const partner = PANEL_PARTNERS.find((role) => role !== 'reviewer' && seated.includes(role))
@@ -10566,20 +10566,26 @@ function runTask(ctx, io, crash) {
     }
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
+      const laneOutput = typeof laneRes.output === 'string' ? laneRes.output : ''
+      const laneTail = laneOutput.slice(-LANE_RED_TAIL_CHARS)
+      const laneRedArtifact = art(`lane-red-r${round}.md`)
+      io.writeFile(laneRedArtifact, `# Red validation lane (round ${round})\n\nCommand:\n    ${lane}\n\nFailures:\n${laneTail || 'the lane produced no output'}\n`)
+      const laneRedRow = { round, artifact: laneRedArtifact, output_bytes: Buffer.byteLength(laneOutput, 'utf8'), truncated: laneOutput.length > LANE_RED_TAIL_CHARS, tail: laneTail }
+      io.log(recordRow({ at: io.now(), lane_red: laneRedRow }))
       if (finalRound()) {
         const c = consultLead(
           `The validation lane is still red after ${round} rounds. Bounce once more with guidance, or escalate?`,
-          ['bounce', 'escalate'], [planPath, journal],
+          ['bounce', 'escalate'], [laneRedArtifact, planPath, journal],
         )
         if (c.decision !== 'bounce') {
           stageComplete()
-          return escalate('lane', c.reason)
+          return escalate('lane', c.reason, [laneRedArtifact])
         }
         grantBuilderAllowance('lane', round)
       }
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('lane', 'builder')
-      io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
+      io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneTail}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'lane-fix'
       stageComplete()
       continue

@@ -1,0 +1,4 @@
+{"schema_version":1,"rules":[
+{"id":"raw-temp-call","roles":["builder"],"tools":["edit","write"],"field":"text","pattern":"\\bmkdtemp(?:Sync)?\\s*\\(","path_pattern":"\\.test\\.mjs$","source":{"path":"test/factory-env.test.mjs","quote":"const RAW_TEMP_CALL"},"reminder":"Use scratchDir from test/helpers.mjs instead of raw temporary-directory calls in tests."},
+{"id":"test-name-pattern","roles":["builder"],"tools":["bash"],"field":"command","pattern":"--test-name-pattern","source":{"path":"crew/drive.mjs","quote":"SUPPRESSES a nested test whose PARENT does not also match"},"reminder":"Remember --test-name-pattern suppresses nested tests unless the parent also matches; run the parent test too."}
+]}

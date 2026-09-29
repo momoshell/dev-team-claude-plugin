@@ -754,8 +754,11 @@ function bandFloorCheck(moves, ladder) {
   const failures = []
   for (const move of seatedMoves) {
     const key = moveKey(move)
-    // ADR-047 decision 10: the advisor cell is held to its own floor, the same one boot applies.
-    const floorName = move?.role === 'advisor' && byName.has(ADVISOR_FLOOR_BAND) ? ADVISOR_FLOOR_BAND : ladder.tier_floors[move?.tier]
+    // ADR-047 decision 10: the advisor cell is held to its own floor, as boot does. Not on the judge
+    // tier: boot also closes a judge cell to local models, which this editor cannot see, so the
+    // tier floor stays the conservative stand-in there (it refuses a hosted basement judge advisor too).
+    const advisorFloor = move?.role === 'advisor' && move?.tier !== 'judge' && byName.has(ADVISOR_FLOOR_BAND)
+    const floorName = advisorFloor ? ADVISOR_FLOOR_BAND : ladder.tier_floors[move?.tier]
     const floor = byName.get(floorName)
     if (!floor) {
       failures.push(`no ratified floor band for tiers.${move?.tier}.${move?.role} at crew/model-ladder.json tier_floors.${move?.tier}`)
@@ -774,7 +777,7 @@ function bandFloorCheck(moves, ladder) {
   }
   return failures.length
     ? check('band_floor', false, failures.join('; '))
-    : check('band_floor', true, `all moved seats sit at or above their ratified tier floor in crew/model-ladder.json`)
+    : check('band_floor', true, `all moved seats sit at or above their ratified tier floor in crew/model-ladder.json (an advisor cell outside the judge tier at or above "${ADVISOR_FLOOR_BAND}", ADR-047 decision 10)`)
 }
 
 // The name remains only to hold LADDER_CHECKS and the out-of-fence panel (residual iii).

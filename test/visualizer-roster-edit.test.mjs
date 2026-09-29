@@ -474,6 +474,10 @@ test('stageMoves validates all four checks and produces an applyable multi-move 
 test('stageMoves holds a basement advisor cell to the advisor floor, as boot does', async () => {
   const advisor = await stageLadder([{ tier: 'build', role: 'advisor', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'pi', effort: 'medium' } }])
   assert.equal(advisor.checks.find((entry) => entry.check === 'band_floor').ok, true)
+  // Kills: the judge-tier exclusion dropped (a local basement judge advisor, which boot refuses as
+  // local-model-judge-seat, would stage clean).
+  const judgeLocal = await stageLadder([{ tier: 'judge', role: 'advisor', cell: { provider: 'llama-swap', id: 'qwen3.8-27b', agent: 'pi', effort: 'medium' } }])
+  assert.equal(judgeLocal.checks.find((entry) => entry.check === 'band_floor').ok, false)
 })
 
 test('stageMoves names floor and cost refusals and reports vendor pairing', async () => {

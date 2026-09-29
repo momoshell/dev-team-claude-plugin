@@ -38,7 +38,7 @@ let skillBootBase
 let skillBootFenced
 async function skillBoot(fenced = false) {
   if (!skillBootHome) {
-    skillBootHome = mkdtempSync(join(tmpdir(), 'crew-skill-delivery-home-'))
+    skillBootHome = scratchDir('crew-skill-delivery-home-')
     const checkout = testCheckout('crew-skill-delivery-checkout-')
     skillBootCheckoutRoot = checkout.root
     skillBootCheckout = checkout.checkout
@@ -92,7 +92,7 @@ test('skill-delivery M4 boot journals mapped skills and closed map failures', as
     assert.equal(Object.hasOwn(row.seat_skills[role], 'reason'), false)
   }
   for (const [reason, content] of [['map-unreadable', null], ['map-unparseable', '{'], ['map-schema', '{}']]) {
-    const root = mkdtempSync(join(tmpdir(), `skill-${reason}-`))
+    const root = scratchDir(`skill-${reason}-`)
     mkdirSync(join(root, 'skills'), { recursive: true })
     if (content !== null) writeFileSync(join(root, 'skills', 'skill-map.json'), content)
     try {

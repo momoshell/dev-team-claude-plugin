@@ -2,6 +2,8 @@
   "version": 1,
   "exempt": ["**/anchors.json", "docs/audits/**"],
   "rules": [
+    {"when":{"roles":["lead","planner","builder","reviewer","tech-lead"]},"skills":["dev-team:lean-build"]},
+    {"when":{"roles":["reviewer","tech-lead"]},"skills":["dev-team:pr-review"]},
     {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs","test/**/*.mjs","skills/**/*.mjs","visualizer/**/*.mjs","visualizer/**/*.js","visualizer/**/*.svelte"]},"skills":["dev-team:lean-build"]},
     {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs"]},"skills":["dev-team:backend-node"]},
     {"when":{"paths":["**/*.test.mjs"]},"skills":["dev-team:qa-test-writing"]},

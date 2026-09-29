@@ -39,7 +39,7 @@ import { join, dirname, basename, isAbsolute, relative, normalize, resolve as re
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { execSync, spawnSync } from 'node:child_process'
+import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
@@ -83,6 +83,8 @@ export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBac
 import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 import { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
+import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
+import { parseFenceScope } from './fence-scope.mjs'
 export { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 
@@ -2809,32 +2811,100 @@ export function assertCharterBudgets(compiled = compiledCharterBytes(), files = 
 // `memory_bytes` is the addendum outside the ceiling — a deliberately configured
 // section, measured, never hidden inside the bound. A prompt that cannot be read
 // is null with a closed cause, never a zero.
-export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}) {
+export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}, skillsSections = {}) {
   const read = deps.readFileSync || readFileSync
   const bytes = {}
   const base = {}
   const memory_bytes = {}
+  const skills_bytes = {}
   const unmeasured = {}
   for (const role of roles || []) {
     const section = sections?.[role] || ''
     const memory = section ? Buffer.byteLength(section, 'utf8') + 2 : 0
     memory_bytes[role] = memory
+    const skillSection = skillsSections?.[role] || ''
+    const skillsBytes = skillSection ? Buffer.byteLength(skillSection, 'utf8') + 2 : 0
+    skills_bytes[role] = skillsBytes
     try {
       bytes[role] = Buffer.byteLength(read(join(taskDir, `role-${role}.md`), 'utf8'), 'utf8')
-      base[role] = bytes[role] - memory
+      base[role] = bytes[role] - memory - skillsBytes
     } catch { bytes[role] = null; base[role] = null; unmeasured[role] = CHARTER_UNMEASURED_CAUSES[0] }
   }
-  return { bytes, base, memory_bytes, ...(Object.keys(unmeasured).length ? { unmeasured } : {}) }
+  return { bytes, base, memory_bytes, skills_bytes, ...(Object.keys(unmeasured).length ? { unmeasured } : {}) }
 }
 
-export function composeRolePrompt(shared, card, section = '', charterArm = 'control') {
+export const SKILL_DELIVERY_STATUSES = Object.freeze(['delivered', 'over-budget', 'unreadable'])
+export const SKILLS_SECTION_HEADING = '## Plugin skills'
+export const SKILLS_BYTE_BUDGET = 32768
+
+export const SKILL_PATHS_UNMEASURED = Object.freeze(['no-fence-register', 'fence-files-unlisted'])
+
+// Seat delivery loads the map without opening every skill: renderSeatSkills reports an
+// unopenable skill on its own row, so one missing file never withholds the rest.
+export function loadDeliveryMap(root) {
+  return loadMap(root, { requireSkillFiles: false })
+}
+
+function trackedUnder(checkout, paths) {
+  if (!paths.length) return []
+  const out = execFileSync('git', ['-C', checkout, 'ls-files', '-z', '--', ...paths], { encoding: 'utf8' })
+  return out.split('\0').filter(Boolean)
+}
+
+// A fence entry is a whole path, a `path:START-END` span or a directory; the skill map
+// matches files. Spans are reduced to their path and directories expand to the tracked
+// files under them. A listing that fails is unmeasured, never an empty fence.
+export function fenceSkillFiles(entries, { checkout, listTracked = trackedUnder } = {}) {
+  const paths = [...new Set((entries || []).map(parseFenceScope).filter((scope) => scope.kind !== 'invalid').map((scope) => scope.path.replace(/\/+$/, '')))]
+  let tracked
+  try { tracked = listTracked(checkout, paths) } catch { return { files: null, reason: SKILL_PATHS_UNMEASURED[1] } }
+  return { files: [...new Set([...paths, ...tracked])], reason: null }
+}
+
+export function renderSeatSkills({ root, mapResult, role, files, filesReason = null, budget = SKILLS_BYTE_BUDGET, read = readFileSync }) {
+  const records = []
+  const bodies = []
+  const resolved = mapResult?.ok ? resolveSeatSkills({ map: mapResult.map, role, files }) : null
+  const reason = mapResult?.ok ? null : (mapResult?.reason || 'map-unreadable')
+  if (resolved) {
+    for (const path of resolved.skills) {
+      const absolute = join(root, path)
+      try {
+        const raw = read(absolute, 'utf8')
+        const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/)
+        if (!match) throw new Error('invalid frontmatter')
+        bodies.push({ path: absolute, body: raw.slice(match[0].length) })
+      } catch { records.push({ path: absolute, status: 'unreadable', bytes: null }) }
+    }
+  }
+  // An unreadable skill was never measured: its bytes are null and the line says so, never "0 bytes".
+  const statusLine = (item) => `- ${item.status}: ${item.bytes === null ? 'unmeasured' : `${item.bytes} bytes`} — ${item.path}`
+  const lines = [SKILLS_SECTION_HEADING]
+  if (reason) lines.push(`Reason: ${reason}`)
+  for (const item of records) lines.push(statusLine(item))
+  for (const item of bodies) {
+    const bytes = Buffer.byteLength(item.body, 'utf8')
+    const candidate = [...lines, statusLine({ ...item, status: 'delivered', bytes }), item.body].join('\n')
+    if (Buffer.byteLength(candidate, 'utf8') <= budget) {
+      item.status = 'delivered'; item.bytes = bytes; lines.push(statusLine(item), item.body)
+    } else {
+      item.status = 'over-budget'; item.bytes = bytes; lines.push(statusLine(item))
+    }
+    records.push({ path: item.path, status: item.status, bytes: item.bytes })
+  }
+  let section = lines.join('\n')
+  if (Buffer.byteLength(section, 'utf8') > budget) section = `${SKILLS_SECTION_HEADING}\nReason: section-budget-too-small`
+  return { section, skills: records, paths_unmeasured: filesReason ?? resolved?.paths_unmeasured ?? null, ...(reason ? { reason } : {}) }
+}
+
+export function composeRolePrompt(shared, card, section = '', charterArm = 'control', skillsSection = '') {
   const charter = `${shared}\n\n${card}`.replace(CHARTER_GUIDELINE_PATH, (_match, path) => join(CHARTER_GUIDELINES_DIR, path))
-  const control = `${charter}${section ? `\n\n${section}` : ''}`
+  const control = `${charter}${section ? `\n\n${section}` : ''}${skillsSection ? `\n\n${skillsSection}` : ''}`
   const tail = Object.hasOwn(CHARTER_TAILS, charterArm) ? CHARTER_TAILS[charterArm] : ''
   return `${control}${tail}`
 }
 
-function writeRolePrompt(role, taskDir, section = '', charterArm = 'control') {
+function writeRolePrompt(role, taskDir, section = '', charterArm = 'control', skillsSection = '') {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
@@ -2843,7 +2913,7 @@ function writeRolePrompt(role, taskDir, section = '', charterArm = 'control') {
   const merged = join(taskDir, `role-${role}.md`)
   const shared = readFileSync(SHARED_PROMPT, 'utf8')
   const card = readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')
-  writeFileSync(merged, composeRolePrompt(shared, card, section, charterArm))
+  writeFileSync(merged, composeRolePrompt(shared, card, section, charterArm, skillsSection))
   return merged
 }
 
@@ -3284,8 +3354,16 @@ export async function bootCmd(args, deps = {}) {
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   const memory = memoryExtracts(roles, args, taskSlug)
-  for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm)
-  const charter = charterBytesRecord(paths.taskDir, roles, memory.sections)
+  const mapResult = loadDeliveryMap(dirname(HERE))
+  let ownFiles = { files: null, reason: null }
+  if (args.fences && args.lane) {
+    const gathered = gatherFences({ fencesPath: args.fences, checkout })
+    ownFiles = fenceSkillFiles(gathered.find((entry) => entry.lane === args.lane)?.files || [], { checkout })
+  }
+  const skillResults = Object.fromEntries(roles.map((role) => [role, renderSeatSkills({ root: dirname(HERE), mapResult, role, files: ownFiles.files, filesReason: ownFiles.reason })]))
+  const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section]))
+  for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm, skillsSections[role])
+  const charter = charterBytesRecord(paths.taskDir, roles, memory.sections, {}, skillsSections)
   // Materialise every register-authoritative Claude MCP set before composing a
   // command or creating a workspace. A failed write is a boot failure: strict
   // mode must never fall back to user configuration.
@@ -3434,6 +3512,8 @@ export async function bootCmd(args, deps = {}) {
     charter_bytes: charter.bytes,
     charter_base_bytes: charter.base,
     charter_memory_bytes: charter.memory_bytes,
+    charter_skills_bytes: charter.skills_bytes,
+    seat_skills: Object.fromEntries(roles.map((role) => [role, { skills: skillResults[role].skills.map((skill) => ({ path: skill.path, status: skill.status, bytes: skill.bytes })), paths_unmeasured: skillResults[role].paths_unmeasured, ...(skillResults[role].reason ? { reason: skillResults[role].reason } : {}) }])),
     ...(charter.unmeasured ? { charter_unmeasured: charter.unmeasured } : {}),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats: { ...seats, advisor } } : {}),

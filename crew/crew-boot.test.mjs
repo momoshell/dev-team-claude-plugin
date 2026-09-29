@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -20,6 +20,7 @@ import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
+import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
@@ -27,7 +28,178 @@ import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, dirname, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+
+const SKILL_ROLES = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+let skillBootHome
+let skillBootCheckoutRoot
+let skillBootCheckout
+let skillBootBase
+let skillBootFenced
+async function skillBoot(fenced = false) {
+  if (!skillBootHome) {
+    skillBootHome = scratchDir('crew-skill-delivery-home-')
+    const checkout = testCheckout('crew-skill-delivery-checkout-')
+    skillBootCheckoutRoot = checkout.root
+    skillBootCheckout = checkout.checkout
+    execSync('git init -q', { cwd: skillBootCheckout })
+    await withHome(skillBootHome, () => bootCmd(
+      { task: 'skill-delivery-base', checkout: skillBootCheckout, roles: SKILL_ROLES.join(','), 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    ))
+    skillBootBase = testCrewDir(skillBootHome, skillBootCheckout, 'skill-delivery-base')
+  }
+  if (fenced && !skillBootFenced) {
+    mkdirSync(join(skillBootCheckout, 'crew'), { recursive: true })
+    writeFileSync(join(skillBootCheckout, 'crew', 'x.mjs'), 'export {}\n')
+    execSync('git add crew/x.mjs && git -c user.email=test@example.com -c user.name=test commit -qm fence-fixture', { cwd: skillBootCheckout })
+    const register = join(skillBootHome, 'fences.json')
+    writeFileSync(register, JSON.stringify({ lanes: [{ lane: 'own', files: ['crew/x.mjs'] }, { lane: 'other', files: ['other.mjs'] }] }))
+    await withHome(skillBootHome, () => bootCmd(
+      { task: 'skill-delivery-fenced', checkout: skillBootCheckout, roles: SKILL_ROLES.join(','), 'headless-all': true, 'claude-bin': process.execPath, fences: register, lane: 'own' },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    ))
+    skillBootFenced = testCrewDir(skillBootHome, skillBootCheckout, 'skill-delivery-fenced')
+  }
+  const dir = fenced ? skillBootFenced : skillBootBase
+  const row = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((entry) => entry.event === 'boot').at(-1)
+  return { dir, row }
+}
+after(async () => {
+  if (skillBootHome) rmSync(skillBootHome, { recursive: true, force: true })
+  if (skillBootCheckoutRoot) rmSync(skillBootCheckoutRoot, { recursive: true, force: true })
+})
+const skillBody = (name) => readFileSync(join(ROOT, 'skills', name, 'SKILL.md'), 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
+
+test('skill-delivery M1 role and path rules resolve in ordered deduplicated paths', () => {
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+})
+test('skill-delivery M2 reviewer role rules resolve two skills', () => {
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'reviewer', files: [] }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md'])
+})
+test('skill-delivery M3 reviewer null fence preserves absence while [] is measured', () => {
+  const map = loadMap(ROOT).map
+  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: null }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md'])
+  assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: null }).paths_unmeasured, 'no-fence-register')
+  assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: [] }).paths_unmeasured, null)
+})
+test('skill-delivery M4 boot journals mapped skills and closed map failures', async () => {
+  const { row } = await skillBoot()
+  for (const role of SKILL_ROLES) {
+    const expected = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).skills
+    assert.deepEqual(row.seat_skills[role].skills, expected)
+    assert.ok(expected.length > 0)
+    assert.equal(Object.hasOwn(row.seat_skills[role], 'reason'), false)
+  }
+  for (const [reason, content] of [['map-unreadable', null], ['map-unparseable', '{'], ['map-schema', '{}']]) {
+    const root = scratchDir(`skill-${reason}-`)
+    mkdirSync(join(root, 'skills'), { recursive: true })
+    if (content !== null) writeFileSync(join(root, 'skills', 'skill-map.json'), content)
+    try {
+      const result = loadMap(root)
+      assert.equal(result.reason, reason)
+      for (const role of SKILL_ROLES) {
+        const rendered = renderSeatSkills({ root, mapResult: result, role, files: null })
+        assert.match(rendered.section, new RegExp(`Reason: ${reason}`)); assert.deepEqual(rendered.skills, []); assert.equal(rendered.reason, reason)
+      }
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+test('skill-delivery D1 own fence delivers backend-node body in the builder prompt', async () => {
+  const { dir } = await skillBoot(true)
+  const prompt = readFileSync(join(dir, 'task', 'role-builder.md'), 'utf8')
+  assert.ok(prompt.includes('## Plugin skills'))
+  assert.ok(prompt.includes(skillBody('backend-node')))
+  assert.ok(prompt.indexOf('## Plugin skills') > prompt.indexOf('# Role'))
+  assert.equal(prompt.includes('---\nname: backend-node'), false)
+})
+test('skill-delivery D2 every booted role receives the exact lean-build body', async () => {
+  const { dir } = await skillBoot()
+  for (const role of SKILL_ROLES) assert.ok(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8').includes(skillBody('lean-build')))
+})
+test('skill-delivery D3 over-budget status includes absolute path and exact bytes without body', () => {
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 300 })
+  const body = skillBody('lean-build'); const path = join(ROOT, 'skills/lean-build/SKILL.md'); const bytes = Buffer.byteLength(body, 'utf8')
+  assert.ok(result.section.includes(`over-budget: ${bytes} bytes — ${path}`)); assert.equal(result.section.includes(body), false)
+})
+test('skill-delivery D4 unreadable status includes absolute path', () => {
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], read: () => { throw new Error('EPERM') } })
+  // Kills: an unreadable skill recorded as a measured zero (bytes 0, "0 bytes") instead of absent.
+  assert.ok(result.section.includes(`unreadable: unmeasured — ${join(ROOT, 'skills/lean-build/SKILL.md')}`))
+  const record = result.skills.find((skill) => skill.path === join(ROOT, 'skills/lean-build/SKILL.md'))
+  assert.equal(record.status, 'unreadable')
+  assert.equal(record.bytes, null)
+})
+// Kills: raw span entries matched as paths (the span yields no backend-node), and directory
+// entries not expanded (the directory yields no backend-node). The tracked list is a literal.
+test('skill-delivery F1 span and directory fence entries resolve to the files the map matches', () => {
+  const listed = []
+  const listTracked = (_checkout, paths) => { listed.push(...paths); return paths.includes('crew') ? ['crew/a.mjs'] : [] }
+  const map = loadDeliveryMap(ROOT)
+  for (const entries of [['crew/crew.mjs:1-2'], ['crew/']]) {
+    const { files, reason } = fenceSkillFiles(entries, { checkout: ROOT, listTracked })
+    assert.equal(reason, null)
+    const skills = renderSeatSkills({ root: ROOT, mapResult: map, role: 'builder', files }).skills.map((skill) => skill.path)
+    assert.ok(skills.includes(join(ROOT, 'skills/backend-node/SKILL.md')), `${entries}: ${skills}`)
+  }
+  assert.deepEqual(listed, ['crew/crew.mjs', 'crew'])
+})
+// Kills: a failed listing treated as an empty fence (files [] and no reason) instead of unmeasured.
+test('skill-delivery F2 a fence whose files cannot be listed is unmeasured with a closed reason', () => {
+  const { files, reason } = fenceSkillFiles(['crew/'], { checkout: ROOT, listTracked: () => { throw new Error('not a git checkout') } })
+  assert.equal(files, null)
+  assert.equal(reason, 'fence-files-unlisted')
+  assert.ok(SKILL_PATHS_UNMEASURED.includes(reason) && Object.isFrozen(SKILL_PATHS_UNMEASURED))
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role: 'builder', files, filesReason: reason })
+  assert.equal(result.paths_unmeasured, 'fence-files-unlisted')
+})
+// Kills: delivery loading the map with the edit gate's strict file check (one missing skill
+// withholds every skill as map-schema). The strict hook default is pinned in the same test.
+test('skill-delivery L1 one missing skill file is reported alone and every other skill is delivered', () => {
+  const root = scratchDir('skill-delivery-l1-')
+  mkdirSync(join(root, 'skills', 'present'), { recursive: true })
+  writeFileSync(join(root, 'skills', 'present', 'SKILL.md'), '---\nname: present\n---\npresent body\n')
+  writeFileSync(join(root, 'skills', 'skill-map.json'), JSON.stringify({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, skills: ['dev-team:present', 'dev-team:absent'] }] }))
+  assert.equal(loadMap(root).reason, 'map-schema')
+  const result = renderSeatSkills({ root, mapResult: loadDeliveryMap(root), role: 'builder', files: null })
+  assert.deepEqual(result.skills.map((skill) => [skill.path.slice(root.length + 1), skill.status]), [
+    ['skills/absent/SKILL.md', 'unreadable'],
+    ['skills/present/SKILL.md', 'delivered'],
+  ])
+  assert.ok(result.section.includes('present body'))
+})
+test('skill-delivery B1 boot journal byte accounting subtracts the skills section and separators', async () => {
+  const { dir, row } = await skillBoot()
+  for (const role of SKILL_ROLES) {
+    const skills = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).section
+    assert.equal(row.charter_skills_bytes[role], Buffer.byteLength(skills, 'utf8') + 2)
+    assert.equal(row.charter_base_bytes[role], row.charter_bytes[role] - row.charter_memory_bytes[role] - row.charter_skills_bytes[role])
+    assert.ok(row.charter_base_bytes[role] <= CHARTER_CEILINGS[role])
+    assert.ok(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8').includes(skills))
+  }
+})
+test('skill-delivery B2 boot journal skill records have closed statuses, paths and byte counts', async () => {
+  const { row } = await skillBoot()
+  for (const role of SKILL_ROLES) {
+    const skills = row.seat_skills[role].skills
+    assert.ok(skills.length > 0)
+    for (const skill of skills) assert.ok(SKILL_DELIVERY_STATUSES.includes(skill.status) && isAbsolute(skill.path) && Number.isInteger(skill.bytes))
+  }
+})
+test('skill-delivery W1 maximum union of shipped path rules is delivered within budget', () => {
+  const files = ['crew/x.mjs', 'crew/x.test.mjs', 'visualizer/x.svelte', 'visualizer/x.css']
+  for (const role of SKILL_ROLES) {
+    const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files })
+    assert.ok(result.skills.every((skill) => skill.status === 'delivered'))
+    assert.ok(Buffer.byteLength(result.section, 'utf8') <= SKILLS_BYTE_BUDGET)
+  }
+})
+test('skill-delivery R1 reviewer documentation names ladder sources', () => {
+  const skill = readFileSync(join(ROOT, 'skills/pr-review/SKILL.md'), 'utf8')
+  const rubric = readFileSync(join(ROOT, 'skills/pr-review/references/rubric.md'), 'utf8')
+  assert.ok(skill.includes("- A hand-rolled shape where crew/roles/_shared.md's ladder or skills/lean-build/SKILL.md names an accepted one is a finding."))
+  assert.match(rubric, /## Ladder/)
+})
 
 test('ADR047 J1 manifest records empty tripwires and resolved advisor cell', () => {
   const manifest = advisorManifest({ briefText: '- unrelated · item', task: 'task', runStartedAt: 1, cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })

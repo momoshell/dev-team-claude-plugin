@@ -51,6 +51,9 @@ gives **28% (7 of 25)** (F13). Escalate to must-fix only when the unprotected
 behaviour is itself a boundary. This section grades a vacuity finding; it does
 not prescribe how to write a non-vacuous test.
 
+## Ladder
+Look for a hand-rolled shape when an accepted shape exists; no exhibit or yield is claimed yet.
+
 ## Scope
 
 Out-of-plan edits are findings (`crew/roles/reviewer.md:16`), but they have

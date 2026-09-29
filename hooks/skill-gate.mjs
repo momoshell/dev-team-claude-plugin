@@ -8,7 +8,10 @@ const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const validGlob = (g) => typeof g === 'string' && g.length > 0 && !g.startsWith('/') && !g.endsWith('/') && !g.includes('\\') && !g.includes('?') && g.split('/').every((s) => s.length > 0 && s !== '.' && s !== '..' && (!s.includes('**') || s === '**'))
 const keySet = (o, keys) => object(o) && Object.keys(o).every((k) => keys.includes(k))
 
-export function validateMap(map, root = process.cwd()) {
+// requireSkillFiles: the edit gate refuses a map naming a skill it cannot open. Seat delivery
+// passes false and reports each unopenable skill on its own row, so one missing file never
+// withholds every other skill.
+export function validateMap(map, root = process.cwd(), { requireSkillFiles = true } = {}) {
   if (!keySet(map, ['version', 'exempt', 'rules']) || map.version !== 1 || !Array.isArray(map.exempt) || !map.exempt.length || !map.exempt.every(validGlob) || !Array.isArray(map.rules) || !map.rules.length) return false
   return map.rules.every((rule) => {
     if (!keySet(rule, ['when', 'skills']) || !keySet(rule.when, ['paths', 'roles']) || (!own(rule.when, 'paths') && !own(rule.when, 'roles')) || !Array.isArray(rule.skills) || !rule.skills.length) return false
@@ -16,17 +19,18 @@ export function validateMap(map, root = process.cwd()) {
     if (own(rule.when, 'roles') && (!Array.isArray(rule.when.roles) || !rule.when.roles.length || !rule.when.roles.every((r) => typeof r === 'string' && r.length))) return false
     return rule.skills.every((s) => {
       if (typeof s !== 'string' || !/^dev-team:[a-z0-9][a-z0-9-]*$/.test(s)) return false
+      if (!requireSkillFiles) return true
       try { return !!readFileSync(join(root, 'skills', s.slice('dev-team:'.length), 'SKILL.md')) } catch { return false }
     })
   })
 }
 
-export function loadMap(root) {
+export function loadMap(root, { requireSkillFiles = true } = {}) {
   let text
   try { text = readFileSync(join(root, 'skills', 'skill-map.json'), 'utf8') } catch (e) { return { ok: false, reason: 'map-unreadable' } }
   let map
   try { map = JSON.parse(text) } catch { return { ok: false, reason: 'map-unparseable' } }
-  if (!validateMap(map, root)) return { ok: false, reason: 'map-schema' }
+  if (!validateMap(map, root, { requireSkillFiles })) return { ok: false, reason: 'map-schema' }
   return { ok: true, map }
 }
 
@@ -51,6 +55,15 @@ export function matchGlob(glob, path) {
     return result
   }
   return match(0, 0)
+}
+
+export function resolveSeatSkills({ map, role, files }) {
+  const roleRules = map.rules.filter((rule) => rule.when.roles?.includes(role))
+  const pathRules = files === null ? [] : map.rules.filter((rule) => rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
+  const paths_unmeasured = files === null ? 'no-fence-register' : null
+  const skills = new Set()
+  for (const rule of [...roleRules, ...pathRules]) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
+  return { skills: [...skills], paths_unmeasured }
 }
 
 export function requiredSkills(map, path) {

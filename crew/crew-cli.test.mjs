@@ -11,7 +11,8 @@ import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, chunkCtxFromArgs } from './crew.mjs'
 import { runCmdFixture } from './drive-fixtures.mjs'
-import { composeRolePrompt } from './crew.mjs'
+import { composeRolePrompt, renderSeatSkills } from './crew.mjs'
+import { loadMap } from '../hooks/skill-gate.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
 import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
@@ -23,6 +24,8 @@ import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow } from './workflows.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
+
+const seatSkillsSection = (role) => renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).section
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -871,6 +874,7 @@ setInterval(() => {}, 1000)
 `)
   } else {
     cpSync(join(CLI_REPO_ROOT, 'crew'), join(checkout, 'crew'), { recursive: true })
+    cpSync(join(CLI_REPO_ROOT, 'hooks'), join(checkout, 'hooks'), { recursive: true })
     symlinkSync(join(CLI_REPO_ROOT, 'scripts'), join(checkout, 'scripts'), 'dir')
     symlinkSync(join(CLI_REPO_ROOT, 'package.json'), join(checkout, 'package.json'))
     writeFileSync(cmuxPath, `#!/usr/bin/env node
@@ -2649,7 +2653,7 @@ test('unconfigured boot keeps every merged prompt byte-identical and omits memor
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card, '', 'control', seatSkillsSection(role)))
     }
     assert.equal(Object.hasOwn(bootRecord(dir), 'memory'), false)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
@@ -2695,7 +2699,7 @@ test('configured boot with a missing memory directory succeeds and records no-di
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card, '', 'control', seatSkillsSection(role)))
     }
     assert.equal(bootRecord(dir).memory.reason, 'no-dir')
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
@@ -2714,7 +2718,7 @@ test('unknown memory backend cannot fail boot and records its error', async () =
     const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
     for (const role of ['lead', 'planner']) {
       const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
-      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card))
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), composeRolePrompt(shared, card, '', 'control', seatSkillsSection(role)))
     }
     assert.match(bootRecord(dir).memory.error, /no-such-backend/)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }

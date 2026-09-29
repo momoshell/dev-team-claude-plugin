@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES } from './crew.mjs'
+import { writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -129,6 +129,44 @@ test('skill-delivery D4 unreadable status includes absolute path', () => {
   const record = result.skills.find((skill) => skill.path === join(ROOT, 'skills/lean-build/SKILL.md'))
   assert.equal(record.status, 'unreadable')
   assert.equal(record.bytes, null)
+})
+// Kills: raw span entries matched as paths (the span yields no backend-node), and directory
+// entries not expanded (the directory yields no backend-node). The tracked list is a literal.
+test('skill-delivery F1 span and directory fence entries resolve to the files the map matches', () => {
+  const listed = []
+  const listTracked = (_checkout, paths) => { listed.push(...paths); return paths.includes('crew') ? ['crew/a.mjs'] : [] }
+  const map = loadDeliveryMap(ROOT)
+  for (const entries of [['crew/crew.mjs:1-2'], ['crew/']]) {
+    const { files, reason } = fenceSkillFiles(entries, { checkout: ROOT, listTracked })
+    assert.equal(reason, null)
+    const skills = renderSeatSkills({ root: ROOT, mapResult: map, role: 'builder', files }).skills.map((skill) => skill.path)
+    assert.ok(skills.includes(join(ROOT, 'skills/backend-node/SKILL.md')), `${entries}: ${skills}`)
+  }
+  assert.deepEqual(listed, ['crew/crew.mjs', 'crew'])
+})
+// Kills: a failed listing treated as an empty fence (files [] and no reason) instead of unmeasured.
+test('skill-delivery F2 a fence whose files cannot be listed is unmeasured with a closed reason', () => {
+  const { files, reason } = fenceSkillFiles(['crew/'], { checkout: ROOT, listTracked: () => { throw new Error('not a git checkout') } })
+  assert.equal(files, null)
+  assert.equal(reason, 'fence-files-unlisted')
+  assert.ok(SKILL_PATHS_UNMEASURED.includes(reason) && Object.isFrozen(SKILL_PATHS_UNMEASURED))
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role: 'builder', files, filesReason: reason })
+  assert.equal(result.paths_unmeasured, 'fence-files-unlisted')
+})
+// Kills: delivery loading the map with the edit gate's strict file check (one missing skill
+// withholds every skill as map-schema). The strict hook default is pinned in the same test.
+test('skill-delivery L1 one missing skill file is reported alone and every other skill is delivered', () => {
+  const root = scratchDir('skill-delivery-l1-')
+  mkdirSync(join(root, 'skills', 'present'), { recursive: true })
+  writeFileSync(join(root, 'skills', 'present', 'SKILL.md'), '---\nname: present\n---\npresent body\n')
+  writeFileSync(join(root, 'skills', 'skill-map.json'), JSON.stringify({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, skills: ['dev-team:present', 'dev-team:absent'] }] }))
+  assert.equal(loadMap(root).reason, 'map-schema')
+  const result = renderSeatSkills({ root, mapResult: loadDeliveryMap(root), role: 'builder', files: null })
+  assert.deepEqual(result.skills.map((skill) => [skill.path.slice(root.length + 1), skill.status]), [
+    ['skills/absent/SKILL.md', 'unreadable'],
+    ['skills/present/SKILL.md', 'delivered'],
+  ])
+  assert.ok(result.section.includes('present body'))
 })
 test('skill-delivery B1 boot journal byte accounting subtracts the skills section and separators', async () => {
   const { dir, row } = await skillBoot()

@@ -39,7 +39,7 @@ import { join, dirname, basename, isAbsolute, relative, normalize, resolve as re
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { execSync, spawnSync } from 'node:child_process'
+import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
@@ -84,6 +84,7 @@ import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 import { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
 import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
+import { parseFenceScope } from './fence-scope.mjs'
 export { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 
@@ -2836,7 +2837,31 @@ export const SKILL_DELIVERY_STATUSES = Object.freeze(['delivered', 'over-budget'
 export const SKILLS_SECTION_HEADING = '## Plugin skills'
 export const SKILLS_BYTE_BUDGET = 32768
 
-export function renderSeatSkills({ root, mapResult, role, files, budget = SKILLS_BYTE_BUDGET, read = readFileSync }) {
+export const SKILL_PATHS_UNMEASURED = Object.freeze(['no-fence-register', 'fence-files-unlisted'])
+
+// Seat delivery loads the map without opening every skill: renderSeatSkills reports an
+// unopenable skill on its own row, so one missing file never withholds the rest.
+export function loadDeliveryMap(root) {
+  return loadMap(root, { requireSkillFiles: false })
+}
+
+function trackedUnder(checkout, paths) {
+  if (!paths.length) return []
+  const out = execFileSync('git', ['-C', checkout, 'ls-files', '-z', '--', ...paths], { encoding: 'utf8' })
+  return out.split('\0').filter(Boolean)
+}
+
+// A fence entry is a whole path, a `path:START-END` span or a directory; the skill map
+// matches files. Spans are reduced to their path and directories expand to the tracked
+// files under them. A listing that fails is unmeasured, never an empty fence.
+export function fenceSkillFiles(entries, { checkout, listTracked = trackedUnder } = {}) {
+  const paths = [...new Set((entries || []).map(parseFenceScope).filter((scope) => scope.kind !== 'invalid').map((scope) => scope.path.replace(/\/+$/, '')))]
+  let tracked
+  try { tracked = listTracked(checkout, paths) } catch { return { files: null, reason: SKILL_PATHS_UNMEASURED[1] } }
+  return { files: [...new Set([...paths, ...tracked])], reason: null }
+}
+
+export function renderSeatSkills({ root, mapResult, role, files, filesReason = null, budget = SKILLS_BYTE_BUDGET, read = readFileSync }) {
   const records = []
   const bodies = []
   const resolved = mapResult?.ok ? resolveSeatSkills({ map: mapResult.map, role, files }) : null
@@ -2869,7 +2894,7 @@ export function renderSeatSkills({ root, mapResult, role, files, budget = SKILLS
   }
   let section = lines.join('\n')
   if (Buffer.byteLength(section, 'utf8') > budget) section = `${SKILLS_SECTION_HEADING}\nReason: section-budget-too-small`
-  return { section, skills: records, paths_unmeasured: resolved?.paths_unmeasured ?? null, ...(reason ? { reason } : {}) }
+  return { section, skills: records, paths_unmeasured: filesReason ?? resolved?.paths_unmeasured ?? null, ...(reason ? { reason } : {}) }
 }
 
 export function composeRolePrompt(shared, card, section = '', charterArm = 'control', skillsSection = '') {
@@ -3329,13 +3354,13 @@ export async function bootCmd(args, deps = {}) {
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   const memory = memoryExtracts(roles, args, taskSlug)
-  const mapResult = loadMap(dirname(HERE))
-  let ownFiles = null
+  const mapResult = loadDeliveryMap(dirname(HERE))
+  let ownFiles = { files: null, reason: null }
   if (args.fences && args.lane) {
     const gathered = gatherFences({ fencesPath: args.fences, checkout })
-    ownFiles = gathered.find((entry) => entry.lane === args.lane)?.files || []
+    ownFiles = fenceSkillFiles(gathered.find((entry) => entry.lane === args.lane)?.files || [], { checkout })
   }
-  const skillResults = Object.fromEntries(roles.map((role) => [role, renderSeatSkills({ root: dirname(HERE), mapResult, role, files: ownFiles })]))
+  const skillResults = Object.fromEntries(roles.map((role) => [role, renderSeatSkills({ root: dirname(HERE), mapResult, role, files: ownFiles.files, filesReason: ownFiles.reason })]))
   const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section]))
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm, skillsSections[role])
   const charter = charterBytesRecord(paths.taskDir, roles, memory.sections, {}, skillsSections)

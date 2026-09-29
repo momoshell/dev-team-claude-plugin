@@ -12,14 +12,13 @@ import {
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, renderSeatSkills } from './crew.mjs'
-import { loadMap } from '../hooks/skill-gate.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
 
 // The boot writes each role's mapped plugin skills after the charter; that section's
 // bytes are pinned by the skill-delivery tests in crew/crew-boot.test.mjs, so the
 // charter tests below take it as given and pin only the charter composition around it.
 // A charter boot has no fence register, so path rules are unmeasured (files: null).
-const bootSkillsSection = (role) => renderSeatSkills({ root: REPO_ROOT, mapResult: loadMap(REPO_ROOT), role, files: null }).section
+const bootSkillsSection = (role) => renderSeatSkills({ root: REPO_ROOT, mapResult: loadDeliveryMap(REPO_ROOT), role, files: null }).section
 import { after } from 'node:test'
 import { tmpdir } from 'node:os'
 import {

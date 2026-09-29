@@ -810,11 +810,13 @@ function openRunInner({
   function bootRunConfiguration(legacyTier) {
     try {
       const raw = readFileSync(join(stateDir, 'crew.json'), 'utf8')
-      const bootConfiguration = JSON.parse(raw)?.run_configuration
+      const crew = JSON.parse(raw)
+      const bootConfiguration = crew?.run_configuration
       if (!bootConfiguration || typeof bootConfiguration !== 'object' || Array.isArray(bootConfiguration)) return null
       const runtimeConfiguration = runtimeRunConfiguration()
       const execution = runtimeConfiguration?.execution
       const configuration = { ...bootConfiguration, execution }
+      const advisorModel = !Object.hasOwn(crew, 'seats') ? null : crew.seats.advisor === null ? 'none' : `${crew.seats.advisor.provider}/${crew.seats.advisor.id}`
       const value = (axis, field) => {
         const candidate = configuration?.[axis]?.[field]
         if (candidate == null) return null
@@ -840,6 +842,8 @@ function openRunInner({
         assurance_source: value('assurance', 'source'),
         legacy_variant: configuration?.execution?.source === 'alias' ? value('execution', 'requested') : null,
         legacy_tier: legacyTier,
+        advisor_model: advisorModel,
+        advisor_granted_json: crew.advisor?.granted == null ? null : JSON.stringify(crew.advisor.granted),
       }
     } catch {
       return null

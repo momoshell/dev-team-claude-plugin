@@ -23,6 +23,20 @@ empty `incomplete` array.
   guarantee. This protocol consumes that guarantee and re-implements none of
   its boot checks.
 
+## Build-run arm readout
+
+Run `node scripts/factory/ledger.mjs advisor-arms [--arms <arm,...>] [--json]`
+to compare recorded advisor arms. Only build-tier runs with a recorded advisor
+model and a recorded builder grant enter an arm. Runs without a recorded
+configuration/model and runs with absent, malformed, or non-builder grants are
+reported as exclusions; non-build tiers are excluded. Rates are descriptive
+and withheld below the separate 12-run arm floor. With `--arms`, `next_arm`
+recommends the listed arm with the fewest eligible runs (ties keep list order).
+Advisor spend covers only priced `advisor_usage` consults; older and HTTP
+consults may be journal-only and are not measured as zero. See the ledger's
+spend-coverage note for this limitation. This 12-run floor is distinct from
+the 12 review-dispatch-per-arm ratification floor below.
+
 ## The four measurements
 
 1. **rounds per run.** Query one run with

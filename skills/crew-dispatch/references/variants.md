@@ -33,8 +33,7 @@ must not edit the checkout, and its planner writes notes in the task
 workspace. A `repair` run is triage, not a shortened planning loop: it carries
 the failing scope and lane into one bounded fix. A `directed` run treats the
 brief as the plan and never asks a seat to author a gate it did not receive.
-Stepped execution resumes only through existing post-build gate, rebase, suite,
-and publish families; step-granular pre-build resume remains unsupported.
+A stepped build escalated after a done step can resume without replanning: one gate run re-verifies done steps in order, skipping only green steps and rebuilding from the first red step within the original global builder budget.
 
 A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, structured findings (or an explicitly measured no-findings empty list), `reviewed_files` paths, and `unreviewable_files` `{path, reason}` rows. Unreviewable reasons are closed to `binary`, `generated`, `too-large`, and `out-of-context`; both lists must be bounded to the base/head change set and remain disjoint. The driver accepts it only with the unchanged zero-write scope proof; there is no commit.
 

@@ -1114,9 +1114,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                   hardTimer = scheduleTimeout(() => settle(failure), childKillGraceMs)
                 }, childKillGraceMs)
               }
-              const onTimeout = () => { timedOut = true; fail(new Error('timeout')) }
+              // A cause is recorded only when it is the FIRST failure: a timeout or an epoch
+              // abort arriving after a stream failure must not relabel or clear that failure.
+              const onTimeout = () => { if (!settled && !failure) timedOut = true; fail(new Error('timeout')) }
               timeout = scheduleTimeout(onTimeout, consultTimeoutMs)
-              const abort = () => { epochAborted = true; fail(new Error('aborted')) }
+              const abort = () => { if (!settled && !failure) epochAborted = true; fail(new Error('aborted')) }
               captured.controller.signal.addEventListener('abort', abort, { once: true })
               // Two bounds, as the subagent reader keeps them. The TOTAL raw bytes
               // the child wrote are capped at STREAM_CAP_BYTES: pi's JSON mode

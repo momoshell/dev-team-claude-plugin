@@ -405,10 +405,11 @@ export async function assertAdvisorCellLive({ record, adapters = {}, models, tas
   if (!record?.granted?.length) return
   for (const role of record.granted) {
     if (!ADVISED_ROLES.has(role)) throw advisorRefusal('role-unsupported', role, record)
+    // ADR-047 decision 8: a null cell never consults, so it never refuses a seat's agent.
+    if (record.cell === null) continue
     const adapter = adapters[role]
     if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
     if (![DEFAULT_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT].includes(adapter?.transport)) throw advisorRefusal('transport-unsupported', role, record)
-    if (record.cell === null) continue
     const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model, models: models ?? record.models })
     if (cell.reason) throw advisorRefusal(cell.reason, role, record)
     if (!record.endpoint) continue

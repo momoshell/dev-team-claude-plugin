@@ -3313,8 +3313,8 @@ test('J1 boot retains adapter and transport refusals', async () => {
   assert.equal(refused.error?.role, 'builder')
   assert.equal(refused.stateDir, false)
   const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' }, deps: GRANTED })
-  assert.equal(unadvised.error?.reason, 'adapter-unsupported')
-  assert.equal(unadvised.stateDir, false)
+  assert.equal(unadvised.error, null)
+  assert.equal(unadvised.crew.members.builder.agent, 'claude')
 })
 
 test('A4', async () => {

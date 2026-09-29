@@ -801,14 +801,15 @@ test('ADR047 R2 an rpc launch spells the consult with the adapter and the real e
   try {
     f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
-    assert.equal(command.env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
-    assert.deepEqual(JSON.parse(command.env.CREW_ADVISOR_MODELS), { 'openai-codex/gpt-6-sol': entry })
+    assert.equal(command.env.CREW_ADVISOR, '1')
+    assert.equal(command.env.CREW_ADVISOR_MODEL, undefined)
+    assert.equal(command.env.CREW_ADVISOR_MODELS, undefined)
     await attachAdvisor({ on() {}, sendMessage() {} }, {
       env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
       deps: { appendFile: (_path, line) => rows.push(JSON.parse(line)), fetchFn: () => { throw new Error('model-only advisor must not probe') } },
     })
     assert.equal(rows.at(-1).advisor_boot.outcome, 'attached')
-    assert.equal(rows.at(-1).advisor_boot.model, 'openai-codex/gpt-6-sol')
+    assert.equal(rows.at(-1).advisor_boot.model, undefined)
   } finally { f.cleanup() }
 })
 
@@ -825,8 +826,9 @@ test('RV2-1 rpc advisor grant emits attachable model-only extension and catalog 
     assert.notEqual(extensionAt, -1)
     assert.equal(command.args[extensionAt + 1], piAdapter.PI_ADVISOR_EXTENSION)
     assert.equal(command.env.CREW_ADVISOR, '1')
-    assert.equal(command.env.CREW_ADVISOR_MODEL, 'provider/model')
-    assert.deepEqual(JSON.parse(command.env.CREW_ADVISOR_MODELS), models)
+    assert.equal(command.env.CREW_ADVISOR, '1')
+    assert.equal(command.env.CREW_ADVISOR_MODEL, undefined)
+    assert.equal(command.env.CREW_ADVISOR_MODELS, undefined)
     const pi = { on() {}, sendMessage() {} }
     await attachAdvisor(pi, {
       env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
@@ -901,8 +903,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
     '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(process.cwd(), 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
   ])
   assert.deepEqual(completeGrant.env, {
-    X: '1', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor',
-    CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
+    X: '1', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
   })
 
   const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }
@@ -3717,7 +3718,7 @@ test('a model-only advised rpc seat clears an inherited advisor endpoint and att
   try {
     f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
-    assert.equal(command.env.CREW_ADVISOR_ENDPOINT, '')
+    assert.deepEqual(Object.keys(command.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
     await attachAdvisor({ on() {}, sendMessage() {} }, {
       env: { ...command.env, CREW_ROLE: 'builder', CREW_TASK_DIR: f.paths.taskDir },
       deps: { appendFile: (_path, line) => rows.push(JSON.parse(line)), fetchFn: (url) => { urls.push(String(url)); throw new Error('must not probe') } },
@@ -3735,6 +3736,6 @@ test('an rpc seat whose boot record names an endpoint carries exactly that endpo
   try {
     f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
-    assert.equal(command.env.CREW_ADVISOR_ENDPOINT, 'http://127.0.0.1:8080/v1')
+    assert.deepEqual(Object.keys(command.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
   } finally { f.cleanup() }
 }))

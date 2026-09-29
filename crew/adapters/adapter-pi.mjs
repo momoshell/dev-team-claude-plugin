@@ -277,7 +277,7 @@ export function advisorLaunchCell(record) {
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null } = spec
   const piDeny = translateDeny(deny)
-  const advisor = grants?.advisor === true && advisorCell?.model !== undefined
+  const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
@@ -292,13 +292,7 @@ export function piRpcSeatParts(spec = {}) {
     env: {
       ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR'))),
       ...(configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}),
-      ...(advisor ? { CREW_ADVISOR: '1',
-        // ALWAYS set, never inherited: an endpoint not admitted by the boot record must not receive the delta.
-        CREW_ADVISOR_ENDPOINT: advisorCell?.endpoint || '',
-        ...(advisorCell?.model !== undefined ? { CREW_ADVISOR_MODEL: advisorCell.model } : {}),
-        ...(advisorCell?.models !== undefined ? { CREW_ADVISOR_MODELS: JSON.stringify(advisorCell.models) } : {}),
-        CREW_ADVISOR_PROVENANCE: 'seat-transitional',
-      } : {}),
+      ...(advisor ? { CREW_ADVISOR: '1' } : {}),
       ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
     },
   }
@@ -425,24 +419,15 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // callable. Extension tools are active by default ONLY when --tools is
   // absent (:2003-2007) — this adapter always passes it, so activation is
   // mandatory here, not merely additive.
-  const advisor = grants?.advisor === true && advisorCell?.model !== undefined
-  const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
+  const paneAdvisor = grants?.advisor === true
+  const extensions = [...new Set([...(grants?.extensions || []), ...(paneAdvisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
   const skills = grants?.skills || []
   return [
-    'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
-    // The advisor activates no tool; --tools stays the complete built-in set.
-    ...(advisor ? [
-      `${PI_ADVISOR_ENV}=1`,
-      // ALWAYS set, never inherited through `env`: the boot record's endpoint,
-      // or '' for a model-only (pi-child) cell, so an endpoint boot never
-      // admitted cannot receive the delta.
-      `${PI_ADVISOR_ENDPOINT_ENV}=${shellSingleQuote(advisorCell?.endpoint || '')}`,
-      ...(advisorCell?.model !== undefined ? [`${PI_ADVISOR_MODEL_ENV}=${shellSingleQuote(advisorCell.model)}`] : []),
-      ...(advisorCell?.models !== undefined ? [`CREW_ADVISOR_MODELS=${shellSingleQuote(JSON.stringify(advisorCell.models))}`] : []),
-      'CREW_ADVISOR_PROVENANCE=seat-transitional',
-    ] : []),
+    // Advisor activation is the sole CREW_ADVISOR* value; the manifest owns the cell.
+    ...(paneAdvisor ? [`${PI_ADVISOR_ENV}=1`] : []),
     // The register-resolved allowlist, transported to the extension. Emitted
     // ONLY when an agent is granted, so every ungranted command is unchanged.
     // Before `pi`, because the boot brief must stay last.

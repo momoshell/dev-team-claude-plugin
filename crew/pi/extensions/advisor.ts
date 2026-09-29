@@ -84,6 +84,7 @@ export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 export const UNAVAILABLE_REASONS = Object.freeze([
   'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
   'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+  'manifest-cell-invalid',
 ])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
 // A consult's advisor_usage spend is measured ONLY IF every frame the shared reducer
@@ -103,7 +104,7 @@ export function ownSpendIncomplete(frame: any): boolean {
 
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const JUDGMENT_ERROR_CODES = Object.freeze([
-  'transport-failed', 'status-not-ok', 'body-too-large', 'body-unreadable',
+  'transport-failed', 'timeout', 'status-not-ok', 'body-too-large', 'body-unreadable',
   'body-not-json', 'content-missing', 'payload-not-an-object', 'unknown-key',
   'class-invalid', 'severity-invalid', 'claim-invalid', 'evidence-invalid',
   'evidence-unanchored', 'no-grounded-delta',
@@ -186,10 +187,16 @@ function manifestText({ taskDir, readFile }) {
     if (value.schema_version !== ADVISOR_CONFIG_VERSION) return null
     if (epochMilliseconds(value.run_started_at) === null) return null
     if (!Array.isArray(value.tripwires) || !value.tripwires.every((item) => typeof item === 'string')) return null
+    const rawCell = value.cell
+    const cellKeys = ['provider', 'id', 'agent', 'effort', 'model']
+    const cell = rawCell && typeof rawCell === 'object' && !Array.isArray(rawCell)
+      && rawCell.agent === 'pi' && cellKeys.every((key) => typeof rawCell[key] === 'string' && SAFE_MODEL.test(rawCell[key]))
+      ? Object.fromEntries(cellKeys.map((key) => [key, rawCell[key]])) : null
     return {
-      schema_version: value.schema_version,
-      run_started_at: value.run_started_at,
-      tripwires: value.tripwires.map((item) => boundTarget(item)),
+      schema_version: value.schema_version, run_started_at: value.run_started_at,
+      tripwires: value.tripwires.map((item) => boundTarget(item)), cell,
+      // A present cell that fails the allowlist is NOT a null (tier-0-only) cell.
+      cell_invalid: rawCell != null && cell === null,
     }
   } catch { return null }
 }
@@ -269,7 +276,7 @@ export function loadContext({ taskDir, deps = {} } = {}) {
   if (!manifest) {
     return {
       files_in_scope: [], validation_lane: null, scope_source: 'absent',
-      tripwires: [], tripwires_source: 'absent', run_started_at: null,
+      tripwires: [], tripwires_source: 'absent', run_started_at: null, cell: null,
     }
   }
   const planner = plannerReturn({ taskDir, manifest, deps })
@@ -279,7 +286,7 @@ export function loadContext({ taskDir, deps = {} } = {}) {
     scope_source: planner.source,
     tripwires: manifest.tripwires,
     tripwires_source: 'manifest',
-    run_started_at: manifest.run_started_at,
+    run_started_at: manifest.run_started_at, cell: manifest.cell,
   }
 }
 
@@ -375,6 +382,8 @@ export function isSelfEcho(text, injected) {
   }
   return false
 }
+
+function cellIdentity(cell) { return { provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model } }
 
 function addFifo(set, value, cap) {
   if (set.has(value)) return
@@ -709,6 +718,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   let contextRowEpoch = null
   let generation = 0
   let calls = 0
+  const callOrdinals = new Map()
   let consults = 0
   let growthBaseline = null
   let delta = []
@@ -798,14 +808,16 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return ''
   }
 
-  function emitTier0({ kind, target, targetKind, signature, trigger = 'predicate' }) {
+  function emitTier0({ kind, target, targetKind, signature, trigger = 'predicate', callOrdinal = calls }) {
     const cleanTarget = boundTarget(target || '')
     const key = `${kind}\0${cleanTarget}`
     if (fired.has(key)) return false
     fired.add(key)
+    const tier0Stamp = { call_ordinal: calls }
+    if (callOrdinal !== calls) tier0Stamp.call_ordinal = callOrdinal
     const payload = {
       run_started_at: context?.run_started_at ?? null,
-      tier: 0, trigger, kind, target: cleanTarget, target_kind: targetKind,
+      tier: 0, trigger, kind, target: cleanTarget, target_kind: targetKind, ...tier0Stamp,
       role, outcome: 'injected',
       ...(signature ? { signature: boundText(signature, SIGNATURE_CAP_BYTES) } : {}),
     }
@@ -815,10 +827,10 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  function queue(id, trigger) {
+  function queue(id, trigger, callOrdinal = calls) {
     if (!id || !TRIGGERS.includes(trigger)) return
     const list = pending.get(String(id)) || []
-    if (!list.includes(trigger)) list.push(trigger)
+    if (!list.some((entry) => entry.trigger === trigger)) list.push({ trigger, call_ordinal: callOrdinal })
     pending.set(String(id), list)
   }
 
@@ -900,6 +912,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const tool = String(event?.toolName || '')
     const input = event?.input || {}
     const id = String(event?.toolCallId || '')
+    const callOrdinal = calls
+    if (id) callOrdinals.set(id, callOrdinal)
     if (tool === 'write' || tool === 'edit') {
       if (growthBaseline === null) {
         growthBaseline = measureDiff()
@@ -937,7 +951,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         measured = { bytes: byteLength(input.content), truncated: false }
       }
       if (growthBaseline && measured && growthCrossed(growthBaseline, measured)) {
-        if (emitTier0({ kind: GROWTH_DIVERGENCE, target: 'repository', targetKind: 'repo' })) queue(id, 'tier0-note')
+        if (emitTier0({ kind: GROWTH_DIVERGENCE, target: 'repository', targetKind: 'repo', callOrdinal: callOrdinals.get(id) ?? calls })) queue(id, 'tier0-note', callOrdinals.get(id) ?? calls)
       }
     } else if (tool === 'read' && !event?.isError) {
       appendDelta(readDelta(event))
@@ -951,7 +965,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         appendDelta(boundText(signature, SIGNATURE_CAP_BYTES))
         if (count >= REPEAT_FAILURE_THRESHOLD) {
           const target = place || signature
-          if (emitTier0({ kind: REPEATED_FAILURE, target, targetKind: place ? 'file' : 'assertion', signature })) queue(id, 'tier0-note')
+          if (emitTier0({ kind: REPEATED_FAILURE, target, targetKind: place ? 'file' : 'assertion', signature, callOrdinal: callOrdinals.get(id) ?? calls })) queue(id, 'tier0-note', callOrdinals.get(id) ?? calls)
         }
       }
     }
@@ -967,7 +981,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (normalized) addFifo(injected, normalized, DEDUPE_CAP)
   }
 
-  function acceptTier1Note({ judgment, trigger, eventId }) {
+  function acceptTier1Note({ judgment, trigger, eventId, captured }) {
     const text = boundText(judgment.claim, NOTE_TEXT_CAP_BYTES)
     const normalized = normalizeNote(text)
     let code
@@ -978,7 +992,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const payload = {
         run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
         kind: TIER1_FINDING, target: boundTarget(String(judgment.evidence?.[0] || '').split(':')[0]),
-        target_kind: 'file', role, outcome: 'suppressed', codes: [code],
+        target_kind: 'file', role, outcome: 'suppressed', codes: [code], ...captured.tier1Stamp,
       }
       if (appendAdvisorRow('advisor_note', payload)) notes.push(payload)
       return false
@@ -989,7 +1003,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       kind: TIER1_FINDING, target: boundTarget(String(evidence[0]).split(':')[0]),
       target_kind: 'file', role, outcome: 'injected',
       judgment_class: judgment.class, severity: judgment.severity,
-      claim: text, evidence,
+      claim: text, evidence, ...captured.tier1Stamp,
     }
     if (!appendAdvisorRow('advisor_note', payload)) return false
     notes.push(payload)
@@ -1003,11 +1017,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  async function consult(trigger, eventId) {
+  async function consult(trigger, eventId, callOrdinal) {
+    const context = currentContext()
+    if (!context?.cell) return
     if (consults >= TIER1_MAX_CONSULTS) return
     if (!anchors.size) {
       const payload = {
-        run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
+        run_started_at: context?.run_started_at ?? null, tier: 1, trigger, call_ordinal: callOrdinal,
         kind: TIER1_FINDING, target: '', target_kind: 'assertion', role,
         outcome: 'skipped', codes: ['no-grounded-delta'],
       }
@@ -1022,9 +1038,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       return Object.freeze({ text: cleaned, anchors: Object.freeze(rebuilt.anchors) })
     }).filter((entry) => entry.text))
     const captured = {
-      epoch: contextEpoch, generation, snapshot,
+      epoch: contextEpoch, generation, snapshot, cell: context.cell, call_ordinal: callOrdinal,
       anchors: new Set(snapshot.flatMap((e) => e.anchors)), controller: new AbortController(),
     }
+    const cell = captured.cell
+    const tier1Stamp = { ...cellIdentity(cell), call_ordinal: captured.call_ordinal }
+    captured.tier1Stamp = tier1Stamp
     controllers.add(captured.controller)
     // The scrub is a fact, not a silence: one row per consult, always, carrying
     // the per-kind count of what this consult's delta had removed from it.
@@ -1033,15 +1052,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
       redacted: redactionTally(delta),
-      model: String(env?.[ADVISOR_MODEL_ENV] || ''),
+      model: captured.cell.model, model_id: captured.cell.id, provider: captured.cell.provider, agent: captured.cell.agent, effort: captured.cell.effort,
     }
-    const body = JSON.stringify({
-      model: String(env?.[ADVISOR_MODEL_ENV] || ''), temperature: 0, stream: false,
-      messages: [
-        { role: 'system', content: systemPrompt(role) },
-        { role: 'user', content: JSON.stringify({ trigger, delta: captured.snapshot }) },
-      ],
-    })
+    consultPayload.provider = cell.provider
     const request = (async () => {
       let codes = []
       let judgment = null
@@ -1054,41 +1067,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       // usage-unavailable). The consult row keeps the partial fold (#1535) with usage_partial.
       let usageIncomplete = false // an own-spend frame lacked complete usage
       let ownSpendFrames = 0 // frames the shared reducer counts as the child's own spend
-      let consultFailed = false // fail(): abort, timeout, cap, stream/stdin error; or spawn error
+      let consultFailed = false // fail(): abort, cap, stream/stdin error; or spawn error
+      let epochAborted = false
+      let timedOut = false
       let parseFault = false // an invalid frame, mid-stream or trailing partial at close
       let childExit = null // { code, signal } from 'close', when the child closed
       try {
-        if (env?.[ADVISOR_ENDPOINT_ENV]) {
-        const response = await fetchFn(requestUrl(String(env?.[ADVISOR_ENDPOINT_ENV] || '')), {
-          method: 'POST', headers: { 'content-type': 'application/json' }, body,
-          signal: abortSignal(captured.controller),
-        })
-        if (!response || response.ok === false || !(response.status >= 200 && response.status < 300)) {
-          codes = ['status-not-ok']
-        } else {
-          const bounded = await readBoundedBody(response, RESPONSE_CAP_BYTES)
-          if (!bounded.ok) codes = [bounded.code]
-          else {
-            let payload
-            try { payload = JSON.parse(bounded.text) } catch { codes = ['body-not-json'] }
-            if (!codes.length) {
-              const content = responseContent(payload)
-              if (content === null) codes = ['content-missing']
-              else {
-                let value
-                try { value = JSON.parse(content) } catch { codes = ['body-not-json'] }
-                if (!codes.length) {
-                  const verdict = validateJudgment(value, {
-                    anchors: captured.anchors, scopeFiles: context?.files_in_scope || [],
-                  })
-                  codes = verdict.codes || []
-                  judgment = verdict.judgment || null
-                }
-              }
-            }
-          }
-        }
-        } else {
+        {
           const resolved = resolveBinary(deps.binaryDeps || {})
           if (!resolved || resolved.error || !String(resolved.command || resolved.binary || '').startsWith('/')) throw new Error('pi binary unresolved')
           const binary = resolved.command || resolved.binary
@@ -1097,7 +1082,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           const promptFile = join(dir, 'system-prompt.txt')
           try {
             writeFileSync(promptFile, systemPrompt(role), { mode: 0o600 })
-            const childArgs = ['-p','--mode','json','--no-session','--model',String(env?.[ADVISOR_MODEL_ENV] || ''),'--tools','read,grep,find,ls','--exclude-tools','edit,write,bash','--no-extensions','--no-skills','--append-system-prompt',promptFile]
+            const childArgs = ['-p','--mode','json','--no-session','--model',String(cell.model),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
             const pushFrame = (frame: any) => {
@@ -1132,8 +1117,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                   hardTimer = scheduleTimeout(() => settle(failure), childKillGraceMs)
                 }, childKillGraceMs)
               }
-              const abort = () => fail(new Error('aborted'))
-              timeout = scheduleTimeout(abort, consultTimeoutMs)
+              // A cause is recorded only when it is the FIRST failure: a timeout or an epoch
+              // abort arriving after a stream failure must not relabel or clear that failure.
+              const onTimeout = () => { if (!settled && !failure) timedOut = true; fail(new Error('timeout')) }
+              timeout = scheduleTimeout(onTimeout, consultTimeoutMs)
+              const abort = () => { if (!settled && !failure) epochAborted = true; fail(new Error('aborted')) }
               captured.controller.signal.addEventListener('abort', abort, { once: true })
               // Two bounds, as the subagent reader keeps them. The TOTAL raw bytes
               // the child wrote are capped at STREAM_CAP_BYTES: pi's JSON mode
@@ -1193,8 +1181,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           } finally { rmSync(dir, { recursive: true, force: true }) }
         }
       } catch (error) {
+        consultFailed = true
+        if (epochAborted) { consultFailed = false; childExit = null }
         if (error?.usage !== undefined && foldedUsage === null) foldedUsage = error.usage
-        if (captured.controller.signal.aborted) codes = ['transport-failed']
+        if (captured.controller.signal.aborted && !timedOut) codes = ['transport-failed']
+        else if (timedOut) codes = ['timeout']
         else codes = error?.code === 'body-too-large' || error?.code === 'body-not-json' ? [error.code] : ['transport-failed']
       } finally {
         controllers.delete(captured.controller)
@@ -1205,32 +1196,35 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const aggregateSafe = foldedUsage !== null && ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
         .every((key) => Number.isSafeInteger(foldedUsage[key]) && foldedUsage[key] >= 0)
       const spendMeasured = foldedUsage !== null && ownSpendFrames > 0 && !usageIncomplete
-        && !consultFailed && !parseFault && !uncleanExit && aggregateSafe
-      if (!env?.[ADVISOR_ENDPOINT_ENV]) {
+        && !consultFailed && !epochAborted && !parseFault && !uncleanExit && aggregateSafe
+      {
         consultPayload.usage = foldedUsage
         if (foldedUsage === null) consultPayload.usage_reason = 'usage-unavailable'
         // #1535 keeps the fold on failure paths; it is labelled, never priced.
         else if (!spendMeasured) consultPayload.usage_partial = true
       }
+      const transportFailure = timedOut || consultFailed || parseFault || uncleanExit
+      const failurePayload = { consult_id: consultId, run_started_at: consultPayload.run_started_at, role, provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model, kind: timedOut ? 'timeout' : 'transport-error', detail: timedOut ? 'consult timed out' : 'pi child transport failed' }
+      if (transportFailure) appendAdvisorRow('advisor_cell_failure', failurePayload)
       appendAdvisorRow('advisor_consult', consultPayload)
-      if (!env?.[ADVISOR_ENDPOINT_ENV]) {
-        appendAdvisorRow('advisor_usage', {
+      {
+        const usagePayload = {
           consult_id: consultId, run_started_at: consultPayload.run_started_at, role,
-          model: consultPayload.model, usage: spendMeasured ? foldedUsage : null,
+          model: consultPayload.model, model_id: cell.id, provider: cell.provider, agent: cell.agent, effort: cell.effort, usage: spendMeasured ? foldedUsage : null,
           usage_reason: spendMeasured ? null : ownSpendFrames === 0 ? 'usage-unavailable' : 'usage-incomplete',
-        })
+        }; usagePayload.provider = cell.provider; appendAdvisorRow('advisor_usage', usagePayload)
       }
       if (!liveGeneration(captured)) return
       if (codes.length || !judgment) {
         const payload = {
           run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
           kind: TIER1_FINDING, target: '', target_kind: 'assertion', role,
-          outcome: 'rejected', codes: errorCodeSet(codes),
+          outcome: 'rejected', codes: errorCodeSet(codes), ...captured.tier1Stamp,
         }
         if (appendAdvisorRow('advisor_note', payload)) notes.push(payload)
         return
       }
-      acceptTier1Note({ judgment, trigger, eventId })
+      acceptTier1Note({ judgment, trigger, eventId, captured })
     })()
     inFlight.add(request)
     request.finally(() => inFlight.delete(request)).catch(() => {})
@@ -1239,7 +1233,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function dispatch(id) {
     const triggers = pending.get(String(id)) || []
     pending.delete(String(id))
-    for (const trigger of triggers) void consult(trigger, String(id))
+    for (const captured of triggers) void consult(captured.trigger, String(id), captured.call_ordinal)
   }
 
   function onToolCall(event, ctx) {
@@ -1254,6 +1248,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     ensureContext()
     processResult(event)
     dispatch(String(event?.toolCallId || ''))
+    callOrdinals.delete(String(event?.toolCallId || ''))
     return undefined
   }
 
@@ -1279,18 +1274,9 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
     throw error
   }
   if (!ADVISED_ROLES.has(role)) return unavailable('role-unsupported')
-  const cell = classifyAdvisorCell(advisorCell(env))
-  if (cell.reason) return unavailable(cell.reason)
-  const modelOnly = !cell.endpoint
-  if (!modelOnly) {
-    let live = false
-    try {
-      live = await probeEndpoint(cell.endpoint, { fetchFn: deps.fetchFn, timeoutMs: PROBE_TIMEOUT_MS })
-    } catch { live = false }
-    if (!live) return unavailable('endpoint-dead')
-  }
+  if (manifestText({ taskDir, readFile: deps.readFile || DEFAULT_READ })?.cell_invalid) return unavailable('manifest-cell-invalid')
   if (typeof pi?.on !== 'function' || typeof pi?.sendMessage !== 'function') throw new Error('advisor extension needs pi.on and pi.sendMessage')
-  const boot = { role, outcome: 'attached', endpoint: cell.endpoint, model: cell.model, config_version: ADVISOR_CONFIG_VERSION }
+  const boot = { role, outcome: 'attached', config_version: ADVISOR_CONFIG_VERSION }
   const written = appendLine({
     appendFile, journalPath,
     row: { at: atOf(now), advisor_boot: boot, role },

@@ -13,7 +13,7 @@ lane from the checkout.
   "repair":   { "trigger": "CI red",                        "ctx": ["--validation-lane"] },
   "directed": { "trigger": "an orchestrator-authored plan", "ctx": ["--validation-lane"] },
   "verify_only": { "trigger": "a declared behavior to verify", "ctx": [] },
-  "stepped": { "trigger": "declared but refused until the ADR-048 executor exists", "ctx": [] }
+  "stepped": { "trigger": "an ordered plan with a validated chunk program", "ctx": [] }
 }
 ```
 
@@ -24,7 +24,7 @@ lane from the checkout.
 | `review_only` | A declared base/head change set needs a structured code review. | The `reviewer` seat only; an optional tech-lead may be booted for rigorous assurance. | `none`. | Read-only validation; no checkout writes. |
 | `review_panel` | A declared base/head change set needs an independent three-seat code review. | `reviewer`, `tech-lead`, and `lead`; reviewer and tech-lead are blind, then lead adjudicates fused divergences. | `none`. | Immutable base/head identity, separate per-seat coverage, one shared changed-files denominator, fused actionable findings, and retained dismissed provenance; no checkout writes or commit. |
 | `verify_only` | A declared behavior needs independent verification evidence. | The `reviewer` seat only. | `none`. | Read-only validation; no lane context and no checkout writes. |
-| `stepped` | Declared but refused until the ADR-048 executor exists; do not dispatch. | None. | None. | No context required. |
+| `stepped` | An ordered plan declares a validated chunk program for sequential builder assignments. | The requested tier's seats. | `planned`. | No context required; do not combine with `--chunked` or `--chunk`. |
 | `repair` | CI is red and the failing run already supplies the bounded scope and validation lane. | The requested tier's seats. | `planned`. | Inherited scope plus `--validation-lane`; its lane source is `ctx`. |
 | `directed` | An orchestrator-authored plan already declares the gate and write surface. | `builder` and `reviewer`. | `planned`. | The brief supplies scope and gate; `--validation-lane` supplies the `ctx` lane. |
 
@@ -33,6 +33,8 @@ must not edit the checkout, and its planner writes notes in the task
 workspace. A `repair` run is triage, not a shortened planning loop: it carries
 the failing scope and lane into one bounded fix. A `directed` run treats the
 brief as the plan and never asks a seat to author a gate it did not receive.
+Stepped execution resumes only through existing post-build gate, rebase, suite,
+and publish families; step-granular pre-build resume remains unsupported.
 
 A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, structured findings (or an explicitly measured no-findings empty list), `reviewed_files` paths, and `unreviewable_files` `{path, reason}` rows. Unreviewable reasons are closed to `binary`, `generated`, `too-large`, and `out-of-context`; both lists must be bounded to the base/head change set and remain disjoint. The driver accepts it only with the unchanged zero-write scope proof; there is no commit.
 

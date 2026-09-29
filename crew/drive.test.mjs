@@ -7,7 +7,7 @@ import {
   B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefect } from './drive.mjs'
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
@@ -2182,7 +2182,7 @@ test('coded shape topology is measured against every successful executor family'
       strictEnvelopeIo(verifyOnlyEnvelope, 'reviewer', 'run-verify-783'),
     ),
   }
-  const measured = Object.keys(EXECUTOR_TOPOLOGIES).map((name) => [name, VARIANTS[name]]).map(([name, shape]) => {
+  const measured = Object.keys(EXECUTOR_TOPOLOGIES).filter((name) => name !== 'stepped').map((name) => [name, VARIANTS[name]]).map(([name, shape]) => {
     const result = fixtures[name]()
     assert.equal(result.status, 'done', name)
     const row = {
@@ -2197,9 +2197,9 @@ test('coded shape topology is measured against every successful executor family'
     assert.deepEqual(row.coded, { defect: null, detail: null }, name)
     return row
   })
-  assert.deepEqual(measured.map(({ name }) => name), Object.keys(EXECUTOR_TOPOLOGIES))
-  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
-  assert.equal(measured.length, Object.keys(EXECUTOR_TOPOLOGIES).length)
+  assert.deepEqual(measured.map(({ name }) => name), Object.keys(EXECUTOR_TOPOLOGIES).filter((name) => name !== 'stepped'))
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), [])
+  assert.equal(measured.length, Object.keys(EXECUTOR_TOPOLOGIES).length - 1)
 
   const allHeads = [...new Set(Object.values(EXECUTOR_TOPOLOGIES).flatMap(({ stages }) => stages))]
   for (const row of measured) {
@@ -2364,15 +2364,13 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
   }
   deeplyFrozen(EXECUTOR_TOPOLOGIES)
   for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.deepEqual(shapeValidationDefect(VARIANTS[name], name), { defect: null, detail: null })
-  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), [])
   assert.deepEqual(VARIANTS.stepped.stages, VARIANTS.full.stages)
   assert.notStrictEqual(VARIANTS.stepped.stages, VARIANTS.full.stages)
   assert.equal(Object.isFrozen(VARIANTS.stepped.stages), true)
   assert.equal(shapeValidationDefect({ ...VARIANTS.stepped, required_seats: ['planner'] }, 'stepped').defect, 'seats-mismatch')
   assert.equal(shapeValidationDefect({ ...VARIANTS.stepped, stages: VARIANTS.stepped.stages.slice(1) }, 'stepped').defect, 'sources-invalid')
-  assert.deepEqual(shapeValidationDefect(VARIANTS.stepped, 'stepped'), {
-    defect: 'stage-unimplemented', detail: 'the stepped executor is not built (ADR-048)',
-  })
+  assert.deepEqual(shapeValidationDefect(VARIANTS.stepped, 'stepped'), { defect: null, detail: null })
   const legacy = [
     [null, undefined, 'no declaration'],
     [{ ...VARIANTS.full, execution: 'unknown' }, 'full', 'execution must be one of reviewed, envelope'],
@@ -2477,15 +2475,8 @@ test('an unknown variant refuses before assignments or journal lines', () => {
   assert.equal(io.calls.logs.length, 0)
 })
 
-test('B1 B2 a stepped lane refuses as unbuilt before any seat assignment or journal line', () => {
-  const io = fakeIo()
-  assert.throws(() => driveTask({ ...CTX, variant: 'stepped' }, io), (err) => {
-    assert.equal(err.stage, 'variant')
-    assert.match(err.message, /the stepped executor is not built \(ADR-048\)/)
-    return true
-  })
-  assert.equal(io.calls.assign.length, 0)
-  assert.equal(io.calls.logs.length, 0)
+test('B1 stepped topology has a valid reviewed shape', () => {
+  assert.equal(shapeValidationDefect(VARIANTS.stepped, 'stepped').defect, null)
 })
 
 test('shapeDefect refuses declarations the driver cannot honour', () => {
@@ -4269,6 +4260,35 @@ test('chunk verdict adjudicates owned-green/foreign-red and fails closed', () =>
   const malformed = chunkGateVerdict(CHUNK_ACCEPTED_GATE, { chunk: 'c1' })
   assert.equal(malformed.ok, false)
   assert.equal(malformed.defect, 'chunk-ownership-malformed')
+})
+
+test('stepped gate verdict defers future reds and reports current failures plus regressions', () => {
+  const chunks = [
+    { id: 'c1', checks_owned: ['A1'] },
+    { id: 'c2', checks_owned: ['A2'] },
+  ]
+  const current = { id: 'c1', checks_owned: ['A1'] }
+  const deferred = steppedGateVerdict(`FAIL A2: later\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}`, current, [], chunks)
+  assert.deepEqual(deferred, { ok: true, failed: [], regressed: [], defect: null })
+  const regressed = steppedGateVerdict(`FAIL A1: regression\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}`, chunks[1], [current], chunks)
+  assert.deepEqual(regressed, { ok: false, failed: ['A1'], regressed: ['A1'], defect: null })
+  assert.equal(steppedGateVerdict('no summary', current, [], chunks).ok, false)
+})
+
+// Kills: dropping the exitOk clause (a nonzero gate exit behind a green summary completes the
+// step), and treating ANY nonzero exit as red (a deferred later-step FAIL is the expected exit).
+test('stepped gate verdict refuses a nonzero exit that no later step owns', () => {
+  const chunks = [
+    { id: 'c1', checks_owned: ['A1'] },
+    { id: 'c2', checks_owned: ['A2'] },
+  ]
+  const green = 'GATE-SUMMARY {"total":2,"failed":0,"errored":0}'
+  assert.deepEqual(steppedGateVerdict(green, chunks[0], [], chunks, [], false),
+    { ok: false, failed: [], regressed: [], defect: 'step-gate-exit-unattributed' })
+  assert.equal(steppedGateVerdict(green, chunks[0], [], chunks, [], true).ok, true)
+  const deferred = `FAIL A2: later\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}`
+  assert.deepEqual(steppedGateVerdict(deferred, chunks[0], [], chunks, [], false),
+    { ok: true, failed: [], regressed: [], defect: null })
 })
 
 test('chunk verdict counts an exempt third bucket but refuses its FAILs', () => {

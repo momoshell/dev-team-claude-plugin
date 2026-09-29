@@ -15,7 +15,7 @@ Every `file:line` below was read at `46594dad`.
 **The plan's order is prose that nothing reads.** `plan.md` has a **Sequencing** section, "what lands before what, if
 anything" (`crew/roles/planner.md:30`). No code under `crew/` or `scripts/` reads it.
 
-**At plan-accept the driver binds these fields and nothing else:** `files_in_scope` (`crew/drive.mjs:8396`),
+**At plan-accept the driver binds these fields and nothing else:** `files_in_scope` (`crew/drive.mjs:8416`),
 `validation_lane` (`:8446`), `gate_path`/`gate_cmd` (`:8458-8459`) and `mutations` (`:8461`). It also runs the
 acceptance coverage check against the brief (`:8485`). On a plan revision it reads `carve_verdict`/`carve_slices`
 (`:1414-1427`). **On a `--chunked` lane only**, it reads `details.chunks` (`:8498-8519`).

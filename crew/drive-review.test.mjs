@@ -2310,8 +2310,8 @@ test('an envelope refusal escalates naming the reason the validator produced', (
 
 test('shapeDefect still judges the DECLARATION alone, unchanged', () => {
   for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.equal(shapeDefect(VARIANTS[name], name), null)
-  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
-  assert.notEqual(shapeDefect(VARIANTS.stepped, 'stepped'), null)
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), [])
+  assert.equal(shapeDefect(VARIANTS.stepped, 'stepped'), null)
   const unknown = shapeDefect({ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout')
   assert.equal(typeof unknown, 'string')
   assert.match(unknown, /kind/)
@@ -4274,7 +4274,7 @@ test('D1 accepted review coverage is carried in envelope values', () => {
 
 test('E1 review coverage preserves every other shipped shape contract', () => {
   for (const name of Object.keys(EXECUTOR_TOPOLOGIES)) assert.equal(shapeDefect(VARIANTS[name], name), null, name)
-  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), ['stepped'])
+  assert.deepEqual(Object.keys(VARIANTS).filter((name) => !Object.hasOwn(EXECUTOR_TOPOLOGIES, name)), [])
   const expected = {
     execution: 'envelope',
     required_seats: ['reviewer'],

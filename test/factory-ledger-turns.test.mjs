@@ -1341,12 +1341,28 @@ test('runSet derives variants in bounded chunks', { skip: SKIP }, () => {
       adw_id: adwId, type: 'log',
       payload: { level: 'info', message: i % 2 === 0 ? 'plan:r1' : 'scout:r1' },
     })
+    if (i === total - 1) seedConfigurationRun(ledger, adwId, RUNSET_SINCE, { effective_execution: 'stepped' })
   }
   const rows = ledger.runSet({ since: RUNSET_SINCE })
   assert.equal(rows.length, total)
   for (const row of rows) {
     const index = Number(row.adw_id.slice('variant-chunk-'.length))
-    assert.equal(row.variant, index % 2 === 0 ? 'full' : 'scout', row.adw_id)
+    assert.equal(row.variant, index === total - 1 ? 'stepped' : index % 2 === 0 ? 'full' : 'scout', row.adw_id)
+  }
+})
+test('configured stepped classification overrides only stepped; other configurations retain first-log evidence', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  for (const [id, execution] of [['stepped', 'stepped'], ['full', 'full'], ['null', null]]) {
+    seedConfigurationRun(ledger, `variant-config-${id}`, RUNSET_SINCE, { effective_execution: execution })
+    ledger.recordEvent({ adw_id: `variant-config-${id}`, type: 'log', payload: { level: 'info', message: 'plan:r1' } })
+  }
+  seedRun(ledger, 'variant-config-missing', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-config-missing', type: 'log', payload: { level: 'info', message: 'plan:r1' } })
+
+  for (const id of ['stepped', 'full', 'null', 'missing']) {
+    const expected = id === 'stepped' ? 'stepped' : 'full'
+    assert.equal(ledger.taskReadout(`variant-config-${id}`).variant, expected)
+    assert.equal(ledger.runSet({ since: RUNSET_SINCE }).find((row) => row.adw_id === `variant-config-${id}`).variant, expected)
   }
 })
 test('runSet returns only the runs whose started_at falls in the window', { skip: SKIP }, () => {

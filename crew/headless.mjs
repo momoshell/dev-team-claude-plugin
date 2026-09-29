@@ -747,6 +747,23 @@ function censusReaderPaths(executable, tokens) {
   return null
 }
 
+export function skillReadsOf(toolName, input) {
+  const reads = new Set()
+  if (toolName === 'Skill' && typeof input?.skill === 'string') {
+    const match = input.skill.match(/^(?:(?:dev-team|crew-skills-[A-Za-z0-9_-]+):)?([A-Za-z0-9_-]+)$/)
+    if (match) reads.add(`skills/${match[1]}/SKILL.md`)
+  } else if (['read', 'functions.read', 'Read', 'bash', 'Bash'].includes(toolName)) {
+    for (const operand of censusFileOperands(toolName, input).paths) {
+      const path = String(operand).replaceAll('\\', '/')
+      const skillMatch = path.match(/(?:^|\/)skills\/([^/]+)\/SKILL\.md$/)
+      const referenceMatch = path.match(/(?:^|\/)skills\/([^/]+)\/references\/([^/]+\.md)$/)
+      const match = skillMatch ?? referenceMatch
+      if (match) reads.add(`skills/${match[1]}/${skillMatch ? 'SKILL.md' : `references/${match[2]}`}`)
+    }
+  }
+  return [...reads].sort()
+}
+
 export function censusFileOperands(toolName, input) {
   const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
   const path = censusPath(input)
@@ -786,6 +803,7 @@ export function claudeCensus(text) {
   const byClass = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
   const inTool = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
   const files = new Set()
+  const skillReads = new Set()
   const starts = new Map()
   let turns = 0
   let toolCalls = 0
@@ -814,6 +832,7 @@ export function claudeCensus(text) {
         const klass = classifyToolCall(use.name, use.input)
         toolCalls += 1
         byClass[klass] += 1
+        for (const path of skillReadsOf(use.name, use.input)) skillReads.add(path)
         const observed = censusFileOperands(use.name, use.input)
         for (const path of observed.paths) {
           if (files.has(path)) reReads += 1
@@ -853,6 +872,7 @@ export function claudeCensus(text) {
     by_class: byClass,
     suite_runs: byClass.test,
     distinct_files_read: files.size,
+    skill_reads: [...skillReads].sort(),
     re_reads: reReads,
     bash_reads_absent_reason: bashReadsAbsentReason,
     tool_spans_matched: matched,
@@ -1456,6 +1476,7 @@ function censusRow(run, transport, stream) {
       compactions_absent_reason: absentReason,
       tool_calls: null,
       distinct_files_read: null,
+      skill_reads: null,
       suite_runs: null,
       re_reads: null,
       by_class: null,
@@ -1477,6 +1498,7 @@ function censusRow(run, transport, stream) {
     ...HEADLESS_JSON_COMPACTION_FIELDS,
     tool_calls: census.tool_calls,
     distinct_files_read: census.distinct_files_read,
+    skill_reads: census.skill_reads ?? [],
     suite_runs: census.suite_runs,
     re_reads: census.re_reads,
     by_class: census.by_class,

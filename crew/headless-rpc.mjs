@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
 import { sleptMilliseconds } from './headless.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
@@ -343,6 +343,7 @@ export function newCensus() {
     by_class: Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0])),
     suite_runs: 0,
     distinct_files_read: 0,
+    skill_reads: new Set(),
     re_reads: 0,
     bash_reads_absent_reason: null,
     tool_spans_matched: 0,
@@ -374,6 +375,7 @@ export function foldCensusFrame(census, frame, at) {
     const klass = classifyToolCall(frame.toolName, frame.args)
     census.by_class[klass] += 1
     census.suite_runs = census.by_class.test
+    for (const path of skillReadsOf(frame.toolName, frame.args)) census.skill_reads.add(path)
     const observed = censusFileOperands(frame.toolName, frame.args)
     for (const path of observed.paths) {
       if (census._files.has(path)) census.re_reads += 1
@@ -838,6 +840,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           compactions_absent_reason: streamUnreadable ? CENSUS_ABSENT_CAUSES.stream_absent : (noFrames ? CENSUS_ABSENT_CAUSES.no_frames : null),
           tool_calls: noFrames ? null : census?.tool_calls ?? null,
           distinct_files_read: noFrames ? null : census?.distinct_files_read ?? null,
+          skill_reads: noFrames || streamUnreadable ? null : [...(census?.skill_reads ?? [])].sort(),
           suite_runs: noFrames ? null : census?.suite_runs ?? null,
           re_reads: noFrames ? null : census?.re_reads ?? null,
           by_class: noFrames ? null : census?.by_class ?? null,

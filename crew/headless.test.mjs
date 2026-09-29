@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawn as realSpawn } from 'node:child_process'
 import {
-  attributeExit, censusFileOperands, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
+  attributeExit, censusFileOperands, skillReadsOf, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
@@ -27,6 +27,21 @@ import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lan
 import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { CTX as DRIVE_CTX, driveTask, fakeIo, reconEnv } from './drive-fixtures.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
+
+test('skill-read classifier counts only plugin skill documents from read tools', () => {
+  assert.deepEqual(skillReadsOf('read', { path: '/abs/plugin/skills/lean-build/SKILL.md' }), ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(skillReadsOf('read', { path: 'skills/qa/references/gates.md' }), ['skills/qa/references/gates.md'])
+  assert.deepEqual(skillReadsOf('Skill', { skill: 'dev-team:backend-node' }), ['skills/backend-node/SKILL.md'])
+  assert.deepEqual(skillReadsOf('Bash', { command: 'cat /plugin/skills/lean-build/SKILL.md' }), ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(skillReadsOf('read', { path: '/plugin/skills/pr-review/anchors.json' }), [])
+  assert.deepEqual(skillReadsOf('write', { path: '/plugin/skills/x/SKILL.md' }), [])
+  assert.deepEqual(skillReadsOf('Skill', { skill: '../backend-node' }), [])
+  assert.deepEqual(skillReadsOf('read', { path: '/plugin/skills/x/SKILL.md', prompt: 'skills/y/SKILL.md' }), ['skills/x/SKILL.md'])
+})
+
+test('RV1-1 Claude crew-skills plugin prefix maps to the requested skill document', () => {
+  assert.deepEqual(skillReadsOf('Skill', { skill: 'crew-skills-reviewer:lean-build' }), ['skills/lean-build/SKILL.md'])
+})
 
 test('Q1: suitefacts writers stamp deterministic clocks and dispatch identities', () => {
   const refusal = suiteRefusalRow({ role: 'builder', transport: 'headless-json', dispatch_id: 'd1', at: 123, verdict: { command: 'npm test', kind: 'test-run', reason: 'refused' } })
@@ -3163,6 +3178,25 @@ test('D1 headless-json reports transport-named unmeasured compactions in both ce
   } finally { empty.cleanup() }
 })
 
+test('C1 skill-read Claude row records Skill calls and absent rows stay null', () => {
+  const f = b416JsonFixture()
+  try {
+    const frame = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'skill-read', name: 'Skill', input: { skill: 'dev-team:lean-build' } }] } }
+    f.writeStream(`${JSON.stringify(frame)}\n`)
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: f.role, status: 'done' }))
+    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+    const row = f.rows.find((entry) => entry.seat_turn_census)?.seat_turn_census
+    assert.deepEqual(row.skill_reads, ['skills/lean-build/SKILL.md'])
+  } finally { f.cleanup() }
+  const absent = b416JsonFixture()
+  try {
+    absent.writeStream('')
+    writeFileSync(absent.assigned.returnPath, JSON.stringify({ assignment_id: absent.assigned.id, role: absent.role, status: 'done' }))
+    assert.equal(absent.io.wait(absent.assigned.returnPath, 60).status, 'done')
+    assert.equal(absent.rows.find((entry) => entry.seat_turn_census)?.seat_turn_census.skill_reads, null)
+  } finally { absent.cleanup() }
+})
+
 test('E1 compaction fields leave every prior census field byte-identical', () => {
   const rpc = e1RpcFixture()
   let rpcCensus
@@ -3201,6 +3235,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     turns: 1,
     tool_calls: 1,
     distinct_files_read: 0,
+    skill_reads: [],
     suite_runs: 0,
     re_reads: 0,
     by_class: { edit: 0, read: 0, test: 0, other: 1 },
@@ -3230,6 +3265,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     turns: 1,
     tool_calls: 1,
     distinct_files_read: 1,
+    skill_reads: [],
     suite_runs: 0,
     re_reads: 0,
     by_class: { edit: 0, read: 1, test: 0, other: 0 },

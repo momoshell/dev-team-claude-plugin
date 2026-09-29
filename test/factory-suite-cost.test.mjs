@@ -144,6 +144,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/factory-model-reeval.test.mjs',
     'test/factory-mutant-census.test.mjs',
     'test/factory-seat-priors.test.mjs',
+    'test/factory-skill-reads.test.mjs',
     'test/zz-added-after-measurement.test.mjs',
   ])
   assert.equal(result.reason, UNRECORDED_SUITE_REASON)

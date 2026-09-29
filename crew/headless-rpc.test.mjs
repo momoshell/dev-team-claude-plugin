@@ -361,6 +361,7 @@ test('E1 RPC half compaction fields leave prior census fields byte-identical', (
       turns: 1,
       tool_calls: 1,
       distinct_files_read: 0,
+      skill_reads: [],
       suite_runs: 0,
       re_reads: 0,
       by_class: { edit: 0, read: 0, test: 0, other: 1 },
@@ -2314,6 +2315,41 @@ test('b401 the live rpc census stamps the tool boundary from the wrapper clock',
   assert.equal(result.distinct_files_read, 1)
 })
 
+test('P1 skill-read RPC row deduplicates repeated skill document reads', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const frames = [
+      { type: 'turn_start' },
+      ...[1, 2].flatMap((n) => [
+        { type: 'tool_execution_start', toolCallId: `skill-${n}`, toolName: 'read', args: { path: '/plugin/skills/lean-build/SKILL.md' } },
+        { type: 'tool_execution_end', toolCallId: `skill-${n}`, toolName: 'read' },
+      ]),
+      { type: 'turn_end' },
+      { type: 'agent_settled' },
+    ]
+    f.writeStream(`${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    assert.deepEqual(rows.find((row) => row.seat_turn_census)?.seat_turn_census.skill_reads, ['skills/lean-build/SKILL.md'])
+  } finally { f.cleanup() }
+})
+
+test('P2 skill-read RPC no-frame row is strictly null', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream('')
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const row = rows.find((entry) => entry.seat_turn_census)?.seat_turn_census
+    assert.equal(row.skill_reads, null)
+    assert.equal(row.absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+  } finally { f.cleanup() }
+})
+
 test('RV1-1 RPC census counts distinct paths and re-reads', () => {
   const census = newCensus()
   const read = (id, path, at) => {
@@ -2696,7 +2732,7 @@ test('D1 prior census fields stay byte-identical', () => {
     assert.equal(JSON.stringify(withoutPreFirstTiming(census)), JSON.stringify({
       role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 1,
       compactions: 0, compaction_frame: 'compaction_start', compactions_absent_reason: null,
-      tool_calls: 1, distinct_files_read: 0, suite_runs: 0, re_reads: 0,
+      tool_calls: 1, distinct_files_read: 0, skill_reads: [], suite_runs: 0, re_reads: 0,
       by_class: { edit: 0, read: 0, test: 0, other: 1 }, in_tool_ms: null,
       out_of_tool_ms: null, span_ms: 0, tool_spans_matched: 0, tool_spans_unmatched: 0,
       tool_spans_same_poll: 1, bash_reads_absent_reason: null,

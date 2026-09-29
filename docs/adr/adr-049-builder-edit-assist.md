@@ -1,6 +1,6 @@
 # ADR-049 — Builder edits: answer a failed edit with the file's own text before adding a new edit tool
 
-**Status:** *proposed* 2026-09-29, for operator decision (questions in "Operator decisions needed" below) · **Owner:**
+**Status:** *ratified* 2026-09-29, operator decision (answers in "Operator decisions" below) · **Owner:**
 operator · **Relates to:** ADR-045 (scope is context, not enforcement), ADR-046 (a policy decision is a ledger fact),
 ADR-048 (ordered build steps)
 
@@ -111,16 +111,17 @@ gate, which is the opposite of a seat tool. It stays an operator skill.
 - **D2, not found:** append the best-matching window of the current file (anchored on the longest `oldText` line
   that occurs in it) with line numbers, or say plainly that none of the lines occur in the file.
 - **D3, indentation only:** when `oldText` matches exactly one place in the file once leading whitespace is ignored,
-  rewrite `event.input` to the file's own text before pi runs the call. This saves the turn.
+  append that place's exact text with its line numbers to the failed result. It is a hint, never a rewrite of
+  `event.input` (operator decision 3), so the model makes every correction and the failure stays measured.
 - **D4, the instrument:** journal every failed edit with a closed cause from the table above, so stage 2 is decided on
   shipped data rather than a stream reader.
-- *Fixes:* D3 removes the turn for indentation-only failures (5%). D1 and D2 do not remove the failed turn; they make
-  the next attempt the last one, which today is unmeasured.
+- *Fixes:* no hint removes the failed turn; D1, D2 and D3 aim to make the next attempt the last one, which today is
+  unmeasured.
 - *Dependency:* none.
 - *Touches:* no new tool name, so the census, the ACP gate and builderloop's eligibility are unchanged, and no new
   grant, because builderloop is already granted.
 
-## Decision (proposed)
+## Decision
 
 Adopt **(d)** as stage 1. Defer **(b)** to a stage 2 that runs only if stage 1's measurement says so. Reject **(a)**
 and **(c)**.
@@ -137,9 +138,9 @@ switch the dispatcher can set per lane, so the A/B below needs no roster change.
 - **Primary metric:** failed-edit round-trips per 100 edits, and round-trips from a failed edit to the next successful
   edit of the same file. Each is reported with its denominator.
 - **Secondary:** builder turns per assignment, and the cause mix from D4.
-- **Stage 2 goes ahead** only if the assist arm still shows at least 1 follow-up round-trip per failure on the
-  not-unique and never-seen causes. **Stage 1 is deleted** if the assist arm is not better than control on the
-  primary metric.
+- **Stage 2 goes ahead** only if the assist arm's anchor-failure rate (not-unique, never-seen, partly-seen and
+  indentation causes, per 100 edits, with its denominator) stays **above 5%** in a cell at or above the floor
+  (operator decision 4). **Stage 1 is deleted** if the assist arm is not better than control on the primary metric.
 
 ## Mutation declarations and the scope gate
 
@@ -158,14 +159,14 @@ gate, builderloop eligibility, the pi tool allowlist), plus a grant change on th
 - The planner's predicted text in mutation declarations (see above).
 - Any change to pi itself.
 
-## Operator decisions needed
+## Operator decisions (2026-09-29)
 
-1. Ratify **(d)** as stage 1, or go straight to **(b)**.
-2. Host D1–D4 in `builderloop.ts` (no grant change), or in a new extension, which needs a builder grant in
-   `crew/capabilities.json`, a protected-floor edit.
-3. Allow **D3**, a silent argument rewrite. The alternative is D1, D2 and D4 only, where every correction goes through
-   the model.
-4. Accept the stage-2 threshold above, or name another.
+1. **(d) is stage 1.** (b) waits for the measurement; (a) and (c) are rejected.
+2. **D1–D4 live in `builderloop.ts`.** No new extension, so no grant change on the protected floor.
+3. **No silent rewrite.** D3 is a hint appended to the failed result; the model makes every correction, so every
+   failure stays visible to D4.
+4. **Stage 2 threshold:** go to (b) only if the assist arm leaves the anchor-failure rate above 5% per 100 edits in
+   a cell with at least 12 builder seats per arm.
 
 ## Reverses if
 

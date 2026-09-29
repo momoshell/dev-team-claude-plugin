@@ -207,7 +207,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     log({ at: now(), acp_turn: { role: assignment.role, assignment_id: assignment.id, returnPath: assignment.returnPath, stopReason: refusal || !turn ? null : turn.stopReason ?? null, stop_reason_absent: refusal ? 'refused' : !turn ? 'response-unread' : null, usage: billed, usage_reason: finalUsageReason } })
     try {
       const tool_calls = assignment.sawUpdate ? assignment.tools.size : null
-      log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', turns: null, tool_calls, absent_reason: ACP_CENSUS_TURNS_ABSENT } })
+      log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', turns: null, tool_calls, skill_reads: null, absent_reason: ACP_CENSUS_TURNS_ABSENT } })
     } catch { /* census is best-effort */ }
     return turn
   }

@@ -25,6 +25,8 @@ const UI_TEST_FILE = 'skills/ui-design/exhibits.test.mjs'
 const UX_OWNER = 'skills/ux/anchors.json'
 const UX_TEST_FILE = 'skills/ux/exhibits.test.mjs'
 const MUTANT_CENSUS_OWNER = 'scripts/factory/mutant-census.mjs'
+const SKILL_READS_OWNER = 'scripts/factory/skill-reads.mjs'
+const SKILL_READS_TEST = 'test/factory-skill-reads.test.mjs'
 const MUTANT_CENSUS_TEST_FILE = 'test/factory-mutant-census.test.mjs'
 // #918: read the pin, never restate it. A key is a line number and a merge moves it;
 // the manifest's content value is what --repair-all preserves.
@@ -361,8 +363,9 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['hooks/hooks.json', ['hooks/skill-gate.test.mjs']],
     ['skills/skill-map.json', ['hooks/skill-gate.test.mjs']],
     [MUTANT_CENSUS_OWNER, [MUTANT_CENSUS_TEST_FILE]],
+    [SKILL_READS_OWNER, [SKILL_READS_TEST]],
   ]
-  const addedTests = ['hooks/skill-gate.test.mjs', 'test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs', MUTANT_CENSUS_TEST_FILE]
+  const addedTests = ['hooks/skill-gate.test.mjs', 'test/factory-agent-doctor.test.mjs', 'test/factory-pr-review.test.mjs', MUTANT_CENSUS_TEST_FILE, SKILL_READS_TEST]
   const currentReach = collectTestReach({ checkout: ROOT })
   const addedPaths = addedOwners.map(([owner]) => owner)
   const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths, ...addedTests])]
@@ -405,6 +408,11 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     assert.ok(ownerDelta >= missingOwners.length)
     assert.ok(pairDelta >= addedOwners.reduce((total, [owner]) => total + (missingOwners.includes(owner) ? addedOwners.find(([candidate]) => candidate === owner)[1].length : 0), 0))
   }
+})
+
+test('RV2-1 newly tracked skill-read owner is covered by dynamic reach census', () => {
+  const currentReach = collectTestReach({ checkout: ROOT })
+  assert.equal(currentReach.pathByFile.get(SKILL_READS_OWNER)?.has(SKILL_READS_TEST), true)
 })
 
 test('RV2-1 newly tracked lab grant owners are covered by dynamic reach census', () => {

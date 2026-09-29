@@ -353,10 +353,9 @@ export function advisorEndpointLabel(endpoint) {
 
 // ADR-047: the record is built from the RESOLVED roster cell, never from the boot
 // environment. CREW_ADVISOR_ENDPOINT/CREW_ADVISOR_MODEL are retired (bootCmd refuses them
-// with advisor-env-retired), so a null cell grants nothing and no endpoint is ever carried:
-// the model channel has none, and the legacy HTTP channel is lane 2's to delete.
+// with advisor-env-retired); grant derives from register adapters even when the resolved cell is null.
 export function advisorBootRecord({ adapters = {}, models, advisor = null } = {}) {
-  const granted = advisor ? Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort() : []
+  const granted = Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort()
   return {
     granted,
     endpoint: '',
@@ -409,6 +408,7 @@ export async function assertAdvisorCellLive({ record, adapters = {}, models, tas
     const adapter = adapters[role]
     if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
     if (![DEFAULT_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT].includes(adapter?.transport)) throw advisorRefusal('transport-unsupported', role, record)
+    if (record.cell === null) continue
     const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model, models: models ?? record.models })
     if (cell.reason) throw advisorRefusal(cell.reason, role, record)
     if (!record.endpoint) continue
@@ -452,7 +452,7 @@ export function advisorManifest({ briefText, task, runStartedAt, cell = null }) 
 // (a non-empty tripwire surface) instead of requiring a cell it never had.
 export function assertAdvisorManifest({ granted = [], manifest, written, legacy = false } = {}) {
   if (!granted.length) return
-  const surface = legacy ? manifest?.tripwires?.length > 0 : Boolean(manifest?.cell)
+  const surface = legacy ? manifest?.tripwires?.length > 0 : manifest != null && Object.hasOwn(manifest, 'cell')
   if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !surface || written !== true) {
     const err = new Error(`advisor manifest is unavailable for a granted run — refusing to start seats without the declared tripwire surface`)
     err.reason = 'advisor-manifest-unavailable'
@@ -2974,11 +2974,10 @@ export async function bootCmd(args, deps = {}) {
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
   const bootEnv = { ...(deps.env ?? process.env) }
-  const inheritedAdvisorEnv = bootEnv.DEVTEAM_WORKER === '1' && bootEnv.CREW_ADVISOR_PROVENANCE === 'seat-transitional'
   // ADR-047 decision 4 refuses a boot that SETS either variable: an exported empty string is
   // still a stale operator configuration the boot would otherwise ignore, so presence refuses.
-  if (bootEnv.CREW_ADVISOR_MODEL !== undefined && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_MODEL is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
-  if (bootEnv.CREW_ADVISOR_ENDPOINT !== undefined && !inheritedAdvisorEnv) throw Object.assign(new Error('CREW_ADVISOR_ENDPOINT is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
+  if (bootEnv.CREW_ADVISOR_MODEL !== undefined) throw Object.assign(new Error('CREW_ADVISOR_MODEL is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
+  if (bootEnv.CREW_ADVISOR_ENDPOINT !== undefined) throw Object.assign(new Error('CREW_ADVISOR_ENDPOINT is retired; use --model-advisor <canonical-provider/id|none>'), { reason: 'advisor-env-retired' })
   const charterArm = args['charter-arm'] ?? 'control'
   if (!CHARTER_ARMS.includes(charterArm)) {
     throw new Error(`invalid --charter-arm ${JSON.stringify(charterArm)}; expected one of ${CHARTER_ARMS.join('|')}`)

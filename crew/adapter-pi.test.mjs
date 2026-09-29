@@ -16,18 +16,38 @@ import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
-test('ADR047 M1 advisor grant without a cell loads no extension and strips inherited rpc env', () => {
+test('ADR047 M1 legacy cellless grant now loads extension and strips inherited rpc env', () => {
   const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: null, env: { CREW_ADVISOR_MODEL: 'inherited' } })
-  assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), false)
+  assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)
   assert.equal(Object.hasOwn(rpc.env, 'CREW_ADVISOR_MODEL'), false)
-  assert.equal(seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: '/tmp', bootBrief: 'brief', grants: { advisor: true }, advisorCell: null }).includes(PI_ADVISOR_EXTENSION), false)
+  assert.equal(seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: '/tmp', bootBrief: 'brief', grants: { advisor: true }, advisorCell: null }).includes(PI_ADVISOR_EXTENSION), true)
 })
 test('ADR047 M2 advisor cell transports canonical model and provenance', () => {
   const cell = { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } }
   const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: cell })
   assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)
-  assert.equal(rpc.env.CREW_ADVISOR_MODEL, 'anthropic/claude-sonnet-5')
-  assert.equal(rpc.env.CREW_ADVISOR_PROVENANCE, 'seat-transitional')
+  assert.equal(Object.hasOwn(rpc.env, 'CREW_ADVISOR_MODEL'), false)
+  assert.equal(Object.keys(rpc.env).filter((key) => key.startsWith('CREW_ADVISOR')).join(','), 'CREW_ADVISOR')
+})
+
+test('ADR47-L2 G1 null-cell advisor grant loads extension in rpc and pane', () => {
+  const grants = { advisor: true }
+  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: null, env: {} })
+  const pane = seatCommand({ role: 'builder', model: 'sonnet', promptFile: 'p', taskDir: '/tmp', bootBrief: 'b', grants, advisorCell: null })
+  assert.ok(rpc.args.includes(PI_ADVISOR_EXTENSION))
+  assert.ok(pane.includes(PI_ADVISOR_EXTENSION))
+})
+
+test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
+  const grants = { advisor: true, tools: [], extensions: [], agents: [], skills: [] }
+  const cell = { model: 'provider/model', endpoint: 'http://sentinel.invalid' }
+  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: cell, env: { CREW_ADVISOR_MODEL: 'inherited', CREW_ADVISOR_SENTINEL: 'secret' } })
+  const pane = seatCommand({ role: 'builder', model: 'sonnet', promptFile: 'p', taskDir: '/tmp', bootBrief: 'b', grants, advisorCell: cell, env: {} })
+  const acp = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'sonnet', promptFile: 'p', cwd: '/tmp', grants, advisorCell: cell, env: {} })
+  assert.deepEqual(Object.keys(rpc.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
+  assert.match(pane, /CREW_ADVISOR=1/)
+  assert.doesNotMatch(pane, /CREW_ADVISOR_(?:MODEL|ENDPOINT|PROVENANCE)=/)
+  assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
 })
 
 const SKELETONREAD_EXTENSION = join(process.cwd(), 'crew/pi/extensions/skeletonread.ts')
@@ -92,10 +112,10 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
   const advisorExtension = join(process.cwd(), 'crew/pi/extensions/advisor.ts')
   assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
-  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:4567', CREW_ADVISOR_MODEL: 'openai-codex/advisor', CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
+  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
   const unseatedAdvisor = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } })
-  for (const key of ['CREW_ADVISOR', 'CREW_ADVISOR_ENDPOINT', 'CREW_ADVISOR_MODEL', 'CREW_ADVISOR_PROVENANCE']) assert.equal(Object.hasOwn(unseatedAdvisor.env, key), false)
-  assert.equal(unseatedAdvisor.args.includes(advisorExtension), false)
+  assert.deepEqual(Object.keys(unseatedAdvisor.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
+  assert.equal(unseatedAdvisor.args.includes(advisorExtension), true)
 
   // No Claude deny name maps to pi's ACP-only powershell gate; it remains gated.
   const allDenied = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: 'Bash,Edit,Write' })
@@ -560,9 +580,9 @@ test('advisor grant appends only its extension and safely transports its cell', 
   assert.equal(granted.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], plain.match(/(?:^|\s)--tools "([^"]*)"/)?.[1])
   assert.match(granted, new RegExp(`-e "${escapeRegex(PI_ADVISOR_EXTENSION)}"`))
   assert.match(granted, /CREW_ADVISOR=1/)
-  assert.match(granted, /CREW_ADVISOR_ENDPOINT='http:\/\/127\.0\.0\.1\/it'"'"'s\/v1'/)
+  assert.doesNotMatch(granted, /CREW_ADVISOR_(?:ENDPOINT|MODEL)=/)
   assert.equal(shellSingleQuote("q'wen3"), `'q'"'"'wen3'`)
-  assert.doesNotMatch(plain, /CREW_ADVISOR|advisor\.ts/)
+  assert.doesNotMatch(plain, /CREW_ADVISOR=1|advisor\.ts/)
 })
 
 // b896: default-off CREW_ROUTER_ATTEMPT_URL routing. A1-K1 pin the shared
@@ -631,7 +651,7 @@ test('A1', () => {
     role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
   }
-  const expected = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
   assert.equal(seatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
   assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
@@ -816,8 +836,7 @@ test('K1', () => {
   }
 })
 
-// The pane seat launches through `env`, which INHERITS the parent environment:
-// the advisor endpoint must be set explicitly or an operator's value leaks in.
+// Pane activation drops every inherited retired advisor key; manifest context owns the cell.
 function paneAdvisorEnv(advisorCell, inherited) {
   const command = seatCommand({
     role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '',
@@ -832,7 +851,7 @@ function paneAdvisorEnv(advisorCell, inherited) {
 test('a model-only advised pane seat clears an inherited advisor endpoint and attaches without probing any URL', async () => {
   const models = { 'provider/model': { provider: 'provider', id: 'model' } }
   const env = paneAdvisorEnv({ model: 'provider/model', models }, 'http://evil.example')
-  assert.equal(env.CREW_ADVISOR_ENDPOINT, '')
+  assert.equal(env.CREW_ADVISOR_ENDPOINT, undefined)
   const { attachAdvisor } = await import('./pi/extensions/advisor.ts')
   const rows = []; const urls = []
   const dir = scratchDir('pane-advisor-')
@@ -845,7 +864,8 @@ test('a model-only advised pane seat clears an inherited advisor endpoint and at
   assert.equal(JSON.stringify(rows).includes('evil.example'), false)
 })
 
-test('a pane seat whose boot record names an endpoint carries exactly that endpoint, not the inherited one', () => {
+test('a pane seat ignores legacy advisor endpoint fields in favor of manifest context', () => {
   const env = paneAdvisorEnv({ endpoint: 'http://127.0.0.1:8080/v1', model: 'qwen3' }, 'http://evil.example')
-  assert.equal(env.CREW_ADVISOR_ENDPOINT, 'http://127.0.0.1:8080/v1')
+  assert.equal(env.CREW_ADVISOR_ENDPOINT, undefined)
+  assert.equal(env.CREW_ADVISOR, '1')
 })

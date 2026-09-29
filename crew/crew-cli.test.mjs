@@ -54,20 +54,21 @@ test('ADR047 D4 an exported empty retired variable still refuses', async () => {
   }
 })
 test('ADR047 D3 exact worker provenance distinguishes composed child env', async () => {
-  // The env a pi seat is launched with (adapter-composed) boots a nested crew; either half
-  // of the provenance alone does not qualify an operator export.
+  // The composed activation-only env still boots a nested crew; cell details stay in its manifest.
   const composed = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true },
     advisorCell: { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } } }).env
+  const advisorKeys = Object.keys(composed).filter((key) => key.startsWith('CREW_ADVISOR'))
+  assert.deepEqual(advisorKeys, ['CREW_ADVISOR'])
   const child = { DEVTEAM_WORKER: '1', ...Object.fromEntries(Object.entries(composed).filter(([key]) => key.startsWith('CREW_ADVISOR'))) }
-  assert.equal(child.CREW_ADVISOR_PROVENANCE, 'seat-transitional')
-  assert.equal(child.CREW_ADVISOR_MODEL, 'anthropic/claude-sonnet-5')
+  assert.equal(child.CREW_ADVISOR, '1')
+  assert.equal(child.CREW_ADVISOR_MODEL, undefined)
   const nested = await bootAdvisor({ task: 'adr047-d3', deps: { env: child } })
   assert.equal(nested.error, null)
   assert.equal(nested.crew.task, 'adr047-d3')
   const bare = await bootAdvisor({ task: 'adr047-d3-bare', deps: { env: { ...child, DEVTEAM_WORKER: undefined } } })
-  assert.equal(bare.error?.reason, 'advisor-env-retired')
+  assert.equal(bare.error, null)
   const spoof = await bootAdvisor({ task: 'adr047-d3-spoof', deps: { env: { ...child, CREW_ADVISOR_PROVENANCE: 'operator' } } })
-  assert.equal(spoof.error?.reason, 'advisor-env-retired')
+  assert.equal(spoof.error, null)
 })
 test('advisor boot record carries canonical model and empty resolved endpoint', () => {
   const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {}, models: { 'anthropic/claude-sonnet-5': {} }, advisor: { agent: 'pi', provider: 'anthropic', id: 'claude-sonnet-5', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
@@ -186,7 +187,7 @@ test('ADR047 E1 crew.json records the adapter-translated advisor model beside th
   assert.equal(result.crew.seats.advisor.model, 'openai-codex/gpt-6-sol')
   assert.equal(result.crew.seats.advisor.provider, 'openai')
   assert.equal(result.crew.seats.advisor.id, 'gpt-6-sol')
-  // The legacy extension record keeps the canonical catalog key until lane 2.
+  // The boot record keeps the canonical catalog key for compatibility.
   assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
 })
 
@@ -201,17 +202,19 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
   // The extension's own model check (the same classifier) admits what it is handed.
   assert.deepEqual(classifyAdvisorCell(launch), { model: 'openai-codex/gpt-6-sol' })
   const env = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: launch }).env
-  assert.equal(env.CREW_ADVISOR_MODEL, 'openai-codex/gpt-6-sol')
-  assert.deepEqual(Object.keys(JSON.parse(env.CREW_ADVISOR_MODELS)), ['openai-codex/gpt-6-sol'])
+  assert.equal(env.CREW_ADVISOR, '1')
+  assert.equal(env.CREW_ADVISOR_MODEL, undefined)
+  assert.equal(env.CREW_ADVISOR_MODELS, undefined)
   // A provider the adapter spells as-is keeps the whole catalog, as before.
   const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet', deps: GRANTED })
   assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5')
   assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
-  // The pane launch (composed at boot, not from crew.json) carries the same spelling. The stub
+  // The pane launch carries activation only; the manifest owns the model identity. The stub
   // cmux never reports a workspace, so the boot stops after composing the layout.
   const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED })
   const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.deepEqual(layout.match(/CREW_ADVISOR_MODEL='[^']*'/g), ["CREW_ADVISOR_MODEL='openai-codex/gpt-6-sol'"])
+  assert.match(layout, /CREW_ADVISOR=1/)
+  assert.doesNotMatch(layout, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
   // A legacy record without consult_model keeps its exact shape.
   assert.deepEqual(advisorLaunchCell({ endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false, models: { x: {} } }),
     { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
@@ -245,6 +248,24 @@ test('ADR047 S1 an advisor cell on a crew that seats no builder boots and report
   const advisorRows = rows.filter((row) => row.role === 'advisor')
   assert.equal(advisorRows.length, 1)
   assert.equal(advisorRows[0].transport, null)
+})
+
+test('ADR47-L2 H1 granted register is recorded with a null advisor cell', () => {
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, advisor: null })
+  assert.deepEqual(record.granted, ['builder'])
+  assert.equal(record.cell, null)
+})
+
+test('ADR47-L2 H2 null manifest cell is accepted as an explicit roster value', () => {
+  const manifest = { schema_version: 1, tripwires: [], cell: null }
+  assert.equal(assertAdvisorManifest({ granted: ['builder'], manifest, written: true }), undefined)
+  assert.throws(() => assertAdvisorManifest({ granted: ['builder'], manifest: undefined, written: true }), (error) => error.reason === 'advisor-manifest-unavailable')
+})
+
+test('ADR47-L2 H3 stale transitional advisor env refuses boot', async () => {
+  const result = await bootAdvisor({ task: 'adr47-l2-h3', deps: { env: { DEVTEAM_WORKER: '1', CREW_ADVISOR_PROVENANCE: 'seat-transitional', CREW_ADVISOR_MODEL: 'stale/model' } } })
+  assert.equal(result.error?.reason, 'advisor-env-retired')
+  assert.equal(result.stateDir, false)
 })
 
 test('ADR047 S2 a --roles boot refuses advisor flags it has no cell to apply', async () => {
@@ -311,7 +332,7 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
 test('ADR047 K2 the shipped default boots a build crew that loads and consults no advisor', async () => {
   const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
   const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.equal(layout.includes('CREW_ADVISOR'), false)
+  assert.doesNotMatch(layout, /CREW_ADVISOR=1/)
   assert.equal(layout.includes('advisor.ts'), false)
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)
@@ -952,12 +973,12 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: EMPTY_GRANTS }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
 })
 
@@ -984,7 +1005,7 @@ test('C1P/C1R subagent-only grants preserve the pre-change argv', () => {
   }
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const rpc = rpcCommand({
     bin: '/repo/pi', model: 'openai-codex/gpt-5.6', sessionDir: '/tmp/crew-task/sessions', sessionId: 'planner',
@@ -1009,7 +1030,7 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
   assert.equal(builderCommand.split(' -e ').length - 1, 5)
@@ -3158,7 +3179,7 @@ test('#809 the advisor boot record carries host and port and the journal project
     adapters: { builder: { grants: { advisor: true } } },
     env: { CREW_ADVISOR_ENDPOINT: 'http://user:sekrit@192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' },
   })
-  assert.deepEqual(fromEnv.granted, [])
+  assert.deepEqual(fromEnv.granted, ['builder'])
   assert.equal(fromEnv.endpoint, '')
   assert.doesNotMatch(JSON.stringify(fromEnv), /sekrit|192\.168|qwen3-coder/)
   const record = legacyEndpointRecord(['builder'], 'http://user:sekrit@192.168.1.42:8080/v1')
@@ -3292,8 +3313,8 @@ test('J1 boot retains adapter and transport refusals', async () => {
   assert.equal(refused.error?.role, 'builder')
   assert.equal(refused.stateDir, false)
   const unadvised = await bootAdvisor({ task: 'j1-claude-builder-none', args: { ...claudeBuilder, 'model-advisor': 'none' }, deps: GRANTED })
-  assert.equal(unadvised.error, null)
-  assert.equal(unadvised.crew.members.builder.agent, 'claude')
+  assert.equal(unadvised.error?.reason, 'adapter-unsupported')
+  assert.equal(unadvised.stateDir, false)
 })
 
 test('A4', async () => {

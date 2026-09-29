@@ -700,7 +700,7 @@ export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'
 export const CAPABILITY_PROBES = Object.freeze({
   advisor: Object.freeze({
     class: 'network',
-    reason: 'The claim is a reachable model endpoint named by CREW_ADVISOR_ENDPOINT; probing that endpoint is a network call, and this suite deliberately makes none.',
+    reason: 'The claim is a register-granted roster consult launched as a local tool-less child; it makes no CREW_ADVISOR_ENDPOINT network probe.',
   }),
   agents: Object.freeze({
     class: 'resolution',

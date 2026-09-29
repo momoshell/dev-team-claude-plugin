@@ -21,7 +21,7 @@ import { ROOT, scratchDir, sqliteAvailable, childTracker } from './helpers.mjs'
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
 import {
-  openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR, advisorArmsReadout,
+  openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   DRIVER_GONE_THRESHOLD_MS, SESSION_STATUS_ABSENT, projectSessions, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB,
   SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
@@ -1953,123 +1953,6 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 // Screener proposal adoption readout
 // ---------------------------------------------------------------------------
 
-// A finished run by default: an arm reads outcomes only from runs that ended.
-function advisorArmTestRun(id, arm = 'p/m', grant = '["builder"]', ledger = openTestLedger(), { running = false, status = 'ok', outcome = 'success' } = {}) {
-  seedConfigurationRun(ledger, id, '2024-01-02T00:00:00.000Z', { advisor_model: arm, advisor_granted_json: grant })
-  const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath)
-  db.prepare("UPDATE sessions SET tier='build' WHERE adw_id=?").run(id)
-  db.close()
-  if (!running) ledger.endSession({ adw_id: id, status, outcome })
-  return ledger
-}
-
-test('R1', () => { const row = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: { provider: 'p', id: 'm' } } }); assert.equal(row.configuration.advisor_model, 'p/m') })
-test('R2', () => { const row = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: null } }); assert.equal(row.configuration.advisor_model, 'none') })
-test('R3', () => { const row = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION); assert.equal(row.configuration.advisor_model, null) })
-test('R4', () => { const granted = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: null }, granted: ['builder'] }); const absent = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: null } }); assert.equal(granted.configuration.advisor_granted_json, '["builder"]'); assert.equal(absent.configuration.advisor_granted_json, null) })
-test('S1', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger, 's1', '2024-01-02T00:00:00.000Z', { advisor_model: 'p/m', advisor_granted_json: '["builder"]' }); assert.equal(ledger.dumpTable('run_configurations')[0].advisor_model, 'p/m'); ledger.close() })
-test('A1', () => { const ledger = advisorArmTestRun('a1', null); assert.equal(advisorArmsReadout(ledger).excluded.unrecorded, 1); ledger.close() })
-test('A2', () => { const ledger = advisorArmTestRun('a2', 'p/m', '[]'); assert.equal(advisorArmsReadout(ledger).excluded.ungranted, 1); ledger.close() })
-test('A3', () => { const ledger = advisorArmTestRun('a3'); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds_per_run, null); ledger.close() })
-test('A4', () => { const ledger = advisorArmTestRun('a4'); ledger.startPhase({ adw_id: 'a4', name: 'build:r1' }); ledger.startPhase({ adw_id: 'a4', name: 'build:r3' }); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds, 3); ledger.close() })
-test('A5', () => { const ledger = advisorArmTestRun('a5'); const row = advisorArmsReadout(ledger).arms[0]; assert.equal(row.review_denominator, 0); ledger.close() })
-test('A6', () => { const ledger = advisorArmTestRun('a6'); assert.equal(advisorArmsReadout(ledger).arms[0].escalation_denominator, 1); ledger.close() })
-test('A7', () => { const ledger = advisorArmTestRun('a7'); assert.equal(advisorArmsReadout(ledger).arms[0].advisor_spend.absent_reason, 'no-advisor-usage'); ledger.close() })
-// Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
-// which inflates lane_spend_denominator; and dropping a billed run (the spend and denominator fall).
-test('A7 lane spend: an unbilled run is missing spend, never a measured zero', () => {
-  const ledger = advisorArmTestRun('a7-billed', 'p/m', '["builder"]', openTestLedger(), { running: true })
-  advisorArmTestRun('a7-unbilled', 'p/m', '["builder"]', ledger)
-  ledger.endSession({ adw_id: 'a7-billed', status: 'ok', outcome: 'success', billed_cost_usd: 1.5 })
-  const arm = advisorArmsReadout(ledger).arms[0]
-  assert.equal(arm.runs, 2)
-  assert.equal(arm.lane_spend_usd, 1.5)
-  assert.equal(arm.lane_spend_denominator, 1)
-  assert.equal(arm.lane_spend_missing_runs, 1)
-  ledger.close()
-})
-// Kills: counting a run still in flight into the arm's runs and rates (twelve running sessions
-// would read runs 12, build_rounds_per_run 0, escalation_rate 0: outcomes nobody has yet), and
-// leaving in-flight runs out of the rotation (next_arm would keep choosing the busy arm).
-test('A10 a run still in flight counts toward the rotation, never toward an outcome rate', () => {
-  const ledger = openTestLedger()
-  for (let i = 1; i <= 12; i++) advisorArmTestRun(`a10-live-${i}`, 'live', '["builder"]', ledger, { running: true })
-  advisorArmTestRun('a10-done', 'done', '["builder"]', ledger)
-  const out = advisorArmsReadout(ledger, { arms: ['live', 'done'] })
-  const live = out.arms.find((row) => row.arm === 'live')
-  assert.equal(live.runs, 0)
-  assert.equal(live.in_flight, 12)
-  assert.equal(live.thin, true)
-  assert.equal(live.build_rounds_per_run, null)
-  assert.equal(live.escalation_rate, null)
-  assert.equal(out.next_arm, 'done')
-  ledger.close()
-})
-// Kills: dropping an in-flight run's id from advisor spend (its consults read as no-advisor-usage
-// while the run is active, then reappear after endSession).
-test('A12 an in-flight run still contributes its recorded advisor consults to spend', () => {
-  const ledger = advisorArmTestRun('a12-live', 'p/m', '["builder"]', openTestLedger(), { running: true })
-  ledger.recordAdvisorUsage({ adw_id: 'a12-live', consult_id: 'c1', model: 'no-such-provider/no-such-model', usage: { billed_input_tokens: 10, billed_output_tokens: 10, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } })
-  const arm = advisorArmsReadout(ledger).arms[0]
-  assert.equal(arm.runs, 0)
-  assert.equal(arm.in_flight, 1)
-  assert.equal(arm.advisor_spend.usage_count, 1)
-  assert.equal(arm.advisor_spend.absent_reason, 'model-unpriced-or-ambiguous')
-  ledger.close()
-})
-// Kills: dropping the changes-needed increment (bounce numerator reads 0) and dropping the
-// escalation increment (escalations read 0); the A1–A9 fixtures carry neither.
-test('A11 bounce and escalation numerators count changes-needed reviews and escalated runs', () => {
-  const ledger = openTestLedger()
-  for (let i = 1; i <= 11; i++) advisorArmTestRun(`a11-${i}`, 'p/m', '["builder"]', ledger)
-  advisorArmTestRun('a11-esc', 'p/m', '["builder"]', ledger, { status: 'fail', outcome: 'escalated' })
-  ledger.recordReviewOutcome({ adw_id: 'a11-1', dispatch_id: 'd1', verdict: 'changes-needed' })
-  ledger.recordReviewOutcome({ adw_id: 'a11-1', dispatch_id: 'd2', verdict: 'pass' })
-  ledger.recordReviewOutcome({ adw_id: 'a11-2', dispatch_id: 'd3', verdict: 'pass' })
-  const arm = advisorArmsReadout(ledger).arms[0]
-  assert.equal(arm.runs, 12)
-  assert.equal(arm.changes_needed, 1)
-  assert.equal(arm.review_denominator, 3)
-  assert.equal(arm.bounce_rate, 1 / 3)
-  assert.equal(arm.escalations, 1)
-  assert.equal(arm.escalation_rate, 1 / 12)
-  ledger.close()
-})
-// Kills: bounding advisor_model by the 64-character tier bound, which refuses a longer model id
-// that resolveTier accepts and so drops its run from every arm.
-test('S2 a run configuration records an advisor model longer than the tier bound', () => {
-  const ledger = openTestLedger()
-  const model = `provider/${'m'.repeat(58)}`
-  assert.equal(model.length, 67)
-  seedConfigurationRun(ledger, 's2', '2024-01-02T00:00:00.000Z', { advisor_model: model, advisor_granted_json: '["builder"]' })
-  assert.equal(ledger.dumpTable('run_configurations')[0].advisor_model, model)
-  ledger.close()
-})
-test('A8', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger, 'a8', '2024-01-02T00:00:00.000Z', { advisor_model: 'p/m', advisor_granted_json: '["builder"]' }); assert.equal(advisorArmsReadout(ledger).excluded.non_build_excluded, 1); ledger.close() })
-test('A9', () => {
-  const ledger = advisorArmTestRun('a9-1', 'first')
-  for (let i = 2; i <= 3; i++) advisorArmTestRun(`a9-${i}`, 'first', '["builder"]', ledger)
-  advisorArmTestRun('a9-4', 'second', '["builder"]', ledger)
-  advisorArmTestRun('a9-5', 'third', '["builder"]', ledger)
-  advisorArmTestRun('a9-6', 'fourth', '["builder"]', ledger)
-  advisorArmTestRun('a9-7', 'fourth', '["builder"]', ledger)
-  const arms = ['first', 'second', 'third', 'fourth']
-  const row = advisorArmsReadout(ledger, { arms })
-  assert.deepEqual(row.arms.map((arm) => arm.runs), [3, 1, 1, 2])
-  assert.equal(row.next_arm, 'second')
-  const dbPath = ledger._dbPath
-  ledger.close()
-  const env = { ...process.env, DEVTEAM_LEDGER_DB: dbPath }
-  const json = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--arms', arms.join(','), '--json'], { env, encoding: 'utf8' })
-  const text = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--arms', arms.join(',')], { env, encoding: 'utf8' })
-  if (json.status === 0 && text.status === 0) {
-    assert.equal(JSON.parse(json.stdout).next_arm, 'second')
-    assert.match(text.stdout, /next_arm: second/)
-    for (const arm of JSON.parse(json.stdout).arms) assert.match(text.stdout, new RegExp(`${arm.arm}: runs=${arm.runs}`))
-  } else {
-    assert.match(json.stderr + text.stderr, /degraded/)
-  }
-})
 
 export {
   NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,

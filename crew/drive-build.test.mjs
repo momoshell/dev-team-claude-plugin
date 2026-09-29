@@ -8455,7 +8455,7 @@ function captureOneDoneStep({ outputs = [steppedGreen(), steppedRed('A2')], buil
 test('C2 stepped-resume acceptance', () => {
   const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'full build paused' }) })
   addStepCheckpointWitness(io)
-  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'full' }, io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'full', roles: ['planner', 'builder', 'reviewer'] }, io)
   assert.equal(result.details.escalation.where, 'build')
   assert.equal(result.details.resume_checkpoint, undefined)
 })

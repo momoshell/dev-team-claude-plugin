@@ -184,7 +184,7 @@
     }
   },
   "gate": {
-    "description": "The driver opens the acceptance-gate stage for the built tree, or for one completed step of a stepped plan, and records the gate result before deciding what follows.",
+    "description": "The driver opens the acceptance-gate stage for the built tree, for one completed step of a stepped plan, or to re-verify a resumed stepped lane's done steps, and records the gate result before deciding what follows.",
     "charter": null,
     "source": {
       "file": "crew/drive.mjs",
@@ -207,6 +207,11 @@
         {
           "callee": "stage",
           "label": "gate:${step.id}:r${stepRound}",
+          "occurrence": 1
+        },
+        {
+          "callee": "stage",
+          "label": "gate:step-reverify",
           "occurrence": 1
         }
       ]

@@ -9854,7 +9854,7 @@ function runTask(ctx, io, crash) {
 
   let stepReverifyResult = null
   if (stepCheckpoint) {
-    stage('step:reverify')
+    stage('gate:step-reverify')
     try { stepReverifyResult = runGate('step:reverify', gateCmd) } catch { stepReverifyResult = null }
     stageComplete()
   }

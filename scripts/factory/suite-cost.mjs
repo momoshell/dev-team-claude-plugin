@@ -531,6 +531,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["crew/pi/extensions/fff.test.mjs",0.3735225,16,null],
   ["crew/pi/extensions/lab.test.mjs",33.957276542007925,58,null],
   ["crew/pi/extensions/readgate.test.mjs",0.14805212497711182,27,null],
+  ["crew/pi/extensions/reminders.test.mjs",0.24396395802497864,15,null],
   ["crew/pi/extensions/skeletonread.test.mjs",0.16577875000238418,18,null],
   ["crew/pi/extensions/subagent.test.mjs",0.15426725000143052,39,null],
   ["crew/reclaim-descendants.test.mjs",1.3658137910068036,37,null],

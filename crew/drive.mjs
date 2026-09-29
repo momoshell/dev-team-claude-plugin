@@ -4759,9 +4759,9 @@ export function narratorModelId(output) {
 // docs/conventions.md entry (the 2026-09-17 entry stands as history).
 // The falsification rules reach every reviewing seat from ONE file. `scripts/factory/pr-review.mjs` already
 // pastes it into a PR-review brief; a lane reviewer saw none of it, which is the whole
-// point of having written it down. It cannot be a capability grant: pi takes a skill as a
-// --skill flag but adapter-claude REFUSES any skill grant, and the judge tier's reviewer is
-// a claude seat — so the brief is the only carrier every agent shares.
+// point of having written it down. A capability grant would not do: a granted skill is only
+// offered to the seat to open (claude seats opened a granted skill 0 of 254 times, measured
+// 2026-09-29), so the brief is the only carrier every agent is sure to read.
 // An unreadable file is STATED in the brief, never silently dropped.
 export const FALSIFICATION_PATH = 'skills/pr-review/references/falsification.md'
 export const FALSIFICATION_HEADING = '## Falsification and adjudication (how a finding earns the right to be written)'

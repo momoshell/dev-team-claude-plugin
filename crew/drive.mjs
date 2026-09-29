@@ -6258,9 +6258,12 @@ function runTask(ctx, io, crash) {
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   let acceptedPlannerReturn = null
   let frozenEntries = []
+  // The plan digest pinned when the plan was frozen; a later snapshot must still match it.
+  let frozenPlanSha = null
   let rewriteOrdinal = 0
   function freezeAcceptedPlan(planPath, plannerReturn) {
     frozenEntries = []
+    frozenPlanSha = null
     const frozen = { plan_path: planPath, plan_sha256: null, envelope_path: plannerReturn?.path ?? null, envelope_sha256: null }
     const snapshot = (kind, livePath, text, snapshotPath, absentReason) => {
       if (typeof text !== 'string') { frozen[`${kind}_absent`] = absentReason; return }
@@ -6283,6 +6286,7 @@ function runTask(ctx, io, crash) {
     let planText = null
     if (taskLocal) try { const value = io.readFile(planPath); if (typeof value === 'string') planText = value } catch { /* unavailable */ }
     snapshot('plan', planPath, planText, art('plan.accepted.md'), taskLocal ? 'read-unavailable' : 'plan-outside-task-dir')
+    frozenPlanSha = frozen.plan_sha256
     if (plannerReturn) snapshot('envelope', plannerReturn.path, plannerReturn.text, art('plan.accepted.envelope.json'), 'planner-return-unavailable')
     else frozen.envelope_absent = stepCheckpoint ? 'resumed-step-checkpoint' : (variant === DIRECTED_STAGE_HEAD ? 'directed-no-seat' : 'triage-derived-plan')
     try { io.log(recordRow({ at: io.now(), plan_frozen: frozen })) } catch { /* journal failures are nonfatal */ }
@@ -6904,12 +6908,15 @@ function runTask(ctx, io, crash) {
       ...(kind === 'step' ? { step: { done: done.map((step) => typeof step === 'string' ? step : step.id), builder_attempts: builderAttempts, envelopes: doneEnvelopes, brief_file: ctx.briefFile, limits, plan_sha256: acceptedPlanDigest() } } : {}),
     }
   }
-  // The digest of the plan accepted at plan time. A step checkpoint without one is refused by
-  // resumeCheckpointDefect, so a resume can never adopt plan bytes nobody accepted.
+  // The digest pinned when the plan was frozen, and only while the snapshot still carries it. A step
+  // checkpoint without one is refused by resumeCheckpointDefect, so a resume never adopts plan bytes
+  // nobody accepted, including a snapshot a seat rewrote after acceptance.
   function acceptedPlanDigest() {
+    if (frozenPlanSha === null) return null
     let bytes = null
     try { const text = io.readFile(art('plan.accepted.md')); if (typeof text === 'string') bytes = text } catch { /* unavailable */ }
-    return bytes === null ? null : createHash('sha256').update(Buffer.from(bytes, 'utf8')).digest('hex')
+    if (bytes === null) return null
+    return createHash('sha256').update(Buffer.from(bytes, 'utf8')).digest('hex') === frozenPlanSha ? frozenPlanSha : null
   }
   const markResume = (result, details) => {
     if (result?.status !== 'escalation') return result

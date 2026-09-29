@@ -8528,6 +8528,21 @@ test('a stepped resume refuses an absent or mismatched accepted-plan snapshot', 
   assert.equal(resumeCheckpointDefect(undigested), 'checkpoint accepted plan digest is absent')
 })
 
+// Kills: capture hashing whatever the snapshot holds at escalation. A seat that rewrites
+// plan.accepted.md after acceptance must leave no checkpoint, so the rewrite can never be resumed.
+test('a step checkpoint is not captured when the accepted-plan snapshot changed after acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2')] })
+  addStepCheckpointWitness(io)
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => {
+    if (spec.role === 'builder') io.calls.files[`${TD}/plan.accepted.md`] = '# rewritten after acceptance\n'
+    return assign(spec)
+  }
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.resume_checkpoint, undefined)
+})
+
 test('C3 stepped-resume acceptance', () => {
   const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
   // Kills: dropping the done-step requirement from the capture guard. The witness and head

@@ -10875,10 +10875,16 @@ function runTask(ctx, io, crash) {
       }
       if (gateRes?.ok) recordStaleSpawnProof();
       if (!gateRes.ok) {
+        const gateOutput = typeof gateRes.output === 'string' ? gateRes.output : ''
+        const gateTail = gateOutput.slice(-LANE_RED_TAIL_CHARS)
+        const gateRedArtifact = art(`gate-red-r${round}.md`)
+        io.writeFile(gateRedArtifact, `# Red acceptance gate (round ${round})\n\nCommand:\n    ${gateCmd}\n\nFailures:\n${gateTail || 'the gate produced no output'}\n`)
+        const gateRedRow = { round, artifact: gateRedArtifact, output_bytes: Buffer.byteLength(gateOutput, 'utf8'), truncated: gateOutput.length > LANE_RED_TAIL_CHARS, tail: gateTail }
+        io.log(recordRow({ at: io.now(), gate_red: gateRedRow }))
         if (finalRound()) {
           const c = consultLead(
             `The acceptance gate is still red after ${round} build rounds. Bounce once more with guidance, or escalate?`,
-            ['bounce', 'escalate'], [planPath, journal],
+            ['bounce', 'escalate'], [gateRedArtifact, planPath, journal],
           )
           if (c.decision !== 'bounce') {
             const settled = settleConvergence({ why: c.reason, where: 'gate', gateOutput: gateRes.output, ctx, io, lastReview: S.lastReview, stages: S.stages, consults: S.consults, dissents: S.dissents, grants: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements, setCommit: (value) => { S.commit = value; return value }, builderEnv, planEnv, planPath, journal, inScope, stage, stageComplete, phaseSlot, emit, carriedBlock, gateBlock, acceptDecisionBlock, escalate })
@@ -10887,13 +10893,13 @@ function runTask(ctx, io, crash) {
               return settled
             }
             stageComplete()
-            return gateEscalate(c.reason)
+            return gateEscalate(c.reason, [gateRedArtifact])
           }
           grantBuilderAllowance('gate', round)
         }
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('gate', 'builder')
-        io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
+        io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateTail}\n\nPlan: ${planPath}`)
         buildBrief = b; buildNote = 'gate-fix'
         stageComplete()
         continue

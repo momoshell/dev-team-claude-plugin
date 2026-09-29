@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  staleSpawnProof, publicationIo, PUBLISH_WARM_OUTPUT,
+  staleSpawnProof, publicationIo, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
@@ -936,6 +936,131 @@ test('C1 lane-red escalation carries the artifact', () => {
   assert.equal(res.status, 'escalation')
   assert.ok(res.artifacts.includes(artifactPath))
   assert.match(io.calls.files[artifactPath], new RegExp(marker))
+})
+
+test('K1', () => {
+  const marker = 'DISTINCTIVE_FINAL_GATE_FAILURE_K1'
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'build remains incomplete' } },
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: 'first failure' },
+      'gate-cmd:3': { ok: false, output: 'round two' }, 'gate-cmd:4': { ok: false, output: marker },
+    },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const artifactPath = `${CTX.taskDir}/gate-red-r3.md`
+  const leadAssign = io.calls.assign.find((a) => a.role === 'lead')
+  assert.ok(leadAssign, JSON.stringify(io.calls.assign.map(({ role, briefFile }) => ({ role, briefFile }))))
+  assert.ok(io.calls.writes[leadAssign.briefFile].includes(marker))
+  const rowIndex = io.calls.sequence.findIndex((event) => event.kind === 'log' && event.row.gate_red?.artifact === artifactPath)
+  const leadIndex = io.calls.sequence.findIndex((event) => event.kind === 'assign' && event.role === 'lead')
+  assert.ok(rowIndex >= 0 && rowIndex < leadIndex)
+  const artifactIndex = io.calls.writeLog.findIndex((event) => event.path === artifactPath)
+  const briefIndex = io.calls.writeLog.findIndex((event) => event.path === leadAssign.briefFile)
+  assert.ok(artifactIndex >= 0 && artifactIndex < briefIndex)
+})
+
+test('K2', () => {
+  const firstLine = 'DISTINCTIVE_FIRST_GATE_LINE_K2'
+  const lastLine = 'DISTINCTIVE_LAST_GATE_LINE_K2'
+  const output = `${firstLine}\n${'x'.repeat(200_000)}\n${lastLine}`
+  const planPath = `${CTX.taskDir}/plan.md`
+  const io = fakeIo({
+    writeThrough: true, files: { [planPath]: 'large plan\n'.repeat(10_000) },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'build remains incomplete' } },
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: 'round one' }, 'gate-cmd:3': { ok: false, output: 'round two' }, 'gate-cmd:4': { ok: false, output } },
+    changed: ['a.mjs'],
+  })
+  driveTask(CTX, io)
+  const artifactPath = `${CTX.taskDir}/gate-red-r3.md`
+  const leadAssign = io.calls.assign.find((a) => a.role === 'lead')
+  assert.ok(leadAssign, JSON.stringify(io.calls.assign.map(({ role, briefFile }) => ({ role, briefFile }))))
+  const brief = io.calls.writes[leadAssign.briefFile]
+  assert.ok(brief.includes(lastLine)); assert.ok(!brief.includes(firstLine))
+  assert.equal(io.calls.logs.find((row) => row.lead_consult_context)?.lead_consult_context.sources.find((source) => source.path === artifactPath).mode, 'inline')
+  const row = io.calls.logs.find((entry) => entry.gate_red?.artifact === artifactPath).gate_red
+  assert.ok(row.tail.length <= 4000); assert.equal(row.truncated, true)
+})
+
+test('N1', () => {
+  const outputs = ['round one 🙂\nLAST_GATE_ROUND_1', 'round two Ω\nLAST_GATE_ROUND_2']
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'build remains incomplete' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: outputs[0] },
+      'gate-cmd:3': { ok: false, output: outputs[1] }, 'gate-cmd:4': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const rows = io.calls.logs.filter((entry) => entry.gate_red).map((entry) => entry.gate_red)
+  assert.equal(rows.length, 2); assert.deepEqual(rows.map((row) => row.round), [1, 2])
+  assert.equal(new Set(rows.map((row) => row.artifact)).size, 2)
+  rows.forEach((row, index) => {
+    assert.ok(row.tail.endsWith(outputs[index].split('\n').at(-1)))
+    assert.equal(row.output_bytes, Buffer.byteLength(outputs[index], 'utf8'))
+    assert.ok(io.calls.writes[row.artifact])
+  })
+  assert.equal(Object.keys(io.calls.writes).filter((path) => path.startsWith(`${CTX.taskDir}/gate-red-r`)).length, 2)
+})
+
+test('N2', () => {
+  for (const output of ['', null]) {
+    const io = fakeIo({
+      writeThrough: true,
+      envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'builder:2': buildEnv() },
+      runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output }, 'gate-cmd:3': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    driveTask(CTX, io)
+    const row = io.calls.logs.find((entry) => entry.gate_red)?.gate_red
+    assert.deepEqual({ output_bytes: row.output_bytes, tail: row.tail, truncated: row.truncated }, { output_bytes: 0, tail: '', truncated: false })
+    assert.match(io.calls.files[row.artifact], /the gate produced no output/)
+    assert.match(io.calls.files[row.artifact], /gate-cmd/)
+  }
+})
+
+test('X1', () => {
+  const io = fakeIo({
+    writeThrough: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'build remains incomplete' } },
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: 'round two' }, 'gate-cmd:3': { ok: false, output: 'round two' }, 'gate-cmd:4': { ok: false, output: 'round three' } },
+    changed: ['a.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.ok(res.artifacts.includes(`${CTX.taskDir}/gate-red-r3.md`))
+})
+
+test('V1', () => {
+  assert.deepEqual(DRIVE_JOURNAL_EXPECTED.filter(([, , keys]) => keys === 'at gate_red'), [['recordRow', '', 'at gate_red']])
+  const sites = driveJournalSites(readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')).filter(({ keys }) => keys === 'at gate_red')
+  assert.equal(sites.length, 1)
+  assert.equal(sites[0].wrapper, 'recordRow')
 })
 
 test('a lane bounce records an applied failure-upgrade on the envelope and journal', () => {

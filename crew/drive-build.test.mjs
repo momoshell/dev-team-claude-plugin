@@ -8509,7 +8509,10 @@ test('B1 stepped-resume acceptance', () => {
 
 test('C3 stepped-resume acceptance', () => {
   const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
-  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  // Kills: dropping the done-step requirement from the capture guard. The witness and head
+  // make the checkpoint otherwise capturable, so only that guard keeps it absent.
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
   assert.equal(result.details.escalation.where, 'build')
   assert.equal(result.details.resume_checkpoint, undefined)
   assert.equal(io.calls.logs.filter((row) => row.event === 'step:done').length, 0)

@@ -50,7 +50,11 @@ test('M1', () => {
   const dir = fixture()
   const result = invoke(dir, 'session-start')
   assert.equal(result.status, 0)
-  assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['**/anchors.json', 'docs/audits/**'], rules: pathRules })
+  assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['**/anchors.json', 'docs/audits/**'], rules: [
+    { when: { roles: ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:lean-build'] },
+    { when: { roles: ['reviewer', 'tech-lead'] }, skills: ['dev-team:pr-review'] },
+    ...pathRules,
+  ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.match(result.stdout, /dev-team:lean-build/)
 })

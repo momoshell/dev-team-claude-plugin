@@ -27,6 +27,7 @@ place that runs the review flow.
 
 ## Critical rules
 
+- A hand-rolled shape where crew/roles/_shared.md's ladder or skills/lean-build/SKILL.md names an accepted one is a finding.
 - State a finding as *state → wrong observable* in one sentence, or grade it a
   consider; this is the measured distinction in F10 and F11.
 - **Falsify before you write.** A candidate survives only when its input, call

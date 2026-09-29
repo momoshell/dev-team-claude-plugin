@@ -53,6 +53,15 @@ export function matchGlob(glob, path) {
   return match(0, 0)
 }
 
+export function resolveSeatSkills({ map, role, files }) {
+  const roleRules = map.rules.filter((rule) => rule.when.roles?.includes(role))
+  const pathRules = files === null ? [] : map.rules.filter((rule) => rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
+  const paths_unmeasured = files === null ? 'no-fence-register' : null
+  const skills = new Set()
+  for (const rule of [...roleRules, ...pathRules]) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
+  return { skills: [...skills], paths_unmeasured }
+}
+
 export function requiredSkills(map, path) {
   if (map.exempt.some((g) => matchGlob(g, path))) return []
   const result = new Set()

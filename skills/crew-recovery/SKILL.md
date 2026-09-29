@@ -21,6 +21,7 @@ suite have been proved, and the PR is published.
 | Deciding whether a seat is idle or busy | `references/liveness.md` | Combine status, pane liveness, and both journal timestamp shapes. |
 | Re-deriving a surprising measurement | `references/instruments.md` | Check the known instrument failure modes before acting on a result. |
 | Interpreting an escalation | `references/escalations.md` | Match the exact emitted token, then take the first evidence-preserving move. |
+| Finishing an escalated lane by hand | `references/hand-finish.md` | Finish when the build exists and the blocker is outside the work; re-dispatch on a wrong premise or a plan-stage death. |
 
 ## Critical rules
 
@@ -39,3 +40,4 @@ suite have been proved, and the PR is published.
 - [`references/liveness.md`](references/liveness.md) — alive versus busy and envelope evidence.
 - [`references/instruments.md`](references/instruments.md) — measured instrument failure modes and second ways to check.
 - [`references/escalations.md`](references/escalations.md) — emitted escalation stages and first moves.
+- [`references/hand-finish.md`](references/hand-finish.md) — finish-or-re-dispatch, the hand-finish procedure, and guarded rebase rules.

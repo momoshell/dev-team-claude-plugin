@@ -3323,7 +3323,16 @@ export async function bootCmd(args, deps = {}) {
         const bytes = Buffer.byteLength(shortCommand, 'utf8')
         throw Object.assign(new Error(`${role}: ${bytes} bytes exceeds PANE_LAUNCH_MAX_BYTES ${PANE_LAUNCH_MAX_BYTES} [pane-launch-too-long]`), { reason: 'pane-launch-too-long' })
       }
-      writeFileSync(launcher, `#!/bin/sh\nexec ${command}\n`, { mode: 0o700 })
+      // Replace, never write through: a planted launch-<role>.sh symlink would otherwise have
+      // boot overwrite its target. 'wx' refuses an existing temporary (a symlink included),
+      // and renameSync swaps the directory entry itself.
+      const temporary = `${launcher}.tmp-${process.pid}`
+      writeFileSync(temporary, `#!/bin/sh\nexec ${command}\n`, { mode: 0o700, flag: 'wx' })
+      try { renameSync(temporary, launcher) }
+      catch (error) {
+        try { unlinkSync(temporary) } catch { /* the launcher path was never written */ }
+        throw error
+      }
       return shortCommand
     }
     const layout = composeLayout(paneRoles, mk)

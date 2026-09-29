@@ -1,7 +1,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, statSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, statSync, symlinkSync, lstatSync } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
@@ -2215,6 +2215,7 @@ async function bootPaneLaunchFixture(task, options = {}) {
   }
   let error = null
   try {
+    options.before?.({ scratch, taskDir: join(testCrewDir(home, checkout, task), 'task') })
     await withHome(home, async () => {
       try {
         await bootCmd({ task, checkout, tier: 'build', 'claude-bin': process.execPath, ...options.args }, {
@@ -2240,6 +2241,28 @@ function layoutCommands(node, commands = []) {
   for (const child of node?.children || []) layoutCommands(child, commands)
   return commands
 }
+
+// Kills: writing the launcher in place (writeFileSync(launcher, …)) — boot would follow a planted
+// launch-lead.sh symlink and overwrite its target. The target must keep its bytes, and the
+// launcher path must end as a regular file boot wrote.
+test('a planted launcher symlink is replaced, never written through', async () => {
+  let target = null
+  const f = await bootPaneLaunchFixture('l4-symlink', {
+    before: ({ scratch, taskDir }) => {
+      target = join(scratch, 'precious.txt')
+      writeFileSync(target, 'precious\n')
+      mkdirSync(taskDir, { recursive: true })
+      symlinkSync(target, join(taskDir, 'launch-lead.sh'))
+    },
+  })
+  try {
+    assert.equal(f.error, null)
+    assert.equal(readFileSync(target, 'utf8'), 'precious\n')
+    const launcher = join(f.taskDir, 'launch-lead.sh')
+    assert.equal(lstatSync(launcher).isSymbolicLink(), false)
+    assert.match(readFileSync(launcher, 'utf8'), /^#!\/bin\/sh\nexec /)
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
 
 test('L1', async () => {
   const f = await bootPaneLaunchFixture('l1-launch')

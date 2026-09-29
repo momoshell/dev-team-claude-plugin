@@ -1444,6 +1444,10 @@ export function seatBand(ladder, seat, { adapter = null, localProviders = null }
 // Refuse, never downgrade. PURE: the ladder and the adapter context are passed
 // in, so a boot and a test exercise one code path. `adapters` is the
 // {role: {name, adapter}} map resolveAdapters returns.
+// ADR-047 decision 10 (operator, 2026-09-29): the advisor cell's floor is the ladder's lowest
+// band, so the advisor-strength A/B can seat a basement model such as claude-haiku-4-5.
+export const ADVISOR_FLOOR_BAND = 'basement'
+
 export function assertBandFloors(seats, tier, ladder, { adapters = null, localProviders = null, models = null } = {}) {
   const floorName = ladder?.floors?.[tier]
   if (typeof floorName !== 'string' || !ladder.ranks.has(floorName)) {
@@ -1492,8 +1496,13 @@ export function assertBandFloors(seats, tier, ladder, { adapters = null, localPr
       throw refuseBandFloor('band-unknown', `seat ${role} expected a model in a ratified band at or above "${floorName}" for tier ${tier}, found ${JSON.stringify(key || null)} proven by no ratified member, at ${ladder.path} bands[].members`)
     }
     const rank = ladder.ranks.get(found.band)
-    if (rank < floorRank) {
-      throw refuseBandFloor('band-below-floor', `seat ${role} expected band at or above "${floorName}" (rank ${floorRank}) for tier ${tier}, found "${found.band}" (rank ${rank}) for model ${key} (ratified member ${found.member}), at ${ladder.path} tier_floors.${tier}`)
+    // ADR-047 decision 10: the advisor writes nothing, so its cell is held to its own floor,
+    // not the tier's. A ladder without that band keeps the tier floor (fail closed).
+    const advisorFloor = role === 'advisor' && ladder.ranks.has(ADVISOR_FLOOR_BAND)
+    const roleFloorName = advisorFloor ? ADVISOR_FLOOR_BAND : floorName
+    const roleFloorRank = advisorFloor ? ladder.ranks.get(ADVISOR_FLOOR_BAND) : floorRank
+    if (rank < roleFloorRank) {
+      throw refuseBandFloor('band-below-floor', `seat ${role} expected band at or above "${roleFloorName}" (rank ${roleFloorRank}) for tier ${tier}, found "${found.band}" (rank ${rank}) for model ${key} (ratified member ${found.member}), at ${ladder.path} ${advisorFloor ? 'ADVISOR_FLOOR_BAND' : `tier_floors.${tier}`}`)
     }
   }
 }

@@ -126,6 +126,12 @@ function builderGrantedRegister() {
   return register
 }
 const GRANTED = Object.freeze({ register: builderGrantedRegister() })
+function builderUngrantedRegister() {
+  const register = structuredClone(loadCapabilities())
+  register.roles.builder.advisor = false
+  return register
+}
+const UNGRANTED = Object.freeze({ register: builderUngrantedRegister() })
 
 // Attempt rows for every seat of the fixture build tier, so the SEATS' aggregate is measured.
 const BUILD_SEAT_ATTEMPTS = [
@@ -173,12 +179,18 @@ test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the
   assert.equal(Object.hasOwn(bare.boot.breaker, 'advisor'), false)
 })
 
-test('ADR047 C2 a below-floor advisor cell refuses the boot before any state dir or workspace', async () => {
-  const result = await bootAdvisor({ task: 'adr047-c2', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
-  assert.equal(result.error?.reason, 'band-below-floor')
-  assert.match(result.error.message, /advisor/)
-  assert.equal(result.stateDir, false)
-  assert.equal(result.workspaceCalls, 0)
+// Kills: the advisor floor dropped (haiku refuses again as an advisor), and the advisor floor
+// applied to every seat (haiku stops refusing as a builder, whose floor is the tier's).
+test('ADR047 C2 a basement advisor cell boots while a basement seat still refuses before any state dir', async () => {
+  // Decision 10: the advisor cell is held to ADVISOR_FLOOR_BAND, not the build tier's utility floor.
+  const advisor = await bootAdvisor({ task: 'adr047-c2-advisor', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(advisor.error, null)
+  assert.equal(advisor.crew.seats.advisor.id, 'claude-haiku-4-5')
+  const seat = await bootAdvisor({ task: 'adr047-c2-seat', args: { 'model-builder': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(seat.error?.reason, 'band-below-floor')
+  assert.match(seat.error.message, /seat builder/)
+  assert.equal(seat.stateDir, false)
+  assert.equal(seat.workspaceCalls, 0)
 })
 
 test('ADR047 E1 crew.json records the adapter-translated advisor model beside the canonical key', async () => {
@@ -275,9 +287,10 @@ test('ADR047 S2 a --roles boot refuses advisor flags it has no cell to apply', a
     assert.equal(result.stateDir, false)
     assert.equal(result.workspaceCalls, 0)
   }
+  // `none` needs no cell, so it boots; the shipped grant still names the builder (tier 0).
   const none = await bootAdvisor({ task: 'adr047-s2-none', args: { tier: undefined, roles: 'builder', 'model-advisor': 'none' } })
   assert.equal(none.error, null)
-  assert.deepEqual(none.crew.advisor.granted, [])
+  assert.deepEqual(none.crew.advisor.granted, ['builder'])
 })
 
 test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its legacy contract', async () => {
@@ -329,19 +342,22 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
   }
 })
 
-test('ADR047 K2 the shipped default boots a build crew that loads and consults no advisor', async () => {
+// Kills: the shipped builder grant reverted to false (the pane layout loses CREW_ADVISOR=1 and
+// advisor.ts), and a grant leaking to a second role (granted stops being exactly ['builder']).
+test('ADR047 K2 the shipped default boots a build crew whose builder loads the advisor', async () => {
+  // Operator decision 9: the grant shipped off until lane 2 (PR #1614); it is now on.
   const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
   const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.doesNotMatch(layout, /CREW_ADVISOR=1/)
-  assert.equal(layout.includes('advisor.ts'), false)
+  assert.match(layout, /CREW_ADVISOR=1/)
+  assert.equal(layout.includes('advisor.ts'), true)
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)
-  assert.deepEqual(headless.crew.advisor.granted, [])
-  // The cell is still resolved and recorded: only the grant is off.
+  assert.deepEqual(headless.crew.advisor.granted, ['builder'])
   assert.equal(headless.crew.seats.advisor.id, 'claude-sonnet-5')
-  // Switched on inside the test, the same boot grants the builder.
-  const granted = await bootAdvisor({ task: 'adr047-k2-granted', deps: GRANTED })
-  assert.deepEqual(granted.crew.advisor.granted, ['builder'])
+  // Switched off inside the test, the same boot grants no seat and still records the cell.
+  const ungranted = await bootAdvisor({ task: 'adr047-k2-ungranted', deps: UNGRANTED })
+  assert.deepEqual(ungranted.crew.advisor.granted, [])
+  assert.equal(ungranted.crew.seats.advisor.id, 'claude-sonnet-5')
 })
 
 test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
@@ -1020,7 +1036,8 @@ test('C1P/C1R subagent-only grants preserve the pre-change argv', () => {
 })
 
 test('BG1', () => {
-  const register = loadCapabilities()
+  // Composition of extensions and skills, independent of the advisor grant (ADR047 M1/M2 pin that).
+  const register = builderUngrantedRegister()
   const builderGrants = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'pi' })
   assert.doesNotThrow(() => assertGrantsBacked('builder', builderGrants, register, { agent: 'pi' }))
   const builder = {
@@ -1077,7 +1094,8 @@ test('BG1', () => {
 })
 
 test('BG2', () => {
-  const register = loadCapabilities()
+  // Composition of extensions and skills, independent of the advisor grant (ADR047 M1/M2 pin that).
+  const register = builderUngrantedRegister()
   const builderGrants = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'pi' })
   assert.doesNotThrow(() => assertGrantsBacked('builder', builderGrants, register, { agent: 'pi' }))
   const builder = rpcCommand({
@@ -2918,8 +2936,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].skills, [])
     assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
     assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
-    // ADR-047 decision 9: no seat is granted the advisor until lane 2 flips the builder.
-    assert.equal(register.roles[role].advisor, false)
+    // ADR-047 decision 9: lane 2 (PR #1614) landed, so the builder alone is granted the advisor.
+    assert.equal(register.roles[role].advisor, role === 'builder')
   }
   for (const tier of Object.keys(roster.tiers)) {
     const { roles, seats } = resolveTier(roster, tier, {})

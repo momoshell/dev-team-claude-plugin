@@ -222,6 +222,13 @@ local cells, which stays ADR-037's.
 9. **Default grant (2026-09-28):** lane 1 ships the builder's `advisor` grant OFF in `crew/capabilities.json`, so no
    lane loads or consults the advisor after lane 1 merges. Lane 2 lands delta-only consults and recorded consult
    failures; then the grant is flipped, and the tier-0 arm (measurement step 1) runs first.
+   Flipped 2026-09-29 after lane 2 merged (PR #1614).
+10. **Advisor floor and strength arms (2026-09-29):** the advisor writes nothing, so its cell is held to its own
+    floor, `ADVISOR_FLOOR_BAND = 'basement'` (`crew/crew.mjs`), not the tier's; every seat keeps the tier floor.
+    The operator wants concrete numbers on advisor strength, so the model channel runs four arms, one cell each,
+    rotated on ordinary build-tier lanes at dispatch with `--model-advisor`: `none` (tier 0),
+    `anthropic/claude-haiku-4-5` (basement), `anthropic/claude-sonnet-5` (workhorse, the shipped default) and
+    `anthropic/claude-opus-5-5` (frontier). Each arm needs the protocol's floor of 12 before it is read.
 
 ## Reverses if
 

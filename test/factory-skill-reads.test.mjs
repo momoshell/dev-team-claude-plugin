@@ -49,6 +49,24 @@ test('RV1-4 skill-read names and counts root traversal and invalid timestamp err
   assert.match(invalidTime.stderr, /journal\.jsonl:1/)
 })
 
+// Kills: the transport lookup reading inherited keys (a plain object indexed by row.transport),
+// and TRANSPORT_AGENTS left unfrozen or with a fourth transport.
+test('SV1 skill-read admits only its three own transports', async () => {
+  const { TRANSPORT_AGENTS } = await import(new URL('../scripts/factory/skill-reads.mjs', import.meta.url).href)
+  assert.deepEqual({ ...TRANSPORT_AGENTS }, { 'headless-rpc': 'pi', 'headless-json': 'claude', acp: 'acp' })
+  assert.equal(Object.isFrozen(TRANSPORT_AGENTS), true)
+  const root = scratchDir('skill-read-proto-')
+  journal(root, 'seat', [{ at: 1780000000000, seat_turn_census: { transport: '__proto__', role: 'builder', skill_reads: [] } }])
+  assert.equal(spawnSync(process.execPath, [script, '--root', root], { encoding: 'utf8' }).stdout, '')
+})
+
+// Kills: --since parsed by Date.parse without the ISO shape check, which accepts `0` as a date.
+test('SV2 skill-read --since refuses a non-ISO value and keeps a date-only one', () => {
+  const root = scratchDir('skill-read-since-')
+  assert.equal(spawnSync(process.execPath, [script, '--root', root, '--since', '0'], { encoding: 'utf8' }).status, 2)
+  assert.equal(spawnSync(process.execPath, [script, '--root', root, '--since', '2026-06-01'], { encoding: 'utf8' }).status, 0)
+})
+
 test('R3 skill-read names unreadable journals', () => {
   const root = scratchDir('skill-read-bad-')
   mkdirSync(join(root, 'seat', 'journal.jsonl'), { recursive: true })

@@ -4,12 +4,19 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+// The three census transports this readout admits, read by own key only so an inherited
+// name such as `__proto__` is a miss rather than a match.
+export const TRANSPORT_AGENTS = Object.freeze({ 'headless-rpc': 'pi', 'headless-json': 'claude', acp: 'acp' })
+const agentOf = (transport) => (Object.hasOwn(TRANSPORT_AGENTS, transport) ? TRANSPORT_AGENTS[transport] : undefined)
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?$/
+
 function args(argv) {
   let root = join(homedir(), '.crew'), since = -Infinity
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root' && argv[i + 1]) root = argv[++i]
     else if (argv[i] === '--since' && argv[i + 1]) {
-      const value = Date.parse(argv[++i]);
+      const text = argv[++i]
+      const value = ISO_TIMESTAMP.test(text) ? Date.parse(text) : NaN
       if (!Number.isFinite(value)) throw new Error('--since must be an ISO timestamp')
       since = value
     } else throw new Error(`unknown or malformed option: ${argv[i]}`)
@@ -35,7 +42,7 @@ export function report(root, since = -Infinity) {
           let value
           try { value = JSON.parse(line) } catch (error) { parseErrors.push(`${path}:${index + 1}`); continue }
           const row = value?.seat_turn_census
-          const agent = ({ 'headless-rpc': 'pi', 'headless-json': 'claude', acp: 'acp' })[row?.transport]
+          const agent = agentOf(row?.transport)
           if (!agent || !row) continue
           const stamp = typeof value.at === 'number' ? value.at : Date.parse(value.at)
           if (!Number.isFinite(stamp)) { timestampErrors.push(`${path}:${index + 1}`); continue }

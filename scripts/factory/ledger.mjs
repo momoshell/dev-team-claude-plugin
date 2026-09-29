@@ -8038,9 +8038,10 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const key = configuration.advisor_model
     const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
     // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
+    // Its advisor consults are already spent, so its id still feeds advisor spend (run_ids).
+    arm.run_ids.push(session.adw_id)
     if (session.ended_at == null) { arm.in_flight++; armsMap.set(key, arm); continue }
     arm.runs++
-    arm.run_ids.push(session.adw_id)
     const buildRounds = phaseRows.filter((row) => row.adw_id === session.adw_id).map((row) => /^build:r(\d+)$/.exec(row.name)?.[1]).filter(Boolean).map(Number)
     arm.build_rounds += buildRounds.length ? Math.max(...buildRounds) : 0
     const runReviews = reviewsRows.filter((row) => row.adw_id === session.adw_id)

@@ -2005,6 +2005,18 @@ test('A10 a run still in flight counts toward the rotation, never toward an outc
   assert.equal(out.next_arm, 'done')
   ledger.close()
 })
+// Kills: dropping an in-flight run's id from advisor spend (its consults read as no-advisor-usage
+// while the run is active, then reappear after endSession).
+test('A12 an in-flight run still contributes its recorded advisor consults to spend', () => {
+  const ledger = advisorArmTestRun('a12-live', 'p/m', '["builder"]', openTestLedger(), { running: true })
+  ledger.recordAdvisorUsage({ adw_id: 'a12-live', consult_id: 'c1', model: 'no-such-provider/no-such-model', usage: { billed_input_tokens: 10, billed_output_tokens: 10, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 } })
+  const arm = advisorArmsReadout(ledger).arms[0]
+  assert.equal(arm.runs, 0)
+  assert.equal(arm.in_flight, 1)
+  assert.equal(arm.advisor_spend.usage_count, 1)
+  assert.equal(arm.advisor_spend.absent_reason, 'model-unpriced-or-ambiguous')
+  ledger.close()
+})
 // Kills: dropping the changes-needed increment (bounce numerator reads 0) and dropping the
 // escalation increment (escalations read 0); the A1–A9 fixtures carry neither.
 test('A11 bounce and escalation numerators count changes-needed reviews and escalated runs', () => {

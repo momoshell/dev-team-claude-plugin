@@ -2960,6 +2960,7 @@ function workflowSeatFields(seat) {
 
 export const BOOT_WORKSPACE_DEADLINE_MS = 60_000
 export const BOOT_WORKSPACE_POLL_MS = 250
+export const PANE_LAUNCH_MAX_BYTES = 512
 
 export async function bootCmd(args, deps = {}) {
   const {
@@ -3309,11 +3310,22 @@ export async function bootCmd(args, deps = {}) {
   if (headlessOnly) {
     for (const role of roles) members[role] = memberFor(role)
   } else {
-    const mk = (role) => paneCommand(role, args, {
-      taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
-      grants: adapters[role].grants, search: adapters[role].search, configDir: adapters[role].configDir,
-      advisorCell: adapters[role].grants?.advisor === true ? piAdapter.advisorLaunchCell(advisorRecord) : null,
-    })
+    const mk = (role) => {
+      const command = paneCommand(role, args, {
+        taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
+        grants: adapters[role].grants, search: adapters[role].search, configDir: adapters[role].configDir,
+        advisorCell: adapters[role].grants?.advisor === true ? piAdapter.advisorLaunchCell(advisorRecord) : null,
+      })
+      const launcher = join(paths.taskDir, `launch-${role}.sh`)
+      const escaped = launcher.replace(/'/g, "'\\''")
+      const shortCommand = `/bin/sh '${escaped}'`
+      if (Buffer.byteLength(shortCommand, 'utf8') > PANE_LAUNCH_MAX_BYTES) {
+        const bytes = Buffer.byteLength(shortCommand, 'utf8')
+        throw Object.assign(new Error(`${role}: ${bytes} bytes exceeds PANE_LAUNCH_MAX_BYTES ${PANE_LAUNCH_MAX_BYTES} [pane-launch-too-long]`), { reason: 'pane-launch-too-long' })
+      }
+      writeFileSync(launcher, `#!/bin/sh\nexec ${command}\n`, { mode: 0o700 })
+      return shortCommand
+    }
     const layout = composeLayout(paneRoles, mk)
 
     const before = treeFn()
@@ -4181,7 +4193,7 @@ export function awaitSeatsReady(crew, mode, journal = null, deps = {}) {
   const recorded = new Set()
   while (pending.size > 0) {
     for (const role of [...pending]) {
-      const res = cmuxFn('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
+      const res = cmuxFn('read-screen', ['--surface', crew.members[role].surface_id])
       const sig = (res.ok && seatReadySignal(res.stdout, role)) || null
       if (!sig) continue
       lastSignal.set(role, sig)

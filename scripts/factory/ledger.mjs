@@ -8043,7 +8043,8 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     arm.reviews += runReviews.length
     arm.changes_needed += runReviews.filter((row) => row.verdict === 'changes-needed').length
     if (session.outcome === 'escalated') arm.escalations++
-    if (Number.isFinite(Number(session.billed_cost_usd))) { arm.billed_runs++; arm.lane_spend_usd += Number(session.billed_cost_usd) }
+    // An unbilled run is absent spend, never $0: Number(null) is 0, so test the stored value itself.
+    if (typeof session.billed_cost_usd === 'number' && Number.isFinite(session.billed_cost_usd)) { arm.billed_runs++; arm.lane_spend_usd += session.billed_cost_usd }
     armsMap.set(key, arm)
   }
   const requested = armOrder ?? [...armsMap.keys()]

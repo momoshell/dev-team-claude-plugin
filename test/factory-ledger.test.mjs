@@ -1973,6 +1973,19 @@ test('A4', () => { const ledger = advisorArmTestRun('a4'); ledger.startPhase({ a
 test('A5', () => { const ledger = advisorArmTestRun('a5'); const row = advisorArmsReadout(ledger).arms[0]; assert.equal(row.review_denominator, 0); ledger.close() })
 test('A6', () => { const ledger = advisorArmTestRun('a6'); assert.equal(advisorArmsReadout(ledger).arms[0].escalation_denominator, 1); ledger.close() })
 test('A7', () => { const ledger = advisorArmTestRun('a7'); assert.equal(advisorArmsReadout(ledger).arms[0].advisor_spend.absent_reason, 'no-advisor-usage'); ledger.close() })
+// Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
+// which inflates lane_spend_denominator; and dropping a billed run (the spend and denominator fall).
+test('A7 lane spend: an unbilled run is missing spend, never a measured zero', () => {
+  const ledger = advisorArmTestRun('a7-billed')
+  advisorArmTestRun('a7-unbilled', 'p/m', '["builder"]', ledger)
+  ledger.endSession({ adw_id: 'a7-billed', status: 'ok', outcome: 'success', billed_cost_usd: 1.5 })
+  const arm = advisorArmsReadout(ledger).arms[0]
+  assert.equal(arm.runs, 2)
+  assert.equal(arm.lane_spend_usd, 1.5)
+  assert.equal(arm.lane_spend_denominator, 1)
+  assert.equal(arm.lane_spend_missing_runs, 1)
+  ledger.close()
+})
 test('A8', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger, 'a8', '2024-01-02T00:00:00.000Z', { advisor_model: 'p/m', advisor_granted_json: '["builder"]' }); assert.equal(advisorArmsReadout(ledger).excluded.non_build_excluded, 1); ledger.close() })
 test('A9', () => {
   const ledger = advisorArmTestRun('a9-1', 'first')

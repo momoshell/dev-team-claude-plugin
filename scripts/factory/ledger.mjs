@@ -3215,7 +3215,9 @@ export function openLedger({
     if (!Number.isInteger(input.schema_version) || input.schema_version < 1) {
       refuse('recordRunConfiguration: schema_version must be a positive integer')
     }
-    if (input.advisor_model != null && (typeof input.advisor_model !== 'string' || input.advisor_model !== 'none' && (!input.advisor_model.trim() || input.advisor_model.length > TIER_MAX_CHARS))) {
+    // The advisor model's own bound (the one recordAdvisorUsage applies), not the tier bound:
+    // a longer model id resolveTier accepts must not silently drop its run from every arm.
+    if (input.advisor_model != null && (typeof input.advisor_model !== 'string' || input.advisor_model !== 'none' && (!input.advisor_model.trim() || input.advisor_model.length > ADVISOR_MODEL_MAX_CHARS))) {
       refuse('recordRunConfiguration: advisor_model must be a bounded nonblank string')
     }
     if (input.advisor_granted_json != null) {
@@ -8034,7 +8036,9 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     if (!Array.isArray(granted) || !granted.every((role) => typeof role === 'string')) granted = []
     if (!granted.includes('builder')) { ungranted++; continue }
     const key = configuration.advisor_model
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
+    if (session.ended_at == null) { arm.in_flight++; armsMap.set(key, arm); continue }
     arm.runs++
     arm.run_ids.push(session.adw_id)
     const buildRounds = phaseRows.filter((row) => row.adw_id === session.adw_id).map((row) => /^build:r(\d+)$/.exec(row.name)?.[1]).filter(Boolean).map(Number)
@@ -8049,7 +8053,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   }
   const requested = armOrder ?? [...armsMap.keys()]
   const results = requested.map((key) => {
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
     const runs = arm.runs
     const thin = runs < CELL_RATE_FLOOR
     const changesNeeded = arm.changes_needed
@@ -8072,10 +8076,10 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const pricedRows = priced.filter((row) => row.cost != null)
     const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
     const noUsage = advisorRows.length === 0 ? null : 'usage-present'
-    return { arm: key, runs, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: runs - arm.billed_runs, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
+    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: runs - arm.billed_runs, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
   })
   let winner = null
-  if (armOrder) for (const candidate of results) if (winner === null || candidate.runs < winner.runs) winner = candidate
+  if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
   return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild }, next_arm: winner?.arm ?? null }
 }
 

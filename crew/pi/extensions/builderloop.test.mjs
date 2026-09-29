@@ -514,7 +514,7 @@ test('D3', async () => {
   const { f, loop, event: evt } = failedFixture({ text, editsIndex: 1, assist: 'on' })
   const before = structuredClone(evt.input)
   const result = await loop.onToolResult(evt, { cwd: f.root })
-  assert.equal(appendedText(result), text); assert.deepEqual(evt.input, before)
+  assert.equal(appendedText(result), text.split('\n').map((line, k) => `${k + 1}: ${line}`).join('\n')); assert.deepEqual(evt.input, before)
 })
 test('B1', async () => {
   const old = recordedEvent(2, 3).input.edits[0].oldText
@@ -522,6 +522,18 @@ test('B1', async () => {
   const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
   const result = await loop.onToolResult(evt, { cwd: f.root })
   assert.ok(Buffer.byteLength(appendedText(result)) <= mod.EDIT_HINT_CAP_BYTES)
+})
+// Kills: occurrenceHint's `size <= EDIT_HINT_CAP_BYTES` loop bound replaced by an unbounded scan.
+// A one-character oldText in one 24,000-character line is 24,000 occurrences whose blocks together
+// exceed V8's string limit, so the hook threw RangeError instead of returning a bounded hint.
+test('RV2-1 a short oldText in a large file yields a bounded hint instead of throwing', async () => {
+  const text = 'x'.repeat(24000)
+  const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
+  evt.input.edits[0].oldText = 'x'
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  const hint = appendedText(result)
+  assert.match(hint, /^1: x/)
+  assert.ok(Buffer.byteLength(hint) <= mod.EDIT_HINT_CAP_BYTES)
 })
 test('N1', async () => {
   const { f, loop, event: evt } = failedFixture({ text: 'x' })

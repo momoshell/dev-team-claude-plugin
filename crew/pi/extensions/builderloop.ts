@@ -911,17 +911,24 @@ function indentationLines(fileText, oldText) {
   return found
 }
 
+// Stops once the hint outgrows EDIT_HINT_CAP_BYTES: a short oldText in a large file has one
+// occurrence per character, and building every block first exhausts string length.
 function occurrenceHint(fileText, oldText) {
   const lines = fileText.split(/\r?\n/)
-  const lineAt = (offset) => fileText.slice(0, offset).split('\n').length - 1
+  let line = 0, scanned = 0, size = 0, from = 0
+  const lineAt = (offset) => {
+    for (; scanned < offset; scanned += 1) if (fileText.charCodeAt(scanned) === 10) line += 1
+    return line
+  }
   const result = []
-  let from = 0
-  while (from <= fileText.length) {
+  while (size <= EDIT_HINT_CAP_BYTES) {
     const idx = fileText.indexOf(oldText, from)
     if (idx < 0) break
     const firstLine = lineAt(idx), lastLine = lineAt(idx + oldText.length - 1)
     const start = Math.max(0, firstLine - 2), end = Math.min(lines.length, lastLine + 3)
-    result.push(lines.slice(start, end).map((line, offset) => `${start + offset + 1}: ${line}`).join('\n'))
+    const block = lines.slice(start, end).map((text, offset) => `${start + offset + 1}: ${text}`).join('\n')
+    result.push(block)
+    size += block.length
     from = idx + oldText.length
   }
   return result.join('\n---\n')
@@ -929,7 +936,11 @@ function occurrenceHint(fileText, oldText) {
 
 function indentationHint(fileText, oldText) {
   const lines = fileText.split(/\r?\n/), wanted = oldText.split(/\r?\n/)
-  for (let i = 0; i <= lines.length - wanted.length; i += 1) if (indentationLines(lines.slice(i, i + wanted.length).join('\n'), oldText).length === 1) return lines.slice(i, i + wanted.length).join('\n')
+  for (let i = 0; i <= lines.length - wanted.length; i += 1) {
+    if (indentationLines(lines.slice(i, i + wanted.length).join('\n'), oldText).length === 1) {
+      return lines.slice(i, i + wanted.length).map((text, offset) => `${i + offset + 1}: ${text}`).join('\n')
+    }
+  }
   return ''
 }
 

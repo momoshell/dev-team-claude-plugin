@@ -5970,7 +5970,8 @@ function runTask(ctx, io, crash) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
-  if (stepCheckpoint && resumeCheckpointDefect(stepCheckpoint)) throw fail('build', 'resume checkpoint is unusable')
+  const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
+  if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,

@@ -32,10 +32,10 @@ function event(toolName, path, { isError = false, text = 'original result' } = {
   }
 }
 
-function loopFor(f, { role = 'builder', context = null, runner = null, deps = {} } = {}) {
+function loopFor(f, { role = 'builder', context = null, runner = null, deps = {}, assist } = {}) {
   const current = context || { files_in_scope: ['fixture.mjs', 'in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' }
   return mod.createBuilderLoop({
-    env: { CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }, cwd: f.root,
+    env: { CREW_ROLE: role, CREW_TASK_DIR: f.taskDir, ...(assist === undefined ? {} : { CREW_EDIT_ASSIST: assist }) }, cwd: f.root,
     deps: {
       loadPlannerContext: () => current,
       ...(runner ? { runNodeTests: runner } : {}),
@@ -53,6 +53,27 @@ function rows(f) {
   if (!existsSync(path)) return []
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
 }
+
+const recordedFrames = readFileSync(new URL('./builderloop-edit-frames.jsonl', import.meta.url), 'utf8').trimEnd().split('\n').map((line) => JSON.parse(line))
+function recordedEvent(startIndex, endIndex) {
+  const start = recordedFrames[startIndex], end = recordedFrames[endIndex]
+  assert.equal(start.toolCallId, end.toolCallId)
+  return { toolName: start.toolName, toolCallId: start.toolCallId, input: start.args, content: end.result.content, isError: end.isError }
+}
+function failedFixture({ text = '', assist, role = 'builder', editsIndex = 0, error = true, deps = {} } = {}) {
+  const f = fixture()
+  const start = editsIndex === 1 ? 0 : 2
+  const end = start + 1
+  const evt = recordedEvent(start, end)
+  const input = { ...evt.input, edits: evt.input.edits.map((edit) => ({ ...edit })) }
+  const loop = loopFor(f, { role, assist, deps: {
+    stat: () => ({ size: Buffer.byteLength(text) }), readFile: () => text,
+    ...deps,
+  } })
+  return { f, loop, event: { ...evt, input, isError: error }, text }
+}
+function failureRows(f) { return rows(f).filter((row) => row.builder_edit_failure).map((row) => row.builder_edit_failure) }
+function assignment(id) { return { prompt: `ASSIGNMENT ${id}: continue\nbody` } }
 
 // BL1: one successful lane result is appended to both supported mutating tools,
 // while the original content remains the first part of each result.
@@ -380,7 +401,7 @@ test('attachBuilderLoop registers both tool hooks', () => {
   const f = fixture()
   const loop = mod.attachBuilderLoop(pi, { env: { CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, cwd: f.root, deps: { loadPlannerContext: () => ({ files_in_scope: ['in.test.mjs'], validation_lane: 'node --test in.test.mjs', gate_cmd: 'node task/gate.mjs' }), measureTree: () => ({ measured: true, digest: 'same' }) } })
   assert.equal(loop.onToolCall({ type: 'tool_call', toolName: 'read', input: { command: 'echo' } }, { cwd: f.root }), undefined)
-  assert.deepEqual([...hooks.keys()].sort(), ['tool_call', 'tool_result'])
+  assert.deepEqual([...hooks.keys()].sort(), ['before_agent_start', 'tool_call', 'tool_result'])
 })
 
 test('default tree measurement uses real git when available', (t) => {
@@ -406,7 +427,180 @@ test('builderloop is zero-dependency, erasable, and exposes only its test seam',
   assert.ok(imports.length > 0)
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
-  assert.deepEqual(Object.keys(mod).sort(), ['attachBuilderLoop', 'createBuilderLoop', 'default', 'fencedNodeTestCommand', 'loadPlannerContext', 'runNodeTests'].sort())
+  assert.deepEqual(Object.keys(mod).sort(), ['attachBuilderLoop', 'createBuilderLoop', 'default', 'EDIT_ASSIST_ENV', 'EDIT_FAILURE_CAUSES', 'EDIT_FAILURE_ABSENT_REASONS', 'EDIT_FILE_CAP_BYTES', 'EDIT_CORPUS_CAP_BYTES', 'EDIT_HINT_CAP_BYTES', 'fencedNodeTestCommand', 'loadPlannerContext', 'runNodeTests'].sort())
+})
+
+test('E1', () => {
+  assert.deepEqual(mod.EDIT_FAILURE_CAUSES, ['not-unique', 'indentation', 'never-seen', 'partly-seen', 'seen-stale', 'other'])
+  assert.equal(Object.isFrozen(mod.EDIT_FAILURE_CAUSES), true)
+})
+test('K1', async () => {
+  const { f, loop, event: evt } = failedFixture({ text: 'x\n'.repeat(8), editsIndex: 0 })
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[0].cause, 'not-unique')
+  assert.equal(failureRows(f)[0].edit_index, 0)
+})
+test('K2', async () => {
+  const base = recordedEvent(0, 1).input.edits[1].oldText
+  const text = base.split('\n').map((line) => `  ${line}`).join('\n')
+  const { f, loop, event: evt } = failedFixture({ text, editsIndex: 1 })
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[0].cause, 'indentation')
+})
+test('K3', async () => {
+  const old = recordedEvent(0, 1).input.edits[1].oldText
+  const { f, loop, event: evt } = failedFixture({ text: 'unrelated', editsIndex: 1 })
+  await loop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: old }], isError: false })
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[0].cause, 'seen-stale')
+})
+test('K4', async () => {
+  const old = recordedEvent(0, 1).input.edits[1].oldText
+  const longest = old.split('\n').map((line) => line.trimStart()).sort((a, b) => b.length - a.length)[0]
+  assert.equal(longest.includes(old), false)
+  const { f, loop, event: evt } = failedFixture({ text: 'unrelated', editsIndex: 1 })
+  await loop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: longest }], isError: false })
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[0].cause, 'partly-seen')
+})
+test('K5', async () => {
+  const old = recordedEvent(0, 1).input.edits[1].oldText
+  const { f, loop, event: evt } = failedFixture({ text: 'unrelated', editsIndex: 1 })
+  loop.onBeforeAgentStart(assignment('same'))
+  await loop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: old }], isError: false })
+  loop.onBeforeAgentStart(assignment('same'))
+  loop.onBeforeAgentStart(assignment('same'))
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[0].cause, 'seen-stale')
+  loop.onBeforeAgentStart(assignment('new'))
+  await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f)[1].cause, 'never-seen')
+})
+test('O1', async () => {
+  const old = recordedEvent(2, 3).input.edits[0].oldText
+  const { f, loop, event: evt } = failedFixture({ text: `${old}\n${old}` })
+  assert.equal(await loop.onToolResult(evt, { cwd: f.root }), undefined)
+  assert.equal(failureRows(f)[0].assist, 'off')
+})
+test('J1', async () => {
+  const { f, loop, event: evt } = failedFixture({ text: 'x' })
+  await loop.onToolResult(evt, { cwd: f.root }); await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(failureRows(f).length, 2)
+})
+test('D1', async () => {
+  const old = recordedEvent(2, 3).input.edits[0].oldText
+  const first = `      ${old}`, second = `      if (decline) ${old}`
+  const text = `head\n${first}\nbetween\n${second}\ntail`
+  const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  assert.match(appendedText(result), /2:/); assert.match(appendedText(result), /4:/)
+  assert.ok(appendedText(result).includes(first))
+  assert.ok(appendedText(result).includes(second))
+})
+test('D2', async () => {
+  const old = 'function a() {\n  return compute(x)\n}'
+  const { f, loop, event: evt } = failedFixture({ text: `function b() {\n  return compute(x)\nnot-b\nnoise\nnoise\nfunction a() {\n  return compute(x)\nnot-a-brace`, editsIndex: 1, assist: 'on' })
+  evt.input.edits[1].oldText = old
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  assert.match(appendedText(result), /6: function a\(\) \{/)
+  assert.doesNotMatch(appendedText(result), /1: function b\(\) \{/)
+  const absent = failedFixture({ text: 'nothing here', editsIndex: 1, assist: 'on' })
+  absent.event.input.edits[1].oldText = 'a()\n\nb()'
+  assert.equal(appendedText(await absent.loop.onToolResult(absent.event, { cwd: absent.f.root })), 'none of the oldText lines occur in crew/drive.mjs')
+})
+test('D3', async () => {
+  const old = recordedEvent(0, 1).input.edits[1].oldText
+  const text = old.split('\n').map((line) => `  ${line}`).join('\n')
+  const { f, loop, event: evt } = failedFixture({ text, editsIndex: 1, assist: 'on' })
+  const before = structuredClone(evt.input)
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  assert.equal(appendedText(result), text.split('\n').map((line, k) => `${k + 1}: ${line}`).join('\n')); assert.deepEqual(evt.input, before)
+})
+test('B1', async () => {
+  const old = recordedEvent(2, 3).input.edits[0].oldText
+  const text = Array(50).fill(old).join('\n')
+  const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  assert.ok(Buffer.byteLength(appendedText(result)) <= mod.EDIT_HINT_CAP_BYTES)
+})
+// Kills: occurrenceHint's `size <= EDIT_HINT_CAP_BYTES` loop bound replaced by an unbounded scan.
+// A one-character oldText in one 24,000-character line is 24,000 occurrences whose blocks together
+// exceed V8's string limit, so the hook threw RangeError instead of returning a bounded hint.
+test('RV2-1 a short oldText in a large file yields a bounded hint instead of throwing', async () => {
+  const text = 'x'.repeat(24000)
+  const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
+  evt.input.edits[0].oldText = 'x'
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  const hint = appendedText(result)
+  assert.match(hint, /^1: x/)
+  assert.ok(Buffer.byteLength(hint) <= mod.EDIT_HINT_CAP_BYTES)
+})
+test('N1', async () => {
+  const { f, loop, event: evt } = failedFixture({ text: 'x' })
+  const reviewer = loopFor(f, { role: 'reviewer' })
+  assert.equal(await reviewer.onToolResult(evt, { cwd: f.root }), undefined)
+  assert.equal(await loop.onToolResult({ ...evt, isError: false }, { cwd: f.root }), undefined)
+  assert.equal(failureRows(f).length, 0)
+})
+test('RV1-1', async () => {
+  const old = recordedEvent(2, 3).input.edits[0].oldText
+  const first = `      ${old}`, second = `      if (decline) ${old}`
+  const text = `head\n${first}\nbetween\n${second}\ntail`
+  const { f, loop, event: evt } = failedFixture({ text, assist: 'on' })
+  const result = await loop.onToolResult(evt, { cwd: f.root })
+  const hint = appendedText(result)
+  assert.ok(hint.includes('2:       ' + old))
+  assert.ok(hint.includes('4:       if (decline) ' + old))
+})
+test('RV1-2', async () => {
+  const old = recordedEvent(2, 3).input.edits[0].oldText
+  const { f, loop, event: evt } = failedFixture({ text: `${old}\n${old}` })
+  assert.equal(await loop.onToolResult(evt, { cwd: f.root }), undefined)
+  assert.equal(failureRows(f)[0].assist, 'off')
+})
+test('RV1-6', async (t) => {
+  const run = async ({ text = 'ordinary', deps = {}, mutate } = {}) => {
+    const fixture = failedFixture({ text, assist: 'on', deps })
+    if (mutate) mutate(fixture.event)
+    const result = await fixture.loop.onToolResult(fixture.event, { cwd: fixture.f.root })
+    return { row: failureRows(fixture.f)[0], result }
+  }
+  await t.test('stat size cap', async () => {
+    const { row, result } = await run({ deps: { stat: () => ({ size: mod.EDIT_FILE_CAP_BYTES + 1 }) } })
+    assert.equal(row.cause, null); assert.equal(row.cause_absent_reason, 'file-too-large'); assert.equal(result, undefined)
+  })
+  await t.test('post-read byte cap', async () => {
+    const { row, result } = await run({ text: 'x'.repeat(mod.EDIT_FILE_CAP_BYTES + 1), deps: { stat: () => ({ size: 1 }) } })
+    assert.equal(row.cause, null); assert.equal(row.cause_absent_reason, 'file-too-large'); assert.equal(result, undefined)
+  })
+  await t.test('stat throws', async () => {
+    const { row, result } = await run({ deps: { stat: () => { throw Object.assign(Error('denied'), { code: 'EPERM' }) } } })
+    assert.equal(row.cause, null); assert.equal(row.cause_absent_reason, 'file-unreadable'); assert.equal(result, undefined)
+  })
+  await t.test('escaping target', async () => {
+    const { row, result } = await run({ mutate: (evt) => { evt.input.path = '../outside.mjs' } })
+    assert.equal(row.cause, null); assert.equal(row.cause_absent_reason, 'file-unreadable'); assert.equal(result, undefined)
+  })
+  await t.test('unmatched message and invalid index', async () => {
+    const unmatched = await run({ mutate: (evt) => { evt.content = [{ type: 'text', text: 'boom' }] } })
+    assert.equal(unmatched.row.cause, 'other'); assert.equal(unmatched.row.edit_index, null); assert.equal(unmatched.result, undefined)
+    const invalid = await run({ mutate: (evt) => { evt.content = [{ type: 'text', text: 'Could not find edits[9] in crew/drive.mjs.' }] } })
+    assert.equal(invalid.row.cause, 'other'); assert.equal(invalid.row.edit_index, null); assert.equal(invalid.result, undefined)
+  })
+  await t.test('old corpus entries evict', async () => {
+    const old = recordedEvent(0, 1).input.edits[1].oldText
+    const fixture = failedFixture({ text: 'ordinary', editsIndex: 1 })
+    await fixture.loop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: old }], isError: false })
+    await fixture.loop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: 'x'.repeat(mod.EDIT_CORPUS_CAP_BYTES + 1) }], isError: false })
+    await fixture.loop.onToolResult(fixture.event, { cwd: fixture.f.root })
+    assert.equal(failureRows(fixture.f)[0].cause, 'never-seen')
+  })
+})
+test('T1', async () => {
+  const { f, loop, event: evt } = failedFixture({ text: 'x', deps: { appendFile: () => { throw Error('EPERM') } } })
+  const before = structuredClone(evt)
+  assert.equal(await loop.onToolResult(evt, { cwd: f.root }), undefined)
+  assert.deepEqual(evt, before)
 })
 
 // 2fac235d moved returns under returns/<run_id>/ and this hook kept scanning returns/ — inert for

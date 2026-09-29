@@ -32,6 +32,13 @@ function parkPending(at, until, wake) { return at < until && wake === null }
 // (REASK_SETTLE_MS × REASK_SETTLE_POLLS), which waits out the same
 // write-then-exit gap one layer up. ONE bound covers BOTH phases, the probe and
 // the reservation race, so a busy round boundary costs 60s and never 120s.
+export const SUSPEND_MIN_MS = 60_000
+export function sleptMilliseconds(wallDelta, monoDelta) {
+  if (!Number.isFinite(wallDelta) || !Number.isFinite(monoDelta)) return 0
+  if (wallDelta - monoDelta <= SUSPEND_MIN_MS) return 0
+  return wallDelta - monoDelta
+}
+
 export const SESSION_BUSY_SETTLE_MS = 60_000
 export const SESSION_BUSY_EVENT = 'seat-session-busy'
 export const SESSION_BUSY_VERDICTS = Object.freeze(['waiting', 'settled', 'expired', 'unresolvable'])
@@ -1664,6 +1671,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || defaultSleep
+  const monotonic = deps.monotonic || (() => Number(process.hrtime.bigint()) / 1e6)
   // [F1] The PARK is a deliberate wait between a refused turn and its
   // replacement spawn, and in exactly that window the previous worker root is
   // gone BY DESIGN. seat-io's deps.sleep is a death PROBE that throws
@@ -2390,7 +2398,23 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   }
   function waitUntil(returnPath, deadline) {
     const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
-    while (now() < deadline) {
+    let priorWall = now()
+    let priorMono
+    try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
+    for (;;) {
+      const wall = now()
+      let mono
+      try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }
+      if (priorMono === undefined || mono === undefined) { priorWall = wall; priorMono = mono }
+      else {
+        const wallDelta = wall - priorWall
+        const monoDelta = mono - priorMono
+        const slept = sleptMilliseconds(wallDelta, monoDelta)
+        deadline += slept
+        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: run.role, transport: 'headless-json', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        priorWall = wall; priorMono = mono
+      }
+      if (wall >= deadline) break
       const enforced = enforceBeforeEnvelope(run, returnPath)
       if (enforced) return enforced
       const env = readEnvelopeOrFail(run)

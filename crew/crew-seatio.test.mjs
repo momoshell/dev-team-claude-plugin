@@ -14,6 +14,21 @@ void [emitAdapter, gateLedgerChecks]
 void [test, assert, mkdtempSync, rmSync, mkdirSync, tmpdir, join, seatReadySignal, waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE, seatLiveness, driveTask, cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE, scratchDir, callCounter]
 
 
+test('P1 sleepdeadline', () => {
+  let wall = 0, mono = 0, sleeps = 0, reads = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/sleepdeadline.json', timeoutS: 900, role: 'builder',
+    readEnvelope: () => (++reads >= 5 ? { status: 'done' } : null),
+    probeSeat: () => true,
+    now: () => wall, monotonic: () => mono,
+    sleep: (ms) => {
+      sleeps++
+      if (sleeps === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    },
+  })
+  assert.deepEqual(env, { status: 'done' })
+})
+
 test('seatLiveness reports headless and preserves pane probe values', () => {
   const probed = []
   const crew = { members: {

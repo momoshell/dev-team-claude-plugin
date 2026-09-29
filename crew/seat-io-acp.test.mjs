@@ -27,11 +27,25 @@ function fixture(options = {}) {
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
-      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
+      existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), monotonic: options.monotonic, sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
+
+test('A1 sleepdeadline', () => {
+  let wall = 0, mono = 0, polls = 0, assignment
+  const f = fixture({ now: () => wall, monotonic: () => mono, sleep: (ms) => {
+    polls++
+    if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    if (polls === 5) writeFileSync(assignment.returnPath, JSON.stringify({ assignment_id: assignment.id, role: 'builder', status: 'done' }))
+  } })
+  try {
+    assignment = assign(f)
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(assignment.returnPath, 900).status, 'done')
+  } finally { cleanup(f) }
+})
 
 test('A1', () => {
   const f = fixture({ guardPending: true }); try {

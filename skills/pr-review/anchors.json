@@ -9,9 +9,9 @@
   "crew/drive.mjs:2174": "export function validateScopeEntries(entries) {",
   "crew/drive.mjs:716": "export function panelSeats(seated) {",
   "crew/drive.mjs:4903": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:5366": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
-  "crew/drive.mjs:5432": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
-  "crew/drive.mjs:5556": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
-  "crew/drive.mjs:10527": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
-  "crew/drive.mjs:11149": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })"
+  "crew/drive.mjs:5386": "function runPanelReview({ round, panel, io, dissents, setAcceptFindings, setLastReview, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit }) {",
+  "crew/drive.mjs:5452": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
+  "crew/drive.mjs:5576": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
+  "crew/drive.mjs:10592": "const panel = ctx.continuation === true ? panelSeats(seatList) : null",
+  "crew/drive.mjs:11214": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })"
 }

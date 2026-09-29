@@ -15,7 +15,6 @@
   "crew/drive.mjs:524": "export const DECISIONS = Object.freeze",
   "crew/shape-validator.mjs:255": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/shape-validator.mjs:244": "if (!shape || typeof shape !== 'object')",
-  "scripts/factory/emit.mjs:1561": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
   "crew/drive-review.test.mjs:1629": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1628": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
@@ -37,9 +36,10 @@
   "test/factory-ledger-cli.test.mjs:323": "unknown flag --untill",
   "test/factory-ledger-cli.test.mjs:321": "refused.status, 2, refused.stderr",
   "test/factory-ledger-cli.test.mjs:328": "payload.until, '2026-08-21T01:00:00.000Z'",
-  "scripts/factory/ledger.mjs:4193": "requireEnum(input.decision, CI_DECISIONS",
-  "scripts/factory/ledger.mjs:7926": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:7890": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:7934": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:9421": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:7939": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7902": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:7947": "unknown flag --${name}",
+  "scripts/factory/emit.mjs:1565": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:9518": "unknown verb: ${verb}",
+  "scripts/factory/ledger.mjs:4205": "requireEnum(input.decision, CI_DECISIONS"
 }

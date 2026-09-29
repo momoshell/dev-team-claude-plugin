@@ -1,8 +1,5 @@
-// The builder-seat result hook: after a successful fenced edit or write, run only
-// the planner's fenced Node test operands (read from returns/<run_id>/dN.planner.json) and append that lane's result to the
-// same Pi tool result. It is intentionally observation-only for every other
-// result: failed edits, non-fenced paths, non-edit tools, and every other role
-// return no patch and therefore preserve Pi's original result byte-for-byte.
+// The builder-seat result hook runs the planner's fenced Node lane after successful edits/writes,
+// and journals failed edits with optional bounded, file-derived repair hints.
 //
 // Why .ts: pi loads extensions directly through jiti and this checkout imports
 // the file with Node's erasable type stripping. This file uses only erasable
@@ -13,6 +10,15 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+
+export const EDIT_ASSIST_ENV = 'CREW_EDIT_ASSIST'
+export const EDIT_FAILURE_CAUSES = Object.freeze(['not-unique', 'indentation', 'never-seen', 'partly-seen', 'seen-stale', 'other'])
+export const EDIT_FAILURE_ABSENT_REASONS = Object.freeze(['file-unreadable', 'file-too-large'])
+// lean: 2 MiB file reads; raise when real edit targets routinely exceed this bound
+export const EDIT_FILE_CAP_BYTES = 2 * 1024 * 1024
+// lean: 512 KiB rolling result corpus; use indexed storage when corpus volume justifies it
+export const EDIT_CORPUS_CAP_BYTES = 512 * 1024
+export const EDIT_HINT_CAP_BYTES = 8 * 1024
 
 const READ_CAP_BYTES = 64 * 1024
 const JOURNAL_CAP_BYTES = READ_CAP_BYTES
@@ -732,6 +738,8 @@ export function createBuilderLoop(value = {}) {
   const loadContext = input.loadPlannerContext || deps.loadPlannerContext || loadPlannerContext
   const runTests = input.runNodeTests || deps.runNodeTests || runNodeTests
   const appendFile = deps.appendFile || deps.appendFileSync || defaultAppend
+  const readFile = deps.readFile || deps.readFileSync || defaultRead
+  const statFile = deps.stat || deps.statSync || statSync
   const now = deps.now || defaultNow
   const measureTree = deps.measureTree || ((cwd) => defaultMeasureTree(cwd, deps))
   const journalPath = join(dirname(taskDir), 'journal.jsonl')
@@ -745,6 +753,27 @@ export function createBuilderLoop(value = {}) {
   })
 
   let last = null
+  const corpus = []
+  let corpusBytes = 0
+  let currentId = null
+
+  function onBeforeAgentStart(event) {
+    const first = String(event?.prompt || event?.text || '').split(/\r?\n/, 1)[0]
+    const parsed = /^ASSIGNMENT\s+([^\s:]+):/.exec(first); const assignment = parsed && { id: parsed[1] }
+    if (assignment && assignment.id !== currentId) corpus.length = 0
+    if (assignment && assignment.id !== currentId) corpusBytes = 0
+    if (assignment) currentId = assignment.id
+    return undefined
+  }
+
+  function saveCorpus(event) {
+    for (const part of Array.isArray(event?.content) ? event.content : []) {
+      if (part?.type !== 'text' || typeof part.text !== 'string') continue
+      corpus.push(part.text)
+      corpusBytes += bytes(part.text)
+      while (corpus.length && corpusBytes > EDIT_CORPUS_CAP_BYTES) corpusBytes -= bytes(corpus.shift())
+    }
+  }
 
   function onToolCall(event, ctx) {
     try {
@@ -784,6 +813,16 @@ export function createBuilderLoop(value = {}) {
   }
 
   async function onToolResult(event, ctx) {
+    if (role !== 'builder' || event?.toolName !== 'edit' || !event?.isError) {
+      saveCorpus(event)
+      return normalToolResult(event, ctx)
+    }
+    const failureResult = failedEdit(event, { cwd: ctx?.cwd || cwdDefault, env, corpus, readFile, statFile, appendFile, journalPath, now })
+    saveCorpus(event)
+    return failureResult
+  }
+
+  async function normalToolResult(event, ctx) {
     let loaded
     try {
       loaded = loadContext({ taskDir, env, deps: contextDeps })
@@ -802,7 +841,117 @@ export function createBuilderLoop(value = {}) {
     }
   }
 
-  return { onToolCall, onToolResult }
+  return { onToolCall, onToolResult, onBeforeAgentStart }
+}
+
+function failedEdit(event, { cwd, env, corpus, readFile, statFile, appendFile, journalPath, now }) {
+  let path = targetRelative(cwd, event?.input?.path)
+  let cause = 'other'
+  let causeAbsentReason = null
+  let editIndex = null
+  let fileText = null
+  let oldText = null
+  if (path && Array.isArray(event?.input?.edits)) {
+    const messages = (Array.isArray(event.content) ? event.content : []).filter((part) => part?.type === 'text').map((part) => String(part.text || '')).join('\n')
+    const match = /(?:Could not find|Found \d+ occurrences of) edits\[(\d+)\] in /.exec(messages)
+    if (match) {
+      const index = Number(match[1])
+      if (Number.isSafeInteger(index) && index >= 0 && index < event.input.edits.length && typeof event.input.edits[index]?.oldText === 'string') {
+        editIndex = index
+        oldText = event.input.edits[index].oldText
+        let stats
+        try { stats = statFile(resolve(cwd, path)) } catch { stats = null }
+        if (!stats) causeAbsentReason = 'file-unreadable'
+        else if (!Number.isFinite(stats.size) || stats.size > EDIT_FILE_CAP_BYTES) causeAbsentReason = 'file-too-large'
+        else {
+          try {
+            const raw = readFile(resolve(cwd, path), 'utf8')
+            const value = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
+            if (bytes(value) > EDIT_FILE_CAP_BYTES) causeAbsentReason = 'file-too-large'
+            else fileText = value
+          } catch { causeAbsentReason = 'file-unreadable' }
+          if (fileText !== null) {
+            const notUnique = /Found \d+ occurrences/.test(messages)
+            if (notUnique) cause = 'not-unique'
+            else {
+              const indentationMatch = indentationLines(fileText, oldText).length === 1
+              if (indentationMatch) cause = 'indentation'
+              else {
+                const strippedLines = oldText.split(/\r?\n/).map((line) => line.trimStart())
+                const longestLine = strippedLines.sort((a, b) => b.length - a.length)[0] || oldText
+                if (corpus.some((text) => text.includes(oldText))) cause = 'seen-stale'
+                else if (corpus.some((text) => text.includes(longestLine))) cause = 'partly-seen'
+                else cause = 'never-seen'
+              }
+            }
+          }
+        }
+      }
+    }
+  } else if (path === null) causeAbsentReason = 'file-unreadable'
+  if (causeAbsentReason) cause = null
+  const assist = env[EDIT_ASSIST_ENV] === 'on' ? 'on' : 'off'
+  const failure = { cause, cause_absent_reason: causeAbsentReason, assist, edit_index: editIndex, path }
+  try { appendFile(journalPath, `${JSON.stringify({ at: now(), builder_edit_failure: failure })}\n`) } catch {}
+  if (assist !== 'on' || cause === null || !fileText || !oldText) return undefined
+  let hintText = ''
+  if (cause === 'not-unique') hintText = occurrenceHint(fileText, oldText)
+  if (cause === 'never-seen' || cause === 'partly-seen' || cause === 'seen-stale') hintText = windowHint(fileText, oldText, path)
+  if (cause === 'indentation') hintText = indentationHint(fileText, oldText)
+  if (!hintText) return undefined
+  return { content: [...event.content, { type: 'text', text: boundedText(hintText, EDIT_HINT_CAP_BYTES) }] }
+}
+
+function indentationLines(fileText, oldText) {
+  const normalized = (text) => text.split(/\r?\n/).map((line) => line.replace(/^\s+/, '')).join('\n')
+  const lines = fileText.split(/\r?\n/)
+  const wanted = normalized(oldText).split('\n')
+  const found = []
+  for (let i = 0; i <= lines.length - wanted.length; i += 1) if (normalized(lines.slice(i, i + wanted.length).join('\n')) === wanted.join('\n')) found.push(i)
+  return found
+}
+
+function occurrenceHint(fileText, oldText) {
+  const lines = fileText.split(/\r?\n/)
+  const lineAt = (offset) => fileText.slice(0, offset).split('\n').length - 1
+  const result = []
+  let from = 0
+  while (from <= fileText.length) {
+    const idx = fileText.indexOf(oldText, from)
+    if (idx < 0) break
+    const firstLine = lineAt(idx), lastLine = lineAt(idx + oldText.length - 1)
+    const start = Math.max(0, firstLine - 2), end = Math.min(lines.length, lastLine + 3)
+    result.push(lines.slice(start, end).map((line, offset) => `${start + offset + 1}: ${line}`).join('\n'))
+    from = idx + oldText.length
+  }
+  return result.join('\n---\n')
+}
+
+function indentationHint(fileText, oldText) {
+  const lines = fileText.split(/\r?\n/), wanted = oldText.split(/\r?\n/)
+  for (let i = 0; i <= lines.length - wanted.length; i += 1) if (indentationLines(lines.slice(i, i + wanted.length).join('\n'), oldText).length === 1) return lines.slice(i, i + wanted.length).join('\n')
+  return ''
+}
+
+function windowHint(fileText, oldText, path) {
+  const lines = fileText.split(/\r?\n/), oldLines = oldText.split(/\r?\n/)
+  const candidates = oldLines.map((line) => line.trimStart()).filter(Boolean)
+  const anchor = [...candidates].sort((a, b) => b.length - a.length).find((candidate) => lines.some((line) => line.trimStart().includes(candidate)))
+  if (!anchor) return `none of the oldText lines occur in ${path}`
+  const k = oldLines.map((line) => line.trimStart()).indexOf(anchor)
+  let bestStart = 0, bestScore = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i].trimStart().includes(anchor)) continue
+    const start = i - k
+    let score = 0
+    for (let j = 0; j < oldLines.length; j += 1) {
+      const expected = oldLines[j].trimStart()
+      if (expected && lines[start + j]?.trimStart() === expected) score += 1
+    }
+    if (score > bestScore) { bestScore = score; bestStart = start }
+  }
+  const contextStart = Math.max(0, bestStart - 2), contextEnd = Math.min(lines.length, bestStart + oldLines.length + 2)
+  return lines.slice(contextStart, contextEnd).map((line, offset) => `${contextStart + offset + 1}: ${line}`).join('\n')
 }
 
 function eligible(event, current, cwd) {
@@ -820,6 +969,7 @@ export function attachBuilderLoop(pi, options = {}) {
   if (typeof pi?.on !== 'function') throw new Error('builder loop extension needs pi.on')
   pi.on('tool_call', (event, ctx) => loop.onToolCall(event, ctx))
   pi.on('tool_result', (event, ctx) => loop.onToolResult(event, ctx))
+  pi.on('before_agent_start', (event) => loop.onBeforeAgentStart(event))
   return loop
 }
 

@@ -5782,11 +5782,11 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
     stageComplete()
     return { escalation: escalateReversion(reversion.paths) }
   }
-  if (refusal.reason === null) { stageComplete(); return { ok: true } }              // ANCHOR A4
+  if (refusal.reason === null) { stageComplete(); return { ok: true, corrections: refusal.corrections } }              // ANCHOR A4
   const canBounce = plans && !finalRound()
   if (!canBounce) {
     stageComplete()
-    return { escalation: escalate('scope', refusal.why, [], {}, { files: escalationFiles([
+    return { corrections: refusal.corrections, escalation: escalate('scope', refusal.why, [], {}, { files: escalationFiles([
       ...(refusal.envelopes || []), ...(refusal.edits || []), ...(refusal.spans || []),
     ]) }) }
   }
@@ -5795,7 +5795,7 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
   io.writeFile(b, scopeBounceBrief(round, refusal, scopeFiles, planPath))
   acceptBuilderBaseline(builderObservation?.fingerprint)
   stageComplete()
-  return { bounce: b }
+  return { bounce: b, corrections: refusal.corrections }
 }
 
 function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure }) {
@@ -8620,6 +8620,35 @@ function runTask(ctx, io, crash) {
   failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
   gateReverified = null // set only when a MID-RUN repair is accepted:
   let builderEnv = null
+  const carriedCorrections = new Map()
+  let carriedRound = 0
+  const rememberCorrection = (entry, round, mutations) => {
+    const declaration = (Array.isArray(mutations) ? mutations : []).find((item) => item?.check === entry?.check)
+    if (!declaration) return
+    const previous = carriedCorrections.get(entry.check)
+    const same = previous?.correction.find === entry.find && previous?.correction.replace === entry.replace
+    carriedCorrections.set(entry.check, {
+      correction: { check: entry.check, find: entry.find, replace: entry.replace },
+      declaration: { file: declaration.file, find: declaration.find, replace: declaration.replace },
+      from_round: same ? previous.from_round : round,
+      accepted: same ? previous.accepted : false,
+    })
+  }
+  const emitCarried = (row) => io.log(recordRow({ at: io.now(), carried_correction: row }))
+  const dropCarried = (check, stage, reason) => {
+    const entry = carriedCorrections.get(check)
+    if (!entry) return
+    carriedCorrections.delete(check)
+    if (entry.from_round < carriedRound) emitCarried({ check, from_round: entry.from_round, round: carriedRound, stage, action: 'dropped', reason })
+  }
+  const processCarried = (result, stage) => {
+    for (const use of result?.carried || []) {
+      const entry = carriedCorrections.get(use.check)
+      if (entry && entry.from_round < carriedRound) emitCarried({ check: use.check, from_round: entry.from_round, round: carriedRound, stage, action: 'applied', reason: null })
+    }
+    const terminalReasons = new Set(['correction-absent', 'correction-ambiguous', 'correction-not-absent', 'correction-shape', 'declaration-changed'])
+    for (const refusal of result?.drops || []) if (terminalReasons.has(refusal.reason)) dropCarried(refusal.check, stage, refusal.reason)
+  }
   gateHistory = [] // every replaced gate_cmd, for the human's audit trail
   gateGeneration = 1
   let gateProvenGeneration = null // the generation whose proof is already recorded
@@ -8766,7 +8795,10 @@ function runTask(ctx, io, crash) {
       // without it. MUTATION A3 flips the reset above, not this line, because a mutant that never
       // measures anything is silent while one that always claims to have measured is the defect.
       checkProofBindMeasured = true
-      corrections = validateMutationCorrections(builderEnv?.details, binds, scopedMutations, readBuilt)
+      const mergedProof = mergeCarriedCorrections(carriedCorrections, builderEnv?.details, scopedMutations)
+      corrections = validateMutationCorrections(mergedProof.details, binds, scopedMutations, readBuilt)
+      processCarried({ carried: mergedProof.carried.filter((entry) => corrections.entries.some((used) => used.check === entry.check)), drops: [...mergedProof.drops, ...corrections.refusals.filter((refusal) => mergedProof.carried.some((entry) => entry.check === refusal.check))] }, 'proof')
+      for (const entry of corrections.entries) rememberCorrection(entry, carriedRound, mutations)
       // MUTATION C1: drop the accepted candidates here and the builder's one authoring moment is
       // discarded — a corrected anchor never reaches the proof and b384's lane escalates as it did.
       const effective = correctedMutations(scopedMutations, binds, corrections.entries)               // ANCHOR C1
@@ -8842,6 +8874,11 @@ function runTask(ctx, io, crash) {
     checkProofUnbound = finalized.unresolved
     checkProofUnlabelledRefusals = finalized.unlabelledRefusals
     rows.splice(0, rows.length, ...finalized.rows)
+    for (const row of rows) {
+      const stored = carriedCorrections.get(row.check)
+      if (stored && row.correction === 'accepted') stored.accepted = true
+      if (row.correction_refusal === 'correction-green') dropCarried(row.check, 'proof', 'correction-green')
+    }
     if (scopedMutations.length !== proofMutations.length || carriedRows.length > 0) {
       const freshByCheck = new Map(rows.map((row) => [row.check, row]))
       const carriedByCheck = new Map(carriedRows.map((row) => [row.check, row]))
@@ -9594,11 +9631,12 @@ function runTask(ctx, io, crash) {
     const settled = new Set((Array.isArray(checkProofs) ? checkProofs : [])
       .filter((row) => row?.correction === 'accepted' || row?.correction === 'refused')
       .map((row) => row.check))
-    return new Set(
-      (Array.isArray(builderEnv?.details?.mutation_corrections) ? builderEnv.details.mutation_corrections : [])
+    return new Set([
+      ...(Array.isArray(builderEnv?.details?.mutation_corrections) ? builderEnv.details.mutation_corrections : [])
         .map((correction) => correction?.check)
         .filter((check) => typeof check === 'string' && !settled.has(check)),
-    )
+      ...[...carriedCorrections].filter(([, entry]) => !entry.accepted).map(([check]) => check),
+    ])
   }
   const refreshProofTree = (round = null, { committedBaseline = false } = {}) => {
     if (pendingRebaseConflict) return { ok: true, gateRes: null, deferred: true }
@@ -10604,6 +10642,7 @@ function runTask(ctx, io, crash) {
     const seededBuild = variant === 'stepped' && seededStepEnv !== null
     if (!seededBuild && builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
     const round = seededStepEnv ? 1 : wholeBuildRound
+    carriedRound = round
     const finalRound = () => builderRemaining() <= 0
     if (!seededBuild) {
       stage(`build:r${round}`)
@@ -10704,7 +10743,11 @@ function runTask(ctx, io, crash) {
     builderEnv = env
     if (!seededBuild) stageComplete()
 
-    const scoped = runScopeGate({ round, finalRound, builderDetails: env.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })
+    const mergedScope = mergeCarriedCorrections(carriedCorrections, env.details, mutations)
+    const scoped = runScopeGate({ round, finalRound, builderDetails: mergedScope.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })
+    const scopeCorrections = scoped.corrections ?? { entries: [], refusals: [] }
+    processCarried({ carried: mergedScope.carried.filter((entry) => scopeCorrections.entries.some((used) => used.check === entry.check)), drops: [...mergedScope.drops, ...scopeCorrections.refusals.filter((refusal) => mergedScope.carried.some((entry) => entry.check === refusal.check))] }, 'scope')
+    for (const entry of scopeCorrections.entries) rememberCorrection(entry, round, mutations)
     if (scoped.escalation) return scoped.escalation
     if (scoped.pendingReversion) pendingReversion = scoped.pendingReversion
     if (scoped.bounce) { buildBrief = scoped.bounce; buildNote = 'scope-fix'; continue }
@@ -12410,11 +12453,11 @@ export function mutationAnchorScopeRefusal(changed, mutations, details, readFile
   } catch {
     // A denied, interrupted or otherwise indeterminate read is not proof of absence.
     // The gate proof remains the authoritative retry/diagnosis path for that tree.
-    return { reason: null, unresolved: [], envelopes: [], edits: [] }
+    return { reason: null, unresolved: [], envelopes: [], edits: [], corrections: { entries: [], refusals: [] } }
   }
   const corrected = new Set(corrections.entries.map((entry) => entry.check))
   const unresolved = binds.filter((row) => row.status === 'absent' && !corrected.has(row.check))
-  if (unresolved.length === 0) return { reason: null, unresolved: [], envelopes: [], edits: [] }
+  if (unresolved.length === 0) return { reason: null, unresolved: [], envelopes: [], edits: [], corrections }
   const byCheck = new Map(declarations.map((entry) => [entry?.check, entry]))
   const refusalByCheck = new Map()
   for (const refusal of corrections.refusals) {
@@ -12438,6 +12481,7 @@ export function mutationAnchorScopeRefusal(changed, mutations, details, readFile
   }).join('; ')
   return {
     reason: 'anchor-absent',
+    corrections,
     unresolved: unresolved.map((row) => detailsByCheck.get(row.check)),
     why: `anchor-absent: ${decorated.length} changed-file ${decorated.length === 1 ? 'declaration' : 'declarations'} did not bind with an accepted correction: ${detail}`,
     envelopes: [],
@@ -14597,6 +14641,35 @@ function parseAnchorCheck(output) {
   const [scanned, manifests, rot, ambiguous, moved, unverified] = match.slice(1).map(Number)
   if (moved !== movedLines.length) return null
   return { scanned, manifests, rot, ambiguous, moved, unverified, movedKeys: [...new Set(movedLines)] }
+}
+
+export function sameDeclaration(left, right) {
+  return left?.file === right?.file && left?.find === right?.find && left?.replace === right?.replace
+}
+
+export function mergeCarriedCorrections(store, details, declarations) {
+  const supplied = details?.mutation_corrections
+  if (supplied !== undefined && (!Array.isArray(supplied) || supplied.some((entry) => typeof entry?.check !== 'string') || new Set(supplied.map((entry) => entry.check)).size !== supplied.length)) {
+    return { details, carried: [], drops: [] }
+  }
+  const byCheck = new Map((Array.isArray(declarations) ? declarations : []).map((entry) => [entry?.check, entry]))
+  const fresh = (Array.isArray(supplied) ? supplied : []).map((entry) => [entry.check, { check: entry.check, find: entry.find, replace: entry.replace }])
+  const carried = []
+  const drops = []
+  for (const [check, entry] of store || []) {
+    const declaration = byCheck.get(check)
+    if (declaration === undefined) continue
+    if (!sameDeclaration(entry.declaration, declaration)) {
+      drops.push({ check, reason: 'declaration-changed', from_round: entry.from_round })
+      continue
+    }
+    carried.push([check, entry.correction])
+  }
+  const freshChecks = new Set(fresh.map(([check]) => check))
+  const submitted = carried.filter(([check]) => !freshChecks.has(check)).map(([, correction]) => correction)
+  const combined = new Map([...carried, ...fresh])
+  const merged = { ...details, mutation_corrections: [...combined.values()] }
+  return { details: merged, carried: submitted, drops }
 }
 
 function carrierInventory(io, directories) {

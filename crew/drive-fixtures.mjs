@@ -815,11 +815,11 @@ function b384Io({ mutations = [B384_MUTATION], scope = ['crew/drive.mjs'], build
   return io
 }
 
-function b384RefactoredIo({ builder = B384_REFACTORED_BUILDER, builder2 = null, files = {}, runs = {}, scope = ['crew/drive.mjs'] } = {}) {
+function b384RefactoredIo({ builder = B384_REFACTORED_BUILDER, builder2 = null, files = {}, runs = {}, scope = ['crew/drive.mjs'], reviewers = { 'reviewer:1': reviewEnv('pass') } } = {}) {
   const envelopes = {
     'planner:1': B384_PLAN(B384_REFACTORED_MUTATIONS, scope),
     'builder:1': builder,
-    'reviewer:1': reviewEnv('pass'),
+    ...reviewers,
   }
   if (builder2 !== null) envelopes['builder:2'] = builder2
   return fakeIo({
@@ -1526,6 +1526,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at adversary_unavailable"],
   ["recordRow", "", "at plan_converged"],
   ["recordRow", "event='acceptance-coverage'", "at ...coverage"],
+  ["recordRow", "", "at carried_correction"],
   ["recordRow", "", "at gate_discrimination gate_generation gate_summary gate_proof_note"],
   ["recordRow", "", "at gate_proof_unproven gate_generation"],
   ["recordRow", "", "at gate_stale_artifact"],

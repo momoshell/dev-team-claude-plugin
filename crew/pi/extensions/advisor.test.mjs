@@ -186,6 +186,26 @@ test('RV1-1 guard C3 grant attaches without manifest or model environment', asyn
   assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
   rmSync(f.root, { recursive: true, force: true })
 })
+// Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
+// the allowlist must refuse loudly, never attach as a silent tier-0-only seat; null still attaches.
+test('a malformed manifest cell refuses attach while an explicit null cell attaches', async () => {
+  for (const [cell, outcome] of [[{ provider: 'p', id: 'm', agent: 'pi', effort: null, model: 'p/m' }, 'refused'], [null, 'attached']]) {
+    const f = fixture(); const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
+    writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, 'utf8')), cell }))
+    const journal = sink(); const p = pi()
+    const attach = advisor.attachAdvisor(p, { env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: { taskDir: f.taskDir, appendFile: journal.appendFile } })
+    if (outcome === 'refused') {
+      await assert.rejects(attach, (err) => err.reason === 'manifest-cell-invalid')
+      assert.equal(journal.rows.find((row) => row.advisor_unavailable)?.advisor_unavailable.reason, 'manifest-cell-invalid')
+      assert.equal(journal.rows.some((row) => row.advisor_boot), false)
+      assert.equal(p.handlers.length, 0)
+    } else {
+      await attach
+      assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
+    }
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})
 test('RV1-1 guard E1 cadence note keeps ordinal 25 across later issued calls', async () => {
   const f = fixture(); const journal = sink(); let spawned = 0
   const a = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: {
@@ -370,6 +390,7 @@ test('D1 extension and boot refusal vocabularies retain exact frozen ordered val
   assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
     'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
     'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+    'manifest-cell-invalid',
   ])
   assert.equal(Object.isFrozen(bootAdvisorRefusals), true)
   assert.deepEqual(bootAdvisorRefusals, [
@@ -811,6 +832,7 @@ test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
     'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
     'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+    'manifest-cell-invalid',
   ])
   assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])

@@ -84,6 +84,7 @@ export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 export const UNAVAILABLE_REASONS = Object.freeze([
   'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
   'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
+  'manifest-cell-invalid',
 ])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
 // A consult's advisor_usage spend is measured ONLY IF every frame the shared reducer
@@ -194,6 +195,8 @@ function manifestText({ taskDir, readFile }) {
     return {
       schema_version: value.schema_version, run_started_at: value.run_started_at,
       tripwires: value.tripwires.map((item) => boundTarget(item)), cell,
+      // A present cell that fails the allowlist is NOT a null (tier-0-only) cell.
+      cell_invalid: rawCell != null && cell === null,
     }
   } catch { return null }
 }
@@ -1271,6 +1274,7 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
     throw error
   }
   if (!ADVISED_ROLES.has(role)) return unavailable('role-unsupported')
+  if (manifestText({ taskDir, readFile: deps.readFile || DEFAULT_READ })?.cell_invalid) return unavailable('manifest-cell-invalid')
   if (typeof pi?.on !== 'function' || typeof pi?.sendMessage !== 'function') throw new Error('advisor extension needs pi.on and pi.sendMessage')
   const boot = { role, outcome: 'attached', config_version: ADVISOR_CONFIG_VERSION }
   const written = appendLine({

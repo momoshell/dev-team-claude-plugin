@@ -555,7 +555,7 @@ export function parseTapSummary(text: string): any {
 
 // What the program printed, as the runner wraps it: exactly {stdout: string}.
 function isProgramStdout(frame: any): boolean {
-  return Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame) && Object.keys(frame).length === 1 && typeof frame.stdout === 'string'
+  return Boolean(frame) && typeof frame === 'object' && !Array.isArray(frame) && Object.keys(frame).length === 1 && typeof frame.stdoutBytes === 'string'
 }
 
 // A raw line (one the runner did not wrap, so written past process.stdout.write,
@@ -621,14 +621,13 @@ const classifyDenial = (err) => {
   return null
 }
 const shortError = (err) => String(err && (err.stack || err.message) || err || '').slice(0, 4096)
-// The program's own stdout travels as {stdout} frames, so nothing it prints can be
+// The program's own stdout travels as {stdoutBytes} frames, so nothing it prints can be
 // taken for a protocol frame; the runner writes its own frames through rawWrite.
 const rawWrite = process.stdout.write.bind(process.stdout)
-const outDecoder = new StringDecoder('utf8')
 process.stdout.write = (chunk, encoding, callback) => {
   const done = typeof encoding === 'function' ? encoding : callback
-  const text = typeof chunk === 'string' ? chunk : outDecoder.write(Buffer.from(chunk))
-  try { if (text) rawWrite(JSON.stringify({ stdout: text }) + '\\n') } catch { /* stdout may already be closed */ }
+  const bytes = typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk)
+  try { if (bytes.length) rawWrite(JSON.stringify({ stdoutBytes: bytes.toString('base64') }) + '\\n') } catch { /* stdout may already be closed */ }
   if (typeof done === 'function') queueMicrotask(() => done())
   return true
 }
@@ -1376,6 +1375,7 @@ export function createLabTool(deps: any = {}) {
         // taken out: this is what a program that exports nothing is shown.
         let stdoutText = ''
         let stdoutTruncated = false
+        const stdoutDecoder = new StringDecoder('utf8')
         const appendOutput = (line: any, kind: string) => {
           if (pendingReason === 'output-oversize') return
           const bounded = boundedTextInfo(`${outputText}${String(line ?? '')}\n`)
@@ -1487,7 +1487,7 @@ export function createLabTool(deps: any = {}) {
           if (kind !== 'stdout') return
           let frame: any
           try { frame = JSON.parse(String(line).trim()) } catch { appendStdout(`${line}\n`); collector.served(); return }
-          if (isProgramStdout(frame)) { appendStdout(frame.stdout); collector.served(); return }
+          if (isProgramStdout(frame)) { appendStdout(stdoutDecoder.write(Buffer.from(frame.stdoutBytes, 'base64'))); collector.served(); return }
           if (!isProtocolFrame(frame)) appendStdout(`${line}\n`)
           if (!frame || frame.done) {
             collector.served()
@@ -1522,6 +1522,7 @@ export function createLabTool(deps: any = {}) {
           clear(deadline); deadline = null
           clear(killTimer); killTimer = null
           collector.end('stdout')
+          appendStdout(stdoutDecoder.end())
           collector.end('stderr')
           if (pendingReason) settle(pendingReason, code, signalValue)
           else if (!terminal) settle(code === 0 ? 'child-failed' : 'child-failed', code, signalValue)

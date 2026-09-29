@@ -2009,6 +2009,54 @@ test('gaps C2.bound (the whole refusal content, hint included, stays inside the 
   assert.match(text, /Its stdout \(truncated\):\nzzz/)
 })
 
+test('gaps E1 (stdout string encodings are framed as Node-written bytes)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write('AB','utf16le'); process.stdout.write('4344','hex'); process.stdout.write('\\n')", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, 'A\0B\0CD\n')
+})
+
+test('gaps T1 (an incomplete trailing UTF-8 byte is replaced at close)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write('ok '); process.stdout.write(Buffer.from('e9','hex'))", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, 'ok \ufffd')
+})
+
+test('gaps T2 (string encoding bytes are decoded as UTF-8)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write('é','latin1')", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, '\ufffd')
+})
+
+test('gaps O1 (decoder state spans byte and string writes)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write(Buffer.from('c3','hex')); process.stdout.write('x')", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, '\ufffdx')
+})
+
+test('gaps L1 (decoder remains open for writes after module resolution)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write(Buffer.from('c3','hex')); setTimeout(() => process.stdout.write(Buffer.from('a9','hex')), 20)", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, 'é')
+})
+
+test('gaps S1 (decoder state spans separate byte writes)', async () => {
+  const { repo } = gapsRepo()
+  const run = await realTool("process.stdout.write(Buffer.from('c3','hex')); process.stdout.write(Buffer.from('a9','hex'))", repo)
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.equal(run.details.stdout_truncated, false)
+  assert.equal(run.details.stdout, 'é')
+})
+
 test('gaps C3 (export default null is a value, not nothing)', async () => {
   const { repo } = gapsRepo()
   const run = await realTool('export default null', repo)

@@ -87,7 +87,8 @@ function advisorRoster(cell = ADVISOR_CELL) {
 }
 
 // A pane boot's layout carries only `/bin/sh '<launcher>'` per seat; the seat commands live in
-// the launcher files. Returns every launcher's text, joined, from a `preserve: true` boot.
+// `launch-<role>.sh`. Returns { role: launcher text } from a `preserve: true` boot, so a grant
+// is asserted on the seat that holds it, not somewhere in the crew.
 function paneLaunchers(boot) {
   const layoutArgs = boot.cmuxCalls.find(([verb]) => verb === 'new-workspace')?.[1] || []
   const commands = []
@@ -96,11 +97,13 @@ function paneLaunchers(boot) {
     for (const child of node?.children || []) walk(child)
   }
   walk(JSON.parse(layoutArgs[layoutArgs.indexOf('--layout') + 1]))
-  return commands.map((command) => {
-    const launcherPath = command.match(/^\/bin\/sh '(.+)'$/)?.[1]
-    assert.ok(launcherPath)
-    return readFileSync(launcherPath, 'utf8')
-  }).join('\n')
+  const byRole = {}
+  for (const command of commands) {
+    const launcher = command.match(/^\/bin\/sh '(.+\/launch-([a-z-]+)\.sh)'$/)
+    assert.ok(launcher, command)
+    byRole[launcher[2]] = readFileSync(launcher[1], 'utf8')
+  }
+  return byRole
 }
 
 // One build-tier boot against advisorRoster(); returns what it wrote, or the refusal and
@@ -248,8 +251,8 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
   const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED, preserve: true })
   try {
     const launchers = paneLaunchers(pane)
-    assert.match(launchers, /CREW_ADVISOR=1/)
-    assert.doesNotMatch(launchers, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
+    assert.match(launchers.builder, /CREW_ADVISOR=1/)
+    for (const text of Object.values(launchers)) assert.doesNotMatch(text, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
   } finally { pane.cleanup() }
   // A legacy record without consult_model keeps its exact shape.
   assert.deepEqual(advisorLaunchCell({ endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', model_only: false, models: { x: {} } }),
@@ -372,9 +375,17 @@ test('ADR047 K2 the shipped default boots a build crew whose builder loads the a
   // Operator decision 9: the grant shipped off until lane 2 (PR #1614); it is now on.
   const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined }, preserve: true })
   try {
+    // Kills: the pane grant moved off the builder — the advisor must be in the builder's launcher
+    // and in no other seat's.
     const launchers = paneLaunchers(pane)
-    assert.match(launchers, /CREW_ADVISOR=1/)
-    assert.equal(launchers.includes('advisor.ts'), true)
+    assert.ok(launchers.builder)
+    assert.match(launchers.builder, /CREW_ADVISOR=1/)
+    assert.equal(launchers.builder.includes('advisor.ts'), true)
+    for (const [role, text] of Object.entries(launchers)) {
+      if (role === 'builder') continue
+      assert.doesNotMatch(text, /CREW_ADVISOR=1/, role)
+      assert.equal(text.includes('advisor.ts'), false, role)
+    }
   } finally { pane.cleanup() }
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)

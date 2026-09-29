@@ -8070,7 +8070,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
       return Number.isFinite(cost) ? { cost, reason: null } : { cost: null, reason: 'cost-not-finite' }
     })
     const pricedRows = priced.filter((row) => row.cost != null)
-    const absentReason = advisorRows.length === 0 ? null : pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
+    const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
     const noUsage = advisorRows.length === 0 ? null : 'usage-present'
     return { arm: key, runs, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: runs - arm.billed_runs, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
   })

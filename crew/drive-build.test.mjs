@@ -5,10 +5,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   staleSpawnProof, publicationIo, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites,
-  acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, gateCheckIds,
+  acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -2435,6 +2435,129 @@ test('a surviving mutation enters the existing lead gate repair path', () => {
   assert.equal(res.details.gate.repairs, 1)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
   assert.equal(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0].why, 'the gate stayed GREEN under the mutation')
+})
+
+test('b1019 S1 (fresh corrections override carried corrections and malformed input is untouched)', () => {
+  const correction = { check: 'B2', find: 'old', replace: 'new' }
+  const store = new Map([['B2', { correction, declaration: { file: 'a.mjs', find: 'decl', replace: 'decl2' }, from_round: 1, accepted: false }]])
+  const details = { mutation_corrections: [{ check: 'B2', find: 'fresh', replace: 'fresh2' }] }
+  const merged = mergeCarriedCorrections(store, details, [{ check: 'B2', file: 'a.mjs', find: 'decl', replace: 'decl2' }])
+  assert.deepEqual(merged.details.mutation_corrections, [details.mutation_corrections[0]])
+  assert.deepEqual(merged.carried, [])
+  assert.deepEqual(merged.drops, [])
+  const malformed = { mutation_corrections: [{ check: 'B2' }, { check: 'B2' }] }
+  const refused = mergeCarriedCorrections(store, malformed, [])
+  assert.equal(refused.details, malformed)
+  assert.equal(refused.details.mutation_corrections.length, 2)
+})
+
+test('b1019 P1 (carried checks outside declarations remain untouched)', () => {
+  const store = new Map([['B2', { correction: { check: 'B2', find: 'x', replace: 'y' }, declaration: { file: 'a.mjs', find: 'a', replace: 'b' }, from_round: 1 }], ['B3', { correction: { check: 'B3', find: 'z', replace: 'w' }, declaration: { file: 'b.mjs', find: 'c', replace: 'd' }, from_round: 1 }]])
+  const result = mergeCarriedCorrections(store, {}, [{ check: 'B2', file: 'a.mjs', find: 'a', replace: 'b' }])
+  assert.deepEqual(result.details.mutation_corrections, [{ check: 'B2', find: 'x', replace: 'y' }])
+  assert.deepEqual(result.drops, [])
+})
+
+test('b1019 D3 (each changed declaration drops its carry)', () => {
+  const store = new Map([['B2', { correction: { check: 'B2', find: 'x', replace: 'y' }, declaration: { file: 'a.mjs', find: 'a', replace: 'b' }, from_round: 1 }]])
+  for (const changed of [{ file: 'z.mjs', find: 'a', replace: 'b' }, { file: 'a.mjs', find: 'z', replace: 'b' }, { file: 'a.mjs', find: 'a', replace: 'z' }]) {
+    assert.deepEqual(mergeCarriedCorrections(store, {}, [{ check: 'B2', ...changed }]).drops.map(({ reason }) => reason), ['declaration-changed'])
+  }
+})
+
+test('b1019 A1 (round 2 omits the correction and reaches done)', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_BUILDER,
+    builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    reviewers: { 'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS), 'reviewer:2': reviewEnv('pass') },
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.stages.includes('escalate:scope'), false)
+  assert.equal(res.details.stages.includes('scope-gate:r2'), true)
+})
+
+test('b1019 A2 (later proof accepts the carried correction)', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_BUILDER,
+    builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    reviewers: { 'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS), 'reviewer:2': reviewEnv('pass') },
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(res.status, 'done')
+  const proofEvents = io.calls.emits.filter((event) => event.kind === 'check-discrimination')
+  const rows = proofEvents.at(-1)?.checks || []
+  assert.ok(rows.some((row) => row.check === 'B2' && row.outcome === 'killed' && row.correction === 'accepted'))
+})
+
+test('b1019 A3 (scope admission survives a red lane)', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_BUILDER,
+    builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    runs: { 'lane-cmd:1': { ok: false, output: 'red' }, 'lane-cmd:2': { ok: true, output: 'green' } },
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.writes[`${TD}/build-bounce-r2.md`], undefined)
+  assert.equal(res.details.stages.includes('escalate:scope'), false)
+  assert.ok(io.calls.emits.some((event) => event.kind === 'check-discrimination'))
+})
+
+test('b1019 D1 (green carried proof journals its terminal drop)', () => {
+  const io = b384RefactoredIo({
+    builder: B384_REFACTORED_BUILDER,
+    builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    runs: { 'lane-cmd:1': { ok: false, output: 'red' }, 'lane-cmd:2': { ok: true, output: 'green' }, 'gate-cmd:3': { ok: true, output: B384_GREEN } },
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'anchor-absent')
+  assert.deepEqual(io.calls.logs.filter((row) => row.carried_correction?.action === 'dropped').map((row) => row.carried_correction), [
+    { check: 'B2', from_round: 1, round: 2, stage: 'proof', action: 'dropped', reason: 'correction-green' },
+  ])
+})
+
+test('b1019 D2 (absent carried find drops at scope)', () => {
+  const io = b384RefactoredIo({ builder: B384_REFACTORED_BUILDER, builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    runs: { 'lane-cmd:1': { ok: false, output: 'red' }, 'lane-cmd:2': { ok: true, output: 'green' } } })
+  const assign = io.assign
+  io.assign = function (spec) {
+    const result = assign.call(this, spec)
+    if (spec.role === 'builder' && this.calls.assign.filter((row) => row.role === 'builder').length === 2) {
+      this.calls.files[`${CTX.checkout}/crew/drive.mjs`] = this.calls.files[`${CTX.checkout}/crew/drive.mjs`].replace(B384_CORRECTED_FIND, 'missing corrected anchor')
+    }
+    return result
+  }
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  const dropped = io.calls.logs.filter((row) => row.carried_correction?.action === 'dropped').map((row) => row.carried_correction)
+  assert.deepEqual(dropped, [{ check: 'B2', from_round: 1, round: 2, stage: 'scope', action: 'dropped', reason: 'correction-absent' }])
+  assert.ok(io.calls.writes[`${TD}/build-bounce-r2.md`] || res.details.stages.includes('escalate:scope'))
+})
+
+test('b1019 J1 (carried applications are journaled by stage)', () => {
+  const io = b384RefactoredIo({ builder: B384_REFACTORED_BUILDER, builder2: B384_REFACTORED_UNCORRECTED_BUILDER,
+    reviewers: { 'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS), 'reviewer:2': reviewEnv('pass') } })
+  driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  const rows = io.calls.logs.map((row) => row.carried_correction).filter((row) => row?.action === 'applied')
+  assert.ok(rows.length >= 1)
+  for (const row of rows) assert.deepEqual({ from_round: row.from_round, round: row.round, reason: row.reason }, { from_round: 1, round: 2, reason: null })
+  assert.equal(new Set(rows.map((row) => `${row.check}:${row.stage}:${row.round}`)).size, rows.length)
+  assert.ok(rows.every((row) => ['scope', 'proof'].includes(row.stage)))
+})
+
+test('b1019 J2 (carry leaves the original round 2 envelope untouched)', () => {
+  const builder2 = B384_REFACTORED_UNCORRECTED_BUILDER
+  const io = b384RefactoredIo({ builder: B384_REFACTORED_BUILDER, builder2,
+    reviewers: { 'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS), 'reviewer:2': reviewEnv('pass') } })
+  driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.deepEqual(builder2.details.mutation_corrections, [])
+  assert.equal(io.calls.assign.some((row) => row.role === 'builder' && row.n === 2), true)
+
+  const freshBuilder = { ...B384_REFACTORED_UNCORRECTED_BUILDER, details: { ...B384_REFACTORED_UNCORRECTED_BUILDER.details, mutation_corrections: [{ check: 'B2', find: 'misspelled correction', replace: 'revised correction' }] } }
+  const refusedIo = b384RefactoredIo({ builder: B384_REFACTORED_BUILDER, builder2: freshBuilder,
+    runs: { 'lane-cmd:1': { ok: false, output: 'red' } } })
+  driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 } }, refusedIo)
+  assert.deepEqual(refusedIo.calls.logs.filter((row) => row.carried_correction?.check === 'B2' && row.carried_correction.action === 'dropped'), [])
 })
 
 test('A1', () => {

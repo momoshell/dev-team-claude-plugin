@@ -3870,7 +3870,7 @@ test('F1 stepped-resume acceptance', () => {
   checkpoint.returns = { planner: { status: 'done', role: 'planner', artifacts: [], details: { chunks: [{ id: 'c1' }] } }, builder: null, reviewer: null }
   checkpoint.decision = null
   checkpoint.commit = { oid: null, pending: true, files: [], message: '', subject: '' }
-  checkpoint.step = { done: [], builder_attempts: 0, envelopes: [], brief_file: '/tmp/brief.md', limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 } }
+  checkpoint.step = { done: [], builder_attempts: 0, envelopes: [], brief_file: '/tmp/brief.md', limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 }, plan_sha256: '0000000000000000000000000000000000000000000000000000000000000000' }
   assert.equal(resumeCheckpointDefect(checkpoint), null, 'empty prefix is a valid schema and does not imply capture eligibility')
   const bad = structuredClone(checkpoint)
   bad.step.builder_attempts = -1

@@ -3922,7 +3922,8 @@ test('V1 stepped-resume acceptance', () => {
     fixture.checkpoint.step = { done: ['c1'], builder_attempts: 1,
       envelopes: [{ status: 'done', role: 'builder', artifacts: [envelopeFile], details: {} }],
       brief_file: briefFile,
-      limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 } }
+      limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 },
+      plan_sha256: '0000000000000000000000000000000000000000000000000000000000000000' }
     assert.equal(validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: { ...fixture.envelope, details: { ...fixture.envelope.details, escalation: { where: 'build' } } } }).kind, 'step')
     execSync('git commit --allow-empty -qm moved', { cwd: fixture.checkout })
     assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.worktreeMoved)

@@ -5058,6 +5058,7 @@ export function resumeCheckpointDefect(checkpoint) {
     if (!Array.isArray(step.envelopes) || step.envelopes.length !== step.done.length || step.envelopes.some((env) => !env || env.role !== 'builder' || env.status !== 'done')) return 'checkpoint step envelopes are invalid'
     if (!Number.isSafeInteger(step.builder_attempts) || step.builder_attempts < step.done.length) return 'checkpoint builder attempts are invalid'
     if (typeof step.brief_file !== 'string' || !step.brief_file.trim()) return 'checkpoint step brief is absent'
+    if (typeof step.plan_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(step.plan_sha256)) return 'checkpoint accepted plan digest is absent'
     if (!step.limits || typeof step.limits !== 'object' || Array.isArray(step.limits) || Object.keys(LIMITS).some((key) => !Number.isSafeInteger(step.limits[key]) || step.limits[key] < 0)) return 'checkpoint step limits are invalid'
   }
   const commit = checkpoint.commit
@@ -6900,8 +6901,15 @@ function runTask(ctx, io, crash) {
       version: RESUME_CHECKPOINT_VERSION,
       kind,
       frozen_where: frozenWhere,
-      ...(kind === 'step' ? { step: { done: done.map((step) => typeof step === 'string' ? step : step.id), builder_attempts: builderAttempts, envelopes: doneEnvelopes, brief_file: ctx.briefFile, limits } } : {}),
+      ...(kind === 'step' ? { step: { done: done.map((step) => typeof step === 'string' ? step : step.id), builder_attempts: builderAttempts, envelopes: doneEnvelopes, brief_file: ctx.briefFile, limits, plan_sha256: acceptedPlanDigest() } } : {}),
     }
+  }
+  // The digest of the plan accepted at plan time. A step checkpoint without one is refused by
+  // resumeCheckpointDefect, so a resume can never adopt plan bytes nobody accepted.
+  function acceptedPlanDigest() {
+    let bytes = null
+    try { const text = io.readFile(art('plan.accepted.md')); if (typeof text === 'string') bytes = text } catch { /* unavailable */ }
+    return bytes === null ? null : createHash('sha256').update(Buffer.from(bytes, 'utf8')).digest('hex')
   }
   const markResume = (result, details) => {
     if (result?.status !== 'escalation') return result
@@ -8513,9 +8521,11 @@ function runTask(ctx, io, crash) {
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (stepCheckpoint) {
     const acceptedPlan = readOrNull(art('plan.accepted.md'))
+    if (typeof acceptedPlan !== 'string') return escalate('build', 'resume refused: the accepted plan snapshot is absent')
+    const sha = createHash('sha256').update(Buffer.from(acceptedPlan, 'utf8')).digest('hex')
+    if (sha !== stepCheckpoint.step.plan_sha256) return escalate('build', 'resume refused: the accepted plan snapshot does not match the checkpoint digest')
     const livePlan = readOrNull(planPath)
-    if (typeof acceptedPlan === 'string' && acceptedPlan !== livePlan) {
-      const sha = createHash('sha256').update(Buffer.from(acceptedPlan, 'utf8')).digest('hex')
+    if (acceptedPlan !== livePlan) {
       frozenEntries = [{ kind: 'plan', path: art('plan.accepted.md'), livePath: planPath, bytes: acceptedPlan, sha }]
       restoreAcceptedPlan('resume-step')
       const restored = readOrNull(planPath)

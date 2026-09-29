@@ -12,7 +12,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'
@@ -8379,6 +8379,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
   const red = checks.map((id) => `FAIL ${id}: pristine red`).join('\n')
   const baseline = `${red}\nGATE-SUMMARY {"total":${checks.length},"failed":${checks.length},"errored":0}`
   const files = {
+    [`${TD}/plan.md`]: '# stepped plan\n',
     ...seedFiles,
     [`${CTX.checkout}/a.mjs`]: 'alpha\n',
     [`${CTX.checkout}/b.mjs`]: 'beta\n',
@@ -8505,6 +8506,26 @@ test('B1 stepped-resume acceptance', () => {
   assert.equal(result.details.escalation.where, 'build')
   assert.equal(result.details.resume_checkpoint.step.builder_attempts, 3)
   assert.deepEqual(result.details.resume_checkpoint.step.done, ['c1'])
+})
+
+// Kills: resume adopting whatever plan.md holds. The checkpoint pins the accepted plan's digest, so
+// an absent snapshot or one that no longer matches refuses before any builder is assigned.
+test('a stepped resume refuses an absent or mismatched accepted-plan snapshot', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  assert.match(checkpoint.step.plan_sha256, /^[0-9a-f]{64}$/)
+  const absentSeed = { ...sourceIo.calls.writes }
+  delete absentSeed[`${TD}/plan.accepted.md`]
+  const absent = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: absentSeed })
+  const absentResult = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, absent.io)
+  assert.match(absentResult.details.escalation.why, /accepted plan snapshot is absent/)
+  assert.equal(absent.io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  const changed = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: { ...sourceIo.calls.writes, [`${TD}/plan.accepted.md`]: '# a plan nobody accepted\n' } })
+  const changedResult = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, changed.io)
+  assert.match(changedResult.details.escalation.why, /does not match the checkpoint digest/)
+  assert.equal(changed.io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  const undigested = structuredClone(checkpoint)
+  delete undigested.step.plan_sha256
+  assert.equal(resumeCheckpointDefect(undigested), 'checkpoint accepted plan digest is absent')
 })
 
 test('C3 stepped-resume acceptance', () => {

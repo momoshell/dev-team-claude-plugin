@@ -3903,6 +3903,36 @@ test('B1 resume refuses a moved worktree without side effects', () => {
   } finally { rmSync(fixture.root, { recursive: true, force: true }) }
 })
 
+test('V1 stepped-resume acceptance', () => {
+  const fixture = resumeValidationFixture('crew-resume-step-v1-')
+  try {
+    const briefFile = join(fixture.taskDir, 'step-brief.md')
+    const envelopeFile = join(fixture.taskDir, 'step-builder.json')
+    writeFileSync(briefFile, 'brief\\n')
+    writeFileSync(envelopeFile, '{"role":"builder"}\\n')
+    fixture.checkpoint.kind = 'step'
+    fixture.checkpoint.frozen_where = 'build'
+    fixture.envelope.details.escalation.where = 'build'
+    fixture.checkpoint.returns = {
+      planner: { ...fixture.checkpoint.returns.planner, details: { plan_path: join(fixture.taskDir, 'plan.md'), chunks: [{ id: 'c1' }] } },
+      builder: null, reviewer: null,
+    }
+    fixture.checkpoint.decision = null
+    fixture.checkpoint.commit = { oid: null, pending: true, files: [], message: '', subject: '' }
+    fixture.checkpoint.step = { done: ['c1'], builder_attempts: 1,
+      envelopes: [{ status: 'done', role: 'builder', artifacts: [envelopeFile], details: {} }],
+      brief_file: briefFile,
+      limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 },
+      plan_sha256: '0000000000000000000000000000000000000000000000000000000000000000' }
+    assert.equal(validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: { ...fixture.envelope, details: { ...fixture.envelope.details, escalation: { where: 'build' } } } }).kind, 'step')
+    execSync('git commit --allow-empty -qm moved', { cwd: fixture.checkout })
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.worktreeMoved)
+    execSync(`git reset --hard ${fixture.head}`, { cwd: fixture.checkout, stdio: 'ignore' })
+    writeFileSync(join(fixture.checkout, 'a.mjs'), 'same HEAD, changed bytes\\n')
+    assert.throws(() => validateResumeState({ args: {}, checkout: fixture.checkout, taskDir: fixture.taskDir, envelope: fixture.envelope }), (error) => error.reason === RESUME_REFUSALS.fingerprintMismatch)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
 test('C1 resume refuses a missing gate artifact by closed name', () => {
   const fixture = resumeValidationFixture('crew-resume-c1-')
   try {

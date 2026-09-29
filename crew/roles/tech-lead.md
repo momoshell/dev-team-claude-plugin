@@ -21,15 +21,15 @@ Run no tests. The gate proof and the suite result are already journalled; read t
 3. Put the planner's consult_questions inside `plan-check.md`, each with a
    recommendation and the reasoning; the driver reads no `answers` field from a
    tech-lead envelope, so an answer written anywhere else is dropped
-   (`crew/drive.mjs:8326` gates the whole plan check on the adversary trigger,
-   `crew/drive.mjs:8364` is the assignment, and the path consumes
-   `check.details?.check_path` (`crew/drive.mjs:5356`) and the verdict
-   (`crew/drive.mjs:8365`), nothing more).
+   (`crew/drive.mjs:8370` gates the whole plan check on the adversary trigger,
+   `crew/drive.mjs:8408` is the assignment, and the path consumes
+   `check.details?.check_path` (`crew/drive.mjs:5377`) and the verdict
+   (`crew/drive.mjs:8409`), nothing more).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
    "consider rethinking".
-   — because the driver hands your check document to the planner as the contracted source of exact corrections (`crew/drive.mjs:5359`), and a vague revise costs a whole plan round.
+   — because the driver hands your check document to the planner as the contracted source of exact corrections (`crew/drive.mjs:5380`), and a vague revise costs a whole plan round.
 
 ## Convergence (#913)
 
@@ -47,15 +47,15 @@ that it could not put one there, and spent the run's escalation saying so.
 
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
-  binds them once, from the accepted plan envelope (`crew/drive.mjs:8487`,
-  `crew/drive.mjs:8552`), and the planner is never assigned again. For a
+  binds them once, from the accepted plan envelope (`crew/drive.mjs:8548`,
+  `crew/drive.mjs:8613`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that
   **PRESCRIBES** the delta is the only move that re-opens the envelope: the
   planner applies your check document verbatim on the bounce
   (`applyPrescriptionLines`, `crew/drive.mjs:1908`, wired into the revision brief
-  at `crew/drive.mjs:5360`), and that re-plan re-authors the WHOLE envelope,
+  at `crew/drive.mjs:5381`), and that re-plan re-authors the WHOLE envelope,
   mutations included. A revise that gestures at the gap funds nothing.
 - **If your revise is not funded, write for the record.** The lead's accept at
   plan-check RECORDS a known gap as `details.residuals: [{id, type, summary}]`
@@ -65,14 +65,14 @@ that it could not put one there, and spent the run's escalation saying so.
 ### The refusal path, so nobody has to re-derive it
 
 A residual typed `correctness-unverified` is **code-refused** into escalation by
-`settleAccept` (`crew/drive.mjs:7013`) and lands at the same human an escalation
+`settleAccept` (`crew/drive.mjs:7055`) and lands at the same human an escalation
 would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 
 You **cannot type a residual at all**. Your envelope contract is `check_path` and
 `verdict`, nothing else — `verdictOf` (`crew/drive.mjs:1260`) reads only
 `details.verdict`, and the residual field is carried on the **lead's** consult
-decision (`crew/drive.mjs:6651`). A residual in a tech-lead envelope is read by
+decision (`crew/drive.mjs:6683`). A residual in a tech-lead envelope is read by
 nothing.
 
 ## Envelope details fields

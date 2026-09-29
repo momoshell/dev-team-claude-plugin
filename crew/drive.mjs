@@ -4984,10 +4984,11 @@ export function applyNarration(record, narrated) {
 
 // --- persisted post-build checkpoints -----------------------------------------
 export const RESUME_CHECKPOINT_VERSION = 2
-export const RESUME_CHECKPOINT_FAMILIES = Object.freeze(['gate', 'rebase', 'suite', 'publish'])
+export const RESUME_CHECKPOINT_FAMILIES = Object.freeze(['step', 'gate', 'rebase', 'suite', 'publish'])
 
 export function resumeCheckpointFamily(where) {
   if (where === 'cold-suite') return 'suite'
+  if (where === 'build') return 'step'
   return RESUME_CHECKPOINT_FAMILIES.includes(where) ? where : null
 }
 
@@ -5007,6 +5008,7 @@ export function resumeCheckpointDefect(checkpoint) {
   if (checkpoint.version !== RESUME_CHECKPOINT_VERSION) return 'unsupported checkpoint version'
   if (!RESUME_CHECKPOINT_FAMILIES.includes(checkpoint.kind)) return 'unsupported checkpoint family'
   if (typeof checkpoint.frozen_where !== 'string' || resumeCheckpointFamily(checkpoint.frozen_where) !== checkpoint.kind) return 'checkpoint family does not match frozen terminal'
+  if (checkpoint.kind !== 'step' && checkpoint.step !== undefined) return 'non-step checkpoint carries step state'
   if (typeof checkpoint.head_oid !== 'string' || !checkpoint.head_oid.trim()) return 'checkpoint HEAD oid is absent'
   const concreteWitnessPath = (path) => typeof path === 'string'
     && path.length > 0
@@ -5038,12 +5040,30 @@ export function resumeCheckpointDefect(checkpoint) {
   }
   const returns = checkpoint.returns
   if (!returns || typeof returns !== 'object' || Array.isArray(returns)) return 'checkpoint accepted returns are absent'
-  for (const role of ['planner', 'builder', 'reviewer']) if (!returns[role] || typeof returns[role] !== 'object' || Array.isArray(returns[role])) return `checkpoint ${role} return is absent`
-  const decision = checkpoint.decision
-  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return 'checkpoint decision is absent'
-  if (typeof decision.accepted_via !== 'string' || typeof decision.verdict !== 'string' || !Array.isArray(decision.residuals) || !Array.isArray(decision.carried_findings) || !Array.isArray(decision.accept_findings) || !decision.accept_decision || typeof decision.accept_decision !== 'object' || !Array.isArray(decision.panel_contributors)) return 'checkpoint decision is incomplete'
+  if (checkpoint.kind === 'step') {
+    if (!returns.planner || typeof returns.planner !== 'object' || Array.isArray(returns.planner) || returns.planner.role !== 'planner' || returns.planner.status !== 'done') return 'checkpoint planner return is absent'
+    for (const role of ['builder', 'reviewer']) if (returns[role] !== null && (!returns[role] || typeof returns[role] !== 'object' || Array.isArray(returns[role]))) return `checkpoint ${role} return is invalid`
+    if (checkpoint.decision !== null) return 'step checkpoint decision is not null'
+  } else {
+    for (const role of ['planner', 'builder', 'reviewer']) if (!returns[role] || typeof returns[role] !== 'object' || Array.isArray(returns[role])) return `checkpoint ${role} return is absent`
+    const decision = checkpoint.decision
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return 'checkpoint decision is absent'
+    if (typeof decision.accepted_via !== 'string' || typeof decision.verdict !== 'string' || !Array.isArray(decision.residuals) || !Array.isArray(decision.carried_findings) || !Array.isArray(decision.accept_findings) || !decision.accept_decision || typeof decision.accept_decision !== 'object' || !Array.isArray(decision.panel_contributors)) return 'checkpoint decision is incomplete'
+  }
+  if (checkpoint.kind === 'step') {
+    const step = checkpoint.step
+    const chunks = returns.planner.details?.chunks
+    if (!step || typeof step !== 'object' || Array.isArray(step) || !Array.isArray(chunks)) return 'checkpoint step state is absent'
+    if (!Array.isArray(step.done) || step.done.some((id, index) => typeof id !== 'string' || chunks[index]?.id !== id) || new Set(step.done).size !== step.done.length || step.done.length > chunks.length) return 'checkpoint completed steps are invalid'
+    if (!Array.isArray(step.envelopes) || step.envelopes.length !== step.done.length || step.envelopes.some((env) => !env || env.role !== 'builder' || env.status !== 'done')) return 'checkpoint step envelopes are invalid'
+    if (!Number.isSafeInteger(step.builder_attempts) || step.builder_attempts < step.done.length) return 'checkpoint builder attempts are invalid'
+    if (typeof step.brief_file !== 'string' || !step.brief_file.trim()) return 'checkpoint step brief is absent'
+    if (typeof step.plan_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(step.plan_sha256)) return 'checkpoint accepted plan digest is absent'
+    if (!step.limits || typeof step.limits !== 'object' || Array.isArray(step.limits) || Object.keys(LIMITS).some((key) => !Number.isSafeInteger(step.limits[key]) || step.limits[key] < 0)) return 'checkpoint step limits are invalid'
+  }
   const commit = checkpoint.commit
   if (!commit || typeof commit !== 'object' || Array.isArray(commit) || typeof commit.pending !== 'boolean' || !Array.isArray(commit.files) || typeof commit.message !== 'string' || typeof commit.subject !== 'string' || (commit.oid !== null && (typeof commit.oid !== 'string' || !commit.oid.trim()))) return 'checkpoint commit is incomplete'
+  if (checkpoint.kind === 'step' && (commit.oid !== null || commit.pending !== true)) return 'step checkpoint commit is invalid'
   const commitFiles = commit.files
   if (commitFiles.some((path) => !concreteWitnessPath(path)) || new Set(commitFiles).size !== commitFiles.length) return 'checkpoint commit files are invalid'
   const witnessed = new Set(treePaths)
@@ -5133,13 +5153,14 @@ function captureResumeCheckpoint(result, ctx, io) {
     publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
     prior_stages: Array.isArray(source.prior_stages) ? [...source.prior_stages] : (result?.details?.stages || []),
     chunk: source.chunk !== undefined ? source.chunk : null,
+    ...(kind === 'step' ? { step: source.step } : {}),
   }
   return resumeCheckpointDefect(checkpoint) ? null : checkpoint
 }
 
 function attachResumeCheckpoint(result, ctx, io) {
   if (!result || !result.details || typeof result.details !== 'object') return result
-  if (ctx?.resume_checkpoint && !result.details.resume_checkpoint) return { ...result, details: { ...result.details, resume_checkpoint: ctx.resume_checkpoint } }
+  if (ctx?.resume_checkpoint && ctx.resume_checkpoint.kind !== 'step' && !result.details.resume_checkpoint) return { ...result, details: { ...result.details, resume_checkpoint: ctx.resume_checkpoint } }
   if (result.details.resume_checkpoint) return result
   const checkpoint = captureResumeCheckpoint(result, ctx, io)
   return checkpoint ? { ...result, details: { ...result.details, resume_checkpoint: checkpoint } } : result
@@ -5949,12 +5970,19 @@ function runTask(ctx, io, crash) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
+  const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
+  const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
+  if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
   // post-commit census recovery changes the allowance; a context record alone does not.
-  let builderAttempts = 0
+  let builderAttempts = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint.step.builder_attempts : 0
+  const done = []
+  const stepEnvelopes = []
+  const doneEnvelopes = []
+  let lastStepEnv = null
   let grantedBuildAllowance = 0
   const builderRemaining = () => limits.build_rounds + grantedBuildAllowance - builderAttempts
   const grantBuilderAllowance = () => {
@@ -6230,9 +6258,12 @@ function runTask(ctx, io, crash) {
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   let acceptedPlannerReturn = null
   let frozenEntries = []
+  // The plan digest pinned when the plan was frozen; a later snapshot must still match it.
+  let frozenPlanSha = null
   let rewriteOrdinal = 0
   function freezeAcceptedPlan(planPath, plannerReturn) {
     frozenEntries = []
+    frozenPlanSha = null
     const frozen = { plan_path: planPath, plan_sha256: null, envelope_path: plannerReturn?.path ?? null, envelope_sha256: null }
     const snapshot = (kind, livePath, text, snapshotPath, absentReason) => {
       if (typeof text !== 'string') { frozen[`${kind}_absent`] = absentReason; return }
@@ -6255,8 +6286,9 @@ function runTask(ctx, io, crash) {
     let planText = null
     if (taskLocal) try { const value = io.readFile(planPath); if (typeof value === 'string') planText = value } catch { /* unavailable */ }
     snapshot('plan', planPath, planText, art('plan.accepted.md'), taskLocal ? 'read-unavailable' : 'plan-outside-task-dir')
+    frozenPlanSha = frozen.plan_sha256
     if (plannerReturn) snapshot('envelope', plannerReturn.path, plannerReturn.text, art('plan.accepted.envelope.json'), 'planner-return-unavailable')
-    else frozen.envelope_absent = variant === DIRECTED_STAGE_HEAD ? 'directed-no-seat' : 'triage-derived-plan'
+    else frozen.envelope_absent = stepCheckpoint ? 'resumed-step-checkpoint' : (variant === DIRECTED_STAGE_HEAD ? 'directed-no-seat' : 'triage-derived-plan')
     try { io.log(recordRow({ at: io.now(), plan_frozen: frozen })) } catch { /* journal failures are nonfatal */ }
   }
   function restoreAcceptedPlan(stageName) {
@@ -6813,7 +6845,8 @@ function runTask(ctx, io, crash) {
     const frozenWhere = resumeTerminalWhere(details)
     const kind = resumeCheckpointFamily(frozenWhere)
     if (!kind || !activeGateCmd) return null
-    if (!Object.values(S.returns).every((env) => env?.status === 'done')) return null
+    if (kind === 'step' && (variant !== 'stepped' || done.length === 0)) return null
+    if (kind === 'step' ? !S.returns.planner : !Object.values(S.returns).every((env) => env?.status === 'done')) return null
     const acceptedFiles = acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : [])
     const concrete = (path) => typeof path === 'string' && path !== '' && !path.startsWith('/') && !path.startsWith('\\')
       && !/^[A-Za-z]:[\\/]/.test(path) && !path.endsWith('/') && !/[?*\[\]{}\\\0\r\n]/.test(path)
@@ -6837,8 +6870,8 @@ function runTask(ctx, io, crash) {
       ? ['reviewer', panel.partner, panel.adjudicator].filter((value, index, values) => typeof value === 'string' && value.trim() && values.indexOf(value) === index)
       : [typeof details.accepted_via === 'string' && details.accepted_via.startsWith('lead accepted') ? 'lead' : 'reviewer']
     return {
-      returns: S.returns,
-      decision: {
+      returns: kind === 'step' ? { planner: S.returns.planner, builder: S.returns.builder, reviewer: S.returns.reviewer } : S.returns,
+      decision: kind === 'step' ? null : {
         accepted_via: typeof details.accepted_via === 'string' ? details.accepted_via : 'review pass',
         verdict: finalReview.verdict || (details.accepted_via === 'review pass' ? 'pass' : 'changes-needed'),
         residuals: Array.isArray(details.accept_decision?.residuals) ? details.accept_decision.residuals : [...finalReview.residuals],
@@ -6847,11 +6880,9 @@ function runTask(ctx, io, crash) {
         accept_decision: details.accept_decision && typeof details.accept_decision === 'object' ? details.accept_decision : { where: 'review', outcome: 'accepted', verdict: finalReview.verdict || 'pass', residuals: [...finalReview.residuals], findings: Array.isArray(S.acceptFindings) ? [...S.acceptFindings] : [] },
         panel_contributors: panelContributors,
       },
-      commit: {
-        oid: details.commit ?? null, pending: details.commit == null,
-        files: committedFiles,
-        message: S.commitMessage || '', subject: S.commitSubject || '',
-      },
+      commit: kind === 'step'
+        ? { oid: null, pending: true, files: [], message: '', subject: '' }
+        : { oid: details.commit ?? null, pending: details.commit == null, files: committedFiles, message: S.commitMessage || '', subject: S.commitSubject || '' },
       proof: {
         gate_cmd: activeGateCmd, gate_path: acceptedGatePath,
         summary: parseGateSummary(lastGateOutput) || details.gate?.summary || {},
@@ -6874,7 +6905,18 @@ function runTask(ctx, io, crash) {
       version: RESUME_CHECKPOINT_VERSION,
       kind,
       frozen_where: frozenWhere,
+      ...(kind === 'step' ? { step: { done: done.map((step) => typeof step === 'string' ? step : step.id), builder_attempts: builderAttempts, envelopes: doneEnvelopes, brief_file: ctx.briefFile, limits, plan_sha256: acceptedPlanDigest() } } : {}),
     }
+  }
+  // The digest pinned when the plan was frozen, and only while the snapshot still carries it. A step
+  // checkpoint without one is refused by resumeCheckpointDefect, so a resume never adopts plan bytes
+  // nobody accepted, including a snapshot a seat rewrote after acceptance.
+  function acceptedPlanDigest() {
+    if (frozenPlanSha === null) return null
+    let bytes = null
+    try { const text = io.readFile(art('plan.accepted.md')); if (typeof text === 'string') bytes = text } catch { /* unavailable */ }
+    if (bytes === null) return null
+    return createHash('sha256').update(Buffer.from(bytes, 'utf8')).digest('hex') === frozenPlanSha ? frozenPlanSha : null
   }
   const markResume = (result, details) => {
     if (result?.status !== 'escalation') return result
@@ -7862,11 +7904,12 @@ function runTask(ctx, io, crash) {
     return result
   }
   if (ctx.roles?.includes('lead')) io.setPermissionLead?.(({ text, options, role, tool_call: call }) => (variant === 'review_panel' && panelPermission(call)) || { decision: consultLead(text, options, [], { exclude: variant === 'review_panel' ? PERSPECTIVE_TARGETS : role }).decision }, { timeoutMs: (2 * waits.lead + Math.max(...PERSPECTIVE_TARGETS.map((r) => waits[r]))) * 1000 })
-  if (ctx.resume_checkpoint) {
+  if (ctx.resume_checkpoint && ctx.resume_checkpoint.kind !== 'step') {
     const checkpoint = ctx.resume_checkpoint
     const resume = runResumeTail(checkpoint, ctx, io)
     return resume
   }
+  if (stepCheckpoint) S.returns.planner = stepCheckpoint.returns.planner
   if (variant === 'review_panel') return driveReviewPanelShape()
   if (shape.execution === 'envelope') return driveEnvelopeShape()
   const driveTriageRound = () => {
@@ -8001,7 +8044,7 @@ function runTask(ctx, io, crash) {
     } }
   }
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
-  let planEnv = null
+  let planEnv = stepCheckpoint ? stepCheckpoint.returns.planner : null
   let planAdversary = null
   let adversaryLogged = false
   let laneDeferred = []
@@ -8056,6 +8099,7 @@ function runTask(ctx, io, crash) {
     if (c.decision === 'escalate') return escalate('plan', c.reason)
   }
 
+  if (stepCheckpoint === null) {
   for (let round = 1; plans && round <= planAttempts(); round += 1) {
     stage(`plan:r${round}`)
     const plannerBrief = art(`planner-assignment-r${round}.md`)
@@ -8474,13 +8518,30 @@ function runTask(ctx, io, crash) {
     stageComplete()
     stageComplete()
   }
-  if (!plans) {
+  }
+  if (!plans && !stepCheckpoint) {
     const sourced = variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
     if (sourced.stop) return sourced.stop
     planEnv = sourced.plan
   }
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
   const planPath = planEnv.details?.plan_path || art('plan.md')
+  if (stepCheckpoint) {
+    const acceptedPlan = readOrNull(art('plan.accepted.md'))
+    if (typeof acceptedPlan !== 'string') return escalate('build', 'resume refused: the accepted plan snapshot is absent')
+    const sha = createHash('sha256').update(Buffer.from(acceptedPlan, 'utf8')).digest('hex')
+    if (sha !== stepCheckpoint.step.plan_sha256) return escalate('build', 'resume refused: the accepted plan snapshot does not match the checkpoint digest')
+    const livePlan = readOrNull(planPath)
+    if (acceptedPlan !== livePlan) {
+      frozenEntries = [{ kind: 'plan', path: art('plan.accepted.md'), livePath: planPath, bytes: acceptedPlan, sha }]
+      restoreAcceptedPlan('resume-step')
+      const restored = readOrNull(planPath)
+      if (restored !== acceptedPlan) return escalate('build', 'accepted plan snapshot could not be restored')
+    }
+    const acceptedEnvelopePath = art('plan.accepted.envelope.json')
+    const acceptedEnvelope = readOrNull(acceptedEnvelopePath)
+    acceptedPlannerReturn = typeof acceptedEnvelope === 'string' ? { path: acceptedEnvelopePath, text: acceptedEnvelope } : null
+  }
   freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
   restoreAcceptedPlan(S.stages.at(-1)?.startsWith('check:') ? 'plan-check' : 'plan')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
@@ -8603,7 +8664,7 @@ function runTask(ctx, io, crash) {
       if (!gateCmd) return escalate('plan-chunks', 'stepped requires a gate_cmd to adjudicate step ownership')
       // One global builder budget (ADR-048): every step costs at least one assignment, so a
       // program longer than the budget can never finish and is refused before any is spent.
-      if (validatedChunks.length > builderRemaining()) return escalate('plan-chunks', `stepped plan declares ${validatedChunks.length} steps but the builder budget is ${builderRemaining()}`)
+      if (!stepCheckpoint && validatedChunks.length > builderRemaining()) return escalate('plan-chunks', `stepped plan declares ${validatedChunks.length} steps but the builder budget is ${builderRemaining()}`)
     }
     const selectedChunk = steppedProgram ? null : selectActiveChunk(ctx, validatedChunks)
     if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}` , planEnv.artifacts || [])
@@ -9809,7 +9870,13 @@ function runTask(ctx, io, crash) {
     return { ok: true, gateRes: null }
   }
 
-  if (gateCmd) {
+  let stepReverifyResult = null
+  if (stepCheckpoint) {
+    stage('gate:step-reverify')
+    try { stepReverifyResult = runGate('step:reverify', gateCmd) } catch { stepReverifyResult = null }
+    stageComplete()
+  }
+  if (gateCmd && !stepCheckpoint) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
     let finalBaselineOutput = baseline.output
@@ -9931,13 +9998,27 @@ function runTask(ctx, io, crash) {
     return wrapperPath
   }
   const steppedChunks = variant === 'stepped' ? validatedChunks : null
-  const stepEnvelopes = []
-  let lastStepEnv = null
+  const savedDone = stepCheckpoint ? stepCheckpoint.step.done : []
+  const savedEnvelopes = stepCheckpoint ? stepCheckpoint.step.envelopes : []
+  let reverifyIndex = savedDone.length
+  if (stepCheckpoint) {
+    if (!stepReverifyResult || typeof stepReverifyResult.output !== 'string') reverifyIndex = 0
+    else for (let index = 0; index < savedDone.length; index += 1) {
+      const verdict = steppedGateVerdict(stepReverifyResult.output, validatedChunks[index], validatedChunks.slice(0, index), validatedChunks, validatedExemptLabels, stepReverifyResult.ok === true)
+      if (verdict.ok) io.log(recordRow({ at: io.now(), event: 'step:reverified', step: savedDone[index], passed: validatedChunks[index].checks_owned }))
+      else {
+        reverifyIndex = index
+        io.log(recordRow({ at: io.now(), event: 'step:reverify-red', step: savedDone[index], failed: verdict.failed || [] }))
+        break
+      }
+    }
+  }
   let mergedStepEnv = null
   let seededStepEnv = null
   let wholeBuildRound = 1
-  const done = []
-  if (steppedChunks) for (const step of steppedChunks) {
+  if (steppedChunks) for (const [index, step] of steppedChunks.entries()) {
+    if (index < reverifyIndex) doneEnvelopes.push(savedEnvelopes[index])
+    if (index < reverifyIndex) { done.push(step); stepEnvelopes.push(savedEnvelopes[index]); lastStepEnv = savedEnvelopes[index]; continue }
     let stepRound = 0
     let stepEnv = null
     let priorStepFailure = null
@@ -9964,6 +10045,7 @@ function runTask(ctx, io, crash) {
       const verdict = steppedGateVerdict(output, step, done, steppedChunks, validatedExemptLabels, stepGate.ok === true)
       if (verdict.ok) io.log(recordRow({ at: io.now(), event: 'step:done', step: step.id, round: stepRound, passed: step.checks_owned }))
       if (verdict.ok) done.push(step)
+      if (verdict.ok) doneEnvelopes.push(env)
       if (verdict.ok) break
       io.log(recordRow({ at: io.now(), event: 'step:red', step: step.id, round: stepRound, failed: verdict.failed, regressed: verdict.regressed }))
       priorStepFailure = `failed: ${verdict.failed.join(', ') || '(unattributed)'}${verdict.defect ? `; defect: ${verdict.defect}` : ''}\n${String(output || '').slice(-2000)}`

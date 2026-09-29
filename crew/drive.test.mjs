@@ -3234,7 +3234,12 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
   const prescriptionSites = sites.filter(({ keys }) => keys.split(' ').includes('plan_prescription_applied'))
   assert.equal(prescriptionSites.length, 1)
   assert.equal(prescriptionSites[0].wrapper, 'recordRow')
-  const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused') && !keys.split(' ').includes('review_identity_refused') && !keys.split(' ').includes('plan_prescription_applied'))
+  const stepReverifySites = sites.filter(({ events }) => events.includes('step:reverified') || events.includes('step:reverify-red'))
+  assert.deepEqual(stepReverifySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), [
+    ['recordRow', "event='step:reverified'", 'at step passed'],
+    ['recordRow', "event='step:reverify-red'", 'at step failed'],
+  ])
+  const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused') && !keys.split(' ').includes('review_identity_refused') && !keys.split(' ').includes('plan_prescription_applied') && keys !== 'at step passed' && keys !== 'at step failed')
   const expectedLegacySites = DRIVE_JOURNAL_EXPECTED.filter(([, , keys]) => keys !== 'at rebase_restore_diagnosis')
   assert.equal(legacySites.length, expectedLegacySites.length)
   assert.deepEqual(legacySites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), expectedLegacySites)
@@ -3860,8 +3865,26 @@ function resumeCheckpointForTest(overrides = {}) {
 
 const RESUME_CHECKPOINT_KEYS = ['version', 'kind', 'frozen_where', 'head_oid', 'tree', 'accepted_scope', 'returns', 'decision', 'commit', 'proof', 'suite', 'publish', 'prior_stages', 'chunk']
 
+test('F1 stepped-resume acceptance', () => {
+  const checkpoint = resumeCheckpointForTest({ kind: 'step', frozen_where: 'build' })
+  checkpoint.returns = { planner: { status: 'done', role: 'planner', artifacts: [], details: { chunks: [{ id: 'c1' }] } }, builder: null, reviewer: null }
+  checkpoint.decision = null
+  checkpoint.commit = { oid: null, pending: true, files: [], message: '', subject: '' }
+  checkpoint.step = { done: [], builder_attempts: 0, envelopes: [], brief_file: '/tmp/brief.md', limits: { plan_rounds: 2, build_rounds: 3, review_rounds: 2, extra_rounds: 1, lead_consults: 4, gate_fails_to_triage: 2, gate_repairs: 1 }, plan_sha256: '0000000000000000000000000000000000000000000000000000000000000000' }
+  assert.equal(resumeCheckpointDefect(checkpoint), null, 'empty prefix is a valid schema and does not imply capture eligibility')
+  const bad = structuredClone(checkpoint)
+  bad.step.builder_attempts = -1
+  assert.match(resumeCheckpointDefect(bad), /builder attempts/)
+  bad.step.builder_attempts = 0
+  bad.step.done = ['not-c1']
+  assert.match(resumeCheckpointDefect(bad), /completed steps/)
+  const nonStep = resumeCheckpointForTest()
+  nonStep.step = checkpoint.step
+  assert.match(resumeCheckpointDefect(nonStep), /non-step checkpoint carries step state/)
+})
+
 test('resume checkpoint schema is complete for every supported terminal family', () => {
-  assert.deepEqual(RESUME_CHECKPOINT_FAMILIES, ['gate', 'rebase', 'suite', 'publish'])
+  assert.deepEqual(RESUME_CHECKPOINT_FAMILIES, ['step', 'gate', 'rebase', 'suite', 'publish'])
   for (const [kind, frozenWhere] of [['gate', 'gate'], ['rebase', 'rebase'], ['suite', 'suite'], ['suite', 'cold-suite'], ['publish', 'publish']]) {
     const checkpoint = resumeCheckpointForTest({ kind, frozen_where: frozenWhere, suite: { cmd: 'node --test custom-suite.mjs' } })
     assert.deepEqual(Object.keys(checkpoint), RESUME_CHECKPOINT_KEYS)

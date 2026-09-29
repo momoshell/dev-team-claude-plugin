@@ -3689,6 +3689,13 @@ export function resumeCmd(args, deps = {}) {
     publish: { branch: checkpoint.publish.branch },
     files_in_scope: checkpoint.accepted_scope,
     resume_checkpoint: checkpoint,
+    ...(checkpoint.kind === 'step' ? (() => {
+      const protectedFloor = checkoutProtectedPaths({ checkout })
+      // lean: resumed step waits use defaults; persist effective waits in a future checkpoint revision if needed
+      return { briefFile: checkpoint.step.brief_file, limits: checkpoint.step.limits,
+        protectedPaths: protectedFloor.paths, protectedPathsBasis: protectedFloor.basis,
+        laneFence: crew.lane_fence, laneName: crew.lane_name, turnCeilings: crew.turn_ceilings }
+    })() : {}),
   }
   const drive = deps.resume || deps.drive || resumeTask
   let result
@@ -4072,11 +4079,21 @@ function resumeArtifactPath(path, { checkout, taskDir }) {
 
 function validateResumeArtifacts(checkpoint, { checkout, taskDir, existsSync: exists = existsSync, readFileSync: read = readFileSync }) {
   const paths = new Set()
-  for (const role of ['planner', 'builder', 'reviewer']) {
+  const roles = checkpoint.kind === 'step' ? ['planner'] : ['planner', 'builder', 'reviewer']
+  for (const role of roles) {
     const returned = checkpoint.returns[role]
     if (returned.status !== 'done' || returned.role !== role) return { reason: RESUME_REFUSALS.stateMissing, message: `${role} accepted return is incomplete` }
     if (Array.isArray(returned.artifacts)) for (const artifact of returned.artifacts) paths.add(artifact)
     for (const key of ['plan_path', 'gate_path', 'review_path']) if (returned.details && returned.details[key]) paths.add(returned.details[key])
+  }
+  if (checkpoint.kind === 'step') {
+    for (const role of ['builder', 'reviewer']) {
+      const returned = checkpoint.returns[role]
+      if (returned !== null && (returned.status !== 'done' || returned.role !== role)) return { reason: RESUME_REFUSALS.stateMissing, message: `${role} accepted return is invalid` }
+      if (Array.isArray(returned?.artifacts)) for (const artifact of returned.artifacts) paths.add(artifact)
+    }
+    for (const returned of checkpoint.step.envelopes) if (Array.isArray(returned.artifacts)) for (const artifact of returned.artifacts) paths.add(artifact)
+    paths.add(checkpoint.step.brief_file)
   }
   for (const raw of paths) {
     const path = resumeArtifactPath(raw, { checkout, taskDir })

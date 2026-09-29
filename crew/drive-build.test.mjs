@@ -12,7 +12,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'
@@ -8369,7 +8369,7 @@ const steppedMutations = [
   { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
   { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
 ]
-function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false } = {}) {
+function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false, resumeGateOutput = null, builder1 = null, builder2 = null, seedFiles = {}, reviewer = reviewEnv('pass') } = {}) {
   const checks = mutations.map(({ check }) => check)
   const plan = planEnv({ details: {
     ...planEnv().details,
@@ -8379,6 +8379,8 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
   const red = checks.map((id) => `FAIL ${id}: pristine red`).join('\n')
   const baseline = `${red}\nGATE-SUMMARY {"total":${checks.length},"failed":${checks.length},"errored":0}`
   const files = {
+    [`${TD}/plan.md`]: '# stepped plan\n',
+    ...seedFiles,
     [`${CTX.checkout}/a.mjs`]: 'alpha\n',
     [`${CTX.checkout}/b.mjs`]: 'beta\n',
   }
@@ -8388,6 +8390,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
   let gateCalls = 0
   runs['stepped-gate'] = () => {
     const index = gateCalls++
+    if (index === 0 && resumeGateOutput !== null) return { ok: !/\"failed\":(?!0)/.test(resumeGateOutput), output: resumeGateOutput }
     if (index === 0) return { ok: false, output: baseline }
     if (corrected) {
       if (files[`${CTX.checkout}/a.mjs`].includes('ALPHA')) return { ok: false, output: steppedRed('A1') }
@@ -8402,9 +8405,9 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
     files, writeThrough: true,
     envelopes: {
       'planner:1': plan,
-      'builder:1': buildEnv({ artifacts: [`${TD}/step-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], ...(corrected ? { mutation_corrections: [correction] } : {}) } }),
-      'builder:2': buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
-      'reviewer:1': reviewEnv('pass'),
+      'builder:1': builder1 || buildEnv({ artifacts: [`${TD}/step-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], ...(corrected ? { mutation_corrections: [correction] } : {}) } }),
+      'builder:2': builder2 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+      'reviewer:1': reviewer,
     },
     runs,
     cleanRuns: { 'stepped-gate': { ok: false, output: baseline } },
@@ -8412,6 +8415,144 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
   })
   return { io, plan, files }
 }
+
+test('C1 stepped-resume acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2')] })
+  io.indexOid = () => 'tree1234'
+  const fileBytes = (text) => `file:-:${createHash('sha256').update(text).digest('hex')}`
+  io.fingerprintTree = () => ({ measured: true, entries: {
+    'a.mjs': fileBytes('alpha\\n'), 'b.mjs': fileBytes('beta\\n'), 'a.test.mjs': fileBytes('test\\n'),
+  } })
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  const checkpoint = result.details.resume_checkpoint
+  assert.ok(checkpoint, JSON.stringify({ details: result.details, logs: io.calls.logs.slice(-10) }))
+  assert.equal(checkpoint.kind, 'step')
+  assert.deepEqual(checkpoint.step.done, ['c1'])
+  assert.equal(checkpoint.step.builder_attempts, 2)
+  assert.equal(checkpoint.step.envelopes.length, 1)
+  assert.equal(checkpoint.step.envelopes[0].role, 'builder')
+  assert.equal(checkpoint.step.brief_file, CTX.briefFile)
+  assert.deepEqual(checkpoint.step.limits, { ...LIMITS, build_rounds: 2 })
+})
+
+function addStepCheckpointWitness(io) {
+  io.indexOid = () => 'tree1234'
+  const fileBytes = (text) => `file:-:${createHash('sha256').update(text).digest('hex')}`
+  io.fingerprintTree = () => ({ measured: true, entries: {
+    'a.mjs': fileBytes('alpha\\n'), 'b.mjs': fileBytes('beta\\n'), 'a.test.mjs': fileBytes('test\\n'),
+  } })
+}
+
+function captureOneDoneStep({ outputs = [steppedGreen(), steppedRed('A2')], buildRounds = 2, seedBuilder = null } = {}) {
+  const { io } = steppedAcceptanceIo({ outputs, builder1: seedBuilder })
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: buildRounds } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.ok(result.details.resume_checkpoint)
+  return { checkpoint: result.details.resume_checkpoint, result, io }
+}
+
+test('C2 stepped-resume acceptance', () => {
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'full build paused' }) })
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'full', roles: ['planner', 'builder', 'reviewer'] }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.resume_checkpoint, undefined)
+})
+
+test('R1 stepped-resume acceptance', () => {
+  const savedBuilder = buildEnv({ artifacts: [`${TD}/saved-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], mutation_corrections: [{ check: 'A1', find: 'alpha', replace: 'ALPHA' }] } })
+  const { checkpoint, io: sourceIo } = captureOneDoneStep({ seedBuilder: savedBuilder })
+  checkpoint.step.builder_attempts = 1
+  const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: sourceIo.calls.writes })
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 }, resume_checkpoint: checkpoint }, io)
+  assert.ok(['done', 'escalation'].includes(result.status))
+  assert.equal(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c1-r1.md')), false)
+  assert.equal(io.calls.logs.filter(({ gate_reap }) => gate_reap?.name === 'step:reverify').length, 1)
+  assert.equal(io.calls.logs.some(({ stage }) => stage === 'gate-baseline'), false)
+  assert.ok(io.calls.logs.some(({ event, step }) => event === 'step:reverified' && step === 'c1'))
+  assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c2-r1.md')))
+})
+
+test('R2 stepped-resume acceptance', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  checkpoint.step.builder_attempts = 1
+  checkpoint.step.limits.build_rounds = 3
+  const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedRed('A1'), outputs: [steppedGreen(), steppedGreen()], seedFiles: sourceIo.calls.writes })
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, io)
+  assert.ok(io.calls.logs.some(({ stage }) => stage === 'build:c1:r1'))
+  assert.ok(io.calls.logs.some(({ event, step }) => event === 'step:reverify-red' && step === 'c1'))
+  assert.ok(io.calls.logs.some(({ stage }) => stage === 'build:c2:r1'))
+  assert.ok(['done', 'escalation'].includes(result.status))
+})
+
+test('R3 stepped-resume acceptance', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  checkpoint.step.builder_attempts = 1
+  const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: sourceIo.calls.writes })
+  driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 }, resume_checkpoint: checkpoint }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner' || role === 'tech-lead').length, 0)
+  assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c2-r1.md')))
+})
+
+test('B1 stepped-resume acceptance', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  checkpoint.step.limits.build_rounds = 3
+  const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), outputs: [steppedRed('A2')], seedFiles: sourceIo.calls.writes })
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.resume_checkpoint.step.builder_attempts, 3)
+  assert.deepEqual(result.details.resume_checkpoint.step.done, ['c1'])
+})
+
+// Kills: resume adopting whatever plan.md holds. The checkpoint pins the accepted plan's digest, so
+// an absent snapshot or one that no longer matches refuses before any builder is assigned.
+test('a stepped resume refuses an absent or mismatched accepted-plan snapshot', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  assert.match(checkpoint.step.plan_sha256, /^[0-9a-f]{64}$/)
+  const absentSeed = { ...sourceIo.calls.writes }
+  delete absentSeed[`${TD}/plan.accepted.md`]
+  const absent = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: absentSeed })
+  const absentResult = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, absent.io)
+  assert.match(absentResult.details.escalation.why, /accepted plan snapshot is absent/)
+  assert.equal(absent.io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  const changed = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: { ...sourceIo.calls.writes, [`${TD}/plan.accepted.md`]: '# a plan nobody accepted\n' } })
+  const changedResult = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, changed.io)
+  assert.match(changedResult.details.escalation.why, /does not match the checkpoint digest/)
+  assert.equal(changed.io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  const undigested = structuredClone(checkpoint)
+  delete undigested.step.plan_sha256
+  assert.equal(resumeCheckpointDefect(undigested), 'checkpoint accepted plan digest is absent')
+})
+
+// Kills: capture hashing whatever the snapshot holds at escalation. A seat that rewrites
+// plan.accepted.md after acceptance must leave no checkpoint, so the rewrite can never be resumed.
+test('a step checkpoint is not captured when the accepted-plan snapshot changed after acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2')] })
+  addStepCheckpointWitness(io)
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => {
+    if (spec.role === 'builder') io.calls.files[`${TD}/plan.accepted.md`] = '# rewritten after acceptance\n'
+    return assign(spec)
+  }
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.resume_checkpoint, undefined)
+})
+
+test('C3 stepped-resume acceptance', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
+  // Kills: dropping the done-step requirement from the capture guard. The witness and head
+  // make the checkpoint otherwise capturable, so only that guard keeps it absent.
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.resume_checkpoint, undefined)
+  assert.equal(io.calls.logs.filter((row) => row.event === 'step:done').length, 0)
+})
 
 test('P1 stepped-executor acceptance', () => {
   const { io } = steppedAcceptanceIo({ empty: true, mutations: [] })

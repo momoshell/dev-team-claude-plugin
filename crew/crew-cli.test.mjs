@@ -179,12 +179,18 @@ test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the
   assert.equal(Object.hasOwn(bare.boot.breaker, 'advisor'), false)
 })
 
-test('ADR047 C2 a below-floor advisor cell refuses the boot before any state dir or workspace', async () => {
-  const result = await bootAdvisor({ task: 'adr047-c2', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
-  assert.equal(result.error?.reason, 'band-below-floor')
-  assert.match(result.error.message, /advisor/)
-  assert.equal(result.stateDir, false)
-  assert.equal(result.workspaceCalls, 0)
+// Kills: the advisor floor dropped (haiku refuses again as an advisor), and the advisor floor
+// applied to every seat (haiku stops refusing as a builder, whose floor is the tier's).
+test('ADR047 C2 a basement advisor cell boots while a basement seat still refuses before any state dir', async () => {
+  // Decision 10: the advisor cell is held to ADVISOR_FLOOR_BAND, not the build tier's utility floor.
+  const advisor = await bootAdvisor({ task: 'adr047-c2-advisor', args: { 'model-advisor': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(advisor.error, null)
+  assert.equal(advisor.crew.seats.advisor.id, 'claude-haiku-4-5')
+  const seat = await bootAdvisor({ task: 'adr047-c2-seat', args: { 'model-builder': 'anthropic/claude-haiku-4-5' } })
+  assert.equal(seat.error?.reason, 'band-below-floor')
+  assert.match(seat.error.message, /seat builder/)
+  assert.equal(seat.stateDir, false)
+  assert.equal(seat.workspaceCalls, 0)
 })
 
 test('ADR047 E1 crew.json records the adapter-translated advisor model beside the canonical key', async () => {

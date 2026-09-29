@@ -2849,10 +2849,11 @@ export function renderSeatSkills({ root, mapResult, role, files, budget = SKILLS
         const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/)
         if (!match) throw new Error('invalid frontmatter')
         bodies.push({ path: absolute, body: raw.slice(match[0].length) })
-      } catch { records.push({ path: absolute, status: 'unreadable', bytes: 0 }) }
+      } catch { records.push({ path: absolute, status: 'unreadable', bytes: null }) }
     }
   }
-  const statusLine = (item) => `- ${item.status}: ${item.bytes} bytes — ${item.path}`
+  // An unreadable skill was never measured: its bytes are null and the line says so, never "0 bytes".
+  const statusLine = (item) => `- ${item.status}: ${item.bytes === null ? 'unmeasured' : `${item.bytes} bytes`} — ${item.path}`
   const lines = [SKILLS_SECTION_HEADING]
   if (reason) lines.push(`Reason: ${reason}`)
   for (const item of records) lines.push(statusLine(item))

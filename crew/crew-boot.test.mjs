@@ -124,7 +124,11 @@ test('skill-delivery D3 over-budget status includes absolute path and exact byte
 })
 test('skill-delivery D4 unreadable status includes absolute path', () => {
   const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], read: () => { throw new Error('EPERM') } })
-  assert.ok(result.section.includes(`unreadable: 0 bytes — ${join(ROOT, 'skills/lean-build/SKILL.md')}`))
+  // Kills: an unreadable skill recorded as a measured zero (bytes 0, "0 bytes") instead of absent.
+  assert.ok(result.section.includes(`unreadable: unmeasured — ${join(ROOT, 'skills/lean-build/SKILL.md')}`))
+  const record = result.skills.find((skill) => skill.path === join(ROOT, 'skills/lean-build/SKILL.md'))
+  assert.equal(record.status, 'unreadable')
+  assert.equal(record.bytes, null)
 })
 test('skill-delivery B1 boot journal byte accounting subtracts the skills section and separators', async () => {
   const { dir, row } = await skillBoot()

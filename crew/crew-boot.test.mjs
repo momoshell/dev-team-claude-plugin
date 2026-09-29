@@ -2264,6 +2264,24 @@ test('a planted launcher symlink is replaced, never written through', async () =
   } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
 })
 
+// Kills: the temporary's exclusive-create flag relaxed ('wx' → 'w') — boot would follow a planted
+// launch-lead.sh.tmp-<pid> symlink and overwrite its target. Boot must refuse, target untouched.
+test('a planted launcher temporary symlink refuses the boot, never written through', async () => {
+  let target = null
+  const f = await bootPaneLaunchFixture('l5-tmpsymlink', {
+    before: ({ scratch, taskDir }) => {
+      target = join(scratch, 'precious.txt')
+      writeFileSync(target, 'precious\n')
+      mkdirSync(taskDir, { recursive: true })
+      symlinkSync(target, join(taskDir, `launch-lead.sh.tmp-${process.pid}`))
+    },
+  })
+  try {
+    assert.equal(f.error?.code, 'EEXIST')
+    assert.equal(readFileSync(target, 'utf8'), 'precious\n')
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
 test('L1', async () => {
   const f = await bootPaneLaunchFixture('l1-launch')
   try {

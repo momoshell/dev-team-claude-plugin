@@ -86,6 +86,23 @@ function advisorRoster(cell = ADVISOR_CELL) {
   return value
 }
 
+// A pane boot's layout carries only `/bin/sh '<launcher>'` per seat; the seat commands live in
+// the launcher files. Returns every launcher's text, joined, from a `preserve: true` boot.
+function paneLaunchers(boot) {
+  const layoutArgs = boot.cmuxCalls.find(([verb]) => verb === 'new-workspace')?.[1] || []
+  const commands = []
+  const walk = (node) => {
+    for (const surface of node?.pane?.surfaces || []) if (surface.command) commands.push(surface.command)
+    for (const child of node?.children || []) walk(child)
+  }
+  walk(JSON.parse(layoutArgs[layoutArgs.indexOf('--layout') + 1]))
+  return commands.map((command) => {
+    const launcherPath = command.match(/^\/bin\/sh '(.+)'$/)?.[1]
+    assert.ok(launcherPath)
+    return readFileSync(launcherPath, 'utf8')
+  }).join('\n')
+}
+
 // One build-tier boot against advisorRoster(); returns what it wrote, or the refusal and
 // whether any state dir or workspace was created before it.
 async function bootAdvisor({ task, args = {}, deps = {}, env = {}, rosterValue = advisorRoster(), preserve = false }) {
@@ -230,19 +247,7 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
   // so the activation-only rule is asserted over the launchers the layout points at.
   const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED, preserve: true })
   try {
-    const layoutArgs = pane.cmuxCalls.find(([verb]) => verb === 'new-workspace')?.[1] || []
-    const layout = JSON.parse(layoutArgs[layoutArgs.indexOf('--layout') + 1])
-    const commands = []
-    const walk = (node) => {
-      for (const surface of node?.pane?.surfaces || []) if (surface.command) commands.push(surface.command)
-      for (const child of node?.children || []) walk(child)
-    }
-    walk(layout)
-    const launchers = commands.map((command) => {
-      const launcherPath = command.match(/^\/bin\/sh '(.+)'$/)?.[1]
-      assert.ok(launcherPath)
-      return readFileSync(launcherPath, 'utf8')
-    }).join('\\n')
+    const launchers = paneLaunchers(pane)
     assert.match(launchers, /CREW_ADVISOR=1/)
     assert.doesNotMatch(launchers, /CREW_ADVISOR_MODEL=|CREW_ADVISOR_MODELS=/)
   } finally { pane.cleanup() }
@@ -365,10 +370,12 @@ test('ADR047 S3 run writes a cell manifest and keeps a pre-ADR-047 record on its
 // advisor.ts), and a grant leaking to a second role (granted stops being exactly ['builder']).
 test('ADR047 K2 the shipped default boots a build crew whose builder loads the advisor', async () => {
   // Operator decision 9: the grant shipped off until lane 2 (PR #1614); it is now on.
-  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined } })
-  const layout = JSON.stringify(pane.cmuxCalls.find(([verb]) => verb === 'new-workspace'))
-  assert.match(layout, /CREW_ADVISOR=1/)
-  assert.equal(layout.includes('advisor.ts'), true)
+  const pane = await bootAdvisor({ task: 'adr047-k2-pane', args: { 'headless-all': undefined }, preserve: true })
+  try {
+    const launchers = paneLaunchers(pane)
+    assert.match(launchers, /CREW_ADVISOR=1/)
+    assert.equal(launchers.includes('advisor.ts'), true)
+  } finally { pane.cleanup() }
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)
   assert.deepEqual(headless.crew.advisor.granted, ['builder'])

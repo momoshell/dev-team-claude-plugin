@@ -8,7 +8,7 @@ The ladder is in your shared charter; this skill does not restate it. These are 
 
 - Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (crew/seat-io.mjs:3734).
 - Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).
-- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39-42).
+- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39).
 - Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:134).
 
 When two standard-library options are the same size, choose the edge-case-correct one.

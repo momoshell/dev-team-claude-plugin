@@ -30,7 +30,7 @@ const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', impo
 
 test('ADR047 A1 build roster resolves its canonical nullable advisor cell without seating it', () => {
   const resolved = resolveTier(shippedRoster(), 'build')
-  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5', model: null })
+  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5-5', model: null })
   assert.equal(resolved.roles.includes('advisor'), false)
 })
 test('ADR047 A2 judge roster keeps advisor explicitly null', () => {
@@ -2037,8 +2037,8 @@ test('resolveSeatModels: an agent-only override keeps the roster cell and transl
     agent: 'claude',
     effort: roster.tiers.build.reviewer.effort,
     provider: 'openai',
-    id: 'gpt-6-sol',
-    model: 'gpt-6-sol',
+    id: 'gpt-6.1-sol',
+    model: 'gpt-6.1-sol',
   })
 })
 
@@ -2053,7 +2053,7 @@ test('resolveSeatModels end to end through the REAL adapters, on the fixture ros
   }
   const out = resolveSeatModels(seats, adapters)
   assert.equal(out.builder.model, 'openai-codex/gpt-6-luna')
-  assert.equal(out.reviewer.model, 'openai-codex/gpt-6-sol')
+  assert.equal(out.reviewer.model, 'openai-codex/gpt-6.1-sol')
   assert.equal(out.planner.model, 'claude-opus-5-5')
 
   const judge = resolveTier(roster, 'judge', {})
@@ -2064,7 +2064,7 @@ test('resolveSeatModels end to end through the REAL adapters, on the fixture ros
     reviewer: { name: 'claude', adapter: claudeMod },
     'tech-lead': { name: 'pi', adapter: piMod },
   })
-  assert.equal(judgeOut['tech-lead'].model, 'openai-codex/gpt-6-sol')
+  assert.equal(judgeOut['tech-lead'].model, 'openai-codex/gpt-6.1-sol')
   assert.equal(judgeOut['tech-lead'].fallback[0].model, 'anthropic/claude-opus-5-5')
   assert.equal(judgeOut['tech-lead'].fallback[0].effort, 'xhigh')
 })
@@ -2279,7 +2279,7 @@ test('a ratified judge roster fixture is admitted unchanged with its own model c
   assert.equal(seatModelKey(seats.planner), 'anthropic/claude-opus-5-5')
   assert.equal(seatModelKey(seats.builder), 'openai/gpt-6-luna')
   assert.equal(seatModelKey(seats.reviewer), 'anthropic/claude-opus-5-5')
-  assert.equal(seatModelKey(seats['tech-lead']), 'openai/gpt-6-sol')
+  assert.equal(seatModelKey(seats['tech-lead']), 'openai/gpt-6.1-sol')
   assert.doesNotThrow(() => assertBandFloors(seats, 'judge', loadLadder(), { models: roster.models }))
 })
 
@@ -2390,11 +2390,12 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable successors', () => {
+test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Sonnet successors', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-09-25')
+  assert.equal(shipped.updated_at, '2026-09-30')
+  assert.equal(shipped.tiers.build.advisor.id, 'claude-sonnet-5-5')
   for (const tier of ['mechanical', 'build', 'judge']) {
-    assert.equal(shipped.tiers[tier].planner.id, 'gpt-6-sol')
+    assert.equal(shipped.tiers[tier].planner.id, 'gpt-6.1-sol')
     assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')
   }
   for (const tier of ['build', 'judge']) {
@@ -2407,22 +2408,31 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
   assert.ok(shipped.models['anthropic/claude-fable-5-1'].tags.includes('override-only'))
   assert.equal(nextModelRung(shipped, { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' }), null)
   const expectedCatalog = {
-    'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
-    'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
-    'anthropic/claude-opus-5-5': [4, 20, 0.2, 8, 1000000],
-    'anthropic/claude-fable-5-1': [10, 50, 0.25, 20, 1000000],
+    '2026-09-23': {
+      'openai/gpt-6-sol': [2, 10, 0.2, 2.5, 1050000],
+      'openai/gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 1050000],
+      'anthropic/claude-opus-5-5': [4, 20, 0.2, 8, 1000000],
+      'anthropic/claude-fable-5-1': [10, 50, 0.25, 20, 1000000],
+    },
+    '2026-09-30': {
+      'openai/gpt-6.1-sol': [2, 10, 0.1, 2.5, 1050000],
+      'anthropic/claude-sonnet-5-5': [2, 10, 0.2, 4, 1000000],
+    },
   }
-  for (const [key, prices] of Object.entries(expectedCatalog)) {
-    const model = shipped.models[key]
-    assert.deepEqual([model.cost_in_per_mtok, model.cost_out_per_mtok, model.cost_cache_read_per_mtok, model.cost_cache_write_per_mtok, model.context], prices)
-    assert.equal(model.source, 'models.dev')
-    assert.equal(model.last_verified, '2026-09-23')
+  for (const [verified, rows] of Object.entries(expectedCatalog)) {
+    for (const [key, prices] of Object.entries(rows)) {
+      const model = shipped.models[key]
+      assert.deepEqual([model.cost_in_per_mtok, model.cost_out_per_mtok, model.cost_cache_read_per_mtok, model.cost_cache_write_per_mtok, model.context], prices)
+      assert.equal(model.source, 'models.dev')
+      assert.equal(model.last_verified, verified)
+    }
   }
   // The predecessors stay as PRICE rows only, so the ledger's history stays priced: no seat,
   // fallback or ladder band names them, and seating one is refused as band-unknown.
   const ladderMembers = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8')).bands.flatMap((band) => band.members)
   const seated = JSON.stringify(shipped.tiers)
-  for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5', 'anthropic/claude-fable-5']) {
+  for (const key of ['openai/gpt-5.6-sol', 'openai/gpt-5.6-luna', 'anthropic/claude-opus-5', 'anthropic/claude-fable-5', 'openai/gpt-6-sol', 'anthropic/claude-sonnet-5']) {
+    assert.ok(shipped.models[key].tags.includes('override-only'), key)
     assert.equal(Object.hasOwn(shipped.models, key), true)
     assert.equal(ladderMembers.includes(key), false)
     assert.equal(seated.includes(`"${key.slice(key.indexOf('/') + 1)}"`), false)
@@ -2440,6 +2450,7 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
     }
   }
   assert.match(shipped.models['openai/gpt-6-sol'].cache_rate_source, /second price tier above 272000 input tokens/)
+  assert.match(shipped.models['openai/gpt-6.1-sol'].cache_rate_source, /second price tier above 272000 input tokens/)
   assert.match(shipped.models['openai/gpt-6-luna'].cache_rate_source, /second price tier above 272000 input tokens/)
   // Astra is seated through pi's openai-codex route, which serves a 272K context; its second
   // price tier starts at 272000 input tokens, so it stays unreachable in one request only while
@@ -2451,7 +2462,7 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
   const frontier = ladder.bands.find((band) => band.band === 'frontier')
   const utility = ladder.bands.find((band) => band.band === 'utility')
   assert.ok(frontier.members.includes('anthropic/claude-opus-5-5'))
-  assert.ok(frontier.members.includes('openai/gpt-6-sol'))
+  assert.ok(frontier.members.includes('openai/gpt-6.1-sol'))
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
   assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
   assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)
@@ -2459,4 +2470,9 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus and Fable succ
     assert.match(String(band.membership_basis), /operator ratification on 2026-09-23/)
     assert.match(String(band.membership_basis), /no successor benchmark score was supplied/)
   }
+  const workhorse = ladder.bands.find((band) => band.band === 'workhorse')
+  assert.ok(workhorse.members.includes('anthropic/claude-sonnet-5-5'))
+  assert.match(String(frontier.membership_basis), /openai\/gpt-6\.1-sol replaces openai\/gpt-6-sol in this same band by operator ratification on 2026-09-30/)
+  assert.match(String(workhorse.membership_basis), /anthropic\/claude-sonnet-5-5 replaces anthropic\/claude-sonnet-5 in this same band by operator ratification on 2026-09-30/)
+  for (const band of [frontier, workhorse]) assert.match(String(band.membership_basis), /2026-09-30; no successor benchmark score was supplied/)
 })

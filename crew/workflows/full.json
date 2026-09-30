@@ -5,7 +5,7 @@
       "role": "planner",
       "agent": "pi",
       "provider": "openai",
-      "id": "gpt-6-sol",
+      "id": "gpt-6.1-sol",
       "effort": "medium",
       "skills": [],
       "extensions": [

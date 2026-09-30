@@ -82,7 +82,7 @@ test('advisor boot record carries canonical model and empty resolved endpoint', 
 
 // ADR-047 lane 1: a roster whose build tier carries an advisor cell. The shared fixture
 // roster has none, so every advisor boot below states its cell explicitly.
-const ADVISOR_CELL = Object.freeze({ provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium' })
+const ADVISOR_CELL = Object.freeze({ provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'pi', effort: 'medium' })
 function advisorRoster(cell = ADVISOR_CELL) {
   const value = structuredClone(roster)
   value.tiers.build = { advisor: cell === null ? null : { ...cell }, ...value.tiers.build }
@@ -163,9 +163,9 @@ const UNGRANTED = Object.freeze({ register: builderUngrantedRegister() })
 const BUILD_SEAT_ATTEMPTS = [
   breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'medium', role: 'lead' }),
   breakerAttempt({ provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'max', role: 'builder' }),
-  breakerAttempt({ provider: 'openai', model_id: 'gpt-6-sol', agent: 'pi', effort: 'high', role: 'reviewer' }),
+  breakerAttempt({ provider: 'openai', model_id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', role: 'reviewer' }),
 ]
-const ADVISOR_LEDGER_KEY = { provider: 'anthropic', model_id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', role: 'advisor' }
+const ADVISOR_LEDGER_KEY = { provider: 'anthropic', model_id: 'claude-sonnet-5-5', agent: 'pi', effort: 'medium', role: 'advisor' }
 
 test('ADR047 C1 an open advisor cell refuses the boot before any state dir or workspace', async () => {
   const openLedger = fakeBreakerLedger([breakerRow({ ...ADVISOR_LEDGER_KEY, failures: 6 })], {
@@ -175,7 +175,7 @@ test('ADR047 C1 an open advisor cell refuses the boot before any state dir or wo
   const result = await bootAdvisor({ task: 'adr047-c1', deps: { openLedger },
     env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-c1.db' } })
   assert.equal(result.error?.code, 'breaker-open')
-  assert.match(result.error.message, /anthropic\/claude-sonnet-5 agent=pi effort=medium roles=advisor rate=0\.5/)
+  assert.match(result.error.message, /anthropic\/claude-sonnet-5-5 agent=pi effort=medium roles=advisor rate=0\.5/)
   assert.equal(result.stateDir, false)
   assert.equal(result.workspaceCalls, 0)
 })
@@ -196,7 +196,7 @@ test('ADR047 N1 an unmeasured advisor cell is its own breaker row and leaves the
   assert.equal(breaker.advisor.denominator, 0)
   assert.deepEqual(breaker.advisor.roles, ['advisor'])
   assert.deepEqual([breaker.advisor.provider, breaker.advisor.model_id, breaker.advisor.agent, breaker.advisor.effort],
-    ['anthropic', 'claude-sonnet-5', 'pi', 'medium'])
+    ['anthropic', 'claude-sonnet-5-5', 'pi', 'medium'])
   // A null advisor adds no row at all: the record is exactly the seats-only shape.
   const bare = await bootAdvisor({ task: 'adr047-n1-null', args: { 'model-advisor': 'none' }, deps: { openLedger },
     env: { CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: '/nonexistent/adr047-n1.db' } })
@@ -220,38 +220,38 @@ test('ADR047 C2 a basement advisor cell boots while a basement seat still refuse
 })
 
 test('ADR047 E1 crew.json records the adapter-translated advisor model beside the canonical key', async () => {
-  const result = await bootAdvisor({ task: 'adr047-e1', args: { 'model-advisor': 'openai/gpt-6-sol' } })
+  const result = await bootAdvisor({ task: 'adr047-e1', args: { 'model-advisor': 'openai/gpt-6.1-sol' } })
   assert.equal(result.error, null)
-  assert.equal(result.crew.seats.advisor.model, 'openai-codex/gpt-6-sol')
+  assert.equal(result.crew.seats.advisor.model, 'openai-codex/gpt-6.1-sol')
   assert.equal(result.crew.seats.advisor.provider, 'openai')
-  assert.equal(result.crew.seats.advisor.id, 'gpt-6-sol')
+  assert.equal(result.crew.seats.advisor.id, 'gpt-6.1-sol')
   // The boot record keeps the canonical catalog key for compatibility.
-  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6.1-sol')
 })
 
 test('ADR047 R1 a consult is launched with the adapter spelling while the record keeps the catalog key', async () => {
-  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6-sol' }, deps: GRANTED })
+  const result = await bootAdvisor({ task: 'adr047-r1', args: { 'model-advisor': 'openai/gpt-6.1-sol' }, deps: GRANTED })
   assert.equal(result.error, null)
-  assert.equal(result.crew.advisor.model, 'openai/gpt-6-sol')
-  assert.equal(result.crew.advisor.consult_model, 'openai-codex/gpt-6-sol')
+  assert.equal(result.crew.advisor.model, 'openai/gpt-6.1-sol')
+  assert.equal(result.crew.advisor.consult_model, 'openai-codex/gpt-6.1-sol')
   const launch = advisorLaunchCell(result.crew.advisor)
-  assert.deepEqual(Object.keys(launch.models), ['openai-codex/gpt-6-sol'])
-  assert.deepEqual(launch.models['openai-codex/gpt-6-sol'], roster.models['openai/gpt-6-sol'])
+  assert.deepEqual(Object.keys(launch.models), ['openai-codex/gpt-6.1-sol'])
+  assert.deepEqual(launch.models['openai-codex/gpt-6.1-sol'], roster.models['openai/gpt-6.1-sol'])
   // The extension's own model check (the same classifier) admits what it is handed.
-  assert.deepEqual(classifyAdvisorCell(launch), { model: 'openai-codex/gpt-6-sol' })
+  assert.deepEqual(classifyAdvisorCell(launch), { model: 'openai-codex/gpt-6.1-sol' })
   const env = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: launch }).env
   assert.equal(env.CREW_ADVISOR, '1')
   assert.equal(env.CREW_ADVISOR_MODEL, undefined)
   assert.equal(env.CREW_ADVISOR_MODELS, undefined)
   // A provider the adapter spells as-is keeps the whole catalog, as before.
   const shipped = await bootAdvisor({ task: 'adr047-r1-sonnet', deps: GRANTED })
-  assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5')
-  assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5')
+  assert.equal(shipped.crew.advisor.consult_model, 'anthropic/claude-sonnet-5-5')
+  assert.equal(advisorLaunchCell(shipped.crew.advisor).model, 'anthropic/claude-sonnet-5-5')
   // The pane launch carries activation only; the manifest owns the model identity. The stub
   // cmux never reports a workspace, so the boot stops after composing the layout.
   // Pane seat commands live in launcher files (the layout carries only `/bin/sh '<launcher>'`),
   // so the activation-only rule is asserted over the launchers the layout points at.
-  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6-sol', 'headless-all': undefined }, deps: GRANTED, preserve: true })
+  const pane = await bootAdvisor({ task: 'adr047-r1-pane', args: { 'model-advisor': 'openai/gpt-6.1-sol', 'headless-all': undefined }, deps: GRANTED, preserve: true })
   try {
     const launchers = paneLaunchers(pane)
     assert.match(launchers.builder, /CREW_ADVISOR=1/)
@@ -271,7 +271,7 @@ test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the build
   assert.equal(rows.crew.roles.includes('advisor'), false)
   const [row] = advisorRows
   assert.equal(row.provider, 'anthropic')
-  assert.equal(row.model_id, 'claude-sonnet-5')
+  assert.equal(row.model_id, 'claude-sonnet-5-5')
   assert.equal(row.agent, 'pi')
   assert.equal(row.effort, 'medium')
   assert.equal(row.model, rows.crew.seats.advisor.model)
@@ -393,18 +393,18 @@ test('ADR047 K2 the shipped default boots a build crew whose builder loads the a
   const headless = await bootAdvisor({ task: 'adr047-k2' })
   assert.equal(headless.error, null)
   assert.deepEqual(headless.crew.advisor.granted, ['builder'])
-  assert.equal(headless.crew.seats.advisor.id, 'claude-sonnet-5')
+  assert.equal(headless.crew.seats.advisor.id, 'claude-sonnet-5-5')
   // Switched off inside the test, the same boot grants no seat and still records the cell.
   const ungranted = await bootAdvisor({ task: 'adr047-k2-ungranted', deps: UNGRANTED })
   assert.deepEqual(ungranted.crew.advisor.granted, [])
-  assert.equal(ungranted.crew.seats.advisor.id, 'claude-sonnet-5')
+  assert.equal(ungranted.crew.seats.advisor.id, 'claude-sonnet-5-5')
 })
 
 test('ADR047 H1 the boot journal run_configuration carries the resolved advisor cell', async () => {
   const result = await bootAdvisor({ task: 'adr047-h1' })
   assert.equal(result.error, null)
   assert.deepEqual(result.boot.run_configuration.advisor, {
-    agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5', model: result.crew.seats.advisor.model,
+    agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5-5', model: result.crew.seats.advisor.model,
   })
   assert.deepEqual(result.boot.seats.advisor, result.crew.seats.advisor)
   assert.equal(Object.hasOwn(result.crew.run_configuration, 'advisor'), false)
@@ -2478,7 +2478,7 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
   const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })], { attemptRows: [
     breakerAttempt(),
     breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'lead' }),
-    breakerAttempt({ provider: 'openai', model_id: 'gpt-6-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
+    breakerAttempt({ provider: 'openai', model_id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
     breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'reviewer' }),
   ] })
   try {
@@ -3223,8 +3223,8 @@ test('#809 a LAN advisor endpoint is admitted and only http(s), userinfo and uns
 // ADR-047: a boot record is built from the RESOLVED roster cell. The retired environment
 // never reaches it, so these helpers state the cell (and, for the legacy HTTP-channel
 // checks assertAdvisorCellLive still carries until lane 2 deletes it, the endpoint record).
-const ADVISOR_MODELS = Object.freeze({ 'anthropic/claude-sonnet-5': {}, 'provider/model': {} })
-function cellRecord(roles, { cell = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' }, models = ADVISOR_MODELS } = {}) {
+const ADVISOR_MODELS = Object.freeze({ 'anthropic/claude-sonnet-5-5': {}, 'provider/model': {} })
+function cellRecord(roles, { cell = { provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5-5' }, models = ADVISOR_MODELS } = {}) {
   return advisorBootRecord({ adapters: Object.fromEntries(roles.map((role) => [role, { grants: { advisor: true } }])), models, advisor: cell })
 }
 function legacyEndpointRecord(roles, endpoint, model = 'qwen3-coder') {
@@ -3475,7 +3475,7 @@ test('shadowPick stands without evidence and abstains when the seated cell is in
       builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
     },
     judge: {
-      builder: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi', effort: 'xhigh' },
+      builder: { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'xhigh' },
     },
   } }
   const base = {
@@ -4733,7 +4733,7 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
-  assert.equal(resolved.seats.planner.id, 'gpt-6-sol')
+  assert.equal(resolved.seats.planner.id, 'gpt-6.1-sol')
   assert.equal(resolved.seats.lead.id, 'claude-opus-5-5')
   assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
   assert.equal(resolved.seats.builder.id, 'gpt-6-luna')
@@ -4982,7 +4982,7 @@ test('routing A1 validates the checkout-pinned schema and returns exactly one ch
   assert.equal(Array.isArray(result.chosen_cell), false)
   const shippedPolicyText = JSON.stringify(loaded.policy)
   // Each route's candidates, exactly: main's routes with only the three ids renamed.
-  const opus = 'anthropic/claude-opus-5-5', luna = 'openai/gpt-6-luna', sol = 'openai/gpt-6-sol'
+  const opus = 'anthropic/claude-opus-5-5', luna = 'openai/gpt-6-luna', sol = 'openai/gpt-6.1-sol'
   const routeCandidates = {}
   for (const [tier, roles] of Object.entries(loaded.policy.routes)) {
     for (const [role, route] of Object.entries(roles)) routeCandidates[`${tier}.${role}`] = route.candidates.map((cell) => `${cell.provider}/${cell.id}`)
@@ -4992,7 +4992,7 @@ test('routing A1 validates the checkout-pinned schema and returns exactly one ch
     'build.lead': [opus], 'build.planner': [opus], 'build.builder': [luna], 'build.reviewer': [sol],
     'judge.lead': [opus], 'judge.planner': [opus], 'judge.builder': [luna], 'judge.reviewer': [opus], 'judge.tech-lead': [sol],
   })
-  for (const predecessor of ['gpt-5.6-sol', 'gpt-5.6-luna']) {
+  for (const predecessor of ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-6-sol']) {
     assert.equal(shippedPolicyText.includes(predecessor), false, `shipped routing policy must not seat ${predecessor}`)
   }
   assert.deepEqual(shippedPolicyText.split(/[^A-Za-z0-9._-]+/).filter((token) => token === 'claude-opus-5'), [])

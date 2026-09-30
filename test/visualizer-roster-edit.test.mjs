@@ -20,13 +20,13 @@ const rosterFixture = () => ({
       lead: null,
       planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
       builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
-      reviewer: { provider: 'openai', id: 'gpt-6-sol', agent: 'pi', effort: 'medium' },
+      reviewer: { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' },
     },
     build: {
       lead: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
       planner: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'medium' },
       builder: { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'max' },
-      reviewer: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' },
+      reviewer: { provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'claude', effort: 'high' },
     },
     judge: {
       lead: { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' },
@@ -38,10 +38,10 @@ const rosterFixture = () => ({
   },
   models: {
     'anthropic/claude-opus-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
-    'anthropic/claude-sonnet-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
+    'anthropic/claude-sonnet-5-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
     'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
     'anthropic/claude-opus-5-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
-    'openai/gpt-6-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
+    'openai/gpt-6.1-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
     'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
     'openai/gpt-5.6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
     'openai/gpt-6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
@@ -210,14 +210,14 @@ test('a same-vendor reviewer/partner pairing is admitted', async () => {
 })
 
 test('a same-vendor reviewer/partner pairing is admitted when the planner changes', async () => {
-  const result = await edit({ role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' } })
+  const result = await edit({ role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'claude', effort: 'high' } })
   assert.equal(result.ok, true)
   assert.notEqual(result.diff, null)
   assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
 })
 
 test('a same-vendor judge tech-lead/planner pairing is admitted', async () => {
-  const result = await edit({ tier: 'judge', role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high' } })
+  const result = await edit({ tier: 'judge', role: 'planner', cell: { provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'claude', effort: 'high' } })
   assert.equal(result.ok, true)
   assert.notEqual(result.diff, null)
   assert.equal(result.refusals.some(({ code }) => code === 'cross_vendor' || code === 'judge_vendor_split'), false)
@@ -367,9 +367,9 @@ test('ladderView keeps ratified drift, measured records and tier rail separate',
 })
 
 const pickCells = {
-  first: { provider:'openai', id:'gpt-6-sol', agent:'pi', effort:'medium' },
+  first: { provider:'openai', id:'gpt-6.1-sol', agent:'pi', effort:'medium' },
   thin: { provider:'openai', id:'gpt-5.6-terra', agent:'pi', effort:'max' },
-  winner: { provider:'anthropic', id:'claude-sonnet-5', agent:'claude', effort:'high' },
+  winner: { provider:'anthropic', id:'claude-sonnet-5-5', agent:'claude', effort:'high' },
 }
 const pickEntry = {
   candidates: [pickCells.first, pickCells.thin, pickCells.winner],

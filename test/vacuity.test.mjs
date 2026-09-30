@@ -207,11 +207,11 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/pi/extensions/lab.test.mjs': '103e8a9259002962fb0094fcef011a3d99a5e1fa89f6c59007a9caef33ea440c',
   'crew/pi/extensions/subagent.test.mjs': 'd17c9cc3cae62362a8f3ed93713b53a1cd6b201f77b9c1271816adf9c5c3c6c6',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
-  'crew/roster-refresh.test.mjs': '633133e09196ad722b89284fe8d7783ba53c2b39a2ee63c4757fffdd4df687be',
+  'crew/roster-refresh.test.mjs': '2aa9146c3330b5c5773d4684efd4c90ce38221dcadc17e59bf439413866f6138',
   'test/factory-emit.test.mjs': '04d1fb0031e1f55dafc8f3e50d5070cccb0ed3ae437c41e96b58fc6725c6f002',
   'test/factory-make-brief.test.mjs': '7be88111ccedcd0e51650edd383b055e673c27af4048d3c3a2f95a34bb8b0951',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': '891ead5f4118add9c735151fafb586964fe730bb68439b51d6473a363b9ea6c1',
+  'test/visualizer-server.test.mjs': '0fe750d3bf9f172b5f5495b54ed5a24b276d5ade72ac290f8de5f2b3d000870f',
   'test/visualizer-shape.test.mjs': '1b6647815e0707a8c4be2e46bab3f011038c768802d3d3dc78dc0be68733865e',
 })
 

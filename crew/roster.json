@@ -227,8 +227,8 @@
       "cost_in_per_mtok": 2,
       "cost_out_per_mtok": 12,
       "cost_cache_read_per_mtok": 0.2,
-      "cost_cache_write_per_mtok": 0,
-      "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+      "cost_cache_write_per_mtok": 2.5,
+      "cache_rate_source": "models.dev lists cache writes at 2.5 per Mtok for openai/gpt-5.6-terra, contradicting the older statement that OpenAI cache writes are not charged; corrected when terra was seated as the build-tier advisor on 2026-09-30. It lists openai/gpt-5.6-terra at input 2, output 12, cacheRead 0.2, cacheWrite 2.5 per Mtok. It also declares a second price tier above 272000 input tokens (input 4, output 18, cacheRead 0.4, cacheWrite 5) that this single-rate entry cannot represent; the openai-codex route this model is seated through serves a 272K context, so one request cannot reach it there, but a route serving the listed 1050000 context would be underpriced by this entry.",
       "context": 1050000,
       "tags": [
         "reasoning",
@@ -236,7 +236,7 @@
         "first-pass-review"
       ],
       "source": "models.dev",
-      "last_verified": "2026-08-13"
+      "last_verified": "2026-09-30"
     },
     "openai/gpt-6-luna": {
       "cost_in_per_mtok": 0.1,

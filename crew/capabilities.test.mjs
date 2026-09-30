@@ -38,6 +38,7 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/subagent.ts': ['agent'],
     'crew/pi/extensions/fff.ts': ['fff_grep', 'fff_find', 'fff_multi_grep'],
     'crew/pi/extensions/submit.ts': ['submit_envelope'],
+    'crew/pi/extensions/reminders.ts': [],
   }
   assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS, expected)
   assert.equal(Object.isFrozen(PI_FIRST_PARTY_EXTENSION_TOOLS), true)
@@ -55,7 +56,7 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
   assert.match(skeletonread, /registerTool\(skeleton\.retrieve\)/)
   assert.match(lab, /LAB_TOOL_NAME = 'lab'/)
   assert.match(lab, /registerTool\(createLabTool\(\)\)/)
-  for (const name of ['advisor', 'builderloop', 'readgate']) assert.doesNotMatch(source(name), /registerTool\s*\(/)
+  for (const name of ['advisor', 'builderloop', 'readgate', 'reminders']) assert.doesNotMatch(source(name), /registerTool\s*\(/)
 })
 
 function capabilityRegister(overrides = {}) {
@@ -722,6 +723,7 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
   const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })

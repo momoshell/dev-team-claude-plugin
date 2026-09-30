@@ -119,7 +119,8 @@
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/skeletonread.ts",
             "crew/pi/extensions/fff.ts",
-            "crew/pi/extensions/submit.ts"
+            "crew/pi/extensions/submit.ts",
+            "crew/pi/extensions/reminders.ts"
           ],
           "skills": [
             "skills/lean-build/SKILL.md"

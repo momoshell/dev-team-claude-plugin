@@ -1088,15 +1088,16 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/fff.ts" -e "/repo/crew/pi/extensions/submit.ts" -e "/repo/crew/pi/extensions/reminders.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
-  assert.equal(builderCommand.split(' -e ').length - 1, 5)
+  assert.equal(builderCommand.split(' -e ').length - 1, 6)
   assert.equal(builderCommand.includes('--skill "/repo/skills/lean-build/SKILL.md"'), true)
   assert.equal(builderCommand.includes('--no-skills'), false)
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/fff.ts"'))
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
   assert.ok(piSeatCommand(builder).includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
+  assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/reminders.ts"'))
   const claudeTaskDir = scratchDir('crew-claude-bg1-')
   try {
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
@@ -1115,6 +1116,7 @@ test('BG1', () => {
       tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny, grants,
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.includes('/repo/crew/pi/extensions/reminders.ts'), false)
     assert.equal(command.split('--skill "/repo/skills/lean-build/SKILL.md"').length - 1, 1)
     assert.equal(command.includes('--no-skills'), false)
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
@@ -1151,11 +1153,12 @@ test('BG2', () => {
       '--session-id', 'builder', '--append-system-prompt', '/tmp/role-builder.md',
       '--tools', 'read,bash,edit,write,grep,find,ls,retrieve,fff_grep,fff_find,fff_multi_grep,submit_envelope', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
-      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/fff.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+      '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/fff.ts', '-e', '/repo/crew/pi/extensions/submit.ts',
+      '-e', '/repo/crew/pi/extensions/reminders.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task' },
   })
-  assert.equal(builder.args.filter((value) => value === '-e').length, 5)
+  assert.equal(builder.args.filter((value) => value === '-e').length, 6)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/builderloop.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
@@ -1163,6 +1166,7 @@ test('BG2', () => {
   assert.equal(builder.args.includes('/repo/skills/lean-build/SKILL.md'), true)
   assert.equal(builder.args.includes('--no-skills'), false)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/fff.ts'), true)
+  assert.equal(builder.args.includes('/repo/crew/pi/extensions/reminders.ts'), true)
   for (const role of ROLE_ORDER.filter((name) => name !== 'builder')) {
     const grants = grantsFor(register, role, { ...PIN_ROOT, agent: 'pi' })
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, register, { agent: 'pi' }))
@@ -1172,6 +1176,7 @@ test('BG2', () => {
       env: { CREW_ROLE: role, CREW_TASK_DIR: '/tmp/crew-task' }, grants,
     })
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
+    assert.equal(command.args.includes('/repo/crew/pi/extensions/reminders.ts'), false)
     assert.equal(command.args.filter((value) => value === '--skill').length, 1)
     assert.equal(command.args.filter((value) => value === '/repo/skills/lean-build/SKILL.md').length, 1)
     assert.equal(command.args.includes('--no-skills'), false)

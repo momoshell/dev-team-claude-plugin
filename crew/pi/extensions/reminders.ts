@@ -16,6 +16,7 @@ function sameKeys(value, keys, optional = []) {
 function validate(table, read) {
   if (!sameKeys(table, TOP_KEYS) || table.schema_version !== 1 || !Array.isArray(table.rules) || !table.rules.length) return 'schema'
   const ids = new Set()
+  let absent = false
   for (const rule of table.rules) {
     if (!sameKeys(rule, RULE_KEYS, ['path_pattern'])) return 'schema'
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule.id) || ids.has(rule.id)) return 'schema'
@@ -30,9 +31,17 @@ function validate(table, read) {
       try { new RegExp(rule.path_pattern) } catch { return 'schema' }
     }
     if (!sameKeys(rule.source, SOURCE_KEYS) || typeof rule.source.path !== 'string' || rule.source.path.startsWith('/') || rule.source.path.split(/[\\/]/).includes('..') || typeof rule.source.quote !== 'string' || !rule.source.quote) return 'schema'
-    try { if (!String(read(join(process.cwd(), rule.source.path), 'utf8')).includes(rule.source.quote)) return 'schema' } catch { return 'schema' }
+    // A source file missing from the working checkout (a foreign repo) is not a broken
+    // table: it gets its own closed reason, and the table still does not fire there. The
+    // rest of the table is still validated, so a real defect anywhere reports `schema`.
+    let text
+    try { text = String(read(join(process.cwd(), rule.source.path), 'utf8')) } catch (error) {
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') { absent = true; continue }
+      return 'schema'
+    }
+    if (!text.includes(rule.source.quote)) return 'schema'
   }
-  return null
+  return absent ? 'source-absent' : null
 }
 export function createReminders({ env = process.env, deps = {} } = {}) {
   const read = deps.readFileSync || readFileSync

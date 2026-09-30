@@ -204,6 +204,7 @@ export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
   'crew/pi/extensions/fff.ts': Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep']),
   'crew/pi/extensions/submit.ts': Object.freeze(['submit_envelope']),
+  'crew/pi/extensions/reminders.ts': Object.freeze([]),
 })
 
 export function validatePiExtensionTools(table) {

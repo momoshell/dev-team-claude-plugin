@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -2248,11 +2248,11 @@ export function parseDirectedBrief(text) {
 // that the check must catch. 32 is a bound, not a target: each entry costs one
 // gate run on the built tree (b31b's voluntary proof declared 19).
 export const MUTATIONS_MAX = 32
-export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe'])
+export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'mutant-unparsable'])
 // The outcomes that are NOT a gate defect: the declaration never reached the built
-// tree or its anchor could not be safely applied, so the plan predicted source the
-// builder did not write. `survived` stays the ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733); `anchor-unsafe` is a binding failure, never a gate defect (#742).
-export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe'])
+// tree, its anchor could not be safely applied, or its mutant could not be parsed.
+// `survived` stays the ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733); `anchor-unsafe` is a binding failure, never a gate defect (#742).
+export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'mutant-unparsable'])
 const BINDING_OUTCOME = Object.freeze({ absent: 'anchor-absent', ambiguous: 'anchor-ambiguous', unsafe: 'anchor-unsafe' })
 // #874 — the bind check's closed status set, reported for EVERY declaration BEFORE any mutation
 // is applied. Three values, not five: `exact` and `normalized` are the two ways an anchor reaches
@@ -8836,6 +8836,7 @@ function runTask(ctx, io, crash) {
     const carriedRows = Array.isArray(options.carried) ? options.carried : []
     const fresh = options.fresh === true
     const freshFields = () => (fresh ? { proof: 'fresh', measured_generation: gateGeneration } : {})
+    const parseCached = memoizedMutationParser()
     const rows = []
     let survivor = null
     let active = null            // the ONE mutation in flight: {abs, original, writeAttempted}
@@ -8882,6 +8883,13 @@ function runTask(ctx, io, crash) {
         if (bound.text === null) {
           rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], match: null, file: mutation.file, summary: null,
             why: bindingWhy(bound.mode, mutation.file), ...freshFields() })
+          active = null
+          continue
+        }
+        const defect = mutantParseDefect(mutation.file, original, bound.text, parseCached)
+        if (defect !== null) {
+          rows.push({ check: mutation.check, outcome: 'mutant-unparsable', match: null, file: mutation.file, summary: null,
+            why: `mutant-unparsable: ${mutation.file}: find ${JSON.stringify(mutation.find)}: ${defect}`, ...freshFields() })
           active = null
           continue
         }
@@ -12415,7 +12423,33 @@ const bindingWhy = (mode, file) => (mode === 'ambiguous'
 // declaration with the built source until the anchor was applied, and by then the only actor who
 // could correct it was gone. An exemption declares no anchor, so it produces no row: `declared`
 // counts anchors, which is the denominator a drift rate needs.
-export function bindMutationDeclarations(entries, readFile) {
+// lean: stripTypeScriptTypes misses early errors and accepts TypeScript-only syntax in a .mjs/.js/.cjs mutant; use an in-process ECMAScript parser with early errors if that contract is required
+export function mutantParseDefect(file, original, mutated, parse = stripTypeScriptTypes) {
+  if (!/\.(?:mjs|js|cjs|ts|mts|cts)$/.test(file)) return null
+  try { parse(original) } catch { return null }
+  try { parse(mutated); return null } catch (err) { return String(err.message) }
+}
+
+function memoizedMutationParser(parse = stripTypeScriptTypes) {
+  const cache = new Map()
+  return (source) => {
+    if (cache.has(source)) {
+      const result = cache.get(source)
+      if (!result.ok) throw result.error
+      return
+    }
+    try {
+      parse(source)
+      cache.set(source, { ok: true })
+    } catch (error) {
+      cache.set(source, { ok: false, error })
+      throw error
+    }
+  }
+}
+
+export function bindMutationDeclarations(entries, readFile, parse = stripTypeScriptTypes) {
+  const parseCached = memoizedMutationParser(parse)
   const rows = []
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry?.exempt) continue
@@ -12424,9 +12458,11 @@ export function bindMutationDeclarations(entries, readFile) {
       rows.push({ check: entry.check, file: entry.file, status: 'absent', why: `${entry.file} does not exist in the built tree` })
       continue
     }
-    const bound = bindMutationAnchor(original, entry.find)
-    const status = BIND_STATUS[bound.mode]
-    rows.push({ check: entry.check, file: entry.file, status, why: status === 'absent' ? bindingWhy(bound.mode, entry.file) : null })
+    const bound = applyMutationAnchor(original, entry.find, entry.replace)
+    const defect = bound.text === null ? null : mutantParseDefect(entry.file, original, bound.text, parseCached)
+    const status = defect ? 'absent' : BIND_STATUS[bound.mode]
+    const why = defect ? `mutant-unparsable: ${entry.file}: find ${JSON.stringify(entry.find)}: ${defect}` : status === 'absent' ? bindingWhy(bound.mode, entry.file) : null
+    rows.push({ check: entry.check, file: entry.file, status, why })
   }
   return rows
 }

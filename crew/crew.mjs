@@ -2954,7 +2954,8 @@ export function writePiSeatAgentDirs({ taskDir, roles, adapters, env = {} }, dep
       const parent = join(taskDir, 'pi-agent')
       try {
         const parentStat = fs.lstatSync(parent)
-        if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) throw new Error(`unsafe pi-agent parent ${parent}`)
+        // lstat: a symlinked parent is not a directory, so this one test refuses both.
+        if (!parentStat.isDirectory()) throw new Error(`unsafe pi-agent parent ${parent}`)
       } catch (error) { if (error.code !== 'ENOENT') throw error }
       const baseDir = resolvePath(entry.configDir ?? env.PI_CODING_AGENT_DIR ?? join((deps.homedir || homedir)(), '.pi', 'agent'))
       const rel = relative(agentDir, baseDir)

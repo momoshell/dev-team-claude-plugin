@@ -52,6 +52,24 @@ test('K11 K12 K13 K14 materialises a settings-only codemode profile and granted 
   writeMcpConfigs({ taskDir, roles: ['builder'], adapters })
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [] } } })
 })
+test('pi agent materialisation refuses before its recursive rm can reach the base dir or a redirected parent', () => {
+  // MUTATION: `if (false)` for the base-within-seat guard (the seat rm deletes base auth.json), or drop the
+  // symlinked pi-agent parent refusal (the rm and writes land in the link target).
+  const root = scratchDir('pi-agent-guards-')
+  const grants = { extensions: ['builtin:codemode'] }
+  const adapters = { builder: { name: 'pi', grants } }
+  const refused = (error) => error.reason === 'grant-unsupported' && /pi agent directory materialisation failed/.test(error.message)
+  const nested = join(root, 'nested'); const seat = join(nested, 'pi-agent', 'builder')
+  mkdirSync(seat, { recursive: true }); writeFileSync(join(seat, 'auth.json'), 'secret')
+  assert.throws(() => writePiSeatAgentDirs({ taskDir: nested, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: seat } }), refused)
+  assert.equal(readFileSync(join(seat, 'auth.json'), 'utf8'), 'secret')
+  const linked = join(root, 'linked'); const elsewhere = join(root, 'elsewhere'); const base = join(root, 'base')
+  mkdirSync(linked); mkdirSync(join(elsewhere, 'builder'), { recursive: true }); mkdirSync(base)
+  writeFileSync(join(elsewhere, 'builder', 'keep'), 'kept')
+  symlinkSync(elsewhere, join(linked, 'pi-agent'))
+  assert.throws(() => writePiSeatAgentDirs({ taskDir: linked, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: base } }), refused)
+  assert.equal(readFileSync(join(elsewhere, 'builder', 'keep'), 'utf8'), 'kept')
+})
 
 const SKILL_ROLES = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
 let skillBootHome

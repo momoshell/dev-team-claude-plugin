@@ -20,14 +20,15 @@ import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-test('K1 K3 K4 K6 K9 K10 resolve opt-in pi grants without ambient leakage', async () => {
-  // MUTATION: unset-as-on, read process.env, omit builtins, or alter MCP delivery/profile.
+test('K1 K3 K4 resolve opt-in pi grants without ambient leakage', async () => {
+  // MUTATION: unset-as-on (K1), read process.env (K3: ambient on must reach neither off nor unset), or omit builtin:codemode (K4).
   const prior = process.env.CREW_PI_CODEMODE
   process.env.CREW_PI_CODEMODE = 'on'
   try {
     const absent = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'off' } })
     const defaulted = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: {} })
     assert.deepEqual(defaulted.builder.grants, absent.builder.grants)
+    for (const seat of [absent, defaulted]) assert.equal(seat.builder.grants.extensions.some((e) => e.startsWith('builtin:')), false)
     const on = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'on' } })
     assert.ok(on.builder.grants.extensions.includes('builtin:codemode'))
     assert.ok(Object.isFrozen(on.builder.grants) && Object.isFrozen(on.builder.grants.extensions))

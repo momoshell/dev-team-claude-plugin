@@ -8048,6 +8048,15 @@ function laneRunSpend(rows, catalog) {
   return { cost: total, reason: null }
 }
 
+function laneBuildRounds(markers) {
+  if (markers.includes(null)) return null
+  const terminal = markers.some((message) => message === 'done' || message.startsWith('escalate:'))
+  if (!terminal) return null
+  const buildRounds = markers.map((message) => /^build:r(\d+)$/.exec(message)?.[1]).filter(Boolean).map(Number).sort((a, b) => a - b)
+  if (!buildRounds.every((round, index) => round === index + 1)) return null
+  return buildRounds.length
+}
+
 export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null } = {}) {
   const before = mirrorErrorCount(ledger)
   const sessions = ledger.dumpTable('sessions')
@@ -8059,7 +8068,22 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     agentRowsByRun.set(row.adw_id, rows)
   }
   const configurations = ledger.dumpTable('run_configurations')
-  const phaseRows = ledger.dumpTable('phases')
+  const eventRows = ledger.dumpTable('events')
+  const stageMarkersByRun = new Map()
+  for (const row of eventRows) {
+    if (row.type !== 'log') continue
+    let message
+    try { message = JSON.parse(row.payload_json).message } catch {
+      const markers = stageMarkersByRun.get(row.adw_id) ?? []
+      markers.push(null)
+      stageMarkersByRun.set(row.adw_id, markers)
+      continue
+    }
+    if (typeof message !== 'string') continue
+    const markers = stageMarkersByRun.get(row.adw_id) ?? []
+    markers.push(message)
+    stageMarkersByRun.set(row.adw_id, markers)
+  }
   const reviewsRows = ledger.dumpTable('review_outcomes')
   const usageRows = ledger.dumpTable('advisor_usage')
   if (ledger.stats().degraded || mirrorErrorCount(ledger) > before) throw new Error('advisor-arms: ledger read degraded')
@@ -8076,14 +8100,15 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     if (!Array.isArray(granted) || !granted.every((role) => typeof role === 'string')) granted = []
     if (!granted.includes('builder')) { ungranted++; continue }
     const key = configuration.advisor_model
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
     // Its advisor consults are already spent, so its id still feeds advisor spend (run_ids).
     arm.run_ids.push(session.adw_id)
     if (session.ended_at == null) { arm.in_flight++; armsMap.set(key, arm); continue }
     arm.runs++
-    const buildRounds = phaseRows.filter((row) => row.adw_id === session.adw_id).map((row) => /^build:r(\d+)$/.exec(row.name)?.[1]).filter(Boolean).map(Number)
-    arm.build_rounds += buildRounds.length ? Math.max(...buildRounds) : 0
+    const measuredRounds = laneBuildRounds(stageMarkersByRun.get(session.adw_id) ?? [])
+    if (measuredRounds === null) arm.rounds_unmeasured_runs++
+    else { arm.rounds_denominator++; arm.build_rounds += measuredRounds }
     const runReviews = reviewsRows.filter((row) => row.adw_id === session.adw_id)
     arm.reviews += runReviews.length
     arm.changes_needed += runReviews.filter((row) => row.verdict === 'changes-needed').length
@@ -8095,12 +8120,14 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   }
   const requested = armOrder ?? [...armsMap.keys()]
   const results = requested.map((key) => {
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     const runs = arm.runs
     const thin = runs < CELL_RATE_FLOOR
     const changesNeeded = arm.changes_needed
     const reviews = arm.reviews
-    const buildRoundsPerRun = thin ? null : arm.build_rounds / runs
+    const roundsDenominator = arm.rounds_denominator
+    const buildRoundsAbsentReason = roundsDenominator === 0 ? 'no-measured-rounds' : roundsDenominator < CELL_RATE_FLOOR ? 'below-run-floor' : null
+    const buildRoundsPerRun = buildRoundsAbsentReason === null ? arm.build_rounds / roundsDenominator : null
     const bounceRate = thin || !reviews ? null : changesNeeded / reviews
     const escalationRate = thin ? null : arm.escalations / runs
     const advisorRows = usageRows.filter((row) => arm.run_ids.includes(row.adw_id))
@@ -8118,7 +8145,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const pricedRows = priced.filter((row) => row.cost != null)
     const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
     const noUsage = advisorRows.length === 0 ? null : 'usage-present'
-    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: arm.lane_spend_missing_runs, lane_spend_absent_reason: arm.lane_spend_absent_reason, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
+    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: roundsDenominator, rounds_unmeasured_runs: arm.rounds_unmeasured_runs, build_rounds_absent_reason: buildRoundsAbsentReason, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: arm.lane_spend_missing_runs, lane_spend_absent_reason: arm.lane_spend_absent_reason, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
   })
   let winner = null
   if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
@@ -8684,7 +8711,7 @@ export function main(argv) {
       let payload
       try { payload = advisorArmsReadout(ledger, { arms: armOrder, catalog }) } catch (error) { refuse(`advisor-arms: the ledger read is degraded — unanswerable, not empty (${ledger.stats().degraded_reason ?? error?.message ?? 'unknown'})`) }
       if (flags.json) stdout.write(`${JSON.stringify(payload)}\n`)
-      else stdout.write(`advisor arms (schema 1)\n${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
+      else stdout.write(`advisor arms (schema 1)\n${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; rounds-unmeasured=${arm.rounds_unmeasured_runs}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
       return 0
     }
 

@@ -283,6 +283,27 @@ function profile(label, fields) {
   return path
 }
 
+test('R1 rendered mutation contract requires actionable FAIL reasons', () => {
+  // Mutations: delete the required FAIL reason line, or soften its MUST print obligation.
+  const root = fixture('mutation-reason-r1')
+  const body = section(compile(root).brief, '## Per-check mutations')
+  assert.match(body, /\n\s*Every failing check MUST print:\n\s*FAIL <check>: expected <x>, found <y> at <where>\n/)
+})
+
+test('R2 rendered mutation contract rejects status-only reasons', () => {
+  // Mutation: delete the status-only rejection sentence from MUTATION_CONTRACT_BLOCK.
+  const root = fixture('mutation-reason-r2')
+  const body = section(compile(root).brief, '## Per-check mutations')
+  assert.ok(body.includes("A status-only reason (node:test's not ok or failing as the found value) is REJECTED."))
+})
+
+test('R3 rendered mutation contract reports assertion values from wrappers', () => {
+  // Mutation: delete the assertion expected/actual instruction from MUTATION_CONTRACT_BLOCK.
+  const root = fixture('mutation-reason-r3')
+  const body = section(compile(root).brief, '## Per-check mutations')
+  assert.ok(body.includes("A check wrapping a node:test reports the assertion's expected and actual values from a caught AssertionError (.expected/.actual) or the TAP reporter's expected:/actual: diagnostics."))
+})
+
 test('the four authored lines are carried verbatim and compilation is idempotent', () => {
   const root = fixture('verbatim')
   const first = compile(root, {}, [], 'first.md').brief

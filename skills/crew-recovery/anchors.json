@@ -1,5 +1,4 @@
 {
-  "scripts/factory/make-brief.mjs:992": "function colourNeutralEnv(base = process.env)",
   "crew/drive.mjs:57": "builder: 2400, reviewer: 1800",
   "scripts/factory/crew-watch.mjs:184": "export function seatLivenessLines(",
   "crew/seat-io.mjs:129": "export const TRANSCRIPT_STALE_MS = 900_000",
@@ -7,5 +6,6 @@
   "crew/drive.mjs:8832": "const completeCheckProof = (label, options = {}) => {",
   "crew/crew.mjs:4100": "escalation -> NEVER teardown",
   "crew/crew.mjs:4767": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4654": "const seats = rows.length"
+  "crew/crew.mjs:4654": "const seats = rows.length",
+  "scripts/factory/make-brief.mjs:997": "function colourNeutralEnv(base = process.env)"
 }

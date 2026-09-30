@@ -438,6 +438,22 @@ test('the lead FIELD bullet carries its correctness-unverified antecedent', () =
   assert.ok(field.includes('correctness-unverified'))
 })
 
+test('R4 planner charter requires the actionable FAIL reason shape', () => {
+  // Mutation: restore the old expected/found/location wording without the FAIL label.
+  const { card } = charterSource('planner')
+  const lines = card.split('\n')
+  const start = lines.findIndex((line) => line.startsWith('- Map each brief requirement to a check;'))
+  const rule = lines.slice(start, start + 3).join('\n')
+  assert.ok(rule.includes('`FAIL <check>: expected X, found Y at PATH`'))
+})
+
+test('R5 planner charter forbids a bare test status as found', () => {
+  // Mutation: delete the bare-status prohibition from the planner rule.
+  const { card } = charterSource('planner')
+  const rule = card.slice(card.indexOf('- Map each brief requirement to a check;')).split('\n- ')[0]
+  assert.ok(rule.includes('Y is never a bare test status.'))
+})
+
 test('the planner charter documents how to discover files_in_scope', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
   for (const token of [

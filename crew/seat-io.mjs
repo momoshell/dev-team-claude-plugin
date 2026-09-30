@@ -3658,12 +3658,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           }
         }
         const to = { ...rung.cell, model }
+        const freshSession = m.transport === HEADLESS_RPC_TRANSPORT && model !== from.model
         if (m.transport === HEADLESS_RPC_TRANSPORT) {
           const refuse = (why) => ({ applied: false, reason: 'transport', why: String(why || `headless-rpc seat ${roleName} could not be retired`), from, to: null })
           try {
             const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
             if (typeof transport?.retire !== 'function') return refuse(`headless-rpc seat ${roleName} has no retire operation`)
-            const retired = transport.retire(role)
+            const retired = transport.retire(role, { freshSession })
             if (retired?.retired !== true && retired?.reason !== 'not-running') return refuse(retired?.why || `headless-rpc seat ${roleName} could not be retired (${retired?.reason || 'unknown reason'})`)
           } catch (err) {
             return refuse(err?.why || err?.message || String(err))
@@ -3675,6 +3676,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           target.effort = rung.cell.effort
           target.provider = rung.cell.provider
           target.id = rung.cell.id
+          if (freshSession) { target.session_id = null; target.started = false }
         }
         // A locked read-modify-write, not a whole-file republish: a seat
         // minting a session id from its own stale copy used to erase this
@@ -3686,6 +3688,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             target.effort = rung.cell.effort
             target.provider = rung.cell.provider
             target.id = rung.cell.id
+            if (freshSession) Object.assign(target, { session_id: null, started: false })
           }
           return true
         }, { writeFileSync, renameSync, readFileSync, existsSync })

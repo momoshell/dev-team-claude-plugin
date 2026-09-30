@@ -981,3 +981,91 @@ test('reseat refuses when no adapter can translate the next cell', () => {
   assert.deepEqual(google.crew.members.reviewer, googleBefore)
   assert.equal(fsExistsSync(join(google.paths.dir, 'crew.json')), false)
 })
+
+function seatFreshFixture({ effortOnly = false, running = true, inFlight = false } = {}) {
+  const dir = scratchDir('seatfresh-contract-')
+  const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+  const seatDir = join(paths.taskDir, 'headless-rpc', 'builder')
+  mkdirSync(seatDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const member = { transport: 'headless-rpc', agent: 'pi', provider: 'openai', id: 'old-model', model: 'openai-codex/old-model', effort: 'medium', session_id: 'old-session', started: true }
+  const crew = { checkout: dir, tier: 'mechanical', members: { builder: member }, seats: { builder: { ...member } } }
+  const cell = { provider: 'openai', id: effortOnly ? 'old-model' : 'new-model', agent: 'pi', effort: 'high' }
+  const roster = { tiers: { mechanical: { builder: { ...member } }, build: { builder: cell } } }
+  const diskPath = join(dir, 'crew.json'), savedPath = join(seatDir, 'session.json'), cmdPath = join(seatDir, 'cmd.json')
+  fsWriteFileSync(diskPath, JSON.stringify(crew))
+  fsWriteFileSync(savedPath, JSON.stringify({ sessionId: 'old-session', lastAssignmentId: 'd0', cursor: 'preserved-cursor' }))
+  let seq = 0, clock = 0
+  const rpc = headlessRpcIo({ crew, paths, checkout: dir, taskDir: paths.taskDir, bin: '/stub/pi', deps: {
+    uuid: () => `new-session-${++seq}`, pid: 700, spawn: () => ({ pid: 701, unref() {} }),
+    openSync: () => 10, closeSync: () => {}, writeSync: () => {},
+    existsSync: path => fsExistsSync(path) || String(path).endsWith('/cmd.fifo'),
+    kill: (_pid, signal) => { if (signal !== 0) fsWriteFileSync(join(seatDir, 'exit'), '0') },
+    now: () => clock, sleep: ms => { clock += ms }, log: () => {},
+  } })
+  const io = seatIo(crew, paths, dir, null, { builder: { modelString: ({ provider, id }) => id === 'old-model' ? 'openai-codex/old-model' : `${provider}/${id}` } }, {}, {
+    headlessRpcIo: () => rpc, readRoster: () => roster, logLine: () => {},
+  })
+  if (running) {
+    const run = rpc.assign({ role: 'builder', briefFile: '/brief.md' })
+    if (!inFlight) {
+      const capture = fsReadFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
+      const settled = capture.split('\n').filter(line => { try { return JSON.parse(line).type === 'agent_settled' } catch { return false } }).join('\n') + '\n'
+      fsWriteFileSync(join(seatDir, 'stream.jsonl'), settled)
+      fsWriteFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+      rpc.wait(run.returnPath, 1)
+    }
+  }
+  const before = { member: structuredClone(crew.members.builder), seat: structuredClone(crew.seats.builder), disk: fsReadFileSync(diskPath, 'utf8'), saved: fsReadFileSync(savedPath, 'utf8') }
+  return { crew, rpc, io, before, savedPath, diskPath, cmdPath }
+}
+function seatFreshArgs(f) {
+  f.rpc.assign({ role: 'builder', briefFile: '/brief-next.md' })
+  return JSON.parse(fsReadFileSync(f.cmdPath, 'utf8')).args.map(String)
+}
+function isFreshSession(args) {
+  const index = args.indexOf('--session-id')
+  return index >= 0 && args[index + 1] !== 'old-session' && !args.includes('--session')
+}
+
+// MUTATION F1: remove the in-memory session reset in the reseat target loop.
+test('F1 model-changing live reseat spawns a fresh session', () => {
+  const f = seatFreshFixture()
+  const result = f.io.reseat('builder'), args = seatFreshArgs(f)
+  assert.equal(result.applied, true)
+  assert.equal(isFreshSession(args), true, JSON.stringify(args))
+})
+
+// MUTATION F2: remove session_id/started reset from updateCrewJson's target loop.
+test('F2 model-changing reseat clears session state in memory and crew.json', () => {
+  const f = seatFreshFixture()
+  assert.equal(f.io.reseat('builder').applied, true)
+  const disk = JSON.parse(fsReadFileSync(f.diskPath, 'utf8'))
+  for (const target of [disk.members.builder, disk.seats.builder, f.crew.members.builder, f.crew.seats.builder]) {
+    assert.equal(target.session_id, null)
+    assert.equal(target.started, false)
+  }
+})
+
+// MUTATION F3: restrict saved-session reset to `&& seat`, excluding not-running.
+test('F3 not-running model-changing reseat still spawns a fresh session', () => {
+  const f = seatFreshFixture({ running: false })
+  assert.equal(f.io.reseat('builder').applied, true)
+  assert.equal(isFreshSession(seatFreshArgs(f)), true)
+})
+
+// MUTATION F4: clear the saved session immediately before the in-flight refusal.
+test('F4 refused in-flight reseat preserves memory and persisted bytes', () => {
+  const f = seatFreshFixture({ inFlight: true })
+  const result = f.io.reseat('builder')
+  assert.equal(result.applied, false)
+  assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, f.before)
+})
+
+// MUTATION F5: drop the model inequality from the freshSession predicate.
+test('F5 effort-only reseat preserves and resumes the existing session', () => {
+  const f = seatFreshFixture({ effortOnly: true })
+  assert.equal(f.io.reseat('builder').applied, true)
+  assert.equal(fsReadFileSync(f.savedPath, 'utf8'), f.before.saved)
+  const args = seatFreshArgs(f), index = args.indexOf('--session')
+  assert.equal(index >= 0 && args[index + 1] === 'old-session' && !args.includes('--session-id'), true, JSON.stringify(args))
+})

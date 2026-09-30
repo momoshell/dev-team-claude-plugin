@@ -1447,8 +1447,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (liveness === LIVENESS.ALIVE) return finish(LIVENESS.ALIVE, 'probe-alive')
     return finish(LIVENESS.UNKNOWN, 'probe-unknown')
   }
-  // Retire only at a settled boundary: kill the worker and release its seat,
-  // while deliberately preserving the session id for the next assignment.
+  // Retire at a settled boundary; resume by default, or explicitly reset identity.
   function retire(role, options = {}) {
     const seat = seats.get(role)
     const inFlight = !!(seat?.turn && !seat.turn.state.settled)
@@ -1459,6 +1458,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         reason: 'in-flight',
         why: `rpc seat ${role} has an in-flight turn; retire it at a bounce boundary`,
       }
+    }
+    if (options?.freshSession === true) {
+      mkdir(seatDir(role), { recursive: true })
+      saveSession(role, { sessionId: null })
     }
     if (!seat) {
       return {
@@ -1472,8 +1475,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (proof.liveness === LIVENESS.DEAD) unlinkSeatFifos(role)
     // Do not clear here: proveGroupDead retains an unproven reservation so a
     // later reader can still find the worker whose death we could not prove.
-    // The session id survives a retire on purpose: ensureProcess will resume it
-    // while reading the newly selected model and effort from the crew member.
+    // Default retirement preserves identity; freshSession above clears it.
     seats.delete(role)
     return { retired: true, sessionId: seat.sessionId, forced, liveness: proof.liveness, reason: proof.reason }
   }

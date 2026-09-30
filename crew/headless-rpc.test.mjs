@@ -1294,6 +1294,74 @@ test('retire: a settled seat is retired and the next assignment resumes the same
   } finally { f.cleanup() }
 })
 
+// Kills removal of the explicit saved-session identity reset while preserving metadata.
+test('retire: freshSession clears identity for a non-running role and preserves metadata', () => {
+  const dir = scratchDir('headless-rpc-fresh-')
+  const f = fixture({ dir })
+  try {
+    const sessionDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(sessionDir, { recursive: true })
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify({ sessionId: 'old', lastAssignmentId: 'd9', cursor: 4 }))
+    assert.equal(f.io.retire('builder', { freshSession: true }).reason, 'not-running')
+    assert.deepEqual(JSON.parse(readFileSync(join(sessionDir, 'session.json'))), { sessionId: null, lastAssignmentId: 'd9', cursor: 4 })
+  } finally { f.cleanup() }
+})
+
+// Kills omission of directory creation for a never-started role.
+test('retire: freshSession creates saved state for a never-started role', () => {
+  const dir = scratchDir('headless-rpc-fresh-empty-')
+  const f = fixture({ dir })
+  try {
+    assert.equal(f.io.retire('builder', { freshSession: true }).reason, 'not-running')
+    assert.deepEqual(JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'))).sessionId, null)
+  } finally { f.cleanup() }
+})
+
+// Kills omission of identity clearing when retiring a settled live worker.
+test('retire: freshSession clears a settled live session before the next spawn', () => {
+  const f = fixture({ dir: scratchDir('headless-rpc-fresh-settled-') })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, first)
+    f.io.wait(first.returnPath, 1)
+    const sessionPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json')
+    writeFileSync(sessionPath, JSON.stringify({ sessionId: 'old-id', lastAssignmentId: 'd0', cursor: 'kept' }))
+    const retired = f.io.retire('builder', { freshSession: true })
+    assert.equal(retired.retired, true)
+    assert.deepEqual(JSON.parse(readFileSync(sessionPath)), { sessionId: null, lastAssignmentId: 'd0', cursor: 'kept' })
+    f.crew.members.builder.started = false
+    f.crew.members.builder.session_id = null
+    f.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    const args = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'))).args.map(String)
+    assert.ok(args.includes('--session-id'), JSON.stringify(args))
+    assert.ok(!args.includes('--session'))
+  } finally { f.cleanup() }
+})
+
+// Kills clearing saved identity before the non-forced in-flight refusal.
+test('retire: freshSession leaves the saved file byte-identical on in-flight refusal', () => {
+  const f = fixture({ dir: scratchDir('headless-rpc-fresh-refused-') })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const sessionPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json')
+    const before = readFileSync(sessionPath, 'utf8')
+    assert.equal(f.io.retire('builder', { freshSession: true }).reason, 'in-flight')
+    assert.equal(readFileSync(sessionPath, 'utf8'), before)
+  } finally { f.cleanup() }
+})
+
+// Kills treating a forced fresh-session retirement as a refusal.
+test('retire: force with freshSession clears identity on an in-flight seat', () => {
+  const f = fixture({ dir: scratchDir('headless-rpc-fresh-force-') })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const sessionPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json')
+    const result = f.io.retire('builder', { force: true, freshSession: true })
+    assert.equal(result.retired, true)
+    assert.equal(JSON.parse(readFileSync(sessionPath)).sessionId, null)
+  } finally { f.cleanup() }
+})
+
 test('retire: an in-flight turn is refused and the worker is left alone', () => {
   const f = fixture()
   try {

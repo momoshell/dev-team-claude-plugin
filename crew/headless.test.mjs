@@ -4889,14 +4889,14 @@ for (const [label, lose, collect, options = {}] of [
 }
 
 // b1023: a delivered envelope settles the stream before usage folds, over the recorded B337 bytes.
-function settleRun({ late = false, exited = false } = {}) {
+function settleRun({ late = false, exited = false, stream = B337_D1_AT_READ } = {}) {
   const emits = []; const sleeps = []
   const f = b416JsonFixture({
     emit: (row) => emits.push(row),
     onSleep: ({ appendStream, ms, sleepCount }) => { sleeps.push(ms); if (late && sleepCount === 1) appendStream(B337_D1_RESULT) },
   })
   try {
-    f.writeStream(B337_D1_AT_READ)
+    if (stream !== null) f.writeStream(stream)
     if (exited) writeFileSync(join(f.taskDir, 'headless', f.assigned.id, 'exit'), '0')
     const envelope = ordinaryJsonEnvelope(f.assigned.id)
     writeFileSync(f.assigned.returnPath, JSON.stringify(envelope))
@@ -4923,7 +4923,16 @@ test('U2 a result frame that never lands bounds the settle at 100 polls of 100ms
 
 // MUTATION U3: result_frame written true unconditionally.
 test('U3 an outcome without a result frame journals result_frame false', () => {
-  assert.equal(settleRun().outcome.result_frame, false)
+  const { outcome } = settleRun()
+  assert.equal(outcome.result_frame, false)
+  assert.equal(outcome.result_frame_absent_reason, null)
+})
+
+// MUTATION U5: result_frame written as stream.terminal === true again, or its absent reason forced to null, so an unread stream journals a measured false.
+test('U5 an unread stream journals result_frame null with its reason', () => {
+  const { outcome } = settleRun({ stream: null })
+  assert.equal(outcome.result_frame, null)
+  assert.equal(outcome.result_frame_absent_reason, CENSUS_ABSENT_CAUSES.stream_absent)
 })
 
 // MUTATION U4: poll > 0 required before the exit or result stop condition is observed.

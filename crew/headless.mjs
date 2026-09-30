@@ -1766,9 +1766,11 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
     if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
+    const unread = stream.census_absent === CENSUS_ABSENT_CAUSES.stream_absent
     log({
       at: now(), headless_outcome: outcome, exit_code: exitCode, signal,
-      terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, result_frame: stream.terminal === true,
+      terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream,
+      result_frame: unread ? null : stream.terminal === true, result_frame_absent_reason: unread ? CENSUS_ABSENT_CAUSES.stream_absent : null,
       ...(includeCensus ? { seat_turn_census: censusRow(run, 'headless-json', stream) } : {}),
       ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
     })

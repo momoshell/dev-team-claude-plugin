@@ -827,3 +827,42 @@ test('ACP L5', () => {
     try { assert.equal(conn.prepare(recipes[0]).all()[0].tool_calls, 2); assert.equal(conn.prepare(recipes[1]).all()[0].policy, 'no-lead'); assert.equal(conn.prepare(recipes[2]).all()[0].stop_reason, 'end_turn') } finally { conn.close() }
   } finally { ledger.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+// MUTATION: append the moved test to the helper; this assertion must fail.
+test('H1 ledger helper has no test calls', () => {
+  const helper = readFileSync(join(ROOT, 'test/factory-ledger.test.mjs'), 'utf8')
+  assert.equal([...helper.matchAll(/^[ \t]*test[ \t]*\(/gm)].length, 0)
+})
+
+// MUTATION: delete the moved block; this complete-block match must fail.
+test('H2 CLI owns chunk-progress test', () => {
+  const cli = readFileSync(join(ROOT, 'test/factory-ledger-cli.test.mjs'), 'utf8')
+  assert.match(cli, /^test\('chunk CLI chunk-progress prints parent progress and refuses unknown flags', \(\) => \{[\s\S]*?^\}\)$/m)
+})
+
+// MUTATION: change bad.status expected value from 2 to 0; this assertion must fail.
+test('H3 chunk-progress test preserves unknown-flag assertion', () => {
+  const cli = readFileSync(join(ROOT, 'test/factory-ledger-cli.test.mjs'), 'utf8')
+  const block = cli.match(/^test\('chunk CLI chunk-progress prints parent progress and refuses unknown flags', \(\) => \{[\s\S]*?^\}\)$/m)?.[0]
+  if (!block) return
+  assert.match(block, /const bad = spawnSync\(process\.execPath, \[SCRIPT, 'chunk-progress', 'cli-p', '--bogus', 'x'\], \{ env, encoding: 'utf8' \}\)/)
+  assert.match(block, /assert\.equal\(bad\.status, 2\)/)
+})
+
+test('chunk CLI chunk-progress prints parent progress and refuses unknown flags', () => {
+  const ledger = openTestLedger()
+  ledger.recordChunkRun({ parentLane: 'cli-p', chunkId: 'c1', lane: 'cli-p-c1', wave: 0, checksOwned: ['A1', 'A2'] })
+  const dbPath = ledger._dbPath
+  const env = { ...process.env, DEVTEAM_LEDGER_DB: dbPath }
+  const ok = spawnSync(process.execPath, [SCRIPT, 'chunk-progress', 'cli-p'], { env, encoding: 'utf8' })
+  assert.equal(ok.status, 0)
+  const payload = JSON.parse(ok.stdout)
+  assert.equal(payload.parent_lane, 'cli-p')
+  assert.equal(payload.chunks_total, 1)
+  assert.equal(payload.chunks[0].owned_total, 2)
+  assert.equal(payload.chunks[0].owned_green, null)
+  assert.equal(payload.chunks[0].reason, 'chunk-lane-unbooted')
+  const bad = spawnSync(process.execPath, [SCRIPT, 'chunk-progress', 'cli-p', '--bogus', 'x'], { env, encoding: 'utf8' })
+  assert.equal(bad.status, 2)
+  ledger.close()
+})

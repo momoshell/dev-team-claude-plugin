@@ -74,11 +74,13 @@ test('boot hands its checkout to the project-MCP refusal', async () => {
   register.roles.builder.mcp_servers = [{ name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }]
   const quiet = process.stdout.write; process.stdout.write = () => true
   try {
-    await assert.rejects(bootCmd({ task: 'project-mcp', checkout, roles: 'builder', 'agent-lead': 'pi', 'agent-builder': 'pi', 'headless-all': true }, {
+    await withHome(home, () => assert.rejects(bootCmd({ task: 'project-mcp', checkout, roles: 'builder', 'agent-lead': 'pi', 'agent-builder': 'pi', 'headless-all': true }, {
       env: { CREW_PI_CODEMODE: 'on', PI_CODING_AGENT_DIR: join(home, 'base') }, register, homedir: () => home, awaitSeatsReady: async () => {},
       cmux() { throw new Error('unexpected cmux') }, openRun: () => ({ recordSeats() {} }),
-    }), (error) => error.reason === 'grant-unsupported' && error.message.includes(join(checkout, '.pi', 'mcp.json')))
+    }), (error) => error.reason === 'grant-unsupported' && error.message.includes(join(checkout, '.pi', 'mcp.json'))))
   } finally { process.stdout.write = quiet }
+  // The boot's crew state lands in the scratch home, never the operator's ~/.crew.
+  assert.equal(existsSync(testCrewDir(home, checkout, 'project-mcp')), true)
 })
 test('pi agent materialisation refuses before its recursive rm can reach the base dir or a redirected parent', () => {
   // MUTATION: `if (false)` for the base-within-seat guard (the seat rm deletes base auth.json), or drop the

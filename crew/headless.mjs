@@ -21,6 +21,8 @@ import { readJsonTri } from './json-leaf.mjs'
 import { readEnvelopeWithRepair } from './envelope-repair.mjs'
 
 export const WAIT_POLL_MS = 5000
+export const USAGE_SETTLE_POLLS = 100
+export const USAGE_SETTLE_POLL_MS = 100
 
 function parkPending(at, until, wake) { return at < until && wake === null }
 
@@ -1764,9 +1766,11 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
     if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
+    const unread = stream.census_absent === CENSUS_ABSENT_CAUSES.stream_absent
     log({
       at: now(), headless_outcome: outcome, exit_code: exitCode, signal,
       terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream,
+      result_frame: unread ? null : stream.terminal === true, result_frame_absent_reason: unread ? CENSUS_ABSENT_CAUSES.stream_absent : null,
       ...(includeCensus ? { seat_turn_census: censusRow(run, 'headless-json', stream) } : {}),
       ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
     })
@@ -2335,6 +2339,14 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       census_absent: observed.read ? CENSUS_ABSENT_CAUSES.no_frames : CENSUS_ABSENT_CAUSES.stream_absent,
     }
   }
+  // lean: reread the cumulative stream per settle poll; incremental tailing if stream sizes make settling costly
+  function settleDelivered(run) {
+    for (let poll = 0; poll < USAGE_SETTLE_POLLS; poll += 1) {
+      if (parseExit(run.exit, read, exists) !== null || streamSummary(run).terminal) break
+      delay(USAGE_SETTLE_POLL_MS)
+    }
+    return telemetryParser(run.stream, read, exists)
+  }
   function ceilingObservation(run) {
     const budget = turnCeilings?.[run.role]
     if (!Number.isFinite(budget)) return null
@@ -2440,7 +2452,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       const enforced = enforceBeforeEnvelope(run, returnPath)
       if (enforced) return enforced
       const env = readEnvelopeOrFail(run)
-      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
+      if (env) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
       if (exitCode !== null) { const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
       sleep(WAIT_POLL_MS)
@@ -2449,7 +2461,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const racedEnforced = enforceBeforeEnvelope(run, returnPath, { alreadyEnded: true })
     if (racedEnforced) return racedEnforced
     const raced = readEnvelopeOrFail(run)
-    if (raced) { const stream = telemetryParser(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
+    if (raced) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = telemetryParser(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused, census: stream.census })
     recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream)
   }

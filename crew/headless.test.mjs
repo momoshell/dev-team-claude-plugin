@@ -117,7 +117,7 @@ function makeFixture(overrides = {}, roles = ['builder']) {
   const calls = []
   const adapter = { headlessCommand(spec) { calls.push(spec); return { bin: '/worker/bin', args: ['-p', spec.prompt], env: {} } } }
   let nextPid = 700
-  const deps = { pid: 700, uuid: (() => { let n = 0; return () => `extra-${++n}` })(), spawn() { return { pid: ++nextPid, unref() {} } }, log() {}, ...overrides }
+  const deps = { pid: 700, uuid: (() => { let n = 0; return () => `extra-${++n}` })(), spawn() { return { pid: ++nextPid, unref() {} } }, log() {}, delay() {}, ...overrides }
   const io = headlessIo({ crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: Object.fromEntries(roles.map((role) => [role, { adapter }])), bin: '/worker/bin', deps })
   return { dir, taskDir, returnsDir, crew, calls, deps, io, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -134,7 +134,7 @@ function fixture(overrides = {}) {
   } }
   let pid = 700
   const io = headlessIo({ crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { builder: { adapter } }, bin: '/worker/bin', deps: {
-    spawn() { return { pid: ++pid, unref() {} } }, uuid: () => 'uuid-1', log() {}, ...overrides,
+    spawn() { return { pid: ++pid, unref() {} } }, uuid: () => 'uuid-1', log() {}, delay() {}, ...overrides,
   } })
   return { dir, taskDir, returnsDir, crew, calls, io, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -3054,7 +3054,7 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, seat = null, runId = null } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, seat = null, runId = null, emit = null } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -3068,7 +3068,7 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
     crew, paths, taskDir, checkout: dir,
     adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
     deps: {
-      ...(telemetry ? { parseStream: telemetry } : {}),
+      ...(telemetry ? { parseStream: telemetry } : {}), ...(emit ? { emit } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
       now: () => state.clock,
       sleep: (ms) => {
@@ -4887,3 +4887,55 @@ for (const [label, lose, collect, options = {}] of [
     } finally { f.cleanup() }
   })
 }
+
+// b1023: a delivered envelope settles the stream before usage folds, over the recorded B337 bytes.
+function settleRun({ late = false, exited = false, stream = B337_D1_AT_READ } = {}) {
+  const emits = []; const sleeps = []
+  const f = b416JsonFixture({
+    emit: (row) => emits.push(row),
+    onSleep: ({ appendStream, ms, sleepCount }) => { sleeps.push(ms); if (late && sleepCount === 1) appendStream(B337_D1_RESULT) },
+  })
+  try {
+    if (stream !== null) f.writeStream(stream)
+    if (exited) writeFileSync(join(f.taskDir, 'headless', f.assigned.id, 'exit'), '0')
+    const envelope = ordinaryJsonEnvelope(f.assigned.id)
+    writeFileSync(f.assigned.returnPath, JSON.stringify(envelope))
+    const returned = f.io.wait(f.assigned.returnPath, 60)
+    return { envelope, returned, sleeps, usage: emits.find((row) => row.kind === 'usage')?.usage, outcome: f.rows.find((row) => row.headless_outcome) }
+  } finally { f.cleanup() }
+}
+
+// MUTATION U1: settleDelivered returns telemetryParser before its loop, so usage folds before the result frame lands.
+test('U1 an envelope before the result frame still emits the result usage', () => {
+  const run = settleRun({ late: true })
+  assert.deepEqual(run.usage, { billed_input_tokens: 156, billed_output_tokens: 82179, billed_cache_write_tokens: 225127, billed_cache_read_tokens: 11682446 })
+  assert.deepEqual(run.returned, run.envelope)
+  assert.equal(run.outcome.result_frame, true)
+  assert.deepEqual(run.sleeps, [100])
+})
+
+// MUTATION U2: USAGE_SETTLE_POLLS raised from 100 to 101; the expected count is a literal, never the constant.
+test('U2 a result frame that never lands bounds the settle at 100 polls of 100ms', () => {
+  const run = settleRun()
+  assert.deepEqual(run.sleeps, Array(100).fill(100))
+  assert.deepEqual(run.returned, run.envelope)
+})
+
+// MUTATION U3: result_frame written true unconditionally.
+test('U3 an outcome without a result frame journals result_frame false', () => {
+  const { outcome } = settleRun()
+  assert.equal(outcome.result_frame, false)
+  assert.equal(outcome.result_frame_absent_reason, null)
+})
+
+// MUTATION U5: result_frame written as stream.terminal === true again, or its absent reason forced to null, so an unread stream journals a measured false.
+test('U5 an unread stream journals result_frame null with its reason', () => {
+  const { outcome } = settleRun({ stream: null })
+  assert.equal(outcome.result_frame, null)
+  assert.equal(outcome.result_frame_absent_reason, CENSUS_ABSENT_CAUSES.stream_absent)
+})
+
+// MUTATION U4: poll > 0 required before the exit or result stop condition is observed.
+test('U4 an exit that already parses settles without a poll', () => {
+  assert.deepEqual(settleRun({ exited: true }).sleeps, [])
+})

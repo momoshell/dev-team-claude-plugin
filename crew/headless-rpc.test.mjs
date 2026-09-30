@@ -3775,3 +3775,28 @@ test('an rpc seat whose boot record names an endpoint carries exactly that endpo
     assert.deepEqual(Object.keys(command.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
   } finally { f.cleanup() }
 }))
+
+// b1023: the journalled census absent reason for a delivered rpc envelope, on a live clock.
+function deliveredCensus(stream) {
+  const rows = []; let clock = 0
+  const f = fixture({ log: (row) => rows.push(row), now: () => clock, monotonic: () => clock, sleep: (ms) => { clock += ms } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(stream)
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    return rows.find((row) => row.seat_turn_census)?.seat_turn_census
+  } finally { f.cleanup() }
+}
+
+// MUTATION C1: the nullish fallback census?.clock_absent ?? stream_absent restored, which relabels a measured census stream_absent.
+test('C1 a measured rpc census journals no absent reason', () => {
+  const row = deliveredCensus(`${recordedRpcBoundaryCapture().split('\n').slice(0, 3).join('\n')}\n`)
+  assert.equal(row.absent_reason, null)
+  assert.ok(Number.isFinite(row.span_ms))
+})
+
+// MUTATION C2: the census cause chosen before noFrames is tested.
+test('C2 an rpc stream with no parsable frame journals no_frames', () => {
+  assert.equal(deliveredCensus('').absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
+})

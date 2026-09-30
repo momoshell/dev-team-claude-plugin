@@ -824,7 +824,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       const noFrames = observed.frames === 0
       const streamUnreadable = noFrames && seat.lastRead === false
       const census = finaliseCensus(observed.census || null)
-      const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : (census?.clock_absent ?? CENSUS_ABSENT_CAUSES.stream_absent)
+      const absentReason = noFrames ? CENSUS_ABSENT_CAUSES.no_frames : (census ? census.clock_absent : CENSUS_ABSENT_CAUSES.stream_absent)
       const timing = noFrames
         ? absentPreFirstTurn(streamUnreadable ? PRE_FIRST_TURN_ABSENT_REASONS.stream_absent : PRE_FIRST_TURN_ABSENT_REASONS.no_frames)
         : safeFinalisePreFirstTurn(turn)

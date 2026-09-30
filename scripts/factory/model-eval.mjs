@@ -34,7 +34,7 @@ import { composeMoves, readLadder } from '../../visualizer/server/roster-ladder.
 export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',
   'no-mechanical-gate', 'production-absent', 'local-endpoint-dead',
-  'judge-unresolvable', 'candidate-unresolvable',
+  'judge-unresolvable', 'judge-is-candidate', 'candidate-unresolvable',
   'routing-policy-unreadable', 'routing-policy-invalid', 'routing-ledger-unavailable',
 ])
 export const EVAL_SEAT_FAILURE_REASONS = Object.freeze({ boot_exit: 'boot-failed', boot_parse: 'boot-unreadable', assignment: 'assignment-failed', wait_error: 'wait-failed', wait_empty: 'wait-empty', runner: 'seat-runner-failed' })
@@ -255,6 +255,10 @@ export async function compileBench({ dir, deps = {} } = {}) {
   const meta = readBenchMeta(dir)
   const source = meta.source
   const sha = meta.sha
+  const { judge: judgeMetadata, candidates: candidateDocument } = source
+  const candidates = candidateDocument.candidates
+  const judge = normalizeJudge(judgeMetadata)
+  if (candidates.some((candidate) => candidateModel(candidate) === candidateModel(judge))) throw refusal('judge-is-candidate', `judge ${candidateModel(judge)} is among candidates`)
 
   let baseline
   try {
@@ -275,8 +279,6 @@ export async function compileBench({ dir, deps = {} } = {}) {
     throw refusal('no-mechanical-gate', 'gate.mjs reports zero mechanical checks — the bench cannot measure a candidate')
   }
 
-  const { judge: judgeMetadata, candidates: candidateDocument } = source
-  const candidates = candidateDocument.candidates
   // RETIRED (#983): no same-vendor candidate refusal.
   // No ADR ratifies the rule; a bench whose judge shares a candidate's vendor is now the operator's call, and during a single-provider outage it is the ONLY bench that can run.
 
@@ -287,7 +289,6 @@ export async function compileBench({ dir, deps = {} } = {}) {
     throw refusal('production-absent', `the seated ${candidateDocument.role} model${productionModel === null ? where : ` ${productionModel}`} is not among candidates`)
   }
 
-  const judge = normalizeJudge(judgeMetadata)
   try {
     await seatModel(judge, 'reviewer', deps)
   } catch (err) {

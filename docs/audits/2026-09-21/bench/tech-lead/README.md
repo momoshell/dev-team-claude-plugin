@@ -12,11 +12,7 @@ eligibility, and digest coverage without contacting an endpoint. Running
 `model-eval.mjs run` is operator-only and is not part of gate or contract
 validation; no ledger row is written by any check here.
 
-The judge is `openai/gpt-6.1-sol` (vendor `openai`). Sol sits in the frontier
-band and is already exercised by the harness; it is neither bench's production
-candidate (tech-lead production is `anthropic/claude-fable-5-1`), so no
-candidate is judged by itself, and the choice adds vendor diversity without
-reviving the retired same-vendor refusal (#983).
+The judge is `openai/gpt-6-sol` (vendor `openai`), the retired predecessor of `openai/gpt-6.1-sol`, and is not a candidate. D1 requires the candidates to include every model at or above the live tier floor, so an in-ladder judge at that floor would also be a candidate. The predecessor remains priced and listed by pi, but a live call was not measured; this choice does not revive the retired same-vendor refusal (#983).
 
 `bench.sha` is the SHA-256 digest over the exact UTF-8 bytes of `task.md`,
 `gate.mjs`, `judge.json`, and `candidates.json`, framed as

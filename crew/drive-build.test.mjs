@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -1962,7 +1962,7 @@ test('binding-failure escalation says BIND while survived keeps did-not-kill wor
 
 test('mutation binding failures are frozen and exclude gate outcomes', () => {
   assert.equal(Object.isFrozen(MUTATION_BINDING_FAILURES), true)
-  assert.deepEqual([...MUTATION_BINDING_FAILURES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'unapplied'])
+  assert.deepEqual([...MUTATION_BINDING_FAILURES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'mutant-unparsable', 'unapplied'])
   assert.ok(MUTATION_BINDING_FAILURES.length < MUTATION_OUTCOMES.length)
   for (const outcome of MUTATION_BINDING_FAILURES) assert.ok(MUTATION_OUTCOMES.includes(outcome))
   for (const outcome of ['killed', 'exempt', 'survived']) assert.equal(MUTATION_BINDING_FAILURES.includes(outcome), false)
@@ -3268,7 +3268,7 @@ test('a whole-proof repair brief stays byte-stable when no mutations are declare
 
 test('mutation outcomes are frozen and every observed row uses the closed vocabulary', () => {
   assert.equal(Object.isFrozen(MUTATION_OUTCOMES), true)
-  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'exempt', 'killed', 'survived', 'unapplied'])
+  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'exempt', 'killed', 'mutant-unparsable', 'survived', 'unapplied'])
 })
 
 test('the per-check proof stage is declared by the full variant', () => {
@@ -8913,4 +8913,162 @@ test('lane-red journal keeps the original five fields and measurements', () => {
   const row = io.calls.logs.find((entry) => entry.lane_red)?.lane_red
   assert.deepEqual(Object.keys(row), ['round', 'artifact', 'output_bytes', 'truncated', 'tail'])
   assert.deepEqual(row, { round: 1, artifact: `${CTX.taskDir}/lane-red-r1.md`, output_bytes: Buffer.byteLength(output), truncated: false, tail: output })
+})
+
+const PARSE_ORIGINAL = 'fs.symlinkSync(join(baseDir, name), join(agentDir, name))\n'
+const PARSE_FIND = 'symlinkSync(join(baseDir, name), join(agentDir, name))'
+const PARSE_REPLACE = "if (name !== 'auth.json') symlinkSync(join(baseDir, name), join(agentDir, name))"
+const PARSE_MUTATION = { check: 'K14', file: 'a.mjs', find: PARSE_FIND, replace: PARSE_REPLACE }
+const parseBuild = (mutation, source, mutationOutput) => {
+  const io = fakeIo({
+    files: { [CHECK_FILE]: source }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([mutation]), changed: ['a.test.mjs'], emit: true,
+    runs: CHECK_RUNS(mutationOutput),
+  })
+  const result = driveTask(CTX, io)
+  const rows = io.calls.logs.flatMap((row) => row.gate_check_discriminations ?? [])
+  return { io, result, rows }
+}
+
+// MUTATION P1: return null from mutantParseDefect's mutant-parse catch.
+test('P1 parse-defect helper reports malformed K14 mutant', () => {
+  const mutant = applyMutationAnchor(PARSE_ORIGINAL, PARSE_FIND, PARSE_REPLACE).text
+  const message = mutantParseDefect('a.mjs', PARSE_ORIGINAL, mutant)
+  assert.equal(typeof message === 'string' && message.length > 0, true)
+})
+// MUTATION P2: delete the helper's supported-extension filter.
+test('P2 parse-defect helper ignores unsupported extension', () => {
+  assert.equal(mutantParseDefect('a.md', 'hello', 'hello world'), null)
+})
+// MUTATION P3: remove the guard that first parses the original source.
+test('P3 parse-defect helper ignores originally invalid source', () => {
+  assert.equal(mutantParseDefect('a.ts', 'hello world', PARSE_MUTATION.replace), null)
+})
+// MUTATION P4: replace the mutant-unparsable diagnostic with generic absent why.
+test('P4 bind report rejects K14 mutant with diagnostic', () => {
+  const [row] = bindMutationDeclarations([PARSE_MUTATION], () => PARSE_ORIGINAL)
+  assert.equal(row.status, 'absent')
+  assert.match(row.why ?? '', /^mutant-unparsable:/)
+  assert.ok(row.why.includes(PARSE_FIND) && row.why.includes(PARSE_MUTATION.file))
+})
+// MUTATION P5: skip parsing in bindMutationDeclarations; proof refusal remains but loses its reason.
+test('P5 declaration route retains parse defect through proof preflight', () => {
+  const { result, io } = parseBuild(PARSE_MUTATION, PARSE_ORIGINAL, "SyntaxError: Unexpected identifier 'symlinkSync'")
+  assert.equal(result.details.escalation?.where ?? result.status, 'anchor-absent')
+  assert.match(result.details.escalation?.why ?? '', /mutant-unparsable/)
+  assert.equal(result.details.gate.repairs, 0)
+  assert.deepEqual(result.details.stages.filter((stage) => stage.startsWith('gate-repair')), [])
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'lead'), [])
+})
+// MUTATION P6: skip proof-time parsing so the malformed mutant is written and run.
+test('P6 proof journals unparsable mutant without writing or running it', () => {
+  const { rows, io } = parseBuild(PARSE_MUTATION, PARSE_ORIGINAL, "SyntaxError: Unexpected identifier 'symlinkSync'")
+  assert.equal(rows.find((row) => row.check === 'K14')?.outcome ?? null, 'mutant-unparsable')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 2)
+  assert.deepEqual(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE), [])
+})
+// MUTATION P7: report a defect for a mutant that parses and bypass its gate proof.
+test('P7 parsing declaration still runs gate and records killed', () => {
+  const { result, io, rows } = parseBuild(CHECK_MUTATION, CHECK_BUILT, 'FAIL check-one: caught\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}')
+  assert.equal(result.status, 'done')
+  assert.equal(rows.find((row) => row.check === 'check-one')?.outcome ?? null, 'killed')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+})
+// MUTATION P8: remove mutant-unparsable from the binding-failure vocabulary.
+test('P8 outcome vocabularies remain frozen and closed', () => {
+  assert.deepEqual([...MUTATION_BINDING_FAILURES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'mutant-unparsable', 'unapplied'])
+  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'exempt', 'killed', 'mutant-unparsable', 'survived', 'unapplied'])
+  assert.equal(Object.isFrozen(MUTATION_BINDING_FAILURES), true)
+  assert.equal(Object.isFrozen(MUTATION_OUTCOMES), true)
+  assert.deepEqual(MUTATION_OUTCOMES.filter((outcome) => !['killed', 'exempt'].includes(outcome) && !MUTATION_BINDING_FAILURES.includes(outcome)), ['survived'])
+})
+
+test('mutant parse defect recognizes all JavaScript and TypeScript extensions', () => {
+  for (const extension of ['mjs', 'js', 'cjs', 'ts', 'mts', 'cts']) {
+    const calls = []
+    const message = mutantParseDefect(`source.${extension}`, 'const value = 1', 'const value = if', (source) => {
+      calls.push(source)
+      if (source === 'const value = if') throw new SyntaxError('invalid mutant')
+    })
+    assert.equal(message, 'invalid mutant', extension)
+    assert.deepEqual(calls, ['const value = 1', 'const value = if'], extension)
+  }
+  assert.equal(mutantParseDefect('typed.ts', 'const value: number = 1', 'const value: number = if', (source) => {
+    if (source.endsWith('if')) throw new SyntaxError('invalid mutant')
+  }), 'invalid mutant')
+})
+
+test('exact and normalized bind defects carry the same declared diagnostic', () => {
+  const find = 'const value = true'
+  const replace = 'const value = if'
+  const exactSource = `${find}\n`
+  const normalizedSource = 'const  value = true\n'
+  const exact = bindMutationDeclarations([{ check: 'exact', file: 'a.mjs', find, replace }], () => exactSource)[0]
+  const normalized = bindMutationDeclarations([{ check: 'normalized', file: 'a.mjs', find, replace }], () => normalizedSource)[0]
+  assert.equal(exact.status, 'absent')
+  assert.equal(normalized.status, 'absent')
+  assert.equal(exact.why, normalized.why)
+  assert.ok(exact.why.includes(JSON.stringify(find)))
+})
+
+test('changed-file scope refusal preserves parse diagnostic and find text', () => {
+  const io = fakeIo({
+    files: { [CHECK_FILE]: PARSE_ORIGINAL }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([PARSE_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs'], emit: true,
+  })
+  const result = driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation?.where, 'builder')
+  assert.match(brief ?? '', /mutant-unparsable/)
+  assert.match(brief ?? '', /symlinkSync/)
+})
+
+test('valid builder correction is discharged by a killed proof', () => {
+  const mutation = { check: 'corrected', file: 'a.mjs', find: 'target()', replace: 'other()' }
+  const correction = [{ check: 'corrected', find: 'false', replace: 'true' }]
+  const { res, io } = runMutationCorrectionCase({ mutation, built: 'export const guard = false\n', changed: ['a.test.mjs'], correction, runs: { 'gate-cmd:3': { ok: false, output: correctionRed('corrected') } } })
+  assert.equal(res.status, 'done')
+  assert.equal(mutationProofRows(io).find((row) => row.check === 'corrected')?.outcome, 'killed')
+})
+
+test('bind parser caches successful and failed source parses per invocation', () => {
+  const source = 'const value = true\n'
+  const declarations = [
+    { check: 'one', file: 'a.mjs', find: 'true', replace: 'false' },
+    { check: 'two', file: 'a.mjs', find: 'true', replace: '0' },
+  ]
+  const successfulCalls = []
+  bindMutationDeclarations(declarations, () => source, (text) => successfulCalls.push(text))
+  assert.equal(successfulCalls.filter((text) => text === source).length, 1)
+
+  const failedCalls = []
+  const invalidSource = source
+  const failed = bindMutationDeclarations(declarations, () => invalidSource, (text) => {
+    failedCalls.push(text)
+    throw new SyntaxError('not parseable')
+  })
+  assert.deepEqual(failed.map((row) => row.status), ['exact', 'exact'])
+  assert.equal(failedCalls.filter((text) => text === invalidSource).length, 1)
+  const nextInvocationCalls = []
+  bindMutationDeclarations([declarations[0]], () => source, (text) => nextInvocationCalls.push(text))
+  assert.equal(nextInvocationCalls.filter((text) => text === source).length, 1)
+})
+
+test('invalid original and unsupported extension retain mutation execution behavior', () => {
+  const run = (file, source, find, replace) => {
+    const mutation = { check: `check-${file}`, file, find, replace }
+    const io = fakeIo({
+      files: { [`${CTX.checkout}/${file}`]: source }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+      envelopes: CHECK_ENVELOPES([mutation]), runs: CHECK_RUNS(), changed: ['a.test.mjs'], emit: true,
+    })
+    driveTask(CTX, io)
+    return io
+  }
+  const invalidOriginal = run('a.mjs', 'hello world', 'hello', 'goodbye')
+  assert.equal(invalidOriginal.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+  assert.equal(invalidOriginal.calls.writeLog.filter(({ path }) => path.endsWith('/a.mjs')).length, 2)
+  const unsupported = run('a.md', 'hello', 'hello', 'world')
+  assert.equal(unsupported.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+  assert.equal(unsupported.calls.writeLog.filter(({ path }) => path.endsWith('/a.md')).length, 2)
 })

@@ -8025,7 +8025,7 @@ function catalogPrice(catalog, key) {
 // ADR-047 decision 10, arms re-set by the operator 2026-09-30 (pi cannot seat anthropic models)
 export const ADVISOR_ARMS = Object.freeze(['none', 'openai/gpt-6-luna', 'openai/gpt-5.6-terra', 'openai/gpt-6.1-sol'])
 
-export const LANE_SPEND_ABSENT_REASONS = Object.freeze(['no-agent-sessions', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
+export const LANE_SPEND_ABSENT_REASONS = Object.freeze(['no-agent-sessions', 'session-id-unavailable', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
 
 function laneRunSpend(rows, catalog) {
   const tokenNames = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
@@ -8033,6 +8033,8 @@ function laneRunSpend(rows, catalog) {
   if (rows.length === 0) return { cost: null, reason: 'no-agent-sessions' }
   let total = 0
   for (const row of rows) {
+    // Rows without a session id share one identity per model, so a running total can land on more than one row.
+    if (row.claude_session_id == null) return { cost: null, reason: 'session-id-unavailable' }
     const priceKey = priceKeyForModel(catalog, row.model)
     if (priceKey === null) return { cost: null, reason: 'model-unpriced-or-ambiguous' }
     if (tokenNames.some((name) => typeof row[name] !== 'number' || !Number.isFinite(row[name]))) return { cost: null, reason: 'usage-unavailable' }

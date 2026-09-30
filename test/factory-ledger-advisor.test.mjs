@@ -1541,7 +1541,7 @@ test('A5', () => { const ledger = advisorArmTestRun('a5'); const row = advisorAr
 test('A6', () => { const ledger = advisorArmTestRun('a6'); assert.equal(advisorArmsReadout(ledger).arms[0].escalation_denominator, 1); ledger.close() })
 test('LANE_SPEND_ABSENT_REASONS is a closed frozen vocabulary', () => {
   assert.equal(Object.isFrozen(LANE_SPEND_ABSENT_REASONS), true)
-  assert.deepEqual(LANE_SPEND_ABSENT_REASONS, ['no-agent-sessions', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
+  assert.deepEqual(LANE_SPEND_ABSENT_REASONS, ['no-agent-sessions', 'session-id-unavailable', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
 })
 test('A7', () => { const ledger = advisorArmTestRun('a7'); assert.equal(advisorArmsReadout(ledger).arms[0].advisor_spend.absent_reason, 'no-advisor-usage'); ledger.close() })
 // Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
@@ -1624,6 +1624,29 @@ test('lane spend reports deterministic first absence and no absence for a reques
   const empty = advisorArmsReadout(ledger, { arms: ['absent-arm'], catalog }).arms[0]
   assert.equal(empty.lane_spend_usd, null); assert.equal(empty.lane_spend_denominator, 0)
   assert.equal(empty.lane_spend_missing_runs, 0); assert.equal(empty.lane_spend_absent_reason, null)
+  ledger.close()
+})
+// Kills: dropping any one token class from the lane-spend sum, or pairing it with another class's
+// rate. Each class carries its own decimal digit (1 + 20 + 300 + 4000), so every such change moves the total.
+test('lane spend prices every billed token class at its own rate', () => {
+  const ledger = advisorArmTestRun('every-class')
+  ledger.startAgentSession({ adw_id: 'every-class', dispatch_id: 'd', role: 'builder', model: 'claude-sonnet-5', claude_session_id: 's', transcript_path: null })
+  ledger.endAgentSession({ adw_id: 'every-class', claude_session_id: 's', model: 'claude-sonnet-5', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000, billed_cache_write_tokens: 3_000_000, billed_cache_read_tokens: 4_000_000 })
+  const catalog = { models: { 'anthropic/claude-sonnet-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 } } }
+  const arm = advisorArmsReadout(ledger, { catalog }).arms[0]
+  assert.equal(arm.lane_spend_usd, 4321); assert.equal(arm.lane_spend_denominator, 1)
+  ledger.close()
+})
+// Kills: pricing rows that carry no session id. Two such rows for one model share an identity, so
+// endAgentSession writes the same running total onto both and the run would price twice ($4 here, not $2).
+test('lane spend refuses rows without a session id instead of pricing a duplicated running total', () => {
+  const ledger = advisorArmTestRun('null-session')
+  for (const dispatch_id of ['d1', 'd2']) ledger.startAgentSession({ adw_id: 'null-session', dispatch_id, role: 'builder', model: 'claude-sonnet-5', claude_session_id: null, transcript_path: null })
+  ledger.endAgentSession({ adw_id: 'null-session', claude_session_id: null, model: 'claude-sonnet-5', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 2_000_000, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+  const catalog = { models: { 'anthropic/claude-sonnet-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 0, cost_cache_write_per_mtok: 0, cost_cache_read_per_mtok: 0 } } }
+  assert.equal(ledger.dumpTable('agent_sessions').length, 2)
+  const arm = advisorArmsReadout(ledger, { catalog }).arms[0]
+  assert.deepEqual([arm.lane_spend_usd, arm.lane_spend_denominator, arm.lane_spend_missing_runs, arm.lane_spend_absent_reason], [null, 0, 1, 'session-id-unavailable'])
   ledger.close()
 })
 // Kills: counting a run still in flight into the arm's runs and rates (twelve running sessions

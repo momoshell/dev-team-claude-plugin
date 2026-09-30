@@ -284,10 +284,10 @@ function profile(label, fields) {
 }
 
 test('R1 rendered mutation contract requires actionable FAIL reasons', () => {
-  // Mutation: delete the required FAIL reason line from MUTATION_CONTRACT_BLOCK.
+  // Mutations: delete the required FAIL reason line, or soften its MUST print obligation.
   const root = fixture('mutation-reason-r1')
   const body = section(compile(root).brief, '## Per-check mutations')
-  assert.ok(body.split('\n').some((line) => line.trim() === 'FAIL <check>: expected <x>, found <y> at <where>'))
+  assert.match(body, /\n\s*Every failing check MUST print:\n\s*FAIL <check>: expected <x>, found <y> at <where>\n/)
 })
 
 test('R2 rendered mutation contract rejects status-only reasons', () => {

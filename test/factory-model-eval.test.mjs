@@ -1115,10 +1115,11 @@ test('routing policy and ledger write refusals stop bench admission without fabr
 const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
-  // Updated 2026-09-23 by the operator-ratified successor bump (PR #1507): production moves to
-  // openai/gpt-6-sol at medium; the local candidate set is unchanged. The operator ratified the
+  // Updated 2026-09-30 by the operator-ratified successor bump: production moves to
+  // openai/gpt-6.1-sol at medium; the local candidate set is unchanged. The operator ratified the
   // bump, not this file: the new candidates.json has had no separate operator review.
-  planner: '873a860fb2015ce78bdf3401ab954ed63f5038e4f2520214d6c4c94d32107d7a',
+  // (Updated 2026-09-23 by the successor bump of PR #1507: production moved to openai/gpt-6-sol.)
+  planner: 'ffd4453393dce0bb21528771ffee1f22d5f3c09a0b2d2cbbe74375a3c6f1d76d',
   // Updated 2026-09-25 by the operator-ratified builder reseat: production moves from
   // meta/muse-spark-1.3-contributor to openai/gpt-6-luna at medium; the local candidate set is
   // unchanged. The operator ratified the seat, not this file: no separate operator review.

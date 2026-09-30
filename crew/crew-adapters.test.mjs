@@ -705,7 +705,7 @@ test('ADR047 P1 an unavailable advisor agent refuses only when a granted seat wi
       rmSync(checkoutRoot, { recursive: true, force: true })
     }
   }
-  const cell = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium' }
+  const cell = { provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'pi', effort: 'medium' }
 
   const consults = await boot('consults', { register: granted, rosterValue: claudeSeated(cell) })
   assert.equal(consults.error?.reason, 'agent-unavailable')

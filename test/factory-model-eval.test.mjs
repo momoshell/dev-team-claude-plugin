@@ -16,7 +16,9 @@ import {
   normalDeps,
   EVAL_SEAT_FAILURE_REASONS,
   EvalRefusal,
+  EVAL_REFUSALS,
   BENCH_DEFAULT_ROUTING_TIER,
+  readBenchMeta,
 } from '../scripts/factory/model-eval.mjs'
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
 import { PI_PROVIDERS } from '../crew/adapters/adapter-pi.mjs'
@@ -89,6 +91,8 @@ function depsFor({
   calls = [],
   runJudge = async () => ({ findings: ['finding-1'] }),
   resolveAdapters = null,
+  runGate = null,
+  runSeat = null,
 } = {}) {
   return {
     ledger: {
@@ -97,10 +101,10 @@ function depsFor({
     },
     probe,
     readRoster,
-    runGate: async () => gate,
+    runGate: runGate || (async () => gate),
     runJudge,
     resolveAdapters: resolveAdapters || ((roles, args, seats) => fixtureAdapters(roles, args, seats)),
-    runSeat: async ({ task, candidate }) => {
+    runSeat: runSeat || (async ({ task, candidate }) => {
       calls.push({ task, candidate })
       const envelope = envelopes[candidate.id]
       if (envelope === null) return { envelope: null, absent_reason: 'no-envelope', duration_ms: 120 }
@@ -110,7 +114,7 @@ function depsFor({
         duration_ms: 100,
         usage: { input: 10, output: 20, cache_read: 30, cache_write: 40 },
       }
-    },
+    }),
   }
 }
 
@@ -272,6 +276,9 @@ async function refusalFor(options) {
     probe: options.probe ?? (async () => true),
     readRoster: options.readRoster,
     resolveAdapters: options.resolveAdapters,
+    runGate: options.runGate,
+    runSeat: options.runSeat,
+    runJudge: options.runJudge,
   })
   let caught = null
   try {
@@ -281,6 +288,76 @@ async function refusalFor(options) {
   }
   return { caught, calls }
 }
+
+// MUTATION: deleting the identity guard must make these offline refusal assertions fail.
+test('J1 refuses self judging before any gate or seat activity', async () => {
+  for (const [judge, candidates] of [
+    [{ model: 'openai/m', vendor: 'wrong', agent: 'claude', effort: 'high' }, [{ provider: 'openai', id: 'm', agent: 'pi', effort: 'medium' }]],
+    [{ model: 'openai/j', vendor: 'openai' }, [{ provider: 'openai', id: 'p', agent: 'pi', effort: 'medium' }, { provider: 'openai', id: 'j', agent: 'pi', effort: 'medium' }]],
+    [{ model: 'short', vendor: 'openai' }, [{ provider: 'openai', id: 'short', agent: 'pi', effort: 'medium' }]],
+  ]) {
+    const events = []
+    const bench = writeBench({ judge, candidates, production: `${candidates[0].provider}/${candidates[0].id}` })
+    const result = await refusalFor({ dir: bench.dir, runGate: async () => { events.push('gate') }, probe: async () => { events.push('probe'); return true }, resolveAdapters: async () => { events.push('adapter'); return fixtureAdapters(['reviewer']) }, runSeat: async () => { events.push('seat') }, runJudge: async () => { events.push('judge') } })
+    assert.ok(result.caught instanceof EvalRefusal)
+    assert.equal(result.caught.refusal, 'judge-is-candidate')
+    assert.deepEqual(events, [])
+    const ran = await assert.rejects(runBench({ dir: bench.dir, deps: { runGate: async () => { events.push('run-gate') }, ledger: { recordRoutingChoice: async () => { events.push('ledger') } } } }), (error) => error.refusal === 'judge-is-candidate')
+    assert.equal(ran, undefined)
+    assert.deepEqual(events, [])
+  }
+})
+
+// MUTATION: provider-only identity comparison must reject these valid distinct models.
+test('J2 permits different complete model identities', async () => {
+  for (const candidate of [
+    { provider: 'openai', id: 'other', agent: 'pi', effort: 'medium' },
+    { provider: 'anthropic', id: 'gpt-5.6-sol', agent: 'claude', effort: 'medium' },
+  ]) {
+    const bench = writeBench({ candidates: [candidate], production: `${candidate.provider}/${candidate.id}` })
+    const compiled = await compileBench({ dir: bench.dir, deps: depsFor({ readRoster: null }) })
+    assert.deepEqual(compiled.candidates, [candidate])
+  }
+})
+
+// MUTATION: dropping the model interpolation must remove the exact identity from detail.
+test('J3 includes self identity in refusal detail', async () => {
+  const candidates = [CANDIDATE_A, { provider: 'openai', id: 'later-self', agent: 'pi', effort: 'medium' }]
+  const bench = writeBench({ judge: { model: 'openai/later-self', vendor: 'openai' }, candidates })
+  const { caught } = await refusalFor({ dir: bench.dir })
+  assert.equal(caught.refusal, 'judge-is-candidate')
+  assert.match(caught.detail, /openai\/later-self/)
+})
+
+// MUTATION: restoring a tracked declaration to a candidate identity must fail this census.
+test('J4 tracked benches have no judge candidate identity collision', () => {
+  const listed = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' })
+  assert.equal(listed.status, 0, listed.stderr)
+  const paths = listed.stdout.split('\0').filter((path) => /^docs\/audits\/[^/]+\/bench\/[^/]+\/judge\.json$/.test(path))
+  assert.ok(paths.length > 0)
+  for (const path of paths) {
+    const judge = JSON.parse(readFileSync(join(ROOT, path), 'utf8'))
+    const candidates = JSON.parse(readFileSync(join(ROOT, path.replace(/judge\.json$/, 'candidates.json')), 'utf8'))
+    const model = String(judge.model || '')
+    const slash = model.indexOf('/')
+    const identity = slash < 0 ? `${judge.vendor}/${model}` : model
+    assert.equal(candidates.candidates.some((candidate) => `${candidate.provider}/${candidate.id}` === identity), false, path)
+  }
+})
+
+// MUTATION: move the identity guard back into compileBench only; the read-only sweep's admission must refuse too.
+test('J6 read-only bench admission refuses self judging', () => {
+  const bench = writeBench({ judge: { model: 'openai/m', vendor: 'openai' }, candidates: [{ provider: 'openai', id: 'm', agent: 'pi', effort: 'medium' }], production: 'openai/m' })
+  assert.throws(() => readBenchMeta(bench.dir), (error) => error instanceof EvalRefusal && error.refusal === 'judge-is-candidate')
+})
+
+// MUTATION: removing the closed enum entry must invalidate constructor admission.
+test('J5 refusal vocabulary is frozen and admits self judging refusal', () => {
+  assert.equal(Object.isFrozen(EVAL_REFUSALS), true)
+  assert.ok(EVAL_REFUSALS.includes('judge-is-candidate'))
+  const error = new EvalRefusal('judge-is-candidate', 'openai/model')
+  assert.equal(error.refusal, 'judge-is-candidate')
+})
 
 test('A1 role benches contain every required valid input', () => {
   const readJson = (relativePath) => JSON.parse(readFileSync(join(ROOT, relativePath), 'utf8'))

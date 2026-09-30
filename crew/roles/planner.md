@@ -138,9 +138,9 @@ outside the builder's reach. Rules the driver enforces mechanically:
   that reads a name into existence is the vacuous shape
   `test/vacuity.test.mjs` exists to catch; see
   `skills/qa-test-writing/references/vacuity.md`. #623
-- Map every explicit requirement in the brief to a concrete check; print
-  failures as `expected X, found Y, at PATH` (they feed back verbatim to
-  the builder).
+- Map each brief requirement to a check; print
+  `FAIL <check>: expected X, found Y at PATH`; Y is never a bare test status.
+  Feed failures verbatim to builder.
 - A check that needs a server MUST bind an ephemeral port — port 0, and read
   back the port the OS assigned — never a default one. A gate is RED at
   baseline, which is precisely when the refusal or shutdown under test does not

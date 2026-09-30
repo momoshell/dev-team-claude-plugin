@@ -296,6 +296,11 @@ A mutation entry carries exactly:
       FAIL <check> — <why>          ← REJECTED, an em dash is not a delimiter
       FAIL <check> <why>            ← REJECTED, a space is not a delimiter
 
+  Every failing check MUST print:
+      FAIL <check>: expected <x>, found <y> at <where>
+  A status-only reason (node:test's not ok or failing as the found value) is REJECTED.
+  A check wrapping a node:test reports the assertion's expected and actual values from a caught AssertionError (.expected/.actual) or the TAP reporter's expected:/actual: diagnostics.
+
   The reason, not merely the prohibition: a label may not be EXTENDED by what follows
   it. Were a space or a dash a legal delimiter, \`FAIL cache\` would match a
   \`FAIL cache-v2\` line and one check's red would be credited to another — the

@@ -665,7 +665,7 @@ test('B1', () => {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot',
   }
-  const expected = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/task/mcp/builder.json" --settings "${PANE_USAGE_SETTINGS}" --allowedTools "Read" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/prompt.md" "boot"`
+  const expected = `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/task/mcp/builder.json" --setting-sources project --settings "${PANE_USAGE_SETTINGS}" --tools "Read" --allowedTools "Read" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/prompt.md" "boot"`
   assert.equal(claudeSeatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(claudeSeatCommand(shape), expected)
   assert.ok(!claudeSeatCommand({ ...shape, env: {} }).includes('ANTHROPIC_BASE_URL'))

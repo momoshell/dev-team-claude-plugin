@@ -319,24 +319,22 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 
   const expectedExamples = [
-    { line: '- Standard library: replace a shell-built `git add` command with `execFileSync(\'git\', [\'add\', \'--\', ...toAdd])` (crew/seat-io.mjs:3734).', file: 'crew/seat-io.mjs', first: 3734, last: 3734, firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
-    { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).", file: 'crew/variants.mjs', first: 12, last: 13, firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
-    { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39-42).', file: 'test/helpers.mjs', first: 39, last: 42, firstFragment: 'export function scratchDir(', lastFragment: 'return dir' },
-    { line: '- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:134).', file: 'crew/headless-rpc.mjs', first: 134, last: 134, firstFragment: 'candidates: null, reason: closedReason(error)', lastFragment: 'candidates: null, reason: closedReason(error)' },
+    { line: "- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])`", file: 'crew/seat-io.mjs', firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
+    { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])`", file: 'crew/variants.mjs', firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
+    { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)`', file: 'test/helpers.mjs', firstFragment: 'export function scratchDir(', lastFragment: 'return dir' },
+    { line: '- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason', file: 'crew/headless-rpc.mjs', firstFragment: 'candidates: null, reason: closedReason(error)', lastFragment: 'candidates: null, reason: closedReason(error)' },
   ]
-  const derived = skillLines.filter((line) => line.startsWith('- '))
-  assert.deepEqual(derived, expectedExamples.map(({ line }) => line))
-  for (const line of derived) {
+  const derived = skillLines.filter((line) => line.startsWith('- ')).map((line) => {
     const citation = line.match(/\(([^():]+):(\d+)(?:-(\d+))?\)\.$/)
     assert.ok(citation, `expected a resolving citation in ${line}`)
-    const [, file, firstText, lastText] = citation
-    const first = Number(firstText)
-    const last = Number(lastText ?? firstText)
+    const text = line.slice(0, -citation[0].length).trimEnd()
+    return { line: text, file: citation[1], first: Number(citation[2]), last: Number(citation[3] ?? citation[2]) }
+  })
+  assert.deepEqual(derived.map(({ line }) => line), expectedExamples.map(({ line }) => line))
+  for (const { line, file, first, last } of derived) {
     const expected = expectedExamples.find((example) => example.line === line)
     assert.ok(expected, `unexpected example ${line}`)
     assert.equal(file, expected.file)
-    assert.equal(first, expected.first)
-    assert.equal(last, expected.last)
     const sourcePath = join(REPO_ROOT, file)
     assert.equal(existsSync(sourcePath), true, sourcePath)
     const sourceLines = readFileSync(sourcePath, 'utf8').split('\n')

@@ -6,7 +6,7 @@ import { scratchDir } from '../../../test/helpers.mjs'
 import { assignmentPrompt } from '../../driver.mjs'
 import { createReminders, attachReminders } from './reminders.ts'
 
-const ids = ['S1','S2','S3','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1']
+const ids = ['S1','S2','S3','S4','S5','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1']
 const shipped = JSON.parse(readFileSync(new URL('./reminders.json', import.meta.url), 'utf8'))
 function setup({ table = shipped, role = 'builder', task = true } = {}) {
   const root = scratchDir('reminders-')
@@ -23,6 +23,25 @@ test('S2 rejects unknown keys, invalid regex, duplicate ids, bad source and top-
   for (const mutate of [t => { t.rules[0].extra = true }, t => { t.rules[0].pattern = '[' }, t => { t.rules[1].id = t.rules[0].id }, t => { t.rules[0].source.quote = 'definitely-not-a-source-quote-zzq' }, t => { t.extra = true }]) { const t = structuredClone(shipped); mutate(t); const f = setup({ table: t }); assert.equal(f.hooks.usable, false); assert.equal(f.hooks.reason, 'schema') }
 })
 test('S3 each shipped source quote occurs literally', () => { for (const r of shipped.rules) assert.ok(readFileSync(r.source.path, 'utf8').includes(r.source.quote)) })
+test('S4 a source file absent from the checkout journals source-absent and never fires', () => {
+  const t = structuredClone(shipped)
+  t.rules[1].source.path = 'crew/definitely-absent-source-zzq.mjs'
+  const f = setup({ table: t })
+  assert.equal(f.hooks.usable, false)
+  assert.equal(f.hooks.reason, 'source-absent')
+  assert.deepEqual(f.rows.map((row) => row.rule_reminder_table_unusable), [{ reason: 'source-absent' }])
+  assert.equal(f.hooks.toolResult(bash('--test-name-pattern')), undefined)
+})
+test('S5 an absent source never masks a schema defect elsewhere in the table', () => {
+  for (const [absent, broken] of [[0, 1], [1, 0]]) {
+    const t = structuredClone(shipped)
+    t.rules[absent].source.path = 'crew/definitely-absent-source-zzq.mjs'
+    t.rules[broken].source.quote = 'definitely-not-a-source-quote-zzq'
+    const f = setup({ table: t })
+    assert.equal(f.hooks.usable, false)
+    assert.equal(f.hooks.reason, 'schema')
+  }
+})
 test('P1 bash reminder prepends and preserves original content order', () => { const f = setup(); const result = f.hooks.toolResult(bash('--test-name-pattern=abc')); assert.match(result.content[0].text, /reminder/); assert.equal(result.content[1].text, 'original') })
 test('P2 edit newText matches on test path', () => { const f = setup(); const result = f.hooks.toolResult({ toolName: 'edit', input: { path: 'x.test.mjs', edits: [{ newText: 'mkdtempSync(' }] }, content: [] }); assert.match(result.content[0].text, /scratchDir/) })
 test('P3 non-test edit does not match', () => { const f = setup(); assert.equal(f.hooks.toolResult({ toolName: 'edit', input: { path: 'x.js', edits: [{ newText: 'mkdtempSync(' }] }, content: [] }), undefined) })
@@ -39,4 +58,4 @@ test('RV1-1 corrupt table assignment hook does not throw', () => {
   assert.equal(hooks.usable, false)
   assert.doesNotThrow(() => hooks.beforeAgentStart({ prompt: assignment('rv1-1') }))
 })
-test('T1 test IDs are exactly the complete set and gate runs this file', () => { const source = readFileSync(new URL(import.meta.url), 'utf8'); const found = [...source.matchAll(/^test\('(S1|S2|S3|P1|P2|P3|P4|E1|R1|O1|O2|J1|U1|T1) /gm)].map(m => m[1]); assert.deepEqual(found.sort(), [...ids].sort()); assert.match(source, /test\('O2 /) })
+test('T1 test IDs are exactly the complete set and gate runs this file', () => { const source = readFileSync(new URL(import.meta.url), 'utf8'); const found = [...source.matchAll(/^test\('(S1|S2|S3|S4|S5|P1|P2|P3|P4|E1|R1|O1|O2|J1|U1|T1) /gm)].map(m => m[1]); assert.deepEqual(found.sort(), [...ids].sort()); assert.match(source, /test\('O2 /) })

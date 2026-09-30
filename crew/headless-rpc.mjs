@@ -1482,9 +1482,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (options?.freshSession === true) {
       const { verdict } = store.reconcile(role)
       result.session = verdict === VERDICTS.FREE || verdict === VERDICTS.RECLAIMABLE ? 'fresh' : 'kept'
+      // The seat is already retired, so a failed reset write keeps the identity
+      // rather than refusing a reseat whose worker is gone.
       if (result.session === 'fresh') {
-        mkdir(seatDir(role), { recursive: true })
-        saveSession(role, { sessionId: null })
+        try {
+          mkdir(seatDir(role), { recursive: true })
+          saveSession(role, { sessionId: null })
+        } catch { result.session = 'kept' }
       }
     }
     return result

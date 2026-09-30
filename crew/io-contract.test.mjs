@@ -982,7 +982,7 @@ test('reseat refuses when no adapter can translate the next cell', () => {
   assert.equal(fsExistsSync(join(google.paths.dir, 'crew.json')), false)
 })
 
-function seatFreshFixture({ effortOnly = false, running = true, inFlight = false, restart = null } = {}) {
+function seatFreshFixture({ effortOnly = false, running = true, inFlight = false, restart = null, failSessionWrite = false } = {}) {
   const dir = scratchDir('seatfresh-contract-')
   const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
   const seatDir = join(paths.taskDir, 'headless-rpc', 'builder')
@@ -994,12 +994,16 @@ function seatFreshFixture({ effortOnly = false, running = true, inFlight = false
   const diskPath = join(dir, 'crew.json'), savedPath = join(seatDir, 'session.json'), cmdPath = join(seatDir, 'cmd.json')
   fsWriteFileSync(diskPath, JSON.stringify(crew))
   fsWriteFileSync(savedPath, JSON.stringify({ sessionId: 'old-session', lastAssignmentId: 'd0', cursor: 'preserved-cursor' }))
-  let seq = 0, clock = 0, spawns = 0, workerDead = false
+  let seq = 0, clock = 0, spawns = 0, workerDead = false, sessionWriteFails = false
   const journal = []
   const supervisor = () => headlessRpcIo({ crew, paths, checkout: dir, taskDir: paths.taskDir, bin: '/stub/pi', deps: {
     uuid: () => `new-session-${++seq}`, pid: 700, spawn: () => { spawns += 1; return { pid: 701, unref() {} } },
     openSync: () => 10, closeSync: () => {}, writeSync: () => {},
     existsSync: path => fsExistsSync(path) || String(path).endsWith('/cmd.fifo'),
+    writeFileSync: (path, ...rest) => {
+      if (sessionWriteFails && path === savedPath) { sessionWriteFails = false; throw Object.assign(new Error('permission denied'), { code: 'EACCES' }) }
+      return fsWriteFileSync(path, ...rest)
+    },
     kill: (_pid, signal) => {
       if (signal === 0 && workerDead) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
       if (signal !== 0) fsWriteFileSync(join(seatDir, 'exit'), '0')
@@ -1028,6 +1032,7 @@ function seatFreshFixture({ effortOnly = false, running = true, inFlight = false
     workerDead = restart === 'dead'
     rpc = supervisor()
   }
+  sessionWriteFails = failSessionWrite
   const before = { member: structuredClone(crew.members.builder), seat: structuredClone(crew.seats.builder), disk: fsReadFileSync(diskPath, 'utf8'), saved: fsReadFileSync(savedPath, 'utf8') }
   return { crew, get rpc() { return rpc }, io, before, savedPath, diskPath, cmdPath, journal, spawns: () => spawns }
 }
@@ -1106,4 +1111,17 @@ test('F7 reseat after a supervisor restart starts fresh once the old worker is p
   assert.equal(f.journal.find(row => row.reseat)?.reseat.session, 'fresh')
   assert.equal(isFreshSession(seatFreshArgs(f)), true)
   assert.equal(f.spawns(), 2)
+})
+
+// MUTATION F9: rethrow the saved-session reset failure after the worker is retired.
+test('F9 a failed session reset after retirement applies the reseat and keeps the identity', () => {
+  const f = seatFreshFixture({ failSessionWrite: true })
+  const result = f.io.reseat('builder')
+  assert.equal(result.applied, true, JSON.stringify(result))
+  assert.equal(f.crew.members.builder.model, 'openai-codex/new-model')
+  assert.equal(f.crew.members.builder.session_id, 'old-session')
+  assert.equal(f.journal.find(row => row.reseat)?.reseat.session, 'kept')
+  const args = seatFreshArgs(f), index = args.indexOf('--session')
+  assert.equal(f.spawns(), 2, 'the retired worker is replaced, not adopted')
+  assert.equal(index >= 0 && args[index + 1] === 'old-session', true, JSON.stringify(args))
 })

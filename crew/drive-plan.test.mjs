@@ -3050,7 +3050,7 @@ test('a lane with no refused command is unchanged', () => {
   assert.deepEqual(result.details.enforcements, [])
 })
 
-test('a bounced builder keeps its accepted fence and the teeth that go with it', () => {
+test('a bounced builder preserves its accepted scope context', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'builder:1': suiteRefusalEnv('builder1', 'builder'), 'builder:2': buildEnv(),
@@ -3067,8 +3067,8 @@ test('a bounced builder keeps its accepted fence and the teeth that go with it',
   for (const dispatch of builders) assert.deepEqual(dispatch.policy.fence, ['a.mjs', 'a.test.mjs'])
   const outside = suiteRunPolicy({ ...builders[1].policy, role: 'builder', command: 'node --test crew/drive.test.mjs' })
   const inside = suiteRunPolicy({ ...builders[1].policy, role: 'builder', command: 'node --test a.test.mjs' })
-  assert.equal(outside.decision, 'refuse')
-  assert.equal(inside.decision, 'admit')
+  assert.deepEqual([outside.decision, outside.reason], ['admit', 'unfenced-test'])
+  assert.deepEqual([inside.decision, inside.reason], ['admit', 'fenced-test'])
 })
 
 test('the drivers assigned policy carries exactly three keys', () => {

@@ -30,7 +30,7 @@ const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', impo
 
 test('ADR047 A1 build roster resolves its canonical nullable advisor cell without seating it', () => {
   const resolved = resolveTier(shippedRoster(), 'build')
-  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-sonnet-5-5', model: null })
+  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: null })
   assert.equal(resolved.roles.includes('advisor'), false)
 })
 test('ADR047 A2 judge roster keeps advisor explicitly null', () => {
@@ -2393,7 +2393,8 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
 test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Sonnet successors', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   assert.equal(shipped.updated_at, '2026-09-30')
-  assert.equal(shipped.tiers.build.advisor.id, 'claude-sonnet-5-5')
+  // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
+  assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
   for (const tier of ['mechanical', 'build', 'judge']) {
     assert.equal(shipped.tiers[tier].planner.id, 'gpt-6.1-sol')
     assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')

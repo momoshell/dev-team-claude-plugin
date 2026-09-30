@@ -344,8 +344,13 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
     // moves a cited line fence this granted skill, a prompt surface.
     const firstPin = leanAnchors[`${file}:${first}`]
     assert.ok(typeof firstPin === 'string' && firstPin.includes(expected.firstFragment), `${file}:${first} is not pinned to ${expected.firstFragment}`)
-    const lastPin = leanAnchors[`${file}:${last}`]
-    if (lastPin !== undefined) assert.ok(lastPin.includes(expected.lastFragment), `${file}:${last} is not pinned to ${expected.lastFragment}`)
+    // A range end is unpinned, so it is read from the source at the same offset from wherever the
+    // pinned start now sits: a shift moves both ends together, a wrong end still fails.
+    const sourceLines = readFileSync(join(REPO_ROOT, file), 'utf8').split('\n')
+    const start = sourceLines.findIndex((text) => text.includes(firstPin))
+    assert.ok(start >= 0, `${file}: the pinned start ${firstPin} is not in the source`)
+    const end = sourceLines[start + (last - first)]
+    assert.ok(typeof end === 'string' && end.includes(expected.lastFragment), `${file}:${last} did not contain ${expected.lastFragment}`)
   }
 
   // The never-simplify list lives ONCE, in _shared.md (every seat); the skill does not restate it.

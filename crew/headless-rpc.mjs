@@ -1447,7 +1447,11 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (liveness === LIVENESS.ALIVE) return finish(LIVENESS.ALIVE, 'probe-alive')
     return finish(LIVENESS.UNKNOWN, 'probe-unknown')
   }
-  // Retire at a settled boundary; resume by default, or explicitly reset identity.
+  // Retire at a settled boundary; resume by default. freshSession asks for a
+  // new identity, granted (`session: 'fresh'`) only when the next ensureProcess
+  // must spawn: a reservation it would adopt (BUSY, e.g. a worker that outlived
+  // a supervisor restart) or cannot resolve keeps the old identity
+  // (`session: 'kept'`), so an adopted worker is never attributed to a new id.
   function retire(role, options = {}) {
     const seat = seats.get(role)
     const inFlight = !!(seat?.turn && !seat.turn.state.settled)
@@ -1459,25 +1463,31 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         why: `rpc seat ${role} has an in-flight turn; retire it at a bounce boundary`,
       }
     }
-    if (options?.freshSession === true) {
-      mkdir(seatDir(role), { recursive: true })
-      saveSession(role, { sessionId: null })
-    }
+    let result
     if (!seat) {
-      return {
+      result = {
         retired: false,
         reason: 'not-running',
         why: `rpc seat ${role} is not running; the next assignment will spawn it`,
       }
+    } else {
+      try { closeFd(seat.fd) } catch {}
+      const proof = proveGroupDead(seat)
+      if (proof.liveness === LIVENESS.DEAD) unlinkSeatFifos(role)
+      // Do not clear here: proveGroupDead retains an unproven reservation so a
+      // later reader can still find the worker whose death we could not prove.
+      seats.delete(role)
+      result = { retired: true, sessionId: seat.sessionId, forced, liveness: proof.liveness, reason: proof.reason }
     }
-    try { closeFd(seat.fd) } catch {}
-    const proof = proveGroupDead(seat)
-    if (proof.liveness === LIVENESS.DEAD) unlinkSeatFifos(role)
-    // Do not clear here: proveGroupDead retains an unproven reservation so a
-    // later reader can still find the worker whose death we could not prove.
-    // Default retirement preserves identity; freshSession above clears it.
-    seats.delete(role)
-    return { retired: true, sessionId: seat.sessionId, forced, liveness: proof.liveness, reason: proof.reason }
+    if (options?.freshSession === true) {
+      const { verdict } = store.reconcile(role)
+      result.session = verdict === VERDICTS.FREE || verdict === VERDICTS.RECLAIMABLE ? 'fresh' : 'kept'
+      if (result.session === 'fresh') {
+        mkdir(seatDir(role), { recursive: true })
+        saveSession(role, { sessionId: null })
+      }
+    }
+    return result
   }
   function abort(role, options = {}) {
     const seat = seats.get(role)

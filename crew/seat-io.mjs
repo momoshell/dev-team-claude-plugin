@@ -3659,6 +3659,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         const to = { ...rung.cell, model }
         const freshSession = m.transport === HEADLESS_RPC_TRANSPORT && model !== from.model
+        // The transport decides: 'kept' when the old worker may still be adopted.
+        let session = null
         if (m.transport === HEADLESS_RPC_TRANSPORT) {
           const refuse = (why) => ({ applied: false, reason: 'transport', why: String(why || `headless-rpc seat ${roleName} could not be retired`), from, to: null })
           try {
@@ -3666,6 +3668,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             if (typeof transport?.retire !== 'function') return refuse(`headless-rpc seat ${roleName} has no retire operation`)
             const retired = transport.retire(role, { freshSession })
             if (retired?.retired !== true && retired?.reason !== 'not-running') return refuse(retired?.why || `headless-rpc seat ${roleName} could not be retired (${retired?.reason || 'unknown reason'})`)
+            if (freshSession) session = retired?.session === 'fresh' ? 'fresh' : 'kept'
           } catch (err) {
             return refuse(err?.why || err?.message || String(err))
           }
@@ -3676,7 +3679,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           target.effort = rung.cell.effort
           target.provider = rung.cell.provider
           target.id = rung.cell.id
-          if (freshSession) { target.session_id = null; target.started = false }
+          if (session === 'fresh') { target.session_id = null; target.started = false }
         }
         // A locked read-modify-write, not a whole-file republish: a seat
         // minting a session id from its own stale copy used to erase this
@@ -3688,12 +3691,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             target.effort = rung.cell.effort
             target.provider = rung.cell.provider
             target.id = rung.cell.id
-            if (freshSession) Object.assign(target, { session_id: null, started: false })
+            if (session === 'fresh') Object.assign(target, { session_id: null, started: false })
           }
           return true
         }, { writeFileSync, renameSync, readFileSync, existsSync })
         const record = { role, from, to, rung: rung.rung, reason }
         if (m.transport === HEADLESS_RPC_TRANSPORT) record.retired = true
+        if (session) record.session = session
         // A save that fails is VISIBLE — showDoc's posture (:2146). The run
         // otherwise continues while crew.json still names the cell the
         // operator did NOT select, silent from both ends. An ABSENT crew.json

@@ -3659,14 +3659,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         const to = { ...rung.cell, model }
         const freshSession = m.transport === HEADLESS_RPC_TRANSPORT && model !== from.model
-        // The transport decides: 'kept' when the old worker may still be adopted.
+        // A held reservation cannot truthfully take a different model.
         let session = null
         if (m.transport === HEADLESS_RPC_TRANSPORT) {
           const refuse = (why) => ({ applied: false, reason: 'transport', why: String(why || `headless-rpc seat ${roleName} could not be retired`), from, to: null })
           try {
             const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
             if (typeof transport?.retire !== 'function') return refuse(`headless-rpc seat ${roleName} has no retire operation`)
-            const retired = transport.retire(role, { freshSession })
+            const retired = transport.retire(role, { freshSession }); if (retired?.session === 'held') return refuse(`worker-adoptable: ${roleName} keeps ${from.model}`)
             if (retired?.retired !== true && retired?.reason !== 'not-running') return refuse(retired?.why || `headless-rpc seat ${roleName} could not be retired (${retired?.reason || 'unknown reason'})`)
             if (freshSession) session = retired?.session === 'fresh' ? 'fresh' : 'kept'
           } catch (err) {

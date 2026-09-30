@@ -1887,6 +1887,70 @@ test('rpc usage accumulates across polls and emits null when unmeasured', () => 
   } finally { empty.cleanup() }
 })
 
+// MUTATION H4: emit the mutable crew model instead of the adopted cmd.json launch model.
+test('H4 adopted worker usage is attributed to its saved launch model', () => {
+  const dir = scratchDir('rpc-model-h4-')
+  const seen = []
+  const crew = { checkout: dir, members: { builder: { model: 'launch-model', transport: 'headless-rpc' } } }
+  const first = fixture({ dir, crew, emit: event => seen.push(event) })
+  const run = first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+  const capture = recordedRpcBoundaryCapture().split('\\n').filter(line => { try { const f = JSON.parse(line); return f.type === 'message_end' || f.type === 'agent_settled' } catch { return false } }).join('\\n') + '\\n'
+  writeFileSync(join(dir, 'task', 'headless-rpc', 'builder', 'pgid'), '701')
+  writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+  crew.members.builder.model = 'current-model'
+  const restarted = fixture({ dir, crew, emit: event => seen.push(event) })
+  const next = restarted.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+  writeFileSync(join(dir, 'task', 'headless-rpc', 'builder', 'stream.jsonl'), capture)
+  writeFileSync(next.returnPath, JSON.stringify({ assignment_id: next.id, role: 'builder', status: 'done' }))
+  restarted.io.wait(next.returnPath, 1)
+  assert.ok(seen.length > 0)
+  assert.ok(seen.every(event => event.model === 'launch-model'))
+})
+
+// MUTATION H5: omit model from the newly spawned seat.
+test('H5 spawned worker usage retains launch model after crew mutation', () => {
+  const dir = scratchDir('rpc-model-h5-')
+  const seen = []
+  const crew = { checkout: dir, members: { builder: { model: 'launch-model', transport: 'headless-rpc' } } }
+  const f = fixture({ dir, crew, emit: event => seen.push(event) })
+  const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+  crew.members.builder.model = 'current-model'
+  const frames = recordedRpcBoundaryCapture().split('\\n').filter(line => { try { const x = JSON.parse(line); return x.type === 'message_end' || x.type === 'agent_settled' } catch { return false } }).join('\\n') + '\\n'
+  writeFileSync(join(dir, 'task', 'headless-rpc', 'builder', 'stream.jsonl'), frames)
+  writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+  f.io.wait(run.returnPath, 1)
+  assert.ok(seen.length > 0)
+  assert.ok(seen.every(event => event.model === 'launch-model'))
+})
+
+// MUTATION H6: fall back to crew.members when a recovered seat model is null.
+test('H6 adopted worker with absent or unusable cmd model emits null usage model', () => {
+  for (const mode of ['absent', 'malformed', 'empty', 'no-model', 'non-array', 'no-value', 'denied']) {
+    const dir = scratchDir(`rpc-model-h6-${mode}-`)
+    const seen = []
+    const crew = { checkout: dir, members: { builder: { model: 'must-not-fallback', transport: 'headless-rpc' } } }
+    const first = fixture({ dir, crew })
+    const run = first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(dir, 'task', 'headless-rpc', 'builder')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    const cmd = join(seatDir, 'cmd.json')
+    if (mode === 'absent') rmSync(cmd, { force: true })
+    else if (mode === 'malformed') writeFileSync(cmd, '{')
+    else if (mode === 'empty') writeFileSync(cmd, '')
+    else writeFileSync(cmd, JSON.stringify({ args: mode === 'no-model' ? [] : mode === 'non-array' ? '--model model' : mode === 'no-value' ? ['--model'] : ['--model', '--effort', 'high'] }))
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+    const deniedRead = mode === 'denied' ? path => { if (path === cmd) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return readFileSync(path) } : undefined
+    const restarted = fixture({ dir, crew, emit: event => seen.push(event), ...(deniedRead ? { readFileSync: deniedRead } : {}) })
+    const next = restarted.io.assign({ role: 'builder', briefFile: '/brief-next.md' })
+    const capture = recordedRpcBoundaryCapture().split('\\n').filter(line => { try { const x = JSON.parse(line); return x.type === 'message_end' || x.type === 'agent_settled' } catch { return false } }).join('\\n') + '\\n'
+    writeFileSync(join(seatDir, 'stream.jsonl'), capture)
+    writeFileSync(next.returnPath, JSON.stringify({ assignment_id: next.id, role: 'builder', status: 'done' }))
+    restarted.io.wait(next.returnPath, 1)
+    assert.ok(seen.length > 0)
+    assert.ok(seen.every(event => event.model === null), mode)
+  }
+})
+
 test('teardownOutcome maps only positive death evidence to proven', () => {
   assert.equal(teardownOutcome('dead'), 'proven')
   assert.equal(teardownOutcome('alive'), 'failed')

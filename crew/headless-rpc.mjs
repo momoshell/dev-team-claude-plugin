@@ -762,7 +762,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   const emit = deps.emit
   function emitUsage(turn, seat, usage) {
     try {
-      emit?.({ kind: 'usage', id: turn.id, role: turn.role, model: crew.members?.[turn.role]?.model ?? null, session_id: seat.sessionId ?? null, transcript_path: seat.stream, usage })
+      emit?.({ kind: 'usage', id: turn.id, role: turn.role, model: seat.model ?? null, session_id: seat.sessionId ?? null, transcript_path: seat.stream, usage })
     } catch { /* ADR-026: instrumentation is never load-bearing */ }
   }
   // The corpse report. On b360-planadopt every one of these facts was
@@ -1237,7 +1237,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       // Adopt a still-running seat rather than opening a second pi session.
       const adoptFifo = !exists(fifo) && exists(legacySeatFifo(role)) ? legacySeatFifo(role) : fifo
       fd = open(adoptFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
-      seat = { role, dir, stream, stderr, exit, pgid, fifo: adoptFifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle: marker.handle }
+      const savedArgs = readJson(cmdPath)?.args
+      const modelIndex = Array.isArray(savedArgs) ? savedArgs.indexOf('--model') : -1
+      const savedModel = modelIndex >= 0 && typeof savedArgs[modelIndex + 1] === 'string' && savedArgs[modelIndex + 1] !== '' && !savedArgs[modelIndex + 1].startsWith('--') ? savedArgs[modelIndex + 1] : null
+      seat = { role, dir, stream, stderr, exit, pgid, fifo: adoptFifo, cmdPath, model: savedModel, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle: marker.handle }
       seats.set(role, seat)
       ensureReuse.set(seat, true)
       return seat
@@ -1248,8 +1251,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     try { if (exists(legacySeatFifo(role))) unlink(legacySeatFifo(role)) } catch {}
     const adapter = adapterFor(adapters, role)
     const commandFactory = adapter?.rpcCommand || rpcCommand
+    const model = member.model
     const command = commandFactory.call(adapter, {
-      role, model: member.model, effort: member.effort, sessionDir: dir,
+      role, model, effort: member.effort, sessionDir: dir,
       sessionId, resume, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`),
       deny: member.deny, bin: bin || 'pi', taskDir: taskDir || paths.taskDir,
       grants: adapters?.[role]?.grants,
@@ -1283,7 +1287,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       member.session_id = sessionId; member.started = true
       notePersist(log, now, role, persistCrew(paths, role, { session_id: sessionId, started: true }, crewDeps))
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), ...(old.lastAssignmentId !== undefined ? { lastAssignmentId: old.lastAssignmentId } : {}) })
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, model, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, deliveryFailed: false, handle }
       seats.set(role, seat)
       ensureReuse.set(seat, false)
       return seat
@@ -1481,9 +1485,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     }
     if (options?.freshSession === true) {
       const { verdict } = store.reconcile(role)
-      result.session = verdict === VERDICTS.FREE || verdict === VERDICTS.RECLAIMABLE ? 'fresh' : 'kept'
-      // The seat is already retired, so a failed reset write keeps the identity
-      // rather than refusing a reseat whose worker is gone.
+      result.session = verdict === VERDICTS.FREE || verdict === VERDICTS.RECLAIMABLE ? 'fresh' : 'held'
+      // An adoptable or unresolved reservation holds identity; reset-write failure below is kept.
       if (result.session === 'fresh') {
         try {
           mkdir(seatDir(role), { recursive: true })

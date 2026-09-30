@@ -229,6 +229,10 @@ local cells, which stays ADR-037's.
     rotated on ordinary build-tier lanes at dispatch with `--model-advisor`: `none` (tier 0),
     `anthropic/claude-haiku-4-5` (basement), `anthropic/claude-sonnet-5` (workhorse, the shipped default) and
     `anthropic/claude-opus-5-5` (frontier). Each arm needs the protocol's floor of 12 before it is read.
+    **Re-set 2026-09-30, before any arm ran:** pi cannot seat anthropic models, so none of those three cells had a
+    route. The advisor default moves to `openai/gpt-5.6-terra` (workhorse), and the arms become one per band on the
+    openai-codex route: `none`, `openai/gpt-6-luna` (utility), `openai/gpt-5.6-terra` (workhorse, the shipped
+    default) and `openai/gpt-6.1-sol` (frontier). The floor of 12 per arm is unchanged.
 
 ## Reverses if
 

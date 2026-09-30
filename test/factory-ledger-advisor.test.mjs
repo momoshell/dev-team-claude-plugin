@@ -1644,8 +1644,11 @@ test('dispatcharms real read counts history and reservations and closes on succe
   const dbPath = ledger._dbPath
   ledger.close()
   let closes = 0
+  // Every path the spy opens is one this test created, so the real ledger is never reachable.
+  const sandboxPaths = new Set([dbPath])
   const spy = (options) => {
-    const handle = openLedger(options)
+    assert.ok(sandboxPaths.has(options.dbPath), `spy opened ${options.dbPath}, outside this test`)
+    const handle = openLedger({ ...options, dbPath: options.dbPath })
     const close = handle.close.bind(handle)
     handle.close = () => { closes++; return close() }
     return handle
@@ -1670,6 +1673,7 @@ test('dispatcharms real read counts history and reservations and closes on succe
   closes = 0
   const corruptPath = join(nextDir(), 'corrupt.db')
   writeFileSync(corruptPath, 'not a sqlite database')
+  sandboxPaths.add(corruptPath)
   const degraded = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: corruptPath } }, open: spy })
   assert.equal(degraded.reason, 'ledger-degraded')
   assert.equal(degraded.readout, null)

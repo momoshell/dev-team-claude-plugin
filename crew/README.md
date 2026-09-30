@@ -91,6 +91,7 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
 | FFF | `crew/pi/extensions/fff.ts` | - | - |
 | Rule reminders (pi builder) | `crew/pi/extensions/reminders.ts` | - | - |
+| Pi native codemode and MCP (switch `CREW_PI_CODEMODE`, default off) | `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-09-30](../docs/conventions.md) |
 | Advisor | `crew/pi/extensions/advisor.ts` | ADR-037 ([decision](../docs/adr/adr-037-local-models.md)) | [Local models](../docs/adr/adr-037-local-models.md) |
 | Scope and out-of-context journal | `crew/drive.mjs` | ADR-045 ([decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md)) | [Scope decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md) |
 | Validation | `crew/drive.mjs` | - | [Acceptance gate](#the-acceptance-gate-gate-first) |

@@ -17,7 +17,7 @@ import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SH
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
-import { chunkProgress, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -821,6 +821,35 @@ function spawnBackground({ file, args, cwd, env, logPath }) {
   }
 }
 
+export const ADVISOR_ROTATION_REASONS = Object.freeze(['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid'])
+
+// lean: rescan ledger tables per eligible wave lane; snapshot the wave if dispatch latency grows with wave size
+export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {}) {
+  const d = normalDeps(deps)
+  const dbPath = d.env.DEVTEAM_LEDGER_DB || join(factoryStateRoot(d), 'ledger.db')
+  try {
+    if (!d.existsSync(dbPath)) return { readout: null, reason: 'ledger-absent' }
+    const ledger = open({ dbPath, readOnly: true, stderr: { write: () => {} } })
+    try {
+      const view = {
+        stats: (...args) => ledger.stats(...args),
+        dumpTable: (name, ...args) => {
+          const rows = ledger.dumpTable(name, ...args)
+          if (name === 'sessions') return [...rows, ...inFlight.map((arm, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, tier: 'build', ended_at: null }))]
+          if (name === 'run_configurations') return [...rows, ...inFlight.map((arm, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, advisor_model: arm, advisor_granted_json: '["builder"]' }))]
+          return rows
+        },
+      }
+      return { readout: advisorArmsReadout(view, { arms: ADVISOR_ARMS }), reason: null }
+    } finally {
+      try { ledger.close() } catch { /* Preserve the original read result or failure. */ }
+    }
+  } catch (error) {
+    const message = String(error?.message || error)
+    return { readout: null, reason: error?.reason === 'home_ledger_under_test' ? 'ledger-refused' : /degraded/i.test(message) ? 'ledger-degraded' : 'ledger-unreadable' }
+  }
+}
+
 export function normalDeps(deps = {}) {
   return {
     existsSync: deps.existsSync || fsExistsSync,
@@ -844,6 +873,7 @@ export function normalDeps(deps = {}) {
     random: deps.random || Math.random,
     sleep: deps.sleep,
     slots: deps.slots,
+    readAdvisorArms: deps.readAdvisorArms || readAdvisorArms,
   }
 }
 
@@ -2844,7 +2874,7 @@ function laneCommandForPlan({ plan, fallbackDir, deps }) {
 
 export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = {}) {
   const d = normalDeps(deps)
-  if (!Array.isArray(plans) || plans.length < 2) return null
+  if (!Array.isArray(plans) || plans.length < 1) return null
   const measuredHeads = heads || laneHeads({ plans, deps: d })
   if (!measuredHeads) return null
   const shas = new Set(measuredHeads.values())
@@ -4326,6 +4356,7 @@ async function compileDispatchWave(prepared) {
 
   const laneByName = new Map(lanes.map((lane) => [lane.lane, lane]))
   const settled = []
+  const advisorWavePicks = []
   for (const item of compiled) {
     const staffing = item.staffing || { ...ABSENT_STAFFING }
     const plan = plans.find((candidate) => candidate.lane === item.lane)
@@ -4364,7 +4395,19 @@ async function compileDispatchWave(prepared) {
       forceReason,
     })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssuranceCanonical || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)} force_reason=${forceReason || 'none'}`)
+    const advisorEligible = result.tier === 'build' && !Object.hasOwn(seats.advisor ?? {}, 'model')
+    let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : 'explicit-model' }
+    if (advisorEligible) {
+      try { rotation = d.readAdvisorArms({ deps: d, inFlight: advisorWavePicks }) } catch { rotation = { readout: null, reason: 'ledger-unreadable' } }
+      const validReason = rotation && typeof rotation === 'object' && ADVISOR_ROTATION_REASONS.includes(rotation.reason)
+      const emptyResult = rotation && typeof rotation === 'object' && rotation.readout == null && rotation.reason == null
+      const validAbstention = rotation && typeof rotation === 'object' && rotation.readout == null && validReason
+      const validReadout = rotation && typeof rotation === 'object' && rotation.readout !== null && typeof rotation.readout === 'object' && !Array.isArray(rotation.readout) && Array.isArray(rotation.readout.arms) && rotation.readout.arms.length > 0 && rotation.readout.arms.every((row) => row && typeof row === 'object' && ADVISOR_ARMS.includes(row.arm)) && ADVISOR_ARMS.includes(rotation.readout.next_arm) && rotation.reason == null
+      if (!validAbstention && !validReadout || emptyResult) rotation = { readout: null, reason: 'readout-invalid' }
+    }
+    const arm = rotation.readout?.next_arm ?? null
+    if (arm !== null) { seats.advisor = { ...seats.advisor, model: arm }; advisorWavePicks.push(arm) }
+    d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssuranceCanonical || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)} force_reason=${forceReason || 'none'} advisor_arm=${arm ?? 'unmeasured'} advisor_from=${arm ? 'rotation' : 'none'} advisor_reason=${arm ? 'none' : rotation.reason}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
@@ -4392,7 +4435,8 @@ async function compileDispatchWave(prepared) {
         force_reason: forceReason,
         recommendation_warning: result.warning,
       },
-      seats: seatChain(batchSeats, laneEntry?.seats),
+      seats: (() => { const chain = seatChain(batchSeats, laneEntry?.seats); if (arm) (chain.advisor ??= {}).model = { batch: null, lane: null, settled: arm, from: 'rotation' }; return chain })(),
+      advisor_rotation: arm ? { arm, source: 'rotation', reason: null } : { arm: null, source: null, reason: rotation.reason },
       operator_spelling: {
         execution: { spelling: laneExecutionSpelling, unmeasured_reason: null },
         assurance: { spelling: laneAssuranceSpelling, unmeasured_reason: null },

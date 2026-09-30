@@ -31,7 +31,7 @@ model and a recorded builder grant enter an arm. Runs without a recorded
 configuration/model and runs with absent, malformed, or non-builder grants are
 reported as exclusions; non-build tiers are excluded. Rates are descriptive
 and withheld below the separate 12-run arm floor. With `--arms`, `next_arm`
-recommends the listed arm with the fewest eligible runs (ties keep list order).
+recommends the listed arm with the fewest eligible runs (ties keep list order). Without `--arms`, the default order is `none`, `openai/gpt-6-luna`, `openai/gpt-5.6-terra`, `openai/gpt-6.1-sol`; dispatch uses this same order and completed-plus-in-flight counts. It rotates only settled build-tier lanes without a named advisor, and unreadable evidence leaves seats untouched.
 Advisor spend covers only priced `advisor_usage` consults; older and HTTP
 consults may be journal-only and are not measured as zero. See the ledger's
 spend-coverage note for this limitation. This 12-run floor is distinct from

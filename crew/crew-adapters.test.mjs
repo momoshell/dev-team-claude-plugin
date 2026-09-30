@@ -23,6 +23,10 @@ delete process.env.CREW_ROUTER_ATTEMPT_URL
 void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, claudeAcpLaunch, ACP_BINARY, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
+const BOOT_GRANTS = { tools: ['mcp__search__find', 'Read'], skills: [], mcp_servers: [{ name: 'search', command: { bin: '/fixture/search', args: [] }, url: null }] }
+const BOOT_BASE = { role: 'builder', model: 'sonnet', promptFile: '/fixture/role.md', tools: 'Read,Bash,Read', deny: 'Task,Agent', taskDir: '/fixture/task', bootBrief: 'boot', prompt: 'go', sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', bin: '/fixture/claude', env: {} }
+const bootValue = (args, flag) => args[args.indexOf(flag) + 1]
+const paneBootValue = (pane, flag) => pane.match(new RegExp(`(?:^| )${flag} "([^\"]*)"(?: |$)`))?.[1]
 // Hoisted: tests both above and below this point branch on it. Below the
 // ledger's Node floor the emitter degrades to JSONL and writes no database,
 // so a real-row assertion there would assert the absence of a feature.
@@ -122,8 +126,72 @@ test('adapter-claude.seatCommand pins the pane command with the per-seat usage s
   // Captured from main BEFORE the adapter refactor — do not regenerate this
   // from the new code; it is the compatibility bar, now including the
   // independently derived per-seat usage settings path.
-  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
+  const EXPECTED = `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Edit,Write,Glob,Grep,Bash" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
   assert.equal(seatCommand(SAMPLE), EXPECTED)
+})
+
+test('K1', () => {
+  // MUTATION K1: remove the headless setting-sources project pair.
+  assert.equal(bootValue(claudeHeadlessCommand(BOOT_BASE).args, '--setting-sources'), 'project')
+})
+test('K2', () => {
+  // MUTATION K2: remove the pane setting-sources project pair.
+  assert.match(seatCommand(BOOT_BASE), /(?:^| )--setting-sources project(?: |$)/)
+})
+test('K3', () => {
+  // MUTATION K3: remove the headless auto-memory-disable environment entry.
+  assert.equal(claudeHeadlessCommand(BOOT_BASE).env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1')
+})
+test('K4', () => {
+  // MUTATION K4: remove the pane auto-memory-disable assignment before claude.
+  assert.match(seatCommand(BOOT_BASE).split(' claude ')[0], /(?:^| )CLAUDE_CODE_DISABLE_AUTO_MEMORY=1(?: |$)/)
+})
+test('K5', () => {
+  // MUTATION K5: replace the headless tools value with default.
+  const { args } = claudeHeadlessCommand({ ...BOOT_BASE, grants: BOOT_GRANTS })
+  assert.deepEqual([bootValue(args, '--tools'), bootValue(args, '--allowedTools')], ['Read,Bash,mcp__search__find', 'Read,Bash,mcp__search__find'])
+})
+test('K6', () => {
+  // MUTATION K6: suppress the conditional Skill suffix on headless tools.
+  const taskDir = scratchDir('claude-k6-')
+  const source = join(taskDir, 'boot-skill.md')
+  writeFileSync(source, '# boot skill\\n')
+  const grants = { ...BOOT_GRANTS, skills: [source] }
+  writeSeatSkills({ taskDir, role: 'builder', grants })
+  const { args } = claudeHeadlessCommand({ ...BOOT_BASE, taskDir, grants })
+  assert.deepEqual([bootValue(args, '--tools'), bootValue(args, '--allowedTools')], ['Read,Bash,mcp__search__find,Skill', 'Read,Bash,mcp__search__find'])
+})
+test('K7', () => {
+  // MUTATION K7: omit the pane tools pair.
+  const pane = seatCommand({ ...BOOT_BASE, grants: BOOT_GRANTS })
+  assert.deepEqual([paneBootValue(pane, '--tools'), paneBootValue(pane, '--allowedTools')], ['Read,Bash,mcp__search__find', 'Read,Bash,mcp__search__find'])
+})
+test('pane skill tool is appended only with a materialised skill grant', () => {
+  const taskDir = scratchDir('claude-pane-skill-')
+  const source = join(taskDir, 'pane-skill.md')
+  writeFileSync(source, '# pane skill\\n')
+  const grants = { ...BOOT_GRANTS, skills: [source] }
+  writeSeatSkills({ taskDir, role: 'builder', grants })
+  const pane = seatCommand({ ...BOOT_BASE, taskDir, grants })
+  assert.match(pane, /--plugin-dir "/)
+  assert.equal(paneBootValue(pane, '--tools'), 'Read,Bash,mcp__search__find,Skill')
+  assert.equal(paneBootValue(pane, '--allowedTools'), 'Read,Bash,mcp__search__find')
+})
+test('tools operand handles empty tools, absent grants, and empty skill grants', () => {
+  for (const [label, input, expected] of [
+    ['absent grants', { tools: 'Read,Bash', grants: undefined }, 'Read,Bash'],
+    ['empty skills', { tools: 'Read,Bash', grants: { tools: [], skills: [], mcp_servers: [] } }, 'Read,Bash'],
+    ['empty tools', { tools: '', grants: EMPTY_GRANTS }, ''],
+  ]) {
+    const headless = claudeHeadlessCommand({ ...BOOT_BASE, ...input })
+    assert.equal(bootValue(headless.args, '--tools'), expected, label)
+  }
+  const taskDir = scratchDir('claude-skill-only-')
+  const source = join(taskDir, 'only-skill.md')
+  writeFileSync(source, '# skill\\n')
+  const grants = { tools: [], skills: [source], mcp_servers: [] }
+  writeSeatSkills({ taskDir, role: 'builder', grants })
+  assert.equal(bootValue(claudeHeadlessCommand({ ...BOOT_BASE, tools: '', taskDir, grants }).args, '--tools'), 'Skill')
 })
 
 test('claude pane usage settings and reader stay pinned to the same side-channel path', () => {
@@ -1946,13 +2014,14 @@ test('claude headless without the router switch matches the pre-change command s
       '--permission-mode', 'bypassPermissions',
       '--strict-mcp-config',
       '--mcp-config', '/tmp/task/mcp/builder.json',
-      '--settings', CLAUDE_USAGE_SETTINGS,
+      '--setting-sources', 'project', '--settings', CLAUDE_USAGE_SETTINGS,
+      '--tools', 'Read',
       '--allowedTools', 'Read',
       '--disallowedTools', 'Task,Agent,mcp__*',
       '--append-system-prompt-file', '/tmp/role-builder.md',
       '--session-id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     ],
-    env: { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' },
+    env: { DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' },
   }
   const unset = claudeHeadlessCommand({ ...base, env: {} })
   assert.deepEqual(unset, EXPECTED)

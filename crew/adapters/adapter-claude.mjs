@@ -453,15 +453,16 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--permission-mode', 'bypassPermissions',
       ...STRICT_MCP_ARGS,
       '--mcp-config', mcpConfigPath({ taskDir, role }),
-      '--settings', PANE_USAGE_SETTINGS,
+      '--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS,
       ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })] : []),
       ...(effort ? ['--effort', effort] : []),
+      '--tools', [allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(','),
       '--allowedTools', allowedTools(tools, grants),
       '--disallowedTools', deniedTools(deny, grants),
       '--append-system-prompt-file', promptFile,
       ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ],
-    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...(headlessRouterUrl ? { ANTHROPIC_BASE_URL: headlessRouterUrl } : {}), ...fffEnvironment(grants) },
+    env: { DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...(headlessRouterUrl ? { ANTHROPIC_BASE_URL: headlessRouterUrl } : {}), ...fffEnvironment(grants) },
   }
 }
 
@@ -482,19 +483,20 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // approve). The ENFORCED tool boundary is --disallowedTools (it holds even
   // under bypass; --allowedTools is only an auto-approve list and is inert
   // here) — beyond that, containment is the git scope gate, the feature-
-  // branch blast radius, and the operator's global deny rules.
+  // branch blast radius, and project settings.
   // effort is OPTIONAL: absent, the command stays byte-identical to the
   // effort-less fff-aware adapter (the compatibility pin in crew.test.mjs holds).
   return [
-    'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    'env', 'DEVTEAM_WORKER=1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(routerUrl ? [`ANTHROPIC_BASE_URL=${shellSingleQuote(routerUrl)}`] : []),
     `CREW_FFF=${fff.CREW_FFF}`, `CREW_FFF_NODE="${fff.CREW_FFF_NODE}"`, `CREW_FFF_HOOK="${fff.CREW_FFF_HOOK}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
     ...STRICT_MCP_ARGS,
     '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,
-    '--settings', `"${PANE_USAGE_SETTINGS}"`,
+    '--setting-sources', 'project', '--settings', `"${PANE_USAGE_SETTINGS}"`,
     ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, `"${skillsPluginDir({ taskDir, role })}"`] : []),
     ...(effort ? ['--effort', `"${effort}"`] : []),
+    '--tools', `"${[allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(',')}"`,
     '--allowedTools', `"${allowedTools(tools, grants)}"`,
     '--disallowedTools', `"${deniedTools(deny, grants)}"`,
     '--append-system-prompt-file', `"${promptFile}"`,

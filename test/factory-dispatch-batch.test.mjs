@@ -3240,6 +3240,17 @@ test('advisor-lease L5 matching session prunes its reservation and counts only t
   assert.equal(dispatchRecordFor(result, 'new-lane').advisor_rotation.source, 'rotation')
 })
 
+// MUTATION L6a: drop the acknowledged set; one session must not clear two same-lane reservations.
+// MUTATION L6b: drop the arm comparison; a session must not clear a same-lane reservation for another arm.
+test('advisor-lease L6 one session acknowledges exactly one same-lane reservation of its own arm', () => {
+  const at = (s) => `2026-09-30T12:00:${String(s).padStart(2, '0')}.000Z`
+  const read = (inFlight) => readAdvisorArms({ deps: { existsSync: () => true, now: () => Date.parse(at(30)) }, inFlight, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'first', task_slug: 'twice', tier: 'build', started_at: at(20), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'first', advisor_model: 'none', advisor_granted_json: '["builder"]' }] : [], close() {} }) })
+  const sameArm = [{ lane: 'twice', arm: 'none', reserved_at: at(1) }, { lane: 'twice', arm: 'none', reserved_at: at(2) }]
+  assert.deepEqual(read(sameArm).reservations, [sameArm[1]])
+  const otherArm = [{ lane: 'twice', arm: 'openai/gpt-6-luna', reserved_at: at(1) }, { lane: 'twice', arm: 'none', reserved_at: at(2) }]
+  assert.deepEqual(read(otherArm).reservations, [otherArm[0]])
+})
+
 // MUTATION: skip the retraction when compileDispatchWave refuses; a wave refused before boot
 // must leave no reservation behind, while an unrelated lane's reservation survives.
 test('advisor-lease a wave refused before boot retracts its own reservation', async () => {

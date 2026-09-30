@@ -838,10 +838,15 @@ export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {})
     try {
       const sessions = ledger.dumpTable('sessions')
       const now = (d.now || Date.now)()
+      // One session acknowledges one reservation, and never one whose arm differs from the arm it recorded:
+      // two dispatches reserving the same lane name must not both be cleared by the first session to land.
+      const sessionArms = new Map(ledger.dumpTable('run_configurations').map((row) => [row.adw_id, row.advisor_model ?? null]))
+      const acknowledged = new Set()
       let liveReservations = inFlight.filter((reservation) => {
         const reserved = Date.parse(reservation.reserved_at)
         if (now - reserved >= ADVISOR_RESERVATION_MAX_AGE_MS) return false
-        const matched = sessions.some((session) => session.task_slug === reservation.lane && Date.parse(session.started_at) >= Date.parse(reservation.reserved_at))
+        const matched = sessions.find((session) => !acknowledged.has(session) && session.task_slug === reservation.lane && Date.parse(session.started_at) >= reserved && (sessionArms.get(session.adw_id) ?? reservation.arm) === reservation.arm)
+        if (matched) acknowledged.add(matched)
         return !matched
       })
       const view = {

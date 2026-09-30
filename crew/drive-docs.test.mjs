@@ -318,6 +318,7 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   assert.ok(reviewerProse.includes('do not flag it'), 'the one smoke test is never bloat')
   assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 
+  const leanAnchors = JSON.parse(readFileSync(join(REPO_ROOT, 'skills/lean-build/anchors.json'), 'utf8'))
   const expectedExamples = [
     { line: "- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])`", file: 'crew/seat-io.mjs', firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
     { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])`", file: 'crew/variants.mjs', firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
@@ -335,13 +336,16 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
     const expected = expectedExamples.find((example) => example.line === line)
     assert.ok(expected, `unexpected example ${line}`)
     assert.equal(file, expected.file)
-    const sourcePath = join(REPO_ROOT, file)
-    assert.equal(existsSync(sourcePath), true, sourcePath)
-    const sourceLines = readFileSync(sourcePath, 'utf8').split('\n')
-    assert.ok(first >= 1 && first <= sourceLines.length, `${file}:${first} is out of bounds`)
-    assert.ok(last >= first && last <= sourceLines.length, `${file}:${last} is out of bounds`)
-    assert.ok(sourceLines[first - 1].includes(expected.firstFragment), `${file}:${first} did not contain ${expected.firstFragment}`)
-    assert.ok(sourceLines[last - 1].includes(expected.lastFragment), `${file}:${last} did not contain ${expected.lastFragment}`)
+    assert.equal(existsSync(join(REPO_ROOT, file)), true, file)
+    assert.ok(last >= first, `${file}:${first}-${last} is not a range`)
+    // The citation is checked against the lean-build content manifest, not the source: the
+    // manifest-to-source check is skills/lean-build/exhibits.test.mjs, which treats a shifted
+    // line as repairable after merge (ADR-040). Reading the source here made every lane that
+    // moves a cited line fence this granted skill, a prompt surface.
+    const firstPin = leanAnchors[`${file}:${first}`]
+    assert.ok(typeof firstPin === 'string' && firstPin.includes(expected.firstFragment), `${file}:${first} is not pinned to ${expected.firstFragment}`)
+    const lastPin = leanAnchors[`${file}:${last}`]
+    if (lastPin !== undefined) assert.ok(lastPin.includes(expected.lastFragment), `${file}:${last} is not pinned to ${expected.lastFragment}`)
   }
 
   // The never-simplify list lives ONCE, in _shared.md (every seat); the skill does not restate it.

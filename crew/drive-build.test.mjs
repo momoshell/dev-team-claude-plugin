@@ -8798,3 +8798,119 @@ test('R4 envelopefreeze restore plan before gate', () => {
   assert.match(row.stage, /^gate:/)
   assert.equal(row.action, 'restored')
 })
+
+import { failingTestsSection } from './lane-red.mjs'
+
+const laneRedCapture = (() => {
+  const dir = scratchDir('lane-red-capture-')
+  const fixture = join(dir, 'reporter.test.mjs')
+  writeFileSync(fixture, `import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('outer fixture', async t => { await t.test('nested fixture', () => assert.equal('ACTUAL_LANE_RED', 'EXPECTED_LANE_RED')); });\ntest('passing fixture', () => {});\ntest('todo fixture', {todo:true}, () => assert.equal(1, 2));\n`)
+  const env = { ...process.env, NO_COLOR: '1' }
+  delete env.FORCE_COLOR
+  delete env.CLICOLOR_FORCE
+  delete env.NODE_TEST_CONTEXT
+  const capture = (reporter) => {
+    const result = spawnSync(process.execPath, ['--test', `--test-reporter=${reporter}`, fixture], { encoding: 'utf8', env, timeout: 15000, maxBuffer: 4 * 1024 * 1024 })
+    assert.equal(result.error, undefined, `${reporter} reporter spawn must complete`)
+    assert.equal(result.status, 1, `${reporter} fixture must be red`)
+    return result.stdout.replace(/\x1b\[[0-9;]*m/g, '')
+  }
+  return { tap: capture('tap'), spec: capture('spec') }
+})()
+const laneRedFailure = laneRedCapture.tap.split(/\r?\n/).find((line) => /^\s*not ok \d+ - .*nested fixture/.test(line))
+const laneRedPassing = laneRedCapture.tap.split(/\r?\n/).find((line) => /^ok \d+ - passing fixture/.test(line))
+const laneRedTodo = laneRedCapture.tap.split(/\r?\n/).find((line) => /^\s*not ok \d+ - .*# TODO/.test(line))
+const laneRedSpecFailure = laneRedCapture.spec.split(/\r?\n/).find((line) => /^\s*✖ nested fixture/.test(line))
+assert.ok(laneRedFailure && laneRedPassing && laneRedTodo && laneRedSpecFailure)
+const laneRedLongOutput = laneRedCapture.tap + (laneRedPassing + '\n').repeat(Math.ceil(1_100_000 / Buffer.byteLength(laneRedPassing + '\n'))) + 'LANE_RED_FINAL_LINE\n'
+
+test('T1 lane-red artifact reports early TAP failures after long output', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() }, runs: { 'lane-cmd:1': { ok: false, output: laneRedLongOutput }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  driveTask(CTX, io)
+  const artifact = io.calls.writes[`${CTX.taskDir}/lane-red-r1.md`]
+  const failures = failingTestsSection(laneRedLongOutput)
+  assert.equal(artifact, `# Red validation lane (round 1)\n\nCommand:\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${laneRedLongOutput.slice(-4000)}\n`)
+  assert.ok(artifact.includes(laneRedFailure), artifact)
+})
+test('T2 lane-red builder bounce reports early TAP failures', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() }, runs: { 'lane-cmd:1': { ok: false, output: laneRedLongOutput }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  driveTask(CTX, io)
+  const bounce = io.calls.writes[`${CTX.taskDir}/build-bounce-r1.md`]
+  const failures = failingTestsSection(laneRedLongOutput)
+  assert.equal(bounce, `# Lane bounce (round 1)\n\nThe validation lane is RED. Make it green:\n\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${laneRedLongOutput.slice(-4000)}\n\nPlan: ${CTX.taskDir}/plan.md`)
+  assert.ok(bounce.includes(laneRedFailure), bounce)
+})
+test('T3 lane-red auto-fix revalidation bounce reports early failures', () => {
+  const io = dispositionIo(D_AUTO, { runs: { 'lane-cmd:2': { ok: false, output: laneRedLongOutput } } })
+  driveTask(CTX, io)
+  const bounce = io.calls.writes[`${CTX.taskDir}/build-bounce-r1.md`]
+  assert.ok(bounce.includes(laneRedFailure), bounce)
+})
+test('T4 lane-red artifact places diagnostics before original tail', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() }, runs: { 'lane-cmd:1': { ok: false, output: laneRedLongOutput }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  driveTask(CTX, io)
+  const artifact = io.calls.writes[`${CTX.taskDir}/lane-red-r1.md`]
+  const section = artifact.indexOf('Failing tests (')
+  const tail = artifact.indexOf('Failures:\n')
+  assert.equal(section >= 0 && tail > section && artifact.slice(tail).endsWith('LANE_RED_FINAL_LINE\n\n'), true)
+})
+test('T5 lane-red diagnostic line bound cuts complete block', () => {
+  const result = failingTestsSection('not ok 1 - bound\n' + Array.from({ length: 100 }, (_, index) => `  diagnostic-${index}`).join('\n'))
+  assert.equal(result.text.split('\n').filter((line) => /^  diagnostic-/.test(line)).length, 40)
+  assert.ok(result.text.endsWith('  [cut: 60 more diagnostic lines]'))
+})
+test('T6 lane-red diagnostic byte bound retains whole lines', () => {
+  const result = failingTestsSection('not ok 1 - bytes\n' + Array.from({ length: 10 }, () => '  ' + '🙂'.repeat(124) + 'xx').join('\n'))
+  const diagnostics = result.text.split('\n').filter((line) => /^  🙂/.test(line))
+  assert.equal(diagnostics.length, 4)
+  assert.ok(Buffer.byteLength(diagnostics.join('\n')) <= 2048)
+  assert.ok(result.text.endsWith('  [cut: 6 more diagnostic lines]'))
+})
+test('T7 lane-red section bound keeps output-order prefix', () => {
+  const input = Array.from({ length: 20 }, (_, index) => `not ok ${index + 1} - section-${index}\n  ${'x'.repeat(1900)}`).join('\n')
+  const result = failingTestsSection(input)
+  assert.equal(result.found, 20)
+  assert.ok(Buffer.byteLength(result.text) <= 12288)
+  assert.ok(result.text.startsWith('not ok 1 - section-0\n  xxx'))
+  const included = result.text.split('\n').filter((line) => /^not ok \d+ - section-/.test(line)).map((line) => Number(line.match(/^not ok (\d+)/)[1]))
+  assert.deepEqual(included, Array.from({ length: included.length }, (_, index) => index + 1))
+})
+test('T8 lane-red section reports omitted failure count', () => {
+  const result = failingTestsSection(Array.from({ length: 20 }, (_, index) => `not ok ${index + 1} - section-${index}\n  ${'x'.repeat(1900)}`).join('\n'))
+  const included = result.text.split('\n').filter((line) => /^not ok \d+ - /.test(line)).length
+  assert.equal(result.omitted, 20 - included)
+  assert.equal(result.text.split('\n').at(-1), `[${result.omitted} more failing tests omitted: section bound 12288 bytes]`)
+})
+test('T9 lane-red absence message reports original UTF-8 byte count', () => {
+  const output = '🙂 no explicit failure\n# fail 1'
+  assert.deepEqual(failingTestsSection(output), { found: 0, omitted: 0, text: `no failing test line found in ${Buffer.byteLength(output)} bytes of output` })
+})
+test('T10 lane-red real TODO failure is excluded', () => assert.equal(failingTestsSection(laneRedTodo).found, 0))
+test('T11 lane-red real spec failure keeps diagnostic block', () => {
+  const result = failingTestsSection(laneRedCapture.spec)
+  assert.ok(result.text.includes(laneRedSpecFailure))
+  assert.ok(result.text.includes('ACTUAL_LANE_RED'))
+  assert.ok(result.text.includes('EXPECTED_LANE_RED'))
+})
+test('T12 lane-red real spec summary header is excluded', () => {
+  const expected = laneRedCapture.spec.split(/\r?\n/).filter((line) => /^\s*✖ /.test(line) && !/^\s*✖ failing tests:/.test(line)).length
+  assert.equal(failingTestsSection(laneRedCapture.spec).found, expected)
+})
+test('T13 lane-red indented TAP child is retained', () => assert.deepEqual(failingTestsSection(laneRedFailure), { found: 1, omitted: 0, text: laneRedFailure }))
+test('T14 lane-red colour wrapped spec failure is normalized', () => {
+  const input = `\x1b[31m${laneRedSpecFailure.trimStart()}\x1b[39m`
+  assert.deepEqual(failingTestsSection(input), { found: 1, omitted: 0, text: laneRedSpecFailure.trimStart() })
+})
+test('T15 lane-red undefined input is safe', () => assert.deepEqual(failingTestsSection(undefined), { found: 0, omitted: 0, text: 'no failing test line found in 0 bytes of output' }))
+
+test('lane-red CRLF blocks preserve interior blanks and discard trailing blanks', () => {
+  assert.deepEqual(failingTestsSection('not ok 1 - crlf\r\n  actual\r\n\r\n  expected\r\n\r\nok 2 - next'), { found: 1, omitted: 0, text: 'not ok 1 - crlf\n  actual\n\n  expected' })
+})
+test('lane-red journal keeps the original five fields and measurements', () => {
+  const output = '🙂\nnot ok 1 - journal'
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() }, runs: { 'lane-cmd:1': { ok: false, output }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  driveTask(CTX, io)
+  const row = io.calls.logs.find((entry) => entry.lane_red)?.lane_red
+  assert.deepEqual(Object.keys(row), ['round', 'artifact', 'output_bytes', 'truncated', 'tail'])
+  assert.deepEqual(row, { round: 1, artifact: `${CTX.taskDir}/lane-red-r1.md`, output_bytes: Buffer.byteLength(output), truncated: false, tail: output })
+})

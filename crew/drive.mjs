@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -10528,7 +10528,7 @@ function runTask(ctx, io, crash) {
       ].join('\n') }
     }
     const laneAfter = io.run(lane)
-    if (!laneAfter.ok) return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failures:\n${String(laneAfter.output || '').slice(-4000)}`)
+    if (!laneAfter.ok) { const afterFailures = failingTestsSection(laneAfter.output); return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failing tests (${afterFailures.found} found):\n${afterFailures.text}\n\nFailures:\n${String(laneAfter.output || '').slice(-4000)}`) }
     if (gateCmd) {
       const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd)
       lastGateOutput = gateAfter.output
@@ -10852,9 +10852,9 @@ function runTask(ctx, io, crash) {
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
       const laneOutput = typeof laneRes.output === 'string' ? laneRes.output : ''
-      const laneTail = laneOutput.slice(-LANE_RED_TAIL_CHARS)
+      const laneTail = laneOutput.slice(-LANE_RED_TAIL_CHARS); const laneFailures = failingTestsSection(laneOutput)
       const laneRedArtifact = art(`lane-red-r${round}.md`)
-      io.writeFile(laneRedArtifact, `# Red validation lane (round ${round})\n\nCommand:\n    ${lane}\n\nFailures:\n${laneTail || 'the lane produced no output'}\n`)
+      io.writeFile(laneRedArtifact, `# Red validation lane (round ${round})\n\nCommand:\n    ${lane}\n\nFailing tests (${laneFailures.found} found):\n${laneFailures.text}\n\nFailures:\n${laneTail || 'the lane produced no output'}\n`)
       const laneRedRow = { round, artifact: laneRedArtifact, output_bytes: Buffer.byteLength(laneOutput, 'utf8'), truncated: laneOutput.length > LANE_RED_TAIL_CHARS, tail: laneTail }
       io.log(recordRow({ at: io.now(), lane_red: laneRedRow }))
       if (finalRound()) {
@@ -10870,7 +10870,7 @@ function runTask(ctx, io, crash) {
       }
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('lane', 'builder')
-      io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneTail}\n\nPlan: ${planPath}`)
+      io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailing tests (${laneFailures.found} found):\n${laneFailures.text}\n\nFailures:\n${laneTail}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'lane-fix'
       stageComplete()
       continue

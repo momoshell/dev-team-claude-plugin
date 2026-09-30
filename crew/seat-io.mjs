@@ -1453,8 +1453,8 @@ export function emitAdapter(emitter, crew = null) {
     } else if (event.kind === 'usage') {
       // agent_sessions is the per-assignment home; sessions.billed_* stays
       // NULL (per-run totals + money are the #119 follow-up). The table is
-      // unique on (adw_id, claude_session_id) and a seat reuses ONE worker
-      // session across assignments, while endAgentSession overwrites without
+      // unique on (adw_id, claude_session_id, model); running totals are per-model
+      // while billed columns on sessions remain NULL. endAgentSession overwrites without
       // COALESCE — so what is written is the seat's RUNNING TOTAL, never a
       // delta that would clobber the previous assignment.
       emitter.emit((handle) => handle.startAgentSession({
@@ -1463,11 +1463,11 @@ export function emitAdapter(emitter, crew = null) {
         transcript_path: event.transcript_path ?? null,
       }))
       if (event.usage) {                       // absent usage stays NULL, never 0
-        const key = `${event.role}\u0000${event.session_id}`
+        const key = JSON.stringify([event.role, event.session_id, event.model ?? null])
         const total = addTotals(usageTotals.get(key), event.usage)
         usageTotals.set(key, total)
         emitter.emit((handle) => handle.endAgentSession({
-          adw_id: emitter.adwId, claude_session_id: event.session_id ?? null,
+          adw_id: emitter.adwId, claude_session_id: event.session_id ?? null, model: event.model ?? null,
           context_tokens: null, context_window: null,
           raw_read_tokens: null, raw_written_tokens: null, ...total,
         }))

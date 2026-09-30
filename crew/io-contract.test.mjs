@@ -687,7 +687,7 @@ test('emitAdapter writes usage measurements to agent_sessions with explicit null
   })
   assert.equal(starts.length, 1); assert.equal(ends.length, 1)
   assert.deepEqual(ends[0], {
-    adw_id: 'adw-usage', claude_session_id: 's1',
+    adw_id: 'adw-usage', claude_session_id: 's1', model: 'sonnet',
     context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
     billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4,
   })
@@ -703,7 +703,10 @@ test('emitAdapter writes the running total for repeated usage on one worker sess
   const base = { kind: 'usage', role: 'builder', model: 'sonnet', session_id: 's1', transcript_path: '/tmp/stream' }
   adapter({ ...base, id: 'd1', usage: { billed_input_tokens: 10, billed_output_tokens: 20, billed_cache_write_tokens: 30, billed_cache_read_tokens: 40 } })
   adapter({ ...base, id: 'd2', usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 } })
-  assert.deepEqual(ends.map((row) => [row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens]), [[10, 20, 30, 40], [11, 22, 33, 44]])
+  adapter({ ...base, id: 'd3', model: 'opus', usage: { billed_input_tokens: 7, billed_output_tokens: 8, billed_cache_write_tokens: 9, billed_cache_read_tokens: 10 } })
+  adapter({ ...base, id: 'd4', usage: { billed_input_tokens: 2, billed_output_tokens: 3, billed_cache_write_tokens: 4, billed_cache_read_tokens: 5 } })
+  assert.deepEqual(ends.map((row) => [row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens]), [[10, 20, 30, 40], [11, 22, 33, 44], [7, 8, 9, 10], [13, 25, 37, 49]])
+  assert.deepEqual(ends.map((row) => row.model), ['sonnet', 'sonnet', 'opus', 'sonnet'])
 })
 
 test('emitAdapter leaves billed columns NULL when usage is unmeasured', () => {

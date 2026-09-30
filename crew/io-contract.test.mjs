@@ -1088,20 +1088,60 @@ test('F5 effort-only reseat preserves and resumes the existing session', () => {
   assert.equal(index >= 0 && args[index + 1] === 'old-session' && !args.includes('--session-id'), true, JSON.stringify(args))
 })
 
-// MUTATION F6: clear identity on every model-changing reseat, ignoring the reconciled reservation.
-test('F6 reseat after a supervisor restart keeps the identity of a live adoptable worker', () => {
+// MUTATION F6: neutralize the held refusal and permit memory/disk model writes.
+test('F6 a live adoptable restart refuses model reseat without changing identity or bytes', () => {
   const f = seatFreshFixture({ restart: 'live' })
-  assert.equal(f.io.reseat('builder').applied, true)
-  const disk = JSON.parse(fsReadFileSync(f.diskPath, 'utf8'))
-  for (const target of [disk.members.builder, disk.seats.builder, f.crew.members.builder, f.crew.seats.builder]) {
-    assert.equal(target.session_id, 'old-session')
-    assert.equal(target.started, true)
-  }
-  assert.equal(fsReadFileSync(f.savedPath, 'utf8'), f.before.saved)
-  assert.equal(f.journal.find(row => row.reseat)?.reseat.session, 'kept')
+  const result = f.io.reseat('builder')
+  assert.equal(result.applied, false)
+  assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, f.before)
+  assert.equal(f.journal.some(row => row.reseat), false)
   const run = f.rpc.assign({ role: 'builder', briefFile: '/brief-next.md' })
   assert.equal(f.spawns(), 1, 'the live worker is adopted, not respawned')
   assert.equal(JSON.parse(fsReadFileSync(f.savedPath, 'utf8')).sessionId, f.crew.members.builder.session_id, JSON.stringify(run))
+})
+
+// MUTATION H1: change held to kept in the reconciled reservation verdict.
+test('H1 live restart retirement reports a held session', () => {
+  const f = seatFreshFixture({ restart: 'live' })
+  assert.equal(f.rpc.retire('builder', { freshSession: true }).session, 'held')
+})
+
+// MUTATION H2: neutralize the held refusal; all four cells would receive the new model.
+test('H2 live held worker leaves all four model cells unchanged', () => {
+  const f = seatFreshFixture({ restart: 'live' })
+  f.io.reseat('builder')
+  const disk = JSON.parse(fsReadFileSync(f.diskPath, 'utf8'))
+  assert.deepEqual([f.crew.members.builder.model, f.crew.seats.builder.model, disk.members.builder.model, disk.seats.builder.model], Array(4).fill('openai-codex/old-model'))
+})
+
+// MUTATION H3: remove the worker-adoptable refusal prefix.
+test('H3 held reseat refusal identifies the retained worker', () => {
+  const f = seatFreshFixture({ restart: 'live' })
+  const result = f.io.reseat('builder')
+  assert.deepEqual([result.applied, result.reason, result.to], [false, 'transport', null])
+  assert.match(result.why, /^worker-adoptable: .* keeps openai-codex\/old-model/)
+  assert.equal(f.journal.some(row => row.reseat), false)
+})
+
+// MUTATION H7: exclude RECLAIMABLE from fresh-session classification.
+test('H7 dead restart reseat applies fresh identity', () => {
+  const f = seatFreshFixture({ restart: 'dead' })
+  assert.equal(f.io.reseat('builder').applied, true)
+  assert.equal(f.journal.find(row => row.reseat)?.reseat.session, 'fresh')
+  assert.equal(isFreshSession(seatFreshArgs(f)), true)
+})
+
+// MUTATION H8: classify a reset-write failure as held instead of kept.
+test('H8 failed session reset still applies and keeps identity', () => {
+  const f = seatFreshFixture({ failSessionWrite: true })
+  assert.equal(f.io.reseat('builder').applied, true)
+  assert.equal(f.journal.find(row => row.reseat)?.reseat.session, 'kept')
+})
+
+// MUTATION H9: remove model inequality from freshSession predicate.
+test('H9 effort-only reseat with live restart applies', () => {
+  const f = seatFreshFixture({ effortOnly: true, restart: 'live' })
+  assert.equal(f.io.reseat('builder').applied, true)
 })
 
 // MUTATION F7: keep identity whenever the role has no local seat, even with its worker proven dead.

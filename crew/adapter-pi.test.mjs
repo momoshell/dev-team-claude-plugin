@@ -3,11 +3,11 @@
 // well-intentioned edit would otherwise silently undo (#147).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
@@ -16,6 +16,48 @@ import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
+test('K5 builtin codemode is activated by rpc --tools', () => {
+  // MUTATION: empty PI_BUILTIN_EXTENSION_TOOLS['builtin:codemode'].
+  const rpc = piRpcSeatParts({ role: 'builder', taskDir: '/tmp/task', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:codemode'] } })
+  assert.ok(rpc.args[rpc.args.indexOf('--tools') + 1].split(',').includes('codemode'))
+})
+test('K7 and K8 MCP tools are pinned and unknown servers refuse', () => {
+  // MUTATION: skip MCP table activation or its own-property guard.
+  const expected = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
+  const tools = piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] })
+  assert.deepEqual(tools.filter((tool) => tool.startsWith('mcp__')), expected)
+  assert.throws(() => piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'toString' }] }), (error) => error.reason === 'grant-unsupported' && error.message.includes('toString'))
+  assert.deepEqual(PI_MCP_SERVER_TOOLS.fff, expected)
+  assert.ok(Object.isFrozen(PI_MCP_SERVER_TOOLS) && Object.isFrozen(PI_MCP_SERVER_TOOLS.fff) && Object.isFrozen(PI_BUILTIN_EXTENSION_TOOLS['builtin:codemode']))
+})
+test('K15 and K16 codemode selects deterministic rpc and pane agent directories', () => {
+  // MUTATION: restore configDir as the agent directory.
+  const grants = { extensions: ['builtin:codemode'] }
+  const expected = '/tmp/task/pi-agent/builder'
+  const rpc = piRpcSeatParts({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p', grants })
+  assert.equal(rpc.env.PI_CODING_AGENT_DIR, expected)
+  const pane = seatCommand({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p', bootBrief: 'b', grants })
+  assert.ok(pane.includes(`PI_CODING_AGENT_DIR="${expected}"`))
+})
+test('K17 ACP launch retains deterministic agent directory', () => {
+  // MUTATION: override the launch env with spec.configDir.
+  const launch = acpLaunch({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', bin: '/opt/pi', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:codemode'] } })
+  assert.equal(launch.env.PI_CODING_AGENT_DIR, '/tmp/task/pi-agent/builder')
+})
+test('codemode router replaces the seat catalog without modifying base models.json', () => {
+  const root = scratchDir('pi-router-codemode-'); const taskDir = join(root, 'task'); const base = join(root, 'base'); const agent = join(taskDir, 'pi-agent', 'builder')
+  mkdirSync(taskDir); mkdirSync(base); mkdirSync(agent, { recursive: true })
+  writeFileSync(join(base, 'models.json'), '{"base":true}')
+  writeFileSync(join(base, 'auth.json'), '{}')
+  symlinkSync(join(base, 'models.json'), join(agent, 'models.json'))
+  symlinkSync(join(base, 'auth.json'), join(agent, 'auth.json'))
+  writeFileSync(join(agent, 'settings.json'), '{}'); writeFileSync(join(agent, 'mcp.json'), '{"mcpServers":{}}')
+  const command = seatCommand({ role: 'builder', model: 'openai-codex/test', taskDir, configDir: base, promptFile: '/p', bootBrief: '/b', grants: { extensions: ['builtin:codemode'] }, env: { CREW_ROUTER_ATTEMPT_URL: 'http://127.0.0.1/a/token/' } })
+  assert.ok(command.includes(`PI_CODING_AGENT_DIR="${agent}"`))
+  assert.deepEqual(JSON.parse(readFileSync(join(agent, 'models.json'), 'utf8')), { providers: { 'openai-codex': { baseUrl: 'http://127.0.0.1/a/token/' } } })
+  assert.equal(readFileSync(join(base, 'models.json'), 'utf8'), '{"base":true}')
+  assert.equal(readFileSync(join(agent, 'auth.json'), 'utf8'), '{}')
+})
 test('ADR047 M1 legacy cellless grant now loads extension and strips inherited rpc env', () => {
   const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: null, env: { CREW_ADVISOR_MODEL: 'inherited' } })
   assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)

@@ -505,6 +505,14 @@ test('T13 the ACP launch carries the role charter, grants, config dir and seat e
   } finally { cleanup(real) }
 })
 
+test('K18 ACP IO passes the per-seat taskDir into adapter launch', () => {
+  // MUTATION: remove taskDir from acpIo's launchFn input.
+  let spec
+  const spy = { grants: { extensions: ['builtin:codemode'] }, configDir: '/cfg', acpLaunch(value) { spec = value; return { bin: '/bin/node', args: [], env: {}, policy: { autoDeny: [], autoApprove: [], escalate: [] } } } }
+  const f = fixture({ adapters: { builder: spy } })
+  try { assign(f); assert.equal(spec.taskDir, f.paths.taskDir) } finally { cleanup(f) }
+})
+
 test('ACP lead permission wiring is role-scoped and supplies the configured timeout', () => {
   const options = [{ optionId: 'a', kind: 'allow_once', name: 'Allow' }, { optionId: 'r', kind: 'reject_once', name: 'Reject' }]
   const asked = []

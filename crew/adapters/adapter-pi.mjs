@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, symlinkSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
 
@@ -90,8 +90,10 @@ const PROFILES = Object.freeze({
 export function capabilitiesFor({ transport, grants } = {}) {
   const p = PROFILES[transport]
   if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
+  if (grants?.extensions?.includes('builtin:mcp')) piMcpTools(grants.mcp_servers || [])
   return Object.freeze({
     ...INVARIANT, ...p,
+    ...(grants?.extensions?.includes('builtin:mcp') ? { mcp_servers: true } : {}),
     // A FUNCTION OF THE GRANTS, on both transports (#693). It was pane-only
     // while rpcCommand emitted neither `-e` nor `--tools`; it now emits both,
     // live-probed against pi 0.84.3.
@@ -195,6 +197,23 @@ function piExtensionRefusal(extension, expected, found, diagnosis = 'malformed-e
 // adapter must not depend on the register to compose a command.
 export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'
 
+export const PI_BUILTIN_EXTENSION_TOOLS = Object.freeze({
+  'builtin:codemode': Object.freeze(['codemode']),
+  'builtin:mcp': Object.freeze([]),
+})
+export const PI_MCP_SERVER_TOOLS = Object.freeze({
+  fff: Object.freeze(['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']),
+})
+
+function piMcpTools(mcpServers) {
+  const activated = new Set()
+  for (const server of mcpServers || []) {
+    if (!own(PI_MCP_SERVER_TOOLS, server.name)) throw piExtensionRefusal(server.name, 'a declared pi MCP server', 'missing declaration')
+    for (const tool of PI_MCP_SERVER_TOOLS[server.name] || []) activated.add(tool)
+  }
+  return [...activated]
+}
+
 export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/advisor.ts': Object.freeze([]),
   'crew/pi/extensions/builderloop.ts': Object.freeze([]),
@@ -222,11 +241,16 @@ export function validatePiExtensionTools(table) {
 
 const normaliseExtensionPath = (extension) => String(extension).replaceAll('\\', '/')
 
-export function piActivatedTools({ tools = [], extensions = [], vendorExtensions = [], agents = [], table = PI_FIRST_PARTY_EXTENSION_TOOLS } = {}) {
+export function piActivatedTools({ tools = [], extensions = [], vendorExtensions = [], agents = [], mcpServers = [], table = PI_FIRST_PARTY_EXTENSION_TOOLS } = {}) {
   const validated = validatePiExtensionTools(table)
   const activated = new Set([...PI_BUILTIN_TOOLS, ...tools])
   const vendorEntries = new Set(vendorExtensions.flatMap((grant) => grant?.entries || []).map(normaliseExtensionPath))
   for (const extension of extensions.map(normaliseExtensionPath)) {
+    if (Object.hasOwn(PI_BUILTIN_EXTENSION_TOOLS, extension)) {
+      for (const tool of PI_BUILTIN_EXTENSION_TOOLS[extension]) activated.add(tool)
+      if (extension === 'builtin:mcp') for (const tool of piMcpTools(mcpServers)) activated.add(tool)
+      continue
+    }
     if (vendorEntries.has(extension)) continue
     const declaration = Object.keys(validated).find((key) => extension === key || extension.endsWith(`/${key}`))
     if (!declaration) throw piExtensionRefusal(extension, 'a declared first-party extension', 'missing declaration', 'unknown-registering-extension')
@@ -275,12 +299,21 @@ export function advisorLaunchCell(record) {
   return { endpoint: record.endpoint, model: record.consult_model, models: entry === undefined ? {} : { [record.consult_model]: entry } }
 }
 
+export function piSeatAgentDir({ taskDir, role } = {}) {
+  if (typeof taskDir !== 'string' || !taskDir.trim() || !isAbsolute(taskDir)) throw new Error('adapter-pi: taskDir must be a non-blank absolute path')
+  if (typeof role !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(role)) throw new Error(`adapter-pi: unsafe role ${JSON.stringify(role)}`)
+  return join(taskDir, 'pi-agent', role)
+}
+
+export function mcpConfigPath(spec) { return join(piSeatAgentDir(spec), 'mcp.json') }
+
 export function piRpcSeatParts(spec = {}) {
-  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null } = spec
+  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, role, taskDir } = spec
+  const agentDir = grants?.extensions?.includes('builtin:codemode') ? piSeatAgentDir({ taskDir, role }) : configDir
   const piDeny = translateDeny(deny)
   const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
-  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
+  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
   const skills = grants?.skills || []
   return {
     args: [
@@ -292,7 +325,7 @@ export function piRpcSeatParts(spec = {}) {
     ],
     env: {
       ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR'))),
-      ...(configDir !== null && configDir !== undefined ? { PI_CODING_AGENT_DIR: configDir } : {}),
+      ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),
       ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
     },
@@ -334,18 +367,28 @@ const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills:
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null, env = process.env }) {
   const routerUrl = routerAttemptUrl(env)
   let router = null
-  let agentDir = configDir
+  let agentDir = grants?.extensions?.includes('builtin:codemode') ? piSeatAgentDir({ taskDir, role }) : configDir
   if (routerUrl !== null) {
     let provider = null
     for (const candidate of Object.values(PI_PROVIDERS)) {
       if (String(model).startsWith(`${candidate}/`) && (provider === null || candidate.length > provider.length)) provider = candidate
     }
     if (provider === null) throw new Error(`adapter-pi: no pi provider for router model "${model}" — refusing a guessed endpoint`)
-    const routerDir = mkdtempSync(join(taskDir, 'router-pi-'))
-    writeFileSync(join(routerDir, 'models.json'), `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`)
+    const codemode = grants?.extensions?.includes('builtin:codemode')
+    const routerDir = codemode ? agentDir : mkdtempSync(join(taskDir, 'router-pi-'))
+    const modelsPath = join(routerDir, 'models.json')
+    if (codemode) {
+      const temporary = `${modelsPath}.tmp-${process.pid}`
+      let created = false
+      try {
+        writeFileSync(temporary, `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`, { flag: 'wx' })
+        created = true
+        renameSync(temporary, modelsPath)
+      } catch (error) { if (created) try { unlinkSync(temporary) } catch {} throw error }
+    } else writeFileSync(modelsPath, `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`)
     const preRouterDir = configDir !== null && configDir !== undefined ? configDir : join(homedir(), '.pi', 'agent')
     const authSrc = join(preRouterDir, 'auth.json')
-    if (existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
+    if (!codemode && existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
     router = { provider, dir: routerDir }
     agentDir = routerDir
   }
@@ -422,7 +465,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // mandatory here, not merely additive.
   const paneAdvisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(paneAdvisor ? [PI_ADVISOR_EXTENSION] : [])])]
-  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [] })
+  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
   const skills = grants?.skills || []
   return [
     'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,

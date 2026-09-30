@@ -33,7 +33,7 @@
 // Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
 // and a bare --lane on run is the round validation lane.
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync, lstatSync, readlinkSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync, lstatSync, readlinkSync, symlinkSync, rmSync,
 } from 'node:fs'
 import { join, dirname, basename, isAbsolute, relative, normalize, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
@@ -2458,6 +2458,9 @@ export async function shadowPickBoot({ roster, tier, seats, sources,
 // is a tier's resolved seat map — when present, its agent choice wins over
 // the --agent-<role>/SEAT_DEFAULTS flags-or-default path.
 export async function resolveAdapters(roles, args, seats = null, deps = {}) {
+  const piCodemode = deps.env?.CREW_PI_CODEMODE
+  if (piCodemode !== undefined && !['off', 'on'].includes(piCodemode)) throw new Error(`invalid CREW_PI_CODEMODE ${JSON.stringify(piCodemode)}; allowed values: off, on`)
+  const piCodemodeOn = piCodemode === 'on'
   const out = {}
   const sourceArgs = args || {}
   for (const key of Object.keys(sourceArgs)) {
@@ -2489,6 +2492,12 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       assertGrantsBacked(role, grants, registry, { agent: name })
       const fff = resolveFffSearch(role, name, grants, exists)
       grants = fff.grants
+      if (name === 'pi' && piCodemodeOn) {
+        const extensions = [...(grants.extensions || [])]
+        extensions.push('builtin:codemode')
+        if ((grants.mcp_servers?.length ?? 0) > 0) extensions.push('builtin:mcp')
+        grants = Object.freeze({ ...grants, extensions: Object.freeze([...new Set(extensions)]) })
+      }
       assertFanoutCoherent(role, grants)
       const activeGrantDimensions = ['extensions', 'skills', 'mcp_servers'].filter((key) => (grants[key]?.length ?? 0) > 0)
       const dimensionsForProvider = (provider) => [
@@ -2547,6 +2556,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       try {
         transportCapabilities = adapter.capabilitiesFor({ transport, grants })
       } catch (err) {
+        if (err?.reason === 'grant-unsupported') throw err
         throw refuse('register-invalid', `seat ${role} expected coding agent ${name} adapter ${JSON.stringify(relativeAdapterPath)} to support transport ${JSON.stringify(transport)}, found adapter refusal ${err?.message || String(err)}, at coding_agents.${name}.transports`)
       }
       let bare
@@ -2929,6 +2939,48 @@ export function mcpConfigDocument(grants = EMPTY_GRANTS) {
   return { mcpServers }
 }
 
+export function writePiSeatAgentDirs({ taskDir, roles, adapters, env = {} }, deps = {}) {
+  const fs = {
+    lstatSync: deps.lstatSync || lstatSync, mkdirSync: deps.mkdirSync || mkdirSync,
+    readdirSync: deps.readdirSync || readdirSync, readFileSync: deps.readFileSync || readFileSync,
+    writeFileSync: deps.writeFileSync || writeFileSync, symlinkSync: deps.symlinkSync || symlinkSync,
+    rmSync: deps.rmSync || rmSync,
+  }
+  for (const role of roles || []) {
+    const entry = adapters?.[role]
+    if (entry?.name !== 'pi' || !entry.grants?.extensions?.includes('builtin:codemode')) continue
+    try {
+      const agentDir = piAdapter.piSeatAgentDir({ taskDir, role })
+      const parent = join(taskDir, 'pi-agent')
+      try {
+        const parentStat = fs.lstatSync(parent)
+        if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) throw new Error(`unsafe pi-agent parent ${parent}`)
+      } catch (error) { if (error.code !== 'ENOENT') throw error }
+      const baseDir = resolvePath(entry.configDir ?? env.PI_CODING_AGENT_DIR ?? join((deps.homedir || homedir)(), '.pi', 'agent'))
+      const rel = relative(agentDir, baseDir)
+      if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) throw new Error(`base directory ${baseDir} is within seat destination ${agentDir}`)
+      let baseSettings = {}
+      try {
+        const text = fs.readFileSync(join(baseDir, 'settings.json'), 'utf8')
+        baseSettings = JSON.parse(String(text))
+        if (!baseSettings || typeof baseSettings !== 'object' || Array.isArray(baseSettings)) throw new Error('settings.json must contain an object')
+      } catch (error) { if (error.code !== 'ENOENT') throw error }
+      let names = []
+      try { names = fs.readdirSync(baseDir) } catch (error) { if (error.code !== 'ENOENT') throw error }
+      fs.rmSync(agentDir, { recursive: true, force: true })
+      fs.mkdirSync(agentDir, { recursive: true })
+      const seatSettings = { ...baseSettings, codemode: { ...baseSettings.codemode, mode: 'only' } }
+      fs.writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(seatSettings, null, 2))
+      for (const name of names) {
+        if (name === 'settings.json' || name === 'mcp.json') continue
+        fs.symlinkSync(join(baseDir, name), join(agentDir, name))
+      }
+    } catch (error) {
+      throw refuse('grant-unsupported', `seat ${role} pi agent directory materialisation failed: ${error.message}; path ${taskDir}`)
+    }
+  }
+}
+
 export function writeMcpConfigs({ taskDir, roles, adapters }, deps = {}) {
   const mkdir = deps.mkdirSync || mkdirSync
   const write = deps.writeFileSync || writeFileSync
@@ -3144,6 +3196,7 @@ export async function bootCmd(args, deps = {}) {
       ...(registerDep ? { register: registerDep } : {}),
       ...(selectedRoster ? { roster: selectedRoster } : {}),
       exists: existsSyncDep ? (path) => path === FFF_MCP_BIN ? existsSyncDep(path) : existsSync(path) : existsSync,
+      env: bootEnv,
     })
   } catch (err) {
     noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
@@ -3367,6 +3420,7 @@ export async function bootCmd(args, deps = {}) {
   // Materialise every register-authoritative Claude MCP set before composing a
   // command or creating a workspace. A failed write is a boot failure: strict
   // mode must never fall back to user configuration.
+  writePiSeatAgentDirs({ taskDir: paths.taskDir, roles, adapters, env: bootEnv }, { ...deps, homedir })
   writeMcpConfigsDep({ taskDir: paths.taskDir, roles, adapters })
   writeClaudeSkillsDep({ taskDir: paths.taskDir, roles, adapters })
   let workspace = null

@@ -192,7 +192,7 @@ test('coding agent duplicate inventory values refuse at their register paths', (
   for (const mutate of [
     (value) => { value.coding_agents.pi.providers.push('openai') },
     (value) => { value.coding_agents.pi.transports.push('pane') },
-    (value) => { value.coding_agents.pi.refuses.push('mcp_servers') },
+    (value) => { value.coding_agents.pi.refuses = ['mcp_servers', 'mcp_servers'] },
   ]) {
     const invalid = structuredClone(shipped)
     mutate(invalid)
@@ -1477,8 +1477,10 @@ test('the pi subagents probe goes red when the register stops being true', async
 test('B1R coding agent refusals derive from shipped adapters', () => {
   const shipped = loadCapabilities()
   const piPane = piCapabilitiesFor({ transport: 'pane' })
+  const piMcpPane = piCapabilitiesFor({ transport: 'pane', grants: { ...EMPTY_GRANTS, extensions: ['builtin:mcp'] } })
   assert.equal(Object.hasOwn(piPane, 'mcp_servers'), false)
-  assert.deepEqual(shipped.coding_agents.pi.refuses, ['mcp_servers'])
+  assert.equal(piMcpPane.mcp_servers, true)
+  assert.deepEqual(shipped.coding_agents.pi.refuses, [])
 
   const seat = { role: 'builder', model: 'model', promptFile: '/tmp/role.md', tools: 'Read', deny: '', taskDir: '/tmp', bootBrief: 'boot' }
   const adapterRefusals = []

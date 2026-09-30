@@ -258,7 +258,6 @@ export async function compileBench({ dir, deps = {} } = {}) {
   const { judge: judgeMetadata, candidates: candidateDocument } = source
   const candidates = candidateDocument.candidates
   const judge = normalizeJudge(judgeMetadata)
-  if (candidates.some((candidate) => candidateModel(candidate) === candidateModel(judge))) throw refusal('judge-is-candidate', `judge ${candidateModel(judge)} is among candidates`)
 
   let baseline
   try {
@@ -654,11 +653,15 @@ export function readBenchMeta(dir, { readBench: readFn = readBench } = {}) {
     throw refusal('bench-sha-mismatch', `bench.sha ${source.benchSha} does not match the digest of task.md, gate.mjs, judge.json and candidates.json (${sha})`)
   }
   const document = source.candidates
+  // Admission is decided here so compileBench and the read-only --all-seats sweep cannot disagree.
+  const candidates = Array.isArray(document?.candidates) ? document.candidates : []
+  const judge = normalizeJudge(source.judge)
+  if (candidates.some((candidate) => candidateModel(candidate) === candidateModel(judge))) throw refusal('judge-is-candidate', `judge ${candidateModel(judge)} is among candidates`)
   return {
     sha,
     role: document?.role ?? null,
     tier: NON_BLANK(document?.tier) ? document.tier : null,
-    candidates: Array.isArray(document?.candidates) ? document.candidates : [],
+    candidates,
     production: document?.production ?? null,
     source,
   }

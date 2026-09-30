@@ -18,6 +18,7 @@ import {
   EvalRefusal,
   EVAL_REFUSALS,
   BENCH_DEFAULT_ROUTING_TIER,
+  readBenchMeta,
 } from '../scripts/factory/model-eval.mjs'
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
 import { PI_PROVIDERS } from '../crew/adapters/adapter-pi.mjs'
@@ -342,6 +343,12 @@ test('J4 tracked benches have no judge candidate identity collision', () => {
     const identity = slash < 0 ? `${judge.vendor}/${model}` : model
     assert.equal(candidates.candidates.some((candidate) => `${candidate.provider}/${candidate.id}` === identity), false, path)
   }
+})
+
+// MUTATION: move the identity guard back into compileBench only; the read-only sweep's admission must refuse too.
+test('J6 read-only bench admission refuses self judging', () => {
+  const bench = writeBench({ judge: { model: 'openai/m', vendor: 'openai' }, candidates: [{ provider: 'openai', id: 'm', agent: 'pi', effort: 'medium' }], production: 'openai/m' })
+  assert.throws(() => readBenchMeta(bench.dir), (error) => error instanceof EvalRefusal && error.refusal === 'judge-is-candidate')
 })
 
 // MUTATION: removing the closed enum entry must invalidate constructor admission.

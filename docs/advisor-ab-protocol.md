@@ -29,8 +29,7 @@ Run `node scripts/factory/ledger.mjs advisor-arms [--arms <arm,...>] [--json]`
 to compare recorded advisor arms. Only build-tier runs with a recorded advisor
 model and a recorded builder grant enter an arm. Runs without a recorded
 configuration/model and runs with absent, malformed, or non-builder grants are
-reported as exclusions; non-build tiers are excluded. Rates are descriptive
-and withheld below the separate 12-run arm floor. With `--arms`, `next_arm`
+reported as exclusions; non-build tiers are excluded. Other rates are descriptive and withheld below the separate 12-finished-run arm floor. Rounds rates require 12 measured finished runs; `rounds_unmeasured_runs` counts unmeasured finished runs. `build_rounds_absent_reason` is `no-measured-rounds` at zero measured runs, `below-run-floor` below twelve, and `null` otherwise. In-flight runs are excluded from all rounds counters. With `--arms`, `next_arm`
 recommends the listed arm with the fewest eligible runs (ties keep list order). Without `--arms`, the default order is `none`, `openai/gpt-6-luna`, `openai/gpt-5.6-terra`, `openai/gpt-6.1-sol`; dispatch uses this same order and completed-plus-in-flight counts. It rotates only settled build-tier lanes without a named advisor, and unreadable evidence leaves seats untouched.
 Lane spend is derived from per-model `agent_sessions` rows, not session cost
 fields; every row in a finished run must have a session id, complete usage and
@@ -44,9 +43,13 @@ the 12 review-dispatch-per-arm ratification floor below.
 
 ## The four measurements
 
-1. **rounds per run.** Query one run with
-   `node scripts/factory/ledger.mjs task <adw_id>`. In its `phases[]`, count
-   names matching `build:r<n>`; the run's rounds are the highest `n`.
+1. **rounds per run.** Read the run's `log` stage markers in `events`.
+   Query one run at a time with `node scripts/factory/ledger.mjs tail <adw_id> --limit <n>`
+   and choose a limit large enough to include its whole marker stream.
+   A finished run is measured iff it has a terminal marker (`done` or a message
+   starting `escalate:`) and its build markers are exactly r1..rN. Its count is N;
+   no build marker with a terminal is a measured zero. Incomplete streams count
+   in `rounds_unmeasured_runs`, not the rounds denominator. A dropped final `build:r<N>` before a recorded terminal marker is not detectable.
 2. **bounce rate.** Use the same `task` readout's `review_outcomes[]`. The
    bounce rate is rows with `verdict === 'changes-needed'` divided by all
    rows.

@@ -1536,7 +1536,7 @@ test('S1', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger,
 test('A1', () => { const ledger = advisorArmTestRun('a1', null); assert.equal(advisorArmsReadout(ledger).excluded.unrecorded, 1); ledger.close() })
 test('A2', () => { const ledger = advisorArmTestRun('a2', 'p/m', '[]'); assert.equal(advisorArmsReadout(ledger).excluded.ungranted, 1); ledger.close() })
 test('A3', () => { const ledger = advisorArmTestRun('a3'); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds_per_run, null); ledger.close() })
-test('A4', () => { const ledger = advisorArmTestRun('a4'); ledger.startPhase({ adw_id: 'a4', name: 'build:r1' }); ledger.startPhase({ adw_id: 'a4', name: 'build:r3' }); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds, 3); ledger.close() })
+test('A4', () => { const ledger = advisorArmTestRun('a4'); for (const [seq, message] of ['plan:r1', 'build:r1', 'build:r2', 'build:r3', 'done'].entries()) ledger.recordEvent({ adw_id: 'a4', type: 'log', seq: seq + 1, payload: { level: 'info', message } }); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds, 3); ledger.close() })
 test('A5', () => { const ledger = advisorArmTestRun('a5'); const row = advisorArmsReadout(ledger).arms[0]; assert.equal(row.review_denominator, 0); ledger.close() })
 test('A6', () => { const ledger = advisorArmTestRun('a6'); assert.equal(advisorArmsReadout(ledger).arms[0].escalation_denominator, 1); ledger.close() })
 test('LANE_SPEND_ABSENT_REASONS is a closed frozen vocabulary', () => {
@@ -1544,6 +1544,136 @@ test('LANE_SPEND_ABSENT_REASONS is a closed frozen vocabulary', () => {
   assert.deepEqual(LANE_SPEND_ABSENT_REASONS, ['no-agent-sessions', 'session-id-unavailable', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
 })
 test('A7', () => { const ledger = advisorArmTestRun('a7'); assert.equal(advisorArmsReadout(ledger).arms[0].advisor_spend.absent_reason, 'no-advisor-usage'); ledger.close() })
+
+test('build rounds evidence', async (t) => {
+  function markers(ledger, id, messages) {
+    for (const [index, message] of messages.entries()) ledger.recordEvent({ adw_id: id, type: 'log', seq: index + 1, payload: { level: 'info', message } })
+  }
+  function seed(ledger, id, messages = [], options = {}) {
+    advisorArmTestRun(id, 'p/m', '["builder"]', ledger, options)
+    markers(ledger, id, messages)
+  }
+  function view(ledger, calls = []) {
+    return { stats: () => ledger.stats(), dumpTable: (name) => { calls.push(name); return ledger.dumpTable(name) } }
+  }
+  await t.test('R1', () => {
+    // MUTATION R1: replace event build-round extraction with empty phase-derived rounds.
+    const ledger = openTestLedger()
+    try {
+      seed(ledger, 'rounds-r1', ['plan:r1', 'build:r1', 'build:r2', 'build:r3', 'done'])
+      seed(ledger, 'other-run', ['build:r1'])
+      ledger.recordEvent({ adw_id: 'rounds-r1', type: 'decision', seq: 1, payload: {} })
+      const calls = []
+      const readout = advisorArmsReadout(view(ledger, calls), { arms: ['p/m'] }).arms[0]
+      assert.equal(readout.build_rounds, 3)
+      assert.equal(calls.filter((name) => name === 'events').length, 1)
+      assert.equal(readout.rounds_denominator, 1)
+      assert.equal(readout.rounds_unmeasured_runs, 1)
+    } finally { ledger.close() }
+  })
+  await t.test('R2', () => {
+    // MUTATION R2: expose runs as rounds_denominator.
+    const ledger = openTestLedger()
+    try { seed(ledger, 'r2-measured', ['build:r1', 'build:r2', 'build:r3', 'done']); seed(ledger, 'r2-empty'); const row = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]; assert.deepEqual([row.rounds_denominator, row.runs], [1, 2]) }
+    finally { ledger.close() }
+  })
+  await t.test('R3', () => {
+    // MUTATION R3: reject an empty build-round array.
+    const ledger = openTestLedger()
+    try { seed(ledger, 'r3', ['plan:r1', 'escalate:plan']); const row = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]; assert.deepEqual([row.build_rounds, row.rounds_denominator, row.rounds_unmeasured_runs], [0, 1, 0]) }
+    finally { ledger.close() }
+  })
+  await t.test('R4', () => {
+    // MUTATION R4: only done is terminal.
+    const ledger = openTestLedger()
+    try { seed(ledger, 'r4', ['build:r1', 'build:r2', 'escalate:gate']); assert.equal(advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0].build_rounds, 2) }
+    finally { ledger.close() }
+  })
+  await t.test('R5', () => {
+    // MUTATION R5: remove terminal requirement.
+    const ledger = openTestLedger()
+    try { seed(ledger, 'r5', ['build:r1', 'build:r2']); const row = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]; assert.deepEqual([row.rounds_unmeasured_runs, row.rounds_denominator], [1, 0]) }
+    finally { ledger.close() }
+  })
+  await t.test('R6', () => {
+    // MUTATION R6: bypass contiguous-round validation.
+    const ledger = openTestLedger()
+    try {
+      for (const [id, stream] of [['r6-gap', ['build:r1', 'build:r3', 'done']], ['r6-duplicate', ['build:r1', 'build:r1', 'done']], ['r6-zero', ['build:r0', 'done']], ['r6-missing-first', ['build:r2', 'done']]]) seed(ledger, id, stream)
+      assert.equal(advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0].rounds_unmeasured_runs, 4)
+    } finally { ledger.close() }
+  })
+  await t.test('R7', () => {
+    // MUTATION R7: return measured zero for an empty marker stream.
+    const ledger = openTestLedger()
+    try {
+      seed(ledger, 'r7-empty')
+      const baseView = view(ledger)
+      const malformedView = { stats: baseView.stats, dumpTable: (name) => name === 'events' ? [...baseView.dumpTable(name), { adw_id: 'r7-malformed', type: 'log', payload_json: '{' }] : baseView.dumpTable(name) }
+      seed(ledger, 'r7-malformed', ['build:r1', 'done'])
+      const row = advisorArmsReadout(malformedView, { arms: ['p/m'] }).arms[0]
+      assert.equal(row.rounds_unmeasured_runs, 2)
+    } finally { ledger.close() }
+  })
+  await t.test('R8', () => {
+    // MUTATION R8: increment unmeasured counter on the existing in-flight branch.
+    const ledger = openTestLedger()
+    try { seed(ledger, 'r8', ['build:r1'], { running: true }); const row = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]; assert.deepEqual([row.build_rounds, row.rounds_denominator, row.rounds_unmeasured_runs], [0, 0, 0]) }
+    finally { ledger.close() }
+  })
+  await t.test('R9', () => {
+    // MUTATION R9: use zero instead of null for an absent rounds rate.
+    const ledger = openTestLedger()
+    try { for (let i = 0; i < 12; i++) seed(ledger, `r9-${i}`); assert.equal(advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0].build_rounds_per_run, null) }
+    finally { ledger.close() }
+  })
+  await t.test('R10', () => {
+    // MUTATION R10: replace the zero-denominator absence reason.
+    const ledger = openTestLedger()
+    try {
+      for (let i = 0; i < 12; i++) seed(ledger, `r10-${i}`)
+      const populated = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]
+      assert.equal(populated.build_rounds_absent_reason, 'no-measured-rounds')
+      const empty = advisorArmsReadout(view(ledger), { arms: ['empty-arm'] }).arms[0]
+      assert.deepEqual([empty.rounds_denominator, empty.rounds_unmeasured_runs, empty.build_rounds_per_run, empty.build_rounds_absent_reason], [0, 0, null, 'no-measured-rounds'])
+    } finally { ledger.close() }
+  })
+  await t.test('R11', () => {
+    // MUTATION R11: apply rounds floor to all runs.
+    const ledger = openTestLedger()
+    try { for (let i = 0; i < 11; i++) seed(ledger, `r11-${i}`, ['build:r1', 'done']); seed(ledger, 'r11-missing'); const row = advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0]; assert.deepEqual([row.build_rounds_per_run, row.build_rounds_absent_reason], [null, 'below-run-floor']) }
+    finally { ledger.close() }
+  })
+  await t.test('R12', () => {
+    // MUTATION R12: divide the measured total by all finished runs.
+    const ledger = openTestLedger()
+    try { for (let i = 0; i < 12; i++) seed(ledger, `r12-${i}`, i < 6 ? ['build:r1', 'build:r2', 'done'] : ['build:r1', 'build:r2', 'build:r3', 'done']); seed(ledger, 'r12-missing'); assert.equal(advisorArmsReadout(view(ledger), { arms: ['p/m'] }).arms[0].build_rounds_per_run, 2.5) }
+    finally { ledger.close() }
+  })
+  await t.test('R13', () => {
+    // MUTATION R13: remove the rounds-unmeasured field from the CLI template.
+    const ledger = openTestLedger()
+    try {
+      seed(ledger, 'r13')
+      const dbPath = ledger._dbPath
+      const child = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--arms', 'p/m'], { encoding: 'utf8', env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath }, timeout: 30000 })
+      assert.equal(child.status, 0, child.stderr)
+      assert.match(child.stdout, /p\/m: runs=1; rounds=0\/0; rounds-unmeasured=1;/)
+    } finally { ledger.close() }
+  })
+  await t.test('D1', () => {
+    // MUTATION D1: replace measurement 1 with the main phases[] paragraph.
+    const doc = readFileSync(join(ROOT, 'docs', 'advisor-ab-protocol.md'), 'utf8')
+    const section = doc.split('1. **rounds per run.**')[1]?.split('2. **bounce rate.**')[0] ?? ''
+    assert.match(section, /rounds_unmeasured_runs/); assert.match(section, /events/); assert.match(section, /log/)
+    assert.match(section, /node scripts\/factory\/ledger\.mjs tail <adw_id> --limit <n>/)
+    assert.match(section, /done/); assert.match(section, /escalate:/); assert.match(section, /r1\.\.rN/); assert.match(section, /zero/)
+    assert.match(section, /dropped final `build:r<N>` before a recorded terminal marker is not detectable/)
+    assert.equal(section.includes('phases[]'), false)
+    const readout = doc.split('## Build-run arm readout')[1]?.split('## The four measurements')[0] ?? ''
+    assert.match(readout, /rounds_unmeasured_runs/); assert.match(readout, /build_rounds_absent_reason/)
+  })
+})
 // Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
 // which inflates lane_spend_denominator; and dropping a billed run (the spend and denominator fall).
 test('A7 lane spend: an unbilled run is missing spend, never a measured zero', () => {

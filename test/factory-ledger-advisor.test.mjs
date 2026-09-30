@@ -1653,6 +1653,7 @@ test('dispatcharms real read counts history and reservations and closes on succe
     handle.close = () => { closes++; return close() }
     return handle
   }
+  assert.throws(() => spy({ dbPath: join(nextDir(), 'outside.db') }), /outside this test/)
   const result = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath } }, inFlight: ['openai/gpt-6-luna'], open: spy })
   assert.equal(result.reason, null)
   assert.equal(result.readout.arms.find(({ arm }) => arm === 'none').runs, 1)

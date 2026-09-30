@@ -15,9 +15,7 @@
         "acp"
       ],
       "adapter": "crew/adapters/adapter-pi.mjs",
-      "refuses": [
-        "mcp_servers"
-      ],
+      "refuses": [],
       "display_name": "Pi",
       "binary": "pi",
       "install_hint": "Install Pi and ensure the pi binary is on PATH.",

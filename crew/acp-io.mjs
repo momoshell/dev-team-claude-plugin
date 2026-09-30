@@ -68,7 +68,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     // The same seat parts headless-rpc hands its command (crew/headless-rpc.mjs): the role charter, the
     // grants (the submit extension delivers the envelope without a gated write), and the seat's env.
     const launch = launchFn({ role, bin: binary, model: member?.model, effort: member?.effort, cwd: checkout || process.cwd(), deny: member?.deny || '',
-      promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir,
+      promptFile: join(seatTaskDir, `role-${role}.md`), grants: adapter.grants, configDir: adapter.configDir, taskDir: seatTaskDir,
       tools: member?.tools, claudeBin: crew.claude_bin, writableDirs: [seatTaskDir, paths.returnsDir],
       advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
         ? piAdapter.advisorLaunchCell(crew.advisor)

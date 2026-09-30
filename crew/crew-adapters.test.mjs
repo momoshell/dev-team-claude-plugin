@@ -20,6 +20,31 @@ import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
+test('K1 K3 K4 resolve opt-in pi grants without ambient leakage', async () => {
+  // MUTATION: unset-as-on (K1), read process.env (K3: ambient on must reach neither off nor unset), or omit builtin:codemode (K4).
+  const prior = process.env.CREW_PI_CODEMODE
+  process.env.CREW_PI_CODEMODE = 'on'
+  try {
+    const absent = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'off' } })
+    const defaulted = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: {} })
+    assert.deepEqual(defaulted.builder.grants, absent.builder.grants)
+    for (const seat of [absent, defaulted]) assert.equal(seat.builder.grants.extensions.some((e) => e.startsWith('builtin:')), false)
+    const on = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'on' } })
+    assert.ok(on.builder.grants.extensions.includes('builtin:codemode'))
+    assert.ok(Object.isFrozen(on.builder.grants) && Object.isFrozen(on.builder.grants.extensions))
+    assert.equal(Object.hasOwn(on.builder.grants, 'mcp_servers'), true)
+  } finally { if (prior === undefined) delete process.env.CREW_PI_CODEMODE; else process.env.CREW_PI_CODEMODE = prior }
+})
+test('K9 off MCP grants retain the adapter delivery refusal; K10 on resolves MCP profile', async () => {
+  // MUTATION: remove the mcp_servers delivery check or withhold the MCP profile claim.
+  const register = capabilityRegister({ coding_agents: { pi: { ...capabilityRegister().coding_agents.pi, refuses: [] } } })
+  const fff = { name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }
+  register.roles.builder.by_agent = { pi: { mcp_servers: [fff] } }
+  await assert.rejects(resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'off' } }), (error) => error.reason === 'grant-unsupported' && /cannot express mcp_servers/.test(error.message))
+  const on = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'on' } })
+  assert.ok(on.builder.grants.extensions.includes('builtin:mcp'))
+  assert.equal(on.builder.adapter.capabilitiesFor({ transport: 'pane', grants: on.builder.grants }).mcp_servers, true)
+})
 void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, claudeAcpLaunch, ACP_BINARY, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))

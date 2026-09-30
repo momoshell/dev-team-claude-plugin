@@ -70,10 +70,12 @@ const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NO
 // crew dir, which is where crew.json lives — and returns its mirrored sessions
 // row. `tier: null` writes a boot record with NO tier key at all, which is
 // exactly what a --roles boot produces.
-function bootTieredRun(tier, runConfiguration = null) {
+function bootTieredRun(tier, runConfiguration = null, advisorFixture = {}) {
   const stateDir = mkdtempSync(join(tmpdir(), 'factory-ledger-boot-'))
   writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
     schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], ...(tier === null ? {} : { tier }),
+    ...(Object.hasOwn(advisorFixture, 'seats') ? { seats: advisorFixture.seats } : {}),
+    ...(Object.hasOwn(advisorFixture, 'granted') ? { advisor: { granted: advisorFixture.granted } } : {}),
     ...(runConfiguration ? { run_configuration: runConfiguration } : {}),
   }))
   if (runConfiguration?.execution) {
@@ -1950,6 +1952,7 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 // ---------------------------------------------------------------------------
 // Screener proposal adoption readout
 // ---------------------------------------------------------------------------
+
 
 export {
   NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,

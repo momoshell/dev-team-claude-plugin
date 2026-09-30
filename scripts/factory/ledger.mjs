@@ -811,6 +811,8 @@ export const TABLES = Object.freeze({
       { name: 'legacy_variant', decl: 'TEXT' },
       { name: 'legacy_tier', decl: 'TEXT' },
       { name: 'created_at', decl: 'TEXT' },
+      { name: 'advisor_model', decl: 'TEXT' },
+      { name: 'advisor_granted_json', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -3213,6 +3215,16 @@ export function openLedger({
     if (!Number.isInteger(input.schema_version) || input.schema_version < 1) {
       refuse('recordRunConfiguration: schema_version must be a positive integer')
     }
+    // The advisor model's own bound (the one recordAdvisorUsage applies), not the tier bound:
+    // a longer model id resolveTier accepts must not silently drop its run from every arm.
+    if (input.advisor_model != null && (typeof input.advisor_model !== 'string' || input.advisor_model !== 'none' && (!input.advisor_model.trim() || input.advisor_model.length > ADVISOR_MODEL_MAX_CHARS))) {
+      refuse('recordRunConfiguration: advisor_model must be a bounded nonblank string')
+    }
+    if (input.advisor_granted_json != null) {
+      let grant
+      try { grant = JSON.parse(input.advisor_granted_json) } catch { refuse('recordRunConfiguration: advisor_granted_json must be a JSON array of role names') }
+      if (!Array.isArray(grant) || grant.some((role) => typeof role !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(role))) refuse('recordRunConfiguration: advisor_granted_json must be a JSON array of role names')
+    }
     const short = (field) => normaliseShortName(input[field], 'recordRunConfiguration', field)
     const args = redact({
       adw_id: input.adw_id,
@@ -3227,6 +3239,8 @@ export function openLedger({
       assurance_source: short('assurance_source'),
       legacy_variant: short('legacy_variant'),
       legacy_tier: short('legacy_tier'),
+      advisor_model: input.advisor_model ?? null,
+      advisor_granted_json: input.advisor_granted_json ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     appendJsonl('recordRunConfiguration', args)
@@ -7879,7 +7893,7 @@ function killVerb(ledger, { adwId, pid, yes }, stdout, stderr) {
 // ---------------------------------------------------------------------------
 
 // --yes is the one boolean (no-value) flag in this CLI's vocabulary.
-const BOOLEAN_FLAGS = new Set(['yes'])
+const BOOLEAN_FLAGS = new Set(['yes', 'json'])
 
 // Every flag each verb accepts. A flag absent from its verb's set is REFUSED
 // (exit 2) rather than ignored: measured on 2026-08-21, `run-set --since X
@@ -7915,6 +7929,7 @@ const VERB_FLAGS = Object.freeze({
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
+  'advisor-arms': new Set(['arms', 'json']),
   doctor: new Set([]),
   kill: new Set(['adw-id', 'pid', 'yes']),
   settle: new Set(['reason']),
@@ -7998,6 +8013,75 @@ function catalogPrice(catalog, key) {
   if (!catalog) return null
   const entry = catalog.models && Object.prototype.hasOwnProperty.call(catalog.models, key) ? catalog.models[key] : null
   return entry ?? null
+}
+
+export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null } = {}) {
+  const before = mirrorErrorCount(ledger)
+  const sessions = ledger.dumpTable('sessions')
+  const configurations = ledger.dumpTable('run_configurations')
+  const phaseRows = ledger.dumpTable('phases')
+  const reviewsRows = ledger.dumpTable('review_outcomes')
+  const usageRows = ledger.dumpTable('advisor_usage')
+  if (ledger.stats().degraded || mirrorErrorCount(ledger) > before) throw new Error('advisor-arms: ledger read degraded')
+  const configs = new Map(configurations.map((row) => [row.adw_id, row]))
+  const armsMap = new Map()
+  let unrecorded = 0, ungranted = 0, nonBuild = 0
+  for (const session of sessions) {
+    if (session.tier !== 'build') { nonBuild++; continue }
+    const configuration = configs.get(session.adw_id)
+    if (!configuration) { unrecorded++; continue }
+    if (configuration.advisor_model == null) { unrecorded++; continue }
+    let granted
+    try { granted = JSON.parse(configuration.advisor_granted_json) } catch { granted = [] }
+    if (!Array.isArray(granted) || !granted.every((role) => typeof role === 'string')) granted = []
+    if (!granted.includes('builder')) { ungranted++; continue }
+    const key = configuration.advisor_model
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
+    // Its advisor consults are already spent, so its id still feeds advisor spend (run_ids).
+    arm.run_ids.push(session.adw_id)
+    if (session.ended_at == null) { arm.in_flight++; armsMap.set(key, arm); continue }
+    arm.runs++
+    const buildRounds = phaseRows.filter((row) => row.adw_id === session.adw_id).map((row) => /^build:r(\d+)$/.exec(row.name)?.[1]).filter(Boolean).map(Number)
+    arm.build_rounds += buildRounds.length ? Math.max(...buildRounds) : 0
+    const runReviews = reviewsRows.filter((row) => row.adw_id === session.adw_id)
+    arm.reviews += runReviews.length
+    arm.changes_needed += runReviews.filter((row) => row.verdict === 'changes-needed').length
+    if (session.outcome === 'escalated') arm.escalations++
+    // An unbilled run is absent spend, never $0: Number(null) is 0, so test the stored value itself.
+    if (typeof session.billed_cost_usd === 'number' && Number.isFinite(session.billed_cost_usd)) { arm.billed_runs++; arm.lane_spend_usd += session.billed_cost_usd }
+    armsMap.set(key, arm)
+  }
+  const requested = armOrder ?? [...armsMap.keys()]
+  const results = requested.map((key) => {
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    const runs = arm.runs
+    const thin = runs < CELL_RATE_FLOOR
+    const changesNeeded = arm.changes_needed
+    const reviews = arm.reviews
+    const buildRoundsPerRun = thin ? null : arm.build_rounds / runs
+    const bounceRate = thin || !reviews ? null : changesNeeded / reviews
+    const escalationRate = thin ? null : arm.escalations / runs
+    const advisorRows = usageRows.filter((row) => arm.run_ids.includes(row.adw_id))
+    const priced = advisorRows.map((row) => {
+      const priceKey = catalog === null ? null : priceKeyForModel(catalog, row.model, 'pi')
+      const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
+      if (!priceKey) return { cost: null, reason: 'model-unpriced-or-ambiguous' }
+      const names = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+      if (names.some((name) => row[name] == null)) return { cost: null, reason: 'usage-unavailable' }
+      const rates = ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((name) => price?.[name])
+      if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, reason: 'price-rate-unavailable' }
+      const cost = Number(row.billed_input_tokens) / 1e6 * rates[0] + Number(row.billed_output_tokens) / 1e6 * rates[1] + Number(row.billed_cache_write_tokens) / 1e6 * rates[2] + Number(row.billed_cache_read_tokens) / 1e6 * rates[3]
+      return Number.isFinite(cost) ? { cost, reason: null } : { cost: null, reason: 'cost-not-finite' }
+    })
+    const pricedRows = priced.filter((row) => row.cost != null)
+    const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
+    const noUsage = advisorRows.length === 0 ? null : 'usage-present'
+    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: runs - arm.billed_runs, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
+  })
+  let winner = null
+  if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
+  return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild }, next_arm: winner?.arm ?? null }
 }
 
 function loadPriceCatalog(path) {
@@ -8544,6 +8628,24 @@ export function main(argv) {
 
     const dbPath = defaultDbPath()
     const ledger = openLedger({ dbPath, nodeVersion, stderr })
+
+    if (verb === 'advisor-arms') {
+      if (positional.length) refuse('advisor-arms: takes no positional arguments')
+      let armOrder = null
+      if (Object.hasOwn(flags, 'arms')) {
+        if (typeof flags.arms !== 'string' || !flags.arms.trim()) refuse('advisor-arms: --arms requires comma-separated arm names')
+        armOrder = flags.arms.split(',')
+        if (armOrder.some((arm) => !arm.trim()) || new Set(armOrder).size !== armOrder.length) refuse('advisor-arms: --arms names must be nonblank and unique')
+      }
+      const defaultPriceSourcePath = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
+      let catalog = null
+      try { catalog = loadPriceCatalog(defaultPriceSourcePath) } catch { /* unavailable means unpriced, never free */ }
+      let payload
+      try { payload = advisorArmsReadout(ledger, { arms: armOrder, catalog }) } catch (error) { refuse(`advisor-arms: the ledger read is degraded — unanswerable, not empty (${ledger.stats().degraded_reason ?? error?.message ?? 'unknown'})`) }
+      if (flags.json) stdout.write(`${JSON.stringify(payload)}\n`)
+      else stdout.write(`advisor arms (schema 1)\n${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
+      return 0
+    }
 
     if (verb === 'chunk-progress') {
       const parentLane = positional[0]

@@ -45,12 +45,40 @@ test('K11 K12 K13 K14 materialises a settings-only codemode profile and granted 
   const adapter = { mcpConfigPath: ({ taskDir: dir, role }) => join(dir, 'pi-agent', role, 'mcp.json'), capabilitiesFor: ({ grants }) => ({ ...(grants.extensions.includes('builtin:mcp') ? { mcp_servers: true } : {}) }) }
   const grants = { extensions: ['builtin:codemode', 'builtin:mcp'], mcp_servers: [{ name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }] }
   const adapters = { builder: { name: 'pi', adapter, transport: 'pane', grants } }
-  writePiSeatAgentDirs({ taskDir, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: base } })
+  writePiSeatAgentDirs({ taskDir, checkout: root, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: base } })
   const dir = join(taskDir, 'pi-agent', 'builder')
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')), { theme: 'dark', codemode: { timeout: 7, mode: 'only' } })
   assert.equal(readlinkSync(join(dir, 'auth.json')), join(base, 'auth.json'))
   writeMcpConfigs({ taskDir, roles: ['builder'], adapters })
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [] } } })
+})
+test('a pi MCP seat refuses while the checkout carries a project .pi/mcp.json; a codemode-only seat does not', () => {
+  // MUTATION: `if (false)` for the project-MCP refusal — pi would load that file after the seat's and let it win by name.
+  const root = scratchDir('pi-agent-project-mcp-')
+  const taskDir = join(root, 'task'); const base = join(root, 'base'); const checkout = join(root, 'checkout')
+  mkdirSync(taskDir); mkdirSync(base); mkdirSync(join(checkout, '.pi'), { recursive: true })
+  writeFileSync(join(checkout, '.pi', 'mcp.json'), JSON.stringify({ mcpServers: { fff: { command: '/hostile' } } }))
+  const mcp = { name: 'pi', grants: { extensions: ['builtin:codemode', 'builtin:mcp'], mcp_servers: [{ name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }] } }
+  assert.throws(() => writePiSeatAgentDirs({ taskDir, checkout, roles: ['builder'], adapters: { builder: mcp }, env: { PI_CODING_AGENT_DIR: base } }),
+    (error) => error.reason === 'grant-unsupported' && error.message.includes(join(checkout, '.pi', 'mcp.json')))
+  assert.equal(existsSync(join(taskDir, 'pi-agent', 'builder')), false)
+  writePiSeatAgentDirs({ taskDir, checkout, roles: ['builder'], adapters: { builder: { name: 'pi', grants: { extensions: ['builtin:codemode'] } } }, env: { PI_CODING_AGENT_DIR: base } })
+  assert.equal(existsSync(join(taskDir, 'pi-agent', 'builder', 'settings.json')), true)
+})
+test('boot hands its checkout to the project-MCP refusal', async () => {
+  // MUTATION: pass writePiSeatAgentDirs any checkout but the booted one — the hostile .pi/mcp.json goes unseen.
+  const home = scratchDir('pi-project-mcp-boot-')
+  const { checkout } = testCheckout('pi-project-mcp-checkout-', home)
+  mkdirSync(join(checkout, '.pi')); writeFileSync(join(checkout, '.pi', 'mcp.json'), '{"mcpServers":{}}')
+  const register = capabilityRegister({ coding_agents: { pi: { ...capabilityRegister().coding_agents.pi, refuses: [] } } })
+  register.roles.builder.mcp_servers = [{ name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }]
+  const quiet = process.stdout.write; process.stdout.write = () => true
+  try {
+    await assert.rejects(bootCmd({ task: 'project-mcp', checkout, roles: 'builder', 'agent-lead': 'pi', 'agent-builder': 'pi', 'headless-all': true }, {
+      env: { CREW_PI_CODEMODE: 'on', PI_CODING_AGENT_DIR: join(home, 'base') }, register, homedir: () => home, awaitSeatsReady: async () => {},
+      cmux() { throw new Error('unexpected cmux') }, openRun: () => ({ recordSeats() {} }),
+    }), (error) => error.reason === 'grant-unsupported' && error.message.includes(join(checkout, '.pi', 'mcp.json')))
+  } finally { process.stdout.write = quiet }
 })
 test('pi agent materialisation refuses before its recursive rm can reach the base dir or a redirected parent', () => {
   // MUTATION: `if (false)` for the base-within-seat guard (the seat rm deletes base auth.json), or drop the
@@ -61,13 +89,13 @@ test('pi agent materialisation refuses before its recursive rm can reach the bas
   const refused = (error) => error.reason === 'grant-unsupported' && /pi agent directory materialisation failed/.test(error.message)
   const nested = join(root, 'nested'); const seat = join(nested, 'pi-agent', 'builder')
   mkdirSync(seat, { recursive: true }); writeFileSync(join(seat, 'auth.json'), 'secret')
-  assert.throws(() => writePiSeatAgentDirs({ taskDir: nested, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: seat } }), refused)
+  assert.throws(() => writePiSeatAgentDirs({ taskDir: nested, checkout: root, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: seat } }), refused)
   assert.equal(readFileSync(join(seat, 'auth.json'), 'utf8'), 'secret')
   const linked = join(root, 'linked'); const elsewhere = join(root, 'elsewhere'); const base = join(root, 'base')
   mkdirSync(linked); mkdirSync(join(elsewhere, 'builder'), { recursive: true }); mkdirSync(base)
   writeFileSync(join(elsewhere, 'builder', 'keep'), 'kept')
   symlinkSync(elsewhere, join(linked, 'pi-agent'))
-  assert.throws(() => writePiSeatAgentDirs({ taskDir: linked, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: base } }), refused)
+  assert.throws(() => writePiSeatAgentDirs({ taskDir: linked, checkout: root, roles: ['builder'], adapters, env: { PI_CODING_AGENT_DIR: base } }), refused)
   assert.equal(readFileSync(join(elsewhere, 'builder', 'keep'), 'utf8'), 'kept')
 })
 

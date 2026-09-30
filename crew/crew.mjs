@@ -2939,7 +2939,7 @@ export function mcpConfigDocument(grants = EMPTY_GRANTS) {
   return { mcpServers }
 }
 
-export function writePiSeatAgentDirs({ taskDir, roles, adapters, env = {} }, deps = {}) {
+export function writePiSeatAgentDirs({ taskDir, checkout, roles, adapters, env = {} }, deps = {}) {
   const fs = {
     lstatSync: deps.lstatSync || lstatSync, mkdirSync: deps.mkdirSync || mkdirSync,
     readdirSync: deps.readdirSync || readdirSync, readFileSync: deps.readFileSync || readFileSync,
@@ -2951,6 +2951,14 @@ export function writePiSeatAgentDirs({ taskDir, roles, adapters, env = {} }, dep
     if (entry?.name !== 'pi' || !entry.grants?.extensions?.includes('builtin:codemode')) continue
     try {
       const agentDir = piAdapter.piSeatAgentDir({ taskDir, role })
+      if (entry.grants.extensions.includes('builtin:mcp')) {
+        // pi's builtin mcp reads <cwd>/.pi/mcp.json after the agent dir for a trusted project, and its
+        // entries win by name; refuse while one exists rather than deliver more than the register grants.
+        const projectMcp = join(checkout, '.pi', 'mcp.json')
+        let present = true
+        try { fs.lstatSync(projectMcp) } catch (error) { if (error.code !== 'ENOENT') throw error; present = false }
+        if (present) throw new Error(`project MCP config ${projectMcp} would add to or override the register-derived servers`)
+      }
       const parent = join(taskDir, 'pi-agent')
       try {
         const parentStat = fs.lstatSync(parent)
@@ -3421,7 +3429,7 @@ export async function bootCmd(args, deps = {}) {
   // Materialise every register-authoritative Claude MCP set before composing a
   // command or creating a workspace. A failed write is a boot failure: strict
   // mode must never fall back to user configuration.
-  writePiSeatAgentDirs({ taskDir: paths.taskDir, roles, adapters, env: bootEnv }, { ...deps, homedir })
+  writePiSeatAgentDirs({ taskDir: paths.taskDir, checkout, roles, adapters, env: bootEnv }, { ...deps, homedir })
   writeMcpConfigsDep({ taskDir: paths.taskDir, roles, adapters })
   writeClaudeSkillsDep({ taskDir: paths.taskDir, roles, adapters })
   let workspace = null

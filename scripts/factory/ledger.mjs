@@ -8015,6 +8015,9 @@ function catalogPrice(catalog, key) {
   return entry ?? null
 }
 
+// ADR-047 decision 10, arms re-set by the operator 2026-09-30 (pi cannot seat anthropic models)
+export const ADVISOR_ARMS = Object.freeze(['none', 'openai/gpt-6-luna', 'openai/gpt-5.6-terra', 'openai/gpt-6.1-sol'])
+
 export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null } = {}) {
   const before = mirrorErrorCount(ledger)
   const sessions = ledger.dumpTable('sessions')
@@ -8631,7 +8634,7 @@ export function main(argv) {
 
     if (verb === 'advisor-arms') {
       if (positional.length) refuse('advisor-arms: takes no positional arguments')
-      let armOrder = null
+      let armOrder = ADVISOR_ARMS
       if (Object.hasOwn(flags, 'arms')) {
         if (typeof flags.arms !== 'string' || !flags.arms.trim()) refuse('advisor-arms: --arms requires comma-separated arm names')
         armOrder = flags.arms.split(',')

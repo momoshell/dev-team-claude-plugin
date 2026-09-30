@@ -130,6 +130,8 @@ import {
   teardownVerdict,
   seatsDefect,
   mergeSeats,
+  readAdvisorArms,
+  ADVISOR_ROTATION_REASONS,
   strongestTierMinimum,
   tierFloor,
   readRegister,
@@ -139,7 +141,7 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
-import { openLedger } from '../scripts/factory/ledger.mjs'
+import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { git, scratchDir } from './helpers.mjs'
@@ -3166,6 +3168,118 @@ test('lanes on different commits fall back to measuring per lane', async () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
+test('dispatcharms rotation reasons are a frozen closed vocabulary', () => {
+  assert.deepEqual(ADVISOR_ROTATION_REASONS, ['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid'])
+  assert.equal(Object.isFrozen(ADVISOR_ROTATION_REASONS), true)
+})
+
+test('dispatcharms reservations rotate eligible build lanes and preserve abstentions', async () => {
+  const picks = []
+  const result = await dispatchFixture({
+    label: 'dispatcharms-wave-rotation', names: ['lane-a', 'lane-b'], batchTier: 'build',
+    readAdvisorArms: ({ inFlight }) => {
+      picks.push([...inFlight])
+      const next = ADVISOR_ARMS[inFlight.length % ADVISOR_ARMS.length]
+      return { readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: next }, reason: null }
+    },
+  })
+  const boots = result.spawned.filter(({ args }) => (args || []).map(String).includes('--model-advisor'))
+  assert.deepEqual(boots.map(({ args }) => { const a = args.map(String); return a[a.indexOf('--model-advisor') + 1] }), ['none', 'openai/gpt-6-luna'])
+  assert.deepEqual(picks, [[], ['none']])
+  const records = ['lane-a', 'lane-b'].map((lane) => dispatchRecordFor(result, lane))
+  assert.deepEqual(records.map(({ advisor_rotation }) => advisor_rotation.source), ['rotation', 'rotation'])
+  assert.ok(records.every(({ seats }) => seats.advisor.model.from === 'rotation'))
+  assert.ok(result.logs.some((line) => line.includes('advisor_arm=none advisor_from=rotation advisor_reason=none')))
+  const abstain = await dispatchFixture({ label: 'dispatcharms-ledger-absent', names: ['lane-c'], batchTier: 'build', readAdvisorArms: () => ({ readout: null, reason: 'ledger-absent' }) })
+  assert.equal(abstain.spawned.some(({ args }) => (args || []).map(String).includes('--model-advisor')), false)
+  const record = dispatchRecordFor(abstain, 'lane-c')
+  assert.deepEqual(record.advisor_rotation, { arm: null, source: null, reason: 'ledger-absent' })
+  assert.ok(abstain.logs.some((line) => line.includes('advisor_arm=unmeasured advisor_from=none advisor_reason=ledger-absent')))
+})
+
+test('dispatcharms five build lanes wrap and carry only advisor model rotation', async () => {
+  const seen = []
+  const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d', 'lane-e']
+  const result = await dispatchFixture({ label: 'dispatcharms-wrap', names, batchTier: 'build', runFlags: { 'effort-advisor': 'high' }, readAdvisorArms: ({ inFlight }) => {
+    seen.push([...inFlight])
+    const next = ADVISOR_ARMS[inFlight.length % ADVISOR_ARMS.length]
+    return { readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: next }, reason: null }
+  } })
+  const values = result.spawned.filter(({ args }) => args.includes('boot')).map(({ args }) => args[args.indexOf('--model-advisor') + 1])
+  assert.deepEqual(values, ['none', 'openai/gpt-6-luna', 'openai/gpt-5.6-terra', 'openai/gpt-6.1-sol', 'none'])
+  assert.deepEqual(seen.map((row) => row.length), [0, 1, 2, 3, 4])
+  assert.ok(result.spawned.filter(({ args }) => args.includes('boot')).every(({ args }) => args[args.indexOf('--effort-advisor') + 1] === 'high'))
+  assert.ok(['lane-a', 'lane-b', 'lane-c', 'lane-d', 'lane-e'].every((lane) => dispatchRecordFor(result, lane).seats.advisor.effort.settled === 'high'))
+})
+
+test('dispatcharms explicit and non-build lanes do not consume rotation slots', async () => {
+  const seen = []
+  const explicit = await dispatchFixture({
+    label: 'dispatcharms-explicit-lane', names: ['lane-a', 'lane-b'], batchTier: 'build',
+    requests: { 'lane-a': requestFor('lane-a', { seats: { advisor: { model: 'openai/gpt-6.1-sol' } } }) },
+    readAdvisorArms: ({ inFlight }) => { seen.push([...inFlight]); return { readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null } },
+  })
+  assert.deepEqual(seen, [[]])
+  const explicitBoot = explicit.spawned.find(({ args }) => args.includes('boot') && args.includes('--model-advisor'))
+  assert.equal(explicitBoot.args[explicitBoot.args.indexOf('--model-advisor') + 1], 'openai/gpt-6.1-sol')
+  assert.equal(dispatchRecordFor(explicit, 'lane-a').advisor_rotation.reason, 'explicit-model')
+  const batchExplicit = await dispatchFixture({ label: 'dispatcharms-batch-none', names: ['lane-a', 'lane-b'], batchTier: 'build', runFlags: { 'model-advisor': 'none' }, readAdvisorArms: () => { throw new Error('should not read') } })
+  assert.ok(batchExplicit.spawned.filter(({ args }) => args.includes('boot')).every(({ args }) => args[args.indexOf('--model-advisor') + 1] === 'none'))
+  for (const lane of ['lane-a', 'lane-b']) assert.deepEqual(dispatchRecordFor(batchExplicit, lane).advisor_rotation, { arm: null, source: null, reason: 'explicit-model' })
+  const tiers = await dispatchFixture({
+    label: 'dispatcharms-nonbuild', names: ['lane-a', 'lane-b'], batchTier: 'build',
+    requests: {
+      'lane-a': requestFor('lane-a', { assurance: null }),
+      'lane-b': requestFor('lane-b', { assurance: 'quick' }),
+    },
+    briefs: { 'lane-a': v2Brief({ recommendedAssurance: 'quick', recommendedModelBand: 'workhorse', minimumAssurance: 'rigorous' }) },
+    readAdvisorArms: () => { throw new Error('should not read') },
+  })
+  assert.ok(tiers.spawned.filter(({ args }) => args.includes('boot')).every(({ args }) => !args.includes('--model-advisor')))
+  assert.equal(dispatchRecordFor(tiers, 'lane-a').tier.settled, 'judge')
+  assert.equal(dispatchRecordFor(tiers, 'lane-b').tier.settled, 'mechanical')
+  assert.ok(['lane-a', 'lane-b'].every((lane) => dispatchRecordFor(tiers, lane).advisor_rotation.reason === 'not-build'))
+  const standard = await dispatchFixture({ label: 'dispatcharms-standard-alias', names: ['lane-a'], batchTier: 'mechanical', requests: { 'lane-a': requestFor('lane-a', { assurance: 'standard' }) }, readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }) })
+  assert.equal(dispatchRecordFor(standard).tier.settled, 'build')
+  assert.equal(dispatchRecordFor(standard).advisor_rotation.arm, 'none')
+})
+
+test('dispatcharms malformed and unavailable readouts abstain with closed reasons', async () => {
+  const cases = [
+    ['degraded', () => ({ readout: null, reason: 'ledger-degraded' }), 'ledger-degraded'],
+    ['refused', () => ({ readout: null, reason: 'ledger-refused' }), 'ledger-refused'],
+    ['throws', () => { throw new Error('unreadable') }, 'ledger-unreadable'],
+    ['undefined', () => undefined, 'readout-invalid'],
+    ['empty', () => ({}), 'readout-invalid'],
+    ['unknown-reason', () => ({ readout: null, reason: 'bogus' }), 'readout-invalid'],
+    ['empty-rows', () => ({ readout: { arms: [], next_arm: 'none' }, reason: null }), 'readout-invalid'],
+    ['unknown-arm', () => ({ readout: { arms: [{ arm: 'anthropic/x' }], next_arm: 'anthropic/x' }, reason: null }), 'readout-invalid'],
+    ['mixed-result', () => ({ readout: { arms: [{ arm: 'none' }], next_arm: 'none' }, reason: 'ledger-degraded' }), 'readout-invalid'],
+  ]
+  for (const [label, readAdvisorArms, reason] of cases) {
+    const result = await dispatchFixture({ label: `dispatcharms-${label}`, names: ['lane-a'], batchTier: 'build', readAdvisorArms })
+    assert.equal(result.spawned.some(({ args }) => args.includes('boot') && args.includes('--model-advisor')), false, label)
+    assert.deepEqual(dispatchRecordFor(result).advisor_rotation, { arm: null, source: null, reason }, label)
+    assert.ok(result.logs.some((line) => line.includes(`advisor_reason=${reason}`)), label)
+  }
+})
+
+test('dispatcharms default read uses a temporary read-only ledger and counts reservations', () => {
+  const dir = join(root, `dispatcharms-ledger-${Math.random().toString(36).slice(2)}`)
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: 'dispatcharms-real-ledger', repo_slug: 'test', task_slug: 'rotation' })
+  ledger.close()
+  const result = readAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath }, home: dir }, inFlight: ['none'] })
+  assert.equal(result.reason, null)
+  assert.equal(result.readout.next_arm, 'openai/gpt-6-luna')
+  assert.equal(result.readout.arms[0].in_flight, 1)
+  assert.equal(result.readout.arms[0].runs, 0)
+  const absent = join(dir, 'absent.db')
+  assert.deepEqual(readAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: absent }, home: dir } }), { readout: null, reason: 'ledger-absent' })
+  assert.equal(fsExistsSync(absent), false)
+})
+
 test('a failed batch measurement never refuses the batch', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c']
   const result = await fakedDispatch({
@@ -3178,12 +3292,12 @@ test('a failed batch measurement never refuses the batch', async () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
-test('a single-lane batch takes no separate batch measurement', async () => {
+test('dispatcharms single-lane batch measures once and hands --baseline to compile', async () => {
   const result = await fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
-  assert.equal(result.measures.length, 0)
+  assert.equal(result.measures.length, 1)
   assert.equal(result.compiles.length, 1)
   assert.equal(result.discovers.length, 1)
-  assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 1)
 })
 
@@ -4189,7 +4303,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -4804,7 +4918,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   assert.equal(line.startsWith(
     'dispatch-batch: lane=lane-a forced=none prompt=code-only recommended=none requested=mechanical requested_from=batch execution=full execution_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
-  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\) force_reason=none$/)
+  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\) force_reason=none advisor_arm=unmeasured advisor_from=none advisor_reason=not-build$/)
 })
 
 test('a legacy proposal block without a tier line remains recommendation-free', async () => {

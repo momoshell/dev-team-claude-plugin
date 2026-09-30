@@ -41,5 +41,5 @@
   "scripts/factory/ledger.mjs:7904": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:7949": "unknown flag --${name}",
   "scripts/factory/ledger.mjs:4207": "requireEnum(input.decision, CI_DECISIONS",
-  "scripts/factory/ledger.mjs:9523": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:9526": "unknown verb: ${verb}"
 }

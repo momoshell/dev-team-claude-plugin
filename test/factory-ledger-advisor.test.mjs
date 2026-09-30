@@ -15,7 +15,10 @@ import { ROOT, scratchDir } from './helpers.mjs'
 import {
   openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
   advisorArmsReadout,
+  ADVISOR_ARMS,
 } from '../scripts/factory/ledger.mjs'
+
+import { readAdvisorArms as readDispatchAdvisorArms } from '../scripts/factory/dispatch-batch.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 
@@ -1608,6 +1611,75 @@ test('S2 a run configuration records an advisor model longer than the tier bound
   ledger.close()
 })
 test('A8', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger, 'a8', '2024-01-02T00:00:00.000Z', { advisor_model: 'p/m', advisor_granted_json: '["builder"]' }); assert.equal(advisorArmsReadout(ledger).excluded.non_build_excluded, 1); ledger.close() })
+test('dispatcharms arm vocabulary is frozen and independently ordered', () => {
+  assert.deepEqual(ADVISOR_ARMS, ['none', 'openai/gpt-6-luna', 'openai/gpt-5.6-terra', 'openai/gpt-6.1-sol'])
+  assert.equal(Object.isFrozen(ADVISOR_ARMS), true)
+  assert.throws(() => { ADVISOR_ARMS.push('x') })
+})
+
+test('dispatcharms CLI defaults to the four arms and preserves explicit order and library omission', () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  assert.equal(advisorArmsReadout(ledger).next_arm, null)
+  ledger.close()
+  const env = { ...process.env, DEVTEAM_LEDGER_DB: dbPath }
+  const json = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--json'], { env, encoding: 'utf8' })
+  const text = spawnSync(process.execPath, [SCRIPT, 'advisor-arms'], { env, encoding: 'utf8' })
+  assert.equal(json.status, 0, json.stderr)
+  assert.equal(text.status, 0, text.stderr)
+  assert.equal(JSON.parse(json.stdout).next_arm, 'none')
+  assert.deepEqual(JSON.parse(json.stdout).arms.map(({ arm }) => arm), ADVISOR_ARMS)
+  assert.match(text.stdout, /next_arm: none/)
+  const override = ['openai/gpt-6.1-sol', 'none']
+  const explicit = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--arms', override.join(','), '--json'], { env, encoding: 'utf8' })
+  assert.equal(explicit.status, 0, explicit.stderr)
+  assert.deepEqual(JSON.parse(explicit.stdout).arms.map(({ arm }) => arm), override)
+  const malformed = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--arms', 'none,', '--json'], { env, encoding: 'utf8' })
+  assert.equal(malformed.status, 2)
+})
+
+// Kills deletion of the finally close (both branches) and mapping a degraded real read to ledger-unreadable at readAdvisorArms catch.
+test('dispatcharms real read counts history and reservations and closes on success and failure', () => {
+  const ledger = advisorArmTestRun('dispatcharms-historical', 'none')
+  const dbPath = ledger._dbPath
+  ledger.close()
+  let closes = 0
+  // Every path the spy opens is one this test created, so the real ledger is never reachable.
+  const sandboxPaths = new Set([dbPath])
+  const spy = (options) => {
+    assert.ok(sandboxPaths.has(options.dbPath), `spy opened ${options.dbPath}, outside this test`)
+    const handle = openLedger({ ...options, dbPath: options.dbPath })
+    const close = handle.close.bind(handle)
+    handle.close = () => { closes++; return close() }
+    return handle
+  }
+  assert.throws(() => spy({ dbPath: join(nextDir(), 'outside.db') }), /outside this test/)
+  const result = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath } }, inFlight: ['openai/gpt-6-luna'], open: spy })
+  assert.equal(result.reason, null)
+  assert.equal(result.readout.arms.find(({ arm }) => arm === 'none').runs, 1)
+  assert.equal(result.readout.arms.find(({ arm }) => arm === 'openai/gpt-6-luna').in_flight, 1)
+  assert.equal(result.readout.next_arm, 'openai/gpt-5.6-terra')
+  assert.equal(closes, 1)
+  closes = 0
+  const failed = readDispatchAdvisorArms({
+    deps: { env: { DEVTEAM_LEDGER_DB: dbPath } },
+    open: (options) => {
+      const handle = spy(options)
+      handle.dumpTable = () => { throw new Error('injected read failure') }
+      return handle
+    },
+  })
+  assert.equal(failed.reason, 'ledger-unreadable')
+  assert.equal(closes, 1)
+  closes = 0
+  const corruptPath = join(nextDir(), 'corrupt.db')
+  writeFileSync(corruptPath, 'not a sqlite database')
+  sandboxPaths.add(corruptPath)
+  const degraded = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: corruptPath } }, open: spy })
+  assert.equal(degraded.reason, 'ledger-degraded')
+  assert.equal(degraded.readout, null)
+})
+
 test('A9', () => {
   const ledger = advisorArmTestRun('a9-1', 'first')
   for (let i = 2; i <= 3; i++) advisorArmTestRun(`a9-${i}`, 'first', '["builder"]', ledger)

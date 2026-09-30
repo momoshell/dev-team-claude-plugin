@@ -865,6 +865,7 @@ async function dispatchFixture({
   spawnedOut = null,
   random = null,
   timeline = null,
+  readAdvisorArms = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -948,6 +949,7 @@ async function dispatchFixture({
     } } : {}),
     ...(assertQuiet ? { assertQuiet } : {}),
     ...(random ? { random } : {}),
+    ...(readAdvisorArms ? { readAdvisorArms } : {}),
     log: (line) => {
       const text = String(line)
       logs.push(text)

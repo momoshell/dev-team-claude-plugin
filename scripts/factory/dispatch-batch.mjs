@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
+import { slotStore } from '../../crew/reclaim.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
@@ -821,7 +822,11 @@ function spawnBackground({ file, args, cwd, env, logPath }) {
   }
 }
 
-export const ADVISOR_ROTATION_REASONS = Object.freeze(['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid'])
+export const ADVISOR_ROTATION_REASONS = Object.freeze(['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
+export const ADVISOR_RESERVATION_MAX_AGE_MS = 60000
+export const ADVISOR_LEASE_WAIT_MS = 5000
+const ADVISOR_LEASE_POLL_MS = 50
+// lean: reservations expire after 60 seconds; durable boot acknowledgements if pick-to-row latency approaches the bound
 
 // lean: rescan ledger tables per eligible wave lane; snapshot the wave if dispatch latency grows with wave size
 export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {}) {
@@ -831,22 +836,133 @@ export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {})
     if (!d.existsSync(dbPath)) return { readout: null, reason: 'ledger-absent' }
     const ledger = open({ dbPath, readOnly: true, stderr: { write: () => {} } })
     try {
+      const sessions = ledger.dumpTable('sessions')
+      const now = (d.now || Date.now)()
+      // One session acknowledges one reservation, and never one whose arm differs from the arm it recorded:
+      // two dispatches reserving the same lane name must not both be cleared by the first session to land.
+      const sessionArms = new Map(ledger.dumpTable('run_configurations').map((row) => [row.adw_id, row.advisor_model ?? null]))
+      const acknowledged = new Set()
+      let liveReservations = inFlight.filter((reservation) => {
+        const reserved = Date.parse(reservation.reserved_at)
+        if (now - reserved >= ADVISOR_RESERVATION_MAX_AGE_MS) return false
+        const matched = sessions.find((session) => !acknowledged.has(session) && session.task_slug === reservation.lane && Date.parse(session.started_at) >= reserved && (sessionArms.get(session.adw_id) ?? reservation.arm) === reservation.arm)
+        if (matched) acknowledged.add(matched)
+        return !matched
+      })
       const view = {
         stats: (...args) => ledger.stats(...args),
+        tableNames: (...args) => ledger.tableNames(...args),
         dumpTable: (name, ...args) => {
-          const rows = ledger.dumpTable(name, ...args)
-          if (name === 'sessions') return [...rows, ...inFlight.map((arm, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, tier: 'build', ended_at: null }))]
-          if (name === 'run_configurations') return [...rows, ...inFlight.map((arm, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, advisor_model: arm, advisor_granted_json: '["builder"]' }))]
+          const rows = name === 'sessions' ? sessions : ledger.dumpTable(name, ...args)
+          if (name === 'sessions') return [...rows, ...liveReservations.map((reservation, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, task_slug: reservation.lane, started_at: reservation.reserved_at, tier: 'build', ended_at: null }))]
+          if (name === 'run_configurations') return [...rows, ...liveReservations.map((reservation, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, advisor_model: reservation.arm, advisor_granted_json: '["builder"]' }))]
           return rows
         },
       }
-      return { readout: advisorArmsReadout(view, { arms: ADVISOR_ARMS }), reason: null }
+      const readout = advisorArmsReadout(view, { arms: ADVISOR_ARMS })
+      if (readout.window.started_at !== null) {
+        const windowEpoch = Date.parse(readout.window.started_at)
+        liveReservations = liveReservations.filter((reservation) => Date.parse(reservation.reserved_at) >= windowEpoch)
+      }
+      return { readout, reason: null, reservations: liveReservations }
     } finally {
       try { ledger.close() } catch { /* Preserve the original read result or failure. */ }
     }
   } catch (error) {
     const message = String(error?.message || error)
     return { readout: null, reason: error?.reason === 'home_ledger_under_test' ? 'ledger-refused' : /degraded/i.test(message) ? 'ledger-degraded' : 'ledger-unreadable' }
+  }
+}
+
+function advisorLeasePool(d, root) {
+  return d.slots ? d.slots({ dir: root, kind: 'advisor-rotation', capacity: 1 }) : slotStore({ dir: root, kind: 'advisor-rotation', capacity: 1, deps: d })
+}
+
+// Bounded poll for the capacity-one advisor-rotation lease: a handle, or no handle and a closed reason.
+function acquireAdvisorLease(d, pool, owner) {
+  const now = d.now || Date.now
+  const sleep = d.sleep || ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms))
+  const started = now()
+  while (now() - started <= ADVISOR_LEASE_WAIT_MS) {
+    let acquired
+    try { acquired = pool.acquire({ owner }) } catch { return { handle: null, reason: 'ledger-unreadable', waited_ms: now() - started } }
+    if (acquired?.handle) return { handle: acquired.handle, reason: null, waited_ms: now() - started }
+    if (now() - started + ADVISOR_LEASE_POLL_MS > ADVISOR_LEASE_WAIT_MS) break
+    sleep(ADVISOR_LEASE_POLL_MS)
+  }
+  return { handle: null, reason: 'lease-timeout', waited_ms: now() - started }
+}
+
+// The leased reservation store: [] only when the file is absent; null when it is empty, unreadable or malformed.
+function readAdvisorReservations(d, reservationPath) {
+  let reservations
+  try {
+    const text = d.readFileSync(reservationPath, 'utf8')
+    if (!text.trim()) return null
+    reservations = JSON.parse(text)
+  } catch (error) {
+    return error?.code === 'ENOENT' ? [] : null
+  }
+  if (!Array.isArray(reservations) || reservations.some((row) => !row || typeof row !== 'object' || typeof row.lane !== 'string' || !row.lane.trim() || !ADVISOR_ARMS.includes(row.arm) || !Number.isFinite(Date.parse(row.reserved_at)))) return null
+  return reservations
+}
+
+// A wave refused before boot never uses its picks: retract exactly those records under the lease.
+// lean: retraction is best-effort; a failed retraction leaves the reservation to the 60-second expiry
+export function retractAdvisorReservations(d, records) {
+  const root = factoryStateRoot(d)
+  const reservationPath = join(root, 'advisor-reservations.json')
+  let pool
+  try { pool = advisorLeasePool(d, root) } catch { return false }
+  const { handle } = acquireAdvisorLease(d, pool, records[0]?.lane ?? 'retract')
+  if (!handle) return false
+  try {
+    const reservations = readAdvisorReservations(d, reservationPath)
+    if (reservations === null) return false
+    const kept = reservations.filter((row) => !records.some((record) => record.lane === row.lane && record.arm === row.arm && record.reserved_at === row.reserved_at))
+    d.writeFileSync(reservationPath, JSON.stringify(kept) + '\n')
+    return true
+  } catch { return false } finally {
+    try { pool.release(handle) } catch { /* lease release is best-effort */ }
+  }
+}
+
+function rotateAdvisorForLane(d, lane) {
+  const root = factoryStateRoot(d)
+  const reservationPath = join(root, 'advisor-reservations.json')
+  try { d.mkdirSync(root, { recursive: true }) } catch { return { readout: null, reason: 'ledger-unreadable', waited_ms: 0 } }
+  let pool
+  try { pool = advisorLeasePool(d, root) } catch { return { readout: null, reason: 'ledger-unreadable', waited_ms: 0 } }
+  const now = d.now || Date.now
+  let handle = null
+  try {
+    const lease = acquireAdvisorLease(d, pool, lane)
+    handle = lease.handle
+    const waited_ms = lease.waited_ms
+    if (!handle) return { readout: null, reason: lease.reason, waited_ms }
+    let reservations = readAdvisorReservations(d, reservationPath)
+    if (reservations === null) return { readout: null, reason: 'ledger-unreadable', waited_ms }
+    let rotation
+    try { rotation = d.readAdvisorArms({ deps: d, inFlight: reservations }) } catch { rotation = { readout: null, reason: 'ledger-unreadable' } }
+    const validReason = rotation && typeof rotation === 'object' && ADVISOR_ROTATION_REASONS.includes(rotation.reason)
+    const validAbstention = rotation && typeof rotation === 'object' && rotation.readout == null && validReason
+    const validReadout = rotation && typeof rotation === 'object' && rotation.readout !== null && typeof rotation.readout === 'object' && !Array.isArray(rotation.readout) && Array.isArray(rotation.readout.arms) && rotation.readout.arms.length > 0 && rotation.readout.arms.every((row) => row && typeof row === 'object' && !Array.isArray(row) && ADVISOR_ARMS.includes(row.arm)) && ADVISOR_ARMS.includes(rotation.readout.next_arm) && rotation.reason == null
+    if (!validAbstention && !validReadout) return { readout: null, reason: 'readout-invalid', waited_ms }
+    if (Array.isArray(rotation.reservations)) reservations = rotation.reservations
+    if (reservations.some((row) => !row || typeof row.lane !== 'string' || !row.lane.trim() || !ADVISOR_ARMS.includes(row.arm) || !Number.isFinite(Date.parse(row.reserved_at)))) return { readout: null, reason: 'readout-invalid', waited_ms }
+    const persistPrunedReservations = () => d.writeFileSync(reservationPath, `${JSON.stringify(reservations)}\n`)
+    if (validReadout) {
+      const reserved = { lane, arm: rotation.readout.next_arm, reserved_at: new Date(now()).toISOString() }
+      reservations.push(reserved)
+      try { d.writeFileSync(reservationPath, JSON.stringify(reservations) + '\n') } catch { return { readout: null, reason: 'ledger-unreadable', waited_ms } }
+      return { ...rotation, reservations, reserved, waited_ms }
+    }
+    if (Array.isArray(rotation.reservations)) {
+      try { persistPrunedReservations() } catch { return { readout: null, reason: 'ledger-unreadable', waited_ms } }
+    }
+    return { ...rotation, reservations, waited_ms }
+  } finally {
+    if (handle) { try { pool.release(handle) } catch { /* lease release is best-effort */ } }
   }
 }
 
@@ -4225,6 +4341,7 @@ function prepareDispatchContext(options) {
 
 async function compileDispatchWave(prepared) {
   const {
+    advisorReservations = [],
     batchDir,
     fences,
     execution,
@@ -4356,7 +4473,6 @@ async function compileDispatchWave(prepared) {
 
   const laneByName = new Map(lanes.map((lane) => [lane.lane, lane]))
   const settled = []
-  const advisorWavePicks = []
   for (const item of compiled) {
     const staffing = item.staffing || { ...ABSENT_STAFFING }
     const plan = plans.find((candidate) => candidate.lane === item.lane)
@@ -4396,18 +4512,12 @@ async function compileDispatchWave(prepared) {
     })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
     const advisorEligible = result.tier === 'build' && !Object.hasOwn(seats.advisor ?? {}, 'model')
-    let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : 'explicit-model' }
-    if (advisorEligible) {
-      try { rotation = d.readAdvisorArms({ deps: d, inFlight: advisorWavePicks }) } catch { rotation = { readout: null, reason: 'ledger-unreadable' } }
-      const validReason = rotation && typeof rotation === 'object' && ADVISOR_ROTATION_REASONS.includes(rotation.reason)
-      const emptyResult = rotation && typeof rotation === 'object' && rotation.readout == null && rotation.reason == null
-      const validAbstention = rotation && typeof rotation === 'object' && rotation.readout == null && validReason
-      const validReadout = rotation && typeof rotation === 'object' && rotation.readout !== null && typeof rotation.readout === 'object' && !Array.isArray(rotation.readout) && Array.isArray(rotation.readout.arms) && rotation.readout.arms.length > 0 && rotation.readout.arms.every((row) => row && typeof row === 'object' && ADVISOR_ARMS.includes(row.arm)) && ADVISOR_ARMS.includes(rotation.readout.next_arm) && rotation.reason == null
-      if (!validAbstention && !validReadout || emptyResult) rotation = { readout: null, reason: 'readout-invalid' }
-    }
+    let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : 'explicit-model', waited_ms: 0 }
+    if (advisorEligible) rotation = rotateAdvisorForLane(d, item.lane)
+    if (rotation.reserved) advisorReservations.push(rotation.reserved)
     const arm = rotation.readout?.next_arm ?? null
-    if (arm !== null) { seats.advisor = { ...seats.advisor, model: arm }; advisorWavePicks.push(arm) }
-    d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssuranceCanonical || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)} force_reason=${forceReason || 'none'} advisor_arm=${arm ?? 'unmeasured'} advisor_from=${arm ? 'rotation' : 'none'} advisor_reason=${arm ? 'none' : rotation.reason}`)
+    if (arm !== null) seats.advisor = { ...seats.advisor, model: arm }
+    d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssuranceCanonical || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)} force_reason=${forceReason || 'none'} advisor_lease_waited=${rotation.waited_ms ?? 0} advisor_arm=${arm ?? 'unmeasured'} advisor_from=${arm ? 'rotation' : 'none'} advisor_reason=${arm ? 'none' : rotation.reason}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
@@ -4658,7 +4768,12 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     deps,
   })
   if (prepared.kind === 'terminal') return prepared.result
-  const compiled = await compileDispatchWave(prepared)
+  const advisorReservations = []
+  let compiled
+  try { compiled = await compileDispatchWave({ ...prepared, advisorReservations }) } catch (error) {
+    if (advisorReservations.length > 0) retractAdvisorReservations(prepared.d, advisorReservations)
+    throw error
+  }
   return launchDispatchWave(compiled)
 }
 

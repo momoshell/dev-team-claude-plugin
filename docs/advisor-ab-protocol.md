@@ -12,7 +12,7 @@ empty `incomplete` array.
 ## Implementation files
 
 - `scripts/factory/ledger.mjs`
-- `test/factory-ledger.test.mjs`
+- `test/factory-ledger-advisor.test.mjs`
 
 ## Arms
 
@@ -25,12 +25,11 @@ empty `incomplete` array.
 
 ## Build-run arm readout
 
-Run `node scripts/factory/ledger.mjs advisor-arms [--arms <arm,...>] [--json]`
-to compare recorded advisor arms. Only build-tier runs with a recorded advisor
+Run `node scripts/factory/ledger.mjs advisor-arms [--arms <arm,...>] [--json] [--since <iso>]` to compare recorded advisor arms. Record an operator window with `node scripts/factory/ledger.mjs advisor-arms --start-window [--note <text>]`; each call appends evidence with its own `window_id`, including calls at the same instant, and a JSONL replay never duplicates a recorded window. `--since` takes precedence over the latest recorded window. Otherwise the latest recorded window (greatest parsed start instant) is used; with neither, no time filter is applied. The JSON readout reports `window.started_at` and its `source` (`since`, `recorded`, or null), plus `excluded.before_window`. Sessions beginning before the selected instant are excluded before configuration attribution, for completed and in-flight runs alike. An older read-only ledger without `advisor_ab_windows` is treated as having no recorded window; no table is created during that read. Only build-tier runs with a recorded advisor
 model and a recorded builder grant enter an arm. Runs without a recorded
 configuration/model and runs with absent, malformed, or non-builder grants are
 reported as exclusions; non-build tiers are excluded. Other rates are descriptive and withheld below the separate 12-finished-run arm floor. Rounds rates require 12 measured finished runs; `rounds_unmeasured_runs` counts unmeasured finished runs. `build_rounds_absent_reason` is `no-measured-rounds` at zero measured runs, `below-run-floor` below twelve, and `null` otherwise. In-flight runs are excluded from all rounds counters. With `--arms`, `next_arm`
-recommends the listed arm with the fewest eligible runs (ties keep list order). Without `--arms`, the default order is `none`, `openai/gpt-6-luna`, `openai/gpt-5.6-terra`, `openai/gpt-6.1-sol`; dispatch uses this same order and completed-plus-in-flight counts. It rotates only settled build-tier lanes without a named advisor, and unreadable evidence leaves seats untouched.
+recommends the listed arm with the fewest eligible runs (ties keep list order). Without `--arms`, the default order is `none`, `openai/gpt-6-luna`, `openai/gpt-5.6-terra`, `openai/gpt-6.1-sol`; dispatch uses this same order and completed-plus-in-flight counts. It rotates only settled build-tier lanes without a named advisor, and unreadable evidence leaves seats untouched. Eligible picks are serialized across dispatch processes by a capacity-one `advisor-rotation` lease. A JSON reservation records lane, arm, and reserved instant until a matching session (same `task_slug` and start instant at/after reservation) acknowledges it or it reaches the 60-second expiry. Damaged reservation evidence fails closed for operator repair; contention gives up after five seconds. A dispatch wave refused before boot retracts the reservations it made under the same lease; a lane whose boot fails after the wave compiled keeps its reservation until the expiry.
 Lane spend is derived from per-model `agent_sessions` rows, not session cost
 fields; every row in a finished run must have a session id, complete usage and
 a uniquely priced model for that run to count. An arm may show a priced subtotal alongside
@@ -140,6 +139,4 @@ never an advisor verdict.
 
 ## Out of scope
 
-This protocol neither runs the experiment nor takes the ratification decision.
-It adds no ledger table: the crew journal already carries every advisor note
-with its epoch and tier.
+This protocol neither runs the experiment nor takes the ratification decision. Reviewer `advisor-ab` continues to use the crew journal and adds no ledger table. The separate `advisor-arms --start-window` operator evidence is stored append-only in `advisor_ab_windows`.

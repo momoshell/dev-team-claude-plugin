@@ -112,6 +112,7 @@ import {
   resolveRequestedTier,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
+import { slotStore } from '../crew/reclaim.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 import { fileURLToPath } from 'node:url'
@@ -866,6 +867,7 @@ async function dispatchFixture({
   random = null,
   timeline = null,
   readAdvisorArms = null,
+  rotationDeps = {},
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -881,6 +883,7 @@ async function dispatchFixture({
   }
   const logs = []
   const wrote = new Map()
+  const rotationFiles = rotationDeps.reservationFiles ?? new Map()
   const appended = []
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
   const defaultOutcomeExists = (path) => {
@@ -900,6 +903,10 @@ async function dispatchFixture({
     readFileSync: (path, encoding) => {
       const text = String(path)
       readObserver(text)
+      if (text.endsWith('advisor-reservations.json')) {
+        if (rotationFiles.has(text)) return rotationFiles.get(text)
+        return readFileSync(text, encoding || 'utf8')
+      }
       if (text.endsWith(REQUEST_SUFFIX) && text.startsWith(batch)) {
         const name = basenameOf(text)
         const lane = name.slice(0, -REQUEST_SUFFIX.length)
@@ -923,7 +930,12 @@ async function dispatchFixture({
       }
       return readFileSync(text, encoding || 'utf8')
     },
-    writeFileSync: (path, content) => { wrote.set(String(path), String(content)); if (writeFile) writeFile(path, content) },
+    writeFileSync: (path, content) => {
+      const text = String(path)
+      wrote.set(text, String(content))
+      if (writeFile) writeFile(path, content)
+      if (text.endsWith('advisor-reservations.json')) rotationFiles.set(text, String(content))
+    },
     appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }); if (appendFile) appendFile(path, content) },
     spawn: (call) => {
       recordSpawn(call)
@@ -950,6 +962,14 @@ async function dispatchFixture({
     ...(assertQuiet ? { assertQuiet } : {}),
     ...(random ? { random } : {}),
     ...(readAdvisorArms ? { readAdvisorArms } : {}),
+    slots: rotationDeps.slots || (({ dir, kind, capacity }) => {
+      if (kind === 'advisor-rotation') {
+        if (capacity !== 1) throw new Error('unexpected advisor slot capacity')
+        return { acquire: () => ({ handle: { kind, token: 'test' } }), release: () => true }
+      }
+      return slotStore({ dir, kind, capacity })
+    }),
+    ...rotationDeps,
     log: (line) => {
       const text = String(line)
       logs.push(text)

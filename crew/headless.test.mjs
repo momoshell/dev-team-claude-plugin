@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { spawn as realSpawn } from 'node:child_process'
+import { execFileSync, spawn as realSpawn } from 'node:child_process'
 import {
   attributeExit, censusFileOperands, skillReadsOf, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
@@ -3495,11 +3495,114 @@ test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence 
   assert.deepEqual(suitePolicyReport(null), { suite_policy: null, suite_policy_absent: null })
 })
 
+// MUTATION P1: restore raw text as the builder target validator input.
+test('P1 builder admits a fenced test with output redirection', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test a.test.mjs > out.txt 2>&1', fence: ['a.test.mjs'] }).decision, 'admit')
+})
+// MUTATION P2: remove tail from BUILDER_SINK_COMMANDS.
+test('P2 builder admits a fenced test through a neutral tail pipeline', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test a.test.mjs 2>&1 | tail -20', fence: ['a.test.mjs'] }).decision, 'admit')
+})
+// MUTATION P3: restore refusal of scoped tests outside the recorded fence.
+test('P3 builder admits a concrete test outside its recorded fence', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence: ['a.test.mjs'] }).decision, 'admit')
+})
+// MUTATION P4: change the unfenced-test reason to fenced-test.
+test('P4 builder names the unfenced scope reason', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/drive.test.mjs', fence: ['a.test.mjs'] }).reason, 'unfenced-test')
+})
+// MUTATION P5: admit a suite in the fenced ownership branch.
+test('P5 builder continues to refuse the declared suite through a pipeline', () => {
+  const verdict = suiteRunPolicy({ role: 'builder', command: 'npm test 2>&1 | tail -5', fence: ['a.test.mjs'], suiteCommand: 'npm test' })
+  assert.equal(verdict.decision, 'refuse')
+  assert.equal(verdict.kind, 'suite')
+})
+// MUTATION P6: treat invalid redirected Node targets as a scoped test.
+test('P6 builder refuses quoted globs with output redirection', () => {
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test "**/*.test.mjs" > out.txt 2>&1', fence: ['a.test.mjs'] }).decision, 'refuse')
+})
+// MUTATION P7: enable builder recognition for every role.
+test('P7 reviewer retains refusal with redirected tests after an opaque cd', () => {
+  assert.equal(suiteRunPolicy({ role: 'reviewer', command: 'cd /x && node --test a.test.mjs > out.txt 2>&1', fence: ['a.test.mjs'] }).decision, 'refuse')
+})
+
+test('builder output redirection, substitutions and neutral sink grammar stays narrow', () => {
+  const policy = (command, fence = ['a.test.mjs'], taskDir = null) => suiteRunPolicy({ role: 'builder', command, fence, taskDir, gatePath: '/task/gate.mjs', suiteCommand: 'npm test' })
+  const admitted = [
+    'node --test a.test.mjs >out.txt', 'node --test >out.txt a.test.mjs', 'node --test a.test.mjs >> out.txt',
+    'node --test a.test.mjs 2>err.txt', 'node --test a.test.mjs 2>> err.txt',
+    'node --test a.test.mjs &>all.txt', 'node --test a.test.mjs > out.txt 2>&1',
+    'node --test a.test.mjs >&2', 'node --test a.test.mjs 2>&1',
+    'node --test a.test.mjs > "out file.txt"', 'node --test a.test.mjs | head -5',
+    'node --test a.test.mjs | grep "x > y"', 'node --test a.test.mjs | tail -2 | head -1',
+  ]
+  for (const command of admitted) {
+    assert.deepEqual([policy(command).decision, policy(command).reason], ['admit', 'fenced-test'], command)
+  }
+  for (const command of [
+    'node --test a.test.mjs >', 'node --test a.test.mjs <in.txt',
+    'node --test a.test.mjs && tail -5',
+    'node --test a.test.mjs; grep x', 'node --test a.test.mjs | /bin/tail',
+    'node --test --require=evil a.test.mjs >out.txt',
+    'node --test --test-reporter=evil a.test.mjs >out.txt',
+    'cd /x && node --test a.test.mjs >out.txt',
+    'echo x && node --test a.test.mjs >out.txt', 'git status && node --test a.test.mjs >out.txt',
+  ]) assert.notEqual(policy(command).decision, 'admit', command)
+  const substitutions = [
+    'node --test a.test.mjs > "$(npm test)"',
+    'node --test a.test.mjs >$(npm${IFS}test)',
+    'node --test a.test.mjs >(npm${IFS}test)',
+    'node --test a.test.mjs > `npm${IFS}test`',
+    'node --test a.test.mjs | tail $(npm test)',
+    'node --test a.test.mjs | grep "$(npm test)"',
+  ]
+  // MUTATION: remove substitution rejection from redirection targets and sink segments.
+  for (const command of substitutions) assert.notEqual(policy(command).decision, 'admit', command)
+  assert.deepEqual([policy("node --test a.test.mjs 2>&1 | grep '$(x)'").decision, policy("node --test a.test.mjs 2>&1 | grep '$(x)'").reason], ['admit', 'fenced-test'])
+  for (const command of ['node --test "a\\>b.test.mjs"', 'node --test a\\>b.test.mjs']) {
+    assert.deepEqual([policy(command).kind, policy(command).reason], ['scoped-test', 'unfenced-test'], command)
+  }
+  assert.equal(policy('node --test a.test.mjs | tail >out.txt').decision, 'unrecognised')
+  assert.equal(policy('node --test crew/drive.test.mjs >out.txt', ['a.test.mjs']).reason, 'unfenced-test')
+  assert.equal(policy('node --test a.test.mjs "**/*.test.mjs" >out.txt').decision, 'refuse')
+  assert.equal(policy('node --test a.test.mjs 2>&1 | tail >log').decision, 'unrecognised')
+  assert.equal(policy('node --test a.test.mjs 2>&1 | tail').kind, 'scoped-test')
+  const refusedSuiteReason = "suite-run-not-owned: the driver's gate-proof stage carries this evidence at /task/gate.mjs"
+  assert.deepEqual([policy('node --test > out.txt 2>&1').decision, policy('node --test > out.txt 2>&1').reason], ['refuse', refusedSuiteReason])
+  const taskDir = '/tmp/d6-lane/task'
+  assert.deepEqual([policy(`node --test ${taskDir}/probe.test.mjs > out.txt`, ['a.test.mjs'], taskDir).decision,
+    policy(`node --test ${taskDir}/probe.test.mjs > out.txt`, ['a.test.mjs'], taskDir).reason], ['admit', 'task-local'])
+  const mixed = `node --test ${taskDir}/probe.test.mjs a.test.mjs > out.txt`
+  assert.deepEqual([policy(mixed, ['a.test.mjs'], taskDir).decision, policy(mixed, ['a.test.mjs'], taskDir).reason], ['admit', 'unfenced-test'])
+  const unsafeImport = 'node --test --import ./x.mjs a.test.mjs > out.txt'
+  assert.deepEqual([policy(unsafeImport).decision, policy(unsafeImport).reason], ['refuse', refusedSuiteReason])
+  assert.equal(suiteRunPolicy({ role: 'reviewer', command: 'node --test a.test.mjs >out.txt', fence: ['a.test.mjs'] }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ role: 'planner', command: 'node --test a.test.mjs >out.txt', fence: ['a.test.mjs'] }).decision, 'admit')
+})
+
+test('role-less and non-builder policies retain old outcomes for builder grammar examples', () => {
+  const commandTable = [
+    ['node --test a.test.mjs > out.txt 2>&1', 'suite', 'refuse', 'suite'],
+    ['node --test a.test.mjs 2>&1 | tail -20', 'suite', 'refuse', 'suite'],
+    ['node --test a.test.mjs | tail -20', null, 'unrecognised', null],
+    ['npm test 2>&1 | tail -5', 'suite', 'refuse', 'suite'],
+    ['cd /x && node --test a.test.mjs > out.txt 2>&1', 'suite', 'refuse', 'suite'],
+  ]
+  for (const [command, kind, reviewerDecision, reviewerKind] of commandTable) {
+    assert.equal(recogniseSuiteInvocation(command), kind, command)
+    const reviewer = suiteRunPolicy({ role: 'reviewer', command, fence: ['a.test.mjs'], suiteCommand: 'npm test' })
+    assert.equal(reviewer.decision, reviewerDecision, command)
+    assert.equal(reviewer.kind, reviewerKind, command)
+  }
+  const planner = suiteRunPolicy({ role: 'planner', command: 'node --test a.test.mjs > out.txt 2>&1', fence: ['a.test.mjs'] })
+  assert.deepEqual([planner.decision, planner.reason, planner.kind, planner.blind], ['admit', 'first-run', 'suite', false])
+})
+
 test('b853 shell-word decoding protects quoted test targets and fails closed', () => {
   const gatePath = '/tmp/b853/gate.mjs'
   const apostropheCommand = `node --test "crew/foo'bar.test.mjs"`
   assert.deepEqual(testTargets(apostropheCommand), ["crew/foo'bar.test.mjs"])
-  assert.equal(suiteRunPolicy({ role: 'builder', command: apostropheCommand, fence: ['crew/foobar.test.mjs'], gatePath }).decision, 'refuse')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: apostropheCommand, fence: ['crew/foobar.test.mjs'], gatePath }).decision, 'admit')
   assert.equal(suiteRunPolicy({ role: 'builder', command: apostropheCommand, fence: ["crew/foo'bar.test.mjs"], gatePath }).decision, 'admit')
 
   for (const [command, target] of [
@@ -3545,16 +3648,20 @@ test('b416 RV1-2 suite policy coverage guards ownership, laundering, and spent p
   }
   assert.equal(suiteRunPolicy({ role: 'builder', command: 'node --test crew/headless.test.mjs', fence, gatePath }).decision, 'admit')
   assert.equal(suiteRunPolicy({ role: 'builder', command: `node ${gatePath}`, fence, gatePath }).decision, 'admit')
-  for (const command of ['node --test crew/daemon.test.mjs', 'node --test crew/headless.test.mjs crew/daemon.test.mjs', 'npm test']) {
-    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse')
+  for (const command of ['node --test crew/daemon.test.mjs', 'node --test crew/headless.test.mjs crew/daemon.test.mjs']) {
+    const verdict = suiteRunPolicy({ role: 'builder', command, fence, gatePath })
+    assert.equal(verdict.decision, 'admit')
+    assert.equal(verdict.reason, 'unfenced-test')
   }
+  assert.equal(suiteRunPolicy({ role: 'builder', command: 'npm test', fence, gatePath }).decision, 'refuse')
   assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', ranBefore: 0, gatePath }).decision, 'admit')
   assert.equal(suiteRunPolicy({ role: 'planner', command: 'npm test', ranBefore: 1, gatePath }).decision, 'refuse')
   const plannerGate = suiteRunPolicy({ role: 'planner', command: `node ${gatePath}`, ranBefore: 1, gatePath })
   assert.deepEqual({ decision: plannerGate.decision, reason: plannerGate.reason, kind: plannerGate.kind }, { decision: 'admit', reason: 'gate', kind: 'gate' })
-  for (const command of [`node ${gatePath} && npm test`, `node ${gatePath}; node --test crew/daemon.test.mjs`]) {
-    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse')
-  }
+  assert.equal(suiteRunPolicy({ role: 'builder', command: `node ${gatePath} && npm test`, fence, gatePath }).decision, 'refuse')
+  const gateAndRepoTest = `node ${gatePath}; node --test crew/daemon.test.mjs`
+  assert.equal(suiteRunPolicy({ role: 'builder', command: gateAndRepoTest, fence, gatePath }).decision, 'admit')
+  assert.equal(suiteRunPolicy({ role: 'builder', command: gateAndRepoTest, fence, gatePath }).reason, 'unfenced-test')
   for (const command of [`node ${gatePath} && bash tools/run-everything.sh`, 'node --test crew/headless.test.mjs && bash tools/run-everything.sh']) {
     assert.equal(recogniseSuiteInvocation(command, { gatePath, suiteCommand: 'npm test' }), null)
     assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath, suiteCommand: 'npm test' }).decision, 'unrecognised')
@@ -3600,10 +3707,11 @@ test('a value option is not an escape hatch', () => {
   const inFence = 'crew/headless.test.mjs'
   const outOfFence = 'crew/daemon.test.mjs'
   const options = { role: 'builder', fence: [inFence], gatePath, suiteCommand: 'npm test' }
-  for (const command of ['node --test --test-name-pattern b485', `node --test --test-name-pattern b485 ${outOfFence}`]) {
-    assert.equal(recogniseSuiteInvocation(command, options), command.endsWith(outOfFence) ? 'scoped-test' : 'suite', command)
-    assert.equal(suiteRunPolicy({ ...options, command }).decision, 'refuse', command)
-  }
+  assert.equal(suiteRunPolicy({ ...options, command: 'node --test --test-name-pattern b485' }).decision, 'refuse')
+  const outsideCommand = `node --test --test-name-pattern b485 ${outOfFence}`
+  assert.equal(recogniseSuiteInvocation(outsideCommand, options), 'scoped-test', outsideCommand)
+  assert.equal(suiteRunPolicy({ ...options, command: outsideCommand }).decision, 'admit', outsideCommand)
+  assert.equal(suiteRunPolicy({ ...options, command: outsideCommand }).reason, 'unfenced-test')
   const consumed = `node --test --test-name-pattern ${inFence}`
   assert.equal(testTargets(consumed), null)
   assert.equal(recogniseSuiteInvocation(consumed, options), 'suite')
@@ -3680,12 +3788,13 @@ test('a traversal out of the task dir is refused', () => {
   }
 })
 
-test('a command mixing an own-task probe with a repo test is fence checked, not admitted', () => {
+test('a command mixing an own-task probe with a repo test is admitted with scope context', () => {
   const taskDir = '/tmp/b502-lane/task'
   const command = `node --test ${taskDir}/probe.test.mjs crew/headless.test.mjs`
   const options = { role: 'builder', command, taskDir, fence: [], gatePath: `${taskDir}/gate.mjs`, suiteCommand: 'npm test' }
   assert.equal(recogniseSuiteInvocation(command, options), 'scoped-test')
-  assert.equal(suiteRunPolicy(options).decision, 'refuse')
+  assert.equal(suiteRunPolicy(options).decision, 'admit')
+  assert.equal(suiteRunPolicy(options).reason, 'unfenced-test')
 })
 
 test('a gate invocation compounded with an own-task probe is a suite run', () => {
@@ -4156,6 +4265,70 @@ test('#929 the recorded corpus is adjudicated: every stated verdict matches the 
   }
 })
 
+const HISTORICAL_CAPTURE_ABSENCE = 'the historical capture 07b28cbc is not in this object store (shallow clone)'
+function historicalCaptureSkipReason(run = execFileSync) {
+  try {
+    run('git', ['cat-file', '-e', '07b28cbcfa94771680b59b9639d40732514f59da^{commit}'])
+    return null
+  } catch (error) {
+    if (error?.status === 128) return HISTORICAL_CAPTURE_ABSENCE
+    throw error
+  }
+}
+
+test('historical corpus comparison skips with named absence when commit probe fails', () => {
+  let invocation = null
+  const reason = historicalCaptureSkipReason((...args) => {
+    invocation = args
+    throw Object.assign(new Error('missing object'), { status: 128 })
+  })
+  assert.deepEqual(invocation, ['git', ['cat-file', '-e', '07b28cbcfa94771680b59b9639d40732514f59da^{commit}']])
+  assert.equal(reason, 'the historical capture 07b28cbc is not in this object store (shallow clone)')
+  for (const error of [Object.assign(new Error('denied'), { code: 'EPERM' }), new Error('unknown'), Object.assign(new Error('interrupted'), { signal: 'SIGTERM' })]) {
+    assert.throws(() => historicalCaptureSkipReason(() => { throw error }), (actual) => actual === error)
+  }
+  assert.equal(historicalCaptureSkipReason(() => undefined), null)
+})
+
+test('the suite corpus changes only builder decisions from the historical capture', (t) => {
+  const unavailable = historicalCaptureSkipReason()
+  if (unavailable !== null) return t.skip(unavailable)
+  const baseline = execFileSync('git', ['show', '07b28cbcfa94771680b59b9639d40732514f59da:test/fixtures/suite-policy-corpus.jsonl'], { encoding: 'utf8' })
+  const oldLines = baseline.split('\n')
+  const newLines = readFileSync(CORPUS_PATH, 'utf8').split('\n')
+  assert.equal(newLines[0], oldLines[0])
+  assert.equal(oldLines.length, newLines.length)
+  const transitions = { 'refuse->unrecognised': 0, 'refuse->admit': 0, changed: 0 }
+  for (let index = 1; index < oldLines.length - 1; index += 1) {
+    const oldEntry = JSON.parse(oldLines[index])
+    const newEntry = JSON.parse(newLines[index])
+    if (newEntry.id === '36527ef6f69c') {
+      assert.deepEqual([newEntry.decisions.builder, CORPUS_CONTEXTS.builder(newEntry.command).decision], ['unrecognised', 'unrecognised'])
+    }
+    if (oldEntry.decisions.builder !== newEntry.decisions.builder) {
+      if (oldEntry.decisions.builder === 'refuse' && newEntry.decisions.builder === 'unrecognised') transitions['refuse->unrecognised'] += 1
+      else if (oldEntry.decisions.builder === 'refuse' && newEntry.decisions.builder === 'admit') transitions['refuse->admit'] += 1
+      else assert.fail(`${oldEntry.id}: unexpected builder transition ${oldEntry.decisions.builder} -> ${newEntry.decisions.builder}`)
+      transitions.changed += 1
+    }
+    const restored = newLines[index].replace(/("builder":")[^"]*(")/, `$1${oldEntry.decisions.builder}$2`)
+    assert.equal(restored, oldLines[index], `${oldEntry.id} changed outside decisions.builder`)
+  }
+  assert.equal(oldLines.length - 2, 488)
+  // One dispatch-time count treated a grep joined by && as a pipeline sink; the
+  // connector-aware scanner correctly leaves it opaque, yielding 177/17 instead of 176/18.
+  assert.deepEqual(transitions, { 'refuse->unrecognised': 177, 'refuse->admit': 17, changed: 194 })
+})
+
+// MUTATION: treat tail/head/grep as a sink regardless of the preceding connector → the full command admits.
+test('corpus row 36527ef6f69c keeps grep joined by && opaque', () => {
+  const full = 'grep -n "tracked symlinks and deleted entries do not block brief discovery" test/factory-make-brief.test.mjs && node --test --test-reporter=tap --test-name-pattern="tracked symlinks and deleted entries" test/factory-make-brief.test.mjs 2>&1 | tail -12'
+  const testOnly = 'node --test --test-reporter=tap --test-name-pattern="tracked symlinks and deleted entries" test/factory-make-brief.test.mjs 2>&1 | tail -12'
+  const policy = (command) => suiteRunPolicy({ role: 'builder', command, fence: [], suiteCommand: 'npm test' })
+  assert.equal(policy(full).decision, 'unrecognised')
+  assert.deepEqual([policy(testOnly).decision, policy(testOnly).reason], ['admit', 'unfenced-test'])
+})
+
 test('#929 every corpus entry states a complete verdict, a role and its source stream', () => {
   const ids = new Set()
   for (const entry of CORPUS) {
@@ -4242,11 +4415,10 @@ test('#929 the cd-then-suite family refuses for the builder in all three joiners
   }
 })
 
-// The RECORDED half of the same shape: every family member refuses for the builder, and
-// did so under the old one-run allowance too — every real spelling carries a `2>&1` or
-// a `>` INSIDE its segment, so not one recorded command was ever a bare declared run.
-// That measurement is why the allowance is gone.
-test('#929 the recorded cd-then-test-run family refuses for the builder', () => {
+// Recorded family rows stay unrecognised for the builder: the opaque `cd` segment is
+// never laundered, even though output stripping makes the adjacent Node segment a
+// scoped-test. The other half of the command remains unreadable to the policy.
+test('the recorded cd-then-test-run family matches builder policy', () => {
   const family = CORPUS.filter((entry) => corpusIsFamily(entry.command))
   assert.ok(family.length >= 100, `family of ${family.length}`)
   assert.equal(family.length, CORPUS_HEADER.cd_then_test_family_count)

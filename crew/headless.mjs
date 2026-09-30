@@ -1243,11 +1243,12 @@ export function fenceCovers(fence, target) {
 // its own pattern, and the fragment `npm test" plan.md` then read as a REAL
 // suite run — the third of three ways one grep killed a lane. An unterminated
 // quote keeps the rest of the string in that quote, which is what the shell does.
-export function splitShellCommands(command) {
+function splitShellParts(command) {
   const source = String(command ?? '')
   const parts = []
   let current = ''
   let quote = null
+  let preceding = null
   for (let index = 0; index < source.length; index += 1) {
     const ch = source[index]
     if (quote === null && ch === '\\' && index + 1 < source.length) {
@@ -1258,12 +1259,89 @@ export function splitShellCommands(command) {
     if (quote === null && (ch === '"' || ch === "'")) { quote = ch; current += ch; continue }
     if (quote !== null) { if (ch === quote) quote = null; current += ch; continue }
     const two = source.slice(index, index + 2)
-    if (two === '&&' || two === '||') { parts.push(current); current = ''; index += 1; continue }
-    if (ch === ';' || ch === '|' || ch === '\n') { parts.push(current); current = ''; continue }
+    if (two === '&&' || two === '||') { parts.push({ text: current, preceding }); current = ''; preceding = two; index += 1; continue }
+    if (ch === ';' || ch === '|' || ch === '\n') { parts.push({ text: current, preceding }); current = ''; preceding = ch; continue }
     current += ch
   }
-  parts.push(current)
-  return parts.map((part) => part.trim()).filter(Boolean)
+  parts.push({ text: current, preceding })
+  return parts.map((part) => ({ ...part, text: part.text.trim() })).filter((part) => part.text)
+}
+
+export function splitShellCommands(command) {
+  return splitShellParts(command).map(({ text }) => text)
+}
+
+const BUILDER_SINK_COMMANDS = new Set(['tail', 'head', 'grep'])
+
+function stripOutputRedirections(text) {
+  const source = String(text ?? '')
+  let out = ''
+  let quote = null
+  for (let i = 0; i < source.length;) {
+    const ch = source[i]
+    if (ch === '\\' && quote !== "'") { out += source.slice(i, i + 2); i += 2; continue }
+    if (quote) { out += ch; if (ch === quote) quote = null; i += 1; continue }
+    if (ch === "'" || ch === '"') { quote = ch; out += ch; i += 1; continue }
+    const descriptorAtWord = i === 0 || /\s|[;|&]/.test(source[i - 1])
+    const operator = source.startsWith('2>&1', i) && descriptorAtWord ? '2>&1'
+      : source.startsWith('>&2', i) ? '>&2'
+        : source.startsWith('&>', i) ? '&>'
+          : source.startsWith('2>>', i) && descriptorAtWord ? '2>>'
+            : source.startsWith('2>', i) && descriptorAtWord ? '2>'
+              : source.startsWith('>>', i) ? '>>' : ch === '>' ? '>' : null
+    if (!operator) { out += ch; i += 1; continue }
+    let targetStart = i + operator.length
+    while (/\s/.test(source[targetStart] ?? '') && source[targetStart] !== '\n') targetStart += 1
+    if (operator === '2>&1' || operator === '>&2') { i = targetStart; continue }
+    let end = targetStart
+    let targetQuote = null
+    let substitution = source.startsWith('(', end)
+    while (end < source.length) {
+      const targetChar = source[end]
+      if (targetChar === '\\' && targetQuote !== "'" && end + 1 < source.length) { end += 2; continue }
+      if (targetQuote === "'") { if (targetChar === "'") targetQuote = null; end += 1; continue }
+      if (targetQuote === '"') {
+        if (targetChar === '"') { targetQuote = null; end += 1; continue }
+        if (targetChar === '`' || (targetChar === '$' && source[end + 1] === '(')) substitution = true
+        end += 1
+        continue
+      }
+      if (targetChar === "'" || targetChar === '"') { targetQuote = targetChar; end += 1; continue }
+      if (/\s/.test(targetChar) || ';|&<>'.includes(targetChar)) break
+      if (targetChar === '`' || (targetChar === '$' && source[end + 1] === '(')) substitution = true
+      end += 1
+    }
+    if (targetQuote !== null || end === targetStart || substitution) { out += source.slice(i); break }
+    i = end
+  }
+  return out
+}
+
+function hasUnquotedRedirection(text) {
+  let quote = null
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index]
+    if (ch === '\\' && quote !== "'" && index + 1 < text.length) { index += 1; continue }
+    if (quote === "'") { if (ch === "'") quote = null; continue }
+    if (quote === '"') {
+      if (ch === '"') { quote = null; continue }
+      if (ch === '`' || text.startsWith('$(', index)) return true
+      continue
+    }
+    if (ch === "'") { quote = ch; continue }
+    if (ch === '"') { quote = ch; continue }
+    if (ch === '`' || text.startsWith('$(', index) || text.startsWith('<(', index) || text.startsWith('>(', index)) return true
+    if (ch === '<' || ch === '>') return true
+  }
+  return false
+}
+
+function neutralBuilderSink(part) {
+  if (part.preceding !== '|') return false
+  const text = part.text
+  if (hasUnquotedRedirection(text)) return false
+  const command = commandTokens(executableText(text))[0]
+  return BUILDER_SINK_COMMANDS.has(command)
 }
 
 // What a segment MENTIONS is not what it RUNS (#929). Quoted spans are ARGUMENTS
@@ -1335,7 +1413,7 @@ function runsDeclaredSuite(tokens, suiteCommand) {
 // letters appeared. A command is what sits at the command word; everywhere else,
 // those letters are data. Heredoc bodies never reach here at all: recogniseInvocation
 // strips them before segmentation, because a heredoc body is data by construction.
-function recogniseSegment(segment, { suiteCommand, gatePath, taskDir = null }) {
+function recogniseSegment(segment, { suiteCommand, gatePath, taskDir = null, builderRecognition = false }) {
   const text = String(segment ?? '')
   const bare = text.split(/\s+/).filter(Boolean)
   if (gatePath && bare.length === 2 && bare[0] === 'node' && bare[1] === gatePath) return 'gate'
@@ -1343,7 +1421,8 @@ function recogniseSegment(segment, { suiteCommand, gatePath, taskDir = null }) {
   if (suiteCommand && runsDeclaredSuite(tokens, suiteCommand)) return 'suite'
   if (isNpmTestInvocation(tokens)) return 'suite'
   if (isNodeTestInvocation(text)) {
-    const targets = testTargets(text, taskDir)
+    const targetText = builderRecognition ? stripOutputRedirections(text) : text
+    const targets = testTargets(targetText, taskDir)
     if (targets === null) return 'suite'
     return targets.every((target) => taskLocalTestFile(target, taskDir)) ? 'task-local' : 'scoped-test'
   }
@@ -1385,20 +1464,22 @@ export function stripHeredocBodies(command) {
   return kept.join('\n')
 }
 
-function recogniseInvocation(command, { suiteCommand = null, gatePath = null, taskDir = null } = {}) {
-  const segments = splitShellCommands(stripHeredocBodies(command))
-  const kinds = segments.map((segment) => recogniseSegment(segment, { suiteCommand, gatePath, taskDir }))
-  if (kinds.every((kind) => kind === null)) return { kind: null, blind: false }
+function recogniseInvocation(command, { suiteCommand = null, gatePath = null, taskDir = null } = {}, builderRecognition = false) {
+  const segments = splitShellParts(stripHeredocBodies(command))
+  const kinds = segments.map((part) => builderRecognition && neutralBuilderSink(part)
+    ? 'sink' : recogniseSegment(part.text, { suiteCommand, gatePath, taskDir, builderRecognition }))
+  const realKinds = kinds.filter((kind) => kind !== 'sink')
+  if (realKinds.every((kind) => kind === null)) return { kind: null, blind: false }
   // An EXPLICIT suite segment refuses first: fail-closed beats honest. But the
   // opaque segment beside it is still a blind spot, and `blind` is how it is
   // charged — a refusal reporting `unrecognised: 0` claims it read a command it
   // could not read.
-  if (kinds.includes('suite')) return { kind: 'suite', blind: kinds.includes(null) }
+  if (realKinds.includes('suite')) return { kind: 'suite', blind: realKinds.includes(null) }
   // A recognised neighbour may not LAUNDER an opaque one.
-  if (kinds.includes(null)) return { kind: null, blind: false }
-  if (kinds.includes('scoped-test')) return { kind: 'scoped-test', blind: false }
-  if (kinds.every((kind) => kind === 'task-local')) return { kind: 'task-local', blind: false }
-  if (segments.length === 1 && kinds[0] === 'gate') return { kind: 'gate', blind: false }
+  if (realKinds.includes(null)) return { kind: null, blind: false }
+  if (realKinds.includes('scoped-test')) return { kind: 'scoped-test', blind: false }
+  if (realKinds.every((kind) => kind === 'task-local')) return { kind: 'task-local', blind: false }
+  if (segments.length === 1 && realKinds[0] === 'gate') return { kind: 'gate', blind: false }
   return { kind: 'suite', blind: false }
 }
 
@@ -1429,18 +1510,20 @@ function decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteComman
   if (SUITE_RUN_OWNERSHIP[role] === 'fenced') {
     if (kind === 'gate') return suiteAdmit('gate', kind)
     if (kind === 'suite') return suiteRefusal(role, command, gatePath, kind)
-    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteRefusal(role, command, gatePath, kind)
+    return fencedScopedTest(command, fence, taskDir) ? suiteAdmit('fenced-test', kind) : suiteAdmit('unfenced-test', kind)
   }
   return suiteRefusal(role, command, gatePath, kind)
 }
 
 function fencedScopedTest(command, fence, taskDir) {
-  const targets = testTargets(command, taskDir)
-  return targets !== null && targets.every((target) => fenceCovers(fence, target))
+  const parts = splitShellParts(stripHeredocBodies(command)).filter((part) => !neutralBuilderSink(part))
+  const targets = parts.filter((part) => isNodeTestInvocation(part.text)).flatMap((part) => testTargets(stripOutputRedirections(part.text), taskDir) ?? [])
+  return targets.length > 0 && targets.every((target) => fenceCovers(fence, target))
 }
 
 export function suiteRunPolicy({ role, command, fence = [], gatePath = null, ranBefore = 0, suiteCommand = null, taskDir = null } = {}) {
-  const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir })
+  const builderRecognition = SUITE_RUN_OWNERSHIP[role] === 'fenced'
+  const { kind, blind } = recogniseInvocation(command, { suiteCommand, gatePath, taskDir }, builderRecognition)
   return { ...decideSuiteRun({ role, command, fence, gatePath, ranBefore, suiteCommand, taskDir, kind }), blind }
 }
 

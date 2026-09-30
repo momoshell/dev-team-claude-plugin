@@ -1534,6 +1534,145 @@ test('R3', () => { const row = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIG
 test('R4', () => { const granted = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: null }, granted: ['builder'] }); const absent = bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { seats: { advisor: null } }); assert.equal(granted.configuration.advisor_granted_json, '["builder"]'); assert.equal(absent.configuration.advisor_granted_json, null) })
 test('S1', () => { const ledger = openTestLedger(); seedConfigurationRun(ledger, 's1', '2024-01-02T00:00:00.000Z', { advisor_model: 'p/m', advisor_granted_json: '["builder"]' }); assert.equal(ledger.dumpTable('run_configurations')[0].advisor_model, 'p/m'); ledger.close() })
 test('A1', () => { const ledger = advisorArmTestRun('a1', null); assert.equal(advisorArmsReadout(ledger).excluded.unrecorded, 1); ledger.close() })
+
+const windowInstant = '2024-01-02T00:00:00.000Z'
+const windowView = ({ sessions = [], windows = [], configs = [] } = {}) => ({
+  stats: () => ({ degraded: false, mirror_errors: 0 }),
+  tableNames: () => ['sessions', 'advisor_ab_windows'],
+  dumpTable: (name) => ({ sessions, advisor_ab_windows: windows, run_configurations: configs }[name] ?? []),
+})
+const windowSession = (adw_id, started_at, ended_at = '2024-01-03T00:00:00.000Z') => ({ adw_id, tier: 'build', started_at, ended_at })
+const windowConfig = (adw_id) => ({ adw_id, advisor_model: 'none', advisor_granted_json: '["builder"]' })
+// MUTATION W1: remove the before-window continue; old completed and in-flight runs must both disappear.
+test('W1 advisor window excludes pre-window completed and in-flight sessions', () => {
+  const readout = advisorArmsReadout(windowView({ sessions: [windowSession('old-done', '2024-01-01T00:00:00Z'), windowSession('old-live', '2024-01-01T00:00:00Z', null)], windows: [{ started_at: windowInstant }], configs: [windowConfig('old-done'), windowConfig('old-live')] }), { arms: ['none'] })
+  assert.deepEqual([readout.arms[0].runs, readout.arms[0].in_flight], [0, 0])
+})
+// MUTATION W2: neutralise beforeWindow++; one old eligible build is excluded exactly once.
+test('W2 advisor window counts excluded build sessions', () => {
+  const readout = advisorArmsReadout(windowView({ sessions: [windowSession('old', '2024-01-01T00:00:00Z')], windows: [{ started_at: windowInstant }], configs: [windowConfig('old')] }), { arms: ['none'] })
+  assert.equal(readout.excluded.before_window, 1)
+})
+// MUTATION W3: give an absent window a current-time fallback; both historical completed runs must remain.
+test('W3 advisor readout preserves history when no window is recorded', () => {
+  const readout = advisorArmsReadout(windowView({ sessions: [windowSession('a', '2024-01-01T00:00:00Z'), windowSession('b', '2024-01-02T00:00:00Z')], configs: [windowConfig('a'), windowConfig('b')] }), { arms: ['none'] })
+  assert.equal(readout.arms[0].runs, 2)
+})
+// MUTATION W4: ignore the explicit --since precedence over a newer recorded window.
+test('W4 advisor readout honors earlier explicit since', () => {
+  const readout = advisorArmsReadout(windowView({ sessions: [windowSession('middle', '2024-01-02T00:00:00Z')], windows: [{ started_at: '2024-01-03T00:00:00Z' }], configs: [windowConfig('middle')] }), { arms: ['none'], since: '2024-01-01T00:00:00Z' })
+  assert.equal(readout.arms[0].runs, 1)
+})
+// MUTATION W5: replace the CLI writer with an inert object; the append-only JSONL row must persist.
+test('W5 advisor start-window CLI persists a noted window', () => {
+  const home = scratchDir('advisor-window-w5-')
+  const result = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--start-window', '--note', 'x'], { env: { ...process.env, HOME: home, DEVTEAM_LEDGER_DIR: home, DEVTEAM_LEDGER_DB: join(home, 'ledger.db') }, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  const ledger = openLedger({ dbPath: join(home, 'ledger.db') })
+  assert.equal(ledger.dumpTable('advisor_ab_windows').length, 1)
+  assert.equal(ledger.dumpTable('advisor_ab_windows')[0].note, 'x')
+  ledger.close()
+})
+// MUTATION W6: choose windows.at(0); latest appended/effective window must be reported.
+test('W6 advisor readout selects the latest recorded window', () => {
+  const readout = advisorArmsReadout(windowView({ windows: [{ started_at: '2024-01-01T00:00:00Z' }, { started_at: windowInstant }] }), { arms: ['none'] })
+  assert.equal(readout.window.started_at, windowInstant)
+})
+// MUTATION W7: blank the windowLine; empty text readout must name no window and zero exclusions.
+test('W7 advisor text readout reports the absent window', () => {
+  const home = scratchDir('advisor-window-w7-')
+  const result = spawnSync(process.execPath, [SCRIPT, 'advisor-arms'], { env: { ...process.env, HOME: home, DEVTEAM_LEDGER_DIR: home, DEVTEAM_LEDGER_DB: join(home, 'ledger.db') }, encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /window: none; before-window=0/)
+})
+// MUTATION: omit note or either timestamp from the persisted window row; equal instants must still append twice.
+test('advisor window writer records note, timestamps, JSONL authority, replay, and duplicate instants', () => {
+  const ledger = openTestLedger()
+  const start = '2024-01-02T00:00:00.000Z'
+  const first = ledger.recordAdvisorAbWindow({ started_at: start, created_at: start, note: 'operator note' })
+  const second = ledger.recordAdvisorAbWindow({ started_at: start, created_at: start, note: 'again' })
+  assert.deepEqual([first.started_at, first.created_at, first.note], [start, start, 'operator note'])
+  assert.deepEqual(ledger.dumpTable('advisor_ab_windows').map(({ started_at }) => started_at), [start, start])
+  const authority = readFileSync(ledger._jsonlPath, 'utf8').trim().split('\n').map(JSON.parse)
+  assert.deepEqual(authority.map(({ kind, args }) => [kind, args.started_at]), [['recordAdvisorAbWindow', start], ['recordAdvisorAbWindow', start]])
+  const replay = openTestLedger()
+  replayJsonl(ledger._jsonlPath, replay)
+  // The mirror orders rows by window_id, so the replay is compared per window identity.
+  const byId = (rows) => Object.fromEntries(rows.map(({ window_id, note }) => [window_id, note]))
+  assert.deepEqual(byId(replay.dumpTable('advisor_ab_windows')), { [first.window_id]: 'operator note', [second.window_id]: 'again' })
+  replay.close()
+  ledger.close()
+})
+// MUTATION: drop the window_id unique key, or insert without OR IGNORE; replaying the JSONL into the ledger that
+// already holds the rows must not manufacture a second copy of either operator window.
+test('advisor window replay into the same ledger adds no duplicate window', () => {
+  const ledger = openTestLedger()
+  const start = '2024-01-02T00:00:00.000Z'
+  const first = ledger.recordAdvisorAbWindow({ started_at: start, created_at: start, note: 'one' })
+  const second = ledger.recordAdvisorAbWindow({ started_at: start, created_at: start, note: 'two' })
+  assert.notEqual(first.window_id, second.window_id)
+  replayJsonl(ledger._jsonlPath, ledger)
+  replayJsonl(ledger._jsonlPath, ledger)
+  // A replayed duplicate is ignored, never a mirror error: MUTATION plain INSERT reddens this.
+  assert.equal(ledger.stats().mirror_errors, 0)
+  assert.deepEqual(ledger.dumpTable('advisor_ab_windows').map(({ window_id, note }) => [window_id, note]).sort(), [[first.window_id, 'one'], [second.window_id, 'two']].sort())
+  ledger.close()
+})
+// MUTATION: drop the replay-time window_id refusal; an id-less authority row replayed twice would
+// mint two ids and manufacture two windows from one recorded call.
+test('advisor window replay refuses an authority row without its window_id', () => {
+  const ledger = openTestLedger()
+  const jsonlPath = join(scratchDir('advisor-window-idless-'), 'authority.jsonl')
+  writeFileSync(jsonlPath, `${JSON.stringify({ kind: 'recordAdvisorAbWindow', args: { started_at: '2024-01-02T00:00:00.000Z', note: null, created_at: '2024-01-02T00:00:00.000Z' } })}\n`)
+  const results = [replayJsonl(jsonlPath, ledger), replayJsonl(jsonlPath, ledger)]
+  assert.deepEqual(results.map(({ applied, failed }) => [applied, failed]), [[0, 1], [0, 1]])
+  assert.match(results[0].first_failure.reason, /window_id/)
+  assert.equal(ledger.dumpTable('advisor_ab_windows').length, 0)
+  ledger.close()
+})
+// MUTATION: ignore the supplied since option or compare local timestamp spellings instead of instants.
+test('advisor window explicit since source, inclusive boundary, and timezone instant', () => {
+  const at = '2024-01-02T01:00:00+01:00'
+  const readout = advisorArmsReadout(windowView({ sessions: [windowSession('equal', at)], windows: [{ started_at: '2024-01-03T00:00:00Z' }], configs: [windowConfig('equal')] }), { arms: ['none'], since: '2024-01-02T00:00:00Z' })
+  assert.equal(readout.window.source, 'since')
+  assert.equal(readout.arms[0].runs, 1)
+  assert.equal(readout.excluded.before_window, 0)
+})
+// MUTATION: accept an invalid --since token rather than returning usage status 2.
+test('advisor window CLI refuses invalid since with usage status', () => {
+  const home = scratchDir('advisor-window-invalid-since-')
+  const result = spawnSync(process.execPath, [SCRIPT, 'advisor-arms', '--since', 'not-a-time'], { env: { ...process.env, HOME: home, DEVTEAM_LEDGER_DIR: home, DEVTEAM_LEDGER_DB: join(home, 'ledger.db') }, encoding: 'utf8' })
+  assert.equal(result.status, 2)
+})
+// MUTATION: create or require the window table on an older read-only database; stats must remain unchanged.
+test('advisor window old read-only mirror has no window table and preserves stats', () => {
+  const ledger = openTestLedger(), dbPath = ledger._dbPath
+  ledger.recordAdvisorAbWindow({ note: 'scratch bootstrap' })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  db.exec('DROP TABLE advisor_ab_windows')
+  db.close()
+  const oldLedger = openLedger({ dbPath, readOnly: true })
+  const before = oldLedger.stats()
+  const readout = advisorArmsReadout(oldLedger, { arms: ['none'] })
+  assert.equal(readout.window.source, null)
+  assert.deepEqual(oldLedger.stats(), before)
+  oldLedger.close()
+})
+// MUTATION: silently treat malformed evidence as a valid window or eligible session.
+test('advisor window malformed timestamps fail closed', () => {
+  assert.throws(() => advisorArmsReadout(windowView({ windows: [{ started_at: 'broken' }] }), { arms: ['none'] }), /malformed recorded window timestamp/)
+  assert.throws(() => advisorArmsReadout(windowView({ windows: [{ started_at: windowInstant }], sessions: [windowSession('bad', undefined)], configs: [windowConfig('bad')] }), { arms: ['none'] }), /malformed build-session timestamp/)
+})
+// MUTATION: allow start-window, note, or since flags to be silently ignored by unrelated verbs.
+test('advisor window flags are refused on other verbs', () => {
+  const home = scratchDir('advisor-window-other-verb-')
+  for (const flag of ['--start-window', '--note', '--since']) {
+    const result = spawnSync(process.execPath, [SCRIPT, 'sessions', flag, ...(flag === '--start-window' ? [] : ['value'])], { env: { ...process.env, HOME: home, DEVTEAM_LEDGER_DIR: home, DEVTEAM_LEDGER_DB: join(home, 'ledger.db') }, encoding: 'utf8' })
+    assert.equal(result.status, 2, `${flag}: ${result.stderr}`)
+  }
+})
 test('A2', () => { const ledger = advisorArmTestRun('a2', 'p/m', '[]'); assert.equal(advisorArmsReadout(ledger).excluded.ungranted, 1); ledger.close() })
 test('A3', () => { const ledger = advisorArmTestRun('a3'); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds_per_run, null); ledger.close() })
 test('A4', () => { const ledger = advisorArmTestRun('a4'); for (const [seq, message] of ['plan:r1', 'build:r1', 'build:r2', 'build:r3', 'done'].entries()) ledger.recordEvent({ adw_id: 'a4', type: 'log', seq: seq + 1, payload: { level: 'info', message } }); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds, 3); ledger.close() })
@@ -1880,7 +2019,7 @@ test('dispatcharms real read counts history and reservations and closes on succe
     return handle
   }
   assert.throws(() => spy({ dbPath: join(nextDir(), 'outside.db') }), /outside this test/)
-  const result = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath } }, inFlight: ['openai/gpt-6-luna'], open: spy })
+  const result = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath } }, inFlight: [{ lane: 'synthetic-lane', arm: 'openai/gpt-6-luna', reserved_at: new Date().toISOString() }], open: spy })
   assert.equal(result.reason, null)
   assert.equal(result.readout.arms.find(({ arm }) => arm === 'none').runs, 1)
   assert.equal(result.readout.arms.find(({ arm }) => arm === 'openai/gpt-6-luna').in_flight, 1)

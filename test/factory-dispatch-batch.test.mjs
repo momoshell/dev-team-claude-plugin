@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
+import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import {
   ADOPT_BLOCK,
   ADOPT_EVENT,
@@ -141,6 +141,7 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
+import { slotStore } from '../crew/reclaim.mjs'
 import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
@@ -3168,8 +3169,216 @@ test('lanes on different commits fall back to measuring per lane', async () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
+const leasedDispatchHome = (label) => scratchDir(`advisor-lease-${label}-`)
+const leasedRotationDeps = (home, events = [], clock = { value: Date.parse('2026-09-30T12:00:00.000Z') }, contents = new Map()) => {
+  const path = join(root, 'factory-state', 'advisor-reservations.json')
+  let held = false
+  return {
+    path, contents, events,
+    deps: {
+      now: () => clock.value,
+      sleep: (ms) => { clock.value += ms },
+      slots: ({ kind, capacity }) => ({
+        acquire: () => { events.push('acquire'); if (events.includes('wait-once') && !events.includes('waited')) { events.push('waited'); return { waiting: true } } held = true; return { handle: { kind, token: 'lease' } } },
+        release: () => { events.push('release'); held = false; return true },
+      }),
+      reservationFiles: contents,
+    },
+  }
+}
+const testRotationRead = ({ inFlight }) => {
+  const arm = ADVISOR_ARMS[inFlight.length % ADVISOR_ARMS.length]
+  return { readout: { arms: ADVISOR_ARMS.map((value) => ({ arm: value })), next_arm: arm }, reason: null }
+}
+// MUTATION L1: skip the durable reservation write; separate calls must rotate from shared state.
+test('advisor-lease L1 durable reservations rotate separate eligible dispatch calls', async () => {
+  const home = leasedDispatchHome('l1'), shared = new Map(), lease = leasedRotationDeps(home, [], undefined, shared)
+  const first = await dispatchFixture({ label: 'lease-l1-a', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead })
+  const second = await dispatchFixture({ label: 'lease-l1-b', names: ['lane-b'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead })
+  const picked = (result) => { const args = result.spawned.find(({ args }) => args.includes('--model-advisor'))?.args ?? []; return args[args.indexOf('--model-advisor') + 1] }
+  assert.deepEqual([picked(first), picked(second)], ['none', 'openai/gpt-6-luna'])
+})
+// MUTATION L2: remove advisorEligible's explicit-model guard; explicit model must not touch lease/store.
+test('advisor-lease L2 explicit advisor model bypasses leasing', async () => {
+  const home = leasedDispatchHome('l2'), events = [], lease = leasedRotationDeps(home, events)
+  const result = await dispatchFixture({ label: 'lease-l2', names: ['lane-a'], batchTier: 'build', requests: { 'lane-a': requestFor('lane-a', { seats: { advisor: { model: 'openai/gpt-6.1-sol' } } }) }, rotationDeps: lease.deps, readAdvisorArms: () => { throw new Error('must not read') } })
+  assert.equal(result.spawned.some(({ args }) => args.includes('--model-advisor')), true)
+  assert.deepEqual(events, [])
+})
+// MUTATION L3: omit waited milliseconds from the log after one controlled 50ms contention.
+test('advisor-lease L3 lease contention reports advisor lease wait', async () => {
+  const home = leasedDispatchHome('l3'), events = ['wait-once'], lease = leasedRotationDeps(home, events)
+  const result = await dispatchFixture({ label: 'lease-l3', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead })
+  assert.match(result.logs.find((line) => line.startsWith('dispatch-batch: lane=')) ?? '', /advisor_lease_waited=50(?: |$)/)
+})
+// MUTATION L4: release before writing; the snapshot must be written while its capacity-one handle is held.
+test('advisor-lease L4 reservation snapshot is written before lease release', async () => {
+  const home = leasedDispatchHome('l4'), events = [], lease = leasedRotationDeps(home, events)
+  await dispatchFixture({ label: 'lease-l4', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead, writeFile: (file) => { if (String(file).endsWith('advisor-reservations.json')) events.push('write-held') } })
+  assert.ok(events.indexOf('write-held') >= 0 && events.indexOf('write-held') < events.indexOf('release'))
+})
+
+// MUTATION L5: disable the matching-session predicate; the persisted reservation must be acknowledged once by its session.
+test('advisor-lease L5 matching session prunes its reservation and counts only the session', async () => {
+  const home = scratchDir('advisor-lease-l5-')
+  const state = join(home, 'factory-state')
+  const reservationPath = join(state, 'advisor-reservations.json')
+  const reservedAt = new Date().toISOString()
+  mkdirSync(state, { recursive: true })
+  writeFileSync(reservationPath, JSON.stringify([{ lane: 'already-started', arm: 'none', reserved_at: reservedAt }]))
+  const lease = leasedRotationDeps(home, [], { value: Date.parse(reservedAt) })
+  let observed
+  const sessions = [{ adw_id: 'existing', task_slug: 'already-started', tier: 'build', started_at: reservedAt, ended_at: null }]
+  const configs = [{ adw_id: 'existing', advisor_model: 'none', advisor_granted_json: '["builder"]' }]
+  const read = ({ deps, inFlight }) => {
+    observed = readAdvisorArms({ deps: { ...deps, existsSync: () => true }, inFlight, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? sessions : name === 'run_configurations' ? configs : [], close() {} }) })
+    return observed
+  }
+  const result = await dispatchFixture({ label: 'lease-l5', names: ['new-lane'], home, batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: read, writeFile: (file, value) => { if (String(file) === reservationPath) writeFileSync(file, value) } })
+  assert.equal(observed.readout.arms.find(({ arm }) => arm === 'none').in_flight, 1)
+  assert.equal(JSON.parse(readFileSync(reservationPath, 'utf8')).some(({ lane }) => lane === 'already-started'), false)
+  assert.equal(dispatchRecordFor(result, 'new-lane').advisor_rotation.source, 'rotation')
+})
+
+// MUTATION: skip the retraction when compileDispatchWave refuses; a wave refused before boot
+// must leave no reservation behind, while an unrelated lane's reservation survives.
+test('advisor-lease a wave refused before boot retracts its own reservation', async () => {
+  const home = scratchDir('advisor-lease-retract-')
+  const state = join(home, 'factory-state')
+  const reservationPath = join(state, 'advisor-reservations.json')
+  const other = { lane: 'other-lane', arm: 'none', reserved_at: '2026-09-30T11:59:59.000Z' }
+  mkdirSync(state, { recursive: true })
+  writeFileSync(reservationPath, JSON.stringify([other]))
+  const events = [], lease = leasedRotationDeps(home, events)
+  const writes = []
+  await assert.rejects(() => dispatchFixture({ label: 'lease-retract', names: ['lane-a'], home, batchTier: 'build', requests: { 'lane-a': requestFor('lane-a', { variant: 'directed' }) }, runFlags: { 'validation-lane': 'npm test' }, rotationDeps: lease.deps, readAdvisorArms: testRotationRead, writeFile: (file, value) => { if (String(file) === reservationPath) { writes.push(JSON.parse(value)); writeFileSync(file, value) } } }),
+    (error) => error instanceof BatchRefusal && error.reason === 'directed-brief-invalid')
+  assert.deepEqual(writes[0].map(({ lane }) => lane), ['other-lane', 'lane-a'])
+  assert.deepEqual(JSON.parse(readFileSync(reservationPath, 'utf8')), [other])
+  assert.deepEqual(events.filter((event) => event === 'acquire' || event === 'release'), ['acquire', 'release', 'acquire', 'release'])
+})
+
+const syntheticLedger =({ sessions = [], windows = [] } = {}) => ({
+  stats: () => ({ degraded: false, mirror_errors: 0 }),
+  tableNames: () => ['sessions', 'run_configurations', ...(windows.length ? ['advisor_ab_windows'] : [])],
+  dumpTable: (name) => name === 'sessions' ? sessions : name === 'advisor_ab_windows' ? windows : [],
+  close() {},
+})
+const readReservations = (reservations, options = {}) => readAdvisorArms({
+  deps: { env: { DEVTEAM_LEDGER_DB: '/fake/ledger.db' }, existsSync: () => true, now: () => options.now ?? Date.parse('2026-09-30T12:00:00.000Z') },
+  inFlight: reservations,
+  open: () => syntheticLedger(options),
+})
+// MUTATION: remove the bounded retry timeout; a stuck pool must abstain before reading or writing.
+test('advisor-lease timeout abstains without reading, picking, or writing', async () => {
+  const home = leasedDispatchHome('timeout'), events = [], clock = { value: 0 }
+  let reads = 0, writes = 0
+  const result = await dispatchFixture({ label: 'lease-timeout', names: ['lane-a'], batchTier: 'build', rotationDeps: {
+    now: () => clock.value, sleep: (ms) => { clock.value += ms },
+    slots: () => ({ acquire: () => ({ waiting: true }), release: () => { events.push('release') } }),
+  }, readAdvisorArms: () => { reads++; return testRotationRead({ inFlight: [] }) }, writeFile: (file) => { if (String(file).endsWith('advisor-reservations.json')) writes++ } })
+  assert.equal(dispatchRecordFor(result, 'lane-a').advisor_rotation.reason, 'lease-timeout')
+  assert.deepEqual([reads, writes], [0, 0])
+  assert.equal(result.spawned.some(({ args }) => args.includes('--model-advisor')), false)
+})
+// MUTATION: treat denied or malformed reservation evidence as an empty store; neither may be overwritten.
+test('advisor-lease denied and malformed reservation stores fail closed', async () => {
+  for (const [label, value, deny] of [['denied', null, true], ['json', '{', false], ['records', '[{}]', false]]) {
+    const home = leasedDispatchHome(label), path = join(home, 'factory-state', 'advisor-reservations.json')
+    const reservationFiles = new Map([[path, value]])
+    let writes = 0
+    const result = await dispatchFixture({ label: `lease-damage-${label}`, names: ['lane-a'], home, batchTier: 'build', rotationDeps: { reservationFiles }, readObserver: (file) => { if (deny && file === path) { const error = new Error('denied'); error.code = 'EACCES'; throw error } }, readAdvisorArms: testRotationRead, writeFile: (file) => { if (String(file) === path) writes++ } })
+    assert.equal(dispatchRecordFor(result, 'lane-a').advisor_rotation.reason, 'ledger-unreadable')
+    assert.equal(writes, 0)
+    if (!deny) assert.equal(reservationFiles.get(path), value)
+  }
+})
+// MUTATION: install the chosen model despite a failed durable write, or release before the write's error unwinds.
+test('advisor-lease failed reservation write abstains and releases', async () => {
+  const events = []
+  const lease = leasedRotationDeps(leasedDispatchHome('write-failure'), events)
+  const result = await dispatchFixture({ label: 'lease-write-failure', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead, writeFile: (file) => { if (String(file).endsWith('advisor-reservations.json')) { events.push('write-failed'); throw new Error('EACCES') } } })
+  assert.equal(dispatchRecordFor(result, 'lane-a').advisor_rotation.reason, 'ledger-unreadable')
+  assert.equal(result.spawned.some(({ args }) => args.includes('--model-advisor')), false)
+  assert.ok(events.indexOf('write-failed') < events.indexOf('release'))
+})
+// MUTATION: return early without releasing the acquired lease after reservation read failure.
+test('advisor-lease releases after reservation read failure', async () => {
+  const events = [], home = leasedDispatchHome('read-failure'), path = join(home, 'factory-state', 'advisor-reservations.json')
+  const result = await dispatchFixture({ label: 'lease-read-failure', names: ['lane-a'], home, batchTier: 'build', rotationDeps: { slots: () => ({ acquire: () => ({ handle: { token: 'x' } }), release: () => { events.push('release') } }) }, readObserver: (file) => { if (file === path) { const error = new Error('denied'); error.code = 'EACCES'; throw error } }, readAdvisorArms: testRotationRead })
+  assert.equal(dispatchRecordFor(result, 'lane-a').advisor_rotation.reason, 'ledger-unreadable')
+  assert.deepEqual(events, ['release'])
+})
+// MUTATION: change the age boundary or discard future reservation instants.
+test('advisor-lease TTL boundary drops exactly 60000ms and preserves younger and future rows', () => {
+  const now = Date.parse('2026-09-30T12:00:00.000Z')
+  const at = (delta) => new Date(now - delta).toISOString()
+  const reservations = [{ lane: 'expired', arm: 'none', reserved_at: at(60000) }, { lane: 'young', arm: 'none', reserved_at: at(59999) }, { lane: 'future', arm: 'none', reserved_at: new Date(now + 1).toISOString() }]
+  assert.deepEqual(readReservations(reservations, { now }).reservations.map(({ lane }) => lane), ['young', 'future'])
+})
+// MUTATION: acknowledge a reservation by lane alone; a session that began earlier is not an acknowledgement.
+test('advisor-lease older matching-lane session does not acknowledge a newer reservation', () => {
+  const reserved = '2026-09-30T12:00:00.000Z'
+  const result = readReservations([{ lane: 'lane-a', arm: 'none', reserved_at: reserved }], { now: Date.parse(reserved), sessions: [{ adw_id: 'old', task_slug: 'lane-a', tier: 'build', started_at: '2026-09-30T11:59:59.000Z', ended_at: null }] })
+  assert.equal(result.reservations.length, 1)
+  assert.equal(result.readout.arms[0].in_flight, 1)
+})
+// MUTATION: count synthetic reservations before the selected window.
+test('advisor-lease pre-window reservations are filtered from rotation', () => {
+  const start = '2026-09-30T12:00:00.000Z'
+  const result = readReservations([{ lane: 'old-lane', arm: 'none', reserved_at: '2026-09-30T11:00:00.000Z' }], { now: Date.parse(start), windows: [{ started_at: start }] })
+  assert.equal(result.readout.arms[0].in_flight, 0)
+  assert.deepEqual(result.reservations, [])
+})
+// MUTATION: consult the store for explicit-model or non-build lanes.
+test('advisor-lease explicit and non-build lanes make zero lease and reader calls', async () => {
+  for (const [label, batchTier, requests] of [['explicit', 'build', { 'lane-a': requestFor('lane-a', { seats: { advisor: { model: 'openai/gpt-6.1-sol' } } }) }], ['nonbuild', 'mechanical', {}]]) {
+    let slots = 0, reads = 0
+    const result = await dispatchFixture({ label: `lease-skip-${label}`, names: ['lane-a'], batchTier, requests, rotationDeps: { slots: () => { slots++; throw new Error('unexpected lease') } }, readAdvisorArms: () => { reads++; throw new Error('unexpected reader') } })
+    assert.deepEqual([slots, reads], [0, 0])
+    if (label === 'explicit') assert.equal(dispatchRecordFor(result, 'lane-a').seats.advisor.model.settled, 'openai/gpt-6.1-sol')
+  }
+})
+// MUTATION: accept an invalid successful reader and persist a reservation anyway.
+test('advisor-lease invalid custom readout cannot reserve', async () => {
+  const events = [], lease = leasedRotationDeps(leasedDispatchHome('invalid-readout'), events)
+  const result = await dispatchFixture({ label: 'lease-invalid-readout', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: () => ({ readout: { arms: [], next_arm: 'none' }, reason: null }), writeFile: (file) => { if (String(file).endsWith('advisor-reservations.json')) events.push('write') } })
+  assert.equal(dispatchRecordFor(result, 'lane-a').advisor_rotation.reason, 'readout-invalid')
+  assert.equal(events.includes('write'), false)
+})
+// MUTATION: use process-local serialization instead of the real cross-process slotStore lease.
+test('advisor-lease child processes serialize rotation through one real slotStore', async () => {
+  const home = scratchDir('advisor-lease-child-')
+  const script = `
+    import { writeFileSync } from 'node:fs';
+    import { slotStore } from ${JSON.stringify(new URL('../crew/reclaim.mjs', import.meta.url).href)};
+    const { dispatchFixture } = await import(${JSON.stringify(new URL('./factory-dispatch-batch-fences.test.mjs', import.meta.url).href)});
+    const home = process.env.ADVISOR_TEST_HOME;
+    const readAdvisorArms = ({ inFlight }) => { const arms = ['none','openai/gpt-6-luna','openai/gpt-5.6-terra','openai/gpt-6.1-sol']; const next_arm = arms[inFlight.length % arms.length]; return { readout: { arms: arms.map(arm => ({ arm })), next_arm }, reason: null }; };
+    const result = await dispatchFixture({ label: 'child-' + process.pid, names: ['child-' + process.pid], home, batchTier: 'build', rotationDeps: { slots: options => slotStore(options) }, readAdvisorArms, writeFile: (path, content) => { if (String(path).endsWith('advisor-reservations.json')) writeFileSync(path, content); } });
+    const args = result.spawned.find(({ args }) => args.includes('--model-advisor'))?.args ?? [];
+    console.log(args[args.indexOf('--model-advisor') + 1] ?? 'none');
+  `
+  const runChild = () => new Promise((resolve, reject) => {
+    const child = childSpawn(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, ADVISOR_TEST_HOME: home, CREW_CLAUDE_BIN: '' } })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += String(chunk) })
+    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+    child.on('error', reject)
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+  const [first, second] = await Promise.all([runChild(), runChild()])
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(second.status, 0, second.stderr)
+  assert.notEqual(first.stdout.trim(), second.stdout.trim())
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  const rows = JSON.parse(readFileSync(path, 'utf8'))
+  assert.equal(rows.length, 2)
+  assert.notEqual(rows[0].arm, rows[1].arm)
+})
+
 test('dispatcharms rotation reasons are a frozen closed vocabulary', () => {
-  assert.deepEqual(ADVISOR_ROTATION_REASONS, ['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid'])
+  assert.deepEqual(ADVISOR_ROTATION_REASONS, ['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
   assert.equal(Object.isFrozen(ADVISOR_ROTATION_REASONS), true)
 })
 
@@ -3185,7 +3394,7 @@ test('dispatcharms reservations rotate eligible build lanes and preserve abstent
   })
   const boots = result.spawned.filter(({ args }) => (args || []).map(String).includes('--model-advisor'))
   assert.deepEqual(boots.map(({ args }) => { const a = args.map(String); return a[a.indexOf('--model-advisor') + 1] }), ['none', 'openai/gpt-6-luna'])
-  assert.deepEqual(picks, [[], ['none']])
+  assert.deepEqual(picks.map((rows) => rows.map(({ lane, arm }) => ({ lane, arm }))), [[], [{ lane: 'lane-a', arm: 'none' }]])
   const records = ['lane-a', 'lane-b'].map((lane) => dispatchRecordFor(result, lane))
   assert.deepEqual(records.map(({ advisor_rotation }) => advisor_rotation.source), ['rotation', 'rotation'])
   assert.ok(records.every(({ seats }) => seats.advisor.model.from === 'rotation'))
@@ -3270,7 +3479,7 @@ test('dispatcharms default read uses a temporary read-only ledger and counts res
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
   ledger.startSession({ adw_id: 'dispatcharms-real-ledger', repo_slug: 'test', task_slug: 'rotation' })
   ledger.close()
-  const result = readAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath }, home: dir }, inFlight: ['none'] })
+  const result = readAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath }, home: dir }, inFlight: [{ lane: 'other-lane', arm: 'none', reserved_at: new Date().toISOString() }] })
   assert.equal(result.reason, null)
   assert.equal(result.readout.next_arm, 'openai/gpt-6-luna')
   assert.equal(result.readout.arms[0].in_flight, 1)
@@ -4918,7 +5127,7 @@ test('staffing fields append to the existing settled dispatch log line', async (
   assert.equal(line.startsWith(
     'dispatch-batch: lane=lane-a forced=none prompt=code-only recommended=none requested=mechanical requested_from=batch execution=full execution_from=batch variant=full variant_from=batch settled=mechanical',
   ), true)
-  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\) force_reason=none advisor_arm=unmeasured advisor_from=none advisor_reason=not-build$/)
+  assert.match(line, / shape=judge strength=workhorse misclassified=false brief_bytes=65 top_section=none granularity=whole-file\(crew\/owned-lane-a\.mjs\) force_reason=none advisor_lease_waited=0 advisor_arm=unmeasured advisor_from=none advisor_reason=not-build$/)
 })
 
 test('a legacy proposal block without a tier line remains recommendation-free', async () => {

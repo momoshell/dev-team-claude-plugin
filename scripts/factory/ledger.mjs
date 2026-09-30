@@ -79,6 +79,7 @@ import { dirname, join, resolve, parse, sep } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { modelString as claudeModelString } from '../../crew/adapters/adapter-claude.mjs'
 import { modelString as piModelString } from '../../crew/adapters/adapter-pi.mjs'
@@ -1558,6 +1559,19 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'consult_id']],
     indexes: [],
   },
+  advisor_ab_windows: {
+    columns: [
+      { name: 'window_id', decl: 'TEXT' },
+      { name: 'started_at', decl: 'TEXT' },
+      { name: 'note', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    // Each --start-window call mints its own id (recording instant + random suffix, so the mirror
+    // lists windows in recording order): equal-clock calls stay separate facts, and a JSONL
+    // replay into a ledger that already holds the row is ignored rather than duplicated.
+    unique: [['window_id']],
+    indexes: [],
+  },
   seat_turns: { columns: [
     { name: 'adw_id', decl: 'TEXT' }, { name: 'role', decl: 'TEXT' }, { name: 'assignment_id', decl: 'TEXT' }, { name: 'transport', decl: 'TEXT' },
     { name: 'stop_reason', decl: 'TEXT' }, { name: 'stop_reason_absent', decl: 'TEXT' }, { name: 'usage_reason', decl: 'TEXT' }, { name: 'at', decl: 'TEXT' },
@@ -1677,7 +1691,7 @@ export const SHADOW_PICK_EXCLUSION_REASONS = Object.freeze(['band-unknown', 'ban
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordAdvisorAbWindow', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1732,6 +1746,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordNarrationMeasurement: 'narration_measurements',
   recordScreenerProposal: 'screener_proposals',
   recordAdvisorUsage: 'advisor_usage',
+  recordAdvisorAbWindow: 'advisor_ab_windows',
   recordSeatTurn: 'seat_turns',
   recordSeatToolCall: 'seat_tool_calls',
   recordSeatPermission: 'seat_permissions',
@@ -4015,6 +4030,26 @@ export function openLedger({
       const cols = tableColumnNames('advisor_usage')
       conn.prepare(`INSERT OR IGNORE INTO advisor_usage (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordAdvisorAbWindow(input = {}) {
+    // A live call mints its id; a replayed row must carry the one it was recorded with, or every
+    // replay would mint a new id and manufacture another window.
+    if (replaying && input.window_id == null) refuse('recordAdvisorAbWindow: a replayed window row must carry its window_id')
+    const timestamp = (value, field) => {
+      if (value === undefined || value === null) return isoMs(now())
+      if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) refuse(`recordAdvisorAbWindow: field '${field}' must be a parseable timestamp`)
+      return value
+    }
+    const args = redact({ window_id: normaliseShortName(input.window_id, 'recordAdvisorAbWindow', 'window_id') ?? `${isoMs(now())}-${randomUUID()}`, started_at: timestamp(input.started_at, 'started_at'), note: textOrNull(input.note, 500), created_at: timestamp(input.created_at, 'created_at') }, stats)
+    if (input.note != null && args.note == null) refuse('recordAdvisorAbWindow: note is invalid or was redacted')
+    if (!args.window_id) refuse('recordAdvisorAbWindow: window_id was redacted')
+    appendJsonl('recordAdvisorAbWindow', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('advisor_ab_windows')
+      conn.prepare(`INSERT OR IGNORE INTO advisor_ab_windows (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => toBindable(args[c])))
     })
     return args
   }
@@ -6676,7 +6711,7 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordAdvisorAbWindow, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
@@ -7899,7 +7934,7 @@ function killVerb(ledger, { adwId, pid, yes }, stdout, stderr) {
 // ---------------------------------------------------------------------------
 
 // --yes is the one boolean (no-value) flag in this CLI's vocabulary.
-const BOOLEAN_FLAGS = new Set(['yes', 'json'])
+const BOOLEAN_FLAGS = new Set(['yes', 'json', 'start-window'])
 
 // Every flag each verb accepts. A flag absent from its verb's set is REFUSED
 // (exit 2) rather than ignored: measured on 2026-08-21, `run-set --since X
@@ -7935,7 +7970,7 @@ const VERB_FLAGS = Object.freeze({
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
-  'advisor-arms': new Set(['arms', 'json']),
+  'advisor-arms': new Set(['arms', 'json', 'start-window', 'note', 'since']),
   doctor: new Set([]),
   kill: new Set(['adw-id', 'pid', 'yes']),
   settle: new Set(['reason']),
@@ -8057,8 +8092,17 @@ function laneBuildRounds(markers) {
   return buildRounds.length
 }
 
-export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null } = {}) {
+export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null, since = null } = {}) {
+  if (since !== null && (typeof since !== 'string' || !Number.isFinite(Date.parse(since)))) throw new LedgerUsageError('advisor-arms: --since requires a parseable timestamp')
   const before = mirrorErrorCount(ledger)
+  const tableNames = typeof ledger.tableNames === 'function' ? ledger.tableNames() : []
+  const windows = tableNames.includes('advisor_ab_windows') ? ledger.dumpTable('advisor_ab_windows').map((row, index) => ({ row, index, epoch: Date.parse(row.started_at) })).sort((a, b) => a.epoch - b.epoch || a.index - b.index).map(({ row, epoch }) => {
+    if (!Number.isFinite(epoch)) throw new Error('advisor-arms: malformed recorded window timestamp')
+    return row
+  }) : []
+  const recordedStart = windows.at(-1)?.started_at ?? null
+  const windowStart = since ?? recordedStart ?? null
+  const windowEpoch = windowStart === null ? null : Date.parse(windowStart)
   const sessions = ledger.dumpTable('sessions')
   const agentRows = ledger.dumpTable('agent_sessions')
   const agentRowsByRun = new Map()
@@ -8089,9 +8133,14 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   if (ledger.stats().degraded || mirrorErrorCount(ledger) > before) throw new Error('advisor-arms: ledger read degraded')
   const configs = new Map(configurations.map((row) => [row.adw_id, row]))
   const armsMap = new Map()
-  let unrecorded = 0, ungranted = 0, nonBuild = 0
+  let unrecorded = 0, ungranted = 0, nonBuild = 0, beforeWindow = 0
   for (const session of sessions) {
     if (session.tier !== 'build') { nonBuild++; continue }
+    if (windowEpoch !== null && !Number.isFinite(Date.parse(session.started_at))) throw new Error('advisor-arms: malformed build-session timestamp')
+    if (windowEpoch !== null && Date.parse(session.started_at) < windowEpoch) {
+      beforeWindow++
+      continue
+    }
     const configuration = configs.get(session.adw_id)
     if (!configuration) { unrecorded++; continue }
     if (configuration.advisor_model == null) { unrecorded++; continue }
@@ -8149,7 +8198,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   })
   let winner = null
   if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
-  return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild }, next_arm: winner?.arm ?? null }
+  return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild, before_window: beforeWindow }, window: { started_at: windowStart, source: since !== null ? 'since' : recordedStart !== null ? 'recorded' : null }, next_arm: winner?.arm ?? null }
 }
 
 function loadPriceCatalog(path) {
@@ -8699,6 +8748,15 @@ export function main(argv) {
 
     if (verb === 'advisor-arms') {
       if (positional.length) refuse('advisor-arms: takes no positional arguments')
+      if (Object.hasOwn(flags, 'note') && !flags['start-window']) refuse('advisor-arms: --note requires --start-window')
+      if (flags['start-window'] && (Object.hasOwn(flags, 'since') || Object.hasOwn(flags, 'arms') || flags.json)) refuse('advisor-arms: --start-window cannot be combined with --since, --arms, or --json')
+      if (Object.hasOwn(flags, 'since') && (typeof flags.since !== 'string' || !Number.isFinite(Date.parse(flags.since)))) refuse('advisor-arms: --since requires a parseable timestamp')
+      if (Object.hasOwn(flags, 'note') && (typeof flags.note !== 'string' || flags.note.length > 500 || !flags.note.trim())) refuse('advisor-arms: --note must be nonblank text of at most 500 characters')
+      if (flags['start-window']) {
+        const row = ledger.recordAdvisorAbWindow({ note: flags.note ?? null })
+        stdout.write(`${row.started_at}\n`)
+        return 0
+      }
       let armOrder = ADVISOR_ARMS
       if (Object.hasOwn(flags, 'arms')) {
         if (typeof flags.arms !== 'string' || !flags.arms.trim()) refuse('advisor-arms: --arms requires comma-separated arm names')
@@ -8709,9 +8767,12 @@ export function main(argv) {
       let catalog = null
       try { catalog = loadPriceCatalog(defaultPriceSourcePath) } catch { /* unavailable means unpriced, never free */ }
       let payload
-      try { payload = advisorArmsReadout(ledger, { arms: armOrder, catalog }) } catch (error) { refuse(`advisor-arms: the ledger read is degraded — unanswerable, not empty (${ledger.stats().degraded_reason ?? error?.message ?? 'unknown'})`) }
+      try { payload = advisorArmsReadout(ledger, { arms: armOrder, catalog, since: flags.since ?? null }) } catch (error) { refuse(`advisor-arms: the ledger read is degraded — unanswerable, not empty (${ledger.stats().degraded_reason ?? error?.message ?? 'unknown'})`) }
       if (flags.json) stdout.write(`${JSON.stringify(payload)}\n`)
-      else stdout.write(`advisor arms (schema 1)\n${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; rounds-unmeasured=${arm.rounds_unmeasured_runs}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
+      else {
+        const windowLine = `window: ${payload.window.started_at ?? 'none'}; before-window=${payload.excluded.before_window}\n`
+        stdout.write(`advisor arms (schema 1)\n${windowLine}${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; rounds-unmeasured=${arm.rounds_unmeasured_runs}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
+      }
       return 0
     }
 

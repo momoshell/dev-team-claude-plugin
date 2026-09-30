@@ -322,7 +322,7 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   const expectedExamples = [
     { line: "- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])`", file: 'crew/seat-io.mjs', firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
     { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])`", file: 'crew/variants.mjs', firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
-    { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)`', file: 'test/helpers.mjs', firstFragment: 'export function scratchDir(', lastFragment: 'return dir' },
+    { line: '- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)`', file: 'test/helpers.mjs', firstFragment: 'export function scratchDir(', lastFragment: 'export function scratchDir(' },
     { line: '- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason', file: 'crew/headless-rpc.mjs', firstFragment: 'candidates: null, reason: closedReason(error)', lastFragment: 'candidates: null, reason: closedReason(error)' },
   ]
   const derived = skillLines.filter((line) => line.startsWith('- ')).map((line) => {
@@ -344,13 +344,12 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
     // moves a cited line fence this granted skill, a prompt surface.
     const firstPin = leanAnchors[`${file}:${first}`]
     assert.ok(typeof firstPin === 'string' && firstPin.includes(expected.firstFragment), `${file}:${first} is not pinned to ${expected.firstFragment}`)
-    // A range end is unpinned, so it is read from the source at the same offset from wherever the
-    // pinned start now sits: a shift moves both ends together, a wrong end still fails.
-    const sourceLines = readFileSync(join(REPO_ROOT, file), 'utf8').split('\n')
-    const start = sourceLines.findIndex((text) => text.includes(firstPin))
-    assert.ok(start >= 0, `${file}: the pinned start ${firstPin} is not in the source`)
-    const end = sourceLines[start + (last - first)]
-    assert.ok(typeof end === 'string' && end.includes(expected.lastFragment), `${file}:${last} did not contain ${expected.lastFragment}`)
+    // A range end is not a manifest key unless it is pinned in its own right (#937), so every
+    // cited range must pin its end too; cite a single line otherwise.
+    if (last !== first) {
+      const lastPin = leanAnchors[`${file}:${last}`]
+      assert.ok(typeof lastPin === 'string' && lastPin.includes(expected.lastFragment), `${file}:${last} is not pinned to ${expected.lastFragment}`)
+    }
   }
 
   // The never-simplify list lives ONCE, in _shared.md (every seat); the skill does not restate it.

@@ -1894,6 +1894,54 @@ test('agent sessions opened without a usage frame name the explicit no_usage_fra
     }
   } finally { ledger.close() }
 })
+test('agent session rows separate model usage and optional model targeting survives replay', { skip: SKIP }, () => {
+  const sourceFixture = openB499Ledger(); const targetFixture = openB499Ledger()
+  const { ledger: source } = sourceFixture; const { ledger: target } = targetFixture
+  try {
+    for (const adw_id of ['model-run-a', 'model-run-b']) source.startSession({ adw_id, repo_slug: 'r', task_slug: 't' })
+    const start = (adw_id, model) => source.startAgentSession({ adw_id, dispatch_id: 'd', role: 'builder', model, claude_session_id: 'same-session', transcript_path: null })
+    start('model-run-a', 'sonnet'); start('model-run-a', 'opus'); start('model-run-a', null); start('model-run-a', null)
+    start('model-run-b', 'sonnet')
+    assert.equal(source.dumpTable('agent_sessions').length, 4)
+    assert.equal(source.dumpTable('agent_sessions').filter((row) => row.adw_id === 'model-run-a' && row.model === null).length, 1)
+    const values = { context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 }
+    source.endAgentSession({ adw_id: 'model-run-a', claude_session_id: 'same-session', model: 'opus', ...values })
+    source.heartbeat({ adw_id: 'model-run-a', target: 'agent_session', claude_session_id: 'same-session', model: 'sonnet', at: '2024-01-01T00:00:01.000Z' })
+    source.endAgentSession({ adw_id: 'model-run-b', claude_session_id: 'same-session', ...values })
+    const replay = replayJsonl(source._jsonlPath, target)
+    assert.equal(replay.failed, 0)
+    assert.deepEqual(target.dumpTable('agent_sessions'), source.dumpTable('agent_sessions'))
+    const rows = source.dumpTable('agent_sessions')
+    assert.equal(rows.find((row) => row.model === 'opus').billed_input_tokens, 1)
+    assert.equal(rows.find((row) => row.adw_id === 'model-run-b').billed_input_tokens, 1)
+    assert.equal(rows.find((row) => row.adw_id === 'model-run-a' && row.model === 'sonnet').billed_input_tokens, null)
+    assert.equal(rows.find((row) => row.adw_id === 'model-run-a' && row.model === null).billed_input_tokens, null)
+    assert.ok(rows.find((row) => row.adw_id === 'model-run-a' && row.model === 'sonnet').last_heartbeat_at)
+    assert.equal(rows.find((row) => row.model === 'opus').last_heartbeat_at, null)
+    assert.equal(rows.find((row) => row.model === null).last_heartbeat_at, null)
+  } finally { source.close(); target.close() }
+})
+test('reopening an old two-column agent-session index permits distinct model rows', { skip: SKIP }, () => {
+  const { ledger, dbPath } = openB499Ledger()
+  ledger.startAgentSession({ adw_id: 'old-index', dispatch_id: 'd', role: 'builder', model: 'sonnet', claude_session_id: 's', transcript_path: null })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  try {
+    const modelIndex = db.prepare('PRAGMA index_list(agent_sessions)').all().find((index) => {
+      const cols = db.prepare(`PRAGMA index_info("${index.name.replaceAll('"', '""')}")`).all().map((row) => row.name)
+      return cols.join(',') === 'adw_id,claude_session_id,model'
+    })
+    if (modelIndex) db.exec(`DROP INDEX "${modelIndex.name.replaceAll('"', '""')}"`)
+    db.exec('CREATE UNIQUE INDEX agent_sessions_adw_id_claude_session_id_uq ON agent_sessions (adw_id, claude_session_id)')
+  } finally { db.close() }
+  const reopened = openLedger({ dbPath })
+  try {
+    reopened.startAgentSession({ adw_id: 'old-index', dispatch_id: 'd', role: 'builder', model: 'opus', claude_session_id: 's', transcript_path: null })
+    assert.equal(reopened.dumpTable('agent_sessions').length, 2)
+    assert.equal(reopened.stats().mirror_errors, 0)
+  } finally { reopened.close() }
+})
 test('endAgentSession clears its named absence and the cleared row replays identically', { skip: SKIP }, () => {
   const sourceFixture = openB499Ledger()
   const targetFixture = openB499Ledger()

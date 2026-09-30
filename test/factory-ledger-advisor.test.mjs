@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, LANE_SPEND_ABSENT_REASONS, priceKeyForModel, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
   advisorArmsReadout,
   ADVISOR_ARMS,
 } from '../scripts/factory/ledger.mjs'
@@ -100,7 +100,7 @@ test("#404: the headless usage writer's agent_sessions arguments are unchanged",
     claude_session_id: 'session-404', transcript_path: '/tmp/session-404.jsonl',
   }])
   assert.deepEqual(ends, [{
-    adw_id: 'adw-404-headless', claude_session_id: 'session-404',
+    adw_id: 'adw-404-headless', claude_session_id: 'session-404', model: 'sonnet',
     context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
     billed_input_tokens: 5, billed_output_tokens: 6, billed_cache_write_tokens: 7, billed_cache_read_tokens: 8,
   }])
@@ -1539,18 +1539,91 @@ test('A3', () => { const ledger = advisorArmTestRun('a3'); assert.equal(advisorA
 test('A4', () => { const ledger = advisorArmTestRun('a4'); ledger.startPhase({ adw_id: 'a4', name: 'build:r1' }); ledger.startPhase({ adw_id: 'a4', name: 'build:r3' }); assert.equal(advisorArmsReadout(ledger).arms[0].build_rounds, 3); ledger.close() })
 test('A5', () => { const ledger = advisorArmTestRun('a5'); const row = advisorArmsReadout(ledger).arms[0]; assert.equal(row.review_denominator, 0); ledger.close() })
 test('A6', () => { const ledger = advisorArmTestRun('a6'); assert.equal(advisorArmsReadout(ledger).arms[0].escalation_denominator, 1); ledger.close() })
+test('LANE_SPEND_ABSENT_REASONS is a closed frozen vocabulary', () => {
+  assert.equal(Object.isFrozen(LANE_SPEND_ABSENT_REASONS), true)
+  assert.deepEqual(LANE_SPEND_ABSENT_REASONS, ['no-agent-sessions', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
+})
 test('A7', () => { const ledger = advisorArmTestRun('a7'); assert.equal(advisorArmsReadout(ledger).arms[0].advisor_spend.absent_reason, 'no-advisor-usage'); ledger.close() })
 // Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
 // which inflates lane_spend_denominator; and dropping a billed run (the spend and denominator fall).
 test('A7 lane spend: an unbilled run is missing spend, never a measured zero', () => {
   const ledger = advisorArmTestRun('a7-billed', 'p/m', '["builder"]', openTestLedger(), { running: true })
   advisorArmTestRun('a7-unbilled', 'p/m', '["builder"]', ledger)
-  ledger.endSession({ adw_id: 'a7-billed', status: 'ok', outcome: 'success', billed_cost_usd: 1.5 })
-  const arm = advisorArmsReadout(ledger).arms[0]
+  ledger.endSession({ adw_id: 'a7-billed', status: 'ok', outcome: 'success', billed_cost_usd: 999 })
+  const usage = { adw_id: 'a7-billed', dispatch_id: 'd1', role: 'builder', model: 'claude-sonnet-5', claude_session_id: 's1', transcript_path: null }
+  ledger.startAgentSession(usage)
+  ledger.endAgentSession({ adw_id: usage.adw_id, claude_session_id: usage.claude_session_id, model: usage.model, context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1_000_000, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+  const catalog = { models: { 'anthropic/claude-sonnet-5': { cost_in_per_mtok: 1.5, cost_out_per_mtok: 0, cost_cache_write_per_mtok: 0, cost_cache_read_per_mtok: 0 } } }
+  const arm = advisorArmsReadout(ledger, { catalog }).arms[0]
   assert.equal(arm.runs, 2)
   assert.equal(arm.lane_spend_usd, 1.5)
   assert.equal(arm.lane_spend_denominator, 1)
   assert.equal(arm.lane_spend_missing_runs, 1)
+  assert.equal(arm.lane_spend_absent_reason, 'no-agent-sessions')
+  ledger.close()
+})
+test('lane spend rejects NULL token classes and unavailable or non-finite rates', () => {
+  const catalog = { models: { 'anthropic/claude-sonnet-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 2, cost_cache_write_per_mtok: 3, cost_cache_read_per_mtok: 4 } } }
+  const tokens = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+  for (const token of tokens) {
+    const ledger = advisorArmTestRun(`null-${token}`)
+    ledger.startAgentSession({ adw_id: `null-${token}`, dispatch_id: 'd', role: 'builder', model: 'claude-sonnet-5', claude_session_id: 's', transcript_path: null })
+    ledger.endAgentSession({ adw_id: `null-${token}`, claude_session_id: 's', model: 'claude-sonnet-5', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, ...Object.fromEntries(tokens.map((name) => [name, name === token ? null : 0])) })
+    const arm = advisorArmsReadout(ledger, { catalog }).arms[0]
+    assert.equal(arm.lane_spend_usd, null); assert.equal(arm.lane_spend_denominator, 0); assert.equal(arm.lane_spend_missing_runs, 1)
+    assert.equal(arm.lane_spend_absent_reason, 'usage-unavailable'); assert.ok(LANE_SPEND_ABSENT_REASONS.includes(arm.lane_spend_absent_reason))
+    ledger.close()
+  }
+  for (const rate of [undefined, NaN, Infinity]) {
+    const ledger = advisorArmTestRun(`rate-${String(rate)}`)
+    ledger.startAgentSession({ adw_id: `rate-${String(rate)}`, dispatch_id: 'd', role: 'builder', model: 'claude-sonnet-5', claude_session_id: 's', transcript_path: null })
+    ledger.endAgentSession({ adw_id: `rate-${String(rate)}`, claude_session_id: 's', model: 'claude-sonnet-5', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1, billed_output_tokens: 1, billed_cache_write_tokens: 1, billed_cache_read_tokens: 1 })
+    const rates = { ...catalog.models['anthropic/claude-sonnet-5'] }
+    if (rate === undefined) delete rates.cost_in_per_mtok; else rates.cost_in_per_mtok = rate
+    const arm = advisorArmsReadout(ledger, { catalog: { models: { 'anthropic/claude-sonnet-5': rates } } }).arms[0]
+    assert.equal(arm.lane_spend_absent_reason, 'price-rate-unavailable'); assert.ok(LANE_SPEND_ABSENT_REASONS.includes(arm.lane_spend_absent_reason))
+    ledger.close()
+  }
+})
+test('lane spend requires a globally unique model mapping and counts zero usage as measured', () => {
+  const rows = { billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }
+  const rates = { cost_in_per_mtok: 1, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 }
+  const cases = [
+    { model: 'unknown-model', catalog: { models: { 'anthropic/claude-sonnet-5': rates } }, reason: 'model-unpriced-or-ambiguous', key: null },
+    { model: 'sonnet', catalog: { models: { 'anthropic/sonnet': rates, 'meta/sonnet': rates } }, reason: 'model-unpriced-or-ambiguous', key: null },
+    { model: 'anthropic/sonnet', catalog: { models: { 'anthropic/anthropic/sonnet': rates, 'anthropic/sonnet': rates } }, reason: 'model-unpriced-or-ambiguous', key: null },
+  ]
+  for (const [index, item] of cases.entries()) {
+    assert.equal(priceKeyForModel(item.catalog, item.model), item.key)
+    const ledger = advisorArmTestRun(`mapping-${index}`)
+    ledger.startAgentSession({ adw_id: `mapping-${index}`, dispatch_id: 'd', role: 'builder', model: item.model, claude_session_id: 's', transcript_path: null })
+    ledger.endAgentSession({ adw_id: `mapping-${index}`, claude_session_id: 's', model: item.model, context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, ...rows })
+    const arm = advisorArmsReadout(ledger, { catalog: item.catalog }).arms[0]
+    assert.equal(arm.lane_spend_absent_reason, item.reason); assert.ok(LANE_SPEND_ABSENT_REASONS.includes(arm.lane_spend_absent_reason))
+    ledger.close()
+  }
+  const shared = { models: { 'anthropic/anthropic/sonnet': rates } }
+  assert.equal(priceKeyForModel(shared, 'anthropic/anthropic/sonnet'), 'anthropic/anthropic/sonnet')
+  const ledger = advisorArmTestRun('zero-usage')
+  ledger.startAgentSession({ adw_id: 'zero-usage', dispatch_id: 'd', role: 'builder', model: 'anthropic/anthropic/sonnet', claude_session_id: 's', transcript_path: null })
+  ledger.endAgentSession({ adw_id: 'zero-usage', claude_session_id: 's', model: 'anthropic/anthropic/sonnet', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, ...rows })
+  const arm = advisorArmsReadout(ledger, { catalog: shared }).arms[0]
+  assert.strictEqual(arm.lane_spend_usd, 0); assert.equal(arm.lane_spend_denominator, 1); assert.equal(arm.lane_spend_missing_runs, 0)
+  ledger.close()
+})
+test('lane spend reports deterministic first absence and no absence for a requested empty arm', () => {
+  const ledger = advisorArmTestRun('z-no-rows', 'lane')
+  const modelMissing = advisorArmTestRun('a-unknown-model', 'lane', '["builder"]', ledger)
+  modelMissing.startAgentSession({ adw_id: 'a-unknown-model', dispatch_id: 'd', role: 'builder', model: 'unknown-model', claude_session_id: 's', transcript_path: null })
+  modelMissing.endAgentSession({ adw_id: 'a-unknown-model', claude_session_id: 's', model: 'unknown-model', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1, billed_output_tokens: 1, billed_cache_write_tokens: 1, billed_cache_read_tokens: 1 })
+  const catalog = { models: { 'anthropic/claude-sonnet-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 1, cost_cache_write_per_mtok: 1, cost_cache_read_per_mtok: 1 } } }
+  assert.deepEqual(ledger.dumpTable('sessions').map((row) => row.adw_id), ['a-unknown-model', 'z-no-rows'])
+  const result = advisorArmsReadout(ledger, { catalog })
+  assert.equal(result.arms[0].lane_spend_absent_reason, 'model-unpriced-or-ambiguous')
+  assert.ok(LANE_SPEND_ABSENT_REASONS.includes(result.arms[0].lane_spend_absent_reason))
+  const empty = advisorArmsReadout(ledger, { arms: ['absent-arm'], catalog }).arms[0]
+  assert.equal(empty.lane_spend_usd, null); assert.equal(empty.lane_spend_denominator, 0)
+  assert.equal(empty.lane_spend_missing_runs, 0); assert.equal(empty.lane_spend_absent_reason, null)
   ledger.close()
 })
 // Kills: counting a run still in flight into the arm's runs and rates (twelve running sessions

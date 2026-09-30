@@ -374,6 +374,7 @@ export const PATH_DEPENDENT_TABLES = Object.freeze({
 export const RETIRED_INDEXES = Object.freeze([
   'seat_teardowns_adw_id_role_uq',
   'review_outcomes_adw_id_dispatch_id_uq',
+  'agent_sessions_adw_id_claude_session_id_uq',
 ])
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
@@ -1025,7 +1026,7 @@ export const TABLES = Object.freeze({
       // closed no_usage_frame reason instead.
       { name: 'absent_reason', decl: 'TEXT' },
     ],
-    unique: [['adw_id', 'claude_session_id']],
+    unique: [['adw_id', 'claude_session_id', 'model']],
     indexes: [],
   },
   cell_failures: {
@@ -4771,6 +4772,7 @@ export function openLedger({
       pid: input.pid ?? null,
       started_at: input.started_at != null ? isoMs(input.started_at) : null,
       claude_session_id: input.claude_session_id ?? null,
+      ...(input.model !== undefined ? { model: input.model } : {}),
     }, stats)
     appendJsonl('heartbeat', args)
     mirror((conn) => {
@@ -4778,8 +4780,10 @@ export function openLedger({
         conn.prepare('UPDATE processes SET last_heartbeat_at = ? WHERE adw_id = ? AND pid = ? AND started_at = ?')
           .run(toBindable(args.at), toBindable(args.adw_id), toBindable(args.pid), toBindable(args.started_at))
       } else if (args.target === 'agent_session') {
-        conn.prepare('UPDATE agent_sessions SET last_heartbeat_at = ? WHERE adw_id = ? AND claude_session_id = ?')
-          .run(toBindable(args.at), toBindable(args.adw_id), toBindable(args.claude_session_id))
+        const modelClause = input.model !== undefined ? ' AND model IS ?' : ''
+        const modelArgs = input.model !== undefined ? [toBindable(args.model)] : []
+        conn.prepare(`UPDATE agent_sessions SET last_heartbeat_at = ? WHERE adw_id = ? AND claude_session_id IS ?${modelClause}`)
+          .run(toBindable(args.at), toBindable(args.adw_id), toBindable(args.claude_session_id), ...modelArgs)
       } else {
         // The run row is the pane seat's only identity home: a pane seat has
         // no pid and no claude_session_id, and inventing one would fabricate
@@ -4819,8 +4823,8 @@ export function openLedger({
     appendJsonl('startAgentSession', args)
     mirror((conn) => {
       const cols = tableColumnNames('agent_sessions').filter((c) => c !== 'id')
-      conn.prepare(`INSERT OR IGNORE INTO agent_sessions (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map((c) => toBindable(args[c])))
+      conn.prepare(`INSERT OR IGNORE INTO agent_sessions (${cols.join(', ')}) SELECT ${cols.map(() => '?').join(', ')} WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM agent_sessions WHERE adw_id = ? AND claude_session_id IS ? AND model IS ?)`)
+        .run(...cols.map((c) => toBindable(args[c])), toBindable(args.model), toBindable(args.adw_id), toBindable(args.claude_session_id), toBindable(args.model))
     })
     return args
   }
@@ -4834,6 +4838,7 @@ export function openLedger({
     const args = redact({
       adw_id: input.adw_id,
       claude_session_id: input.claude_session_id,
+      ...(input.model !== undefined ? { model: input.model } : {}),
       ended_at: isoMs(input.ended_at ?? now()),
       context_tokens: input.context_tokens,
       context_window: input.context_window,
@@ -4852,7 +4857,7 @@ export function openLedger({
           raw_read_tokens = ?, raw_written_tokens = ?, billed_input_tokens = ?,
           billed_output_tokens = ?, billed_cache_write_tokens = ?, billed_cache_read_tokens = ?,
           absent_reason = ?
-        WHERE adw_id = ? AND claude_session_id = ?
+        WHERE adw_id = ? AND claude_session_id IS ?${input.model !== undefined ? ' AND model IS ?' : ''}
       `).run(
         toBindable(args.ended_at), toBindable(args.context_tokens), toBindable(args.context_window),
         toBindable(args.raw_read_tokens), toBindable(args.raw_written_tokens),
@@ -4860,6 +4865,7 @@ export function openLedger({
         toBindable(args.billed_cache_write_tokens), toBindable(args.billed_cache_read_tokens),
         toBindable(args.absent_reason),
         toBindable(args.adw_id), toBindable(args.claude_session_id),
+        ...(input.model !== undefined ? [toBindable(args.model)] : []),
       )
     })
     return args
@@ -7991,22 +7997,23 @@ const CELL_MODEL_TRANSLATORS = Object.freeze({ claude: claudeModelString, pi: pi
 // Map a recorded `model` string back to a provider/id price-catalog key, the
 // way crew/crew.mjs:776 (bandForRaw) resolves a raw override: translate every
 // catalog key FORWARD through the adapter the review says ran it, and accept
-// only a UNIQUE match. It ASSUMES the recorded `agent` is the adapter that
-// produced the string. A prefix is never stripped and a provider is never
-// guessed: an unmatched or ambiguous string is unmapped, and an unmapped cell
-// is unpriced — never another model's price.
+// only one catalog key across the selected adapter(s). A prefix is never
+// stripped and a provider is never guessed: unmatched or ambiguous strings
+// are unpriced — never another model's price.
 export function priceKeyForModel(catalog, model, agent) {
-  const translate = CELL_MODEL_TRANSLATORS[agent]
-  if (typeof translate !== 'function' || model == null || !catalog?.models) return null
-  const matches = []
+  const translators = agent == null ? Object.values(CELL_MODEL_TRANSLATORS) : [CELL_MODEL_TRANSLATORS[agent]]
+  if (translators.some((translate) => typeof translate !== 'function') || model == null || !catalog?.models) return null
+  const matches = new Set()
   for (const key of Object.keys(catalog.models)) {
     const slash = key.indexOf('/')
     if (slash < 0) continue
-    let candidate
-    try { candidate = translate({ provider: key.slice(0, slash), id: key.slice(slash + 1) }) } catch { continue }
-    if (candidate === model) matches.push(key)
+    for (const translate of translators) {
+      let candidate
+      try { candidate = translate({ provider: key.slice(0, slash), id: key.slice(slash + 1) }) } catch { continue }
+      if (candidate === model) matches.add(key)
+    }
   }
-  return matches.length === 1 ? matches[0] : null
+  return matches.size === 1 ? [...matches][0] : null
 }
 
 function catalogPrice(catalog, key) {
@@ -8018,9 +8025,37 @@ function catalogPrice(catalog, key) {
 // ADR-047 decision 10, arms re-set by the operator 2026-09-30 (pi cannot seat anthropic models)
 export const ADVISOR_ARMS = Object.freeze(['none', 'openai/gpt-6-luna', 'openai/gpt-5.6-terra', 'openai/gpt-6.1-sol'])
 
+export const LANE_SPEND_ABSENT_REASONS = Object.freeze(['no-agent-sessions', 'model-unpriced-or-ambiguous', 'usage-unavailable', 'price-rate-unavailable', 'cost-not-finite'])
+
+function laneRunSpend(rows, catalog) {
+  const tokenNames = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+  const rateNames = ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok']
+  if (rows.length === 0) return { cost: null, reason: 'no-agent-sessions' }
+  let total = 0
+  for (const row of rows) {
+    const priceKey = priceKeyForModel(catalog, row.model)
+    if (priceKey === null) return { cost: null, reason: 'model-unpriced-or-ambiguous' }
+    if (tokenNames.some((name) => typeof row[name] !== 'number' || !Number.isFinite(row[name]))) return { cost: null, reason: 'usage-unavailable' }
+    const price = catalogPrice(catalog, priceKey)
+    const rates = rateNames.map((name) => price?.[name])
+    if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, reason: 'price-rate-unavailable' }
+    const cost = tokenNames.reduce((sum, name, index) => sum + row[name] * rates[index], 0) / 1e6
+    if (!Number.isFinite(cost) || !Number.isFinite(total + cost)) return { cost: null, reason: 'cost-not-finite' }
+    total += cost
+  }
+  return { cost: total, reason: null }
+}
+
 export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = null } = {}) {
   const before = mirrorErrorCount(ledger)
   const sessions = ledger.dumpTable('sessions')
+  const agentRows = ledger.dumpTable('agent_sessions')
+  const agentRowsByRun = new Map()
+  for (const row of agentRows) {
+    const rows = agentRowsByRun.get(row.adw_id) ?? []
+    rows.push(row)
+    agentRowsByRun.set(row.adw_id, rows)
+  }
   const configurations = ledger.dumpTable('run_configurations')
   const phaseRows = ledger.dumpTable('phases')
   const reviewsRows = ledger.dumpTable('review_outcomes')
@@ -8039,7 +8074,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     if (!Array.isArray(granted) || !granted.every((role) => typeof role === 'string')) granted = []
     if (!granted.includes('builder')) { ungranted++; continue }
     const key = configuration.advisor_model
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
     // Its advisor consults are already spent, so its id still feeds advisor spend (run_ids).
     arm.run_ids.push(session.adw_id)
@@ -8051,13 +8086,14 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     arm.reviews += runReviews.length
     arm.changes_needed += runReviews.filter((row) => row.verdict === 'changes-needed').length
     if (session.outcome === 'escalated') arm.escalations++
-    // An unbilled run is absent spend, never $0: Number(null) is 0, so test the stored value itself.
-    if (typeof session.billed_cost_usd === 'number' && Number.isFinite(session.billed_cost_usd)) { arm.billed_runs++; arm.lane_spend_usd += session.billed_cost_usd }
+    const spend = laneRunSpend(agentRowsByRun.get(session.adw_id) ?? [], catalog)
+    if (spend.cost !== null) { arm.billed_runs++; arm.lane_spend_usd += spend.cost }
+    else { arm.lane_spend_missing_runs++; if (arm.lane_spend_absent_reason === null) arm.lane_spend_absent_reason = spend.reason }
     armsMap.set(key, arm)
   }
   const requested = armOrder ?? [...armsMap.keys()]
   const results = requested.map((key) => {
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     const runs = arm.runs
     const thin = runs < CELL_RATE_FLOOR
     const changesNeeded = arm.changes_needed
@@ -8080,7 +8116,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const pricedRows = priced.filter((row) => row.cost != null)
     const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
     const noUsage = advisorRows.length === 0 ? null : 'usage-present'
-    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: runs - arm.billed_runs, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
+    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: runs, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: arm.lane_spend_missing_runs, lane_spend_absent_reason: arm.lane_spend_absent_reason, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
   })
   let winner = null
   if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate

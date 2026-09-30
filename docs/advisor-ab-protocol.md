@@ -32,9 +32,14 @@ configuration/model and runs with absent, malformed, or non-builder grants are
 reported as exclusions; non-build tiers are excluded. Rates are descriptive
 and withheld below the separate 12-run arm floor. With `--arms`, `next_arm`
 recommends the listed arm with the fewest eligible runs (ties keep list order). Without `--arms`, the default order is `none`, `openai/gpt-6-luna`, `openai/gpt-5.6-terra`, `openai/gpt-6.1-sol`; dispatch uses this same order and completed-plus-in-flight counts. It rotates only settled build-tier lanes without a named advisor, and unreadable evidence leaves seats untouched.
-Advisor spend covers only priced `advisor_usage` consults; older and HTTP
-consults may be journal-only and are not measured as zero. See the ledger's
-spend-coverage note for this limitation. This 12-run floor is distinct from
+Lane spend is derived from per-model `agent_sessions` rows, not session cost
+fields; every row in a finished run must have complete usage and a uniquely
+priced model for that run to count. An arm may show a priced subtotal alongside
+its priced/missing run denominators and the first missing cause. There is no
+historical backfill; cellUsage dispatch joins intentionally continue summing
+both fallback rows. Advisor spend covers only priced `advisor_usage` consults;
+older and HTTP consults may be journal-only and are not measured as zero. See
+the ledger's spend-coverage note for this limitation. This 12-run floor is distinct from
 the 12 review-dispatch-per-arm ratification floor below.
 
 ## The four measurements

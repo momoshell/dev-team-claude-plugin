@@ -2216,6 +2216,141 @@ test('source text wires synthetic exclusion into exactly twelve ordinary readers
   assert.match(task, /SELECT adw_id FROM sessions WHERE adw_id = \?/, 'direct forensic task lookup must remain visible')
   assert.match(task, /SELECT \* FROM sessions WHERE adw_id = \?/, 'resolved forensic task row must remain visible')
 })
+function legacySessionArgs(model) { return { adw_id: 'history', dispatch_id: 'd1', role: 'builder', model, claude_session_id: 'same-session', transcript_path: 'fixture.jsonl', started_at: '2026-09-29T00:00:00.000Z' } }
+function legacyAuthority(path, secondAt = '2026-09-29T00:00:00.000Z', onlyMissing = false) {
+  const records = onlyMissing ? [{ v: 1, kind: 'startAgentSession', at: '2026-09-29T00:00:00.000Z', args: legacySessionArgs('B') }] : [
+    { v: 1, kind: 'startAgentSession', at: '2026-09-29T00:00:00.000Z', args: legacySessionArgs('A') },
+    { v: 1, kind: 'startAgentSession', at: secondAt, args: legacySessionArgs('B') },
+  ]
+  writeFileSync(path, records.map(JSON.stringify).join('\n') + '\n')
+}
+test('L1 historical agent-session key collapse is measured', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-drift-l1-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession(legacySessionArgs('A')); legacyAuthority(jsonlPath)
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 0); assert.equal(writer.legacy_collapsed_keys, 1)
+  } finally { ledger.close() }
+})
+test('L2 cutoff equality and later agent-session keys remain drift', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-drift-l2-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession(legacySessionArgs('A')); legacyAuthority(jsonlPath, '2026-09-30T12:08:25.000Z')
+    assert.equal(ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession').drift, 1)
+    legacyAuthority(jsonlPath, 'not-a-timestamp')
+    assert.equal(ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession').legacy_collapsed_keys, 0)
+  } finally { ledger.close() }
+})
+test('L3 historical keys without a mirror pair remain drift', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-drift-l3-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    legacyAuthority(jsonlPath, undefined, true)
+    assert.equal(ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession').drift, 1)
+  } finally { ledger.close() }
+})
+// MUTATION RV1-2: remove the per-current-key all-occurrences eligibility latch.
+test('RV1-2 mixed historical and post-cutoff occurrences never receive legacy drift credit', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-drift-mixed-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession(legacySessionArgs('A'))
+    const before = '2026-09-29T00:00:00.000Z', after = '2026-10-01T00:00:00.000Z'
+    const records = [
+      { v: 1, kind: 'startAgentSession', at: before, args: legacySessionArgs('A') },
+      { v: 1, kind: 'startAgentSession', at: after, args: legacySessionArgs('B') },
+      { v: 1, kind: 'startAgentSession', at: before, args: legacySessionArgs('B') },
+    ]
+    writeFileSync(jsonlPath, records.map(JSON.stringify).join('\n') + '\n')
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
+  } finally { ledger.close() }
+})
+// MUTATION RV1-1: accept a seed read whose mirror-error counter increases and returns [].
+test('RV1-1 replay treats a swallowed agent-session seed read error as incomplete', () => {
+  const dir = scratchDir('legacy-seed-error-'), authority = join(dir, 'authority.jsonl')
+  legacyAuthority(authority, undefined, true)
+  for (const failAs of ['mirror-errors', 'degraded']) {
+    let mirrorErrors = 0, degraded = false
+    const result = replayJsonl(authority, {
+      stats: () => ({ degraded, mirror_errors: mirrorErrors }),
+      dumpTable() { if (failAs === 'mirror-errors') mirrorErrors += 1; else degraded = true; return [] },
+      startAgentSession() {},
+    })
+    assert.equal(result.failed, 1); assert.equal(result.complete, false)
+  }
+})
+// MUTATION RV1-2: remove the historical predicate from replay's pair skip.
+test('RV1-2 post-cutoff replay preserves modern model rows sharing a session', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-replay-modern-'), authority = join(dir, 'authority.jsonl')
+  writeFileSync(authority, [
+    { v: 1, kind: 'startAgentSession', at: '2026-09-29T00:00:00.000Z', args: legacySessionArgs('A') },
+    { v: 1, kind: 'startAgentSession', at: '2026-10-01T00:00:00.000Z', args: legacySessionArgs('B') },
+  ].map(JSON.stringify).join('\n') + '\n')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), stderr: { write() {} } })
+  try {
+    const result = replayJsonl(authority, ledger)
+    assert.equal(ledger.dumpTable('agent_sessions').length, 2)
+    assert.equal(result.legacy_skipped, undefined); assert.equal(result.complete, true)
+  } finally { ledger.close() }
+})
+// MUTATION RV1-3: treat null claude_session_id as a legacy pair key.
+test('RV1-3 NULL historical session ids remain distinct like SQLite UNIQUE NULLs', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-null-session-'), authority = join(dir, 'authority.jsonl')
+  const nullSession = (model) => ({ ...legacySessionArgs(model), claude_session_id: null })
+  writeFileSync(authority, [
+    { v: 1, kind: 'startAgentSession', at: '2026-09-29T00:00:00.000Z', args: nullSession('A') },
+    { v: 1, kind: 'startAgentSession', at: '2026-09-29T00:00:00.000Z', args: nullSession('B') },
+  ].map(JSON.stringify).join('\n') + '\n')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath: join(dir, 'mirror.jsonl'), stderr: { write() {} } })
+  try {
+    ledger.startAgentSession(nullSession('A'))
+    writeFileSync(ledger._jsonlPath, readFileSync(authority, 'utf8'))
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
+    const target = openLedger({ dbPath: join(dir, 'target.db'), stderr: { write() {} } })
+    try { assert.equal(replayJsonl(authority, target).applied, 2); assert.equal(target.dumpTable('agent_sessions').length, 2) }
+    finally { target.close() }
+  } finally { ledger.close() }
+})
+// MUTATION RV1-2: classify every startAgentSession line as historical despite invalid timestamps.
+test('RV1-2 invalid historical timestamp remains drift', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-drift-invalid-time-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession(legacySessionArgs('A'))
+    writeFileSync(jsonlPath, JSON.stringify({ v: 1, kind: 'startAgentSession', at: 'not-a-timestamp', args: legacySessionArgs('B') }) + '\n')
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
+  } finally { ledger.close() }
+})
+// MUTATION S3: drop the started_at bound on drift credit, or the historical-row filter on the replay seed.
+test('S3 a modern mirror row is no evidence of a historical collapse', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-modern-pair-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession({ ...legacySessionArgs('A'), started_at: '2026-10-01T00:00:00.000Z' })
+    legacyAuthority(jsonlPath, undefined, true)
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
+    const result = replayJsonl(jsonlPath, ledger)
+    assert.equal(result.legacy_skipped ?? 0, 0)
+    assert.deepEqual(ledger.dumpTable('agent_sessions').map((r) => r.model).sort(), ['A', 'B'])
+  } finally { ledger.close() }
+})
+test('L4 replay skips historical agent-session duplicate pairs', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-replay-l4-'), source = join(dir, 'authority.jsonl')
+  legacyAuthority(source)
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), stderr: { write() {} } })
+  try {
+    const result = replayJsonl(source, ledger)
+    assert.equal(ledger.dumpTable('agent_sessions').length, 1)
+    assert.equal(result.legacy_skipped, 1); assert.equal(result.complete, true)
+    assert.equal(replayJsonl(source, ledger).legacy_skipped, 2)
+  } finally { ledger.close() }
+})
 test('doctor reports per-writer JSONL/mirror drift naming the writer and the count', { skip: SKIP }, () => {
   const source = openTestLedger()
   source.startSession({ adw_id: 'drift-present', repo_slug: 'r', task_slug: 't' })
@@ -2228,7 +2363,7 @@ test('doctor reports per-writer JSONL/mirror drift naming the writer and the cou
     assert.equal(drift.measured, true)
     assert.deepEqual(drift.writers.find((writer) => writer.writer === 'startSession'), {
       writer: 'startSession', table: 'sessions', unique_key: ['adw_id'],
-      lines: 2, distinct_keys: 2, rows_present: 1, drift: 1, collapsed_keys: 0,
+      lines: 2, distinct_keys: 2, rows_present: 1, drift: 1, collapsed_keys: 0, legacy_collapsed_keys: 0,
     })
     assert.equal(drift.drift_total, 1)
   } finally { ledger.close() }

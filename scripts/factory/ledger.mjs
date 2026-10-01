@@ -377,6 +377,14 @@ export const RETIRED_INDEXES = Object.freeze([
   'review_outcomes_adw_id_dispatch_id_uq',
   'agent_sessions_adw_id_claude_session_id_uq',
 ])
+export const AGENT_SESSION_LEGACY_KEY = Object.freeze({
+  columns: Object.freeze(['adw_id', 'claude_session_id']),
+  before: '2026-09-30T12:08:25.000Z',
+})
+function legacyAgentSessionLine(parsed) {
+  const atMs = typeof parsed.at === 'string' ? Date.parse(parsed.at) : NaN
+  return parsed.kind === 'startAgentSession' && Number.isFinite(atMs) && atMs < Date.parse(AGENT_SESSION_LEGACY_KEY.before)
+}
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
@@ -6560,10 +6568,16 @@ export function openLedger({
         continue
       }
       const cols = TABLES[table].unique[0]
-      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set(), lines: 0, groups: new Set() })
+      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set(), lines: 0, groups: new Set(), legacy: new Map() })
       const info = perWriter.get(kind)
       const key = driftKey(cols, parsed.args)
       info.keys.add(key)
+      if (kind === 'startAgentSession' && parsed.args?.claude_session_id != null) {
+        const legacyKey = driftKey(AGENT_SESSION_LEGACY_KEY.columns, parsed.args)
+        const eligible = legacyAgentSessionLine(parsed)
+        const prior = info.legacy.get(key)
+        info.legacy.set(key, { legacyKey, eligible: eligible && (prior ? prior.eligible : true) })
+      }
       info.lines += 1
       const groupKey = `${table}\u0000${key}`
       if (!groups.has(groupKey)) groups.set(groupKey, { contents: new Set(), writers: new Set() })
@@ -6608,14 +6622,33 @@ export function openLedger({
       }
       const rowSet = rowKeysByTable.get(info.table)
       if (!rowSet) {
-        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: null, drift: null, collapsed_keys: collapsedKeys })
+        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: null, drift: null, collapsed_keys: collapsedKeys, legacy_collapsed_keys: null })
         continue
       }
       let present = 0
+      let legacy = 0
+      let legacyRowSet = new Set()
+      if (kind === 'startAgentSession') {
+        try {
+          const selection = AGENT_SESSION_LEGACY_KEY.columns.flatMap((c) => [
+            quoteSqlIdentifier(c),
+            `typeof(${quoteSqlIdentifier(c)}) AS ${quoteSqlIdentifier(`${DRIFT_TYPE_PREFIX}${c}`)}`,
+          ]).join(', ')
+          // Credit needs evidence of a historical collapse: the surviving mirror row itself predates the key change.
+          legacyRowSet = new Set(conn.prepare(`SELECT ${selection} FROM ${quoteSqlIdentifier(info.table)} WHERE started_at < ?`).all(AGENT_SESSION_LEGACY_KEY.before).map((row) => driftRowKey(AGENT_SESSION_LEGACY_KEY.columns, row)))
+        } catch { legacyRowSet = new Set() }
+      }
       for (const key of info.keys) {
         if (rowSet.has(key)) present += 1
+        else if (kind === 'startAgentSession') {
+          const { legacyKey, eligible: legacyEligible } = info.legacy.get(key) ?? { legacyKey: null, eligible: false }
+          if (legacyEligible && legacyRowSet.has(legacyKey)) {
+            present += 1
+            legacy += 1
+          }
+        }
       }
-      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present, collapsed_keys: collapsedKeys })
+      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present, collapsed_keys: collapsedKeys, legacy_collapsed_keys: legacy })
     }
     // Per table, the other direction: mirror rows whose key no authority line
     // names (an authority line was lost). Keys are unioned across writers that
@@ -6762,6 +6795,8 @@ function _probeFts5() {
 export function replayJsonl(jsonlPath, ledger) {
   let applied = 0
   let skipped = 0
+  let legacySkipped = 0
+  let legacyPairs = null
   let failed = 0
   let firstFailure = null
   if (!existsSync(jsonlPath)) {
@@ -6800,8 +6835,18 @@ export function replayJsonl(jsonlPath, ledger) {
         continue
       }
       try {
+        const legacyEligible = legacyAgentSessionLine(parsed) && parsed.args?.claude_session_id != null
+        if (legacyEligible && legacyPairs === null) {
+          const errorsBefore = mirrorErrorCount(ledger)
+          const rows = ledger.dumpTable('agent_sessions')
+          if (ledger.stats?.().degraded || mirrorErrorCount(ledger) > errorsBefore) throw new Error('agent_sessions replay seed unavailable')
+          legacyPairs = new Set(rows.filter((row) => Date.parse(row.started_at) < Date.parse(AGENT_SESSION_LEGACY_KEY.before)).map((row) => driftKey(AGENT_SESSION_LEGACY_KEY.columns, row)))
+        }
+        const pairKey = parsed.kind === 'startAgentSession' ? driftKey(AGENT_SESSION_LEGACY_KEY.columns, parsed.args) : null
+        if (legacyEligible && legacyPairs.has(pairKey)) { legacySkipped += 1; continue }
         ledger[parsed.kind](parsed.args)
         applied += 1
+        if (legacyEligible && legacyPairs !== null) legacyPairs.add(pairKey)
       } catch (err) {
         noteReplayFailure(lineNo, err)
       }
@@ -6809,7 +6854,7 @@ export function replayJsonl(jsonlPath, ledger) {
   } finally {
     if (restore !== null) ledger._setReplaying(restore)
   }
-  return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
+  return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure, ...(legacySkipped > 0 ? { legacy_skipped: legacySkipped } : {}) }
 }
 
 function journalFactArgs(writer, row, adwId, reask = null) {
@@ -7201,7 +7246,7 @@ function mirrorErrorCount(ledger) {
   try { return typeof ledger?.stats === 'function' ? Number(ledger.stats().mirror_errors || 0) : 0 } catch { return 0 }
 }
 
-export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, dry_run = false, require_present = false, strict_adw_id = false, lane = null, _scratchLedgerForTest = null } = {}) {
+export function ingestJournal(journalPath, ledger, { adw_id = null, since = null, from_line = null, dry_run = false, require_present = false, strict_adw_id = false, lane = null, _scratchLedgerForTest = null } = {}) {
   const sinceMs = since === null || since === undefined ? null : epochMsOrNull(since)
   // lean: full-table scan per backfill journal; keyed SQL lookup if scale demands
   const seen = new Set()
@@ -7233,7 +7278,7 @@ export function ingestJournal(journalPath, ledger, { adw_id = null, since = null
     if (scratch.degraded || (typeof scratch.stats === 'function' && scratch.stats().degraded)) {
       return { applied: 0, skipped: 0, ignored: 0, failed: 1, unstamped: 0, complete: false, first_failure: { line: null, reason: 'scratch-ledger-degraded' } }
     }
-    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane })
+    return ingestJournalRows(journalPath, dry_run ? null : ledger, scratch, { adw_id, sinceMs, fromLine: from_line, seen, require_present, strict_adw_id, lane })
   } finally {
     try { scratch.close() } catch { /* a throwaway ledger */ }
     try { rmSync(scratchDir, { recursive: true, force: true }) } catch { /* a throwaway dir */ }
@@ -7302,7 +7347,7 @@ function suiteReaskIndex(lines) {
   return index
 }
 
-function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen, require_present, strict_adw_id, lane }) {
+function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, fromLine = null, seen, require_present, strict_adw_id, lane }) {
   let content
   try {
     content = readFileSync(journalPath, 'utf8')
@@ -7326,6 +7371,8 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, seen
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1
     if (!line) continue
+    // A run reads only its own journal segment: lines before its run-start belong to earlier runs.
+    if (Number.isInteger(fromLine) && lineNo < fromLine) { ignored += 1; continue }
     let parsed
     try {
       parsed = JSON.parse(line)

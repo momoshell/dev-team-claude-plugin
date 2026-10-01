@@ -1,14 +1,16 @@
 // test/factory-model-reeval.test.mjs — offline injected-dependency coverage for the
-// --all-seats re-evaluation cadence. W3 reads real disposable bench inputs but
-// no test probes a real endpoint, resolves a worker binary, uses live credentials,
-// or edits audit fixtures: git discovery, bench runs, ledger, routing,
-// composition, and roster writes are all stubbed through explicit dependency
-// seams. The default sweep reads stored rows only; only provisioned:true runs
-// benches.
+// --all-seats re-evaluation cadence. Tests read real disposable bench inputs and
+// tracked authored inputs offline without executing their gates; no test probes a
+// real endpoint, resolves a worker binary, uses live credentials, or edits audit
+// fixtures. Ledger, routing, composition, and roster writes are stubbed through
+// explicit dependency seams. The default sweep reads stored rows only; only
+// provisioned:true runs benches.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
   EvalRefusal,
@@ -47,6 +49,57 @@ function makeRow(over = {}) {
   }
 }
 
+// MUTATION: restore cwd-relative default metadata reads; external-cwd admission must fail.
+test('P1 default readers admit tracked benches from a different cwd without writes', () => {
+  const root = childSweep(ROOT)
+  const external = childSweep(scratchDir('factory-reeval-p1-'))
+  assert.ok(root.dirs.length > 0)
+  for (const result of [root, external]) {
+    assert.equal(result.report.seat_reports.length, result.dirs.length)
+    assert.ok(result.report.seat_reports.every((seat) => seat.refusal === null))
+    assert.equal(result.writes, 0)
+  }
+  assert.equal(external.report.seat_reports.length, root.report.seat_reports.length)
+})
+
+// MUTATION: report absolute resolved seat identifiers; reports and candidates stay checkout-relative.
+test('P2 reports and candidate rows retain discovered relative seat identifiers', () => {
+  const cwd = scratchDir('factory-reeval-p2-')
+  const dry = childSweep(cwd)
+  assert.deepEqual(dry.report.seat_reports.map((seat) => seat.seat), dry.dirs)
+  assert.deepEqual(dry.report.seat_reports.map((seat) => seat.path), dry.dirs)
+  assert.ok(dry.dirs.every((dir) => !dir.startsWith('/')))
+  const rows = childSweep(cwd, 'rows')
+  assert.equal(rows.report.candidate_rows.length, rows.dirs.length)
+  assert.deepEqual(rows.report.candidate_rows.map((row) => row.seat), rows.dirs)
+})
+
+// MUTATION: pass relative args.dir to the default runBench; provisioned reads must reach the offline gate.
+test('P3 default provisioned runner reaches the injected offline gate refusal', () => {
+  const result = childSweep(scratchDir('factory-reeval-p3-'), 'gate')
+  assert.ok(result.dirs.length > 0)
+  assert.equal(result.report.seat_reports.length, result.dirs.length)
+  assert.ok(result.report.seat_reports.every((seat) => seat.refusal === 'no-mechanical-gate' && seat.refusal_detail.includes('offline gate sentinel')))
+  assert.equal(result.writes, 0)
+})
+
+// MUTATION: resolve the injected metadata argument; injected readers and runners must receive relative dirs.
+test('P4 injected readers and runners continue receiving relative discovered dirs', () => {
+  const result = childSweep(scratchDir('factory-reeval-p4-'), 'injected')
+  assert.ok(result.dirs.length > 0)
+  assert.deepEqual(result.seenMeta, result.dirs)
+  assert.deepEqual(result.seenRunner, result.dirs)
+})
+
+// MUTATION: create or clean up seat worktrees from process.cwd() again; a sweep run elsewhere must still build seats from its checkout.
+test('P5 provisioned seats are built from the swept checkout, not the cwd', () => {
+  const result = childSweep(scratchDir('factory-reeval-p5-'), 'seat')
+  assert.ok(result.seenWorktree.length > 0)
+  assert.deepEqual([...new Set(result.seenWorktree)], [ROOT])
+  assert.ok(result.seenCleanup.length > 0)
+  assert.deepEqual([...new Set(result.seenCleanup)], [ROOT])
+})
+
 function metaFor(dir, over = {}) {
   return {
     sha: `sha-${dir.replace(/[^a-z0-9]+/gi, '-')}`,
@@ -70,6 +123,43 @@ function stubLedger() {
       evalCells: async (args) => { reads.push(args); return [] },
     },
   }
+}
+
+function childSweep(cwd, mode = 'dry') {
+  const moduleUrl = pathToFileURL(join(ROOT, 'scripts/factory/model-eval.mjs')).href
+  const source = `
+    const { runAllSeats, discoverAuthoredBenches } = await import(${JSON.stringify(moduleUrl)});
+    const [checkout, mode] = process.argv.slice(1);
+    const writes = [], seenMeta = [], seenRunner = [], seenWorktree = [], seenCleanup = [];
+    const deps = {
+      ledger: { recordEvalCell: async (row) => { writes.push(row); return { ok: true }; }, evalCells: async () => [] },
+      readStoredRows: async ({ benches }) => mode === 'rows' ? benches.map((bench) => ({ bench, role:'builder', provider:'anthropic', model_id:'m', agent:'claude', effort:'medium', production:0, task_sha:'t', envelope_status:'received', absent_reason:null, asserts_declared:1, asserts_passed:1 })) : [],
+      loadRoutingPolicy: () => ({ policy: { routes: {} }, policyHash: 'a'.repeat(64) }),
+      materialiseRoutingChoice: async () => ({ outcome:'abstained', chosen_cell:null }),
+      readRosterText: () => JSON.stringify({ schema_version:1, tiers:{ build:{ builder:null } } }),
+      readLadder: () => ({ degraded:false, error:null }),
+      composeMoves: async () => ({ ok:true, patch:null, branch:null, commit_subject:null, checks:[], refusals:[] }),
+    };
+    if (mode === 'injected') {
+      deps.readBenchMeta = async (dir) => { seenMeta.push(dir); return { sha:'sha-'+dir, role:'builder', tier:'build', candidates:[], production:'anthropic/m' }; };
+      deps.runBench = async ({dir}) => { seenRunner.push(dir); return { cells:[], role:'builder', tier:'build' }; };
+    }
+    if (mode === 'gate') deps.runGate = () => { throw new Error('offline gate sentinel'); };
+    if (mode === 'seat') {
+      deps.ledger.recordRoutingChoice = async () => {};
+      deps.runGate = () => 'GATE-SUMMARY {"total":1,"failed":0,"errored":0}';
+      deps.makeWorktree = (source) => { seenWorktree.push(source); return '/nonexistent/model-eval-p5/checkout'; };
+      deps.removeWorktree = (source) => { seenCleanup.push(source); return { removed: true }; };
+      deps.seatIo = () => { throw new Error('seat sentinel'); };
+    }
+    const dirs = await discoverAuthoredBenches({ checkout });
+    const report = await runAllSeats({ checkout, provisioned: mode === 'gate' || mode === 'injected' || mode === 'seat', deps });
+    console.log(JSON.stringify({ dirs, report, writes:writes.length, seenMeta, seenRunner, seenWorktree, seenCleanup }));
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, ROOT, mode], { cwd, encoding: 'utf8', timeout: 30000 })
+  assert.equal(result.error, undefined, result.error?.message)
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout.trim().split('\n').at(-1))
 }
 
 function offlineDeps(over = {}) {

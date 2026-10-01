@@ -9,6 +9,8 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { scratchDir } from './helpers.mjs'
 import {
   extractSuiteCorpus,
@@ -237,6 +239,27 @@ test('F1 unavailable references are absent with a reason and retain their denomi
   assert.equal(verification.report.unavailable_rows[0].population.value, null)
   assert.equal(verification.report.unavailable_rows[0].population.drawn_from, 1)
   assert.ok(extraction.report.entries.drawn_from > 0)
+})
+
+// MUTATION: restore deps.cwd-relative default for the plugin-owned corpus fixture.
+test('P6 no-reference verification reads the shipped corpus from a foreign checkout', () => {
+  const checkout = scratchDir('corpus-foreign-checkout-')
+  execFileSync('git', ['init', '-q', checkout])
+  const home = scratchDir('corpus-foreign-home-')
+  const sourceRoot = join(home, '.crew')
+  mkdirSync(sourceRoot, { recursive: true })
+  const reads = []
+  let output = ''
+  const sink = { write: (chunk) => { output += chunk } }
+  const pluginReference = fileURLToPath(new URL('../test/fixtures/suite-policy-corpus.jsonl', import.meta.url))
+  const status = main(['--source-root', sourceRoot], {
+    cwd: checkout, home, stdout: sink, stderr: sink,
+    io: { ...realIo(), readdir: (path, options) => realIo().readdir(path, options), readFile: (path, encoding) => { reads.push(path); return readFileSync(path, encoding) } },
+  })
+  assert.equal(status, 0, output)
+  assert.ok(reads.includes(pluginReference))
+  assert.match(output, /"verification"/)
+  assert.doesNotMatch(output, /reference-unreadable/)
 })
 
 test('argument parsing refuses unknown flags without performing discovery', () => {

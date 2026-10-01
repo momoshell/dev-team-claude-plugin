@@ -6,8 +6,8 @@ import {
   existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 
-import { join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { isAbsolute, join, resolve } from 'node:path'
+import { spawnSync, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT, scratchDir, gitResult } from './helpers.mjs'
 import {
@@ -2131,4 +2131,32 @@ test('the recordOnly seam leaves existing library callers alone', () => {
   assert.deepEqual(recordingResult.promotions, [])
   assert.equal(recordingHarness.calls.branches.length, 0)
   assert.equal(recordingHarness.calls.moves.length, 0)
+})
+
+const PLUGIN_CREW_PATH = fileURLToPath(new URL('../crew/crew.mjs', import.meta.url))
+function foreignCheckoutForPathTest() {
+  const root = scratchDir('intake-foreign-path-')
+  execFileSync('git', ['init', '-q', root])
+  return root
+}
+function assertForeignCrewCall(call, checkout) {
+  assert.equal(isAbsolute(call.args[0]), true)
+  assert.equal(existsSync(call.args[0]), true)
+  assert.equal(call.args[0], PLUGIN_CREW_PATH)
+  assert.equal(call.cwd, checkout)
+  assert.equal(call.args[call.args.indexOf('--checkout') + 1], checkout)
+}
+// MUTATION: restore the foreign checkout-derived crew/crew.mjs boot path.
+test('P1 foreign checkout boot executes the plugin crew entrypoint', () => {
+  const checkout = foreignCheckoutForPathTest(), calls = []
+  normalDeps({ spawnSync: (file, args, options) => { calls.push({ file, args, ...options }); return { status: 0, stdout: '' } } }).crewBoot({ checkout, task: 'foreign', tier: 'judge' })
+  assert.equal(calls.length, 1)
+  assertForeignCrewCall(calls[0], checkout)
+})
+// MUTATION: restore the foreign checkout-derived crew/crew.mjs run path.
+test('P2 foreign checkout run executes the plugin crew entrypoint', () => {
+  const checkout = foreignCheckoutForPathTest(), calls = []
+  normalDeps({ spawnSync: (file, args, options) => { calls.push({ file, args, ...options }); return { status: 0, stdout: '' } } }).crewRun({ checkout, task: 'foreign', briefPath: join(checkout, 'brief.md'), variant: 'standard' })
+  assert.equal(calls.length, 1)
+  assertForeignCrewCall(calls[0], checkout)
 })

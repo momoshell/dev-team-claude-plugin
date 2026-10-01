@@ -1,8 +1,10 @@
 import { test } from 'node:test'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { scratchDir } from '../test/helpers.mjs'
 import assert from 'node:assert/strict'
 import {
-  existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
@@ -384,4 +386,34 @@ test('gc dry run reports without mutating MEMORY.md', () => {
     assert.ok(report.pruned.some((entry) => entry.path === 'dry-gone.md'))
     assert.equal(readFileSync(indexPath, 'utf8'), snapshot)
   } finally { clean(dir) }
+})
+
+// MUTATION: restore relative node scripts/factory/ledger.mjs query arguments.
+test('P5 emitted task, sessions, and run-set queries resolve to the plugin ledger CLI', async () => {
+  const result = memory.lintMemoryDelta({ body: 'PR #219 merged. 400 tokens. Suite ran 5/6 green.' })
+  const expected = fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url))
+  const families = result.findings.map(({ query }) => query.includes(' task ') ? 'task' : query.includes(' sessions') ? 'sessions' : 'run-set')
+  for (const family of ['task', 'sessions', 'run-set']) assert.ok(families.includes(family))
+  for (const { query } of result.findings) {
+    const probe = query.replace(' <adw_id|task_slug>', '').replace(' --since <iso>', '')
+    const output = execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', probe], { encoding: 'utf8' })
+    const cli = output.split('\0').filter(Boolean)[1]
+    assert.equal(cli, expected)
+    assert.equal(isAbsolute(cli), true)
+    assert.equal(existsSync(cli), true)
+  }
+  const copied = scratchDir("memory path ' with space-")
+  assert.match(copied, /memory path ' with space-/)
+  mkdirSync(join(copied, 'crew'), { recursive: true })
+  mkdirSync(join(copied, 'scripts/factory'), { recursive: true })
+  cpSync(new URL('./memory.mjs', import.meta.url), join(copied, 'crew/memory.mjs'))
+  cpSync(new URL('./memory-md.mjs', import.meta.url), join(copied, 'crew/memory-md.mjs'))
+  cpSync(new URL('../scripts/factory/ledger.mjs', import.meta.url), join(copied, 'scripts/factory/ledger.mjs'))
+  const copiedMemory = await import(pathToFileURL(join(copied, 'crew/memory.mjs')).href)
+  const copiedQuery = copiedMemory.lintMemoryDelta({ body: 'PR #219 merged.' }).findings[0].query
+  const copiedPrefix = copiedQuery.replace(' <adw_id|task_slug>', '')
+  const copiedOutput = execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', copiedPrefix], { encoding: 'utf8' })
+  const copiedCli = copiedOutput.split('\0').filter(Boolean)[1]
+  assert.equal(copiedCli, realpathSync(join(copied, 'scripts/factory/ledger.mjs')))
+  assert.equal(existsSync(copiedCli), true)
 })

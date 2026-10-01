@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os'
 import {
   documentDiffImages, documentDeclarations, documentChangedDeclarations, documentTrigger,
   documentStagePlan, documentEntry, runDocumentationDecision, DOCUMENT_APPEND_TARGET, DOCUMENT_BATCH_TARGET, DOCUMENT_FLAGS_TARGET, DOCUMENT_LIFECYCLE_ENTRY, driveTask, REVIEWED_CORE_STAGES, SHAPE_MAJOR_PHASES,
-  VARIANTS,
+  VARIANTS, ANCHOR_PIN_COMMAND,
 } from './drive.mjs'
 import { convergeIo, convergeRun, runPublished, CONVERGE_CTX, CTX, planEnv, publicationIo } from './drive-fixtures.mjs'
 
@@ -941,7 +941,7 @@ function documentationIo({ diff = DOCUMENT_DIFF, targetText = DOCUMENT_BASE, tar
     run(command) {
       runs.push(command); events.push({ type: 'run', command })
       if (command.startsWith('git diff --binary --no-ext-diff ')) return { ok: true, output: diff }
-      if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
+      if (command.startsWith(`${ANCHOR_PIN_COMMAND} --repair `)) {
         anchorCommands.push(command)
         return typeof repair === 'function' ? repair(command, io) : repair
       }
@@ -998,7 +998,7 @@ function decorateDriverDocumentationIo(io, { targetText = DOCUMENT_BASE, targetP
     return originalWrite(path, content)
   }
   io.run = (command) => {
-    if (command.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair ')) {
+    if (command.startsWith(`${ANCHOR_PIN_COMMAND} --repair `)) {
       events.push({ type: 'repair', command })
       if (typeof repair === 'function') return repair(command, { files, changedDocs, events })
       return { ok: true, output: '' }
@@ -1262,7 +1262,7 @@ test('F1 conventions append behavior remains unchanged', () => {
   const io = documentationIo({ diff: DOCUMENT_REFUSAL_DIFF })
   const result = documentationDecision(io)
   const entry = DOCUMENT_ENTRIES[2].entry
-  const command = "node skills/qa-test-writing/anchor-pin.mjs --repair skills/backend-node --root '/tmp/document-author-checkout' --base 'base1111'"
+  const command = `${ANCHOR_PIN_COMMAND} --repair skills/backend-node --root '/tmp/document-author-checkout' --base 'base1111'`
   assert.equal(result.commit, 'author-1')
   assert.equal(io.files.get(DOCUMENT_TARGET_PATH), `${DOCUMENT_BASE}${entry}\n`)
   assert.deepEqual(io.writes.map(({ path }) => path), [DOCUMENT_TARGET_PATH])
@@ -1332,7 +1332,7 @@ test('I3 dispatch document entries omit add instructions', () => {
 })
 
 test('J1 structural documentation runs one fenced crew-dispatch anchor repair', () => {
-  const command = "node skills/qa-test-writing/anchor-pin.mjs --repair skills/crew-dispatch --root '/tmp/document-author-checkout' --base 'base1111'"
+  const command = `${ANCHOR_PIN_COMMAND} --repair skills/crew-dispatch --root '/tmp/document-author-checkout' --base 'base1111'`
   const io = documentationIo({
     diff: DOCUMENT_STRUCTURAL_DIFF,
     repair: (seen, fixture) => {

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  staleSpawnProof, publicationIo, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites,
+  staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
@@ -203,14 +203,14 @@ function anchorSuiteIo({ suite, checks = [anchorCheck(), anchorCheck({ moved: 0,
   let checkIndex = 0
   fixture.io.run = (command) => {
     const text = String(command)
-    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --check')) {
+    if (text.startsWith(`${ANCHOR_PIN_COMMAND} --check`)) {
       fixture.io.calls.run.push({ cmd: text, n: 0 })
       return { ok: false, output: checks[checkIndex++] ?? anchorCheck({ moved: 0, lines: 0 }) }
     }
     if (text === `${gitFiles} -z -- '*anchors.json'`) return { ok: true, output: `${dispatch}/anchors.json\0${recovery}/anchors.json\0` }
     if (text.startsWith(`${gitFiles} -z --cached --`)) return { ok: true, output: `${dispatch}/anchors.json\0${recovery}/anchors.json\0` }
     if (text.startsWith(`${gitFiles} -z --others`)) return { ok: true, output: '' }
-    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all')) {
+    if (text.startsWith(`${ANCHOR_PIN_COMMAND} --repair-all`)) {
       fixture.io.calls.run.push({ cmd: text, n: 0 })
       repairStarted = true
       if (repair) return repair({ command: text, files, dispatch, recovery })
@@ -331,7 +331,7 @@ function publishingAnchorIo(secondDiff) {
       const first = ++suiteIndex === 1
       return { ok: !first, output: first ? suiteRed('a.test.mjs', 1, 'moved-only red') : PUBLISH_WARM_OUTPUT }
     }
-    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --check')) {
+    if (text.startsWith(`${ANCHOR_PIN_COMMAND} --check`)) {
       io.calls.run.push(text)
       return { ok: checkIndex++ === 0, output: checkIndex === 1 ? anchorCheck() : anchorCheck({ moved: 0, lines: 0 }) }
     }
@@ -339,7 +339,7 @@ function publishingAnchorIo(secondDiff) {
       io.calls.run.push(text)
       return { ok: true, output: text.includes('--others') ? '' : `${dispatch}\0${recovery}\0` }
     }
-    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all')) {
+    if (text.startsWith(`${ANCHOR_PIN_COMMAND} --repair-all`)) {
       io.calls.run.push(text)
       repaired = true
       files[`${CTX.checkout}/${dispatch}`] = JSON.stringify({ 'crew/drive.mjs:1': 'repaired dispatch' })
@@ -7387,7 +7387,7 @@ test('F1 driver keeps the mutation runner behind the scripts import firewall', (
   assert.equal(hasScriptsImport(`${source}\nimport { forbidden } from '../scripts/forbidden.mjs'\n`), true)
   assert.equal(hasScriptsImport(`${source}\nimport '../scripts/forbidden.mjs'\n`), true)
   assert.match(source, /runner = phaseSlot\(SUITE_SLOT_PHASES\.gate, \(\) => io\.run\(/)
-  assert.match(source, /node scripts\/factory\/prove-mutations\.mjs --diff-config/)
+  assert.match(source, /\$\{PROVE_MUTATIONS_COMMAND\} --diff-config/)
 })
 
 test('G1 baseline inventory fatal retains the typed tree contamination shape', () => {
@@ -9151,4 +9151,24 @@ test('invalid original and unsupported extension retain mutation execution behav
   const unsupported = run('a.md', 'hello', 'hello', 'world')
   assert.equal(unsupported.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
   assert.equal(unsupported.calls.writeLog.filter(({ path }) => path.endsWith('/a.md')).length, 2)
+})
+
+// MUTATION D1-D7: point any plugin-owned driver path back at the lane checkout, as a constant or at a call site.
+test('D1-D7 driver resolves plugin-owned tools and resources from the plugin, never the lane checkout', async () => {
+  const d = await import('./drive.mjs')
+  const { existsSync, readFileSync: read } = await import('node:fs')
+  const { dirname: dir, join: joinPath } = await import('node:path')
+  const { fileURLToPath: toPath } = await import('node:url')
+  const pluginRoot = dir(dir(toPath(import.meta.url)))
+  assert.equal(d.PLUGIN_ROOT, pluginRoot)
+  for (const [path, rel] of [[d.PROVE_MUTATIONS_SCRIPT, 'scripts/factory/prove-mutations.mjs'], [d.ANCHOR_PIN_SCRIPT, 'skills/qa-test-writing/anchor-pin.mjs'], [d.CAPABILITIES_PATH, 'crew/capabilities.json'], [d.SCREENER_MODULE, 'crew/screener.mjs']]) {
+    assert.equal(path, joinPath(pluginRoot, rel)); assert.ok(existsSync(path), path)
+  }
+  assert.equal(d.PROVE_MUTATIONS_COMMAND, `node ${d.shellArg(d.PROVE_MUTATIONS_SCRIPT)}`)
+  assert.equal(d.ANCHOR_PIN_COMMAND, `node ${d.shellArg(d.ANCHOR_PIN_SCRIPT)}`)
+  const source = read(new URL('./drive.mjs', import.meta.url), 'utf8')
+  for (const relative of ['node skills/', 'node scripts/', 'checkout}/crew/', 'checkout}/skills/', 'falsificationLines(io, ctx.checkout)']) assert.equal(source.includes(relative), false, relative)
+  const uses = (token) => source.split(token).length - 1
+  // The lead adjudicator gets the same seat brief, and so the same falsification rules, as the other panel seats.
+  assert.deepEqual([uses('${ANCHOR_PIN_COMMAND}'), uses('${PROVE_MUTATIONS_COMMAND}'), uses('readFile(CAPABILITIES_PATH)'), uses('modulePath: SCREENER_MODULE'), uses('falsificationLines(io, PLUGIN_ROOT)'), uses("panelSeatBrief('lead'")], [4, 1, 3, 1, 2, 1])
 })

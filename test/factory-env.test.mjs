@@ -1063,7 +1063,6 @@ const PLUGIN_PATH_CENSUS = Object.freeze({
   'crew/adapters/adapter-claude.mjs': Object.freeze({ sites: 1, why: 'root is plugin/task dir' }),
   'crew/crew-test-helpers.mjs': Object.freeze({ sites: 6, why: 'fixture construction' }),
   'crew/crew.mjs': Object.freeze({ sites: 1, why: 'checkout entry matcher also admits own module' }),
-  'crew/drive.mjs': Object.freeze({ sites: 5, why: 'real deferred R1 bugs; b1051 owns file' }),
   'crew/pi/acp-bridge.mjs': Object.freeze({ sites: 1, why: 'repo already module anchored' }),
   'scripts/factory/closeout.mjs': Object.freeze({ sites: 1, why: 'operator hint deferred' }),
   'scripts/factory/dispatch-batch.mjs': Object.freeze({ sites: 2, why: 'operator hint plus target skills-anchor read' }),
@@ -1090,7 +1089,7 @@ test('G1 tracked masked plugin path census and detector controls', () => {
   const expected = Object.fromEntries(Object.entries(PLUGIN_PATH_CENSUS).map(([file, entry]) => [file, entry.sites]))
   console.log(`G1 scanned ${files.length} files; found ${Object.values(counts).reduce((sum, sites) => sum + sites, 0)} sites`)
   assert.deepEqual(counts, expected)
-  assert.deepEqual(Object.values(PLUGIN_PATH_CENSUS).map(({ sites }) => sites).reduce((a, b) => a + b, 0), 19)
+  assert.deepEqual(Object.values(PLUGIN_PATH_CENSUS).map(({ sites }) => sites).reduce((a, b) => a + b, 0), 14)
   for (const shape of [
     "join(root, 'crew/crew.mjs')", 'resolve(checkout, "scripts/factory/ledger.mjs")',
     "resolvePath(repoRoot, 'skills/x')", "join(process.cwd(), 'docs/x')",

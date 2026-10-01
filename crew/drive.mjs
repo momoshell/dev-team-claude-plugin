@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -4238,7 +4238,7 @@ export function runDocumentationDecision({ ctx = {}, io, commit, inScope = () =>
 
   const repairRoots = [...new Set(staged.map(({ target }) => DOCUMENT_TARGET_ROOTS.get(target)).filter(Boolean))]
   for (const root of repairRoots) {
-    const repairCommand = `node skills/qa-test-writing/anchor-pin.mjs --repair ${root} --root ${shellArg(ctx.checkout)} --base ${shellArg(ctx.head)}`
+    const repairCommand = `${ANCHOR_PIN_COMMAND} --repair ${root} --root ${shellArg(ctx.checkout)} --base ${shellArg(ctx.head)}`
     const repair = io.run(repairCommand)
     const refusalOutput = /^\s*refused\b/m.test(String(repair?.output || ''))
     if (repair?.ok !== true || (Array.isArray(repair?.refusals) && repair.refusals.length > 0) || repair?.refused === true || refusalOutput) {
@@ -7157,7 +7157,7 @@ function runTask(ctx, io, crash) {
         ? 'Return base and head, adjudications for every collision-safe divergent id, each disposition uphold or dismiss, each with a non-empty reason, and your own reviewed_files and unreviewable_files.'
         : 'Return the complete review-only fields: base, head, outcome, findings, reviewed_files, and unreviewable_files. Review independently; do not rely on another seat or write to the checkout.',
       'Do not create, edit, delete, checkout, or commit anything in the checkout. Read-only validation is permitted.',
-      ...falsificationLines(io, ctx.checkout),
+      ...falsificationLines(io, PLUGIN_ROOT),
       `Transport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role=${JSON.stringify(role)}.`,
     ].join('\n')
     const writeBriefAndAssign = (role, file, note, briefBuilder) => {
@@ -7294,7 +7294,7 @@ function runTask(ctx, io, crash) {
       'Return base, head, adjudications, reviewed_files, and unreviewable_files. Each adjudication must be exactly one of uphold or dismiss and must include a non-empty reason.',
       'Do not create, edit, delete, checkout, or commit anything in the checkout.',
     ].join('\n')
-    const adjudicatorDispatch = writeBriefAndAssign('lead', adjudicationBrief, 'review-panel-adjudication', (id, runId) => `${adjudicationText}\nTransport identity is exact: assignment_id=${JSON.stringify(id ?? '<dispatch id>')}, run_id=${JSON.stringify(runId ?? '<current run id>')}, role="lead".`)
+    const adjudicatorDispatch = writeBriefAndAssign('lead', adjudicationBrief, 'review-panel-adjudication', (id, runId) => `${panelSeatBrief('lead', id, runId)}\n${adjudicationText}`)
     const adjudicatorEnv = adjudicatorDispatch.env
     const adjudicatorWriteRefusal = provePanelZeroWrite('lead', adjudicatorEnv)
     if (adjudicatorWriteRefusal) return failAfterSeat('lead', adjudicatorWriteRefusal.reason, adjudicatorEnv, adjudicatorDispatch.error, adjudicatorWriteRefusal)
@@ -7862,7 +7862,7 @@ function runTask(ctx, io, crash) {
         }
         const bodyPath = art('pr-body.md')
         let resumeRegisterText = ''
-        try { resumeRegisterText = String(resumeIo.readFile(`${resumeCtx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
+        try { resumeRegisterText = String(resumeIo.readFile(CAPABILITIES_PATH) || '') } catch { /* narration is never load-bearing */ }
         const resumeNarrated = narrateRecord({ record: bodyRecord, registerText: resumeRegisterText, io: resumeIo })
         const resumeBodyRecord = applyNarration(bodyRecord, resumeNarrated)
         const resumePublishedNarrative = typeof resumeBodyRecord?.narrative === 'string' ? resumeBodyRecord.narrative : ''
@@ -9247,7 +9247,7 @@ function runTask(ctx, io, crash) {
     }
     let runner
     try {
-      runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`node scripts/factory/prove-mutations.mjs --diff-config ${shellArg(configPath)}`))
+      runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`${PROVE_MUTATIONS_COMMAND} --diff-config ${shellArg(configPath)}`))
     } catch (err) { runner = { ok: false, output: '', error: err?.message ?? String(err) } }
     const runnerOutput = runner?.output ?? `${runner?.stdout || ''}${runner?.stderr || ''}`
     let reportSource = 'stdout-sentinel'
@@ -10574,7 +10574,7 @@ function runTask(ctx, io, crash) {
   const runScreenerRound = (roundNo) => {
     const empty = emptyScreenerResult()
     try {
-      const registerText = io.readFile(`${ctx.checkout}/crew/capabilities.json`)
+      const registerText = io.readFile(CAPABILITIES_PATH)
       const config = screenerConfig(registerText)
       if (!config || config.refused) return empty
       const models = io.run(screenerModelsCommand(config.root))
@@ -10588,7 +10588,7 @@ function runTask(ctx, io, crash) {
       if (typeof acceptance !== 'string' || !acceptance.trim()) return empty
       const inputPath = art(`screener-input-${roundNo}.json`)
       const input = {
-        modulePath: `${ctx.checkout}/crew/screener.mjs`,
+        modulePath: SCREENER_MODULE,
         root: config.root,
         diff: diff.output,
         acceptance,
@@ -11235,7 +11235,7 @@ function runTask(ctx, io, crash) {
         ...screenerBriefLines(screenerResult.proposals),
         // Before the diff-mutant findings: that section ends the brief with a JSON array,
         // and a reader (and a test) takes everything after its heading as that array.
-        ...falsificationLines(io, ctx.checkout),
+        ...falsificationLines(io, PLUGIN_ROOT),
         ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
@@ -11699,7 +11699,7 @@ function runTask(ctx, io, crash) {
             before.set(path, bytes)
           }
           for (const directory of [...directories].sort()) {
-            const command = `node skills/qa-test-writing/anchor-pin.mjs --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`
+            const command = `${ANCHOR_PIN_COMMAND} --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`
             let resolved
             try { resolved = io.run(command) } catch (err) { resolved = { ok: false, output: err?.message ?? String(err) } }
             const refusalOutput = /^\s*refused\b/m.test(String(resolved?.output || ''))
@@ -11944,7 +11944,7 @@ function runTask(ctx, io, crash) {
     let before = new Map()
     let changedCarriers = []
     let unrecoverable = null
-    const checkCommand = `node skills/qa-test-writing/anchor-pin.mjs --check . --root ${shellArg(ctx.checkout)}`
+    const checkCommand = `${ANCHOR_PIN_COMMAND} --check . --root ${shellArg(ctx.checkout)}`
     let check
     try { check = io.run(checkCommand) } catch (error) { check = { ok: false, output: error?.message ?? String(error) } }
     const output = String(check?.output ?? '')
@@ -11999,7 +11999,7 @@ function runTask(ctx, io, crash) {
       else {
         for (const directory of dirs) {
           let repair
-          try { repair = io.run(`node skills/qa-test-writing/anchor-pin.mjs --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`) } catch (error) { repair = { ok: false, output: error?.message ?? String(error) } }
+          try { repair = io.run(`${ANCHOR_PIN_COMMAND} --repair-all ${shellArg(directory)} --root ${shellArg(ctx.checkout)}`) } catch (error) { repair = { ok: false, output: error?.message ?? String(error) } }
           if (repair?.ok !== true || /^\s*refused\b/m.test(String(repair?.output ?? ''))) { decline = 'refused'; break }
         }
         let afterPaths
@@ -12272,7 +12272,7 @@ function runTask(ctx, io, crash) {
       hardening: hardenBlindSpots.length > 0 ? { unmeasured: hardenBlindSpots } : null,
     }
     let registerText = ''
-    try { registerText = String(io.readFile(`${ctx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
+    try { registerText = String(io.readFile(CAPABILITIES_PATH) || '') } catch { /* narration is never load-bearing */ }
     const narrated = narrateRecord({ record, registerText, io })
     const bodyRecord = applyNarration(record, narrated)
     const publishedNarrative = typeof bodyRecord?.narrative === 'string' ? bodyRecord.narrative : ''

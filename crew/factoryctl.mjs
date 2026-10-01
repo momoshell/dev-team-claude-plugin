@@ -13,6 +13,7 @@ import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { archivedLanes, crewRoot, discoverLanes } from '../scripts/factory/lane-watch.mjs'
+import { checkoutBaseBranch } from '../scripts/factory/probe-repo.mjs'
 
 export const DEFAULT_TIMEOUT_MS = 5000
 
@@ -555,6 +556,8 @@ export function pendingDeps(deps = {}) {
     statSync: deps.statSync || fsStatSync,
     spawnSync: deps.spawnSync || cpSpawnSync,
     home: deps.home,
+    factoryRoot: deps.factoryRoot,
+    baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
   }
 }
 
@@ -584,15 +587,6 @@ export function gitRunner(d, repo) {
     if (result?.error) return { status: 128, stdout: '', stderr: String(result.error.message || result.error) }
     return { status: result?.status, stdout: String(result?.stdout || '').trim(), stderr: String(result?.stderr || '').trim() }
   }
-}
-
-function defaultBranch(git) {
-  const head = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
-  if (head.status === 0 && head.stdout) return head.stdout
-  for (const name of ['main', 'master']) {
-    if (git('show-ref', '--verify', '--quiet', `refs/heads/${name}`).status === 0) return name
-  }
-  return null
 }
 
 function remoteName(git) {
@@ -751,7 +745,13 @@ export function pendingVerb(args, deps = {}) {
     ? resolvePath(args.repo)
     : (typeof deps.cwd === 'function' ? deps.cwd() : process.cwd())
   const git = gitRunner(d, repo)
-  const ctx = { d, git, repo, base: defaultBranch(git), remote: remoteName(git) }
+  const remote = remoteName(git)
+  let base = null
+  try {
+    const { branch } = d.baseBranch({ checkout: repo })
+    base = remote ? `${remote}/${branch}` : null
+  } catch { /* an unresolved policy leaves the containment base absent */ }
+  const ctx = { d, git, repo, base, remote }
   const pendingRows = []
   const index = new Map()
   const counts = {

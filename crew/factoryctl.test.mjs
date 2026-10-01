@@ -120,7 +120,7 @@ function pendingLane(root, name, text, { task = name, archived = false, settled 
   return { id: `repo/${name}`, repo: 'repo', task, dir, journal: join(dir, 'journal.jsonl'), taskDir: join(dir, 'task'), settled, archived, archivedAt: archived ? 'stamp' : null }
 }
 
-function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {} } = {}) {
+function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {}, originHead = 'origin/main', remote = 'origin' } = {}) {
   const calls = []
   const spawnSync = (command, argv, options) => {
     calls.push({ command, argv: [...argv], options })
@@ -133,8 +133,8 @@ function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new 
     }
     if (command !== 'git') return { status: 127, stdout: '', stderr: 'unknown command' }
     const args = argv.slice(2)
-    if (args[0] === 'rev-parse') return { status: 0, stdout: 'origin/main', stderr: '' }
-    if (args[0] === 'remote') return { status: 0, stdout: 'origin', stderr: '' }
+    if (args[0] === 'rev-parse') return { status: 0, stdout: originHead, stderr: '' }
+    if (args[0] === 'remote') return { status: 0, stdout: remote, stderr: '' }
     if (args[0] === 'cat-file') {
       const commit = String(args[2] || '').replace(/\^\{commit\}$/, '')
       return { status: Object.prototype.hasOwnProperty.call(branches, commit) || merged.has(commit) ? 0 : 1, stdout: '', stderr: '' }
@@ -156,14 +156,14 @@ function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new 
   return { spawnSync, calls }
 }
 
-function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {}, completionLog = null } = {}) {
+function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {}, completionLog = null, baseBranch = () => ({ branch: 'main' }), originHead = 'origin/main', remote = 'origin' } = {}) {
   const root = scratchDir('factoryctl-pending-')
   const laneRoot = join(root, 'lanes')
   const repo = join(root, 'repo')
   mkdirSync(laneRoot, { recursive: true }); mkdirSync(repo, { recursive: true })
   const lanes = (specs || []).map((spec) => pendingLane(laneRoot, spec.name, spec.text, spec.options))
   if (completionLog !== null) writeFileSync(completionLogPath({ root, env: {} }), completionLog)
-  const d = pendingSpawn({ branches, merged, remoteBranches, messages, gh })
+  const d = pendingSpawn({ branches, merged, remoteBranches, messages, gh, originHead, remote })
   const run = () => {
     let stdout = ''
     const result = pendingVerb({ _: ['pending'], json: true, 'crew-root': root, repo }, {
@@ -174,6 +174,8 @@ function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches 
       stdout: (text) => { stdout += text },
       cwd: () => repo,
       env: {},
+      factoryRoot: scratchDir('factoryctl-pending-profile-'),
+      baseBranch,
     })
     return { result, output: JSON.parse(stdout) }
   }
@@ -1388,4 +1390,20 @@ test('main routes waiting without connecting to a daemon', async () => {
   assert.equal(code, 0)
   assert.equal(touched, false)
   assert.match(stdout, /no lane is waiting on a human/)
+})
+
+test('F1 base branch: pending containment uses origin/dispute despite stale origin/HEAD', () => {
+  // MUTATION F1: use the stale origin/HEAD branch for containment.
+  const result = pendingUnit({ specs: [{ name: 'feature', text: `${JSON.stringify({ status: 'done', commit: 'feature-commit' })}\n` }], branches: { 'feature-commit': 'feature' }, merged: new Set(['feature-commit']), baseBranch: () => ({ branch: 'dispute' }), originHead: 'origin/master' })
+  const query = result.calls.find(({ argv }) => argv.includes('merge-base'))
+  assert.ok(query); assert.ok(query.argv.includes('origin/dispute')); assert.equal(result.output.counts.published, 1)
+})
+test('pending base branch refusal and absent remote fail closed', () => {
+  for (const options of [
+    { baseBranch: () => { throw new Error('profile-unratified') } },
+    { remote: '' },
+  ]) {
+    const result = pendingUnit({ specs: [{ name: 'feature', text: `${JSON.stringify({ status: 'done', commit: 'feature-commit' })}\n` }], branches: { 'feature-commit': 'feature' }, ...options })
+    assert.equal(result.calls.some(({ argv }) => argv.includes('merge-base')), false)
+  }
 })

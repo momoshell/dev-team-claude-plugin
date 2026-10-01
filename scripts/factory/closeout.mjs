@@ -31,6 +31,7 @@ import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-pat
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
+import { checkoutBaseBranch } from './probe-repo.mjs'
 
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
 // read is indistinguishable from a failure without it.
@@ -95,6 +96,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   ANCHOR_AMBIGUOUS: 'anchor-ambiguous',
   ISSUE_CLOSE_FAILED: 'issue-close-failed',
   WORKTREE_FAILED: 'worktree-failed',
+  BASE_BRANCH_UNRESOLVED: 'base-branch-unresolved',
   BRANCH_FAILED: 'branch-failed',
   ARCHIVE_FAILED: 'archive-failed',
   TREE_NOT_QUIET: 'tree-not-quiet',
@@ -189,6 +191,8 @@ export function normalDeps(deps = {}) {
     resolveTaskReturn: deps.resolveTaskReturn || defaultResolveTaskReturn,
     ingestJournal: deps.ingestJournal || defaultIngestJournal,
     home: deps.home || homedir(),
+    factoryRoot: deps.factoryRoot,
+    baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
   d.promptMeasurePath = deps.promptMeasurePath || defaultPromptMeasurePath(d)
@@ -970,10 +974,12 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
       return { prs: batch.length }
     },
     'scratch-worktree': () => {
+      let mergeBaseRef
+      try { mergeBaseRef = `origin/${d.baseBranch({ checkout: root }).branch}` } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED, 'scratch-worktree') }
       try { scratch = d.mkdtempSync(join(tmpdir(), 'closeout-scratch-')) } catch (error) {
         refuse(`cannot create scratch worktree: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'scratch-worktree')
       }
-      const result = runCommand({ file: 'git', args: ['worktree', 'add', '--detach', scratch, 'origin/main'], cwd: root }, d)
+      const result = runCommand({ file: 'git', args: ['worktree', 'add', '--detach', scratch, mergeBaseRef], cwd: root }, d)
       if (!commandOk(result)) refuse(`scratch worktree creation failed: ${childFailure(result)}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'scratch-worktree')
       return { scratch }
     },
@@ -1528,7 +1534,11 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
   const d = normalDeps(deps)
   const laneDir = report.lane_dir || fallbackLaneDir({ lane, checkout, crew: null })
   const runners = {
-    rebase: () => gitStep({ args: ['rebase', 'main'], cwd: laneDir, reason: CLOSEOUT_REFUSALS.REBASE_FAILED, step: 'rebase', deps: d, message: `rebase failed for ${lane}` }),
+    rebase: () => {
+      let recoveryBaseRef
+      try { recoveryBaseRef = d.baseBranch({ checkout }).branch } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED, 'rebase') }
+      return gitStep({ args: ['rebase', recoveryBaseRef], cwd: laneDir, reason: CLOSEOUT_REFUSALS.REBASE_FAILED, step: 'rebase', deps: d, message: `rebase failed for ${lane}` })
+    },
     gate: () => {
       const result = runCommand({ file: 'node', args: [join(crewDir, 'task', 'gate.mjs')], cwd: laneDir }, d)
       if (!commandOk(result)) refuse(`acceptance gate failed for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.GATE_RED, 'gate')

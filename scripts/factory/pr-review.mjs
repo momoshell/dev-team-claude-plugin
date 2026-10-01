@@ -17,6 +17,8 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { checkoutBaseBranch, isPlainBranchName } from './probe-repo.mjs'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECKOUT = resolve(HERE, '../..')
 const CREW = join(CHECKOUT, 'crew', 'crew.mjs')
@@ -115,6 +117,8 @@ function normalDeps(deps = {}) {
   return {
     ...source,
     checkout,
+    factoryRoot: source.factoryRoot,
+    baseBranch: source.baseBranch || (({ checkout: root }) => checkoutBaseBranch({ checkout: root, factoryRoot: source.factoryRoot })),
     tempRoot: typeof source.tempRoot === 'string' && source.tempRoot.trim() ? source.tempRoot : tmpdir(),
     spawn,
     gh: source.gh || ((args, opts) => spawn('gh', args, options(opts))),
@@ -228,7 +232,7 @@ function parseJson(value) {
 async function resolvePullRequest(pr, d) {
   let result
   try {
-    result = await invoke(d.gh, ['pr', 'view', pr, '--json', 'headRefOid,title,body'], { cwd: d.checkout, encoding: 'utf8' })
+    result = await invoke(d.gh, ['pr', 'view', pr, '--json', 'headRefOid,title,body,baseRefName'], { cwd: d.checkout, encoding: 'utf8' })
   } catch (error) {
     refuse(PR_REVIEW_REFUSALS.UNKNOWN_PR, `gh could not resolve PR ${pr}: ${errorText(error)}`)
   }
@@ -253,6 +257,7 @@ async function resolvePullRequest(pr, d) {
     head_sha: head,
     title: typeof metadata.title === 'string' ? metadata.title : '',
     body: typeof metadata.body === 'string' ? metadata.body : '',
+    baseRefName: metadata.baseRefName,
   }
 }
 
@@ -265,8 +270,8 @@ async function gitText(d, args, reason, detail) {
   return commandOutput(result)
 }
 
-async function resolveBase(head, d) {
-  const text = await gitText(d, ['merge-base', head, 'origin/main'], PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA, 'git merge-base could not resolve origin/main')
+async function resolveBase(head, d, baseRef) {
+  const text = await gitText(d, ['merge-base', head, baseRef], PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA, `git merge-base could not resolve ${baseRef}`)
   const base = text.endsWith('\n') ? text.slice(0, -1) : text
   if (!SHA.test(base)) refuse(PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA, 'git merge-base returned a malformed review base SHA')
   return base
@@ -756,13 +761,18 @@ async function resolveLocalBaseSha(ref, d) {
   return shaFrom(text, PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `base ref ${ref} resolved to a malformed SHA`)
 }
 
+function resolveReviewBranch(d, reason = PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA) {
+  try { return d.baseBranch({ checkout: d.checkout }).branch } catch (error) { refuse(reason, `cannot resolve checkout base branch: ${error.reason || error.message}`) }
+}
+
 async function resolveLocalBaseRef(d, explicit) {
   if (typeof explicit === 'string' && explicit.trim() !== '') {
     const name = explicit.trim()
     const sha = await resolveLocalBaseSha(name, d)
     return { baseRef: name, baseSha: sha }
   }
-  for (const candidate of ['origin/HEAD', 'origin/main', 'main']) {
+  const branch = resolveReviewBranch(d, PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED)
+  for (const candidate of [`origin/${branch}`, branch]) {
     let result
     try {
       result = await invoke(d.git, ['rev-parse', '--verify', candidate], { cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER })
@@ -774,7 +784,7 @@ async function resolveLocalBaseRef(d, explicit) {
     } catch { continue }
     return { baseRef: candidate, baseSha: sha }
   }
-  refuse(PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, 'no local base ref resolved among origin/HEAD, origin/main, main')
+  refuse(PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED, `no local base ref resolved among origin/${branch}, ${branch}`)
 }
 
 async function resolveLocalMergeBase(baseRef, head, d) {
@@ -930,11 +940,13 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   const wantArtifact = typeof config.artifactDir === 'string' && config.artifactDir.trim() !== ''
   const metadata = await resolvePullRequest(pr, d)
   const head = metadata.head_sha
+  const prBaseBranch = isPlainBranchName(metadata.baseRefName) ? metadata.baseRefName : resolveReviewBranch(d)
+  const prBaseRef = `origin/${prBaseBranch}`
   let base = null
   let diff = null
   let changedFiles = null
   try {
-    base = await resolveBase(head, d)
+    base = await resolveBase(head, d, prBaseRef)
     diff = await gitText(d, ['diff', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the PR')
     const changedText = await gitText(d, ['diff', '--name-only', '-z', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not list changed files')
     changedFiles = parseChangedFiles(changedText)
@@ -945,8 +957,8 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   }
   const dirty = wantArtifact ? await probeWorktreeDirty(d) : false
   const prBaseForArtifact = async () => {
-    const originMain = await safeGitOutput(d, ['rev-parse', '--verify', 'origin/main'])
-    return originMain !== null && SHA.test(originMain) ? originMain : null
+    const originBase = await safeGitOutput(d, ['rev-parse', '--verify', prBaseRef])
+    return originBase !== null && SHA.test(originBase) ? originBase : null
   }
   let report = null
   try {

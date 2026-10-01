@@ -79,13 +79,15 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   let clock = 0
   const deps = normalDeps({
     home,
     promptMeasurePath: queuePath,
+    factoryRoot: scratch('closeout-factory-root-'),
+    ...(baseBranch ? { baseBranch } : {}),
     mkdtempSync: (prefix) => scratchDir(basename(prefix), { parent: dirname(prefix) }),
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
@@ -383,6 +385,17 @@ test('adoptCommandLine carries the measured batch and fence values or explicit u
   assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy', fencesPath: '/tmp/batch/fences.json' }), null)
   assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy', batchDir: '/tmp/batch' }), null)
   assert.equal(adoptCommandLine({ lane, archive: '/tmp/lane.recovery-copy' }), null)
+})
+
+test('C1 base branch: merge scratch worktree uses origin/dispute', () => {
+  // MUTATION C1: restore origin/main in scratch-worktree argv.
+  const { deps, calls } = harness({ baseBranch: () => ({ branch: 'dispute' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', { status: 0, stdout: '# pass 1\\n# fail 0\\n# skipped 0\\n', stderr: '' }],
+    ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+  ] })
+  mergeCheck({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  assert.equal(spawned(calls, 'worktree add')[0].args.at(-1), 'origin/dispute')
 })
 
 test('mergeCheck uses one scratch, merges every lane, runs suite and repairs every manifest', () => {
@@ -978,6 +991,33 @@ test('RV1-3 reap attributes unreadable PR failures to pr-merged', () => {
   assert.equal(result.lines[0].step, 'pr-merged')
   assert.equal(result.lines[0].reason, CLOSEOUT_REFUSALS.PR_UNREADABLE)
   assert.equal(spawned(calls, 'worktree remove').length, 0)
+})
+
+test('C2 base branch: committed recovery rebases onto dispute', () => {
+  // MUTATION C2: restore main in committed-recovery rebase argv.
+  const fixture = laneFixture('closeout-C2-base', { commit: 'abc123' })
+  const { deps, calls } = harness({ home: fixture.home, baseBranch: () => ({ branch: 'dispute' }), answers: [['crew.mjs teardown', teardownReply()], ['pgrep', { status: 1, stdout: '', stderr: '' }], ['--test', { status: 0, stdout: '# pass 1\\n# fail 0\\n# skipped 0\\n', stderr: '' }]] })
+  recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(spawned(calls, 'git rebase')[0]?.args[1], 'dispute')
+})
+
+test('base branch refusal stops merge allocation and committed recovery rebase; pre-commit path skips resolver', () => {
+  const fixture = laneFixture('closeout-base-refusal', { commit: 'abc123' })
+  const allocation = harness({ home: fixture.home, baseBranch: () => { throw Object.assign(new Error('profile-unratified'), { reason: 'profile-unratified' }) }, answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }]] })
+  const merge = mergeCheck({ lanes: ['lane-a'], checkout: fixture.checkout, deps: allocation.deps })
+  assert.equal(merge.refusal.reason, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED)
+  assert.equal(merge.refusal.step, 'scratch-worktree')
+  assert.equal(spawned(allocation.calls, 'worktree add').length, 0)
+  const recoverDeps = harness({ home: fixture.home, baseBranch: () => { throw Object.assign(new Error('profile-unratified'), { reason: 'profile-unratified' }) }, answers: [['crew.mjs teardown', teardownReply()], ['pgrep', { status: 1, stdout: '', stderr: '' }]] })
+  const recovery = recover({ lane, checkout: fixture.checkout, deps: recoverDeps.deps })
+  assert.equal(recovery.refusal.reason, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED); assert.equal(recovery.refusal.step, 'rebase')
+  assert.equal(spawned(recoverDeps.calls, 'git rebase').length, 0)
+  const precommit = laneFixture('closeout-base-precommit')
+  // MUTATION: run closeoutHalf for a pre-commit recovery; the resolver is then consulted.
+  let precommitResolutions = 0
+  const deps = harness({ home: precommit.home, baseBranch: () => { precommitResolutions += 1; throw new Error('must not resolve') }, answers: [['crew.mjs teardown', teardownReply()], ['pgrep', { status: 1, stdout: '', stderr: '' }]] }).deps
+  recover({ lane, checkout: precommit.checkout, deps })
+  assert.equal(precommitResolutions, 0)
 })
 
 test('recover refuses a moving tree before preserve or teardown', () => {

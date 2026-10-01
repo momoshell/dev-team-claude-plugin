@@ -1307,6 +1307,8 @@ test('E4 main records the in-flight mutant beside the config, before the mutant 
   assert.ok(order.indexOf(inflightPath) >= 0 && order.indexOf(inflightPath) < order.indexOf(file), JSON.stringify(order))
   const record = JSON.parse(readFileSync(inflightPath, 'utf8'))
   const digest = (bytes) => createHash('sha256').update(bytes).digest('hex')
+  // MUTATION S4: omit source text from the pre-write in-flight record.
+  assert.deepEqual({ line: record.line, find: record.find, replace: record.replace }, { line: 2, find: "  const alpha = 'beta'", replace: "  const alpha = ''" })
   assert.equal(record.path, 'lib/widget.mjs')
   assert.equal(record.original_sha256, digest(Buffer.from(after)))
   assert.notEqual(record.mutant_sha256, record.original_sha256)

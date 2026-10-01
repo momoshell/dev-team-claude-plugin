@@ -7052,12 +7052,12 @@ const diffSettlementReport = (generation) => ({
   omitted_reason: DIFF_SETTLEMENT_OMITTED_REASON, blind_spot: null, skip_counts: {}, mutants: [],
 })
 
-function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false, file = DIFF_SETTLEMENT_FILE, runnerWrites = 'mutated by failed runner\n', inflight = 'match' } = {}) {
+function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = null, runnerUnavailable = false, contaminate = false, failRestore = false, snapshotState = null, lstats = null, absentCurrent = false, file = DIFF_SETTLEMENT_FILE, runnerWrites = 'mutated by failed runner\n', inflight = 'match', extraFiles = {}, builderChanges = null, filesInScope = null, changedFiles = null, deriveListing = false, runnerFile = file, inflightRecord = null, currentSnapshot = undefined, snapshotFiles = {}, deniedInflight = false } = {}) {
   const DIFF_SETTLEMENT_PATH = `${CTX.checkout}/${file}`
-  const files = { [DIFF_SETTLEMENT_PATH]: runnerUnavailable ? 'baseline\n' : 'before\n' }
+  const files = { [DIFF_SETTLEMENT_PATH]: runnerUnavailable ? 'baseline\n' : 'before\n', ...Object.fromEntries(Object.entries(extraFiles).map(([path, bytes]) => [`${CTX.checkout}/${path}`, bytes])) }
   const snapshotPath = `${TD}/diff-1-0-current-${file.replace(/[^A-Za-z0-9._-]+/g, '_')}`
   const plan = planEnv({ details: {
-    ...planEnv().details, files_in_scope: [file], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
+    ...planEnv().details, files_in_scope: filesInScope || [file], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd',
   } })
   const envelopes = {
     'planner:1': plan,
@@ -7066,6 +7066,7 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
         if (absentCurrent) delete files[DIFF_SETTLEMENT_PATH]
         else files[DIFF_SETTLEMENT_PATH] = 'before\n'
       }
+      builderChanges?.(files, CTX.checkout)
       return buildEnv()
     },
     'reviewer:1': review === 'changes-needed' ? reviewEnv('changes-needed') : reviewEnv('pass'),
@@ -7088,19 +7089,28 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
     cleanRuns: { 'gate-cmd': { ok: false, output: DIFF_SETTLEMENT_RED } },
     files, writeThrough: true, lstats,
     throwWrites: failRestore ? [DIFF_SETTLEMENT_PATH] : [],
-    diffListing: () => `${file}\0${contaminate && Object.hasOwn(files, `${CTX.checkout}/untracked.mjs`) ? 'untracked.mjs\0' : ''}`, changed: [file],
+    diffListing: () => deriveListing
+      ? `${Object.keys(files).filter((path) => path.startsWith(`${CTX.checkout}/`)).map((path) => path.slice(CTX.checkout.length + 1)).sort().join('\0')}${Object.keys(files).some((path) => path.startsWith(`${CTX.checkout}/`)) ? '\0' : ''}`
+      : `${file}\0${contaminate && Object.hasOwn(files, `${CTX.checkout}/untracked.mjs`) ? 'untracked.mjs\0' : ''}`, changed: changedFiles || [file],
     diffReports: (command, index) => {
       const match = /diff-mutation-(\d+)\.json/.exec(String(command))
       const generation = Number(match?.[1] ?? index + 1)
       if (runnerUnavailable) {
         if (snapshotState === 'missing') delete files[snapshotPath]
         if (snapshotState === 'mismatched') files[snapshotPath] = 'untrusted snapshot\n'
-        files[DIFF_SETTLEMENT_PATH] = runnerWrites
+        const runnerTarget = `${CTX.checkout}/${runnerFile}`
+        files[runnerTarget] = runnerWrites
+        if (currentSnapshot !== undefined) files[snapshotPath] = currentSnapshot
+        for (const [path, bytes] of Object.entries(snapshotFiles)) {
+          const index = (changedFiles || [file]).indexOf(path)
+          const snapshotName = `${TD}/diff-1-${index}-current-${path.replace(/[^A-Za-z0-9._-]+/g, '_')}`
+          files[snapshotName] = bytes
+        }
         // The runner records the one mutant it writes before writing it; 'match' names the
         // bytes the runner left, 'stale' names a different mutant, 'wrong-original' binds the
         // right mutant to other pre-proof bytes, 'none' writes no record.
         const digest = (text) => createHash('sha256').update(Buffer.from(text)).digest('hex')
-        if (inflight !== 'none') files[`${TD}/diff-mutation-${generation}.inflight.json`] = JSON.stringify({ generation, path: file, original_sha256: digest(inflight === 'wrong-original' ? 'another baseline\n' : 'before\n'), mutant_sha256: digest(inflight === 'match' || inflight === 'wrong-original' ? 'mutated by failed runner\n' : 'some other mutant\n') })
+        if (inflight !== 'none') files[`${TD}/diff-mutation-${generation}.inflight.json`] = inflight === 'malformed' ? '{' : JSON.stringify(inflightRecord || { generation, path: runnerFile, line: 1, find: 'before', replace: 'mutated by failed runner', original_sha256: digest(inflight === 'wrong-original' ? 'another baseline\n' : 'before\n'), mutant_sha256: digest(inflight === 'match' || inflight === 'wrong-original' ? 'mutated by failed runner\n' : 'some other mutant\n') })
         if (contaminate) files[`${CTX.checkout}/untracked.mjs`] = 'unexpected\n'
         return { ok: false, status: 1, stderr: 'runner died', output: '' }
       }
@@ -7109,6 +7119,7 @@ function diffSettlementIo({ settleRead = null, review = 'pass', onBuilder2 = nul
   })
   const baseRead = io.readFile
   io.readFile = function (path) {
+    if (deniedInflight && path === `${TD}/diff-mutation-1.inflight.json`) throw Object.assign(new Error('permission denied'), { code: 'EPERM' })
     if (settleRead && io.calls.diffConfigs.length > 0 && path === DIFF_SETTLEMENT_PATH) {
       if (settleRead === 'throw') throw new Error('permission denied')
       if (settleRead === 'change') return 'after\n'
@@ -7150,6 +7161,34 @@ test('RV1-3 recovery refuses symlink targets and newly present absent cells', ()
   assert.equal(noLstatResult.status, 'escalation')
   assert.match(diffSettlementFatal(noLstat.io)?.why || '', /target type is unverifiable/)
   assert.equal(noLstat.io.calls.logs.some((row) => row.diff_proof_restored), false)
+})
+
+test('S1 recovery accepts an empty current snapshot', () => {
+  // MUTATION S1: reject a readable empty snapshot as unavailable.
+  const digest = (text) => createHash('sha256').update(Buffer.from(text)).digest('hex')
+  const fixture = diffSettlementIo({ runnerUnavailable: true, currentSnapshot: '', builderChanges: (files, checkout) => { files[`${checkout}/a.mjs`] = '' }, inflightRecord: { generation: 1, path: 'a.mjs', line: 1, find: '', replace: 'mutated by failed runner', original_sha256: digest(''), mutant_sha256: digest('mutated by failed runner\n') } })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'done', JSON.stringify({ fatal: diffSettlementFatal(fixture.io) }))
+})
+
+test('S2 vanished inventory members default to absent during recovery', () => {
+  // MUTATION S2: remove the absent default for a disappeared inventory cell.
+  const fixture = diffSettlementIo({ runnerUnavailable: true, filesInScope: ['a.mjs'], changedFiles: ['a.mjs', 'guard.test.mjs'], extraFiles: { 'guard.test.mjs': 'guard\\n' }, deriveListing: true,
+    builderChanges: (files, checkout) => { delete files[`${checkout}/guard.test.mjs`] } })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'done', JSON.stringify({ fatal: diffSettlementFatal(fixture.io) }))
+  assert.deepEqual(fixture.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof?.diff_proof_restored, { generation: 1, files: ['a.mjs'] })
+})
+
+test('S7 deleted sole-child parents are safe when restoring an absent path', () => {
+  // MUTATION S7: refuse a missing parent of an absent cell again.
+  const digest = (text) => createHash('sha256').update(Buffer.from(text)).digest('hex')
+  const fixture = diffSettlementIo({ runnerUnavailable: true, filesInScope: ['a.mjs', 'gone/deleted.mjs'], changedFiles: ['a.mjs', 'gone/deleted.mjs'], extraFiles: { 'gone/deleted.mjs': 'gone' }, deriveListing: true,
+    builderChanges: (files, checkout) => { files[`${checkout}/a.mjs`] = 'built'; delete files[`${checkout}/gone/deleted.mjs`] }, currentSnapshot: 'built', runnerWrites: 'mutated by failed runner', snapshotFiles: { 'gone/deleted.mjs': '' }, inflightRecord: { generation: 1, path: 'a.mjs', line: 1, find: 'built', replace: 'mutated by failed runner', original_sha256: digest('built'), mutant_sha256: digest('mutated by failed runner') } })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'done', JSON.stringify({ fatal: diffSettlementFatal(fixture.io) }))
+  assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], 'built')
+  assert.deepEqual(fixture.io.calls.logs.find((entry) => entry.diff_mutation_proof)?.diff_mutation_proof?.diff_proof_restored, { generation: 1, files: ['a.mjs'] })
 })
 
 test('RV2-1 recovery refuses a target whose parent directory became a symlink', () => {
@@ -7202,6 +7241,47 @@ test('RV3-2 recovery restores only the recorded in-flight mutant and keeps any o
   const restored = driveTask(CTX, matched.io)
   assert.equal(restored.status, 'done')
   assert.equal(matched.files[DIFF_SETTLEMENT_PATH], 'before\n')
+})
+
+test('S3 absent current targets refuse newly written live content with the trust-boundary reason', () => {
+  const fixture = diffSettlementIo({ runnerUnavailable: true, absentCurrent: true })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.match(diffSettlementFatal(fixture.io)?.why || '', /absent diff target unexpectedly exists for a\.mjs/)
+  assert.match(fixture.files[DIFF_SETTLEMENT_PATH], /^mutated by failed runner/)
+})
+
+test('S5 recovery diagnostics identify a possibly applied recorded mutation', () => {
+  // MUTATION S5: remove the possibly-applied diagnostic assignment.
+  const fixture = diffSettlementIo({ runnerUnavailable: true, runnerWrites: 'operator edit\\n', inflightRecord: {
+    generation: 1, path: 'a.mjs', line: 1, find: 'before', replace: 'mutated by failed runner',
+    original_sha256: 'not-used', mutant_sha256: 'not-used',
+  } })
+  const result = driveTask(CTX, fixture.io)
+  assert.equal(result.status, 'escalation')
+  const fatal = diffSettlementFatal(fixture.io)
+  assert.deepEqual(fatal?.possibly_applied, [{ file: 'a.mjs', line: 1, find: 'before', replace: 'mutated by failed runner' }])
+  assert.match(fatal?.why || '', /possibly applied: a\.mjs:1/)
+  assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], 'operator edit\\n')
+})
+
+test('S6 missing and stale in-flight records report honest absence', () => {
+  // MUTATION S6: report [] instead of an unknown possibly-applied record.
+  for (const options of [
+    { inflight: 'none' }, { inflight: 'malformed' }, { deniedInflight: true },
+    { inflightRecord: { generation: 0, path: 'a.mjs', line: 1, find: 'x', replace: 'y' } },
+    { inflightRecord: { generation: 1, path: 'not-changed.mjs', line: 1, find: 'x', replace: 'y' } },
+    { inflightRecord: { generation: 1, path: 'a.mjs', original_sha256: 'digest-only' } },
+  ]) {
+    const fixture = diffSettlementIo({ runnerUnavailable: true, runnerWrites: 'operator edit\\n', ...options })
+    const result = driveTask(CTX, fixture.io)
+    assert.equal(result.status, 'escalation')
+    const fatal = diffSettlementFatal(fixture.io)
+    assert.equal(fatal?.possibly_applied, null)
+    assert.equal(fatal?.possibly_applied_absent, 'no-inflight-record')
+    assert.doesNotMatch(fatal?.why || '', /possibly applied/)
+    assert.equal(fixture.files[DIFF_SETTLEMENT_PATH], 'operator edit\\n')
+  }
 })
 
 test('T5 unavailable runner recovery still refuses untracked contamination', () => {

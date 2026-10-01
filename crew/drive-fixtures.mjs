@@ -2,6 +2,8 @@
 // Every path through driveTask is exercised with a fake io: happy path,
 // red-lane bounce, scope bounce, review bounce, insufficient->lead consult,
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
+import { ANCHOR_PIN_COMMAND, CAPABILITIES_PATH } from './drive.mjs'
+export { ANCHOR_PIN_COMMAND, CAPABILITIES_PATH }
 import { after, test } from 'node:test'
 
 import assert from 'node:assert/strict'
@@ -44,7 +46,7 @@ import {
   NARRATION_STAGE_VOCABULARY, narrationStageDefect,
   narratorConfig, narratorApiRoot, narratorModelsCommand, narratorModelId, narrationPrompt, narratorCommand,
   narrationFromResponse, narrationIsRawJson, trimPathToken, recordFacts, narrationDefect, narrateRecord,
-  shellArg, journalRowsSinceRunStart, prAnomalies, parseSuiteCounts, refsFromCommitMessage, composePrBody,
+  shellArg, PROVE_MUTATIONS_COMMAND, journalRowsSinceRunStart, prAnomalies, parseSuiteCounts, refsFromCommitMessage, composePrBody,
   VALIDATION_LANE_UNLOADABLE, VALIDATION_LANE_EVENT, LOADABLE_LANE_EXTENSIONS, LANE_PROBE_KINDS,
   LANE_INPUT_VERDICTS, LANE_COMMAND_SHAPES, LANE_VALUE_OPTIONS, LANE_PATH_OPTIONS, shellWords,
   laneCommandShape, laneCommandInputs, laneProbeCommand, laneProbeKinds, laneInputExtension,
@@ -192,7 +194,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     readFile(p) {
       if (p.startsWith(`${CTX.checkout}/`)) calls.checkoutLog.push({ op: 'read', path: p })
       if (throwOn === 'read' && p.startsWith(`${CTX.checkout}/`)) throw new Error('readFile: permission denied')
-      if (screener && p === `${CTX.checkout}/crew/capabilities.json`) return screener.register ?? SCREENER_REGISTER
+      if (screener && p === CAPABILITIES_PATH) return screener.register ?? SCREENER_REGISTER
       if (Object.prototype.hasOwnProperty.call(files, p)) return files[p]
       if (/gate-reap\.\d+\.json$/.test(p)) return '{"pgid":"4242","outcome":"already-dead","reason":"probe-dead","signals":0,"survivors":""}'
       return null
@@ -238,7 +240,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
           : diffListingQueue ? (diffListingQueue.shift() ?? '') : diffListing
         return { ok: true, output }
       }
-      if (text.includes('scripts/factory/prove-mutations.mjs --diff-config')) {
+      if (text.startsWith(`${PROVE_MUTATIONS_COMMAND} --diff-config`)) {
         calls.diffRuns.push(cmd)
         calls.diffConfigs.push(cmd)
         const index = calls.diffConfigs.length - 1
@@ -1699,7 +1701,7 @@ function publicationIo(options = {}) {
     readFile(path) {
       if (readFileThrows) throw new Error('journal read denied')
       if (path === journal) return journalText
-      if (capabilities !== null && path === `${CTX.checkout}/crew/capabilities.json`) return capabilities
+      if (capabilities !== null && path === CAPABILITIES_PATH) return capabilities
       return null
     },
     run(command) {

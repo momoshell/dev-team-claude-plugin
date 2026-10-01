@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -580,7 +580,7 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
       }
       return record(response(spec.checkoutResult))
     }
-    if (text.startsWith('node skills/qa-test-writing/anchor-pin.mjs --repair-all ')) {
+    if (text.startsWith(`${ANCHOR_PIN_COMMAND} --repair-all `)) {
       this.state.resolverCalls.push(text)
       const spec = this.state.currentSpec || first
       const result = record(response(spec.resolverResult))
@@ -839,7 +839,7 @@ test('A2 mechanical anchor conflict resolves and continues', () => {
   assert.equal(io.state.continueCount, 1)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
   const stageRead = io.calls.order.findIndex((entry) => entry === `run:git show ':2:${ANCHOR_MANIFEST}'`)
-  const resolverRun = io.calls.order.findIndex((entry) => entry.startsWith('run:node skills/qa-test-writing/anchor-pin.mjs --repair-all'))
+  const resolverRun = io.calls.order.findIndex((entry) => entry.startsWith(`run:${ANCHOR_PIN_COMMAND} --repair-all`))
   assert.ok(stageRead >= 0 && resolverRun > stageRead)
   assert.equal(io.state.addCommands.length, 1)
   assert.match(io.state.addCommands[0], /git add -- 'crew\/roles\/anchors\.json'/)

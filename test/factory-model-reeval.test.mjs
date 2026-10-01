@@ -143,7 +143,7 @@ function childSweep(cwd, mode = 'dry') {
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, ROOT, mode], { cwd, encoding: 'utf8', timeout: 30000 })
   assert.equal(result.error, undefined, result.error?.message)
   assert.equal(result.status, 0, result.stderr)
-  return JSON.parse(result.stdout.trim().split('\\n').at(-1))
+  return JSON.parse(result.stdout.trim().split('\n').at(-1))
 }
 
 function offlineDeps(over = {}) {

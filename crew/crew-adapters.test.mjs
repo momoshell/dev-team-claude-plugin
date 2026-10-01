@@ -847,15 +847,15 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
   const resolvedPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi' })
   assert.equal(resolvedPlanner.planner.name, 'pi')
   assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
-    join(process.cwd(), 'crew/pi/extensions/subagent.ts'),
-    join(process.cwd(), 'crew/pi/extensions/lab.ts'),
-    join(process.cwd(), 'crew/pi/extensions/readgate.ts'),
-    join(process.cwd(), 'crew/pi/extensions/submit.ts'),
+    join(ROOT, 'crew/pi/extensions/subagent.ts'),
+    join(ROOT, 'crew/pi/extensions/lab.ts'),
+    join(ROOT, 'crew/pi/extensions/readgate.ts'),
+    join(ROOT, 'crew/pi/extensions/submit.ts'),
   ])
-  assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
+  assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })
   assert.equal(headlessPlanner.planner.transport, 'headless-rpc')
-  assert.deepEqual(headlessPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
+  assert.deepEqual(headlessPlanner.planner.grants.agents, [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
   assert.equal(headlessPlanner.planner.adapter.capabilitiesFor({ transport: 'headless-rpc', grants: headlessPlanner.planner.grants }).subagents, true)
   // The reviewer is deliberately NOT subject to this: its charter names no
   // fan-out, so the requirement belongs to the CHARTER, not the seat: today's

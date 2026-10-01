@@ -395,7 +395,7 @@ test('C1 base branch: merge scratch worktree uses origin/dispute', () => {
     ['--test', { status: 0, stdout: '# pass 1\\n# fail 0\\n# skipped 0\\n', stderr: '' }],
     ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
   ] })
-  mergeCheck({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  mergeCheck({ lanes: ['lane-a'], checkout: ROOT, deps })
   assert.equal(spawned(calls, 'worktree add')[0].args.at(-1), 'origin/dispute')
 })
 
@@ -409,7 +409,7 @@ test('mergeCheck uses one scratch, merges every lane, runs suite and repairs eve
     ],
     log: (line) => logs.push(line),
   })
-  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: process.cwd(), deps })
+  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps })
   assert.equal(result.code, 0)
   assert.equal(result.refusal, null)
   assert.equal(spawned(calls, 'worktree add').length, 1)
@@ -425,7 +425,7 @@ test('mergeCheck uses one scratch, merges every lane, runs suite and repairs eve
 })
 
 test('mergeCheck gives its scratch suite a local ledger directory over an inherited sentinel', () => {
-  const sentinel = join(process.cwd(), 'operator-ledger-sentinel')
+  const sentinel = join(ROOT, 'operator-ledger-sentinel')
   const previous = process.env.DEVTEAM_LEDGER_DIR
   process.env.DEVTEAM_LEDGER_DIR = sentinel
   try {
@@ -436,7 +436,7 @@ test('mergeCheck gives its scratch suite a local ledger directory over an inheri
         ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
       ],
     })
-    const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+    const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
     assert.equal(result.code, 0)
     const suite = spawned(calls, '--test')[0]
     assert.ok(suite)
@@ -455,7 +455,7 @@ test('mergeCheck stops on red suite and removes the scratch worktree', () => {
       ['--test', { status: 1, stdout: '# pass 2\n# fail 1\n', stderr: 'failed' }],
     ],
   })
-  const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
   assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
   assert.equal(result.lines.at(-1).step, 'suite')
   assert.equal(spawned(calls, 'git worktree remove --force').length, 1)
@@ -470,7 +470,7 @@ test('RV2-1 mergeCheck blocks anchor refusals and main returns named refusal exi
         ['anchor-pin.mjs', { status: 1, stdout: `refused crew/drive.mjs:52: ${repair}\n`, stderr: '' }],
       ],
     })
-    const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+    const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
     assert.equal(result.code, 1)
     assert.equal(result.refusal.reason, reason)
     assert.equal(result.refusal.step, 'anchor-repair')
@@ -480,7 +480,7 @@ test('RV2-1 mergeCheck blocks anchor refusals and main returns named refusal exi
   }
   const rotDeps = check(`content appears nowhere in crew/drive.mjs; ${ROT_MARK}`, CLOSEOUT_REFUSALS.ANCHOR_ROT)
   check(`content occurs 2 times in crew/drive.mjs; ${AMBIGUOUS_MARK}`, CLOSEOUT_REFUSALS.ANCHOR_AMBIGUOUS)
-  assert.equal(main(['merge-check', lane, '--checkout', process.cwd()], rotDeps), 1)
+  assert.equal(main(['merge-check', lane, '--checkout', ROOT], rotDeps), 1)
 })
 
 test('reap closes every Closes issue and archives only unarchived recovery copies', () => {
@@ -512,7 +512,7 @@ test('reap closes only the Closes set and leaves Refs referenced and open', () =
     home: scratch('closeout-reap-trailers-'),
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes: #806\nRefs: #904' }), stderr: '' }]],
   })
-  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   const closes = spawned(calls, 'issue close')
   assert.equal(closes.length, 1)
   assert.equal(closes[0].args[2], '806')
@@ -529,7 +529,7 @@ test('reap reports both sets by name and never infers a close', () => {
     home: scratch('closeout-reap-no-trailers-'),
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'no trailer here\n' }), stderr: '' }]],
   })
-  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   assert.equal(spawned(calls, 'issue close').length, 0)
   const detail = rows(result).find((row) => row.step === 'issues').detail
   assert.deepEqual(detail.closed, [])
@@ -957,7 +957,7 @@ test('reap refuses an open PR before closing issues or removing anything', () =>
     home: scratch('closeout-reap-open-'),
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'OPEN', body: 'Refs #758' }), stderr: '' }]],
   })
-  const result = reap({ lanes: [lane], checkout: process.cwd(), deps })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
   assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.PR_NOT_MERGED)
   assert.equal(spawned(calls, 'issue close').length, 0)
   assert.equal(spawned(calls, 'worktree remove').length, 0)
@@ -985,7 +985,7 @@ test('RV1-3 reap attributes unreadable PR failures to pr-merged', () => {
     home: scratch('closeout-reap-pr-unreadable-'),
     answers: [['gh pr view', { status: 1, stdout: '', stderr: 'network unavailable' }]],
   })
-  const result = reap({ lanes: [lane], checkout: process.cwd(), deps })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
   assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.PR_UNREADABLE)
   assert.equal(result.refusal.step, 'pr-merged')
   assert.equal(result.lines.length, 1)
@@ -1323,7 +1323,7 @@ test('run-log convention applies to merge-check, reap, and recover', () => {
     ],
     log: (line) => mergeOutput.push(line),
   })
-  const mergeResult = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps: mergeRun.deps })
+  const mergeResult = mergeCheck({ lanes: [lane], checkout: ROOT, deps: mergeRun.deps })
 
   const reapOutput = []
   const reapRun = harness({
@@ -1331,7 +1331,7 @@ test('run-log convention applies to merge-check, reap, and recover', () => {
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'OPEN', body: '' }), stderr: '' }]],
     log: (line) => reapOutput.push(line),
   })
-  const reapResult = reap({ lanes: [lane], checkout: process.cwd(), deps: reapRun.deps })
+  const reapResult = reap({ lanes: [lane], checkout: ROOT, deps: reapRun.deps })
 
   const fixture = laneFixture('closeout-log-recover-')
   const recoverOutput = []
@@ -1530,7 +1530,7 @@ test('merge-check refuses anchor-rot when a repair reports content nowhere', () 
       ['anchor-pin.mjs', { status: 1, stdout: 'refused crew/drive.mjs:52: content appears nowhere in crew/drive.mjs; this is rot, not a shift\n', stderr: '' }],
     ],
   })
-  const result = mergeCheck({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = mergeCheck({ lanes: ['lane-a'], checkout: ROOT, deps })
   assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.ANCHOR_ROT)
   assert.equal(result.lines.some((row) => row.step === 'report'), false)
 })
@@ -1543,7 +1543,7 @@ test('merge-check refuses anchor-ambiguous when a repair reports more than one m
       ['anchor-pin.mjs', { status: 1, stdout: 'refused crew/drive.mjs:52: content occurs 3 times in crew/drive.mjs; a repair refuses to guess\n', stderr: '' }],
     ],
   })
-  const result = mergeCheck({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = mergeCheck({ lanes: ['lane-a'], checkout: ROOT, deps })
   assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.ANCHOR_AMBIGUOUS)
 })
 
@@ -1564,7 +1564,7 @@ test('main returns exit code 1 for a named refusal', () => {
 })
 
 test('merge-check removes the scratch worktree on the success path', () => {
-  const checkout = process.cwd()
+  const checkout = ROOT
   const { deps, calls } = harness({
     answers: [
       ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
@@ -1585,7 +1585,7 @@ test('reap closes each issue with a comment naming the PR', () => {
     home: scratch('closeout-named-comment-'),
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes #758, #800' }), stderr: '' }]],
   })
-  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   const closes = spawned(calls, 'issue close')
   assert.equal(result.code, 0)
   assert.equal(closes.length, 2)
@@ -1607,7 +1607,7 @@ test('merge-check emits one JSON line per step with step, ms and outcome', () =>
     ],
     log: (line) => logged.push(line),
   })
-  const result = mergeCheck({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = mergeCheck({ lanes: ['lane-a'], checkout: ROOT, deps })
   const rows = logged.map((line) => JSON.parse(line))
   assert.deepEqual(rows.map((row) => row.step), [...MERGE_CHECK_STEPS])
   assert.deepEqual(result.lines.map((row) => row.step), [...MERGE_CHECK_STEPS])
@@ -1625,7 +1625,7 @@ test('reap emits one JSON line per step with step, ms and outcome', () => {
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }]],
     log: (line) => logged.push(line),
   })
-  const result = reap({ lanes: ['lane-a'], checkout: process.cwd(), deps })
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   const loggedRows = logged.map((line) => JSON.parse(line))
   assert.deepEqual(loggedRows.map((row) => row.step), [...REAP_STEPS])
   assert.deepEqual(result.lines.map((row) => row.step), [...REAP_STEPS])
@@ -1821,7 +1821,7 @@ test('H1 reap preserves its existing ordered step contract', () => {
     home: scratch('closeout-prompt-h1-'),
     answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1008, state: 'MERGED', body: 'Closes #1031' }), stderr: '' }]],
   })
-  const result = reap({ lanes: ['ordinary-lane'], checkout: process.cwd(), deps })
+  const result = reap({ lanes: ['ordinary-lane'], checkout: ROOT, deps })
   assert.deepEqual([...REAP_STEPS], ['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
   assert.deepEqual(rows(result).map((row) => row.step), [...REAP_STEPS])
   assert.deepEqual(result.report.closed, [1031])
@@ -1847,7 +1847,7 @@ test('a suite whose output could not be read is unmeasured, not red, and the def
         ['--test', suiteAnswer],
       ],
     })
-    const result = mergeCheck({ lanes: [lane], checkout: process.cwd(), deps })
+    const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
     return { reason: result.refusal?.reason ?? null, message: result.refusal?.why ?? result.refusal?.message ?? '' }
   }
   const truncated = outcome({ status: null, signal: 'SIGTERM', stdout: 'TAP version 13\nok 1 - a\n', stderr: '', error: Object.assign(new Error('spawnSync node ENOBUFS'), { code: 'ENOBUFS' }) })

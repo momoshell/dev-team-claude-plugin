@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchDir } from '../../../test/helpers.mjs'
+import { scratchDir, ROOT } from '../../../test/helpers.mjs'; process.chdir(ROOT)
 import { assignmentPrompt } from '../../driver.mjs'
 import { createReminders, attachReminders } from './reminders.ts'
 
@@ -22,7 +22,7 @@ test('S1 shipped table has exactly two expected rules', () => { assert.equal(shi
 test('S2 rejects unknown keys, invalid regex, duplicate ids, bad source and top-level keys', () => {
   for (const mutate of [t => { t.rules[0].extra = true }, t => { t.rules[0].pattern = '[' }, t => { t.rules[1].id = t.rules[0].id }, t => { t.rules[0].source.quote = 'definitely-not-a-source-quote-zzq' }, t => { t.extra = true }]) { const t = structuredClone(shipped); mutate(t); const f = setup({ table: t }); assert.equal(f.hooks.usable, false); assert.equal(f.hooks.reason, 'schema') }
 })
-test('S3 each shipped source quote occurs literally', () => { for (const r of shipped.rules) assert.ok(readFileSync(r.source.path, 'utf8').includes(r.source.quote)) })
+test('S3 each shipped source quote occurs literally', () => { for (const r of shipped.rules) assert.ok(readFileSync(join(ROOT, r.source.path), 'utf8').includes(r.source.quote)) })
 test('S4 a source file absent from the checkout journals source-absent and never fires', () => {
   const t = structuredClone(shipped)
   t.rules[1].source.path = 'crew/definitely-absent-source-zzq.mjs'

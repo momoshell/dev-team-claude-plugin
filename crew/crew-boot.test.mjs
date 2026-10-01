@@ -514,7 +514,7 @@ test('resolveLaneFence takes both flags or neither', () => {
       { lane: 'b', files: ['z.mjs', 'y.mjs'] },
       { lane: 'a', files: ['x.mjs'] },
     ] }))
-    assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a' }), {
+    assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a', checkout: dir }), {
       lane: 'a', fence: [{ lane: 'b', files: ['y.mjs', 'z.mjs'] }],
     })
     mkdirSync(join(dir, 'config'))
@@ -533,7 +533,7 @@ test('resolveLaneFence takes both flags or neither', () => {
     assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a', checkout: dir }), {
       lane: 'a', fence: [{ lane: 'b', files: ['config/'] }],
     })
-    assert.throws(() => resolveLaneFence({ fences: register, lane: 'unknown' }), (err) => err.reason === 'unknown-lane')
+    assert.throws(() => resolveLaneFence({ fences: register, lane: 'unknown', checkout: dir }), (err) => err.reason === 'unknown-lane')
     writeFileSync(register, '{not json')
     assert.throws(() => resolveLaneFence({ fences: register, lane: 'a' }), (err) => err.reason === 'bad-fences')
     const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')

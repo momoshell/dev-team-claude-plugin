@@ -575,7 +575,7 @@ test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
   let out
   try {
     writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
-    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
     out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
     assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
     assert.equal(out.stderr, '')

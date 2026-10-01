@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { scratchDir } from './helpers.mjs'
+import { scratchDir, ROOT } from './helpers.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
 const BAD_PATHSPEC_STATUS = 128
@@ -8,7 +8,7 @@ const IMPOSSIBLE_NEEDLE = 'b212-absence-impossible-needle-4d1e'
 
 // Mutation killed: treating status 1 as fatal makes a successful absence check throw again.
 test('zero matches reads as absent, not as a failure', () => {
-  const options = { needle: IMPOSSIBLE_NEEDLE, paths: ['scripts/'] }
+  const options = { needle: IMPOSSIBLE_NEEDLE, paths: ['scripts/'], cwd: ROOT }
   assert.deepEqual(gitGrepHits(options), { count: 0, lines: [] })
   assert.equal(absenceFailure(options), null)
 })
@@ -16,7 +16,7 @@ test('zero matches reads as absent, not as a failure', () => {
 // Mutation killed: swallowing every status makes a search that never ran read as clean.
 test('a bad pathspec magic is rethrown, never read as absent', () => {
   assert.throws(
-    () => gitGrepHits({ needle: 'planner', paths: [':(nosuchmagic).'] }),
+    () => gitGrepHits({ needle: 'planner', paths: [':(nosuchmagic).'], cwd: ROOT }),
     (err) => {
       assert.equal(err.status, BAD_PATHSPEC_STATUS)
       assert.match(String(err.stderr), /Invalid pathspec magic/)
@@ -42,7 +42,7 @@ test('a non-repo cwd is rethrown, never read as absent', () => {
 test('a present needle reports the count and searched paths', () => {
   const needle = 'PROTECTED_PATHS_FIELD'
   const paths = ['scripts/factory/probe-repo.mjs']
-  const failure = absenceFailure({ needle, paths })
+  const failure = absenceFailure({ needle, paths, cwd: ROOT })
   assert.match(failure, /^expected no reference to PROTECTED_PATHS_FIELD, found [1-9]\d* in scripts\/factory\/probe-repo\.mjs$/)
 })
 

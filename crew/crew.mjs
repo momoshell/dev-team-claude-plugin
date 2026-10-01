@@ -2857,13 +2857,13 @@ export function loadDeliveryMap(root) {
 
 function trackedUnder(checkout, paths) {
   if (!paths.length) return []
-  const out = execFileSync('git', ['-C', checkout, 'ls-files', '-z', '--', ...paths], { encoding: 'utf8' })
+  const out = execFileSync('git', ['-C', checkout, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...paths], { encoding: 'utf8' })
   return out.split('\0').filter(Boolean)
 }
 
 // A fence entry is a whole path, a `path:START-END` span or a directory; the skill map
-// matches files. Spans are reduced to their path and directories expand to the tracked
-// files under them. A listing that fails is unmeasured, never an empty fence.
+// matches files. Spans are reduced to their path and directories expand to tracked and
+// untracked non-ignored files under them. A listing that fails is unmeasured, never an empty fence.
 export function fenceSkillFiles(entries, { checkout, listTracked = trackedUnder } = {}) {
   const paths = [...new Set((entries || []).map(parseFenceScope).filter((scope) => scope.kind !== 'invalid').map((scope) => scope.path.replace(/\/+$/, '')))]
   let tracked

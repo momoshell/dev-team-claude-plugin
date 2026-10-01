@@ -99,6 +99,7 @@ import {
   measureBatchBaseline,
   mergeCheckLine,
   normalDeps,
+  retractAdvisorReservations,
   parseCliArgs,
   resolveAdoptions,
   planWaves,
@@ -3484,6 +3485,124 @@ test('dispatcharms malformed and unavailable readouts abstain with closed reason
   }
 })
 
+// MUTATION R1: delete the launch catch's unlaunched retraction call.
+test('advisor reservation R1 retracts a failed boot before a later pick', async () => {
+  const home = scratchDir('advisor-r1-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  let id = 0
+  const now = () => Date.parse('2026-09-30T12:00:00.000Z')
+  const rotationDeps = { now, randomUUID: () => `R1-${++id}` }
+  const options = { label: 'reservation-r1', names: ['twice'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  let refusal
+  try { await dispatchFixture({ ...options, spawnResult: (args) => args.includes('boot') ? { status: 1, stderr: 'dead boot' } : { status: 0, stdout: '' } }) } catch (error) { refusal = error }
+  assert.equal(refusal?.reason, 'boot-failed')
+  await dispatchFixture({ ...options, label: 'reservation-r1-second' })
+  const rows = JSON.parse(readFileSync(path, 'utf8'))
+  assert.deepEqual(rows.map(({ id }) => id), ['R1-2'])
+  const result = readAdvisorArms({ deps: { ...normalDeps({ home, env: { DEVTEAM_LEDGER_DIR: dirname(path) }, now }), existsSync: () => true }, inFlight: rows, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'live', task_slug: 'twice', tier: 'build', started_at: new Date(now()).toISOString(), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'live', advisor_model: 'none', advisor_granted_json: '["builder"]' }] : [], close() {} }) })
+  assert.deepEqual(result.reservations, [])
+})
+
+// MUTATION R2: filter the entire wave instead of unlaunched lanes.
+test('advisor reservation R2 retains the successfully spawned first lane', async () => {
+  const home = scratchDir('advisor-r2-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  let id = 0, runCount = 0
+  const options = { label: 'reservation-r2', names: ['first', 'second'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { randomUUID: () => `R2-${++id}` }, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  let refusal
+  try { await dispatchFixture({ ...options, spawnResult: (args) => args.includes('run') && ++runCount === 2 ? { status: 1, stderr: 'dead spawn' } : { status: 0, stdout: '' } }) } catch (error) { refusal = error }
+  assert.equal(refusal?.reason, 'run-failed')
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).map(({ lane }) => lane), ['first'])
+})
+
+test('advisor reservation RV1-1 counts failed cleanup and keeps the launch refusal', async () => {
+  const home = scratchDir('advisor-cleanup-failure-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  let id = 0, runCount = 0, refusalStarted = false, denied = 0
+  writeFileSync(path, '[]\n')
+  let refusal
+  try {
+    await dispatchFixture({ label: 'reservation-cleanup-failure', names: ['first', 'second'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { randomUUID: () => `cleanup-${++id}` }, spawnResult: (args) => {
+      if (args.includes('run') && ++runCount === 2) { refusalStarted = true; return { status: 1, stderr: 'dead spawn' } }
+      return { status: 0, stdout: '' }
+    }, writeFile: (file, text) => { if (String(file) === path) { if (refusalStarted) { denied++; throw new Error('cleanup denied') } writeFileSync(file, text) } } })
+  } catch (error) { refusal = error }
+  assert.equal(refusal?.reason, 'run-failed')
+  assert.match(refusal.message, /crew run failed for second/)
+  assert.equal(denied, 1)
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).map(({ lane }) => lane), ['first', 'second'])
+})
+
+test('advisor reservation launch marks a successful run before a later log throws', async () => {
+  const home = scratchDir('advisor-log-throw-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  let id = 0
+  const originalPush = Array.prototype.push
+  const thrown = new Error('watch logging failed')
+  const options = { label: 'reservation-log-throw', names: ['first', 'second'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { randomUUID: () => `log-${++id}` }, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  Array.prototype.push = function (...items) {
+    if (items.some((item) => typeof item === 'string' && item.startsWith('dispatch-batch: watch lane=first'))) throw thrown
+    return originalPush.apply(this, items)
+  }
+  try {
+    await assert.rejects(() => dispatchFixture(options), (error) => error === thrown)
+  } finally {
+    Array.prototype.push = originalPush
+  }
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).map(({ lane }) => lane), ['first'])
+})
+
+test('advisor reservation legacy tuple retraction retains id-bearing reservation', () => {
+  const home = scratchDir('advisor-legacy-retract-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  const legacy = { lane: 'legacy', arm: 'none', reserved_at: '2026-09-30T12:00:00.000Z' }
+  const otherLegacy = { lane: 'other-legacy', arm: 'none', reserved_at: legacy.reserved_at }
+  const identified = { id: 'kept-id', lane: 'other-lane', arm: 'none', reserved_at: legacy.reserved_at }
+  writeFileSync(path, JSON.stringify([legacy, otherLegacy, identified]))
+  const now = () => Date.parse(legacy.reserved_at)
+  assert.equal(retractAdvisorReservations(normalDeps({ home, env: { DEVTEAM_LEDGER_DIR: dirname(path) }, now }), [legacy]), true)
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), [otherLegacy, identified])
+})
+
+// MUTATION R3: id-first matching must remove only the selected same-tuple pick.
+test('advisor reservation R3 mints unique IDs and retracts by ID', async () => {
+  const home = scratchDir('advisor-r3-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  let id = 0
+  const rotationDeps = { now: () => Date.parse('2026-09-30T12:00:00.000Z'), randomUUID: () => `R3-${++id}` }
+  const options = { label: 'reservation-r3', names: ['twice'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  await dispatchFixture(options)
+  await dispatchFixture({ ...options, label: 'reservation-r3-second' })
+  const rows = JSON.parse(readFileSync(path, 'utf8'))
+  assert.deepEqual(rows.map(({ id }) => id), ['R3-1', 'R3-2'])
+  assert.equal(retractAdvisorReservations(normalDeps({ home, env: { DEVTEAM_LEDGER_DIR: dirname(path) }, now: rotationDeps.now }), [rows[0]]), true)
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), [rows[1]])
+})
+
+// MUTATION R4: reject missing IDs; legacy rows must remain readable and malformed present IDs fail closed.
+test('advisor reservation R4 accepts legacy IDs and rejects malformed present IDs', async () => {
+  const home = scratchDir('advisor-r4-')
+  const path = join(home, 'factory-state', 'advisor-reservations.json')
+  mkdirSync(dirname(path), { recursive: true })
+  const legacy = [{ lane: 'legacy', arm: 'none', reserved_at: '2026-09-30T12:00:00.000Z' }]
+  writeFileSync(path, JSON.stringify(legacy))
+  const options = { label: 'reservation-r4', names: ['new'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { now: () => Date.parse('2026-09-30T12:00:00.000Z'), randomUUID: () => 'R4-new' }, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  const result = await dispatchFixture(options)
+  assert.equal(JSON.parse(readFileSync(join(result.out, 'new.dispatch.json'), 'utf8')).advisor_rotation.source, 'rotation')
+  for (const id of [null, 7, '', '  ']) {
+    writeFileSync(path, JSON.stringify([{ ...legacy[0], id }]))
+    const before = readFileSync(path, 'utf8')
+    await dispatchFixture({ ...options, label: `reservation-r4-${String(id)}` })
+    assert.equal(readFileSync(path, 'utf8'), before)
+  }
+})
+
 test('dispatcharms default read uses a temporary read-only ledger and counts reservations', () => {
   const dir = join(root, `dispatcharms-ledger-${Math.random().toString(36).slice(2)}`)
   const dbPath = join(dir, 'ledger.db')
@@ -4523,7 +4642,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {

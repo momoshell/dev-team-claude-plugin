@@ -30,7 +30,7 @@ import {
   createHash,
 } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import {
@@ -44,6 +44,7 @@ import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
 export const STATUSES = Object.freeze(['ratified', 'proposed', 'unknown'])
+export const BASE_BRANCH_REFUSALS = Object.freeze(['profile-unreadable', 'profile-field-unknown', 'profile-unratified', 'profile-ratification-invalid', 'profile-ratification-refused', 'base-branch-invalid'])
 // gh failure reasons describe what the evidence actually showed:
 // - gh_unavailable: gh never ran or never answered (for example, ENOENT,
 //   EACCES, or timeout). Human action: install gh or fix PATH.
@@ -1118,6 +1119,30 @@ export function repoKeyFor({ checkout } = {}) {
   const root = checkoutDirectory(checkout)
   const gitRootPath = gitRoot(root)
   return remoteRepoKey(root, gitRootPath !== null)
+}
+
+export function isPlainBranchName(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.startsWith('-') || /[\s\x00-\x1f\x7f]/u.test(value) || value.includes('..') || value.includes('@{')) return false
+  try {
+    const result = spawnSync('git', ['check-ref-format', '--branch', value], { encoding: 'utf8', timeout: 3000 })
+    return !result.error && result.status === 0
+  } catch { return false }
+}
+
+export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  let present = false
+  try { lstatSync(path); present = true } catch (error) {
+    if (error?.code !== 'ENOENT') throw new ProfileRefusal(`cannot inspect base branch profile · ${path}`, 'profile-unreadable')
+  }
+  if (!present) return { branch: 'main', basis: `default base branch main · no profile at ${path}` }
+  let profile
+  try { profile = readProfile(path) } catch {
+    throw new ProfileRefusal(`cannot read base branch profile · ${path}`, 'profile-unreadable')
+  }
+  const branch = requireField(profile, 'default_branch')
+  if (!isPlainBranchName(branch)) throw new ProfileRefusal(`base branch ${JSON.stringify(branch)} is invalid · ${path}`, 'base-branch-invalid')
+  return { branch, basis: `ratified profile field default_branch · ${path}` }
 }
 
 export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRoot } = {}) {

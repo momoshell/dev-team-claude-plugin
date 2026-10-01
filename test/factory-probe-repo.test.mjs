@@ -5,7 +5,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
-  statSync, writeFileSync,
+  statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
@@ -18,7 +18,7 @@ import {
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
   checkoutIntakeBoard, checkoutProtectedPaths, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, readProfile,
-  requireField, writeProfile,
+  requireField, writeProfile, checkoutBaseBranch, isPlainBranchName, BASE_BRANCH_REFUSALS,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -1115,4 +1115,34 @@ test('stable fields keep today\'s merge behaviour', () => {
   assert.equal(changed.superseded_ratification, 'node')
   assert.equal(changed.probe_additions, undefined)
   assert.equal(changed.refused_ratification, undefined)
+})
+
+test('R1 ratified checkout base resolves the profile branch', () => {
+  const root = nextRoot('R1'), path = put(root, 'profile.json', JSON.stringify({ repo_key: 'fixture', fields: { default_branch: { status: 'ratified', value: 'dispute', source: 'test', ratified_by: 'operator', ratified_at: 'now' } } }))
+  const result = checkoutBaseBranch({ checkout: root, profilePath: path })
+  assert.equal(result.branch, 'dispute'); assert.ok(result.basis.includes(path))
+})
+test('R2 absent profile alone selects main', () => {
+  const root = nextRoot('R2'), path = join(root, 'absent.json')
+  assert.match(checkoutBaseBranch({ checkout: root, profilePath: path }).basis, /default base branch main/)
+})
+test('R3 proposed base field refuses', () => {
+  const root = nextRoot('R3'), path = put(root, 'profile.json', JSON.stringify({ fields: { default_branch: { status: 'proposed', value: 'dispute', source: 'test' } } }))
+  assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: path }), e => e.reason === 'profile-unratified')
+})
+test('R4 branch grammar and frozen refusal vocabulary', () => {
+  for (const value of ['-x', 'a b', '', 'a..b', 'a\0b', 'a\nb', 'a\x7fb', 'bad..name']) assert.equal(isPlainBranchName(value), false)
+  assert.equal(isPlainBranchName('feature/dispute'), true)
+  assert.deepEqual(BASE_BRANCH_REFUSALS, ['profile-unreadable','profile-field-unknown','profile-unratified','profile-ratification-invalid','profile-ratification-refused','base-branch-invalid'])
+  assert.equal(Object.isFrozen(BASE_BRANCH_REFUSALS), true)
+})
+test('R5 present malformed profile refuses unreadable', () => {
+  const root = nextRoot('R5'), path = put(root, 'profile.json', '{')
+  assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: path }), e => e.reason === 'profile-unreadable')
+  // MUTATION: treat every stat error as absent; ENOTDIR must refuse, never default to main.
+  assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: join(path, 'nested.json') }), e => e.reason === 'profile-unreadable')
+  // MUTATION R6: probe presence with statSync again; a dangling profile symlink must refuse, never default to main.
+  const dangling = join(root, 'dangling-profile.json')
+  symlinkSync(join(root, 'missing-target.json'), dangling)
+  assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: dangling }), e => e.reason === 'profile-unreadable')
 })

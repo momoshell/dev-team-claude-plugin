@@ -13,6 +13,7 @@ import { TASK_PROFILES } from './task-profiles.mjs'
 import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { archivedLanes, crewRoot, discoverLanes } from '../scripts/factory/lane-watch.mjs'
+import { checkoutBaseBranch } from '../scripts/factory/probe-repo.mjs'
 
 export const DEFAULT_TIMEOUT_MS = 5000
 
@@ -555,6 +556,8 @@ export function pendingDeps(deps = {}) {
     statSync: deps.statSync || fsStatSync,
     spawnSync: deps.spawnSync || cpSpawnSync,
     home: deps.home,
+    factoryRoot: deps.factoryRoot,
+    baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
   }
 }
 
@@ -586,20 +589,11 @@ export function gitRunner(d, repo) {
   }
 }
 
-function defaultBranch(git) {
-  const head = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
-  if (head.status === 0 && head.stdout) return head.stdout
-  for (const name of ['main', 'master']) {
-    if (git('show-ref', '--verify', '--quiet', `refs/heads/${name}`).status === 0) return name
-  }
-  return null
-}
-
 function remoteName(git) {
   const listed = git('remote')
   if (listed.status !== 0) return null
-  const first = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)[0]
-  return first || null
+  const names = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+  return names.includes('origin') ? 'origin' : (names[0] || null)
 }
 
 function localName(branch) { return typeof branch === 'string' ? branch.replace(/^[^/]+\//, '') : branch }
@@ -693,6 +687,13 @@ function classifyTerminal({ task, terminal, doneAt, ctx, source }) {
   }
   const commit = terminal.commit
   const known = ctx.git('cat-file', '-e', `${commit}^{commit}`).status === 0
+  // Without a resolved base nothing can say whether the commit already landed: unknown, never pending.
+  if (!ctx.base) {
+    return {
+      kind: 'unknown', reason: 'base-unresolved',
+      row: { lane: task, commit, branch: PENDING_UNKNOWN, issue: PENDING_UNKNOWN, done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN, state: 'unknown', reason: 'base-unresolved', source },
+    }
+  }
   const branch = known ? resolveBranch(ctx.git, commit, task, ctx.base) : PENDING_UNKNOWN
   if (known && ctx.base && ctx.git('merge-base', '--is-ancestor', commit, ctx.base).status === 0) {
     return { kind: 'skip', reason: 'merged' }
@@ -751,7 +752,13 @@ export function pendingVerb(args, deps = {}) {
     ? resolvePath(args.repo)
     : (typeof deps.cwd === 'function' ? deps.cwd() : process.cwd())
   const git = gitRunner(d, repo)
-  const ctx = { d, git, repo, base: defaultBranch(git), remote: remoteName(git) }
+  const remote = remoteName(git)
+  let base = null
+  try {
+    const { branch } = d.baseBranch({ checkout: repo })
+    base = remote ? `${remote}/${branch}` : null
+  } catch { /* an unresolved policy leaves the containment base absent */ }
+  const ctx = { d, git, repo, base, remote }
   const pendingRows = []
   const index = new Map()
   const counts = {

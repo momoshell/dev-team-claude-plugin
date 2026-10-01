@@ -868,6 +868,8 @@ async function dispatchFixture({
   timeline = null,
   readAdvisorArms = null,
   rotationDeps = {},
+  baseBranch = undefined,
+  factoryRoot = scratchDir('dispatch-factory-root-'),
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -893,6 +895,8 @@ async function dispatchFixture({
   }
   const deps = {
     home,
+    factoryRoot,
+    ...(baseBranch ? { baseBranch } : {}),
     env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
     existsSync: (path) => existsProbe ? existsProbe(path) : defaultOutcomeExists(path),
     readdirSync: (path, options) => {
@@ -987,7 +991,7 @@ async function dispatchFixture({
     runFlags,
     deps,
   })
-  return { report, spawned, logs, batch, parent, out, fences: laneFences, wrote, appended }
+  return { report, spawned, logs, batch, parent, out, fences: laneFences, wrote, appended, factoryRoot }
 }
 
 function turnCensusRow({ turns, out_of_tool_ms, span_ms, in_tool_ms = { edit: 1, read: 2, test: 3, other: 4 }, role = 'builder' }) {

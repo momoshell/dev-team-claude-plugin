@@ -18,6 +18,7 @@ import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SH
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
+import { checkoutBaseBranch } from './probe-repo.mjs'
 import { ADVISOR_ARMS, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
@@ -59,6 +60,7 @@ const CHUNK_DUPLICATE_ID = 'chunk-duplicate-id'
 const CHUNK_DEPS_UNORDERED = 'chunk-deps-unordered'
 const CHUNK_SCOPE_OUTSIDE_PARENT = 'chunk-scope-outside-parent'
 const CHUNK_DEPS_UNSETTLED = 'chunk-deps-unsettled'
+const BASE_BRANCH_UNRESOLVED = 'base-branch-unresolved'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
@@ -95,6 +97,7 @@ export const REFUSAL_REASONS = Object.freeze([
   CHUNK_DEPS_UNORDERED,
   CHUNK_SCOPE_OUTSIDE_PARENT,
   CHUNK_DEPS_UNSETTLED,
+  BASE_BRANCH_UNRESOLVED,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 
@@ -145,8 +148,6 @@ export const STALE_READ_ACK = 'stale-read-ack'
 
 export const PREDECESSOR_ESCALATED = 'predecessor-escalated'
 export const PREDECESSOR_UNSETTLED = 'predecessor-unsettled'
-export const DISPATCH_BASE_REF = 'main'
-
 export const REQUEST_SUFFIX = '.request.json'
 export const TURN_CENSUS_FLAG = 'turn-census'
 export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
@@ -776,6 +777,11 @@ export class BatchRefusal extends Error {
 }
 
 function refuse(message, reason) { throw new BatchRefusal(message, reason) }
+function resolveDispatchBase(checkout, d) {
+  try { return d.baseBranch({ checkout }) } catch (error) {
+    refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, BASE_BRANCH_UNRESOLVED)
+  }
+}
 
 function warningRow(kind, fields, text) {
   return { kind, ...fields, text }
@@ -991,6 +997,8 @@ export function normalDeps(deps = {}) {
     slots: deps.slots,
     readAdvisorArms: deps.readAdvisorArms || readAdvisorArms,
     randomUUID: deps.randomUUID || randomUUID,
+    factoryRoot: deps.factoryRoot,
+    baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
   }
 }
 
@@ -1354,6 +1362,7 @@ function renderSurfaceUnmeasured(name, reason) {
 export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) {
   const d = normalDeps(deps)
   const checkout = typeof checkoutDir === 'string' && checkoutDir.trim() ? checkoutDir : process.cwd()
+  const surfaceBaseRef = resolveDispatchBase(checkout, d).branch
   let name = 'unknown'
   try {
     name = laneNameOf(lane)
@@ -1385,7 +1394,7 @@ export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) 
       const typeProbe = gitProbe(['cat-file', '-t', '--end-of-options', base], { checkout, deps: d })
       if (!typeProbe.ok) return unmeasuredSurface(name, typeProbe.reason === 'probe-timeout' ? typeProbe.reason : 'base-commit-unknown')
       if (typeProbe.stdout.trim() !== 'commit') return unmeasuredSurface(name, 'base-commit-unknown')
-      const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', `${DISPATCH_BASE_REF}^{commit}`], { checkout, deps: d })
+      const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', `${surfaceBaseRef}^{commit}`], { checkout, deps: d })
       if (!tipProbe.ok) return unmeasuredSurface(name, tipProbe.reason === 'probe-timeout' ? tipProbe.reason : 'base-tip-unresolvable')
       const tip = tipProbe.stdout.trim().split('\n')[0]?.trim()
       if (!tip) return unmeasuredSurface(name, 'base-tip-unresolvable')
@@ -1405,7 +1414,7 @@ export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) 
     } catch {
       return unmeasuredSurface(name, 'request-stat-unreadable')
     }
-    const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', DISPATCH_BASE_REF], { checkout, deps: d })
+    const tipProbe = gitProbe(['rev-parse', '--verify', '--end-of-options', surfaceBaseRef], { checkout, deps: d })
     if (!tipProbe.ok) return unmeasuredSurface(name, tipProbe.reason === 'probe-timeout' ? tipProbe.reason : 'base-tip-unresolvable')
     const tip = tipProbe.stdout.trim().split('\n')[0]?.trim()
     if (!tip) return unmeasuredSurface(name, 'base-tip-unresolvable')
@@ -2531,12 +2540,13 @@ export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
 export function createWorktrees({ plans, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const worktreeBaseRef = resolveDispatchBase(root, d).branch
   for (const plan of Array.isArray(plans) ? plans : []) {
     let result
     try {
       result = d.spawn({
         file: 'git',
-        args: ['-C', root, 'worktree', 'add', '-b', plan.branch, plan.dir, DISPATCH_BASE_REF],
+        args: ['-C', root, 'worktree', 'add', '-b', plan.branch, plan.dir, worktreeBaseRef],
         cwd: root,
       })
     } catch (err) {
@@ -4195,6 +4205,8 @@ function prepareDispatchContext(options) {
   // so an invalid run option must refuse before any probe runs. A refusal must
   // name the cause it measured, not the first one it tripped over.
   preflightRunOptions({ execution, runFlags, lanes })
+  const dispatchBase = resolveDispatchBase(root, d)
+  d.baseBranch = () => dispatchBase
   const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d })
   const hasAdmissions = fenceReport.admissions.length > 0
   const effectiveFences = fenceReport.fences
@@ -4263,7 +4275,7 @@ function prepareDispatchContext(options) {
           })
           break
         }
-        const baseRef = DISPATCH_BASE_REF
+        const baseRef = dispatchBase.branch
         if (!baseContains({ commit: outcome.commit, base: baseRef, checkout: root, deps: d })) refuse(`lane ${lane.lane} depends on ${dep} whose result ${outcome.commit || 'none'} is not contained in the dispatch base ${baseRef}; merge it before dispatching wave ${waveNumber}`, DEPENDENT_BASE_STALE)
       }
     }

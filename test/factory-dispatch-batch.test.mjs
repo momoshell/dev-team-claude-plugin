@@ -139,6 +139,7 @@ import {
   resolveRequestedExecution,
   resolveRequestedTier,
   scanSurfaceMovement,
+  createWorktrees,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
@@ -147,6 +148,7 @@ import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { git, scratchDir } from './helpers.mjs'
+import { ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 
 test('E1 journals sourced admissions and refuses an unsourced admission', async () => {
   for (const source of [undefined, 'unknown']) {
@@ -4642,7 +4644,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -6679,4 +6681,63 @@ test('E1 resume preserves flag order after script', async () => {
     '--force',
     '--wave', '2',
   ])
+})
+
+test('D1 base branch: createWorktrees argv ends in dispute', async () => {
+  // MUTATION D1: restore main as the worktree argv ref.
+  const calls = []; let resolutions = 0
+  createWorktrees({ checkout: root, plans: [{ lane: 'lane', branch: 'crew/lane', dir: join(root, 'new-worktree') }], deps: { baseBranch: () => { resolutions += 1; return { branch: 'dispute' } }, spawn: call => { calls.push(call.args); return { status: 0 } } } })
+  assert.equal(calls[0].at(-1), 'dispute'); assert.equal(resolutions, 1)
+  let batchResolutions = 0
+  await dispatchFixture({ label: 'D1-base-batch', names: ['lane-a'], runFlags: { 'dry-run': true }, baseBranch: () => { batchResolutions += 1; return { branch: 'dispute' } } })
+  assert.equal(batchResolutions, 1)
+})
+
+test('D2 base branch: dependent wave checks containment against dispute', async () => {
+  // MUTATION D2: restore main as the dependent-wave base ref.
+  let resolutions = 0
+  const result = await dispatchFixture({ label: 'D2-base', names: ['lane-a', 'lane-b'], requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) }, runFlags: { wave: '2', 'dry-run': true }, outcomes: { 'lane-a': { status: 'done', details: { commit: 'c'.repeat(40) } } }, baseBranch: () => { resolutions += 1; return { branch: 'dispute' } } })
+  const probe = result.spawned.find(call => call.args.includes('--is-ancestor') && call.args.includes('c'.repeat(40)))
+  assert.ok(probe); assert.equal(probe.args.at(-1), 'dispute'); assert.equal(resolutions, 1)
+})
+
+test('D3 base branch: both surface scan clocks probe dispute', () => {
+  // MUTATION D3: restore main as the surface scan tip.
+  const calls = [], deps = { baseBranch: () => ({ branch: 'dispute' }), statSync: () => ({ mtime: new Date(0) }), spawn: call => { calls.push(call.args); if (call.args.includes('cat-file')) return { status: 0, stdout: 'commit\n' }; if (call.args.includes('rev-parse')) return { status: 0, stdout: 'a'.repeat(40) + '\n' }; return { status: 0, stdout: '' } } }
+  scanSurfaceMovement({ lane: { lane: 'lane', requestPath: join(root, 'request'), authored_request: { where: ['src/a.mjs'] }, base_commit: 'b'.repeat(40) }, checkout: root, deps })
+  scanSurfaceMovement({ lane: { lane: 'lane', requestPath: join(root, 'request'), authored_request: { where: ['src/a.mjs'] } }, checkout: root, deps })
+  assert.deepEqual(calls.filter(args => args.includes('rev-parse')).map(args => args.at(-1)), ['dispute^{commit}', 'dispute'])
+})
+
+test('D4 base branch: resolver refusal names cause before worktree creation', async () => {
+  // MUTATION D4: substitute a silent main fallback for the unresolved-base refusal.
+  const spawned = []
+  await assert.rejects(() => dispatchFixture({ label: 'D4-base', names: ['lane-a'], spawnedOut: spawned, baseBranch: () => { throw new ProfileRefusal('profile-unratified', 'profile-unratified') } }), error => error.reason === 'base-branch-unresolved' && error.message.includes('profile-unratified'))
+  assert.equal(spawned.some(call => call.args.includes('worktree') && call.args.includes('add')), false)
+})
+
+test('W1 base branch: default dependency creates worktree at ratified dispute commit', () => {
+  // MUTATION W1: make the default dependency return main instead of reading profile.
+  const checkout = gitFixture(), factoryRoot = scratchDir('dispatch-base-profile-'), dir = join(scratchDir('dispatch-base-worktree-'), 'lane')
+  git(checkout, 'remote', 'add', 'origin', 'https://github.com/gate/repo.git')
+  git(checkout, 'checkout', '-b', 'dispute'); put(join(checkout, 'dispute-only'), 'unique'); git(checkout, 'add', '.'); git(checkout, 'commit', '-m', 'dispute-only')
+  const dispute = git(checkout, 'rev-parse', 'HEAD'); git(checkout, 'checkout', 'main')
+  const profile = { repo_key: 'gate__repo', fields: { default_branch: { status: 'ratified', value: 'dispute', source: 'test', ratified_by: 'operator', ratified_at: 'now' } } }
+  put(join(factoryRoot, 'profiles', 'gate__repo.json'), JSON.stringify(profile))
+  createWorktrees({ checkout, plans: [{ lane: 'lane', branch: 'crew/base-test', dir }], deps: { factoryRoot } })
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), dispute); assert.notEqual(git(dir, 'rev-parse', 'HEAD'), git(checkout, 'rev-parse', 'HEAD'))
+})
+
+test('dispatchBatch default base resolver retains its scratch factoryRoot after dependency normalization', async () => {
+  // MUTATION: drop factoryRoot from normalDeps; the proposed-profile run then reads the operator store, resolves main and does not refuse.
+  const checkout = gitFixture(), factoryRoot = scratchDir('dispatch-batch-default-profile-')
+  git(checkout, 'remote', 'add', 'origin', 'https://github.com/gate/repo.git')
+  const profile = { repo_key: 'gate__repo', fields: { default_branch: { status: 'ratified', value: 'dispute', source: 'test', ratified_by: 'operator', ratified_at: 'now' } } }
+  put(join(factoryRoot, 'profiles', 'gate__repo.json'), JSON.stringify(profile))
+  const result = await dispatchFixture({ label: 'default-base-integration', checkout, factoryRoot, names: ['lane-a'], runFlags: { 'dry-run': true } })
+  assert.equal(result.report.dryRun, true)
+  assert.ok(result.logs.some(line => line.includes('dry-run')))
+  const proposedRoot = scratchDir('dispatch-batch-default-proposed-')
+  put(join(proposedRoot, 'profiles', 'gate__repo.json'), JSON.stringify({ ...profile, fields: { default_branch: { status: 'proposed', value: 'dispute', source: 'test' } } }))
+  await assert.rejects(() => dispatchFixture({ label: 'default-base-proposed', checkout, factoryRoot: proposedRoot, names: ['lane-a'], runFlags: { 'dry-run': true } }), error => error.reason === 'base-branch-unresolved' && error.message.includes('profile-unratified'))
 })

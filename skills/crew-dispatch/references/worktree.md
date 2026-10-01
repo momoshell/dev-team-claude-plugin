@@ -1,10 +1,10 @@
 # Worktree hygiene
 
 Give each lane a real checkout so its branch, dirty state, and scope are
-independent. From a clean repository, create the lane worktree before boot:
+independent. From a clean repository, create the lane worktree before boot. `<base-branch>` is the checkout's base branch (profile `default_branch`, else `main`):
 
 ```sh
-git worktree add -b crew/<slug> ../<slug> main
+git worktree add -b crew/<slug> ../<slug> <base-branch>
 cd ../<slug>
 ```
 
@@ -45,8 +45,8 @@ were a clean dependency tree.
 Bring the lane branch up to date and replay the built commit before publishing:
 
 ```sh
-git fetch origin main
-git rebase origin/main
+git fetch origin <base-branch>
+git rebase origin/<base-branch>
 ```
 
 Run the lane's gate and suite again after the rebase, then push and open the PR.

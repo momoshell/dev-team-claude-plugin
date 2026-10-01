@@ -60,6 +60,8 @@ function fixture({
   logSubjects = ['local subject one', 'local subject two'],
   toplevel = null,
   branch = 'main',
+  baseBranch = undefined,
+  factoryRoot = scratchDir('pr-review-factory-root-'),
   escalateRun = false,
 } = {}) {
   const root = scratchDir('pr-review-fixture-')
@@ -81,6 +83,8 @@ function fixture({
   }
   const deps = {
     checkout,
+    factoryRoot,
+    ...(baseBranch ? { baseBranch } : {}),
     tempRoot: root,
     gh: (args, options) => {
       calls.gh.push({ args: [...args], options })
@@ -109,7 +113,7 @@ function fixture({
           if (sha === null) return { status: 1, stderr: `unknown ref ${ref}` }
           return { status: 0, stdout: `${sha}\n` }
         }
-        if (ref === 'origin/main' || ref === 'origin/HEAD' || ref === 'main') {
+        if (ref === 'origin/main' || ref === 'origin/HEAD' || ref === 'main' || ref === 'origin/dispute' || ref === 'dispute') {
           if (ref === defaultBaseRef || (!baseRefMap && ref === 'origin/main')) return { status: 0, stdout: `${BASE40}\n` }
           return { status: 1, stderr: `unknown ref ${ref}` }
         }
@@ -566,7 +570,7 @@ test('POST-A1', async () => {
   })
   assert.equal(current.calls.review.length, 0)
   assert.deepEqual(current.calls.gh.map(({ args }) => args), [
-    ['pr', 'view', '41', '--json', 'headRefOid,title,body'],
+    ['pr', 'view', '41', '--json', 'headRefOid,title,body,baseRefName'],
     ['pr', 'view', '41', '--json', 'headRefOid,reviews'],
   ])
   assertCleaned(current)
@@ -1252,4 +1256,35 @@ test('artifact write failure surfaces artifact-write-failed', async () => {
   }
   await assert.rejects(runLocalReview({ local: true, artifactDir: dir, deps: current.deps }), (error) => error instanceof PrReviewError && error.reason === 'artifact-write-failed')
   assertCleaned(current)
+})
+
+test('P1 base branch: valid PR metadata wins for merge and artifact base', async () => {
+  // MUTATION P1: ignore baseRefName and resolve from profile instead.
+  const current = fixture({ ghViews: [{ headRefOid: HEAD40, title: 't', body: '', baseRefName: 'dispute' }, { headRefOid: HEAD40, reviews: [] }], baseBranch: () => ({ branch: 'main' }), baseRefMap: { 'origin/dispute': BASE40 } })
+  await runPrReview({ pr: 1, noPost: true, artifactDir: join(current.root, 'artifacts'), deps: current.deps })
+  assert.deepEqual(current.calls.git.filter(({ args }) => args[0] === 'merge-base').map(({ args }) => args.at(-1)), ['origin/dispute'])
+  assert.ok(current.calls.git.some(({ args }) => args[0] === 'rev-parse' && args[2] === 'origin/dispute'))
+})
+test('P2 base branch: absent or invalid PR metadata uses the profile branch', async () => {
+  // MUTATION P2: fall back to main instead of resolving the ratified branch.
+  for (const metadata of [undefined, '-x']) {
+    const current = fixture({ ghViews: [{ headRefOid: HEAD40, title: 't', body: '', ...(metadata === undefined ? {} : { baseRefName: metadata }) }, { headRefOid: HEAD40, reviews: [] }], baseBranch: () => ({ branch: 'dispute' }), baseRefMap: { 'origin/dispute': BASE40 } })
+    await runPrReview({ pr: 2, noPost: true, deps: current.deps })
+    assert.equal(current.calls.git.find(({ args }) => args[0] === 'merge-base').args.at(-1), 'origin/dispute')
+  }
+})
+test('P3 base branch: local probes origin/dispute then dispute, never origin/HEAD', async () => {
+  // MUTATION P3: restore the origin/HEAD/main candidate list.
+  const current = fixture({ headSha: LOCAL_HEAD, baseBranch: () => ({ branch: 'dispute' }), baseRefMap: { 'origin/dispute': null, dispute: BASE40 }, mergeBase: LOCAL_MERGE, values: localValues('no-findings') })
+  await runLocalReview({ local: true, repo: current.deps.checkout, deps: current.deps })
+  const candidates = current.calls.git.filter(({ args }) => args[0] === 'rev-parse' && args[1] === '--verify' && args[2] !== 'HEAD').map(({ args }) => args[2])
+  assert.deepEqual(candidates.slice(0, 2), ['origin/dispute', 'dispute']); assert.equal(candidates.includes('origin/HEAD'), false)
+})
+test('explicit local base never invokes the resolver and resolver refusals preserve review vocabulary', async () => {
+  const explicit = fixture({ headSha: LOCAL_HEAD, baseBranch: () => { throw new Error('must not resolve') }, mergeBase: LOCAL_MERGE, values: localValues('no-findings') })
+  await runLocalReview({ local: true, repo: explicit.deps.checkout, base: 'explicit', deps: explicit.deps })
+  const pr = fixture({ baseBranch: () => { throw Object.assign(new Error('unratified'), { reason: 'profile-unratified' }) } })
+  await assert.rejects(runPrReview({ pr: 3, noPost: true, deps: pr.deps }), e => e.reason === PR_REVIEW_REFUSALS.INVALID_REVIEW_SHA)
+  const local = fixture({ baseBranch: () => { throw Object.assign(new Error('unreadable'), { reason: 'profile-unreadable' }) } })
+  await assert.rejects(runLocalReview({ local: true, repo: local.deps.checkout, deps: local.deps }), e => e.reason === PR_REVIEW_REFUSALS.LOCAL_BASE_UNRESOLVED)
 })

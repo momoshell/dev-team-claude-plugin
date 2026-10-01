@@ -90,7 +90,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import {
-  openLedger, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded,
+  openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded,
 } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
@@ -709,7 +709,9 @@ function openRunInner({
   // obtains its ledger handle, so a test can inject a handle whose writers
   // throw or are otherwise degraded without touching the real ledger.
   _openLedger,
+  _ingestJournal = ingestJournal,
 } = {}) {
+  const ingestJournalFn = _ingestJournal
   const ledgerDir = join(stateDir, 'ledger')
   const sidecarPath = join(ledgerDir, 'run.json')
   const lockPath = join(ledgerDir, 'run.lock')
@@ -717,6 +719,33 @@ function openRunInner({
   const requestedJsonlPath = join(dirname(requestedDbPath), 'ledger.jsonl')
 
   secureMkdirSync(ledgerDir)
+
+  let runStartedAt = null
+  let boundaryError = null
+  try {
+    const journal = join(stateDir, 'journal.jsonl')
+    let raw = null
+    try { raw = readFileSync(journal, 'utf8') } catch (err) { if (err?.code !== 'ENOENT') throw err }
+    if (raw !== null) {
+      let latest = null
+      let malformedAfterStart = false
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue
+        let record
+        try { record = JSON.parse(line) } catch {
+          if (latest) malformedAfterStart = true
+          continue
+        }
+        if (record?.event === 'run-start') { latest = record; malformedAfterStart = false }
+      }
+      if (malformedAfterStart) throw new Error('latest run-start boundary segment is malformed')
+      if (latest) {
+        const atMs = typeof latest.at === 'string' ? Date.parse(latest.at) : NaN
+        if (!Number.isFinite(atMs)) throw new Error('latest run-start has an invalid timestamp')
+        runStartedAt = new Date(atMs).toISOString()
+      }
+    }
+  } catch (err) { boundaryError = err }
 
   const localStats = { ...ZERO_STATS }
   let lastFlushedStats = { ...ZERO_STATS }
@@ -1030,6 +1059,17 @@ function openRunInner({
       localStats.dropped += 1
       noteStderrOnce(`emit: ledger handle is degraded (${s.degraded_reason || 'unknown'}) for a reason other than below-floor — every emission on it is counted as dropped`)
     }
+  }
+  function ingestOwnJournal(handle) {
+    if (boundaryError) throw boundaryError
+    if (runStartedAt === null) return
+    const health = typeof handle?.stats === 'function' ? handle.stats() : null
+    if (health?.degraded && health.degraded_reason === 'below_floor') return
+    const report = ingestJournalFn(join(stateDir, 'journal.jsonl'), handle, { adw_id: adwId, since: runStartedAt })
+    if (report?.complete === false) throw new Error(report.first_failure?.reason || 'journal ingestion incomplete')
+  }
+  function ingestRunJournal(handle) {
+    try { ingestOwnJournal(handle) } catch (err) { localStats.dropped += 1; noteStderrOnce(`emit: journal ingest dropped: ${err && err.message}`) }
   }
   function closeLedgerHandle() {
     if (cachedLedgerHandle) {
@@ -1384,6 +1424,7 @@ function openRunInner({
           billed_cache_read_tokens: billedSnapshot ? billedSnapshot.cache_read : null,
         })
       })
+      ingestRunJournal(ledgerHandle())
       closeLedgerHandle()
     } catch (err) {
       localStats.dropped += 1

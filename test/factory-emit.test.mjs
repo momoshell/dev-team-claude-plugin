@@ -14,7 +14,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT, nonTempCheckout, scratchDir, sqliteAvailable, childTracker } from './helpers.mjs'
 import { openRun, parseProposalBrief, recordCellFailure, recordPhaseSlotWait, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
-import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
+import { openLedger, ingestJournal, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { headlessIo } from '../crew/headless.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
@@ -1871,4 +1871,101 @@ test('b443 #887 an unclassified provider status keeps today\'s terminal path', {
     assert.equal(journal.filter((row) => row.event === 'seat-fallback').length, 0)
     assert.equal(readFileSync(crewPath, 'utf8'), before)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+function journalIngestFixture(extra = {}) {
+  const stateDir = scratchDir('emit-journal-tests-')
+  const dbPath = join(stateDir, 'mirror.db')
+  const journal = join(stateDir, 'journal.jsonl')
+  const epoch = '2030-01-01T00:00:00.000Z'
+  writeFileSync(journal, [
+    { at: '2029-12-31T23:59:59.000Z', advisor_usage: { consult_id: 'old', role: 'builder', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } },
+    { event: 'run-start', at: epoch, run_id: 'current' },
+    { at: '2030-01-01T00:00:01.000Z', seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 3 } },
+    { at: '2030-01-01T00:00:02.000Z', advisor_usage: { consult_id: 'current', role: 'builder', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } },
+  ].map(JSON.stringify).join('\n') + '\n')
+  _resetNoticeGuardsForTest()
+  const emitter = openRun({ stateDir, dbPath, repoSlug: 'fixture', taskSlug: 'emit-journal', now: () => Date.parse(epoch) + 5000, stderr: { write() {} }, ...extra })
+  emitter.startRun()
+  return { emitter, dbPath, journal, epoch }
+}
+test('E1 endRun ingests journal fact families once', { skip: SKIP }, () => {
+  const f = journalIngestFixture()
+  f.emitter.endRun({ status: 'ok' })
+  const ledger = openLedger({ dbPath: f.dbPath, stderr: { write() {} } })
+  try {
+    assert.deepEqual(ledger.dumpTable('seat_turn_census').map((r) => [r.adw_id, r.turns]), [[f.emitter.adwId, 3]])
+    assert.deepEqual(ledger.dumpTable('advisor_usage').map((r) => [r.adw_id, r.consult_id]), [[f.emitter.adwId, 'current']])
+    ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
+    const afterOneRepeat = ledger.dumpTable('advisor_usage').length
+    ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
+    assert.equal(afterOneRepeat, 1); assert.equal(ledger.dumpTable('advisor_usage').length, 1)
+  } finally { ledger.close(); f.emitter.dispose() }
+})
+// MUTATION RV1-2: remove ingestJournal's seen-key duplicate filter.
+test('RV1-2 explicit repeat journal ingestion adds no second fact row', { skip: SKIP }, () => {
+  const f = journalIngestFixture()
+  const ledger = openLedger({ dbPath: f.dbPath, stderr: { write() {} } })
+  try {
+    const first = ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
+    const second = ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
+    assert.equal(first.complete, true); assert.equal(second.complete, true)
+    assert.equal(ledger.dumpTable('advisor_usage').length, 1)
+  } finally { ledger.close(); f.emitter.dispose() }
+})
+test('E2 aborted endRun ingests only since the current run-start', { skip: SKIP }, () => {
+  const f = journalIngestFixture()
+  f.emitter.endRun({ status: 'aborted' })
+  const ledger = openLedger({ dbPath: f.dbPath, stderr: { write() {} } })
+  try { assert.deepEqual(ledger.dumpTable('advisor_usage').map((r) => r.consult_id), ['current']) }
+  finally { ledger.close(); f.emitter.dispose() }
+})
+// MUTATION RV1-2: treat a nonthrowing incomplete ingest report as success.
+test('RV1-2 incomplete journal-ingest reports count as drops', () => {
+  const f = journalIngestFixture({ _ingestJournal() { return { complete: false, first_failure: { reason: 'fixture incomplete' } } } })
+  const before = f.emitter.stats().dropped
+  f.emitter.endRun({ status: 'ok' })
+  assert.ok(f.emitter.stats().dropped > before)
+  f.emitter.dispose()
+})
+// MUTATION RV1-2: remove the saved boundaryError check in ingestOwnJournal.
+test('RV1-2 malformed latest and torn current journal boundaries count as drops', () => {
+  for (const records of [
+    [{ event: 'run-start', at: 'garbage' }],
+    [{ event: 'run-start', at: '2030-01-01T00:00:00.000Z' }, '{torn'],
+  ]) {
+    const stateDir = scratchDir('emit-invalid-boundary-'), dbPath = join(stateDir, 'mirror.db')
+    writeFileSync(join(stateDir, 'journal.jsonl'), records.map((r) => typeof r === 'string' ? r : JSON.stringify(r)).join('\n') + '\n')
+    const emitter = openRun({ stateDir, dbPath, repoSlug: 'fixture', taskSlug: 'invalid-boundary', stderr: { write() {} } })
+    emitter.startRun()
+    const before = emitter.stats().dropped
+    emitter.endRun({ status: 'ok' })
+    assert.ok(emitter.stats().dropped > before)
+    emitter.dispose()
+  }
+})
+// MUTATION RV1-4: ignore an unparsable line after a prior run-start and reuse its boundary.
+test('RV1-4 torn latest journal segment never falls back to the previous run boundary', () => {
+  const stateDir = scratchDir('emit-torn-old-boundary-'), dbPath = join(stateDir, 'mirror.db')
+  writeFileSync(join(stateDir, 'journal.jsonl'), [
+    JSON.stringify({ event: 'run-start', at: '2029-01-01T00:00:00.000Z' }),
+    '{torn-current-run-start',
+  ].join('\n') + '\n')
+  let ingests = 0
+  const emitter = openRun({ stateDir, dbPath, repoSlug: 'fixture', taskSlug: 'torn-boundary', stderr: { write() {} }, _ingestJournal() { ingests += 1; return { complete: true } } })
+  emitter.startRun()
+  const before = emitter.stats().dropped
+  emitter.endRun({ status: 'ok' })
+  assert.equal(ingests, 0); assert.ok(emitter.stats().dropped > before)
+  emitter.dispose()
+})
+test('E3 ingestion failure is counted and still closes ledger handle', () => {
+  let ended = false, closed = false
+  const f = journalIngestFixture({ _ingestJournal() { throw new Error('denied') }, _openLedger() {
+    return { startSession() {}, endSession() { ended = true }, endPhase() {}, close() { closed = true } }
+  } })
+  const before = f.emitter.stats().dropped
+  f.emitter.endRun({ status: 'ok' })
+  assert.equal(ended, true); assert.equal(closed, true); assert.ok(f.emitter.stats().dropped > before)
+  f.emitter.dispose()
 })

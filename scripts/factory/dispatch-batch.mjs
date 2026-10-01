@@ -7,7 +7,7 @@ import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsL
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
@@ -903,11 +903,11 @@ function readAdvisorReservations(d, reservationPath) {
   } catch (error) {
     return error?.code === 'ENOENT' ? [] : null
   }
-  if (!Array.isArray(reservations) || reservations.some((row) => !row || typeof row !== 'object' || typeof row.lane !== 'string' || !row.lane.trim() || !ADVISOR_ARMS.includes(row.arm) || !Number.isFinite(Date.parse(row.reserved_at)))) return null
+  if (!Array.isArray(reservations) || reservations.some((row) => !row || typeof row !== 'object' || typeof row.lane !== 'string' || !row.lane.trim() || !ADVISOR_ARMS.includes(row.arm) || !Number.isFinite(Date.parse(row.reserved_at)) || (Object.hasOwn(row, 'id') && (typeof row.id !== 'string' || !row.id.trim())))) return null
   return reservations
 }
 
-// A wave refused before boot never uses its picks: retract exactly those records under the lease.
+// Retract only unused picks under the lease.
 // lean: retraction is best-effort; a failed retraction leaves the reservation to the 60-second expiry
 export function retractAdvisorReservations(d, records) {
   const root = factoryStateRoot(d)
@@ -919,7 +919,7 @@ export function retractAdvisorReservations(d, records) {
   try {
     const reservations = readAdvisorReservations(d, reservationPath)
     if (reservations === null) return false
-    const kept = reservations.filter((row) => !records.some((record) => record.lane === row.lane && record.arm === row.arm && record.reserved_at === row.reserved_at))
+    const kept = reservations.filter((row) => !records.some((record) => record.id !== undefined ? record.id === row.id : record.lane === row.lane && record.arm === row.arm && record.reserved_at === row.reserved_at))
     d.writeFileSync(reservationPath, JSON.stringify(kept) + '\n')
     return true
   } catch { return false } finally {
@@ -952,7 +952,7 @@ function rotateAdvisorForLane(d, lane) {
     if (reservations.some((row) => !row || typeof row.lane !== 'string' || !row.lane.trim() || !ADVISOR_ARMS.includes(row.arm) || !Number.isFinite(Date.parse(row.reserved_at)))) return { readout: null, reason: 'readout-invalid', waited_ms }
     const persistPrunedReservations = () => d.writeFileSync(reservationPath, `${JSON.stringify(reservations)}\n`)
     if (validReadout) {
-      const reserved = { lane, arm: rotation.readout.next_arm, reserved_at: new Date(now()).toISOString() }
+      const reserved = { id: d.randomUUID(), lane, arm: rotation.readout.next_arm, reserved_at: new Date(now()).toISOString() }
       reservations.push(reserved)
       try { d.writeFileSync(reservationPath, JSON.stringify(reservations) + '\n') } catch { return { readout: null, reason: 'ledger-unreadable', waited_ms } }
       return { ...rotation, reservations, reserved, waited_ms }
@@ -990,6 +990,7 @@ export function normalDeps(deps = {}) {
     sleep: deps.sleep,
     slots: deps.slots,
     readAdvisorArms: deps.readAdvisorArms || readAdvisorArms,
+    randomUUID: deps.randomUUID || randomUUID,
   }
 }
 
@@ -4589,7 +4590,7 @@ async function compileDispatchWave(prepared) {
   return { ...prepared, plannerSymbolsArms, settled }
 }
 
-function launchDispatchWave(compiled) {
+function launchDispatchWave(compiled, launchedLanes) {
   const {
     d,
     runFlags,
@@ -4724,6 +4725,7 @@ function launchDispatchWave(compiled) {
     if (run && run.status !== undefined && run.status !== 0 && run.status !== 3) {
       refuse(`crew run failed for ${item.lane}: ${JSON.stringify(childFailure(run))}`, RUN_FAILED)
     }
+    launchedLanes.add(item.lane)
     // b313-waitextend's driver died with no pid anywhere on disk (#749 ask 1).
     // The pid is a DIAGNOSTIC, never the run's liveness: the run log's terminal
     // {"status":…} line stays the signal.
@@ -4774,7 +4776,14 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     if (advisorReservations.length > 0) retractAdvisorReservations(prepared.d, advisorReservations)
     throw error
   }
-  return launchDispatchWave(compiled)
+  const launchedLanes = new Set()
+  try {
+    return launchDispatchWave(compiled, launchedLanes)
+  } catch (error) {
+    const unlaunchedReservations = advisorReservations.filter((record) => !launchedLanes.has(record.lane))
+    if (unlaunchedReservations.length > 0) retractAdvisorReservations(prepared.d, unlaunchedReservations)
+    throw error
+  }
 }
 
 export function parseCliArgs(argv) {

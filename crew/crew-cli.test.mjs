@@ -4070,6 +4070,28 @@ function resumeCommandFixture(prefix = 'crew-resume-command-') {
   return { root, home, checkout, task, dir, taskDir, taskReturn, journal, checkpoint, gatePath, setEnvelope, envelope }
 }
 
+test('B5 resume context uses frozen checkpoint base and branch without resolving profile', () => {
+  const fixture = resumeCommandFixture('crew-resume-base-')
+  const previousHome = process.env.HOME
+  try {
+    fixture.checkpoint.publish = { branch: 'topic', base: 'dispute' }
+    fixture.setEnvelope(fixture.envelope())
+    process.env.HOME = fixture.home
+    let seen
+    resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, {
+      checkoutBaseBranch: () => { throw new Error('resume must not resolve a base') },
+      openRun: () => ({ startRun() {}, endRun() {} }), seatIo: () => ({}),
+      resume: (ctx) => { seen = ctx; return { status: 'done', summary: 'resumed', artifacts: [], details: {} } },
+      writeTerminalLine: () => {},
+    })
+    assert.equal(seen.publish.base, 'dispute')
+    assert.equal(seen.publish.branch, 'topic')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+})
+
 function assertResumeRefusal(fixture, reason, args = {}) {
   const beforeEnvelope = existsSync(fixture.taskReturn) ? readFileSync(fixture.taskReturn, 'utf8') : null
   const beforeJournal = readFileSync(fixture.journal, 'utf8')
@@ -4910,7 +4932,7 @@ test('E1-unnamed boot member record stays deep-equal', async () => {
   }))
   const crewContract = (crew) => {
     const copy = JSON.parse(JSON.stringify(crew))
-    for (const key of ['created_at', 'checkout', 'workspace_id', 'window_id', 'task', 'task_return', 'roster', 'workflow']) delete copy[key]
+    for (const key of ['created_at', 'checkout', 'workspace_id', 'window_id', 'task', 'task_return', 'roster', 'workflow', 'base_branch']) delete copy[key]
     copy.members = withoutWorkflowSeat(copy.members)
     return copy
   }

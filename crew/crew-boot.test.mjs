@@ -19,9 +19,9 @@ import { modelString as piModelString, seatCommand as piSeatCommand } from './ad
 import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
-import { ROOT, scratchDir } from '../test/helpers.mjs'
+import { ROOT, scratchDir, git } from '../test/helpers.mjs'
 import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
-import { probeRepo } from '../scripts/factory/probe-repo.mjs'
+import { probeRepo, ProfileRefusal, checkoutBaseBranch } from '../scripts/factory/probe-repo.mjs'
 import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
@@ -333,7 +333,7 @@ function protectedProfile(factoryRoot, checkout, cell) {
   const path = join(factoryRoot, 'profiles', `${repoKey}.json`)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, JSON.stringify({
-    schema: 1, profile_version: 1, repo_key: repoKey, fields: { protected_paths_candidates: cell }, meta: {},
+    schema: 1, profile_version: 1, repo_key: repoKey, fields: { protected_paths_candidates: cell, default_branch: { status: 'ratified', value: 'main', source: 'human', ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z' } }, meta: {},
   }))
   return path
 }
@@ -1699,6 +1699,87 @@ test('run refuses an unusable ratified protected-path cell before driving', asyn
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
 })
+
+async function withBaseBranchFixture(fn) {
+  const root = scratchDir('crew-base-branch-')
+  const home = join(root, 'home'), checkout = join(root, 'checkout'), factoryRoot = join(home, 'factory')
+  mkdirSync(home); mkdirSync(checkout)
+  const saved = Object.fromEntries(['HOME', 'DEVTEAM_FACTORY_DIR', 'DEVTEAM_LEDGER_DIR', 'DEVTEAM_LEDGER_DB'].map((key) => [key, process.env[key]]))
+  Object.assign(process.env, { HOME: home, DEVTEAM_FACTORY_DIR: factoryRoot, DEVTEAM_LEDGER_DIR: join(home, 'ledger'), DEVTEAM_LEDGER_DB: join(home, 'ledger.db') })
+  git(checkout, 'init', '-q')
+  git(checkout, 'config', 'user.email', 'crew@example.invalid'); git(checkout, 'config', 'user.name', 'crew')
+  writeFileSync(join(checkout, 'a.mjs'), 'fixture\n'); git(checkout, 'add', 'a.mjs'); git(checkout, 'commit', '-qm', 'base')
+  const repoKey = probeRepo({ checkout }).repo_key
+  const profilePath = join(factoryRoot, 'profiles', `${repoKey}.json`)
+  const task = 'base-branch-fixture', brief = join(home, 'brief.md')
+  writeFileSync(brief, '# fixture\n')
+  const crewPath = join(testCrewDir(home, checkout, task), 'crew.json')
+  let calls = 0, effects = 0, ctx
+  const profile = (branch, status = 'ratified') => {
+    mkdirSync(dirname(profilePath), { recursive: true })
+    writeFileSync(profilePath, JSON.stringify({ schema: 1, profile_version: 1, repo_key: repoKey, fields: { default_branch: { status, value: branch, source: 'fixture', ratified_by: 'operator', ratified_at: 'now' } }, meta: {} }))
+  }
+  const deps = {
+    checkoutBaseBranch(options) { calls++; return checkoutBaseBranch(options) },
+    cmux: () => { effects++; return {} }, tree: () => { effects++; return {} }, renameTab: () => { effects++ },
+    awaitSeatsReady: async () => {}, openRun: () => ({ recordSeats() {}, startRun() {}, endRun() {} }),
+  }
+  const boot = () => bootCmd({ task, checkout, 'headless-all': true, 'claude-bin': process.execPath }, deps)
+  const run = () => runCmd({ task, checkout, 'brief-file': brief, keep: true }, { ...deps, seatIo: () => ({}), drive: (value) => { ctx = value; return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } } }, appendCompletion: () => {}, writeTerminalLine: () => {} })
+  try { await fn({ root, home, checkout, task, profilePath, profile, crewPath, boot, run, deps, get calls() { return calls }, get effects() { return effects }, get ctx() { return ctx } }) }
+  finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('B1 boot persists ratified base provenance exactly once', async () => withBaseBranchFixture(async (f) => {
+  f.profile('dispute'); await f.boot()
+  const crew = JSON.parse(readFileSync(f.crewPath, 'utf8'))
+  const journal = readFileSync(join(dirname(f.crewPath), 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  assert.deepEqual(crew.base_branch, { branch: 'dispute', basis: `ratified profile field default_branch · ${f.profilePath}` })
+  assert.deepEqual(journal.find((row) => row.event === 'boot')?.base_branch, crew.base_branch)
+  assert.equal(f.calls, 1)
+}))
+
+test('B2 proposed base refuses before boot side effects and preserves refusal reasons', async () => withBaseBranchFixture(async (f) => {
+  f.profile('dispute', 'proposed')
+  await assert.rejects(f.boot(), (error) => error.reason === 'profile-unratified' && error.message.includes('profile-unratified'))
+  assert.equal(existsSync(f.crewPath), false)
+  assert.equal(f.effects, 0)
+  for (const reason of ['profile-unreadable', 'base-branch-invalid']) {
+    const refusal = new ProfileRefusal('resolver detail', reason)
+    await assert.rejects(bootCmd({ task: `${f.task}-${reason}`, checkout: f.checkout, 'headless-all': true }, { checkoutBaseBranch: () => { throw refusal } }), (error) => error === refusal && error.reason === reason && error.message === `${reason}: resolver detail`)
+  }
+}))
+
+test('B3 run keeps the boot-frozen base after profile edits', async () => withBaseBranchFixture(async (f) => {
+  f.profile('dispute'); await f.boot(); f.profile('trunk'); f.run()
+  assert.equal(f.ctx.publish.base, 'dispute')
+  assert.equal(f.calls, 1)
+}))
+
+test('B4 legacy run resolves and persists missing base once; proposed legacy profile refuses before driving', async () => withBaseBranchFixture(async (f) => {
+  await f.boot()
+  const crew = JSON.parse(readFileSync(f.crewPath, 'utf8')); delete crew.base_branch; writeFileSync(f.crewPath, JSON.stringify(crew))
+  f.run()
+  assert.equal(f.ctx.publish.base, 'main')
+  const journalPath = join(dirname(f.crewPath), 'journal.jsonl')
+  const rows = readFileSync(journalPath, 'utf8').trim().split('\n').map(JSON.parse).filter((row) => row.event === 'base-branch')
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].base_branch, { branch: 'main', basis: `default base branch main · no profile at ${f.profilePath}` })
+  assert.deepEqual(JSON.parse(readFileSync(f.crewPath, 'utf8')).base_branch, rows[0].base_branch)
+  f.run(); assert.equal(f.calls, 2)
+  const legacy = JSON.parse(readFileSync(f.crewPath, 'utf8')); delete legacy.base_branch; writeFileSync(f.crewPath, JSON.stringify(legacy)); f.profile('dispute', 'proposed')
+  let drove = 0
+  assert.throws(() => checkoutBaseBranch({ checkout: f.checkout }), (error) => error.reason === 'profile-unratified')
+  const proposed = new ProfileRefusal('proposed default branch', 'profile-unratified')
+  assert.throws(() => runCmd({ task: f.task, checkout: f.checkout, 'brief-file': join(f.home, 'brief.md'), keep: true }, { checkoutBaseBranch: () => { throw proposed }, drive: () => { drove++ }, seatIo: () => { drove++ } }), (error) => error === proposed && error.message.includes('profile-unratified'))
+  assert.equal(drove, 0)
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(f.crewPath, 'utf8')), 'base_branch'), false)
+  const unexpected = new Error('unexpected resolver failure')
+  await assert.rejects(bootCmd({ task: `${f.task}-unexpected`, checkout: f.checkout, 'headless-all': true }, { checkoutBaseBranch: () => { throw unexpected } }), (error) => error === unexpected)
+}))
 
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-headless-home-'))

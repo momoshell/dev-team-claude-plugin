@@ -64,7 +64,7 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './seat-io.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
-import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
+import { checkoutBaseBranch, checkoutProtectedPaths, ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
@@ -3093,6 +3093,16 @@ export const BOOT_WORKSPACE_DEADLINE_MS = 60_000
 export const BOOT_WORKSPACE_POLL_MS = 250
 export const PANE_LAUNCH_MAX_BYTES = 512
 
+function resolveBaseBranch(checkout, deps) {
+  try { return (deps.checkoutBaseBranch || checkoutBaseBranch)({ checkout }) }
+  catch (error) {
+    if (error instanceof ProfileRefusal) {
+      error.message = `${error.reason}: ${error.message}`
+    }
+    throw error
+  }
+}
+
 export async function bootCmd(args, deps = {}) {
   const {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
@@ -3139,6 +3149,7 @@ export async function bootCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const laneFence = resolveLaneFence(args)
+  const baseBranch = resolveBaseBranch(checkout, deps)
   let roles, tierName = null, tierSeats = null, sources = null, advisor = null, roster = null
   let rosterRecord = null
   let workflow = null
@@ -3539,7 +3550,7 @@ export async function bootCmd(args, deps = {}) {
   }
 
   const crew = {
-    schema_version: 3, task: taskSlug, checkout, charter_arm: charterArm,
+    schema_version: 3, task: taskSlug, checkout, charter_arm: charterArm, base_branch: baseBranch,
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     run_configuration: bootConfigRecord,
@@ -3563,7 +3574,7 @@ export async function bootCmd(args, deps = {}) {
     ? await shadowPickBoot({ roster, tier: tierName, seats: tierSeats, sources, adapters, registry, ladder, env: bootEnv, dbPath: ledgerDbPath() })
     : null
   logLine(join(paths.dir, 'journal.jsonl'), {
-    at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm,
+    at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm, base_branch: baseBranch,
     run_configuration: { ...bootConfigRecord, advisor },
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
@@ -3850,7 +3861,7 @@ export function resumeCmd(args, deps = {}) {
     task: taskSlug, taskDir: paths.taskDir, checkout, journal,
     head: checkpoint.head_oid, roles: crew.roles, variant,
     lane: null, suite: checkpoint.suite.cmd,
-    publish: { branch: checkpoint.publish.branch },
+    publish: { branch: checkpoint.publish.branch, base: checkpoint.publish.base },
     files_in_scope: checkpoint.accepted_scope,
     resume_checkpoint: checkpoint,
     ...(checkpoint.kind === 'step' ? (() => {
@@ -3920,6 +3931,11 @@ export function runCmd(args, deps = {}) {
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
+  if (!Object.hasOwn(crew, 'base_branch')) {
+    crew.base_branch = resolveBaseBranch(checkout, deps)
+    saveCrew(paths, crew)
+    logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'base-branch', base_branch: crew.base_branch })
+  }
   const runId = String(randomUUIDDep())
   const runPaths = runScopedPaths(paths, runId)
   // Resolve twice on purpose: the first pure call refuses malformed dispatch
@@ -4006,7 +4022,7 @@ export function runCmd(args, deps = {}) {
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
-    publish: { branch: readBranch(checkout) },
+    publish: { branch: readBranch(checkout), base: crew.base_branch.branch },
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(crew.turn_ceilings ? { turnCeilings: crew.turn_ceilings } : {}),

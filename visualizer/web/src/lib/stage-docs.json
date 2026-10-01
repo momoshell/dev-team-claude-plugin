@@ -346,6 +346,11 @@
           "callee": "stage",
           "label": "publish",
           "occurrence": 2
+        },
+        {
+          "callee": "stage",
+          "label": "publish",
+          "occurrence": 3
         }
       ]
     }

@@ -3731,7 +3731,7 @@ function assertChoiceEscalation(result, where, slots, label = where) {
 }
 
 function rebaseSlotFixture(runs) {
-  return driveTask({ ...CTX, publish: { branch: 'feature/slot-coverage' } }, fakeIo({
+  return driveTask({ ...CTX, publish: { branch: 'feature/slot-coverage', base: 'main' } }, fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs,
     changed: ['a.mjs', 'a.test.mjs'],
@@ -3774,7 +3774,7 @@ test('C1', () => {
   })
   const unresolved = driveTask({ ...CTX, limits: { ...CTX.limits, build_rounds: 1, review_rounds: 1 } }, reviewIo)
 
-  const rebase = rebaseSlotFixture({ 'git fetch origin main': { ok: false, output: 'fetch failed' } })
+  const rebase = rebaseSlotFixture({ [`git fetch origin ${shellArg('main')}`]: { ok: false, output: 'fetch failed' } })
   for (const [label, result, where, slots] of [
     [scope.producer, scope.run(), 'scope', { files: scope.files }],
     ['plan-check', planCheck, 'plan-check', { finding_ids: ['PC-1'] }],
@@ -3789,9 +3789,9 @@ test('C1', () => {
 
 test('RV1-1 producer slots survive every envelope route', () => {
   const rebaseBase = {
-    'git fetch origin main': { ok: true, output: '' },
-    'git rev-parse origin/main': { ok: true, output: 'base111\n' },
-    'git merge-base HEAD origin/main': { ok: true, output: 'older000\n' },
+    [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+    [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base111\n' },
+    [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'older000\n' },
   }
   const commonSlots = { files: [], base: 'origin/main', commit: 'abc1234' }
   const recoveryOid = 'a'.repeat(40)
@@ -3802,21 +3802,21 @@ test('RV1-1 producer slots survive every envelope route', () => {
     [`git rev-parse --verify '${recoveryRef}^{commit}'`]: { ok: true, output: `${recoveryOid}\n` },
   }
   const rebaseCases = [
-    ['fetch', { 'git fetch origin main': { ok: false, output: 'fetch failed' } }, commonSlots],
-    ['base-probe', { ...rebaseBase, 'git rev-parse origin/main': { ok: false, output: '' } }, commonSlots],
-    ['merge-base-probe', { ...rebaseBase, 'git merge-base HEAD origin/main': { ok: false, output: '' } }, commonSlots],
+    ['fetch', { [`git fetch origin ${shellArg('main')}`]: { ok: false, output: 'fetch failed' } }, commonSlots],
+    ['base-probe', { ...rebaseBase, [`git rev-parse ${shellArg('origin/main')}`]: { ok: false, output: '' } }, commonSlots],
+    ['merge-base-probe', { ...rebaseBase, [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: false, output: '' } }, commonSlots],
     ['conflict', {
       ...rebaseBase, ...recoveryProof,
-      'git rebase origin/main': { ok: false, output: 'conflict' },
+      [`git rebase ${shellArg('origin/main')}`]: { ok: false, output: 'conflict' },
       'git diff --name-only --diff-filter=U': { ok: true, output: 'conflict.mjs\n' },
     }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }, /conflict evidence was empty or unmeasurable/],
     ['recovery-ref', {
       ...rebaseBase,
-      'git rebase origin/main': { ok: false, output: 'conflict' },
+      [`git rebase ${shellArg('origin/main')}`]: { ok: false, output: 'conflict' },
       'git diff --name-only --diff-filter=U': { ok: true, output: 'conflict.mjs\n' },
     }, { files: ['conflict.mjs'], base: 'origin/main', commit: 'abc1234' }, /accepted commit recovery ref was not proved/],
     ['post-rebase-head', {
-      ...rebaseBase, 'git rebase origin/main': { ok: true, output: '' },
+      ...rebaseBase, [`git rebase ${shellArg('origin/main')}`]: { ok: true, output: '' },
       'git rev-parse HEAD': { ok: false, output: '' },
     }, commonSlots],
   ]
@@ -4498,9 +4498,9 @@ test('chunk completing lane publishes the accepted counts in the PR body', () =>
       'gate-cmd': gate, 'lane-cmd': { ok: true, output: '' },
       'suite-cmd': { ok: true, output: '# pass 1\n# fail 0\n' },
       'git write-tree': { ok: true, output: 'tree1234\n' },
-      'git fetch origin main': { ok: true, output: '' },
-      'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
-      'git merge-base HEAD origin/main': { ok: true, output: 'base1111\n' },
+      [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+      [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+      [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
       'git rev-parse HEAD': { ok: true, output: 'abc1234\n' },
       'command -v gh': { ok: true, output: '/usr/bin/gh\n' },
       'gh auth status': { ok: true, output: 'logged in\n' },
@@ -4516,7 +4516,7 @@ test('chunk completing lane publishes the accepted counts in the PR body', () =>
     if (text.startsWith('gh pr create ')) return { ok: true, output: 'https://github.com/o/r/pull/42\n' }
     return baseRun(cmd)
   }
-  const result = driveTask({ ...CHUNK_PROOF_CTX, head: 'abc1234', publish: { branch } }, io)
+  const result = driveTask({ ...CHUNK_PROOF_CTX, head: 'abc1234', publish: { branch, base: 'main' } }, io)
   assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
   const body = io.calls.writes[`${TD}/pr-body.md`]
   assert.match(body, /Chunk c1: 1 owned, 1 deferred/)

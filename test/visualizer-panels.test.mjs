@@ -21,15 +21,15 @@ import { shapeRun } from '../visualizer/server/shape.mjs'
 import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { scratchDir, sqliteAvailable } from './helpers.mjs'
+import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import { getAssurances, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')
   try {
-    const sourcePath = join(process.cwd(), 'visualizer/web/src/lib/fleet.js')
-    const semanticsPath = join(process.cwd(), 'visualizer/web/src/lib/workflow-semantics.js')
-    const profilesPath = join(process.cwd(), 'crew/task-profiles.mjs')
+    const sourcePath = join(ROOT, 'visualizer/web/src/lib/fleet.js')
+    const semanticsPath = join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js')
+    const profilesPath = join(ROOT, 'crew/task-profiles.mjs')
     const source = readFileSync(sourcePath, 'utf8')
     const original = "export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])"
     const changed = `export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted', '${extraKey}'])`
@@ -133,7 +133,7 @@ test('F1', () => {
 })
 
 test('G1', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
   assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
   assert.match(source, /let baseRows = \$derived\(/)
   assert.match(source, /configurationFilterView\(baseRows,/)
@@ -336,7 +336,7 @@ test('G1 task detail state reports measured facts and independently missing fact
 })
 
 test('H1 RunDetail composes plain detail helpers and renders each audited field', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, shipStatus, tokenCell \} from '\.\/fleet\.js'/)
   assert.match(source, /let configurationDetail = \$derived\(runDetailConfiguration\(run\)\)/)
   assert.match(source, /let seatPolicy = \$derived\(runDetailSeats\(run\)\)/)
@@ -373,7 +373,7 @@ test('operations aggregate carries a denominator on every readout', () => {
 })
 
 test('Operations view delegates the aggregate to the fleet plain module', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
   assert.match(source, /import \{ operationsOverview \} from '\.\/fleet\.js'/)
   assert.match(source, /let operations = \$derived\(operationsOverview\(runs\)\)/)
   assert.doesNotMatch(source, /function operationsOverview\(/)
@@ -516,7 +516,7 @@ test('fleetEscalationRate does not count a run that did not escalate', () => {
 })
 
 test('the metrics strip renders the sessions derivations and derives nothing', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const strip = readFileSync(join(root, 'lib/MetricsStrip.svelte'), 'utf8')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
@@ -549,7 +549,7 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
 })
 
 test('model directory pagination uses compact named controls', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /class="directory-pager"/)
   assert.match(source, /Previous model page/)
   assert.match(source, /Next model page/)
@@ -558,7 +558,7 @@ test('model directory pagination uses compact named controls', () => {
 })
 
 test('E1 directory add uses OpenRouter runtime identity', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /const key = variant\.runtime_id/)
   assert.match(source, /provider:variant\.runtime_id\.split\('\/'\)\[0\]/)
   assert.match(source, /id:variant\.runtime_id\.split\('\/'\)\.slice\(1\)\.join\('\/'\)/)
@@ -567,7 +567,7 @@ test('E1 directory add uses OpenRouter runtime identity', () => {
 })
 
 test('RV1-1 tier variants use their own runtime draft key', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /const chip = directoryChip\(variant\)/)
   assert.match(source, /if \(directoryChip\(variant\)\)/)
   assert.doesNotMatch(source, /const chip = directoryChip\(model\)/)
@@ -575,7 +575,7 @@ test('RV1-1 tier variants use their own runtime draft key', () => {
 })
 
 test('RV1-2 unconfigured intelligence keeps key setup and footer honest', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /\{#if directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models\}/)
   assert.match(source, /Model intelligence not configured/)
   assert.match(source, /Add API key/)
@@ -586,8 +586,8 @@ test('RV1-2 unconfigured intelligence keeps key setup and footer honest', () => 
 })
 
 test('RV2-1 configured AA failure keeps repair controls and footer honest', () => {
-  const directorySource = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/model-directory.js'), 'utf8')
-  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const directorySource = readFileSync(join(ROOT, 'visualizer/web/src/lib/model-directory.js'), 'utf8')
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(directorySource, /\? 'aa-unavailable' : 'not-benchmarked'/)
   assert.match(panel, /directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models/)
   assert.match(panel, /catalogKeyError \|\| directory\?\.artificial_analysis_absent \|\| directory\?\.absent/)
@@ -595,7 +595,7 @@ test('RV2-1 configured AA failure keeps repair controls and footer honest', () =
 })
 
 test('F1 null intelligence produces an unmeasured draft', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /if \(intelligence == null\) return null/)
   assert.match(source, /band == null \? 'unmeasured'/)
   assert.match(source, /reference_pending:variant\.intelligence == null \? variant\.score_absent_reason/)
@@ -604,7 +604,7 @@ test('F1 null intelligence produces an unmeasured draft', () => {
 })
 
 test('roster seat assignment asks for an explicit per-seat thinking effort', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /const EFFORT_OPTIONS = \[/)
   for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.match(source, new RegExp(`value:'${effort}'`))
   assert.match(source, /function beginAssignment\(tier, role, key\)/)
@@ -617,7 +617,7 @@ test('roster seat assignment asks for an explicit per-seat thinking effort', () 
 })
 
 test('roster drafts have an explicit local activation path for the next task', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /async function applyLocal\(\)/)
   assert.match(source, /applyRosterLadder\(staged, \{ allowWarnings:!visibleResult\?\.ok \}\)/)
   assert.match(source, /'Apply for next task'/)
@@ -633,8 +633,8 @@ test('roster drafts have an explicit local activation path for the next task', (
 test('roster diffs distinguish metadata, additions, removals, and context', () => {
   const lines = diffLines('--- a/crew/roster.json\n+++ b/crew/roster.json\n@@ -1 +1 @@\n-  "effort": "max"\n+  "effort": "high"\n }')
   assert.deepEqual(lines.map((line) => line.kind), ['meta', 'meta', 'meta', 'removal', 'addition', 'context'])
-  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  const block = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const block = readFileSync(join(ROOT, 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
   assert.equal((panel.match(/<DiffBlock /g) || []).length, 3)
   assert.match(block, /diff-line\.addition/)
   assert.match(block, /diff-line\.removal/)
@@ -642,7 +642,7 @@ test('roster diffs distinguish metadata, additions, removals, and context', () =
 })
 
 test('the metrics strip probes task envelopes for successful sessions', () => {
-  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.equal(app.includes('escalationProbeTargets(nextRuns)'), false)
   assert.ok(app.includes(`for (const run of Array.isArray(nextRuns) ? nextRuns : []) {
       const id = run?.adw_id
@@ -650,7 +650,7 @@ test('the metrics strip probes task envelopes for successful sessions', () => {
 })
 
 test('the metrics strip publishes task envelopes as probes finish across refreshes', () => {
-  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /const envelopeCache = new Map\(\)/)
   assert.match(app, /envelopes = new Map\(envelopeCache\)/)
   assert.match(app, /envelopeQueued\.has\(id\)/)
@@ -711,7 +711,7 @@ test("C1 propose the pick returns today's diff without a write", async () => {
     assert.equal(calls[0].path, '/api/roster/propose')
     assert.equal(calls.filter(({ path }) => /\/apply(?:\?|$)/.test(path)).length, 0)
     assert.deepEqual(JSON.parse(calls[0].options.body), { tier:'build', role:'reviewer', cell })
-    const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+    const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
     assert.match(panel, /Propose the pick/)
     assert.match(panel, /proposeRosterEdit\(column\.tier, seat\.role, pick\.chosen_cell\)/)
     const policyStart = panel.indexOf('class="pick-explanation"')
@@ -754,7 +754,7 @@ test('assurance page preserves the server refusal message from a 400 response', 
       assert.equal(error.message, message)
       return true
     })
-    const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/AssurancePage.svelte'), 'utf8')
+    const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AssurancePage.svelte'), 'utf8')
     assert.match(page, /message: cause\?\.message/)
     assert.doesNotMatch(page, /request failed \(400\)/)
   } finally {
@@ -763,7 +763,7 @@ test('assurance page preserves the server refusal message from a 400 response', 
 })
 
 test('RV1-1 roster pick fetch effect ignores staged local drafts', () => {
-  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(panel, /let pickRows = \$derived\(\(payload\?\.rail \|\| \[\]\)\.flatMap\(/)
   const start = panel.indexOf('const revision = ++pickRevision')
   const end = panel.indexOf('return () => { active = false }', start)
@@ -1199,7 +1199,7 @@ test('hash routes parse and format all ten canonical views', () => {
 })
 
 test('E1 agents page route nav and title are wired', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
   assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
@@ -1211,7 +1211,7 @@ test('E1 agents page route nav and title are wired', () => {
 })
 
 test('skills-page:D1', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/SkillsPage.svelte'), 'utf8')
   assert.equal(formatHash(parseHash('#/skills')), '#/skills')
@@ -1251,7 +1251,7 @@ test('skills-page:E1', async () => {
 })
 
 test('assurance page exposes separate axes and only prepares proposals', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AssurancePage.svelte'), 'utf8')
   assert.match(app, /Assurances · Factory/)
@@ -1274,7 +1274,7 @@ test('assurance page exposes separate axes and only prepares proposals', () => {
 })
 
 test('prompts-page:A1', async () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/PromptsPage.svelte'), 'utf8')
   assert.deepEqual(parseHash('#/prompts'), { view: 'prompts', adw_id: null, phase: null })
@@ -1316,14 +1316,14 @@ test('prompts-page:A1', async () => {
 })
 
 test('prompts-page:RV1-1 consequence export resolves', async () => {
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
-  const agents = await import(`${pathToFileURL(join(process.cwd(), 'visualizer/web/src/lib/agents.js')).href}?prompts-page-rv1-1`)
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
+  const agents = await import(`${pathToFileURL(join(ROOT, 'visualizer/web/src/lib/agents.js')).href}?prompts-page-rv1-1`)
   assert.match(page, /import \{[^}]*PROMPT_SURFACE_CONSEQUENCE[^}]*\} from '\.\/agents\.js'/)
   assert.equal(agents.PROMPT_SURFACE_CONSEQUENCE, 'Charter changes force stronger assurance and require a measurement claim in the commit message.')
 })
 
 test('F1 agents page uses only Tier-2 colour aliases', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
   const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] || ''
   const declarations = [...css.matchAll(/(?:^|[;{}])\s*[-a-z]+\s*:\s*([^;{}]+)/g)].map((match) => match[1].trim())
   assert.equal(css.includes('data-theme'), false)
@@ -1399,7 +1399,7 @@ test('slotWaitCell preserves measured waits and honest absence', () => {
   assert.equal(unmeasured.text, windowReason)
   assert.doesNotMatch(unmeasured.text, /0s/)
 
-  const card = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunCard.svelte'), 'utf8')
+  const card = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunCard.svelte'), 'utf8')
   assert.match(card, /import \{[^}]*slotWaitCell[^}]*\} from '\.\/fleet\.js'/)
   assert.match(card, /let slotWait = \$derived\(slotWaitCell\(run\)\)/)
   assert.match(card, /\{#if slotWait\}/)
@@ -1434,7 +1434,7 @@ test('K1: the top bar calls an unobserved run unsettled and runtime unconfirmed'
 })
 
 test('L1: the visualizer only copies the reconciliation command', () => {
-  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   assert.match(detail, /Copy reconciliation command/)
   assert.match(detail, /await navigator\.clipboard\.writeText\(run\.reconciliation_command\)/)
   assert.doesNotMatch(detail, /fetch\(run\.reconciliation_command\)/)
@@ -1482,7 +1482,7 @@ test('fleet surfaces pin honest cost, heartbeat, and escalated status tone', () 
   assert.equal(rows[1].cost.dashed, true)
   assert.notEqual(rows[1].cost.text, '0')
 
-  const root = join(process.cwd(), 'visualizer/web/src/lib')
+  const root = join(ROOT, 'visualizer/web/src/lib')
   const table = readFileSync(join(root, 'FleetTable.svelte'), 'utf8')
   assert.match(table, /duration<\/th><th class="micro">tokens<\/th><th class="micro">cost<\/th><th class="micro">heartbeat<\/th>/)
   assert.match(table, /\{@render mark\(row\.cost\)\}/)
@@ -1520,7 +1520,7 @@ test('return probing shares one six-request semaphore across refresh generations
 })
 
 test('role colour stays isolated to RoleTag and escalations render their why in the rail', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   for (const file of ['App.svelte', 'lib/FleetTable.svelte', 'lib/RunCard.svelte', 'lib/Filters.svelte']) {
     assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /--role-|--lane-\d/)
   }
@@ -1711,14 +1711,14 @@ test('phase artifacts keep return narratives separate and deduplicate file evide
   assert.deepEqual(panel.artifacts.documents.map((document) => document.role), ['lead','planner'])
   assert.equal(panel.artifacts.paths.length, 2)
   assert.deepEqual(panel.artifacts.paths.find((artifact) => artifact.path === 'task/plan.md').sources, ['planner d1','lead d3'])
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
   assert.match(source, /let documentOpen = \$state\(\{\}\)/)
   assert.match(source, /ontoggle=\{\(event\) => rememberDocument\(event, document\)\}/)
   assert.doesNotMatch(source, /open=\{index === 0\}/)
 })
 
 test('phase inspection explains factory checkpoints and suppresses empty gate counters', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
   assert.match(source, /Task completion recorded/)
   assert.match(source, /No agent lane owned this checkpoint/)
   assert.match(source, /No gate ran on this checkpoint/)
@@ -1732,7 +1732,7 @@ test('phase inspection explains factory checkpoints and suppresses empty gate co
 })
 
 test('operations cadence keeps time labels below the chart baseline', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
   assert.match(source, /\.histogram::before[^}]*inset:0 0 1\.15rem[^}]*border-bottom/)
   assert.match(source, /\.bar-column[^}]*grid-template-rows:minmax\(0,1fr\) 1\.15rem/)
   assert.match(source, /\.bar-column > span[^}]*grid-row:2/)
@@ -1740,7 +1740,7 @@ test('operations cadence keeps time labels below the chart baseline', () => {
 })
 
 test('trace source tripwires keep route, role order, and server read-only', () => {
-  const root = join(process.cwd(), 'visualizer')
+  const root = join(ROOT, 'visualizer')
   const shape = readFileSync(join(root, 'server/shape.mjs'), 'utf8')
   const runDetail = readFileSync(join(root, 'web/src/lib/RunDetail.svelte'), 'utf8')
   const eventStream = readFileSync(join(root, 'web/src/lib/EventStream.svelte'), 'utf8')
@@ -1754,19 +1754,19 @@ test('trace source tripwires keep route, role order, and server read-only', () =
   assert.deepEqual([...ROLE_ORDER], ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
   assert.ok(shape.includes("Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])"))
   for (const file of ['visualizer/server/shape.mjs', 'visualizer/server/ledger-feed.mjs']) {
-    const source = readFileSync(join(process.cwd(), file), 'utf8')
+    const source = readFileSync(join(ROOT, file), 'utf8')
     assert.equal(/INSERT INTO|UPDATE \\w+ SET|DELETE FROM/i.test(source), false)
   }
 })
 
 test('PhaseGantt resolves identity by lane key rather than timeline row position', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.ok(source.includes('identityFor(lane)'))
   assert.equal(source.includes('identities.lanes[laneIndex]'), false)
 })
 
 test('PhaseGantt renders every gate marker attached to a block', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.ok(source.includes('markersFor(block.phase_id)'))
   assert.match(source, /#each markers as marker/)
 })
@@ -1833,7 +1833,7 @@ test('acceptEvidence explains a pending cosmetic count', () => {
 })
 
 test('PhaseGantt draws named bounce connectors inside the timeline layer', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.match(source, /class="bounce-layer"/)
   assert.ok(source.includes('connectorPath(from, to)'))
   assert.ok(source.includes('connectorLabel(from, to, arrow)'))
@@ -1845,7 +1845,7 @@ test('PhaseGantt draws named bounce connectors inside the timeline layer', () =>
 })
 
 test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.ok(source.includes('--identity-column:17rem'))
   assert.ok(source.includes('--lane-gap:.6rem'))
   assert.ok(source.includes('left:calc(var(--identity-column) + var(--lane-gap))'))
@@ -1853,20 +1853,20 @@ test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
 })
 
 test('PhaseGantt starts its round connector below the phase number', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.match(source, /waterfall-row\.has-rounds \.phase-meta::before/)
   assert.ok(source.includes('top:calc(50% + .72rem)'))
 })
 
 test('PhaseGantt keeps compact gate proof badges readable on narrow bars', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.match(source, /gateChipLabel\(marker\)/)
   assert.match(source, /\.bar \{[^}]*overflow:visible/)
   assert.match(source, /\.bar > span,\.gate \{ flex:0 0 auto; \}/)
 })
 
 test('PhaseGantt clears a selected child when a phase is chosen', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   const handler = source.match(/function choosePhase\(block\) \{([^}]*)\}/)?.[1] || ''
   assert.match(handler, /selectedStep = null/)
   assert.match(handler, /onselectphase\(block\.phase_id \?\? block\.name\)/)
@@ -1955,7 +1955,7 @@ test('RV1-1 profile evidence array references use distinct RunDetail keys', () =
   }] })
   const references = view.blocks.find((block) => block.key === 'structured_findings').references
   assert.deepEqual(references.map((reference) => `${reference.dispatch_seq}-${reference.field}-${reference.role}`), ['4-findings-reviewer', '4-findings-reviewer'])
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   assert.ok(source.includes("{#each block.references as reference, index (`${reference.dispatch_seq ?? 'task'}-${reference.field}-${reference.role ?? 'unknown'}-${index}`)}"))
 })
 
@@ -1998,8 +1998,8 @@ test('factory step trace keeps checkpoints in distinct measured phases', () => {
 })
 
 test('RunDetail places profile evidence before raw payloads and keeps topology plain', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  const fleetSource = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/fleet.js'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const fleetSource = readFileSync(join(ROOT, 'visualizer/web/src/lib/fleet.js'), 'utf8')
   assert.match(source, /profileEvidenceView\(configuration\.profile\.key, returns\)/)
   assert.match(source, /executionTopology\(configuration\.execution\.key, observedStageLabels/)
   assert.match(source, /class="profile-evidence" aria-label="Profile evidence summary"/)
@@ -2040,9 +2040,9 @@ test('factory step trace distinguishes unavailable telemetry from a measured emp
 })
 
 test('task detail shares one journal read between waterfall and trajectory', () => {
-  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  const trajectory = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
-  const waterfall = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const trajectory = readFileSync(join(ROOT, 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  const waterfall = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.match(detail, /<PhaseGantt[^>]*\{journalState\}/)
   assert.match(detail, /<Trajectory[^>]*\{journalState\}/)
   assert.equal(trajectory.includes("fetch(`/api/journal"), false)
@@ -2051,7 +2051,7 @@ test('task detail shares one journal read between waterfall and trajectory', () 
 })
 
 test('factory checkpoint inspection stays local and highlights the related waterfall phase', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   const inspect = source.match(/function inspectStep\(step\) \{([^}]*)\}/)?.[1] || ''
   assert.equal(inspect.includes('onselectphase'), false)
   assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
@@ -2084,8 +2084,8 @@ test('factory checkpoint inspection stays local and highlights the related water
 })
 
 test('task detail refreshes do not reset finished-run disclosures for an unchanged task id', () => {
-  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  const trajectory = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const trajectory = readFileSync(join(ROOT, 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
   assert.match(detail, /target\.adw_id === detailKey/)
   assert.match(detail, /key === journalKey/)
   assert.ok(detail.indexOf('key === journalKey') < detail.indexOf('journalState = initialJournalState()'))
@@ -2094,7 +2094,7 @@ test('task detail refreshes do not reset finished-run disclosures for an unchang
 })
 
 test('PhasePanel shows pending gate retries alongside valid checks', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
   assert.ok(source.includes('{#if panel.gate.checks_pending}'))
   assert.ok(source.includes('class="checks-pending muted"'))
   assert.equal(source.includes('{:else if panel.gate.checks_pending}'), false)
@@ -2161,7 +2161,7 @@ test('the panel read loop re-reads on the family cadence and stops when the pane
 // shaped like the wiring cannot satisfy it — a tripwire a deleted implementation
 // still passes is worse than no tripwire.
 test('each panel wires its own read clock and tears its timer down', () => {
-  const root = join(process.cwd(), 'visualizer/web/src/lib')
+  const root = join(ROOT, 'visualizer/web/src/lib')
   for (const [file, shape] of Object.entries(PANEL_SHAPERS)) {
     const source = readFileSync(join(root, file), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -2257,7 +2257,7 @@ test('a contradicted lane is not suppressed', () => {
   assert.equal(view.rows.length, 2)
   assert.equal(view.rail.filter((row) => row.adw_id === 'fresh').length, 1)
   assert.equal(view.rail.filter((row) => row.adw_id === 'stale').length, 1)
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/fleet.js'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/fleet.js'), 'utf8')
   assert.match(source, /run\?\.triage\?\.reviewed_at/)
 })
 
@@ -2530,7 +2530,7 @@ test('a contradicted lane renders as an open record with no return, never in pro
 })
 
 test('A1: every visualizer consumer uses the shared attention classifier', () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
   const fleet = readFileSync(join(root, 'lib/fleet.js'), 'utf8')
@@ -2555,13 +2555,13 @@ test('the contradiction heading is not the stale heading', () => {
   assert.equal(openRecordNote('silent'), 'Stale open record')
   assert.equal(openRecordNote('unverified'), 'Open record not verified')
   assert.equal(openRecordNote('live'), null)
-  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   assert.ok((detail.match(/openRecordNote\(status\.key\)/g) || []).length >= 2)
   assert.doesNotMatch(detail, /'Stale open record'/)
 })
 
 test('the metrics strip counts a contradiction without calling it a heartbeat', () => {
-  const strip = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/MetricsStrip.svelte'), 'utf8')
+  const strip = readFileSync(join(ROOT, 'visualizer/web/src/lib/MetricsStrip.svelte'), 'utf8')
   assert.match(strip, /activity\.silent \+ activity\.unverified \+ activity\.contradicted/)
   assert.match(strip, /activity\.contradicted \? ` · \$\{activity\.contradicted\} contradicted`/)
   assert.match(strip, /activity\.contradicted.*crew state directory is archived/)
@@ -2569,7 +2569,7 @@ test('the metrics strip counts a contradiction without calling it a heartbeat', 
 })
 
 test('B1: a synthetic vocabulary key reaches every attention consumer', async () => {
-  const root = join(process.cwd(), 'visualizer/web/src')
+  const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
   assert.match(app, /needsAttention\(row\.status\.key\)/)
@@ -2587,7 +2587,7 @@ test('B1: a synthetic vocabulary key reaches every attention consumer', async ()
 })
 
 test('C1: every current attention key routes the metric click to attention', () => {
-  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /const state = attentionRows\.length \? 'attention' : activity\.live \? 'active' : 'all'/)
   const chooseState = (attentionRows, activity = {}) => attentionRows.length ? 'attention' : activity.live ? 'active' : 'all'
   for (const key of ATTENTION_KEYS) assert.equal(chooseState([{ status: { key } }]), 'attention')
@@ -2636,8 +2636,8 @@ test('G1: a key outside the attention vocabulary is not attention work', () => {
 })
 
 test('G1 task list ships column and tab use only Tier-2 colour aliases', () => {
-  const taskList = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
-  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const taskList = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   assert.equal(shipStatus({ ship: { state: 'merged', reason: 'merged' } }).tone, 'ok')
   assert.equal(shipStatus({ ship: { state: 'open', reason: 'open' } }).tone, 'busy')
   assert.equal(shipStatus({ ship: { state: 'closed-unmerged', reason: 'closed' } }).tone, 'fail')
@@ -2679,7 +2679,7 @@ function fakeLayoutEngine() {
 // Mutation killed: re-adding a bare package import to the shaper makes this fail,
 // and the suite would otherwise break only in CI, where no node_modules exist.
 test('workflow-page:import-free shaper', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
   const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
   assert.deepEqual(bare, [])
 })
@@ -2694,7 +2694,7 @@ test('workflow-page:A1', () => {
 })
 
 test('D1 workflows page preserves every declared shape', () => {
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   for (const shape of Object.keys(VARIANTS)) {
     const presentation = workflowPresentation(shape, { observedLabels: [] })
     const expected = executionTopology(shape, []).rows.map((row, index) => ({ name: row.stage, position: index + 1 }))
@@ -2727,11 +2727,11 @@ test('workflow-catalog:B1 declaration facts and profile inversion', () => {
 })
 
 test('workflow-catalog:C1 canonical topology contract and page dependency', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
   const body = source.match(/export function workflowPresentation\([\s\S]*?\n\}/)?.[0] || ''
   assert.match(body, /const canonicalTopology = executionTopology\(executionShape, observedLabels\)/)
   assert.doesNotMatch(body, /(?:VARIANTS\[[^\]]+\]|declaration)\.stages/)
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   assert.match(page, /import \{ workflowPresentation \} from '\.\/workflows\.js'/)
   assert.match(page, /workflowPresentation\(workflow\?\.shape/)
 })
@@ -2756,7 +2756,7 @@ test('workflow-catalog:D1 empty facts explain their absence', () => {
 })
 
 test('A1 workflows page composes proposal diff', () => {
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   assert.match(page, /import \{ getWorkflows, proposeWorkflowEdit \} from '\.\/api\.js'/)
   assert.match(page, /import DiffBlock from '\.\/DiffBlock\.svelte'/)
   assert.match(page, /proposal = await proposeWorkflowEdit\(\{ workflow: selectedWorkflow, edit: \{ stage: selectedStage, role: selectedRole, cell \}, tier: selectedTier \}\)/)
@@ -2770,7 +2770,7 @@ test('A1 workflows page composes proposal diff', () => {
 })
 
 test('C1 workflows page has no execution action', () => {
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   assert.match(page, /<form class="proposal-form" onsubmit=\{submitProposal\}>/)
   assert.equal((page.match(/onsubmit=/g) || []).length, 1)
   assert.doesNotMatch(page, /data-action\s*=/i)
@@ -2830,7 +2830,7 @@ function resolveStageSite(site, scanned) {
 
 // Mutation killed: storing a line number again reintroduces the pin that broke b768.
 test('workflow-page:D1.no-stored-lines', () => {
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   for (const [stage, doc] of Object.entries(docs)) {
     for (const site of doc.source.sites) {
       assert.equal(Object.prototype.hasOwnProperty.call(site, 'line'), false, `${stage} stores a line number`)
@@ -2840,9 +2840,9 @@ test('workflow-page:D1.no-stored-lines', () => {
 })
 
 test('workflow-page:D1', () => {
-  const drivePath = join(process.cwd(), 'crew/drive.mjs')
+  const drivePath = join(ROOT, 'crew/drive.mjs')
   const drive = readFileSync(drivePath, 'utf8')
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
   for (const match of drive.matchAll(/stage\(\s*(['"`])(.*?)\1/g)) { const head = match[2].split(':')[0]; if (!head.startsWith('${')) declared.add(head) }
   assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
@@ -2868,7 +2868,7 @@ test('workflow-page:D1', () => {
 })
 
 test('workflow-page:D2', () => {
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const graph = shapeWorkflowGraph('scout', { observedLabels: ['scout'], docs })
   const newest = { run_id: 'newest', stages: [{ label: 'scout', duration_ms: 21, outcome: 'ok' }] }
   const older = { run_id: 'older', stages: [{ label: 'scout', duration_ms: 8, outcome: 'failed' }] }
@@ -2897,7 +2897,7 @@ test('workflow-page:E1', () => {
   assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
   for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/prompts', '#/assurances', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
   assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
-  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)
   assert.match(app, /route\.view === 'workflows'/)
   assert.match(app, /Workflows · Factory/)
@@ -2908,7 +2908,7 @@ test('workflow-page:E1', () => {
 test('workflow-page:F1', () => {
   const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|neutral|status-[a-z-]+|role-[a-z-]+)\)/
   for (const relative of ['visualizer/web/src/lib/WorkflowsPage.svelte', 'visualizer/web/src/lib/WorkflowGraph.svelte']) {
-    const source = readFileSync(join(process.cwd(), relative), 'utf8')
+    const source = readFileSync(join(ROOT, relative), 'utf8')
     for (const declaration of source.matchAll(/(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-color)?|box-shadow)\s*:[^;}]+/gm)) {
       assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
       assert.doesNotMatch(declaration[0], /#|rgb\(|--ink|--paper|--spot|--serious/)
@@ -2917,7 +2917,7 @@ test('workflow-page:F1', () => {
 })
 
 test('workflow-page:F2', () => {
-  const graph = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowGraph.svelte'), 'utf8')
+  const graph = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowGraph.svelte'), 'utf8')
   assert.match(graph, /@xyflow\/svelte/)
   assert.match(graph, /<SvelteFlow[\s\S]*\{nodes\}[\s\S]*\{edges\}/)
   assert.match(graph, /class="graph-shell"/)
@@ -2930,7 +2930,7 @@ test('workflow-page:F2', () => {
 // The import firewall is checked separately from the node suite so CI can load
 // the pure shaper without installing the browser-only graph dependencies.
 test('H1.import-free', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/workflows.js'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
   const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((match) => match[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
   assert.deepEqual(bare, [])
 })
@@ -3023,8 +3023,8 @@ test('A1.multiline-call', () => {
 })
 
 test('A1.variable-callers', () => {
-  const drive = readFileSync(join(process.cwd(), 'crew/drive.mjs'), 'utf8')
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const drive = readFileSync(join(ROOT, 'crew/drive.mjs'), 'utf8')
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const calls = scanStageSites(drive)
   for (const [callee, label] of [
     ['recordGateProof', 'gate-proof:${gateGeneration}'],
@@ -3044,7 +3044,7 @@ test('A1.variable-callers', () => {
 })
 
 test('A1.variant-sites', () => {
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   assert.deepEqual(docs.repair.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 2, bindings: { variant: 'repair' } }])
   assert.deepEqual(docs.directed.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 3, bindings: { variant: 'directed' } }])
   for (const key of ['scout', 'review_only', 'verify_only']) {
@@ -3062,8 +3062,8 @@ test('A1.closed-no-call', () => {
 })
 
 test('A1.swap-sites', () => {
-  const drive = readFileSync(join(process.cwd(), 'crew/drive.mjs'), 'utf8')
-  const docs = JSON.parse(readFileSync(join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
+  const drive = readFileSync(join(ROOT, 'crew/drive.mjs'), 'utf8')
+  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
   const scannedCalls = scanStageSites(drive)
   for (const call of scannedCalls) {
@@ -3110,7 +3110,7 @@ test('RV1-3 final-index topology move is measured and refused', () => {
 })
 
 test('RV1-4 workflow page states the proposal-only boundary', () => {
-  const page = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   assert.match(page, /<p class="boundary-note">This page composes a workflow proposal diff for copying; it never dispatches or boots a run, posts a review, applies policy, or writes the proposal\.<\/p>/)
   assert.doesNotMatch(page, />Read-only catalog<\/p>/)
   assert.match(page, /workflowPresentation/)

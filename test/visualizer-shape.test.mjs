@@ -11,7 +11,7 @@ import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/l
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
 import { INTAKE_REFUSALS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
-import { sqliteAvailable } from './helpers.mjs'
+import { ROOT, sqliteAvailable } from './helpers.mjs'
 
 const SQLITE_SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 
@@ -393,7 +393,7 @@ test('shapeRun publishes heartbeat threshold and distinguishes live freshness fr
 })
 
 test('theme role and lane aliases follow the ratified role order', () => {
-  const css = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/theme.css'), 'utf8')
+  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
   for (const [index, role] of ROLE_ORDER.entries()) {
     assert.match(css, new RegExp(`--role-${role}\\s*:`))
     assert.match(css, new RegExp(`--lane-${index}\\s*:\\s*var\\(\\s*--role-${role}\\s*\\)`))
@@ -401,7 +401,7 @@ test('theme role and lane aliases follow the ratified role order', () => {
 })
 
 test('theme gives component scrollbars a thin theme-aware treatment', () => {
-  const css = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/theme.css'), 'utf8')
+  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
   assert.match(css, /--scrollbar-track\s*:/)
   assert.match(css, /--scrollbar-thumb\s*:/)
   assert.match(css, /scrollbar-width:\s*thin/)
@@ -605,7 +605,7 @@ test('shapeRunSet marks a degraded ledger read absent with the flag read after t
 })
 
 test('the run-set route reads the feed degraded flag after the query it reports on', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/server/server.mjs'), 'utf8')
   const routeStart = source.indexOf("if (url.pathname === '/api/run-set')")
   const routeEnd = source.indexOf("if (url.pathname === '/api/", routeStart + 1)
   assert.ok(routeStart >= 0)
@@ -733,7 +733,7 @@ test('shape.mjs carries no stale claim that crew agent events lack phase linkage
   // drive -- and the comment-shaped-to-match-the-regex trick cannot satisfy a
   // doesNotMatch, which a comment can only ever break.
   // MUTATION V2b: widen the forbidden pattern and the stale claim slips back in.
-  const shape = readFileSync(join(process.cwd(), 'visualizer/server/shape.mjs'), 'utf8')
+  const shape = readFileSync(join(ROOT, 'visualizer/server/shape.mjs'), 'utf8')
   assert.doesNotMatch(shape, /crew agent events carry no phase_id/)
 })
 
@@ -964,25 +964,25 @@ test('shapeCellHealth carries catalog prices and leaves absent prices pending', 
 })
 
 test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries', () => {
-  const files = allFiles(join(process.cwd(), 'visualizer'))
+  const files = allFiles(join(ROOT, 'visualizer'))
   const allowed = new Set(['visualizer/server/triage.mjs'])
   for (const file of files) {
     const source = readFileSync(file, 'utf8')
-    const relative = file.replace(`${process.cwd()}/`, '')
+    const relative = file.replace(`${ROOT}/`, '')
     if (source.includes('node:sqlite')) assert.ok(allowed.has(relative), relative)
     if (file.endsWith('.svelte')) {
       assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
       assert.doesNotMatch(source, /^\s*\$:\s/m, relative)
     }
   }
-  const feed = readFileSync(join(process.cwd(), 'visualizer/server/ledger-feed.mjs'), 'utf8')
+  const feed = readFileSync(join(ROOT, 'visualizer/server/ledger-feed.mjs'), 'utf8')
   assert.doesNotMatch(feed, /node:sqlite/)
   assert.doesNotMatch(feed, /DatabaseSync/)
   assert.doesNotMatch(feed, /\bSELECT\b/)
   assert.doesNotMatch(feed, /\.prepare\(/)
   assert.match(feed, /import \{ openLedger \} from ['"]\.\.\/\.\.\/scripts\/factory\/ledger\.mjs['"]/)
 })
-
+test('V6 visualizer tests anchor plugin paths', () => { /* MUTATION V6: restore a cwd-based panels source path. */ const paths = ['test/visualizer-panels.test.mjs', 'test/visualizer-server.test.mjs', 'test/visualizer-roster-edit.test.mjs', 'test/visualizer-shape.test.mjs', 'test/visualizer-teardown.test.mjs']; const offenders = []; const cwdPattern = /process\s*\.\s*cwd\s*\(\s*\)/; const readPattern = /readFileSync\(\s*(['"])(?:visualizer|crew|skills|scripts)\//; const spawnPattern = /(?:spawn|spawnSync|spawnProcess)\(\s*process\.execPath\s*,\s*\[\s*(['"])(?:visualizer|crew|skills|scripts)\//; const argsPattern = /const args\s*=\s*\[\s*(['"])(?:visualizer|crew|skills|scripts)\//; for (const path of paths) { const source = readFileSync(join(ROOT, path), 'utf8'); for (const [index, line] of source.split('\n').entries()) if (cwdPattern.test(line) || readPattern.test(line) || spawnPattern.test(line) || argsPattern.test(line)) offenders.push({ path, line: index + 1, source: line }) } const cwd = ['process', '.', 'cwd', '()'].join(''); const bad = `${cwd}; readFileSync('${['visualizer', 'x'].join('/')}'); spawn(process.execPath, ['${['visualizer', 'x'].join('/')}']); const args = ['${['crew', 'x'].join('/')}']`; assert.equal(cwdPattern.test(bad), true); assert.equal(readPattern.test(bad), true); assert.equal(spawnPattern.test(bad), true); assert.equal(argsPattern.test(bad), true); assert.equal(cwdPattern.test('ROOT; readFileSync(join(ROOT, fixture)); spawn(process.execPath, [absoluteScript])'), false); assert.deepEqual(offenders, [], JSON.stringify(offenders)) })
 test('shapeIntake merges per-issue candidates, keeps the latest refusal, and sorts by issue', () => {
   const view = shapeIntake({
     sweeps: [], refusals: [], picks: [], ever: { sweeps: 1 }, absent: null,

@@ -5,13 +5,13 @@ import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { scratchDir } from '../test/helpers.mjs'
+import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities } from '../crew/crew.mjs'
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
 import { applyMoves, composeMoves, ladderView, readLadder, readReference, rosterPickView, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
-const shippedRosterPath = join(process.cwd(), 'crew', 'roster.json')
-const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
+const shippedRosterPath = join(ROOT, 'crew', 'roster.json')
+const schemaPath = join(ROOT, 'crew', 'roster.schema.json')
 const rosterFixture = () => ({
   schema_version: 1,
   updated_at: '2026-08-30',
@@ -66,7 +66,7 @@ const v2Roster = (policy = {}) => ({
   models: structuredClone(roster.models),
   policy: structuredClone(policy),
 })
-const ladderPath = join(process.cwd(), 'crew', 'model-ladder.json')
+const ladderPath = join(ROOT, 'crew', 'model-ladder.json')
 const ratifiedLadder = readLadder({ ladderPath })
 
 function ladderRosterView() {
@@ -244,7 +244,7 @@ test('seat enums are loaded from the supplied schema', async () => {
 })
 
 test('propose-time and boot-time refusals agree for every seat, adapter and transport', async () => {
-  const adaptersDir = join(process.cwd(), 'crew', 'adapters')
+  const adaptersDir = join(ROOT, 'crew', 'adapters')
   const agents = readdirSync(adaptersDir)
     .map((name) => /^adapter-(.+)\.mjs$/.exec(name)?.[1])
     .filter(Boolean)

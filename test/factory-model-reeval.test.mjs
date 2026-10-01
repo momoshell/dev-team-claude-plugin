@@ -1,17 +1,18 @@
 // test/factory-model-reeval.test.mjs — offline injected-dependency coverage for the
-// --all-seats re-evaluation cadence. No test in this file probes a real
-// endpoint, resolves a worker binary, uses live credentials, or edits audit
-// fixtures: git discovery, bench metadata, bench runs, ledger, routing,
+// --all-seats re-evaluation cadence. W3 reads real disposable bench inputs but
+// no test probes a real endpoint, resolves a worker binary, uses live credentials,
+// or edits audit fixtures: git discovery, bench runs, ledger, routing,
 // composition, and roster writes are all stubbed through explicit dependency
 // seams. The default sweep reads stored rows only; only provisioned:true runs
 // benches.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
   EvalRefusal,
+  benchSha,
   classifyStoredAbsences,
   discoverAuthoredBenches,
   runAllSeats,
@@ -457,4 +458,79 @@ test('RV1-2 default sweep opens an uninjected ledger read-only and runs nothing'
     if (savedDb === undefined) delete process.env.DEVTEAM_LEDGER_DB
     else process.env.DEVTEAM_LEDGER_DB = savedDb
   }
+})
+
+// MUTATION: remove refusedSeats.length === 0; mixed/all-refused successful proposals must fail.
+test('W1 refused benches fail mixed and all-refused dry and provisioned sweeps', async () => {
+  for (const provisioned of [false, true]) {
+    for (const dirs of [['bench/refused', 'bench/admitted'], ['bench/refused']]) {
+      const checkout = scratchDir('factory-reeval-w1-')
+      const deps = offlineDeps({
+        listTrackedFiles: async () => dirs.map((dir) => `${dir}/candidates.json`),
+        readBenchMeta: async (dir) => {
+          if (dir === 'bench/refused') throw new EvalRefusal('judge-is-candidate', 'fixture self judge')
+          return metaFor(dir)
+        },
+        runBench: async () => ({
+          bench: 'sha', role: 'builder', tier: 'build', candidates: [CANDIDATE_A],
+          cells: [makeRow({ bench: 'sha', asserts_declared: 1, asserts_passed: 1 })],
+        }),
+      })
+      const report = await runAllSeats({ provisioned, checkout, deps })
+      assert.equal(report.ok, false)
+      assert.equal(report.metadata.seats_refused, 1)
+      assert.equal(report.metadata.seats_admitted, dirs.length - 1)
+      if (provisioned) assert.deepEqual(report.provisioned_check, { ran: true, ok: true, real_cells: dirs.length - 1 })
+    }
+  }
+})
+
+// MUTATION: replace admission seats with []; the exact named-seat summary must redden.
+test('W2 admission summary names refused seat and preserves its refusal detail', async () => {
+  const checkout = scratchDir('factory-reeval-w2-')
+  const deps = offlineDeps({
+    listTrackedFiles: async () => ['bench/refused/candidates.json', 'bench/admitted/candidates.json'],
+    readBenchMeta: async (dir) => {
+      if (dir === 'bench/refused') throw new EvalRefusal('judge-is-candidate', 'fixture self judge')
+      return metaFor(dir)
+    },
+  })
+  const report = await runAllSeats({ checkout, deps })
+  assert.deepEqual(report.admission, { ok: false, reason: 'bench-refused', seats: ['bench/refused'] })
+  const refused = report.seat_reports.find((seat) => seat.seat === 'bench/refused')
+  assert.equal(refused.refusal, 'judge-is-candidate')
+  assert.equal(refused.refusal_detail, 'fixture self judge')
+})
+
+// MUTATION: remove readBenchMeta's self-judge refusal; this real digest-valid bench must no longer refuse.
+test('W3 real digest-valid self-judging bench is refused without a metadata stub', async () => {
+  const checkout = scratchDir('factory-reeval-w3-')
+  const dir = join(checkout, 'bench', 'self-judge')
+  mkdirSync(dir, { recursive: true })
+  const task = 'fixture task\n'
+  const gate = 'export default true\n'
+  const candidate = { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'medium' }
+  const judgeText = JSON.stringify({ model: 'anthropic/claude-sonnet-5', vendor: 'anthropic' })
+  const candidatesText = JSON.stringify({ schema: 1, role: 'builder', tier: 'build', production: 'anthropic/claude-sonnet-5', candidates: [candidate] })
+  writeFileSync(join(dir, 'task.md'), task)
+  writeFileSync(join(dir, 'gate.mjs'), gate)
+  writeFileSync(join(dir, 'judge.json'), judgeText)
+  writeFileSync(join(dir, 'candidates.json'), candidatesText)
+  writeFileSync(join(dir, 'bench.sha'), benchSha({ task, gate, judge: judgeText, candidates: candidatesText }))
+  const deps = offlineDeps({ listTrackedFiles: async () => [join(dir, 'candidates.json')] })
+  const report = await runAllSeats({ checkout, deps })
+  assert.equal(report.ok, false)
+  assert.equal(report.seat_reports[0].refusal, 'judge-is-candidate')
+})
+
+// MUTATION: replace refused-seat clause with && false; admitted success must redden.
+test('W4 all-admitted dry sweep succeeds with no stored cells', async () => {
+  const checkout = scratchDir('factory-reeval-w4-')
+  const deps = offlineDeps({
+    listTrackedFiles: async () => ['bench/admitted/candidates.json'],
+    readBenchMeta: async () => metaFor('bench/admitted'),
+  })
+  const report = await runAllSeats({ checkout, deps })
+  assert.equal(report.ok, true)
+  assert.deepEqual(report.admission, { ok: true })
 })

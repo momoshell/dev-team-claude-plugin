@@ -91,6 +91,13 @@ test('P4 injected readers and runners continue receiving relative discovered dir
   assert.deepEqual(result.seenRunner, result.dirs)
 })
 
+// MUTATION: create seat worktrees from process.cwd() again; a sweep run elsewhere must still build seats from its checkout.
+test('P5 provisioned seats are built from the swept checkout, not the cwd', () => {
+  const result = childSweep(scratchDir('factory-reeval-p5-'), 'seat')
+  assert.ok(result.seenWorktree.length > 0)
+  assert.deepEqual([...new Set(result.seenWorktree)], [ROOT])
+})
+
 function metaFor(dir, over = {}) {
   return {
     sha: `sha-${dir.replace(/[^a-z0-9]+/gi, '-')}`,
@@ -121,7 +128,7 @@ function childSweep(cwd, mode = 'dry') {
   const source = `
     const { runAllSeats, discoverAuthoredBenches } = await import(${JSON.stringify(moduleUrl)});
     const [checkout, mode] = process.argv.slice(1);
-    const writes = [], seenMeta = [], seenRunner = [];
+    const writes = [], seenMeta = [], seenRunner = [], seenWorktree = [];
     const deps = {
       ledger: { recordEvalCell: async (row) => { writes.push(row); return { ok: true }; }, evalCells: async () => [] },
       readStoredRows: async ({ benches }) => mode === 'rows' ? benches.map((bench) => ({ bench, role:'builder', provider:'anthropic', model_id:'m', agent:'claude', effort:'medium', production:0, task_sha:'t', envelope_status:'received', absent_reason:null, asserts_declared:1, asserts_passed:1 })) : [],
@@ -136,9 +143,14 @@ function childSweep(cwd, mode = 'dry') {
       deps.runBench = async ({dir}) => { seenRunner.push(dir); return { cells:[], role:'builder', tier:'build' }; };
     }
     if (mode === 'gate') deps.runGate = () => { throw new Error('offline gate sentinel'); };
+    if (mode === 'seat') {
+      deps.ledger.recordRoutingChoice = async () => {};
+      deps.runGate = () => 'GATE-SUMMARY {"total":1,"failed":0,"errored":0}';
+      deps.makeWorktree = (source) => { seenWorktree.push(source); throw new Error('worktree sentinel'); };
+    }
     const dirs = await discoverAuthoredBenches({ checkout });
-    const report = await runAllSeats({ checkout, provisioned: mode === 'gate' || mode === 'injected', deps });
-    console.log(JSON.stringify({ dirs, report, writes:writes.length, seenMeta, seenRunner }));
+    const report = await runAllSeats({ checkout, provisioned: mode === 'gate' || mode === 'injected' || mode === 'seat', deps });
+    console.log(JSON.stringify({ dirs, report, writes:writes.length, seenMeta, seenRunner, seenWorktree }));
   `
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, ROOT, mode], { cwd, encoding: 'utf8', timeout: 30000 })
   assert.equal(result.error, undefined, result.error?.message)

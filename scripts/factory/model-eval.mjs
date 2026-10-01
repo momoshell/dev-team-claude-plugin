@@ -716,8 +716,8 @@ async function defaultReadStoredRows({ ledger, benches = [] } = {}) {
 
 export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, deps = {} } = {}) {
   const source = deps && typeof deps === 'object' && !Array.isArray(deps) ? deps : {}
-  const nd = normalDeps(source)
   const root = resolve(String(checkout))
+  const nd = normalDeps({ sourceCheckout: root, ...source })
   const runBenchFn = typeof source.runBench === 'function' ? source.runBench : (args) => runBench({ ...args, dir: resolve(root, args.dir) })
   const readMetaFn = typeof source.readBenchMeta === 'function' ? source.readBenchMeta : (dir) => readBenchMeta(resolve(root, dir))
   const readStoredRows = typeof source.readStoredRows === 'function' ? source.readStoredRows : defaultReadStoredRows
@@ -1069,12 +1069,14 @@ export async function defaultRunSeat({ task, candidate, role, bench, dir, briefF
   if (typeof deps.settleSeatTeardown !== 'function') deps = { ...deps, settleSeatTeardown }
   if (typeof deps.readFile !== 'function') deps = { ...deps, readFile: readFileSync }
 
-  const checkout = deps.makeWorktree(process.cwd())
+  // The checkout the bench was discovered in, when a sweep names one; otherwise the cwd.
+  const sourceCheckout = deps.sourceCheckout ?? process.cwd()
+  const checkout = deps.makeWorktree(sourceCheckout)
   if (!NON_BLANK(checkout)) throw new Error('model-eval: worktree helper returned no checkout')
   const runKey = basename(dirname(checkout))
   const taskSlug = `model-eval-${String(bench).slice(0, 16)}-${role}-${candidate.provider}-${candidate.id}-${runKey}`
     .replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 120)
-  const cleanup = worktreeCleanup(process.cwd(), checkout, deps.removeWorktree)
+  const cleanup = worktreeCleanup(sourceCheckout, checkout, deps.removeWorktree)
   const failure = (reason, detail) => ({
     envelope: null,
     absent_reason: reason,

@@ -286,17 +286,19 @@ export async function proposeWorkflowEdit({ root = process.cwd(), variants = VAR
   return { ok: true, refusals: [], diff, workflow_path: relativePath, before, after }
 }
 
-export function createWorkflowsSource({ root = process.cwd(), feed = null, variants = VARIANTS, rosterPath, docsPath, defaultRecentRuns = DEFAULT_RECENT_RUNS } = {}) {
+export function createWorkflowsSource({ root = process.cwd(), pluginRoot = root, feed = null, variants = VARIANTS, rosterPath, docsPath, defaultRecentRuns = DEFAULT_RECENT_RUNS } = {}) {
   const checkout = resolve(root)
+  const resourcesRoot = resolve(pluginRoot)
   const declarations = record(variants) ? variants : VARIANTS
   const rosterFile = resolve(rosterPath ? (isAbsolute(rosterPath) ? rosterPath : join(checkout, rosterPath)) : join(checkout, 'crew', 'roster.json'))
-  const mapsDirectory = join(checkout, 'crew', 'workflows')
-  const docsFile = resolve(docsPath ? (isAbsolute(docsPath) ? docsPath : join(checkout, docsPath)) : join(checkout, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'))
+  const readRosterFile = resolve(rosterPath ? (isAbsolute(rosterPath) ? rosterPath : join(resourcesRoot, rosterPath)) : join(resourcesRoot, 'crew', 'roster.json'))
+  const mapsDirectory = join(resourcesRoot, 'crew', 'workflows')
+  const docsFile = resolve(docsPath ? (isAbsolute(docsPath) ? docsPath : join(resourcesRoot, docsPath)) : join(resourcesRoot, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'))
 
   function readWorkflows(input = {}) {
     const recent = typeof input === 'number' ? input : input?.recent ?? input?.limit ?? defaultRecentRuns
     const parsedLimit = Number.isSafeInteger(Number(recent)) && Number(recent) >= 0 ? Number(recent) : defaultRecentRuns
-    const roster = readRoster(rosterFile)
+    const roster = readRoster(readRosterFile)
     const maps = readWorkflowMaps(mapsDirectory, declarations)
     const docs = readJson(docsFile, { label: 'stage documentation' })
     if (!docs.error && !record(docs.value)) docs.error = `stage documentation must be a JSON object, at ${docsFile}`
@@ -341,7 +343,7 @@ export function createWorkflowsSource({ root = process.cwd(), feed = null, varia
     return {
       degraded,
       error: errors[0] || null,
-      roster: { path: rosterFile, measured: !roster.error, error: roster.error, tiers },
+      roster: { path: readRosterFile, measured: !roster.error, error: roster.error, tiers },
       docs: docs.error ? null : docs.value,
       docs_error: docs.error,
       declarations: rows.map(({ shape, declaration }) => ({ shape, declaration })),

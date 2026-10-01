@@ -481,21 +481,22 @@ export function proposePrompt({ checkout = process.cwd(), role, text, readFileSy
 }
 
 
-export function createAgentsSource({ checkout = process.cwd(), crewRoot = process.env.HOME ? join(process.env.HOME, '.crew') : process.cwd(), readFileSync = fsReadFileSync, readdirSync = fsReaddirSync, statSync = fsStatSync } = {}) {
+export function createAgentsSource({ checkout = process.cwd(), pluginRoot = checkout, crewRoot = process.env.HOME ? join(process.env.HOME, '.crew') : process.cwd(), readFileSync = fsReadFileSync, readdirSync = fsReaddirSync, statSync = fsStatSync } = {}) {
   const root = resolve(checkout)
+  const resourcesRoot = resolve(pluginRoot)
   const runtimeRoot = resolve(crewRoot)
   const read = readFileSync
   const readdir = readdirSync
   const stat = statSync
   return {
     read() {
-      const register = readRegister(read, root)
+      const register = readRegister(read, resourcesRoot)
       const registerReasons = [...(register.refusals || []).map((item) => item.message)]
-      const skillResult = listSkills({ read, readdir, checkout: root })
+      const skillResult = listSkills({ read, readdir, checkout: resourcesRoot })
       const agents = registerAgents(register.value, registerReasons)
       const deliveries = Object.fromEntries(AGENT_ROLES.map((role) => [role, roleDelivery({ read, readdir, stat, crewRoot: runtimeRoot, role })]))
       const matrix = matrixRows({ skills: skillResult.skills, register: register.value, deliveries })
-      const promptResult = promptRows({ read, checkout: root, deliveries })
+      const promptResult = promptRows({ read, checkout: resourcesRoot, deliveries })
       const reasons = [...registerReasons, ...skillResult.reasons, ...promptResult.reasons]
       for (const role of AGENT_ROLES) {
         const delivery = deliveries[role]
@@ -515,6 +516,7 @@ export function createAgentsSource({ checkout = process.cwd(), crewRoot = proces
         role_evidence: roleEvidence,
         prompts: promptResult.prompts,
         checkout: root,
+        plugin_root: resourcesRoot,
         crew_root: runtimeRoot,
       }
     },

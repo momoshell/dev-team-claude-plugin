@@ -3601,3 +3601,192 @@ test('RV2-1 bounds multi-line assurance proposal documents before diffing', asyn
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('V1 agents resources come from the plugin root for a foreign checkout', async () => {
+  const root = scratchDir('visualizer-foreign-agents-')
+  let server
+  try {
+    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
+    server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
+    const agents = await json(server.base, '/api/agents')
+    // Mutation: omit pluginRoot from the agents-source construction.
+    assert.ok(agents.json.agents.length > 0)
+    assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/lean-build/SKILL.md'))
+    assert.equal(agents.json.plugin_root, process.cwd())
+    assert.equal(agents.json.checkout, root)
+    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/roles/builder.md')
+    assert.equal(agents.json.reasons.some((reason) => reason.includes(root)), false)
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('V2 workflows resources come from the plugin root for a foreign checkout', async () => {
+  const root = scratchDir('visualizer-foreign-workflows-')
+  let server
+  try {
+    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
+    server = await startInProcess({ close() {}, listRuns() { return { measured: true, runs: [] } } }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
+    // Mutation: omit pluginRoot from the workflows-source construction.
+    const workflows = await json(server.base, '/api/workflows')
+    assert.equal(workflows.json.error, null)
+    assert.equal(workflows.json.docs_error, null)
+    assert.equal(workflows.json.roster.path, join(process.cwd(), 'crew', 'roster.json'))
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('V3 the stop switch remains anchored to the foreign target checkout', async () => {
+  const root = scratchDir('visualizer-foreign-brake-')
+  let server
+  try {
+    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
+    mkdirSync(join(root, '.factory'), { recursive: true })
+    writeFileSync(join(root, '.factory', 'STOP'), 'stop\n')
+    server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
+    // Mutation: change readBrake's checkout-based path to PROJECT_ROOT.
+    const brake = await json(server.base, '/api/intake/brake')
+    assert.equal(brake.json.state, 'engaged')
+    assert.equal(brake.json.path, join(root, '.factory', 'STOP'))
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('V4 prompt proposal reads the target checkout, not plugin resources', async () => {
+  const root = scratchDir('visualizer-foreign-prompt-')
+  let server
+  try {
+    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
+    server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
+    // Mutation: change only the prompt proposal wrapper to checkout: resourcesRoot.
+    const prompt = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', text: '# replacement\n' }) })
+    assert.equal(prompt.status, 200)
+    assert.equal(prompt.json.ok, false)
+    assert.equal(prompt.json.refusals[0].code, 'read-unavailable')
+    assert.ok(prompt.json.refusals[0].message.includes(join(root, 'crew', 'roles', 'builder.md')))
+  } finally {
+    if (server) await stopInProcess(server)
+  }
+})
+
+test('agents source separates plugin reads from target proposals compatibly', () => {
+  const target = agentsFixture('visualizer-agents-target-root-')
+  const plugin = agentsFixture('visualizer-agents-plugin-root-')
+  const path = require('node:path')
+  const fs = require('node:fs')
+  try {
+    const checkoutOnly = createAgentsSource({ checkout: target.checkout, crewRoot: target.crewRoot }).read()
+    assert.equal(checkoutOnly.plugin_root, path.resolve(target.checkout))
+    assert.equal(checkoutOnly.checkout, path.resolve(target.checkout))
+    assert.equal(checkoutOnly.prompts.find((row) => row.role === 'builder').text, '# builder\nFixture charter for builder.\n')
+
+    writeFileSync(join(plugin.checkout, 'crew', 'roles', 'builder.md'), '# PLUGIN-ONLY builder charter\n')
+    const pluginCapabilities = JSON.parse(readFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), 'utf8'))
+    pluginCapabilities.coding_agents.pi.adapter = 'crew/adapters/PLUGIN-ONLY-pi.mjs'
+    writeFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), `${JSON.stringify(pluginCapabilities, null, 2)}\n`)
+    mkdirSync(join(plugin.checkout, 'skills', 'plugin-only-skill'), { recursive: true })
+    writeFileSync(join(plugin.checkout, 'skills', 'plugin-only-skill', 'SKILL.md'), '---\nname: plugin-only-skill\ndescription: Plugin-only skill.\n---\n\nPLUGIN-ONLY skill body\n')
+    const source = createAgentsSource({ checkout: target.checkout, pluginRoot: plugin.checkout, crewRoot: target.crewRoot })
+    const read = source.read()
+    assert.equal(read.agents.find((agent) => agent.name === 'pi').adapter, 'crew/adapters/PLUGIN-ONLY-pi.mjs')
+    assert.ok(read.skills.some((skill) => skill.path === 'skills/plugin-only-skill/SKILL.md' && skill.content.includes('PLUGIN-ONLY skill body')))
+    assert.equal(read.prompts.find((row) => row.role === 'builder').text, '# PLUGIN-ONLY builder charter\n')
+    assert.equal(read.prompts.find((row) => row.role === 'builder').path, 'crew/roles/builder.md')
+    assert.equal(read.checkout, path.resolve(target.checkout))
+    assert.equal(read.plugin_root, path.resolve(plugin.checkout))
+    assert.equal(read.crew_root, path.resolve(target.crewRoot))
+
+    const prompt = source.proposePrompt({ role: 'builder', text: '# proposed target charter\n' })
+    assert.equal(prompt.ok, true)
+    assert.equal(prompt.target_path, join(target.checkout, 'crew', 'roles', 'builder.md'))
+    assert.match(prompt.diff, /Fixture charter for builder/)
+    assert.doesNotMatch(prompt.diff, /PLUGIN-ONLY builder charter/)
+    const agent = source.proposeAgent({ name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
+    assert.equal(agent.ok, true)
+    assert.equal(agent.target_path, join(target.checkout, 'crew', 'capabilities.json'))
+    assert.equal(JSON.parse(agent.after_text).coding_agents.pi.display_name, 'Pi')
+    const skills = source.proposeSkills({ role: 'builder', skills: ['frontend-svelte'] })
+    assert.equal(skills.ok, true)
+    assert.equal(skills.target_path, join(target.checkout, 'crew', 'capabilities.json'))
+    assert.deepEqual(JSON.parse(skills.after_text).roles.builder.skills, ['frontend-svelte'])
+    assert.equal(fs.existsSync(join(target.checkout, 'skills', 'plugin-only-skill')), false)
+  } finally {
+    rmSync(target.dir, { recursive: true, force: true })
+    rmSync(plugin.dir, { recursive: true, force: true })
+  }
+})
+
+test('workflow source reads plugin resources but proposals retain target resources', async () => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const target = scratchDir('visualizer-workflows-target-root-')
+  const plugin = scratchDir('visualizer-workflows-plugin-root-')
+  const external = scratchDir('visualizer-workflows-external-root-')
+  const seat = (id) => ({ provider: 'anthropic', id, agent: 'pi', effort: 'high' })
+  const roster = (id) => ({ tiers: { build: { planner: seat(id), builder: { provider: 'openai', id: `${id}-builder`, agent: 'pi', effort: 'max' } } } })
+  const writeRoster = (root, id, relative = 'crew/roster.json') => {
+    mkdirSync(join(root, path.dirname(relative)), { recursive: true })
+    writeFileSync(join(root, relative), `${JSON.stringify(roster(id), null, 2)}\n`)
+    return join(root, relative)
+  }
+  try {
+    writeRoster(target, 'target-planner')
+    const targetMaps = join(target, 'crew', 'workflows')
+    mkdirSync(targetMaps, { recursive: true })
+    fs.cpSync(join(process.cwd(), 'crew', 'workflows'), join(plugin, 'crew', 'workflows'), { recursive: true })
+    fs.cpSync(join(process.cwd(), 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'), join(plugin, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'))
+    writeRoster(plugin, 'plugin-planner')
+    fs.cpSync(join(process.cwd(), 'crew', 'workflows', 'full.json'), join(targetMaps, 'full.json'))
+    const targetMapPath = join(targetMaps, 'full.json')
+    const targetMap = JSON.parse(readFileSync(targetMapPath, 'utf8'))
+    targetMap.seats.planner = seat('target-planner')
+    writeFileSync(targetMapPath, `${JSON.stringify(targetMap, null, 2)}\n`)
+
+    const feed = { listRuns() { return { runs: [] } } }
+    const defaults = createWorkflowsSource({ root: target, pluginRoot: plugin, feed })
+    const pluginRead = defaults.readWorkflows()
+    assert.equal(pluginRead.roster.path, join(plugin, 'crew', 'roster.json'))
+    assert.equal(pluginRead.roster.tiers[0].seats.planner.id, 'plugin-planner')
+    assert.equal(pluginRead.docs_error, null)
+    assert.ok(pluginRead.workflows.some((row) => row.shape === 'full' && row.map))
+
+    const relativeRoster = writeRoster(plugin, 'relative-plugin-planner', 'custom/roster.json')
+    const relativeDocs = join(plugin, 'custom', 'docs.json')
+    mkdirSync(join(plugin, 'custom'), { recursive: true })
+    fs.copyFileSync(join(plugin, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'), relativeDocs)
+    const relative = createWorkflowsSource({ root: target, pluginRoot: plugin, rosterPath: 'custom/roster.json', docsPath: 'custom/docs.json', feed }).readWorkflows()
+    assert.equal(relative.roster.path, relativeRoster)
+    assert.equal(relative.roster.tiers[0].seats.planner.id, 'relative-plugin-planner')
+    assert.equal(relative.docs_error, null)
+
+    const absoluteRoster = writeRoster(external, 'external-planner')
+    const absoluteDocs = join(external, 'docs.json')
+    fs.copyFileSync(relativeDocs, absoluteDocs)
+    const absolute = createWorkflowsSource({ root: target, pluginRoot: plugin, rosterPath: absoluteRoster, docsPath: absoluteDocs, feed }).readWorkflows()
+    assert.equal(absolute.roster.path, absoluteRoster)
+    assert.equal(absolute.roster.tiers[0].seats.planner.id, 'external-planner')
+    assert.equal(absolute.docs_error, null)
+
+    const targetOnly = createWorkflowsSource({ root: target, feed }).readWorkflows()
+    assert.equal(targetOnly.roster.path, join(target, 'crew', 'roster.json'))
+    assert.equal(targetOnly.roster.tiers[0].seats.planner.id, 'target-planner')
+
+    // Mutation: pass readRosterFile instead of the target proposal rosterFile to proposeWorkflowEdit.
+    const proposal = await defaults.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
+    assert.equal(proposal.ok, true)
+    assert.equal(proposal.workflow_path, 'crew/workflows/full.json')
+    assert.match(proposal.before, /target-planner/)
+    assert.doesNotMatch(proposal.before, /plugin-planner/)
+    const unseededProposal = await defaults.propose({ workflow: 'repair', edit: { stage: 'repair', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
+    assert.equal(unseededProposal.ok, true)
+    assert.equal(unseededProposal.before, '')
+    assert.match(unseededProposal.after, /target-planner-builder/)
+    assert.doesNotMatch(unseededProposal.after, /plugin-planner-builder/)
+  } finally {
+    rmSync(target, { recursive: true, force: true })
+    rmSync(plugin, { recursive: true, force: true })
+    rmSync(external, { recursive: true, force: true })
+  }
+})

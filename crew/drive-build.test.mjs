@@ -354,7 +354,7 @@ function publishingAnchorIo(secondDiff) {
     : originalRunCold(command, names)
   io.readFile = (path) => files[path] ?? null
   io.changedFiles = () => repaired ? [dispatch] : ['a.mjs', 'a.test.mjs']
-  return { io, ctx: { ...CTX, publish: { branch: 'feature/ship' } }, dispatch, get diffCalls() { return diffIndex } }
+  return { io, ctx: { ...CTX, publish: { branch: 'feature/ship', base: 'main' } }, dispatch, get diffCalls() { return diffIndex } }
 }
 
 test('suite anchor A5 caps mechanical repairs at one per drive', () => {
@@ -4761,7 +4761,7 @@ test('A1a a checkout shipping no census instrument drives through without runnin
   // first builder dispatch; this proves the ONLY thing that stops it is a measured absence,
   // and that the lane still finishes instead of escalating `census-malformed-output` the way
   // every foreign checkout did while `node crew/census-exhibits.mjs` was run unconditionally.
-  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census', base: 'main' } } })
   io.exists = () => false
   const result = driveTask(ctx, io)
   assert.equal(result.status, 'done')
@@ -4780,7 +4780,7 @@ test('A1b presence is re-probed per phase, so an instrument removed mid-lane is 
   // pre-build census. A presence probed once per lane would keep censusEnabled true and send
   // the post-commit census to a MODULE_NOT_FOUND escalation — the very defect this fix
   // removes, relocated to post-commit, where the warm suite would no longer name the cause.
-  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census', base: 'main' } } })
   const probes = []
   io.exists = (path) => { probes.push(path); return probes.length === 1 }
   const result = driveTask(ctx, io)
@@ -4794,7 +4794,7 @@ test('A1b presence is re-probed per phase, so an instrument removed mid-lane is 
 })
 
 test('B1 census reruns after commit before publish', () => {
-  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census' } } })
+  const { ctx, io } = censusDriveIo([censusRecord(), censusRecord()], { publish: true, ctx: { publish: { branch: 'feature/census', base: 'main' } } })
   const result = driveTask(ctx, io)
   assert.equal(result.status, 'done')
   const commit = io.calls.logs.findIndex((row) => row.stage_done === 'commit')

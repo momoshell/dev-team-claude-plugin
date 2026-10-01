@@ -2541,7 +2541,7 @@ test('plan-check accept residuals survive into the single driver-written publica
   const ctx = {
     ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'],
     task: 'plan-accept', journal: `${TD}/journal.jsonl`, limits: { plan_rounds: 2 },
-    publish: { branch: 'feature/plan-accept' },
+    publish: { branch: 'feature/plan-accept', base: 'main' },
   }
   const result = driveTask(ctx, io)
   assert.equal(result.status, 'done')

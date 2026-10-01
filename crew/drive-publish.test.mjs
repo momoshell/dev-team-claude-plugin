@@ -82,9 +82,9 @@ function resumeCheckpointFixture(overrides = {}) {
 test('A1 resume retries frozen rebase without restarting plan or build and reaches done', () => {
   const checkpoint = resumeCheckpointFixture()
   const io = fakeIo({ runs: {
-    'git fetch origin main': { ok: true, output: '' },
-    'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
-    'git merge-base HEAD origin/main': { ok: true, output: 'base1111\n' },
+    [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+    [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+    [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
     'git rev-parse HEAD': { ok: true, output: 'pre1111\n' },
     'suite-cmd': { ok: true, output: '# pass 1\\n# fail 0\\n' },
   } })
@@ -119,7 +119,7 @@ test('RVR1-2 gate resume preserves typed gate escalation when pending commit fai
 test('A1-resume: resumed publication preserves gate and suite order', () => {
   const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
   const io = withPublicationDiff(publicationIo(), {})
-  const result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  const result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
   assert.equal(result.status, 'done')
   assert.equal(io.calls.assign?.length || 0, 0)
   assert.ok(io.calls.run.some((command) => command.includes('gate-cmd')), 'resume must invoke the canonical gate')
@@ -146,7 +146,7 @@ test('RV1-1 resumes a suite checkpoint with a publish branch through to publicat
     prior_stages: ['review:r1', 'commit', 'rebase', 'suite'],
   })
   const io = withPublicationDiff(publicationIo(), { finalDiff: ['a.mjs'] })
-  const result = resumeTask({ ...CTX, task: 'resume-suite-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  const result = resumeTask({ ...CTX, task: 'resume-suite-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.files_committed, ['a.mjs'])
   assert.deepEqual(result.details.pr, { url: 'https://github.com/o/r/pull/42', number: 42, head: 'feature/ship', base_sha: 'base1111' })
@@ -207,9 +207,9 @@ function runPublished(options = {}) {
   const ctx = {
     ...CTX, task: options.task || 'published-task', taskDir: options.taskDir || TD,
     journal: options.journal || `${options.taskDir || TD}/journal.jsonl`,
-    ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
+    ...(options.ctx || {}), publish: options.publish === undefined ? { branch, base: options.base === undefined ? 'main' : options.base } : options.publish,
   }
-  const io = installParentProbe(withPublicationDiff(publicationIo({ ...options, branch }), options), options.commands?.['git rev-parse HEAD^'])
+  const io = installParentProbe(withPublicationDiff(publicationIo({ ...options, branch, base: options.base === undefined ? 'main' : options.base }), options), options.commands?.['git rev-parse HEAD^'])
   if (Object.hasOwn(options, 'briefText')) {
     const baseRead = io.readFile.bind(io)
     const briefText = options.briefText
@@ -272,7 +272,7 @@ function wideResumeCheckpoint({ kind = 'publish', message = 'feat: resume\n\n ',
 function runWideResume(finalDiff, options = {}) {
   const checkpoint = options.checkpoint || wideResumeCheckpoint(options)
   const io = withPublicationDiff(publicationIo({ changed: WIDE_PROMPT_FENCE }), { ...options, finalDiff })
-  const result = resumeTask({ ...CTX, task: options.task || 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: WIDE_PROMPT_FENCE }, io, checkpoint)
+  const result = resumeTask({ ...CTX, task: options.task || 'resume-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: WIDE_PROMPT_FENCE }, io, checkpoint)
   return { checkpoint, io, result }
 }
 
@@ -298,12 +298,12 @@ function rebaseIo(options = {}) {
       'builder:1': options.builderEnv || buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     commands: {
-      'git rev-parse origin/main': { ok: true, output: `${REBASE_PARENT}\n` },
+      [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: `${REBASE_PARENT}\n` },
       // Stateful: a real rebase MOVES the merge base. Before it, a moved base shares an
       // older ancestor (that gap is what `rebased` is derived from); after it, the base
       // IS the merge base. A static value here is what let `HEAD^` pass as the parent
       // check while only ever being correct for a one-commit lane.
-      'git merge-base HEAD origin/main': (s) => ({
+      [`git merge-base HEAD ${shellArg('origin/main')}`]: (s) => ({
         ok: true,
         output: `${moved && s.head !== postHead ? 'older000' : REBASE_PARENT}\n`,
       }),
@@ -337,7 +337,7 @@ function rebaseIo(options = {}) {
   }
   io.run = function (command) {
     const text = String(command)
-    if (text === 'git rebase origin/main') {
+    if (text === `git rebase ${shellArg('origin/main')}`) {
       const result = baseRun.call(this, command)
       this.state.phase = 'rebased'
       this.state.head = postHead
@@ -424,7 +424,7 @@ function rebaseIo(options = {}) {
 
 function runRebase(options = {}) {
   const io = rebaseIo(options)
-  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
+  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship', base: 'main' } }, io)
   return { io, result }
 }
 
@@ -541,7 +541,7 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
       const output = ref && this.state.recoveryRefs.has(ref) ? `${this.state.recoveryRefs.get(ref)}\n` : ''
       return record(recoveryResult(recoveryReadbackResult, { ok: true, output }))
     }
-    if (text === 'git rebase origin/main') {
+    if (text === `git rebase ${shellArg('origin/main')}`) {
       baseRun.call(this, command)
       const spec = specs[this.state.rebaseCount] || null
       this.state.rebaseCount += 1
@@ -674,7 +674,7 @@ function runAnchorPublication(options = {}) {
     ...CTX,
     limits: options.limits || {},
     ...(options.ctx || {}),
-    publish: { branch: 'feature/ship' },
+    publish: { branch: 'feature/ship', base: 'main' },
   }
   let result
   try { result = driveTask(ctx, io) } catch (error) { return { io, ctx, error } }
@@ -1008,7 +1008,7 @@ test('C1-suite-publish: the final suite precedes publication', () => {
 test('C1-resume-tail: resumed warm and cold suites precede publication', () => {
   const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
   const io = withPublicationDiff(publicationIo(), {})
-  const result = resumeTask({ ...CTX, task: 'resume-publish-tail', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  const result = resumeTask({ ...CTX, task: 'resume-publish-tail', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
   assert.equal(result.status, 'done')
   const complete = normaliseStageHeads(result.details.stages)
   const publishIndex = complete.indexOf('publish')
@@ -1185,23 +1185,23 @@ test('G1 anchor metadata publication is admitted without a prompt measurement cl
 test('stateful moved and unmoved bases prove the exact rebase policy', () => {
   const moved = runPublished({})
   assert.equal(moved.result.status, 'done')
-  assert.equal(moved.io.calls.run.includes('git rebase origin/main'), true)
+  assert.equal(moved.io.calls.run.includes(`git rebase ${shellArg('origin/main')}`), true)
   assert.equal(moved.io.calls.suiteHead, moved.io.state.post)
   const unmoved = runPublished({
     commands: {
-      'git rev-parse origin/main': { ok: true, output: 'same1111\n' },
-      'git merge-base HEAD origin/main': { ok: true, output: 'same1111\n' },
+      [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'same1111\n' },
+      [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'same1111\n' },
       'git rev-parse HEAD^': { ok: true, output: 'same1111\n' },
     },
   })
   assert.equal(unmoved.result.status, 'done')
-  assert.equal(unmoved.io.calls.run.includes('git rebase origin/main'), false)
+  assert.equal(unmoved.io.calls.run.includes(`git rebase ${shellArg('origin/main')}`), false)
   assert.equal(unmoved.io.calls.logs.find((entry) => entry.published).published.rebased, false)
   assert.equal(unmoved.result.details.commit, unmoved.io.state.pre)
 })
 
 test('post-commit fetch, push, and warm-suite failures are deliberate escalations with the real commit', () => {
-  const failedFetch = runPublished({ commands: { 'git fetch origin main': { ok: false, output: 'network down' } } })
+  const failedFetch = runPublished({ commands: { [`git fetch origin ${shellArg('main')}`]: { ok: false, output: 'network down' } } })
   assert.equal(failedFetch.result.status, 'escalation')
   assert.equal(failedFetch.result.details.escalation.where, 'rebase')
   assert.equal(failedFetch.result.details.commit, failedFetch.io.state.pre)
@@ -1218,10 +1218,10 @@ test('post-commit fetch, push, and warm-suite failures are deliberate escalation
 
 test('failed and blank rebase probes, post-head probes, empty conflicts, and recovery-ref failures fail closed', () => {
   const probes = [
-    { commands: { 'git rev-parse origin/main': { ok: false, output: 'missing' } } },
-    { commands: { 'git rev-parse origin/main': { ok: true, output: '' } } },
-    { commands: { 'git merge-base HEAD origin/main': { ok: false, output: 'missing' } } },
-    { commands: { 'git merge-base HEAD origin/main': { ok: true, output: '' } } },
+    { commands: { [`git rev-parse ${shellArg('origin/main')}`]: { ok: false, output: 'missing' } } },
+    { commands: { [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: '' } } },
+    { commands: { [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: false, output: 'missing' } } },
+    { commands: { [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: '' } } },
     { commands: { 'git rev-parse HEAD': { ok: false, output: 'missing' } } },
     { commands: { 'git rev-parse HEAD': { ok: true, output: '' } } },
   ]
@@ -1240,7 +1240,7 @@ test('failed and blank rebase probes, post-head probes, empty conflicts, and rec
   }
   const emptyConflict = runPublished({ commands: {
     ...recoveryCommands,
-    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    [`git rebase ${shellArg('origin/main')}`]: (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: '' },
   } })
   assert.equal(emptyConflict.result.status, 'escalation')
@@ -1249,7 +1249,7 @@ test('failed and blank rebase probes, post-head probes, empty conflicts, and rec
   assert.equal(emptyConflict.result.details.recovery_ref, recoveryRef)
   assert.equal(emptyConflict.io.calls.run.some((command) => command === 'git rebase --abort'), false)
   const failedRecovery = runPublished({ commands: {
-    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    [`git rebase ${shellArg('origin/main')}`]: (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
   } })
   assert.equal(failedRecovery.result.status, 'escalation')
@@ -1280,7 +1280,7 @@ test('A2 resumed prompt-surface silence is refused before any publish side effec
     kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' },
   })
   const io = withPublicationDiff(publicationIo({ changed: PROMPT_SCOPE }), { finalDiff: PROMPT_SCOPE })
-  const result = resumeTask({ ...CTX, task: 'resume-prompt-publish', publish: { branch: 'feature/ship' }, files_in_scope: PROMPT_SCOPE }, io, checkpoint)
+  const result = resumeTask({ ...CTX, task: 'resume-prompt-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: PROMPT_SCOPE }, io, checkpoint)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'publish')
   assert.equal(result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
@@ -1419,17 +1419,130 @@ const NO_DISPATCH_BRIEF = [
 
 function runIssueResume(briefText, checkpoint, options = {}) {
   const io = withPublicationDiff(publicationIo(options.ioOptions || {}), options.diff || {})
-  const ctx = { ...CTX, task: options.task || 'resume-issue-task', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'], ...(options.ctx || {}) }
+  const ctx = { ...CTX, task: options.task || 'resume-issue-task', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'], ...(options.ctx || {}) }
   const baseRead = io.readFile.bind(io)
   io.readFile = (path) => (path === ctx.briefFile ? briefText : baseRead(path))
   const result = resumeTask(ctx, io, checkpoint)
   return { ctx, io, result }
 }
 
+// Mutation: replace publishBase resolution with the retired default; every asserted sink changes.
+test('P1 fresh publication uses the run-frozen dispute base throughout', () => {
+  const run = runPublished({ branch: 'feature/p1', base: 'dispute' })
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.run.includes(`git fetch origin ${shellArg('dispute')}`))
+  assert.ok(run.io.calls.run.includes(`git rebase ${shellArg('origin/dispute')}`))
+  assert.ok(run.io.calls.run.some((command) => command.includes(`gh pr create --base ${shellArg('dispute')}`)))
+  assert.equal(run.io.calls.logs.find((row) => row.published)?.published.base, 'dispute')
+})
+
+// Mutation: freeze the old default in resumeSnapshotFor; this generated checkpoint then differs.
+test('P2 generated gated checkpoint freezes the run base at a forced fetch failure', () => {
+  let gates = 0
+  const run = runPublished(widePublicationOptions(FINAL_CODE_FILES, {
+    fingerprint: true, fingerprintFiles: WIDE_PROMPT_FENCE, base: 'dispute',
+    gateResult: () => (++gates === 1 ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }),
+    commands: { [`git fetch origin ${shellArg('dispute')}`]: { ok: false, output: 'forced fetch failure' } },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', files_in_scope: WIDE_PROMPT_FENCE } }) },
+  }))
+  assert.equal(run.result.status, 'escalation')
+  assert.equal(run.result.details.resume_checkpoint.publish.base, 'dispute')
+})
+
+// Mutation: resolve resumed baseName from context instead of the checkpoint.
+test('P3 resumed publication uses the checkpoint base rather than changed context', () => {
+  const checkpoint = resumeCheckpointFixture({ kind: 'rebase', frozen_where: 'rebase', publish: { branch: 'feature/resume', base: 'dispute', base_sha: 'base1111' } })
+  const io = withPublicationDiff(publicationIo({ base: 'trunk', commands: {
+    [`git fetch origin ${shellArg('dispute')}`]: { ok: true, output: '' },
+    [`git rev-parse ${shellArg('origin/dispute')}`]: { ok: true, output: 'base1111\n' },
+    [`git merge-base HEAD ${shellArg('origin/dispute')}`]: { ok: true, output: 'base1111\n' },
+  } }), { finalDiff: ['a.mjs'] })
+  const run = resumeTask({ ...CTX, publish: { branch: 'feature/resume', base: 'trunk' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(run.status, 'done')
+  assert.ok(io.calls.run.includes(`git fetch origin ${shellArg('dispute')}`))
+  assert.ok(io.calls.run.some((command) => command.includes(`gh pr create --base ${shellArg('dispute')}`)))
+})
+
+// Mutation: compare the branch with the retired fixed value instead of publishBase.
+test('P4 branch refusal compares against the frozen base', () => {
+  const refused = runPublished({ branch: 'dispute', base: 'dispute' })
+  assert.equal(refused.result.details.publish.refused, PUBLISH_REFUSALS.branchMain)
+  const allowed = runPublished({ branch: 'main', base: 'dispute' })
+  assert.equal(allowed.result.status, 'done')
+})
+
+// Mutation: default an empty fresh base; the refusal and pre-fetch assertions fail.
+test('P5 blank fresh bases refuse before fetch, while absent non-publishing context remains local', () => {
+  for (const base of [undefined, null, '', '  ']) {
+    const run = runPublished({ publish: { branch: 'feature/blank', ...(base === undefined ? {} : { base }) } })
+    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.baseUnresolved)
+    assert.equal(run.result.details.escalation.where, 'publish')
+    assert.equal(run.io.calls.run.some((command) => command.startsWith('git fetch origin ')), false)
+  }
+  const io = publicationIo()
+  const local = driveTask({ ...CTX, publish: undefined }, io)
+  assert.equal(local.status, 'done')
+})
+
+// Mutation: restore resume's default-base fallback; unresolved checkpoints proceed to fetch.
+test('P6 unresolved checkpoint bases refuse without consulting context or fetching', () => {
+  for (const kind of ['rebase', 'gate', 'suite', 'publish']) for (const base of [undefined, null, '', '  ']) {
+    const publish = { branch: 'feature/frozen', ...(base === undefined ? {} : { base }) }
+    const checkpoint = resumeCheckpointFixture({ kind, frozen_where: kind, publish })
+    if (base === undefined) delete checkpoint.publish.base
+    const io = publicationIo()
+    const result = resumeTask({ ...CTX, publish: { branch: 'feature/frozen', base: 'trunk' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+    assert.equal(result.details.publish.refused, PUBLISH_REFUSALS.baseUnresolved, `${kind}/${String(base)}`)
+    assert.equal(io.calls.run.some((command) => command.startsWith('git fetch origin ')), false)
+  }
+})
+
+test('PUBLISH_REFUSALS is frozen closed data including base-unresolved', () => {
+  // Mutation: remove/rename baseUnresolved or make either vocabulary mutable.
+  assert.deepEqual(PUBLISH_REFUSAL_NAMES, ['branch-unresolved', 'branch-main', 'base-unresolved', 'gh-missing', 'gh-auth', 'pr-exists', 'pr-check', 'push-rejected', 'pr-create', 'prompt-measurement-missing', 'issue-statement-missing'])
+  assert.equal(Object.isFrozen(PUBLISH_REFUSALS), true)
+  assert.equal(Object.isFrozen(PUBLISH_REFUSAL_NAMES), true)
+})
+
+test('gate checkpoint with null branch and missing base does not fetch', () => {
+  // Mutation: restore the null-based gate checkpoint rebase condition.
+  const checkpoint = resumeCheckpointFixture({ kind: 'gate', frozen_where: 'gate', publish: { branch: null } })
+  delete checkpoint.publish.base
+  const io = publicationIo()
+  const result = resumeTask({ ...CTX, publish: { branch: null, base: 'trunk' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.run.some((command) => command.startsWith('git fetch origin ')), false)
+})
+
+test('resume validator permits missing, null and string bases but rejects nonstrings', () => {
+  for (const base of ['missing', null, 'dispute']) {
+    const checkpoint = resumeCheckpointFixture({ publish: { branch: null } })
+    if (base === 'missing') delete checkpoint.publish.base
+    else checkpoint.publish.base = base
+    assert.equal(resumeCheckpointDefect(checkpoint), null, String(base))
+  }
+  for (const base of [7, [], {}, true]) {
+    const checkpoint = resumeCheckpointFixture({ publish: { branch: null, base } })
+    assert.match(resumeCheckpointDefect(checkpoint), /publication state is incomplete/)
+  }
+})
+
+test('base shell arguments preserve quotes and metacharacters', () => {
+  const base = `feature/o'neil;$(echo nope)`
+  const quoted = shellArg(base)
+  const run = runPublished({ branch: 'feature/head', base })
+  assert.equal(run.result.status, 'done')
+  assert.equal(quoted, "'feature/o'\"'\"'neil;$(echo nope)'")
+  assert.ok(run.io.calls.run.includes(`git fetch origin ${quoted}`))
+  assert.ok(run.io.calls.run.includes(`git rebase ${shellArg(`origin/${base}`)}`))
+  assert.ok(run.io.calls.run.some((command) => command.includes(`gh pr create --base ${quoted}`)))
+})
+
 test('each closed publish refusal is named and never creates a pull request', () => {
   const cases = [
     ['branch-unresolved', { branch: '' }],
     ['branch-main', { branch: 'main' }],
+    ['base-unresolved', { publish: { branch: 'feature/no-base', base: '  ' } }],
     ['gh-missing', { commands: { 'command -v gh': { ok: false, output: '' } } }],
     ['gh-auth', { commands: { 'gh auth status': { ok: false, output: 'not logged in' } } }],
     ['pr-exists', { commands: { 'gh pr view': { ok: true, output: 'not json' } } }],
@@ -1602,7 +1715,7 @@ test('C1 publication names the measured proof generation', () => {
     return baseRun.call(this, command)
   }
   io.runClean = () => ({ ok: false, output: red })
-  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship' } }, io)
+  const result = driveTask({ ...CTX, publish: { branch: 'feature/ship', base: 'main' } }, io)
   assert.equal(result.status, 'done')
   assert.equal(result.details.gate.generation, 2)
   const body = io.calls.writes[`${TD}/pr-body.md`]
@@ -1641,7 +1754,7 @@ test('C1 publication names the measured proof generation', () => {
   }
   const cleanRuns = [oldRed, oldGreen, repairedRed]
   refreshedIo.runClean = () => ({ ok: false, output: cleanRuns.shift() || repairedRed })
-  const refreshed = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 }, publish: { branch: 'feature/ship' } }, refreshedIo)
+  const refreshed = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 2 }, publish: { branch: 'feature/ship', base: 'main' } }, refreshedIo)
   assert.equal(refreshed.status, 'done')
   assert.equal(refreshed.details.gate.cmd, 'repaired-gate-cmd')
   assert.equal(refreshed.details.gate.generation, 4)
@@ -2355,7 +2468,7 @@ test('R1-resume: resumed publication carries accepted narration and journals it'
     const checkpoint = resumeCheckpointFixture({ kind: 'publish', frozen_where: 'publish', publish: { branch: 'feature/ship', base: 'main' } })
     const io = withPublicationDiff(publicationIo({ capabilities, commands }), {})
     let result
-    try { result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship' }, files_in_scope: ['a.mjs'] }, io, checkpoint) } catch (error) { return { io, error } }
+    try { result = resumeTask({ ...CTX, task: 'resume-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'] }, io, checkpoint) } catch (error) { return { io, error } }
     return { io, result }
   }
   const acc = runResume({ [NARRATOR_CHAT_COMMAND_PREFIX]: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The work went well from start to finish.' } }] }) } })
@@ -2539,7 +2652,7 @@ test('E2 direct-parent validation rejects blank mismatch and dropped replay', ()
   // wrong only AFTER the replay — a blank, a mismatch, and a base that never moved.
   const badMergeBase = (after) => ({
     commands: {
-      'git merge-base HEAD origin/main': (state) => (state.head === state.post
+      [`git merge-base HEAD ${shellArg('origin/main')}`]: (state) => (state.head === state.post
         ? after
         : { ok: true, output: 'older000\n' }),
     },
@@ -2577,11 +2690,11 @@ test('E3 a MULTI-commit lane rebases and re-proves, because HEAD^ is not the bas
 })
 
 test('F1 existing rebase escalation text remains exact', () => {
-  const fetch = runPublished({ commands: { 'git fetch origin main': { ok: false, output: 'network down' } } })
+  const fetch = runPublished({ commands: { [`git fetch origin ${shellArg('main')}`]: { ok: false, output: 'network down' } } })
   assert.equal(fetch.result.details.escalation.why, 'the fetch of origin/main failed: network down')
-  const base = runPublished({ commands: { 'git rev-parse origin/main': { ok: true, output: '' } } })
+  const base = runPublished({ commands: { [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: '' } } })
   assert.equal(base.result.details.escalation.why, 'the rebase probe git rev-parse origin/main failed or returned blank output')
-  const merge = runPublished({ commands: { 'git merge-base HEAD origin/main': { ok: true, output: '' } } })
+  const merge = runPublished({ commands: { [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: '' } } })
   assert.equal(merge.result.details.escalation.why, 'the rebase probe git merge-base HEAD origin/main failed or returned blank output')
   const full = 'f'.repeat(40)
   const recoveryRef = `refs/crew/recovery/${full}`
@@ -2589,14 +2702,14 @@ test('F1 existing rebase escalation text remains exact', () => {
     ["git rev-parse --verify 'pre1111^{commit}'"]: { ok: true, output: `${full}\n` },
     [`git update-ref '${recoveryRef}' '${full}'`]: { ok: true, output: '' },
     [`git rev-parse --verify '${recoveryRef}^{commit}'`]: { ok: true, output: `${full}\n` },
-    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    [`git rebase ${shellArg('origin/main')}`]: (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
   } })
   assert.equal(emptyEvidence.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; conflict evidence was empty or unmeasurable; no builder was dispatched')
   assert.equal(emptyEvidence.result.details.recovery_ref, recoveryRef)
   assert.equal(emptyEvidence.io.calls.run.some((command) => command === 'git rebase --abort'), false)
   const unprovedRecovery = runPublished({ commands: {
-    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    [`git rebase ${shellArg('origin/main')}`]: (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
     'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
   } })
   assert.equal(unprovedRecovery.result.details.escalation.why, 'the rebase onto origin/main failed with conflicts in a.mjs; the accepted commit recovery ref was not proved: accepted commit canonicalization returned a non-OID result')
@@ -2649,13 +2762,17 @@ test('chunk resumed publication narrates the restored summary', () => {
     commit: { oid: null, pending: true, files: ['crew/a.mjs'], message: 'feat: chunk\n\nCloses #42', subject: 'feat: chunk' },
     proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 2, failed: 1, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
     suite: { cmd: 'suite-cmd', warm: null, cold: null },
-    publish: { branch: 'feature/chunk', base: null, base_sha: 'base1111' },
+    publish: { branch: 'feature/chunk', base: 'main', base_sha: 'base1111' },
   })
   assert.equal(resumeCheckpointDefect(checkpoint), null)
   const io = fakeIo({
     runs: {
       'gate-cmd': { ok: false, output: `FAIL A2: other red\nGATE-SUMMARY {"total":2,"failed":1,"errored":0}` },
       'suite-cmd': { ok: true, output: '# pass 1\n# fail 0\n' },
+      [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+      [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+      [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+      'git rev-parse HEAD': { ok: true, output: 'pre1111\n' },
       "git diff --name-only -z 'base1111'...HEAD": { ok: true, output: 'crew/a.mjs\0' },
     },
     cold: { ok: true, output: '# pass 1\n# fail 0\n', path: '/zz/aa11bb', kept: null },

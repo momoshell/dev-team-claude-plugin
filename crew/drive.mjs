@@ -3481,8 +3481,8 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 // crew.mjs. crew.mjs imports and re-exports it, so `run-start` stays one string.
 export const RUN_START_EVENT = 'run-start'
 
-// #679 — the driver publishes. The base is fixed by the ratified design.
-export const PUBLISH_BASE = 'main'
+// #679 — the driver publishes against the base frozen by its run or checkpoint.
+
 // #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the optional top-level `narrator`
 // declaration that turns narration on: the KEY is the switch and `base_url` names the endpoint.
 // crew/capabilities.schema.json defines `properties.narrator` and `$defs.localprovider`
@@ -3559,7 +3559,7 @@ function publishDiffFiles(io, baseSha) {
 
 export const PUBLISH_REFUSALS = Object.freeze({
   branchUnresolved: 'branch-unresolved',
-  branchMain: 'branch-main',
+  branchMain: 'branch-main', baseUnresolved: 'base-unresolved',
   ghMissing: 'gh-missing',
   ghAuth: 'gh-auth',
   prExists: 'pr-exists',
@@ -5073,7 +5073,7 @@ export function resumeCheckpointDefect(checkpoint) {
   const suite = checkpoint.suite
   if (!suite || typeof suite !== 'object' || Array.isArray(suite) || typeof suite.cmd !== 'string' || !suite.cmd.trim()) return 'checkpoint suite command is absent'
   const publish = checkpoint.publish
-  if (!publish || typeof publish !== 'object' || Array.isArray(publish) || (publish.branch !== null && typeof publish.branch !== 'string') || (publish.base !== null && typeof publish.base !== 'string')) return 'checkpoint publication state is incomplete'
+  if (!publish || typeof publish !== 'object' || Array.isArray(publish) || (publish.branch !== null && typeof publish.branch !== 'string') || (publish.base != null && typeof publish.base !== 'string')) return 'checkpoint publication state is incomplete'
   if (!Array.isArray(checkpoint.prior_stages)) return 'checkpoint prior stages are absent'
   const chunk = checkpoint.chunk
   if (chunk !== undefined && chunk !== null) {
@@ -5150,7 +5150,7 @@ function captureResumeCheckpoint(result, ctx, io) {
     returns: source.returns, decision: source.decision,
     commit: { ...(source.commit || {}), files: commitFiles }, proof: { ...source.proof, gate_cmd: source.proof?.gate_cmd || source.gate_cmd, gate_path: source.proof?.gate_path || `${ctx.taskDir}/gate.mjs` },
     suite: { ...source.suite, cmd: source.suite?.cmd || ctx.suite },
-    publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null },
+    publish: source.publish || { branch: ctx.publish?.branch ?? null, base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? (ctx.publish?.base ?? null) : null },
     prior_stages: Array.isArray(source.prior_stages) ? [...source.prior_stages] : (result?.details?.stages || []),
     chunk: source.chunk !== undefined ? source.chunk : null,
     ...(kind === 'step' ? { step: source.step } : {}),
@@ -6893,7 +6893,7 @@ function runTask(ctx, io, crash) {
       suite: { cmd: ctx.suite, warm: resumeWarmCounts, cold: resumeColdSuite?.counts ?? details.cold_suite?.counts ?? null },
       publish: {
         branch: ctx.publish?.branch ?? null,
-        base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? PUBLISH_BASE : null,
+        base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? (ctx.publish?.base ?? null) : null,
         ...(typeof verifiedPublishBaseSha === 'string' && verifiedPublishBaseSha.trim() ? { base_sha: verifiedPublishBaseSha.trim() } : {}),
       },
       accepted_scope: snapshotFiles,
@@ -7670,7 +7670,7 @@ function runTask(ctx, io, crash) {
     const resumeEscalate = (where, why, extraDetails = {}, commit = commitOid) => escalationResult({
       where, why, question: escalationQuestion(where, {}), summary: `Task ${resumeCtx.task} needs a human: ${why}`,
       commit: commit ?? null, extraDetails: { ...extraDetails, resume_checkpoint: checkpoint }, terminal: true,
-    })
+    }); const baseName = typeof checkpoint.publish.base === 'string' ? checkpoint.publish.base.trim() : ''; if (!baseName && (checkpoint.kind === 'rebase' || (typeof checkpoint.publish.branch === 'string' && checkpoint.publish.branch.trim()))) return resumeEscalate('publish', 'publication base is unresolved in the frozen checkpoint', { publish: { refused: PUBLISH_REFUSALS.baseUnresolved } })
     const probe = (command) => {
       try {
         const result = resumeIo.run(command)
@@ -7736,23 +7736,23 @@ function runTask(ctx, io, crash) {
       stageComplete()
     }
 
-    const needsRebase = checkpoint.kind === 'rebase' || (checkpoint.kind === 'gate' && checkpoint.publish.base !== null)
+    const needsRebase = checkpoint.kind === 'rebase' || (checkpoint.kind === 'gate' && baseName !== '')
     if (needsRebase) {
       stage('rebase')
-      const baseName = checkpoint.publish.base || PUBLISH_BASE
+
       const base = `origin/${baseName}`
       let fetched
-      try { fetched = resumeIo.run(`git fetch origin ${baseName}`) }
+      try { fetched = resumeIo.run(`git fetch origin ${shellArg(baseName)}`) }
       catch (error) { fetched = { ok: false, output: error?.message ?? String(error) } }
       if (!fetched?.ok) { stageComplete(); return resumeEscalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`) }
-      const baseSha = probe(`git rev-parse ${base}`)
+      const baseSha = probe(`git rev-parse ${shellArg(base)}`)
       verifiedBaseSha = baseSha
-      const mergeBase = probe(`git merge-base HEAD ${base}`)
+      const mergeBase = probe(`git merge-base HEAD ${shellArg(base)}`)
       if (!baseSha || !mergeBase) { stageComplete(); return resumeEscalate('rebase', `the rebase probe for ${base} failed or returned blank output`) }
       let rebased = false
       if (baseSha !== mergeBase) {
         let rebasedResult
-        try { rebasedResult = resumeIo.run(`git rebase ${base}`) }
+        try { rebasedResult = resumeIo.run(`git rebase ${shellArg(base)}`) }
         catch (error) { rebasedResult = { ok: false, output: error?.message ?? String(error) } }
         if (!rebasedResult?.ok) { stageComplete(); return resumeEscalate('rebase', `the rebase onto ${base} failed${rebasedResult?.output ? `: ${String(rebasedResult.output).slice(-2000)}` : ''}`) }
         rebased = true
@@ -7814,7 +7814,7 @@ function runTask(ctx, io, crash) {
 
     if (shouldPublish) {
       stage('publish')
-      const baseName = checkpoint.publish.base || PUBLISH_BASE
+
       const refusePublish = (reason, detail) => {
         stageComplete()
         return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
@@ -11489,7 +11489,7 @@ function runTask(ctx, io, crash) {
   }
 
   // ---- 3. FINISH: commit, optional rebase, then full suite (code) -------------
-  const publishing = ctx.publish && typeof ctx.publish === 'object' ? ctx.publish : null
+  const publishing = ctx.publish && typeof ctx.publish === 'object' ? ctx.publish : null; const publishBase = typeof publishing?.base === 'string' ? publishing.base.trim() : ''; if (publishing && !publishBase) { stage('publish'); stageComplete(); return escalate('publish', `publish refused (${PUBLISH_REFUSALS.baseUnresolved}): publication base is unresolved for this run`, [], { publish: { refused: PUBLISH_REFUSALS.baseUnresolved } }) }
   let baseSha = null
   let rebased = false
   let rebaseMs = 0
@@ -11598,7 +11598,7 @@ function runTask(ctx, io, crash) {
   if (publishing) {
     stage('rebase')
     const rebaseStartedAt = io.now()
-    const base = `origin/${PUBLISH_BASE}`
+    const base = `origin/${publishBase}`
     const probe = (command) => {
       let result
       try { result = io.run(command) } catch { return null }
@@ -11607,19 +11607,19 @@ function runTask(ctx, io, crash) {
     }
     if (!continuingRebase) {
     let fetched
-    try { fetched = io.run(`git fetch origin ${PUBLISH_BASE}`) }
+    try { fetched = io.run(`git fetch origin ${shellArg(publishBase)}`) }
     catch (err) { fetched = { ok: false, output: err?.message ?? String(err) } }
     if (!fetched?.ok) {
       stageComplete()
       return escalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
-    baseSha = probe(`git rev-parse ${base}`)
+    baseSha = probe(`git rev-parse ${shellArg(base)}`)
     if (!baseSha) {
       stageComplete()
       return escalate('rebase', `the rebase probe git rev-parse ${base} failed or returned blank output`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
     }
     verifiedPublishBaseSha = baseSha
-    const mergeBase = probe(`git merge-base HEAD ${base}`)
+    const mergeBase = probe(`git merge-base HEAD ${shellArg(base)}`)
     if (!mergeBase) {
       stageComplete()
       return escalate('rebase', `the rebase probe git merge-base HEAD ${base} failed or returned blank output`, [], { commit: S.commit }, { files: [], base, commit: S.commit })
@@ -11627,7 +11627,7 @@ function runTask(ctx, io, crash) {
     rebased = baseSha !== mergeBase
     if (rebased) {
       let rebaseResult
-      try { rebaseResult = io.run(`git rebase ${base}`) }
+      try { rebaseResult = io.run(`git rebase ${shellArg(base)}`) }
       catch (err) { rebaseResult = { ok: false, output: err?.message ?? String(err) } }
       if (!rebaseResult?.ok) {
         let conflictProbe
@@ -11809,7 +11809,7 @@ function runTask(ctx, io, crash) {
     // question actually being asked: does HEAD descend from the rebase base, whatever
     // the commit count. The soft reset below then collapses every lane commit into the
     // index, which is what re-proving the lane's whole diff against the new parent means.
-    const postCommitParent = probe(`git merge-base HEAD ${base}`)
+    const postCommitParent = probe(`git merge-base HEAD ${shellArg(base)}`)
     if (!postCommitParent || postCommitParent !== baseSha) {
       stageComplete()
       return escalate('rebase', `the verified direct parent did not match the rebase base: expected ${baseSha}, found ${postCommitParent || '(unavailable)'}`, [], { commit: S.commit })
@@ -12214,7 +12214,7 @@ function runTask(ctx, io, crash) {
       })
     }
     if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
-    if (branch === PUBLISH_BASE) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${PUBLISH_BASE}`)
+    if (branch === publishBase) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${publishBase}`)
     const issueDefect = issueStatementDefect({ brief: briefText, details: planEnv?.details })
     if (issueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, issueDefect)
     const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(message) }) })
@@ -12290,7 +12290,7 @@ function runTask(ctx, io, crash) {
     let created
     try {
       io.writeFile(bodyPath, composePrBody(bodyRecord))
-      created = io.run(`gh pr create --base ${shellArg(PUBLISH_BASE)} --head ${shellArg(branch)} --title ${shellArg(subject)} --body-file ${shellArg(bodyPath)}`)
+      created = io.run(`gh pr create --base ${shellArg(publishBase)} --head ${shellArg(branch)} --title ${shellArg(subject)} --body-file ${shellArg(bodyPath)}`)
     } catch (err) {
       created = { ok: false, output: err?.message ?? String(err) }
     }
@@ -12299,7 +12299,7 @@ function runTask(ctx, io, crash) {
     if (!created?.ok || !urlMatch) return refusePublish(PUBLISH_REFUSALS.prCreate, `gh pr create did not return a pull request URL${created?.output ? `: ${String(created.output).slice(-2000)}` : ''}`)
     const url = urlMatch[0]
     const number = Number(urlMatch[1])
-    const publishedRow = { url, number, branch, base: PUBLISH_BASE, base_sha: baseSha, rebased, durations_ms: { rebase: rebaseMs, push: pushMs, pr_create: prCreateMs } }
+    const publishedRow = { url, number, branch, base: publishBase, base_sha: baseSha, rebased, durations_ms: { rebase: rebaseMs, push: pushMs, pr_create: prCreateMs } }
     io.log(recordRow({ at: io.now(), published: publishedRow }))
     published = { url, number, head: branch, base_sha: baseSha }
     stageComplete()

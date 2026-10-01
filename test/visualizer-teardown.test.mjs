@@ -8,7 +8,7 @@ import { openLedger, NODE_FLOOR, SEAT_TEARDOWN_OUTCOMES as LEDGER_OUTCOMES } fro
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { defaultTeardownWindow, SEAT_TEARDOWN_OUTCOMES, shapeSeatTeardowns } from '../visualizer/server/shape.mjs'
 import { teardownPanel } from '../visualizer/web/src/lib/panels.js'
-import { sqliteAvailable } from './helpers.mjs'
+import { ROOT, sqliteAvailable } from './helpers.mjs'
 
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const children = new Set()
@@ -58,8 +58,8 @@ function announce(child) {
 }
 
 function startServer(ledgerDb, triageDb) {
-  const child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb], {
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const child = spawn(process.execPath, [join(ROOT, 'visualizer/server/server.mjs'), '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb], {
+    cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
   })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
@@ -184,15 +184,15 @@ test('HTTP route returns a read-only, unmeasured run', { skip: SKIP }, async () 
 test('read-only surface has no control verbs', () => {
   const banned = [/node:child_process/, /spawn\(/, /process\.kill/, /SIGKILL/, /\/api\/(boot|launch|merge|push)/, /git (push|merge|commit)/, /closeSurface|closeWorkspace/]
   for (const path of ['visualizer/server/shape.mjs', 'visualizer/server/ledger-feed.mjs', 'visualizer/web/src/lib/panels.js', 'visualizer/web/src/lib/TeardownPanel.svelte']) {
-    const source = readFileSync(path, 'utf8')
+    const source = readFileSync(join(ROOT, path), 'utf8')
     for (const pattern of banned) assert.doesNotMatch(source, pattern, `${path} matches ${pattern}`)
   }
 })
 
 test('API and visualizer mount the teardown panel', () => {
-  const api = readFileSync('visualizer/web/src/lib/api.js', 'utf8')
-  const app = readFileSync('visualizer/web/src/App.svelte', 'utf8')
-  const component = readFileSync('visualizer/web/src/lib/TeardownPanel.svelte', 'utf8')
+  const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
+  const component = readFileSync(join(ROOT, 'visualizer/web/src/lib/TeardownPanel.svelte'), 'utf8')
   assert.match(api, /getSeatTeardowns/)
   assert.match(api, /\/api\/seat-teardowns/)
   assert.match(app, /<TeardownPanel\s*\/>/)
@@ -203,8 +203,8 @@ test('API and visualizer mount the teardown panel', () => {
 })
 
 test('prompts-page:RV1-1 import/export linkage remains resolvable', async () => {
-  const app = readFileSync('visualizer/web/src/App.svelte', 'utf8')
-  const page = readFileSync('visualizer/web/src/lib/PromptsPage.svelte', 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
   const agents = await import('../visualizer/web/src/lib/agents.js')
   assert.match(app, /import PromptsPage from '\.\/lib\/PromptsPage\.svelte'/)
   assert.match(page, /import \{[^}]*PROMPT_SURFACE_CONSEQUENCE[^}]*\} from '\.\/agents\.js'/)

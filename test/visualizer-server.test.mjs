@@ -25,7 +25,7 @@ import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { loadCapabilities } from '../crew/capabilities.mjs'
-import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
+import { ROOT, rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const children = new Set()
@@ -64,17 +64,17 @@ function announceDetails(child) {
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
 }
-const SERVER_SCRIPT = join(process.cwd(), 'visualizer', 'server', 'server.mjs')
+const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
 function runServerCli(args, opts = {}) {
-  return spawnSync(process.execPath, [SERVER_SCRIPT, ...args], { encoding: 'utf8', ...opts })
+  return spawnSync(process.execPath, [SERVER_SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8', ...opts })
 }
 function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = null, ladderPath = null, referencePath = null) {
-  const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
+  const args = [SERVER_SCRIPT, '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
   if (crewRoot) args.push('--crew-root', crewRoot)
   if (rosterPath) args.push('--roster', rosterPath)
   if (ladderPath) args.push('--ladder', ladderPath)
   if (referencePath) args.push('--model-reference', referencePath)
-  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(environment || {}) } })
+  const child = spawnProcess(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(environment || {}) } })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
 }
@@ -83,7 +83,7 @@ async function stopServer(child) {
   await new Promise((resolve) => child.once('exit', resolve))
 }
 async function startInProcess(feed, options = {}) {
-  const handles = startVisualizerServer({ port: 0, host: '127.0.0.1', feed, ...options, env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(options.env || {}) } })
+  const handles = startVisualizerServer({ port: 0, host: '127.0.0.1', feed, checkout: ROOT, ...options, env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL, ...(options.env || {}) } })
   await new Promise((resolve, reject) => {
     handles.server.once('error', reject)
     handles.server.once('listening', resolve)
@@ -567,7 +567,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
     assert.equal(rawStatus(originless), 200)
     assert.equal(rawJson(originless).ok, true)
 
-    const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+    const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
     const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
     assert.equal(posts.length, 12)
     assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
@@ -801,8 +801,8 @@ test('the visualizer CLI announces a port through a symlinked repository path', 
   const link = join(dir, 'repo-link')
   const checkout = join(dir, 'checkout')
   mkdirSync(checkout, { recursive: true })
-  symlinkSync(process.cwd(), link)
-  const child = spawnProcess(process.execPath, [join(link, 'visualizer/server/server.mjs'), '--port', '0', '--ledger-db', join(dir, 'ledger.db'), '--triage-db', join(dir, 'visualizer.db'), '--checkout', checkout], { stdio: ['ignore', 'pipe', 'pipe'] })
+  symlinkSync(ROOT, link)
+  const child = spawnProcess(process.execPath, [join(link, 'visualizer/server/server.mjs'), '--port', '0', '--ledger-db', join(dir, 'ledger.db'), '--triage-db', join(dir, 'visualizer.db'), '--checkout', checkout], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
   children.add(child)
   try {
     const base = await announce(child)
@@ -824,7 +824,7 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
   const crewBefore = treeDigest(crewRoot)
   let child, base
   try {
-    child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb, '--crew-root', crewRoot], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL } })
+    child = spawn(process.execPath, [SERVER_SCRIPT, '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb, '--crew-root', crewRoot], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DEVTEAM_GITHUB_API_URL: TEST_GITHUB_API_URL } })
     children.add(child)
     base = await announce(child)
     const sessions = await json(base, '/api/sessions')
@@ -1234,7 +1234,7 @@ test('cell health reports a stated window, run-less rows and kinds without a ver
 test('cell health, roster ladder, and breaker agree on host-attributed failures in one process', { skip: SKIP }, async () => {
   const dir = scratchDir('visualizer-cell-health-three-way-')
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
-  const roster = JSON.parse(readFileSync(join(process.cwd(), 'crew', 'roster.json'), 'utf8'))
+  const roster = JSON.parse(readFileSync(join(ROOT, 'crew', 'roster.json'), 'utf8'))
   const seat = roster.tiers.judge.planner
   const adwId = 'visualizer-three-way-0000-000000000001'
   const ledger = openLedger({ dbPath: ledgerDb })
@@ -1497,8 +1497,8 @@ test('/api/run-set uses the ledger pane wording and never resurrects the deleted
 
 test('the deleted usage absence cause is absent from visualizer and present in scripts', () => {
   const needle = 'predates per-agent token measurement'
-  const visualizer = gitGrepHits({ needle, paths: ['visualizer/'] })
-  const scripts = gitGrepHits({ needle, paths: ['scripts/'] })
+  const visualizer = gitGrepHits({ needle, paths: ['visualizer/'], cwd: ROOT })
+  const scripts = gitGrepHits({ needle, paths: ['scripts/'], cwd: ROOT })
   assert.equal(visualizer.count, 0)
   assert.ok(scripts.count > 0)
 })
@@ -2269,7 +2269,7 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
   ]
   let child
   try {
-    child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawnProcess(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
     children.add(child)
     const announced = await announceDetails(child)
     assert.equal(announced.listening, true)
@@ -2298,7 +2298,7 @@ test('viz-port-env-door — DEVTEAM_VIZ_PORT=0 binds an ephemeral port and an ab
   const ledgerDb = join(dir, 'ledger.db')
   let child
   try {
-    child = spawnProcess(process.execPath, [SERVER_SCRIPT], {
+    child = spawnProcess(process.execPath, [SERVER_SCRIPT], { cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, DEVTEAM_VIZ_PORT: '0', DEVTEAM_LEDGER_DB: ledgerDb },
     })
@@ -2312,7 +2312,7 @@ test('viz-port-env-door — DEVTEAM_VIZ_PORT=0 binds an ephemeral port and an ab
     const env = { ...process.env }
     delete env.DEVTEAM_VIZ_PORT
     const script = `import(${JSON.stringify(new URL('../visualizer/server/server.mjs', import.meta.url).href)}).then((m) => process.stdout.write(String(m.parseCliArgs([]).port)))`
-    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env, timeout: 20000, killSignal: 'SIGKILL' })
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, encoding: 'utf8', env, timeout: 20000, killSignal: 'SIGKILL' })
     assert.equal(result.status, 0, result.stderr || result.error?.message)
     assert.equal(result.stdout.trim(), '4488')
   } finally {
@@ -2388,14 +2388,14 @@ test('intake console keeps the stop-switch path in lockstep and has no boot or g
   ]
   const banned = [/node:child_process/, /\bspawnSync\b|\bspawn\(/, /['"`]\/api\/(boot|launch|merge|push)/, /\bgit (push|merge|commit)\b/, /\bgh (pr|api|issue) /, /crewBoot|crewRun/, /scripts\/factory\/intake\.mjs/]
   for (const file of files) {
-    const source = readFileSync(join(process.cwd(), file), 'utf8')
+    const source = readFileSync(join(ROOT, file), 'utf8')
     for (const pattern of banned) assert.doesNotMatch(source, pattern, file)
   }
 })
 
 test('roster staging preserves an explicit unmeasured breaker verdict', async () => {
-  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
-  const ladder = readLadder({ ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+  const rosterPath = join(ROOT, 'crew', 'roster.json')
+  const ladder = readLadder({ ladderPath: join(ROOT, 'crew', 'model-ladder.json') })
   const rosterText = readFileSync(rosterPath, 'utf8')
   const roster = JSON.parse(rosterText)
   const current = roster.tiers.build.reviewer
@@ -2529,7 +2529,7 @@ test('roster ladder apply updates only the configured local roster for the next 
   const dir = scratchDir('visualizer-roster-apply-')
   const rosterPath = join(dir, 'roster.json')
   const ledgerDb = join(dir, 'ledger.db')
-  const sourcePath = join(process.cwd(), 'crew', 'roster.json')
+  const sourcePath = join(ROOT, 'crew', 'roster.json')
   writeFileSync(rosterPath, JSON.stringify(serverRosterFixture(), null, 2))
   fixture(ledgerDb)
   const originalProjectDigest = digest(sourcePath)
@@ -2597,10 +2597,10 @@ test('ladder HTTP requests degrade honestly for missing ladder and reference fil
 })
 
 test('ladder source and API calls carry the required drag surface', () => {
-  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
-  const server = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
-  const catalog = readFileSync(join(process.cwd(), 'visualizer/server/model-catalog.mjs'), 'utf8')
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
+  const server = readFileSync(join(ROOT, 'visualizer/server/server.mjs'), 'utf8')
+  const catalog = readFileSync(join(ROOT, 'visualizer/server/model-catalog.mjs'), 'utf8')
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
   assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder|applyRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
   for (const needle of ['Assurance presets', 'Assurance changes who oversees a run', 'Task profile', 'What outcome is needed', 'Not recorded or configured by the current runtime', 'Capability bands', 'Separate from assurance', 'evidence states, not extra bands', 'Roster workspace', 'Add a model manually', 'saved locally', 'Any model, any seat', 'Copy experiment draft', 'Check readiness', 'Roster readiness', 'Apply for next task', 'next newly booted task', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
@@ -2704,9 +2704,9 @@ test('the model catalog endpoint persists a key only when explicitly requested',
 })
 
 test('RV1-1 GitHub repository routing guard and local env catalog secrets', async () => {
-  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  const ignore = readFileSync(join(process.cwd(), '.gitignore'), 'utf8')
-  const example = readFileSync(join(process.cwd(), '.env.example'), 'utf8')
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const ignore = readFileSync(join(ROOT, '.gitignore'), 'utf8')
+  const example = readFileSync(join(ROOT, '.env.example'), 'utf8')
   assert.match(pkg.scripts['viz:serve'], /--env-file-if-exists=\.env\.local/)
   assert.match(ignore, /^\.env\.\*$/m)
   assert.match(ignore, /^!\.env\.example$/m)
@@ -2729,7 +2729,7 @@ test('RV1-1 GitHub repository routing guard and local env catalog secrets', asyn
 })
 
 test('visualizer dropdowns use the shared themed listbox instead of native menus', () => {
-  const root = join(process.cwd(), 'visualizer', 'web', 'src')
+  const root = join(ROOT, 'visualizer', 'web', 'src')
   const dropdown = readFileSync(join(root, 'lib', 'Dropdown.svelte'), 'utf8')
   const consumers = ['App.svelte', 'lib/Filters.svelte', 'lib/Pagination.svelte', 'lib/TaskList.svelte', 'lib/EventStream.svelte', 'lib/RosterPanel.svelte']
   for (const file of consumers) {
@@ -2738,7 +2738,7 @@ test('visualizer dropdowns use the shared themed listbox instead of native menus
     assert.doesNotMatch(source, /<select\b/)
   }
   assert.equal(existsSync(join(root, 'lib', 'RosterEditor.svelte')), false)
-  assert.equal(gitGrepHits({ needle:'RosterEditor', paths:['visualizer/web/src/'], cwd:process.cwd() }).count, 0)
+  assert.equal(gitGrepHits({ needle:'RosterEditor', paths:['visualizer/web/src/'], cwd:ROOT }).count, 0)
   for (const needle of ['role="combobox"', 'role="listbox"', 'role="option"', 'aria-controls', 'ArrowDown', 'ArrowUp', 'Escape', 'dropdown-menu']) assert.match(dropdown, new RegExp(needle))
   assert.match(dropdown, /var\(--panel-raised\)/)
 })
@@ -2969,7 +2969,7 @@ test('SIGTERM closes an in-flight visualizer request', { skip: SKIP }, async () 
 test('static responses refuse symlinks that leave web/dist', { skip: SKIP }, async () => {
   const dir = scratchDir('visualizer-static-outside-')
   const outside = join(dir, 'outside.txt')
-  const dist = join(process.cwd(), 'visualizer', 'web', 'dist')
+  const dist = join(ROOT, 'visualizer', 'web', 'dist')
   const madeDist = !existsSync(dist)
   const leakPath = join(dist, `b288-symlink-${process.pid}-${Date.now()}.txt`)
   writeFileSync(outside, 'B288-SYMLINK-ESCAPED-CONTENT')
@@ -3177,7 +3177,7 @@ test('E1 published journal identity wins over a branch-name pull request', async
 })
 
 test('F1 ship state has no child process dependency', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/server/ship-state.mjs'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/server/ship-state.mjs'), 'utf8')
   assert.doesNotMatch(source, /node:child_process/)
 })
 
@@ -3215,7 +3215,7 @@ test('D1.tier-unmeasured', async () => {
     build: { planner: { provider: 'anthropic', id: 'planner', agent: 'pi', effort: 'high' }, builder: { provider: 'openai', id: 'builder', agent: 'pi', effort: 'max' }, reviewer: { provider: 'anthropic', id: 'reviewer', agent: 'claude', effort: 'high' } },
     judge: null,
   } }))
-  const source = createWorkflowsSource({ root, rosterPath, feed: { listRuns: () => ({ runs: [] }) }, docsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  const source = createWorkflowsSource({ root, rosterPath, feed: { listRuns: () => ({ runs: [] }) }, docsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') })
   try {
     const proposal = await source.propose({ workflow: 'full', tier: 'judge', edit: { role: 'planner', cell: { provider: 'anthropic', id: 'new-planner', agent: 'pi', effort: 'max' } } })
     assert.deepEqual(proposal, { ok: false, refusals: [{ code: 'tier-unmeasured', message: 'selected tier is unmeasured' }], diff: null, workflow_path: 'crew/workflows/full.json', before: null, after: null })
@@ -3235,7 +3235,7 @@ test('E1.feed-reasons', () => {
     const rosterPath = join(crew, 'roster.json')
     writeFileSync(rosterPath, JSON.stringify({ tiers: { build: { planner: { provider: 'anthropic', id: 'planner', agent: 'pi', effort: 'high' } } } }))
     try {
-      return createWorkflowsSource({ root, rosterPath, feed, docsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') }).readWorkflows({ recent: 1 })
+      return createWorkflowsSource({ root, rosterPath, feed, docsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') }).readWorkflows({ recent: 1 })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -3267,7 +3267,7 @@ test('B1 unsupported topology refuses with closed code and no write', async () =
     { adw_id: 'older', execution_shape: 'full', started_at: '2026-01-01T00:00:00.000Z', phases: [{ name: 'plan', status: 'ok', duration_ms: 4 }], seats: [{ role: 'planner', provider: 'anthropic', model_id: 'planner', agent: 'pi', effort: 'high' }] },
     { adw_id: 'newer', execution_shape: 'full', started_at: '2026-01-02T00:00:00.000Z', phases: [{ name: 'plan', status: 'ok', duration_ms: 9 }], seats: [{ role: 'planner', provider: 'anthropic', model_id: 'planner', agent: 'pi', effort: 'high' }] },
   ] } }, close() {} }
-  const source = createWorkflowsSource({ root, feed, variants: VARIANTS, rosterPath, docsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  const source = createWorkflowsSource({ root, feed, variants: VARIANTS, rosterPath, docsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') })
   const absent = source.readWorkflows({ recent: 1 })
   assert.deepEqual(absent.workflows.map((row) => row.shape), Object.keys(VARIANTS))
   assert.equal(absent.workflows.find((row) => row.shape === 'full').source, 'roster-default')
@@ -3320,7 +3320,7 @@ test('workflow-page:C2', async () => {
   writeFileSync(rosterPath, JSON.stringify({ tiers: { build: { planner: { provider: 'anthropic', id: 'planner', agent: 'pi', effort: 'high' } } } }))
   let feedReads = 0
   const feed = { listRuns() { feedReads += 1; return { runs: [], degraded: true, absent: 'ledger denied' } }, close() {} }
-  const server = await startInProcess(feed, { checkout: root, rosterPath, workflowsDocsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  const server = await startInProcess(feed, { checkout: root, rosterPath, workflowsDocsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') })
   try {
     const get = await json(server.base, '/api/workflows?recent=2')
     assert.equal(get.status, 200)
@@ -3328,7 +3328,7 @@ test('workflow-page:C2', async () => {
     assert.equal(get.json.evidence.measured, false)
     assert.match(get.json.evidence.error, /ledger denied/i)
     assert.equal(feedReads, 1)
-    const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+    const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
     assert.match(api, /proposeWorkflowEdit = \(\{ workflow, edit, tier \}\) => request\('\/api\/workflows\/propose'/)
     assert.equal((await json(server.base, '/api/workflows?unknown=1')).status, 400)
     assert.equal((await json(server.base, '/api/workflows', { method: 'POST' })).status, 405)
@@ -3374,7 +3374,7 @@ test('workflow-page:C4 an unmeasured workflow evidence row carries a closed reas
   const rosterPath = join(root, 'crew', 'roster.json')
   writeFileSync(rosterPath, JSON.stringify({ tiers: { build: { planner: { provider: 'anthropic', id: 'p', agent: 'pi', effort: 'high' } } } }))
   const feed = { listRuns() { return { runs: [{ adw_id: 'r1', execution_shape: 'full', phases: [] }] } }, close() {} }
-  const source = createWorkflowsSource({ root, feed, variants: VARIANTS, rosterPath, docsPath: join(process.cwd(), 'visualizer/web/src/lib/stage-docs.json') })
+  const source = createWorkflowsSource({ root, feed, variants: VARIANTS, rosterPath, docsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') })
   const rows = source.readWorkflows({}).workflows
   for (const row of rows) if (row.evidence.measured === false) assert.ok(row.evidence.reason, `${row.shape} evidence is unmeasured with no reason`)
   assert.equal(rows.find((row) => row.shape === 'scout').evidence.reason, 'no-runs-for-shape')
@@ -3383,7 +3383,7 @@ test('workflow-page:C4 an unmeasured workflow evidence row carries a closed reas
 test('assurance endpoints derive policy authority and keep floors separate', async () => {
   const root = scratchDir('visualizer-assurance-policy-')
   const ladderPath = join(root, 'model-ladder.json')
-  writeFileSync(ladderPath, readFileSync(join(process.cwd(), 'crew', 'model-ladder.json')))
+  writeFileSync(ladderPath, readFileSync(join(ROOT, 'crew', 'model-ladder.json')))
   let server
   try {
     server = await startInProcess({ close() {} }, { checkout: root, ladderPath })
@@ -3438,7 +3438,7 @@ test('assurance proposal validates a closed body and emits a no-write canonical 
   const canonical = `${JSON.stringify({ ask: 'fixture', assurance: 'standard' }, null, 2)}\n`
   let server
   try {
-    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(ROOT, 'crew', 'model-ladder.json') })
     const post = (body) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) })
     for (const body of ['null', '[]', '{ not json']) {
       const response = await post(body)
@@ -3518,7 +3518,7 @@ test('RV1-1 closes assurance proposal query vocabulary before parsing a valid bo
   assert.equal(Buffer.byteLength(document), 4246)
   let server
   try {
-    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(ROOT, 'crew', 'model-ladder.json') })
     const post = (path) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document, assurance: 'judge' }) })
     const accepted = await post('/api/assurances/propose')
     assert.equal(accepted.status, 200)
@@ -3546,7 +3546,7 @@ test('RV1-2 accepts a bounded large assurance proposal document', async () => {
   assert.ok(Buffer.byteLength(envelope) < 262144)
   let server
   try {
-    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(ROOT, 'crew', 'model-ladder.json') })
     const post = (body) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     const accepted = await post({ document, assurance: 'judge' })
     assert.equal(accepted.status, 200)
@@ -3564,7 +3564,7 @@ test('RV1-2 accepts a bounded large assurance proposal document', async () => {
 })
 
 test('assurance body overflow classification uses its error sentinel', () => {
-  const source = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  const source = readFileSync(join(ROOT, 'visualizer/server/server.mjs'), 'utf8')
   assert.match(source, /const BODY_TOO_LARGE = 'body_too_large'/)
   assert.match(source, /error\.code = BODY_TOO_LARGE/)
   assert.match(source, /err\?\.code === BODY_TOO_LARGE/)
@@ -3582,7 +3582,7 @@ test('RV2-1 bounds multi-line assurance proposal documents before diffing', asyn
   assert.ok(lineCount(acceptedLines) < 2000)
   let server
   try {
-    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(process.cwd(), 'crew', 'model-ladder.json') })
+    server = await startInProcess({ close() {} }, { checkout: root, ladderPath: join(ROOT, 'crew', 'model-ladder.json') })
     const post = (document) => json(server.base, '/api/assurances/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document, assurance: 'judge' }) })
     const refused = await post(tooManyLines)
     const message = `document has ${refusedCount} lines; the proposal endpoint accepts at most 2000`
@@ -3612,7 +3612,7 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
     // Mutation: omit pluginRoot from the agents-source construction.
     assert.ok(agents.json.agents.length > 0)
     assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/lean-build/SKILL.md'))
-    assert.equal(agents.json.plugin_root, process.cwd())
+    assert.equal(agents.json.plugin_root, ROOT)
     assert.equal(agents.json.checkout, root)
     assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/roles/builder.md')
     assert.equal(agents.json.reasons.some((reason) => reason.includes(root)), false)
@@ -3631,7 +3631,7 @@ test('V2 workflows resources come from the plugin root for a foreign checkout', 
     const workflows = await json(server.base, '/api/workflows')
     assert.equal(workflows.json.error, null)
     assert.equal(workflows.json.docs_error, null)
-    assert.equal(workflows.json.roster.path, join(process.cwd(), 'crew', 'roster.json'))
+    assert.equal(workflows.json.roster.path, join(ROOT, 'crew', 'roster.json'))
   } finally {
     if (server) await stopInProcess(server)
   }
@@ -3735,10 +3735,10 @@ test('workflow source reads plugin resources but proposals retain target resourc
     writeRoster(target, 'target-planner')
     const targetMaps = join(target, 'crew', 'workflows')
     mkdirSync(targetMaps, { recursive: true })
-    fs.cpSync(join(process.cwd(), 'crew', 'workflows'), join(plugin, 'crew', 'workflows'), { recursive: true })
-    fs.cpSync(join(process.cwd(), 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'), join(plugin, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'))
+    fs.cpSync(join(ROOT, 'crew', 'workflows'), join(plugin, 'crew', 'workflows'), { recursive: true })
+    fs.cpSync(join(ROOT, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'), join(plugin, 'visualizer', 'web', 'src', 'lib', 'stage-docs.json'))
     writeRoster(plugin, 'plugin-planner')
-    fs.cpSync(join(process.cwd(), 'crew', 'workflows', 'full.json'), join(targetMaps, 'full.json'))
+    fs.cpSync(join(ROOT, 'crew', 'workflows', 'full.json'), join(targetMaps, 'full.json'))
     const targetMapPath = join(targetMaps, 'full.json')
     const targetMap = JSON.parse(readFileSync(targetMapPath, 'utf8'))
     targetMap.seats.planner = seat('target-planner')

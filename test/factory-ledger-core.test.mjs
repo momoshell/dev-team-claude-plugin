@@ -2326,6 +2326,20 @@ test('RV1-2 invalid historical timestamp remains drift', { skip: SKIP }, () => {
     assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
   } finally { ledger.close() }
 })
+// MUTATION S3: drop the started_at bound on drift credit, or the historical-row filter on the replay seed.
+test('S3 a modern mirror row is no evidence of a historical collapse', { skip: SKIP }, () => {
+  const dir = scratchDir('legacy-modern-pair-'), jsonlPath = join(dir, 'authority.jsonl')
+  const ledger = openLedger({ dbPath: join(dir, 'mirror.db'), jsonlPath, stderr: { write() {} } })
+  try {
+    ledger.startAgentSession({ ...legacySessionArgs('A'), started_at: '2026-10-01T00:00:00.000Z' })
+    legacyAuthority(jsonlPath, undefined, true)
+    const writer = ledger.jsonlDrift().writers.find(({ writer }) => writer === 'startAgentSession')
+    assert.equal(writer.drift, 1); assert.equal(writer.legacy_collapsed_keys, 0)
+    const result = replayJsonl(jsonlPath, ledger)
+    assert.equal(result.legacy_skipped ?? 0, 0)
+    assert.deepEqual(ledger.dumpTable('agent_sessions').map((r) => r.model).sort(), ['A', 'B'])
+  } finally { ledger.close() }
+})
 test('L4 replay skips historical agent-session duplicate pairs', { skip: SKIP }, () => {
   const dir = scratchDir('legacy-replay-l4-'), source = join(dir, 'authority.jsonl')
   legacyAuthority(source)

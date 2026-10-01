@@ -721,6 +721,7 @@ function openRunInner({
   secureMkdirSync(ledgerDir)
 
   let runStartedAt = null
+  let runStartLine = null
   let boundaryError = null
   try {
     const journal = join(stateDir, 'journal.jsonl')
@@ -728,21 +729,23 @@ function openRunInner({
     try { raw = readFileSync(journal, 'utf8') } catch (err) { if (err?.code !== 'ENOENT') throw err }
     if (raw !== null) {
       let latest = null
+      let latestLine = null
       let malformedAfterStart = false
-      for (const line of raw.split('\n')) {
+      for (const [index, line] of raw.split('\n').entries()) {
         if (!line.trim()) continue
         let record
         try { record = JSON.parse(line) } catch {
           if (latest) malformedAfterStart = true
           continue
         }
-        if (record?.event === 'run-start') { latest = record; malformedAfterStart = false }
+        if (record?.event === 'run-start') { latest = record; latestLine = index + 1; malformedAfterStart = false }
       }
       if (malformedAfterStart) throw new Error('latest run-start boundary segment is malformed')
       if (latest) {
         const atMs = typeof latest.at === 'string' ? Date.parse(latest.at) : NaN
         if (!Number.isFinite(atMs)) throw new Error('latest run-start has an invalid timestamp')
         runStartedAt = new Date(atMs).toISOString()
+        runStartLine = latestLine
       }
     }
   } catch (err) { boundaryError = err }
@@ -1065,7 +1068,7 @@ function openRunInner({
     if (runStartedAt === null) return
     const health = typeof handle?.stats === 'function' ? handle.stats() : null
     if (health?.degraded && health.degraded_reason === 'below_floor') return
-    const report = ingestJournalFn(join(stateDir, 'journal.jsonl'), handle, { adw_id: adwId, since: runStartedAt })
+    const report = ingestJournalFn(join(stateDir, 'journal.jsonl'), handle, { adw_id: adwId, since: runStartedAt, from_line: runStartLine })
     if (report?.complete === false) throw new Error(report.first_failure?.reason || 'journal ingestion incomplete')
   }
   function ingestRunJournal(handle) {

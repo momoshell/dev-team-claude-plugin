@@ -1910,6 +1910,7 @@ test('RV1-2 explicit repeat journal ingestion adds no second fact row', { skip: 
     const first = ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
     const second = ingestJournal(f.journal, ledger, { adw_id: f.emitter.adwId, since: f.epoch })
     assert.equal(first.complete, true); assert.equal(second.complete, true)
+    assert.equal(first.applied > 0, true); assert.equal(second.applied, 0)
     assert.equal(ledger.dumpTable('advisor_usage').length, 1)
   } finally { ledger.close(); f.emitter.dispose() }
 })
@@ -1958,6 +1959,26 @@ test('RV1-4 torn latest journal segment never falls back to the previous run bou
   emitter.endRun({ status: 'ok' })
   assert.equal(ingests, 0); assert.ok(emitter.stats().dropped > before)
   emitter.dispose()
+})
+// MUTATION S1: bound the run segment by timestamp only (drop from_line); an earlier run's fact stamped in the run-start millisecond must stay out.
+// MUTATION S2: drop ingestJournal's from_line skip; an earlier run's torn line must not count as a drop for this run.
+test('S1 S2 endRun ingests only lines after the latest run-start by position', { skip: SKIP }, () => {
+  const stateDir = scratchDir('emit-run-segment-'), dbPath = join(stateDir, 'mirror.db'), epoch = '2030-01-01T00:00:00.000Z'
+  writeFileSync(join(stateDir, 'journal.jsonl'), [
+    '{torn-previous-run',
+    JSON.stringify({ at: epoch, advisor_usage: { consult_id: 'previous', role: 'builder', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } }),
+    JSON.stringify({ event: 'run-start', at: epoch, run_id: 'current' }),
+    JSON.stringify({ at: epoch, advisor_usage: { consult_id: 'current', role: 'builder', model: 'model-a', usage: null, usage_reason: 'usage-unavailable' } }),
+  ].join('\n') + '\n')
+  _resetNoticeGuardsForTest()
+  const emitter = openRun({ stateDir, dbPath, repoSlug: 'fixture', taskSlug: 'run-segment', now: () => Date.parse(epoch) + 5000, stderr: { write() {} } })
+  emitter.startRun()
+  const before = emitter.stats().dropped
+  emitter.endRun({ status: 'ok' })
+  assert.equal(emitter.stats().dropped, before)
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  try { assert.deepEqual(ledger.dumpTable('advisor_usage').map((r) => r.consult_id), ['current']) }
+  finally { ledger.close(); emitter.dispose() }
 })
 test('E3 ingestion failure is counted and still closes ledger handle', () => {
   let ended = false, closed = false

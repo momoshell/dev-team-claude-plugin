@@ -37,9 +37,9 @@
   "test/factory-ledger-cli.test.mjs:328": "payload.until, '2026-08-21T01:00:00.000Z'",
   "scripts/factory/ledger.mjs:524": "export const CI_DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:4251": "requireEnum(input.decision, CI_DECISIONS",
-  "scripts/factory/ledger.mjs:8026": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:7989": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:8034": "unknown flag --${name}",
-  "scripts/factory/emit.mjs:1606": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:9696": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:8029": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:7992": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:8037": "unknown flag --${name}",
+  "scripts/factory/emit.mjs:1609": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:9699": "unknown verb: ${verb}"
 }

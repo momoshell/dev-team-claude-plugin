@@ -444,9 +444,9 @@ export function startServer(options = {}) {
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const ship = config.shipState || createShipStateResolver({ journalSource: journal, fetchImpl: config.fetchImpl, token: env.GITHUB_TOKEN, apiUrl: env.DEVTEAM_GITHUB_API_URL, repository: env.GITHUB_REPOSITORY })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
-  const workflows = config.workflows || createWorkflowsSource({ root: config.checkout, feed, variants: VARIANTS, rosterPath: config.rosterPath, docsPath: config.workflowsDocsPath })
+  const workflows = config.workflows || createWorkflowsSource({ root: config.checkout, pluginRoot: PROJECT_ROOT, feed, variants: VARIANTS, rosterPath: config.rosterPath, docsPath: config.workflowsDocsPath })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
-  const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, crewRoot: config.crewRoot })
+  const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
   const openRouterCatalog = config.openRouterCatalog || createOpenRouterCatalog({ fetchImpl: config.fetchImpl })
   const readModelCatalog = async () => {
     const [openRouter, artificialAnalysis] = await Promise.all([openRouterCatalog.get(), modelCatalog.get()])

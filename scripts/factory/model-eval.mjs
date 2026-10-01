@@ -797,6 +797,7 @@ export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, de
   // with its denominators, but the result cannot read ok:true.
   const degradedSeats = seat_reports.filter((seat) => seat.stored_error != null).map((seat) => seat.seat)
   const hasStoredError = degradedSeats.length > 0
+  const refusedSeats = seat_reports.filter((seat) => seat.refusal != null).map((seat) => seat.seat)
   let policy = null
   let policyHash = null
   let policyError = null
@@ -936,7 +937,7 @@ export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, de
         detail: `provisioned sweep left ${missing.length} candidate model(s) without exactly one real cell`,
       }
   }
-  const ok = proposal.ok === true && provisioned_check.ok !== false && !hasStoredError
+  const ok = proposal.ok === true && provisioned_check.ok !== false && !hasStoredError && refusedSeats.length === 0
   return {
     schema: 1,
     mode: 'all-seats',
@@ -953,6 +954,7 @@ export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, de
     candidate_rows,
     stored_absences,
     stored_ledger: hasStoredError ? { ok: false, reason: 'ledger-degraded', seats: degradedSeats } : { ok: true },
+    admission: refusedSeats.length > 0 ? { ok: false, reason: 'bench-refused', seats: refusedSeats } : { ok: true },
     proposal,
     provisioned_check,
     cell_health: { value: null, reason: 'breaker-unconfigured' },

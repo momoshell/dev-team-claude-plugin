@@ -216,7 +216,7 @@ function slashVerdict(prev) {
   return 'regex-in-operand-position'
 }
 
-function maskCode(source) {
+function maskCode(source, literals = null) {
   const text = String(source)
   const out = text.split('')
   const lineOf = (at) => text.slice(0, at).split('\n').length
@@ -231,7 +231,7 @@ function maskCode(source) {
   while (i < text.length) {
     if (mode === 'template') {
       if (text[i] === '\\') { out[i] = ' '; if (i + 1 < text.length) blankAt(i + 1); i += 2; continue }
-      if (text[i] === '`') { out[i] = ' '; i += 1; mode = 'code'; prev = { kind: 'value', text: '`' }; continue }
+      if (text[i] === '`') { if (literals) literals.push([templateStart, i + 1]); out[i] = ' '; i += 1; mode = 'code'; prev = { kind: 'value', text: '`' }; continue }
       if (text[i] === '$' && text[i + 1] === '{') {
         out[i] = ' '; out[i + 1] = ' '; i += 2
         substitutions.push({ braces: 0 })
@@ -272,7 +272,7 @@ function maskCode(source) {
         blankAt(i); i += 1
       }
       if (!closedString) refuseMask(start, 'an unterminated string literal')
-      prev = { kind: 'value', text: quote }
+      if (literals) literals.push([start, i]); prev = { kind: 'value', text: quote }
       continue
     }
     if (MASK_WORD.test(ch)) {
@@ -1057,4 +1057,48 @@ test("RV1-1 a side-effect package import before a from-import is still refused",
 test("RV1-2 a quoted word in a trailing comment is not an import specifier", () => {
   assert.deepEqual(importSpecifiers("import './a.js' // moved from 'pkg'\n"), ["./a.js"])
   assert.deepEqual(importSpecifiers("import {\n  a,\n  b,\n} from './multi.js'\n"), ["./multi.js"])
+})
+
+const PLUGIN_PATH_CENSUS = Object.freeze({
+  'crew/adapters/adapter-claude.mjs': Object.freeze({ sites: 1, why: 'root is plugin/task dir' }),
+  'crew/crew-test-helpers.mjs': Object.freeze({ sites: 6, why: 'fixture construction' }),
+  'crew/crew.mjs': Object.freeze({ sites: 1, why: 'checkout entry matcher also admits own module' }),
+  'crew/drive.mjs': Object.freeze({ sites: 5, why: 'real deferred R1 bugs; b1051 owns file' }),
+  'crew/pi/acp-bridge.mjs': Object.freeze({ sites: 1, why: 'repo already module anchored' }),
+  'scripts/factory/closeout.mjs': Object.freeze({ sites: 1, why: 'operator hint deferred' }),
+  'scripts/factory/dispatch-batch.mjs': Object.freeze({ sites: 2, why: 'operator hint plus target skills-anchor read' }),
+  'scripts/factory/seat-priors.mjs': Object.freeze({ sites: 2, why: 'provenance text' }),
+})
+const PLUGIN_PATH_SITE = /\b(?:join|resolve|resolvePath)\s*\(\s*(?:checkout|root|repo|repoRoot|cwd|process\.cwd\s*\(\s*\)|deps\.cwd\s*\?\?\s*process\.cwd\s*\(\s*\))\s*,\s*['"`](?:crew|scripts|skills|test|docs|visualizer)(?:\/|['"`])|['"`]node (?:scripts|skills)\//g
+function maskCommentsPreservingLiterals(source) {
+  const spans = []
+  const masked = maskCode(source, spans).split('')
+  for (const [start, end] of spans) for (let i = start; i < end; i += 1) masked[i] = source[i]
+  return masked.join('')
+}
+function pluginPathSites(source) {
+  return [...maskCommentsPreservingLiterals(source).matchAll(PLUGIN_PATH_SITE)].length
+}
+// MUTATION: restoring a relative ledger query adds a non-census memory path site.
+test('G1 tracked masked plugin path census and detector controls', () => {
+  const files = trackedFiles(ROOT).filter((file) => /^(?:crew|scripts)\//.test(file) && /\.(?:mjs|ts)$/.test(file) && !file.endsWith('.test.mjs'))
+  const counts = {}
+  for (const file of files) {
+    const sites = pluginPathSites(readFileSync(join(ROOT, file), 'utf8'))
+    if (sites) counts[file] = sites
+  }
+  const expected = Object.fromEntries(Object.entries(PLUGIN_PATH_CENSUS).map(([file, entry]) => [file, entry.sites]))
+  console.log(`G1 scanned ${files.length} files; found ${Object.values(counts).reduce((sum, sites) => sum + sites, 0)} sites`)
+  assert.deepEqual(counts, expected)
+  assert.deepEqual(Object.values(PLUGIN_PATH_CENSUS).map(({ sites }) => sites).reduce((a, b) => a + b, 0), 19)
+  for (const shape of [
+    "join(root, 'crew/crew.mjs')", 'resolve(checkout, "scripts/factory/ledger.mjs")',
+    "resolvePath(repoRoot, 'skills/x')", "join(process.cwd(), 'docs/x')",
+    "join(deps.cwd ?? process.cwd(), 'visualizer/x')", "join(cwd, `test/fixtures/x`)",
+    "const cmd = 'node scripts/factory/ledger.mjs task'", "const cmd = `node skills/crew-dispatch/dispatch-batch.mjs`",
+  ]) assert.equal(pluginPathSites(shape), 1, shape)
+  for (const comment of ["// join(root, 'crew/crew.mjs')", "/* join(root, 'crew/crew.mjs') */", "/** join(root, 'crew/crew.mjs') */"]) assert.equal(pluginPathSites(comment), 0)
+  assert.equal(pluginPathSites(`const s = "https://host/a"; const apostrophe = "it's // literal"; join(root, 'crew/x')`), 1)
+  assert.equal(pluginPathSites("const nothing = join(root, 'package.json')"), 0)
+  assert.equal(pluginPathSites(readFileSync(join(ROOT, 'crew/memory.mjs'), 'utf8')), 0)
 })

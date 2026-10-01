@@ -10,8 +10,8 @@
 // mechanical brief oracle. Prose outside that block is never interpreted.
 //
 // NO IDENTITY IN THE SOURCE
-// Board, repository, and task names arrive as arguments. Every path resolves
-// from the caller's checkout or process.cwd().
+// Board, repository, and task names arrive as arguments. Target paths resolve
+// from the caller's checkout or process.cwd(); the crew entrypoint is plugin-owned.
 
 import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -20,6 +20,7 @@ import {
   writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
   } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   INTAKE_REFUSALS, INTAKE_OUTCOMES, openLedger,
 } from './ledger.mjs'
@@ -27,6 +28,8 @@ import {
   BriefUsageError, discoverTripwires, proposeTier, renderBrief, resolveWriteSurface,
   validateRequest, verifyWhere,
 } from './make-brief.mjs'
+
+const CREW_PATH = fileURLToPath(new URL('../../crew/crew.mjs', import.meta.url))
 
 export const INTAKE_BLOCK_KEYS = Object.freeze(['ask', 'where', 'done-means', 'out-of-scope'])
 // These values are defaults for callers that have no board configuration. A
@@ -492,7 +495,7 @@ function defaultBranchFor(d, { checkout } = {}) {
 
 function defaultCrewBoot(d, { task, checkout, tier } = {}) {
   const root = resolve(typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd())
-  const argv = [join(root, 'crew', 'crew.mjs'), 'boot', '--task', task, '--checkout', root, '--tier', tier]
+  const argv = [CREW_PATH, 'boot', '--task', task, '--checkout', root, '--tier', tier]
   try {
     const result = d.spawnSync(process.execPath, argv, { cwd: root, encoding: 'utf8' })
     return {
@@ -508,7 +511,7 @@ function defaultCrewBoot(d, { task, checkout, tier } = {}) {
 function defaultCrewRun(d, { task, checkout, briefPath, variant } = {}) {
   const root = resolve(typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd())
   const argv = [
-    join(root, 'crew', 'crew.mjs'), 'run', '--task', task, '--checkout', root,
+    CREW_PATH, 'run', '--task', task, '--checkout', root,
     '--brief-file', briefPath, '--variant', variant, '--keep',
   ]
   try {

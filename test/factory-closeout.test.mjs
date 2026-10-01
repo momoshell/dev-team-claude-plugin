@@ -12,9 +12,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { ROOT, scratchDir } from './helpers.mjs'
 import {
   AMBIGUOUS_MARK,
@@ -2337,4 +2338,49 @@ test('ingest-all drops a store on a mirror error even when a validation failure 
   assert.equal(result.code, 1)
   assert.equal(calls, 1, 'the second lane on the divergent store is never ingested')
   assert.equal(result.report.skipped_by_reason.store_drift, 1)
+})
+
+function initForeignCheckout() {
+  const checkout = scratchDir('closeout-foreign-checkout-')
+  execFileSync('git', ['init', '-q', checkout])
+  return checkout
+}
+function assertPluginLedgerCall(call, checkout) {
+  const expected = fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url))
+  assert.equal(call.args[0], expected)
+  assert.equal(existsSync(call.args[0]), true)
+  assert.equal(isAbsolute(call.args[0]), true)
+  assert.equal(call.cwd, checkout)
+}
+// MUTATION: restore the foreign-checkout ledger path for reap turns.
+test('P3 foreign checkout reap reads turns with the plugin ledger CLI', () => {
+  const fixture = turnsFixture('closeout-foreign-turns-', { checkoutName: 'foreign', adwId: 'foreign-adw' })
+  const { checkout, home, crewDir } = fixture
+  const calls = []
+  execFileSync('git', ['init', '-q', checkout])
+  put(join(crewDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: '2026-09-04T06:04:46.127Z' })}\n`)
+  reap({ lanes: [lane], checkout, deps: { home, log() {}, promptMeasurePath: join(home, 'pending.json'), openLedger: () => ({ degraded: false, close() {} }), ingestJournal: () => ({ complete: true }), renameSync() {}, rmSync() {}, spawn: (call) => {
+    calls.push(call)
+    if (call.file === 'gh') return { status: 0, stdout: JSON.stringify({ number: 1, state: 'MERGED', body: '' }) }
+    return { status: 0, stdout: JSON.stringify({ schema: 1, absent: null, turns: 20, dispatches_measured: 2 }) }
+  } } })
+  const turns = calls.find((call) => call.args[0] === fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url)) && call.args[1] === 'turns')
+  assert.ok(calls.length > 0)
+  assert.ok(turns)
+  assertPluginLedgerCall(turns, checkout)
+})
+// MUTATION: restore the foreign-checkout ledger path for prompt metrics.
+test('P4 foreign checkout prompt metrics use the plugin ledger CLI', () => {
+  const checkout = initForeignCheckout(), state = scratchDir('closeout-foreign-prompt-'), calls = []
+  const queuePath = join(state, 'pending.json')
+  put(queuePath, JSON.stringify({ schema: 1, records: [promptRecord({ lane: 'foreign-task', pr_number: 1, before: { value: 9, denominator: 12 } })] }))
+  const deps = normalDeps({ promptMeasurePath: queuePath, defaultDbPath: () => join(state, 'ledger.db'), spawn: (call) => {
+    calls.push(call)
+    return { status: 0, stdout: JSON.stringify(call.file === 'gh' ? { files: [{ path: 'crew/roles/planner.md' }], mergedAt: '2026-09-14T08:00:00Z' } : { schema: 1, rows: [{ first_round_passes: 9, first_round_reviews: 12 }], absent: {} }) }
+  } })
+  reapPromptMeasures({ lane: 'foreign-task', root: checkout, pr: { number: 1, checkout, body: '' }, deps })
+  const metric = calls.find((call) => call.args[0] === fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url)))
+  assert.ok(calls.length > 0)
+  assert.ok(metric)
+  assertPluginLedgerCall(metric, checkout)
 })

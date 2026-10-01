@@ -3,13 +3,17 @@
 // text with included/dropped byte accounting. recall and embeddings are rung 2
 // and are not part of this seam.
 import { openMarkdownMemory } from './memory-md.mjs'
+import { fileURLToPath } from 'node:url'
+
+const LEDGER_PATH = fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url))
+const LEDGER_CLI_SHELL = `'${LEDGER_PATH.replaceAll("'", "'\\''")}'`
 
 export const DEFAULT_BACKEND = 'markdown'
 export const DEFAULT_BUDGET_BYTES = 8000
 
-const TASK_QUERY = 'node scripts/factory/ledger.mjs task <adw_id|task_slug>'
-const SESSIONS_QUERY = 'node scripts/factory/ledger.mjs sessions'
-const RUN_SET_QUERY = 'node scripts/factory/ledger.mjs run-set --since <iso>'
+const TASK_QUERY = `node ${LEDGER_CLI_SHELL} task <adw_id|task_slug>`
+const SESSIONS_QUERY = `node ${LEDGER_CLI_SHELL} sessions`
+const RUN_SET_QUERY = `node ${LEDGER_CLI_SHELL} run-set --since <iso>`
 export const LEDGER_QUERIES_DOC = 'docs/ledger-queries.md'
 
 // The battery is deliberately narrow. Every rule demands a concrete run-scoped token —

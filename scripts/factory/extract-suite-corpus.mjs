@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { shellToolCalls, recogniseSuiteInvocation, suiteRunPolicy, splitShellCommands } from '../../crew/headless.mjs'
 
+const REFERENCE_PATH = fileURLToPath(new URL('../../test/fixtures/suite-policy-corpus.jsonl', import.meta.url))
 const SUITE_COMMAND = 'npm test'
 const SAMPLE_PREFIXES = Object.freeze(['00', '01', '02', '03'])
 const DECISION_KEYS = Object.freeze(['lead', 'planner', 'builder'])
@@ -587,7 +588,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     const args = parseArgs(argv)
     const machineHome = deps.home ?? homedir()
     const sourceRoot = args.sourceRoot ?? join(homedir(), '.crew')
-    const referencePath = args.referencePath ?? join(deps.cwd ?? process.cwd(), 'test/fixtures/suite-policy-corpus.jsonl')
+    const referencePath = args.referencePath ?? REFERENCE_PATH
     const outPath = args.outPath ?? null
     const extraction = extractSuiteCorpus({ sourceRoot, home: machineHome, extractedAt: args.date ?? undefined, io })
     const text = extraction.text

@@ -19,6 +19,7 @@ import { homedir, tmpdir } from 'node:os'
 import { stripVTControlCharacters } from 'node:util'
 import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   collectAnchorPins,
   crewJsonPath,
@@ -32,6 +33,8 @@ import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
+
+const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
 
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
 // read is indistinguishable from a failure without it.
@@ -587,7 +590,7 @@ function reapTurnEconomy({ lane, laneDir, root, deps }) {
   const ingest = safeReapIngest({ journalPath: context.journalPath, identity: context.identity, deps: d, since: context.since })
   const command = {
     file: 'node',
-    args: [join(root, 'scripts/factory/ledger.mjs'), 'turns', '--adw-id', context.identity.adw_id, '--since', window.since, '--until', window.until],
+    args: [LEDGER_PATH, 'turns', '--adw-id', context.identity.adw_id, '--since', window.since, '--until', window.until],
     cwd: root,
     env: { ...process.env, DEVTEAM_LEDGER_DB: context.identity.db_path },
   }
@@ -699,7 +702,7 @@ function promptMetricCommand({ measure, mergedAt, direction, root, deps }) {
   if (typeof dbPath !== 'string' || dbPath.trim() === '') return promptMetricFailure('ledger-path-unavailable: default path is absent')
   const command = {
     file: 'node',
-    args: [join(root, 'scripts/factory/ledger.mjs'), verb, direction === 'before' ? '--until' : '--since', mergedAt],
+    args: [LEDGER_PATH, verb, direction === 'before' ? '--until' : '--since', mergedAt],
     cwd: root,
     env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath },
   }

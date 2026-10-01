@@ -9274,13 +9274,13 @@ function runTask(ctx, io, crash) {
         && inflight.original_sha256 === sha(preProof) && inflight.mutant_sha256 === sha(live)
       try {
         for (const [index, path] of built.changed.entries()) {
-          const cell = current.cells.get(path)
+          const cell = current.cells.get(path) || { state: 'absent', bytes: null }
           if (!cell || cell.state === 'unreadable') throw new Error(`current snapshot state is unverifiable for ${path}`)
           const snapshotPath = diffSnapshotName(round, index, 'current', path)
           const snapshot = io.readFile(snapshotPath)
           if (snapshot === null || snapshot === undefined) throw new Error(`current task snapshot is unavailable for ${path}`)
           const bytes = Buffer.isBuffer(snapshot) || snapshot instanceof Uint8Array || typeof snapshot === 'string' ? snapshot : null
-          if (!bytes) throw new Error(`current task snapshot is unreadable for ${path}`)
+          if (bytes === null) throw new Error(`current task snapshot is unreadable for ${path}`)
           if (cell.state === 'present' && !diffBytesEqual(bytes, cell.bytes)) throw new Error(`current task snapshot does not match pre-run bytes for ${path}`)
           if (cell.state === 'absent' && Buffer.from(bytes).length !== 0) throw new Error(`absent current task snapshot is not empty for ${path}`)
           if (typeof io.lstat !== 'function') throw new Error(`target type is unverifiable for ${path}`)
@@ -9289,7 +9289,9 @@ function runTask(ctx, io, crash) {
           const components = path.split('/')
           for (let depth = 1; depth < components.length; depth += 1) {
             const parent = components.slice(0, depth).join('/')
-            if (io.lstat(`${ctx.checkout}/${parent}`)?.type !== 'directory') throw new Error(`unsafe diff target parent ${parent} for ${path}`)
+            const parentMeta = io.lstat(`${ctx.checkout}/${parent}`)
+            if (cell.state === 'absent' && parentMeta === null) break
+            if (parentMeta?.type !== 'directory') throw new Error(`unsafe diff target parent ${parent} for ${path}`)
           }
           const metadata = io.lstat(`${ctx.checkout}/${path}`)
           if (cell.state === 'absent') {
@@ -9311,6 +9313,16 @@ function runTask(ctx, io, crash) {
         io.log(recordRow({ at: io.now(), diff_proof_restored: diffMutationReport.diff_proof_restored }))
       } catch (err) {
         diffMutationReport.fatal = { reason: 'tree-not-restored', why: `runner-unavailable snapshot recovery failed: ${err?.message ?? String(err)}` }
+        if (inflight && typeof inflight === 'object' && !Array.isArray(inflight)
+          && inflight.generation === gateGeneration && built.changed.includes(inflight.path)
+          && Number.isInteger(inflight.line) && inflight.line >= 1
+          && typeof inflight.find === 'string' && typeof inflight.replace === 'string') {
+          diffMutationReport.fatal.possibly_applied = [{ file: inflight.path, line: inflight.line, find: inflight.find, replace: inflight.replace }]
+          diffMutationReport.fatal.why += `; possibly applied: ${inflight.path}:${inflight.line}`
+        } else {
+          diffMutationReport.fatal.possibly_applied = null
+          diffMutationReport.fatal.possibly_applied_absent = 'no-inflight-record'
+        }
         journalDiffMutation()
         diffMutationReports.push(diffMutationReport)
         gateProofFatal = `tree-not-restored: ${diffMutationReport.fatal.why}`

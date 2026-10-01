@@ -1119,7 +1119,7 @@ export async function runDiffMutationProof(config, deps = {}) {
           else {
             writeAttempted = true
             if (typeof deps.inflightPath === 'string') {
-              d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
+              d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, line: candidate.line, find: candidate.original, replace: candidate.replacement, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
             }
             d.writeFile(guardWrite.abs, reapplied.bytes)
             const remaining = () => Math.max(0, totalDeadline - now())

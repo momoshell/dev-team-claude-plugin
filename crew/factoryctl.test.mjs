@@ -1398,6 +1398,18 @@ test('F1 base branch: pending containment uses origin/dispute despite stale orig
   const query = result.calls.find(({ argv }) => argv.includes('merge-base'))
   assert.ok(query); assert.ok(query.argv.includes('origin/dispute')); assert.equal(result.output.counts.published, 1)
 })
+// MUTATION F2: drop the unresolved-base guard in classifyTerminal; an unratified profile must report unknown, never pending.
+test('F2 pending reports an unresolved base as unknown with a closed reason', () => {
+  const result = pendingUnit({ specs: [{ name: 'feature', text: `${JSON.stringify({ status: 'done', commit: 'feature-commit' })}\n` }], branches: { 'feature-commit': 'feature' }, baseBranch: () => { throw new Error('profile-unratified') } })
+  assert.equal(result.output.counts.pending, 0); assert.equal(result.output.counts.unknown, 1)
+  assert.equal(result.output.rows[0].reason, 'base-unresolved')
+})
+// MUTATION F3: take the first listed remote again; with backup listed before origin, containment must still use origin.
+test('F3 pending containment prefers origin over an earlier listed remote', () => {
+  const result = pendingUnit({ specs: [{ name: 'feature', text: `${JSON.stringify({ status: 'done', commit: 'feature-commit' })}\n` }], branches: { 'feature-commit': 'feature' }, merged: new Set(['feature-commit']), remote: 'backup\norigin' })
+  const query = result.calls.find(({ argv }) => argv.includes('merge-base'))
+  assert.ok(query); assert.ok(query.argv.includes('origin/main')); assert.equal(result.output.counts.published, 1)
+})
 test('pending base branch refusal and absent remote fail closed', () => {
   for (const options of [
     { baseBranch: () => { throw new Error('profile-unratified') } },

@@ -5,7 +5,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
-  statSync, writeFileSync,
+  statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
@@ -1141,4 +1141,8 @@ test('R5 present malformed profile refuses unreadable', () => {
   assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: path }), e => e.reason === 'profile-unreadable')
   // MUTATION: treat every stat error as absent; ENOTDIR must refuse, never default to main.
   assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: join(path, 'nested.json') }), e => e.reason === 'profile-unreadable')
+  // MUTATION R6: probe presence with statSync again; a dangling profile symlink must refuse, never default to main.
+  const dangling = join(root, 'dangling-profile.json')
+  symlinkSync(join(root, 'missing-target.json'), dangling)
+  assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: dangling }), e => e.reason === 'profile-unreadable')
 })

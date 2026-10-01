@@ -30,7 +30,7 @@ import {
   createHash,
 } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import {
@@ -1132,7 +1132,7 @@ export function isPlainBranchName(value) {
 export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot } = {}) {
   const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
   let present = false
-  try { statSync(path); present = true } catch (error) {
+  try { lstatSync(path); present = true } catch (error) {
     if (error?.code !== 'ENOENT') throw new ProfileRefusal(`cannot inspect base branch profile · ${path}`, 'profile-unreadable')
   }
   if (!present) return { branch: 'main', basis: `default base branch main · no profile at ${path}` }

@@ -592,8 +592,8 @@ export function gitRunner(d, repo) {
 function remoteName(git) {
   const listed = git('remote')
   if (listed.status !== 0) return null
-  const first = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)[0]
-  return first || null
+  const names = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
+  return names.includes('origin') ? 'origin' : (names[0] || null)
 }
 
 function localName(branch) { return typeof branch === 'string' ? branch.replace(/^[^/]+\//, '') : branch }
@@ -687,6 +687,13 @@ function classifyTerminal({ task, terminal, doneAt, ctx, source }) {
   }
   const commit = terminal.commit
   const known = ctx.git('cat-file', '-e', `${commit}^{commit}`).status === 0
+  // Without a resolved base nothing can say whether the commit already landed: unknown, never pending.
+  if (!ctx.base) {
+    return {
+      kind: 'unknown', reason: 'base-unresolved',
+      row: { lane: task, commit, branch: PENDING_UNKNOWN, issue: PENDING_UNKNOWN, done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN, state: 'unknown', reason: 'base-unresolved', source },
+    }
+  }
   const branch = known ? resolveBranch(ctx.git, commit, task, ctx.base) : PENDING_UNKNOWN
   if (known && ctx.base && ctx.git('merge-base', '--is-ancestor', commit, ctx.base).status === 0) {
     return { kind: 'skip', reason: 'merged' }

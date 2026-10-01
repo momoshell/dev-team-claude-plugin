@@ -717,8 +717,9 @@ async function defaultReadStoredRows({ ledger, benches = [] } = {}) {
 export async function runAllSeats({ provisioned = false, checkout = CHECKOUT, deps = {} } = {}) {
   const source = deps && typeof deps === 'object' && !Array.isArray(deps) ? deps : {}
   const nd = normalDeps(source)
-  const runBenchFn = typeof source.runBench === 'function' ? source.runBench : runBench
-  const readMetaFn = typeof source.readBenchMeta === 'function' ? source.readBenchMeta : (dir) => readBenchMeta(dir)
+  const root = resolve(String(checkout))
+  const runBenchFn = typeof source.runBench === 'function' ? source.runBench : (args) => runBench({ ...args, dir: resolve(root, args.dir) })
+  const readMetaFn = typeof source.readBenchMeta === 'function' ? source.readBenchMeta : (dir) => readBenchMeta(resolve(root, dir))
   const readStoredRows = typeof source.readStoredRows === 'function' ? source.readStoredRows : defaultReadStoredRows
   const readRosterText = typeof source.readRosterText === 'function' ? source.readRosterText : () => readFileSync(ROSTER, 'utf8')
   const rosterPath = source.rosterPath ?? ALL_SEATS_ROSTER_PATH

@@ -15,7 +15,7 @@ import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { fingerprintTree } from './tree-fingerprint.mjs'
+import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT } from '../test/helpers.mjs'
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
 const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
@@ -87,7 +87,7 @@ test('RV1-2 full reorder pins the same refusal as every other shape', () => {
 // crew/reclaim-descendants.test.mjs or test/visualizer-shape.test.mjs moves both
 // values, and literal replacements then silently no-op (b740, b741).
 const frozenSourcePair = () => {
-  const current = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const current = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const committed = current
     .replace(/crew\/reclaim-descendants\.test\.mjs:(\d+)/, (_, line) => `crew/reclaim-descendants.test.mjs:${Number(line) === 820 ? 821 : 820}`)
     .replace(/('test\/visualizer-shape\.test\.mjs': ')([0-9a-f]{64})'/, (_, key, hash) => `${key}${hash === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64)}'`)
@@ -2872,7 +2872,7 @@ test('E1 run-level refusal row passes ledger enum validation', () => {
 })
 
 test('RV2-1 keeps the literal ledger edge and census carrier aligned', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive-build.test.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive-build.test.mjs`, 'utf8')
   const literalImport = `import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../${['scripts', 'factory', 'ledger.mjs'].join('/')}'`
   assert.ok(source.includes(literalImport))
 })
@@ -4729,7 +4729,7 @@ function censusDriveIo(censusOutputs, { ctx = {}, publish = false, changed = ['a
 }
 
 function gitPaths(args) {
-  const result = spawnSync('git', args, { cwd: process.cwd(), encoding: 'utf8' })
+  const result = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' })
   const output = String(result.stdout || '')
   return { status: result.status, paths: (output.includes('\0') ? output.split('\0') : output.split(/\r?\n/)).filter(Boolean) }
 }
@@ -5011,7 +5011,7 @@ test('C1 census prefilter tripwire names an unlisted candidate', () => {
 
 test('census register covers every literal tracked census-shaped test', () => {
     // The pre-filter is a LITERAL substring scan, so a suite that enumerates the checkout through a helper, an imported constant or a command built at run time is invisible to it. Silence from this check is not a complete census of census suites.
-    const selected = selectCensusExhibits({ checkout: process.cwd() })
+    const selected = selectCensusExhibits({ checkout: ROOT })
     const remedy = 'add a CENSUS_EXHIBIT_REGISTER entry with its kind and reason'
     const failure = selected.defects.map(({ file }) => `${file}: ${remedy}`).join('\n')
     assert.equal(selected.reason, null, failure || `census exhibit selection failed: ${selected.reason}`)
@@ -5411,7 +5411,7 @@ test('F2 file admitted before witness capture forces fresh discrimination', () =
 })
 
 test('reported-only proof inventory validates entries and never inserts exact scope literals', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const start = source.indexOf('  const compareProofTree = () => {')
   const end = source.indexOf('  const mutationLabel =', start)
   const compare = source.slice(start, end)
@@ -5501,8 +5501,8 @@ test('J1 census module is tracked before census measurement', () => {
 
 test('J2 edited test comment parity matches HEAD', () => {
   for (const file of ['crew/drive-build.test.mjs', 'skills/crew-dispatch/exhibits.test.mjs']) {
-    const currentParity = commentParity(readFileSync(`${process.cwd()}/${file}`, 'utf8'))
-    const head = spawnSync('git', ['show', `HEAD:${file}`], { cwd: process.cwd(), encoding: 'utf8' })
+    const currentParity = commentParity(readFileSync(`${ROOT}/${file}`, 'utf8'))
+    const head = spawnSync('git', ['show', `HEAD:${file}`], { cwd: ROOT, encoding: 'utf8' })
     assert.equal(head.status, 0)
     const headParity = commentParity(head.stdout)
     assert.equal(currentParity, headParity, file)
@@ -5510,10 +5510,10 @@ test('J2 edited test comment parity matches HEAD', () => {
 })
 
 test('RV2-1 keeps the H1 floor check task-local', () => {
-  const testSource = readFileSync(`${process.cwd()}/crew/drive-build.test.mjs`, 'utf8')
+  const testSource = readFileSync(`${ROOT}/crew/drive-build.test.mjs`, 'utf8')
   const retired = ['H1 drive diff changes only below line ', String(5443)].join('')
   assert.equal(testSource.includes(`test('${retired}'`), false)
-  const driverSource = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const driverSource = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   assert.equal(driverSource.includes("export const CENSUS_UNREADABLE = 'census-unreadable'"), true)
 })
 
@@ -6387,7 +6387,7 @@ test('C1 a genuinely vacuous gate is still caught before commit', () => {
 })
 
 test('B1 all four post-commit suite re-entry sites retain explicit committed provenance', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const branch = (start, end) => {
     const from = source.indexOf(start)
     const to = source.indexOf(end, from + start.length)
@@ -6405,13 +6405,13 @@ test('B1 all four post-commit suite re-entry sites retain explicit committed pro
 })
 
 test('D1 committed rebase provenance is explicit and not inferred', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const boundary = '    S.commit = continuedHead\n    committedBaseline = true\n    pendingRebaseConflict = null'
   assert.equal(source.split(boundary).length - 1, 1)
 })
 
 test('RV1-1 post-reset refresh requires retained-continuation provenance', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const start = source.indexOf('      let postRebaseProof')
   const end = source.indexOf('      if (postRebaseProofThrown !== null) {', start)
   assert.ok(start >= 0 && end > start)
@@ -6436,7 +6436,7 @@ test('B2 frozen inventory repair permits only one re-entry', () => {
 })
 
 test('C1 frozen inventory repair refuses detector regex and warranty logic edits', () => {
-  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const source = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const digest = '7d7c508c980cd5b7be2b9952bdc37b7e76a759b77f8e6c93db117c600a3ddb8f'
   const replacementDigest = '0ffdacdc5f084cb66b620ae9cd84c2b237f752f7c308803e8ea478b02a64d172'
   const contexts = [
@@ -6466,7 +6466,7 @@ test('C1 frozen inventory repair refuses detector regex and warranty logic edits
 })
 
 test('D1 frozen inventory repair refuses audited identity changes', () => {
-  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const source = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const identity = frozenAuditedIdentity(source, 'io.fingerprintTree')
   const identityChanges = [
     source.replace(identity, `${identity} /* test/decoy.mjs:17 */`),
@@ -6480,7 +6480,7 @@ test('D1 frozen inventory repair refuses audited identity changes', () => {
     assert.equal(result.action, 'refuse')
     assert.equal(result.reason, 'identity')
   }
-  const factory = readFileSync(FROZEN_FACTORY_ENV_FILE, 'utf8')
+  const factory = readFileSync(join(ROOT, FROZEN_FACTORY_ENV_FILE), 'utf8')
   const factoryEntry = "['crew/arms.test.mjs', frozenTempSites(1)],"
   for (const current of [
     factory.replace(factoryEntry, ''),
@@ -6535,7 +6535,7 @@ test('F1 frozen inventory repair is journaled and returned on the envelope', () 
 })
 
 test('frozen repair keeps pending verification across review bounce and reviewer auto-fix', () => {
-  const source = readFileSync(FROZEN_INVENTORY_FILE, 'utf8')
+  const source = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const identity = frozenAuditedIdentity(source, 'io.fingerprintTree')
   const autoFinding = { ...D_AUTO, patch: D_AUTO.patch }
   const scenarios = [
@@ -7354,7 +7354,7 @@ test('D1 settle-time inventory fatals are journalled', () => {
 })
 
 test('D2 settle-time fatal reports remain retained for aggregation', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   for (const marker of ['diff inventory could not be refreshed', 'checkout inventory changed while proving diff generation']) {
     const markerAt = source.indexOf(marker)
     assert.notEqual(markerAt, -1)
@@ -7380,7 +7380,7 @@ test('E1 unchanged settle-time inventory settles and advances its baseline', () 
 })
 
 test('F1 driver keeps the mutation runner behind the scripts import firewall', () => {
-  const source = readFileSync(`${process.cwd()}/crew/drive.mjs`, 'utf8')
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const staticImportSpecifiers = (text) => [...String(text).matchAll(/^import\s+(?:[^'"\n]*?\s+from\s+)?['"]([^'"]+)['"]/gm)].map((match) => match[1])
   const hasScriptsImport = (text) => staticImportSpecifiers(text).some((specifier) => specifier.includes('scripts/'))
   assert.deepEqual(staticImportSpecifiers(source).filter((specifier) => specifier.includes('scripts/')), [])

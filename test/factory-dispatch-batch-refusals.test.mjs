@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'; import { ROOT } from './helpers.mjs'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -198,7 +198,7 @@ test('E1', () => {
     text: warning.text,
   })
   assert.equal(persisted.blind_spots['census-carrier'], CENSUS_CARRIER_BLIND_SPOT)
-  const doctrine = readFileSync(join(process.cwd(), 'skills/crew-dispatch/references/batch.md'), 'utf8')
+  const doctrine = readFileSync(join(ROOT, 'skills/crew-dispatch/references/batch.md'), 'utf8')
   assert.equal(doctrine.split(CENSUS_CARRIER_BLIND_SPOT).length - 1, 1)
 })
 

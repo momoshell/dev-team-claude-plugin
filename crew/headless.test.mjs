@@ -2252,7 +2252,7 @@ test('#887 reads a rejected reset in unix seconds and rejects unreadable values'
   const noReset = parseStream('/fixture/no-reset-field.jsonl', () => `${JSON.stringify(missing)}\n${base}`, () => true)
   assert.deepEqual(noReset.providerReset, { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_RESET_FIELD })
 
-  const allowedFrame = readFileSync(join(process.cwd(), 'tasks/headless-worker/captures/a-baseline.jsonl'), 'utf8').split('\n').find((line) => {
+  const allowedFrame = readFileSync(join(ROOT, 'tasks/headless-worker/captures/a-baseline.jsonl'), 'utf8').split('\n').find((line) => {
     try { return JSON.parse(line)?.type === 'rate_limit_event' && JSON.parse(line).rate_limit_info?.status === 'allowed' } catch { return false }
   })
   assert.ok(allowedFrame)
@@ -4577,10 +4577,10 @@ function repairSharedStage(name) {
 
 test('repairshared/C1 exactly one repair owner with both readers delegating', () => {
   const scanner = ['function repair', 'JsonStringControls'].join('')
-  assert.equal(absenceFailure({ needle: scanner, paths: ['crew/headless.mjs', 'crew/seat-io.mjs'] }), null)
-  assert.equal(gitGrepHits({ needle: scanner, paths: ['crew/envelope-repair.mjs'] }).count, 1)
-  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/headless.mjs'] }).count >= 1)
-  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/seat-io.mjs'] }).count >= 1)
+  assert.equal(absenceFailure({ needle: scanner, paths: ['crew/headless.mjs', 'crew/seat-io.mjs'], cwd: ROOT }), null)
+  assert.equal(gitGrepHits({ needle: scanner, paths: ['crew/envelope-repair.mjs'], cwd: ROOT }).count, 1)
+  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/headless.mjs'], cwd: ROOT }).count >= 1)
+  assert.ok(gitGrepHits({ needle: 'readEnvelopeWithRepair', paths: ['crew/seat-io.mjs'], cwd: ROOT }).count >= 1)
 })
 
 test('repairshared/D1 malformed UTF-8 is refused on both readers, never repaired', () => {
@@ -4654,8 +4654,8 @@ test('repairshared/F1 repaired and terminal reads leave return bytes identical o
 
 test('repairshared/G1 flat returns journal beside crew.json, never by path depth', () => {
   const retired = 'dirname(dirname(path))'
-  assert.equal(absenceFailure({ needle: retired, paths: ['crew/envelope-repair.mjs'] }), null)
-  assert.equal(gitGrepHits({ needle: "join(crewDir, 'journal.jsonl')", paths: ['crew/envelope-repair.mjs'] }).count, 1)
+  assert.equal(absenceFailure({ needle: retired, paths: ['crew/envelope-repair.mjs'], cwd: ROOT }), null)
+  assert.equal(gitGrepHits({ needle: "join(crewDir, 'journal.jsonl')", paths: ['crew/envelope-repair.mjs'], cwd: ROOT }).count, 1)
   const f = repairSharedCrew()
   try {
     const returnPath = join(f.returnsDir, 'd1.builder.json')

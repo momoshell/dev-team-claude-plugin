@@ -9,7 +9,7 @@ import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
 import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
-import { scratchDir } from '../test/helpers.mjs'
+import { scratchDir, ROOT } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
@@ -92,7 +92,7 @@ test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
   assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
 })
 
-const SKELETONREAD_EXTENSION = join(process.cwd(), 'crew/pi/extensions/skeletonread.ts')
+const SKELETONREAD_EXTENSION = join(ROOT, 'crew/pi/extensions/skeletonread.ts')
 const RETRIEVE_TOOL = PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/skeletonread.ts'][0]
 
 const MODELS = ['sonnet', 'anthropic/claude-opus-5', 'openai-codex/gpt-5.6-luna']
@@ -126,7 +126,7 @@ function piOnPath() {
 }
 
 test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
-  const bridge = join(process.cwd(), 'crew/pi/acp-bridge.mjs')
+  const bridge = join(ROOT, 'crew/pi/acp-bridge.mjs')
   const toolSet = 'read,bash,edit,write,grep,find,ls'
   const roles = [
     ['builder', 'Task,Agent,Workflow', [], ['bash', 'edit', 'write', 'powershell']],
@@ -149,10 +149,10 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   const bare = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', cwd: '/tmp', env: {} })
   assert.equal(bare.args.includes('-e'), false)
   assert.equal(Object.hasOwn(bare.env, 'CREW_ADVISOR_ENDPOINT'), false)
-  const extension = join(process.cwd(), 'crew/pi/extensions/subagent.ts')
+  const extension = join(ROOT, 'crew/pi/extensions/subagent.ts')
   const grants = { tools: [], extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }], skills: ['/skill.md'], advisor: true }
   const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
-  const advisorExtension = join(process.cwd(), 'crew/pi/extensions/advisor.ts')
+  const advisorExtension = join(ROOT, 'crew/pi/extensions/advisor.ts')
   assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
   assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
   const unseatedAdvisor = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } })
@@ -184,7 +184,7 @@ test('builder ACP roster approvals bypass lead while reviewer gated writes consu
 })
 
 test('ACP C4 real submit grant activates submit_envelope', () => {
-  const extension = join(process.cwd(), 'crew/pi/extensions/submit.ts')
+  const extension = join(ROOT, 'crew/pi/extensions/submit.ts')
   const launch = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/tmp/prompt.md', cwd: process.cwd(), env: {}, grants: { tools: [], extensions: [extension], agents: [], skills: [], advisor: false } })
   const extensionIndex = launch.args.indexOf(extension)
   assert.ok(extensionIndex > 0 && launch.args[extensionIndex - 1] === '-e')
@@ -272,7 +272,7 @@ test('pi extension activation declares tools, preserves passive entries, and ref
 })
 
 test('C1P keeps the subagent-only pane activator byte-compatible', () => {
-  const extension = join(process.cwd(), 'crew/pi/extensions/subagent.ts')
+  const extension = join(ROOT, 'crew/pi/extensions/subagent.ts')
   const command = seatCommand({
     role: 'planner', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp/task', bootBrief: 'boot',
     grants: { tools: [], extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false },

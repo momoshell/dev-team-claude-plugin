@@ -5,7 +5,7 @@ import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { join, relative } from 'node:path'
-import { tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'; import { ROOT } from './helpers.mjs'
 
 import {
   DESCENDANT_DIR,
@@ -337,18 +337,18 @@ test('empty and wholly refused roots have distinguishable outcomes', () => {
 })
 
 test('CLI exits 2 for usage and absent roots, and 0 for an empty dry run', () => {
-  const modulePath = join(process.cwd(), 'scripts/factory/reap-stale.mjs')
+  const modulePath = join(ROOT, 'scripts/factory/reap-stale.mjs')
   const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' }
-  const bad = spawnSync(process.execPath, [modulePath, '--no-such-flag'], { encoding: 'utf8', env, cwd: process.cwd() })
+  const bad = spawnSync(process.execPath, [modulePath, '--no-such-flag'], { encoding: 'utf8', env, cwd: ROOT })
   assert.equal(bad.status, 2)
 
   const empty = newRoot()
-  const good = spawnSync(process.execPath, [modulePath, '--dry-run', '--root', empty], { encoding: 'utf8', env, cwd: process.cwd() })
+  const good = spawnSync(process.execPath, [modulePath, '--dry-run', '--root', empty], { encoding: 'utf8', env, cwd: ROOT })
   assert.equal(good.status, 0)
   assert.match(good.stdout, /nothing-to-reclaim/)
 
   const missing = join(empty, 'no-such-root')
-  const absent = spawnSync(process.execPath, [modulePath, '--root', missing], { encoding: 'utf8', env, cwd: process.cwd() })
+  const absent = spawnSync(process.execPath, [modulePath, '--root', missing], { encoding: 'utf8', env, cwd: ROOT })
   assert.equal(absent.status, 2)
 })
 

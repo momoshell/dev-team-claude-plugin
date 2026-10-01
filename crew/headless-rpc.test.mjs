@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, rmSync, lstatSync, constants as fsConstants } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'; import { ROOT } from '../test/helpers.mjs'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
@@ -901,7 +901,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   assert.deepEqual(completeGrant.args, [
     '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
     '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,agent', '--exclude-tools', 'edit',
-    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(process.cwd(), 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(ROOT, 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
   ])
   assert.deepEqual(completeGrant.env, {
     X: '1', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),

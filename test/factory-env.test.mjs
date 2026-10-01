@@ -1101,3 +1101,33 @@ test('G1 tracked masked plugin path census and detector controls', () => {
   assert.equal(pluginPathSites("const nothing = join(root, 'package.json')"), 0)
   assert.equal(pluginPathSites(readFileSync(join(ROOT, 'crew/memory.mjs'), 'utf8')), 0)
 })
+
+// These are source strings intentionally emitted into scratch child programs; they do not execute from the checkout.
+const CWD_PATH_CENSUS = Object.freeze({
+  'test/factory-kill-redundancy.test.mjs': Object.freeze({ sites: 1, why: 'scratch child source intentionally models cwd-relative behavior' }),
+  'test/factory-prove-mutations.test.mjs': Object.freeze({ sites: 1, why: 'scratch child source intentionally models cwd-relative behavior' }),
+})
+const CWD_PATH_SHAPE = /\b(?:join|resolve|resolvePath)\s*\(\s*process\.cwd\s*\(\s*\)\s*,|\$\{\s*process\.cwd\s*\(\s*\)\s*\}\/|process\.cwd\s*\(\s*\)\s*\+\s*['"`]\/(?:crew|scripts|skills|visualizer)\/|\b(?:readFileSync|existsSync|readdirSync|statSync)\s*\(\s*['"`](?:crew|scripts|skills|visualizer)\/|process\.execPath\s*,\s*\[\s*['"`](?:crew|scripts|skills|visualizer)\//g
+function cwdPathSites(source) { return [...maskCommentsPreservingLiterals(source).matchAll(CWD_PATH_SHAPE)].length }
+test('G2 tracked test sources contain only documented cwd path examples', () => {
+  const tracked = trackedFiles(ROOT)
+  const files = tracked.filter((file) => file.endsWith('.test.mjs') || ['test/helpers.mjs', 'test/fixtures.mjs', 'crew/crew-test-helpers.mjs'].includes(file)).filter((file) => file !== 'test/factory-env.test.mjs')
+  const found = {}
+  for (const file of files) {
+    const sites = cwdPathSites(readFileSync(join(ROOT, file), 'utf8'))
+    if (sites) found[file] = sites
+  }
+  const expected = Object.fromEntries(Object.entries(CWD_PATH_CENSUS).map(([file, entry]) => [file, entry.sites]))
+  console.log(`G2 scanned ${files.length} files; found ${Object.values(found).reduce((sum, count) => sum + count, 0)} sites`)
+  assert.ok(files.length >= 100)
+  assert.deepEqual(found, expected)
+  assert.equal(Object.isFrozen(CWD_PATH_CENSUS), true)
+  assert.equal(Object.isFrozen(CWD_PATH_CENSUS['test/factory-kill-redundancy.test.mjs']), true)
+  for (const shape of [
+    "join(process.cwd(), 'crew/x')", "resolve(process.cwd(), 'scripts/x')", "resolvePath(process.cwd(), 'skills/x')",
+    '`${process.cwd()}/crew/x`', "process.cwd() + '/scripts/x'", "readFileSync('crew/x')", "existsSync('scripts/x')",
+    "readdirSync('skills/x')", "statSync('visualizer/x')", "spawnSync(process.execPath, ['crew/x'])",
+  ]) assert.equal(cwdPathSites(shape), 1, shape)
+  for (const shape of ["join(ROOT, 'crew/x')", "gitGrepHits({ needle: 'x', cwd: ROOT })", "// join(process.cwd(), 'crew/x')"]) assert.equal(cwdPathSites(shape), 0, shape)
+  // Runtime defaults and relative constants are not statically visible; C1-C3 exercise those paths from a foreign cwd.
+})

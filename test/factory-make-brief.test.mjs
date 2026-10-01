@@ -2997,7 +2997,7 @@ test('a coupled fixture can acknowledge a read-only caller verbatim', () => {
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({
     lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: './lib/caller.mjs', why }] }],
   }, null, 2)}\n`)
-  assert.deepEqual(gatherFences({ fencesPath })[0].reads, [{ file: 'lib/caller.mjs', why }])
+  assert.deepEqual(gatherFences({ fencesPath, checkout: root })[0].reads, [{ file: 'lib/caller.mjs', why }])
   const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'])
   assert.match(section(brief, '## Coupled sources'), new RegExp(`acknowledged read-only: ${why}`))
 })

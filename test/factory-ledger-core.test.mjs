@@ -373,6 +373,43 @@ test('T2: an out-of-range epoch is refused by isoMs and a writer', { skip: SKIP 
     )
   } finally { ledger.close() }
 })
+// MUTATION M1: execute indexes in the initial pass before missing columns are repaired.
+test('M1: old advisor windows gain window_id before their unique index is created', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(join(scratchDir('migration-m1-'), 'older.db'))
+  try {
+    db.exec('CREATE TABLE advisor_ab_windows (started_at TEXT, note TEXT)')
+    assert.doesNotThrow(() => applyMigrations(db))
+    const columns = db.prepare('PRAGMA table_info(advisor_ab_windows)').all().map(({ name }) => name)
+    assert.deepEqual(TABLES.advisor_ab_windows.columns.map(({ name }) => name).filter(name => columns.includes(name)).sort(), TABLES.advisor_ab_windows.columns.map(({ name }) => name).sort())
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get('advisor_ab_windows_window_id_uq')?.name, 'advisor_ab_windows_window_id_uq')
+  } finally { db.close() }
+})
+// MUTATION M2: classify only CREATE UNIQUE INDEX as an index statement.
+test('M2: old observations gain observed_at before their plain index is created', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(join(scratchDir('migration-m2-'), 'older.db'))
+  try {
+    db.exec('CREATE TABLE run_observations (id INTEGER PRIMARY KEY AUTOINCREMENT, adw_id TEXT, observer TEXT, driver_state TEXT, source TEXT, reason_code TEXT, detail TEXT)')
+    assert.doesNotThrow(() => applyMigrations(db))
+    const columns = db.prepare('PRAGMA table_info(run_observations)').all().map(({ name }) => name)
+    assert.ok(columns.includes('observed_at'))
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get('run_observations_adw_observed_id_idx')?.name, 'run_observations_adw_observed_id_idx')
+  } finally { db.close() }
+})
+// MUTATION M3: rethrow unique-index constraint failures instead of naming the skipped index.
+test('M3: duplicate advisor windows preserve rows and report the unenforced unique index', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(join(scratchDir('migration-m3-'), 'duplicates.db'))
+  try {
+    db.exec("CREATE TABLE advisor_ab_windows (window_id TEXT, started_at TEXT, note TEXT, created_at TEXT); INSERT INTO advisor_ab_windows (window_id, note) VALUES ('duplicate', 'first'), ('duplicate', 'second')")
+    let report
+    assert.doesNotThrow(() => { report = applyMigrations(db) })
+    assert.deepEqual(report, { unenforced_unique_indexes: ['advisor_ab_windows_window_id_uq'] })
+    assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get('advisor_ab_windows_window_id_uq'), undefined)
+    assert.deepEqual(db.prepare('SELECT note FROM advisor_ab_windows ORDER BY rowid').all().map(({ note }) => note), ['first', 'second'])
+  } finally { db.close() }
+})
 test('AC-4: running the full migration list twice is a no-op', { skip: SKIP }, () => {
   const { DatabaseSync } = require('node:sqlite')
   const dbPath = join(nextDir(), 'mig.db')

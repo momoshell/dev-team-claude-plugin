@@ -1835,21 +1835,13 @@ function uniqueIndexNameOf(stmt) {
 // upgrade) directly against a raw DatabaseSync connection.
 export function applyMigrations(db, migrations = MIGRATIONS) {
   const unenforced = []
-  for (const stmt of migrations) {
-    try {
-      db.exec(stmt)
-    } catch (err) {
-      if (!isUniqueIndexFailure(err, stmt)) throw err
-      unenforced.push(uniqueIndexNameOf(stmt))
-    }
-  }
+  const isIndex = (stmt) => /^CREATE (?:UNIQUE )?INDEX/i.test(String(stmt))
+  for (const stmt of migrations.filter((stmt) => !isIndex(stmt))) db.exec(stmt)
   for (const table of Object.keys(TABLES)) {
     const existingCols = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name))
     if (existingCols.size === 0) {
-      // The table itself does not exist yet (a genuinely earlier migration
-      // prefix that predates this table entirely). Nothing to ADD COLUMN
-      // onto — it is created whole, with every current column, the next
-      // time the full MIGRATIONS list's CREATE TABLE IF NOT EXISTS runs.
+      // An earlier prefix may predate this table; there is nothing to ALTER.
+      // The full list creates it whole with every current column next time.
       continue
     }
     for (const col of TABLES[table].columns) {
@@ -1858,6 +1850,14 @@ export function applyMigrations(db, migrations = MIGRATIONS) {
         // older db file) is added; no column is ever dropped or altered.
         db.exec(`ALTER TABLE ${quoteSqlIdentifier(table)} ADD COLUMN ${quoteSqlIdentifier(col.name)} ${col.decl}`)
       }
+    }
+  }
+  for (const stmt of migrations.filter(isIndex)) {
+    try {
+      db.exec(stmt)
+    } catch (err) {
+      if (!isUniqueIndexFailure(err, stmt)) throw err
+      unenforced.push(uniqueIndexNameOf(stmt))
     }
   }
   return { unenforced_unique_indexes: unenforced }

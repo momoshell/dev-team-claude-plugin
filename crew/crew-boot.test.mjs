@@ -224,6 +224,54 @@ test('skill-delivery F2 a fence whose files cannot be listed is unmeasured with 
   const result = renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role: 'builder', files, filesReason: reason })
   assert.equal(result.paths_unmeasured, 'fence-files-unlisted')
 })
+
+function gitFenceFixture() {
+  const checkout = scratchDir('skill-delivery-git-fence-')
+  mkdirSync(join(checkout, 'committed'), { recursive: true })
+  writeFileSync(join(checkout, 'committed', 'keep.txt'), 'tracked\n')
+  execSync('git init -q', { cwd: checkout, stdio: 'ignore' })
+  execSync('git add -- committed/keep.txt', { cwd: checkout, stdio: 'ignore' })
+  execSync('git -c user.email=t@t -c user.name=t -c commit.gpgsign=false commit -qm fixture', { cwd: checkout, stdio: 'ignore' })
+  const panel = 'visualizer/src/lib/newpanel/Panel.svelte'
+  const ignored = 'visualizer/src/lib/newpanel/ignored.svelte'
+  mkdirSync(join(checkout, 'visualizer/src/lib/newpanel'), { recursive: true })
+  writeFileSync(join(checkout, panel), '<script>export let value</script>')
+  writeFileSync(join(checkout, ignored), 'ignored')
+  writeFileSync(join(checkout, '.gitignore'), `${ignored}\n`)
+  return { checkout, panel, ignored }
+}
+
+// Kills: omit --others, which leaves the untracked component out of the directory fence.
+test('U1', () => {
+  const { checkout, panel } = gitFenceFixture()
+  const directory = 'visualizer/src/lib/newpanel'
+  const fenced = fenceSkillFiles([directory], { checkout })
+  assert.equal(fenced.reason, null)
+  assert.ok(fenced.files.includes(panel))
+  const render = (files) => renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role: 'builder', files })
+  const skillPaths = ['skills/frontend-svelte/SKILL.md', 'skills/ui-design/SKILL.md', 'skills/ux/SKILL.md'].map((path) => join(ROOT, path))
+  const delivered = render(fenced.files).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'delivered')
+  assert.deepEqual(delivered.map((skill) => skill.path), skillPaths)
+  assert.deepEqual(delivered, render([panel]).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'delivered'))
+})
+
+// Kills: omit --exclude-standard, which admits this existing ignored component.
+test('U2', () => {
+  const { checkout, ignored } = gitFenceFixture()
+  const { files, reason } = fenceSkillFiles(['visualizer/src/lib/newpanel'], { checkout })
+  assert.equal(reason, null)
+  assert.ok(Array.isArray(files))
+  assert.ok(!files.includes(ignored))
+})
+
+// Kills: omit --cached, which loses committed files from the directory fence.
+test('U3', () => {
+  const { checkout } = gitFenceFixture()
+  const { files, reason } = fenceSkillFiles(['committed'], { checkout })
+  assert.equal(reason, null)
+  assert.ok(files.includes('committed/keep.txt'))
+})
+
 // Kills: delivery loading the map with the edit gate's strict file check (one missing skill
 // withholds every skill as map-schema). The strict hook default is pinned in the same test.
 test('skill-delivery L1 one missing skill file is reported alone and every other skill is delivered', () => {

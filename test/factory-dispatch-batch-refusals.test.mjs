@@ -712,7 +712,7 @@ test('R1', async () => { const f = await summaryFixture('r1', true); assert.equa
 // MUTATION R2: remove rollback from compile refusal.
 test('R2', async () => { const f = await summaryFixture('r2', true); assert.equal(f.spawnedOut.filter(c => c.args.includes('remove') && c.args.includes('--force')).length, 2) })
 // MUTATION R3: skip rollback on a pre-boot floor refusal.
-test('R3', async () => { const f = await summaryFixture('r3', true); assert.equal(f.spawnedOut.filter(c => c.args.includes('remove')).length, 2) })
+test('R3', async () => { const spawnedOut = []; let error; try { await dispatchFixture({ label: 'r3-floor', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { assurance: 'quick', where: ['crew/drive.mjs'] }) }, fences: [entry('lane-a', ['crew/drive.mjs'])], spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught } assert.equal(error?.reason, 'tier-floor-conflict'); const adds = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('add')); assert.equal(adds.length, 1); assert.deepEqual(spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1)), adds.map(c => c.args.at(-2))) })
 // MUTATION R4: switch branch creation to a detached branch command.
 test('R4', () => { const attached = []; const plans = [{ lane: 'a', branch: 'a', dir: '/tmp/a' }]; attachBranches({ plans, attached, deps: { spawn: () => ({ status: 0 }) } }); assert.deepEqual(attached, plans) })
 // MUTATION R5: moving attachBranches directly after createWorktrees must fail this compile-only order pin.

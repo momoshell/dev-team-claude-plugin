@@ -32,7 +32,7 @@ An empty vocabulary means a verb accepts no flags; it is not an open parser.
 Exhibit: `scripts/factory/ledger.mjs:8071`.
 
 An unknown verb must refuse before a flag can acquire accidental meaning.
-Exhibit: `scripts/factory/ledger.mjs:9931`.
+Exhibit: `scripts/factory/ledger.mjs:9930`.
 
 If parsing is interrupted, do not resume with the default window.
 Status: this interrupted-parser edge is unbacked in this checkout; see

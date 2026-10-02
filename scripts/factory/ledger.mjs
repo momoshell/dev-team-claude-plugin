@@ -8362,7 +8362,6 @@ function backfillAdvisorSourcePath(ledger, path, { dryRun = false } = {}) {
     ? unrecorded.filter((session) => configs.get(session.adw_id).advisor_model === recordedArm)
     : []
   if (matches.length === 0) return { path, outcome: 'arm-mismatch' }
-  if (matches.length > 1) return { path, outcome: 'ambiguous' }
   const match = matches[0]
   if (dryRun) return { path, outcome: 'would-backfill', adw_id: match.adw_id }
   ledger.recordAdvisorSourceBackfill({ adw_id: match.adw_id, advisor_source: 'rotation', evidence: path })

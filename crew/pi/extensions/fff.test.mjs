@@ -365,7 +365,7 @@ test('B1 ungranted claude Bash search remains untouched', async () => {
   const headless = claudeHeadlessCommand(base)
   assert.deepEqual(paneFffEnvironment(pane), { CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
   assert.deepEqual(headless.env, {
-    DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir,
+    DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir,
     CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '',
   })
   assert.deepEqual(headless.args.slice(headless.args.indexOf('--settings') - 2, headless.args.indexOf('--allowedTools')), ['--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS, '--tools', SEAT_DEFAULTS.builder.tools])

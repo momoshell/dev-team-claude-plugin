@@ -5897,7 +5897,7 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
   return { bounce: b, corrections: refusal.corrections }
 }
 
-function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure }) {
+function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure, prescribed = null }) {
   const rows = []
   let fatal = null
   const proveEntry = (entry) => {
@@ -5946,9 +5946,16 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
         // measured nothing and is never read as `new`.
         if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
       }
-      let control = nameVerdict(hardenRun(cmd)?.output, entry.name)
-      if (control === 'absent') { cmd = witnessCmd; control = nameVerdict(hardenRun(cmd)?.output, entry.name) }
-      if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
+      // A pinned-test-prescription finding was told to close with a NEW top-level test(...),
+      // so its control is adjudicated on top-level lines only and never falls back to the
+      // unfiltered run that admits nested names.
+      // MUTATION P1: adjudicate a prescription guard like any other and a nested guard
+      // closes the finding whose brief demanded a top-level one.
+      const topLevelOnly = prescribed?.has(entry.finding) === true                       // ANCHOR P1
+      const verdictOf = topLevelOnly ? topLevelNameVerdict : nameVerdict
+      let control = verdictOf(hardenRun(cmd)?.output, entry.name)
+      if (control === 'absent' && !topLevelOnly) { cmd = witnessCmd; control = nameVerdict(hardenRun(cmd)?.output, entry.name) }
+      if (control === 'absent') return row('name-absent', topLevelOnly ? `the repaired control reported no exact TOP-LEVEL test named ${entry.name}; a pinned-test-prescription finding must close with a new top-level test(...)` : `the repaired control reported no exact test named ${entry.name}`)
       if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
       if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
       if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
@@ -10622,6 +10629,10 @@ function runTask(ctx, io, crash) {
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
   let hardenWitness = new Map()         // Map<finding id, Map<repo-relative path, {state, bytes}>>
+  // Map<repo-relative test path, {finding, bytes}> — the review-time bytes of every witnessed
+  // test a pinned-test-prescription conversion told the builder to leave as it was. Lane-long:
+  // a later round may not undo what an earlier conversion pinned.
+  const prescriptionPins = new Map()
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the
   // reviewer; it is bounded because an unbounded one lets a reviewer that grants nothing
@@ -11284,7 +11295,8 @@ function runTask(ctx, io, crash) {
       stage(`lane:harden:r${round}`)
       const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
       for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
-      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure })
+      const prescribed = new Set(hardenOwed.owed.filter((finding) => finding.prescription).map(({ id }) => id))
+      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure, prescribed })
       for (const row of rows) logHardened(round, row)
       // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
       // (crew/drive.mjs:3490-3492) already refuses to continue when `gateProofFatal` is
@@ -11543,6 +11555,10 @@ function runTask(ctx, io, crash) {
               conflicted.add(finding.id)
               const carried = hardenOwed.owed.find((entry) => entry.id === finding.id)
               if (carried) carried.prescription = prescriptionConflict
+              if (!prescriptionPins.has(prescriptionConflict.file)) {
+                const cell = tree.get(prescriptionConflict.file)
+                prescriptionPins.set(prescriptionConflict.file, { finding: finding.id, bytes: cell?.state === 'read' ? cell.bytes : null })
+              }
               panelLog({ hardening_prescription_conflict: prescriptionConflict })
             }
           }
@@ -11706,6 +11722,21 @@ function runTask(ctx, io, crash) {
   }
   if (!builderEnv || !accepted) {
     return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s)`)
+  }
+
+  // Sub-class 1's conversion is verified HERE, where every accepted path converges before
+  // the commit: no lane is accepted while a witnessed test a conversion pinned has lost a
+  // top-level statement or a top-level check. Unreadable is refused, never passed.
+  // MUTATION P4: skip this loop and the builder's promise to leave the witnessed checks
+  // as they were is taken on trust — the false clean Sol reproduced on b1074.
+  for (const [file, pin] of prescriptionPins) {                                          // ANCHOR P4
+    let built
+    try { const bytes = io.readFile(`${ctx.checkout}/${file}`); built = bytes === null ? { state: 'absent' } : { state: 'read', bytes } }
+    catch (err) { built = { state: 'unreadable', why: err?.message || String(err) } }
+    const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
+    const record = { finding: pin.finding, file, reason: preserved.reason, why: preserved.why, ...(preserved.runtime ? { runtime: preserved.runtime } : {}) }
+    panelLog({ hardening_preservation: record })
+    if (preserved.reason !== null) return escalate('harden', `[${preserved.reason}] finding ${pin.finding}: ${preserved.why}`, [], { hardening_preservation: record })
   }
 
   // The reviewer can accept only the tree that is about to be committed. This
@@ -14318,6 +14349,72 @@ export function nameVerdict(output, name) {
   if (hits.length > 1) return 'ambiguous'                // two tests of one name adjudicate nothing
   return hits[0]
 }
+// The same adjudication over the run's TOP-LEVEL lines only. Node's TAP reporter indents
+// every subtest line (measured on node v26.10.0: `    ok 1 - inner guard` under
+// `ok 2 - outer`), so an unindented exact name is a top-level test(...) and nothing else.
+export function topLevelNameVerdict(output, name) {
+  return nameVerdict(String(output || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').filter((line) => !/^\s/.test(line)).join('\n'), name)
+}
+
+// A pinned-test-prescription conversion (sub-class 1) suppresses a review patch to a
+// hardening-witnessed test and tells the builder to leave that file's existing checks as
+// they were. This verifies that instruction, and its invariant is the CLASS: no lane is
+// accepted unless every witnessed top-level statement of the file (each test(...), helper
+// and fixture; import declarations excepted) is still present verbatim as a top-level
+// statement, and every literal top-level test name still runs as a top-level test and
+// passes. Anything that cannot be read or measured is refused, never passed.
+export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
+// A top-level statement starts on a column-0 line that does not begin with whitespace or a
+// closing `}`, `)` or `]`; it runs to the next such line. Normalised, and ONLY these:
+// CRLF → LF, trailing spaces/tabs per line, trailing blank lines per statement. None of
+// them changes what node executes or asserts. Indentation is NOT normalised: re-indenting
+// a check is how it gets nested inside another test.
+export function topLevelStatements(text) {
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n').map((line) => line.replace(/[ \t]+$/, ''))
+  const statements = []
+  let current = []
+  for (const line of lines) {
+    if (/^[^\s})\]]/.test(line)) {
+      if (current.length > 0) statements.push(current)
+      current = [line]
+    } else current.push(line)
+  }
+  if (current.length > 0) statements.push(current)
+  return statements
+    .map((statement) => { while (statement.length > 0 && statement.at(-1) === '') statement.pop(); return statement.join('\n') })
+    .filter((statement) => statement !== '')
+}
+const PRESERVED_IMPORT = /^import\b/
+const LITERAL_TEST_NAME = /^test\((['"])((?:(?!\1)[^\\])*)\1\s*[,)]/
+export function witnessedTestPreservation({ file, witnessed, built, run }) {
+  const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
+  if (typeof witnessed !== 'string') return refuse('witnessed-test-unverifiable', `the review-time bytes of ${file} were not captured, so its existing checks cannot be compared`)
+  if (!built || built.state === 'unreadable' || (built.state === 'read' && typeof built.bytes !== 'string')) return refuse('witnessed-test-unverifiable', `the built ${file} could not be read${built?.why ? `: ${built.why}` : ''}`)
+  if (built.state !== 'read') return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its witnessed checks are gone`)
+  const remaining = new Map()
+  for (const statement of topLevelStatements(built.bytes)) remaining.set(statement, (remaining.get(statement) || 0) + 1)
+  const kept = topLevelStatements(witnessed).filter((statement) => !PRESERVED_IMPORT.test(statement))
+  const missing = []
+  // MUTATION P2: skip this comparison and a builder may delete or rewrite a witnessed check.
+  for (const statement of kept) {                                                       // ANCHOR P2
+    const left = remaining.get(statement) || 0
+    if (left > 0) remaining.set(statement, left - 1)
+    else missing.push(statement.split('\n')[0])
+  }
+  if (missing.length > 0) return refuse('witnessed-test-altered', `${missing.length} of ${kept.length} witnessed top-level statement(s) of ${file} are no longer present verbatim at top level: ${missing.slice(0, 3).map((line) => JSON.stringify(line.slice(0, 120))).join(', ')}`, { missing })
+  const names = kept.flatMap((statement) => { const m = LITERAL_TEST_NAME.exec(statement); return m ? [m[2]] : [] })
+  if (names.length === 0) return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim; it has no literal top-level test name to run`, runtime: 'not-run: no literal top-level test name' }
+  let output
+  try { output = run() } catch (err) { return refuse('witnessed-test-unverifiable', `the run of ${file} threw: ${err?.message || String(err)}`) }
+  if (typeof output !== 'string' || !/^(?:not ok|ok) \d+ - /m.test(output)) return refuse('witnessed-test-unverifiable', `the run of ${file} produced no top-level TAP result line, so the witnessed names were not measured`)
+  // MUTATION P3: adjudicate with nameVerdict (indented lines too) and a witnessed check
+  // nested inside another test reads as still top-level.
+  for (const name of names) {
+    const verdict = topLevelNameVerdict(output, name)                                   // ANCHOR P3
+    if (verdict !== 'passed') return refuse('witnessed-test-altered', `the witnessed check ${JSON.stringify(name)} in ${file} is ${verdict} as a top-level test of the built tree`, { name, verdict })
+  }
+  return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim and its ${names.length} literal top-level test name(s) pass at top level`, runtime: 'measured' }
+}
 
 // The findings that OWE a permanent guard, and the ones the reviewer exempted. Derived
 // from the FINDINGS, never from the routing: `dispositionPlan(...).needsSeat` excludes
@@ -14657,7 +14754,7 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary, prescription }) => {
-    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were` : ''
+    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were (verified before acceptance: every review-time top-level statement of that file except imports must remain verbatim at top level, and its top-level tests must still pass as top-level tests)` : ''
     return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
   }))
   lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',

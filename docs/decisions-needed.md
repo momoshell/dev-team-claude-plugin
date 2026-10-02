@@ -33,7 +33,7 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Re-prove after a moved-base rebase; retain the current proof sequencing.
 - **Blocked:** Commit/rebase/publish sequencing and preservation of the post-rebase tree.
 - **Raised:** 2026-09-08 (Re-prove after a moved-base rebase?)
-- **Built 2026-09-12:** shipped in commit `f74decc0`. `crew/drive.mjs:11316` marks whether the base moved; at `crew/drive.mjs:11506` a moved rebase with a gate and proof-tree witness enters proof, and `crew/drive.mjs:11537` refreshes proof on the rebased tree. Archived sweep observations: 471 journals and 233 post-ship rebase stages; moved publications had 37 proof and 2 direct-suite runs (both on the old head); unmoved cases had 120 direct-suite and 7 proof runs (one inspected double rebase, six not verified). b980's stage trace re-proves on a moved base. Six unmoved→proof cases remain unverified, so this entry remains open.
+- **Built 2026-09-12:** shipped in commit `f74decc0`. `crew/drive.mjs:11713` marks whether the base moved; at `crew/drive.mjs:11903` a moved rebase with a gate and proof-tree witness enters proof, and `crew/drive.mjs:11934` refreshes proof on the rebased tree. Archived sweep observations: 471 journals and 233 post-ship rebase stages; moved publications had 37 proof and 2 direct-suite runs (both on the old head); unmoved cases had 120 direct-suite and 7 proof runs (one inspected double rebase, six not verified). b980's stage trace re-proves on a moved base. Six unmoved→proof cases remain unverified, so this entry remains open.
 
 ## 4. Do prompt changes require a measured eval (#1031)?
 

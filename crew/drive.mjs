@@ -5973,7 +5973,7 @@ function runTask(ctx, io, crash) {
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  const S = { consults: 0, stages: [], commit: null, lastLeadDecision: null, bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, latestBuildGate: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
@@ -6762,7 +6762,7 @@ function runTask(ctx, io, crash) {
       replyContract,
       `guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer.`,
     ]
-    const delivery = leadContextDelivery(contextPaths, prefixLines, suffixLines)
+    const delivery = leadDecisionDelivery({ S, io, ctx, round, label, contextPaths, prefixLines, suffixLines, fullDelivery: leadContextDelivery })
     io.writeFile(briefPath, delivery.brief)
     io.log(recordRow({ at: io.now(), lead_consult_context: { brief: briefPath, consult: S.consults, round, mode: delivery.mode, sources: delivery.sources } }))
     const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
@@ -6809,7 +6809,7 @@ function runTask(ctx, io, crash) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
     if (decided !== d.decision) io.log(recordRow({ at: io.now(), bounce_target_mapped: { answered: d.decision, treated_as: decided, consult: S.consults, round } }))
-    io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason }))
+    io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason })); rememberLeadDecision(S, { consult: S.consults, brief: briefPath, decision: decided })
     emit({ kind: 'decision', decided, why: d.reason || '', consult: S.consults, round })
     return {
       decision: decided, reason: d.reason || '', guidance: requestedGuidance || d.guidance || '', from: d.from,
@@ -10586,7 +10586,7 @@ function runTask(ctx, io, crash) {
     const laneAfter = io.run(lane)
     if (!laneAfter.ok) { const afterFailures = failingTestsSection(laneAfter.output); return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failing tests (${afterFailures.found} found):\n${afterFailures.text}\n\nFailures:\n${String(laneAfter.output || '').slice(-4000)}`) }
     if (gateCmd) {
-      const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd)
+      const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd); S.latestBuildGate = { output: gateAfter?.output, consult: S.lastLeadDecision?.consult ?? 0 }
       lastGateOutput = gateAfter.output
       if (!gateAfter.ok) return failed('gate', `The ACCEPTANCE GATE is red after the patch. The gate is immutable to you:\n\n    ${gateCmd}`, `Failures (verbatim):\n${String(gateAfter.output || '').slice(-4000)}`)
     }
@@ -10663,6 +10663,12 @@ function runTask(ctx, io, crash) {
     } catch { /* screener evidence is never load-bearing */ }
   }
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
+  let previousBuilderEndpoint = null
+  const buildLoopGate = (label, command) => {
+    const result = runGate(label, command)
+    S.latestBuildGate = { output: result?.output, consult: S.lastLeadDecision?.consult ?? 0 }
+    return result
+  }
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
   let gateObserving = false
@@ -10760,7 +10766,7 @@ function runTask(ctx, io, crash) {
   const gateBeforeConsult = (round) => {
     if (!gateCmd || round < limits.gate_fails_to_triage || gateTriaged || gateObserveTriaged || gateRepairs >= limits.gate_repairs) return {}
     stage(`gate:r${round}`)
-    const probe = runGate(`gate:r${round}`, gateCmd)
+    const probe = buildLoopGate(`gate:r${round}`, gateCmd)
     // MUTATION B2: neutralise this call and a triage-eligible non-done path observes the
     // gate but never reaches triage, so a lane still terminates on consult exhaustion with
     // gate_repairs 0.
@@ -10773,13 +10779,21 @@ function runTask(ctx, io, crash) {
     // answered — which is the causation-from-observation shape plan-check TL1 rejected. A
     // GREEN observation is untouched, so the mutation probes exactly the red half D1 claims.
     stageComplete()
-    return {}                                                                          // ANCHOR VD3
+    return { gateRes: triaged.gateRes }                                                                          // ANCHOR VD3
   }
   build:
   for (;;) {
     const seededBuild = steppedRun && seededStepEnv !== null
     if (!seededBuild && builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
     const round = seededStepEnv ? 1 : wholeBuildRound
+    if (!seededBuild && S.buildRound !== null) {
+      const bounce = S.nonDoneBounce
+      const bounceRow = { round: S.buildRound, note: buildNote, source: S.bounceDecisionSinceBuild ? 'lead-consult' : 'driver', trigger: bounce?.trigger ?? null, failing_checks: bounce?.failing_checks ?? null, no_progress: bounce?.no_progress ?? null }
+      try { io.log(recordRow({ at: io.now(), build_bounce: bounceRow })) } catch { /* diagnostic journal failures cannot abort a build */ }
+    }
+    S.bounceDecisionSinceBuild = false
+    S.nonDoneBounce = null
+    S.buildRound = round
     carriedRound = round
     const finalRound = () => builderRemaining() <= 0
     if (!seededBuild) {
@@ -10795,6 +10809,8 @@ function runTask(ctx, io, crash) {
       return escalate('build', refusalWhy, env.artifacts || [])
     }
     const builderObservation = observeBuilderEndpoint()
+    const immediatePreviousBuilderEndpoint = previousBuilderEndpoint
+    previousBuilderEndpoint = { round, nonDone: false, fingerprint: builderObservation.fingerprint, gateRed: null, failingChecks: null }
     const hasScopeRequest = env.details && typeof env.details === 'object' && !Array.isArray(env.details)
       && Object.prototype.hasOwnProperty.call(env.details, 'scope_request')
     if (hasScopeRequest) {
@@ -10853,10 +10869,40 @@ function runTask(ctx, io, crash) {
       // `insufficient` at the triage threshold never runs the gate, so the round reaches the
       // lead with the gate unobserved and the repair valve unreachable — the b464-createslane defect.
       const valve = gateBeforeConsult(round)                                           // ANCHOR VD4
+      if (valve.gateRes) S.latestBuildGate = { output: valve.gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
       if (valve.escalation) return valve.escalation
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
+      let gateRes = valve.gateRes ?? null
+      if (gateCmd && !gateRes) {
+        stage(`gate:r${round}`)
+        gateRes = buildLoopGate(`gate:r${round}`, gateCmd)
+        stageComplete()
+      }
+      const failingChecks = gateRes ? failingCheckSet(gateRes.output) : null
+      previousBuilderEndpoint.gateRed = gateRes ? gateRes.ok === false : null
+      previousBuilderEndpoint.failingChecks = failingChecks
+      const prior = immediatePreviousBuilderEndpoint
+      const consecutive = Boolean(prior && prior.round === round - 1 && prior.nonDone)
+      const comparison = compareFingerprints(prior?.fingerprint, builderObservation.fingerprint)
+      const noProgress = comparison.outcome === FINGERPRINT_OUTCOMES.unmeasurable ? null : comparison.outcome === FINGERPRINT_OUTCOMES.unchanged
+      const repeatedChecks = consecutive && prior.gateRed && gateRes?.ok === false && failingChecks.length > 0 && JSON.stringify(prior.failingChecks) === JSON.stringify(failingChecks)
+      const statusConflict = env.status !== 'insufficient'
+      const questionConflict = questions.length > 0 || (asked?.rejected?.length ?? 0) > 0
+      const atFinalRound = finalRound()
+      const trigger = statusConflict || questionConflict ? LEAD_CONSULT_TRIGGERS[0] : atFinalRound ? LEAD_CONSULT_TRIGGERS[1] : repeatedChecks || (consecutive && noProgress === true) ? LEAD_CONSULT_TRIGGERS[2] : null
+      S.nonDoneBounce = { note: 'build-fix', trigger, failing_checks: failingChecks, no_progress: consecutive ? noProgress : null }
+      previousBuilderEndpoint.nonDone = true
+      if (trigger === null) {
+        let laneRes = null
+        if (!gateRes || gateRes.ok) laneRes = io.run(lane)
+        const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('build', 'builder')
+        io.writeFile(b, driverBounceLines({ round, env, gateCmd, gateRes, laneRes, planPath }).join('\n'))
+        buildBrief = b; buildNote = 'build-fix'
+        continue
+      }
       const c = consultLead(
         [`The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?`,
           ...questionConsultLines('builder', questions)].join('\n'),
@@ -10944,12 +10990,13 @@ function runTask(ctx, io, crash) {
     if (gateCmd) {
       stage(`gate:r${round}`)
       let forceFullCheckProof = false
-      let gateRes = runGate(`gate:r${round}`, gateCmd)
+      let gateRes = buildLoopGate(`gate:r${round}`, gateCmd)
       // MUTATION B3: neutralise this call and the triage this lane hoisted no longer
       // fires where it always fired — the DONE-path valve, gone.
       const valved = gateDefectValve(round, gateRes, { committedBaseline })                                   // ANCHOR VD1
       if (valved.escalation) { stageComplete(); return valved.escalation }
       gateRes = valved.gateRes
+      S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
       forceFullCheckProof = valved.forceFullCheckProof === true
       // First green of this generation: measure, once. A generation repaired
       // above was already proven by its re-proof, so this is a no-op there —
@@ -10965,6 +11012,7 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) {
           forceFullCheckProof = settled.forceFullCheckProof === true
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
+          S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       // Per-CHECK proof, post-green BY CONSTRUCTION. An observed green built-tree
@@ -11032,6 +11080,7 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) {
           forceFullCheckProof = settled.forceFullCheckProof === true
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
+          S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       if (!pendingRebaseConflict && gateRes.ok && gateDiscrimination === 'proven' && (!proofMutations.length || checkProofVerdict === 'proven')) {
@@ -11052,6 +11101,7 @@ function runTask(ctx, io, crash) {
             return refreshed.escalation
           }
           gateRes = refreshed.gateRes || gateRes
+          if (refreshed.gateRes) S.latestBuildGate = { output: refreshed.gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       if (gateRes?.ok) recordStaleSpawnProof();
@@ -15281,4 +15331,64 @@ export function heldAssertionLines({ io, ctx, changed, round }) {
   const guard = { round, status, test_files: testFiles, lane_added: inventoryKnown ? laneAddedCount : null, assertions_changed: total(assertions), body_lines_changed: total(body), tests_removed: total(tests), totals_absent: totalsAbsent, unmeasured }
   try { io.log(recordRow({ at: io.now(), assertion_guard: guard })) } catch {}
   return lines
+}
+
+export const LEAD_CONSULT_TRIGGERS = Object.freeze(['shape-conflict', 'final-round', 'repeated-failure'])
+
+export function failingCheckSet(output) {
+  return [...gateCheckIds(output)].filter((label) => checkFailureLine(output, label)).sort()
+}
+
+export function driverBounceLines({ round, env, gateCmd, gateRes, laneRes, planPath }) {
+  const lines = [`# Build bounce (round ${round})`, '', `Status: ${env?.status ?? 'unknown'}`, '', `Summary: ${env?.summary || 'the builder produced no summary'}`]
+  if (env?.details?.residuals != null) lines.push('Residuals:', JSON.stringify(env.details.residuals))
+  if (gateRes) {
+    lines.push('', 'Acceptance gate:', `Command: ${gateCmd || 'unknown'}`, `Failing checks: ${JSON.stringify(failingCheckSet(gateRes.output))}`, 'Output:', typeof gateRes.output === 'string' && gateRes.output ? gateRes.output.slice(-LANE_RED_TAIL_CHARS) : 'the gate produced no output')
+  }
+  if (laneRes && !laneRes.ok) {
+    const tail = dropPassingLines(typeof laneRes.output === 'string' ? laneRes.output : '').slice(-LANE_RED_TAIL_CHARS)
+    lines.push('', 'Validation lane failures:', tail || 'the lane produced no output')
+  }
+  lines.push('', `Plan: ${planPath}`)
+  return lines
+}
+
+function rememberLeadDecision(S, decision) {
+  S.lastLeadDecision = { consult: decision.consult, brief: decision.brief }
+  if (decision.decision.startsWith('bounce')) S.bounceDecisionSinceBuild = true
+}
+
+function leadDiffStat(io, ctx) {
+  const base = shellArg(ctx.head || 'HEAD')
+  try {
+    const result = io.run(`git diff --stat ${base}`)
+    if (!result?.ok) return `unavailable (git diff --stat exited ${result?.status ?? 'unknown'})`
+    if (typeof result.output !== 'string') return 'unavailable (git diff --stat returned non-text output)'
+    return result.output
+  } catch (err) {
+    return `unavailable (${err?.message ?? String(err)})`
+  }
+}
+
+function leadDecisionDelivery({ S, io, ctx, round, label, contextPaths, prefixLines, suffixLines, fullDelivery }) {
+  const resumed = round === 1 && label === '' && S.lastLeadDecision !== null && S.lastLeadDecision.consult < S.consults
+  if (!resumed) return fullDelivery(contextPaths, prefixLines, suffixLines)
+  const stat = S.buildRound === null ? 'none' : leadDiffStat(io, ctx)
+  const latest = S.latestBuildGate?.consult >= S.lastLeadDecision.consult
+    ? String(S.latestBuildGate.output ?? '').slice(-3000)
+    : `no gate run since consult ${S.lastLeadDecision.consult}`
+  const contextLines = [
+    '## Since your last consult (delivery mode: delta)',
+    `Last consult: ${S.lastLeadDecision.consult} (${S.lastLeadDecision.brief})`,
+    `Build round: ${S.buildRound ?? 'none'}`,
+    'Diff stat:', stat,
+    'Latest gate output:', latest,
+    'Context paths:',
+  ]
+  for (const path of contextPaths) contextLines.push(`- ${path}`)
+  return {
+    brief: [...prefixLines, ...contextLines, ...suffixLines].join('\n'),
+    mode: 'delta',
+    sources: contextPaths.map((path) => ({ path, mode: 'path', state: 'not-read', bytes: null, reason: 'delta' })),
+  }
 }

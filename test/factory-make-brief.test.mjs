@@ -3430,9 +3430,9 @@ test('b476 RV1 hardening a build verdict on a non-done round leaves the done-pat
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete', details: { questions: [{ id: 'q1', question: 'What is missing?' }] } }),
       'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
-      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete', details: { questions: [{ id: 'q2', question: 'What remains?' }] } }),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the partial diff is not evidence of a gate defect' } },
       'lead:2': leadEnv('bounce', 'complete the build before deciding the gate'),
       'builder:3': buildEnv(),
@@ -3442,8 +3442,9 @@ test('b476 RV1 hardening a build verdict on a non-done round leaves the done-pat
     },
     runs: {
       'gate-bad:1': { ok: false, output: RED(3) },
-      'gate-bad:2': { ok: false, output: RED(3) },
+      'gate-bad:2': { ok: true, output: '' },
       'gate-bad:3': { ok: false, output: RED(3) },
+      'gate-bad:4': { ok: false, output: RED(3) },
       'gate-fixed': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },

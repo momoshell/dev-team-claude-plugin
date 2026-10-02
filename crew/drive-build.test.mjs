@@ -2016,15 +2016,17 @@ const triagedGateRepairBrief = () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad', mutations: [CHECK_MUTATION] } }),
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green', details: { questions: [{ id: 'q1', question: 'How should the gate be repaired?' }] } }),
       'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
-      'builder:2': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' }),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green', details: { questions: [{ id: 'q2', question: 'Can the gate be fixed?' }] } }),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate needs its delimiter doctrine' } },
       'lead:2': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
     },
     runs: {
       'gate-bad:1': { ok: false, output: RED(3) },
       'gate-bad:2': { ok: false, output: RED(3) },
+      'gate-bad:3': { ok: false, output: RED(3) },
+      'gate-bad:4': { ok: false, output: RED(3) },
       'gate-fixed': { ok: true, output: '' },
     },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -4400,9 +4402,9 @@ test('b476 B1 a non-done builder round runs the acceptance gate before the lead 
   const io = fakeIo({
     envelopes: {
       'planner:1': plan,
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green' }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green', details: { questions: [{ id: 'q1', question: 'How should the gate be fixed?' }] } }),
       'lead:1': leadEnv('bounce', 'keep going until the triage threshold'),
-      'builder:2': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green' }),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green', details: { questions: [{ id: 'q2', question: 'What gate defect remains?' }] } }),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the second-round diff is partial' } },
       'lead:2': leadEnv('bounce', 'steer the builder'),
       'builder:3': buildEnv(),
@@ -4410,8 +4412,9 @@ test('b476 B1 a non-done builder round runs the acceptance gate before the lead 
     },
     runs: {
       'gate-cmd:1': { ok: false, output: RED(3) },
-      'gate-cmd:2': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
-      'gate-cmd:3': { ok: true, output: '' },
+      'gate-cmd:2': { ok: true, output: '' },
+      'gate-cmd:3': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
+      'gate-cmd:4': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -4419,9 +4422,9 @@ test('b476 B1 a non-done builder round runs the acceptance gate before the lead 
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.ok(res.details.stages.includes('gate:r2'))
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 4)
   const gateStage = io.calls.logs.findIndex((row) => row.stage === 'gate:r2')
-  const leadAnswer = io.calls.logs.findIndex((row) => row.envelope === 'lead2')
+  const leadAnswer = io.calls.logs.findIndex((row) => row.decision && row.consult === 2)
   assert.notEqual(gateStage, -1)
   assert.notEqual(leadAnswer, -1)
   assert.ok(gateStage < leadAnswer, 'the gate stage must open before the lead answers')
@@ -4436,15 +4439,16 @@ test('b476 B2 lead-consult exhaustion cannot terminate a lane with the gate repa
     'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate names a symbol the brief never asked for' } },
   }
   for (let n = 1; n <= 5; n += 1) {
-    envelopes[`builder:${n}`] = buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green' })
+    envelopes[`builder:${n}`] = buildEnv({ status: 'insufficient', summary: 'the gate is red and I cannot make it green', details: { questions: [{ id: `q${n}`, question: 'How should the gate be fixed?' }] } })
     envelopes[`lead:${n}`] = leadEnv('bounce', 'keep going', { gate_cmd: 'gate-fixed' })
   }
   const io = fakeIo({
     envelopes,
     runs: {
       'gate-bad:1': { ok: false, output: RED(3) }, // baseline
-      // Round 1 is below the triage threshold; round 2 is the observation that triages.
-      'gate-bad:2': { ok: false, output: RED(3) },
+      // Round 1 observes without triage; round 2 reaches the repair valve.
+      'gate-bad:2': { ok: true, output: '' },
+      'gate-bad:3': { ok: false, output: RED(3) },
       'gate-fixed': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
@@ -4457,7 +4461,7 @@ test('b476 B2 lead-consult exhaustion cannot terminate a lane with the gate repa
   assert.equal(res.details.gate.repairs, 1)
   assert.equal(res.details.gate.cmd, 'gate-fixed')
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 5)
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-bad').length, 2)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-bad').length, 3)
   assert.ok(Object.values(io.calls.writes).some((content) => /GATE DEFECT/.test(content)))
   assert.match(io.calls.writes[`${TD}/gate-triage-r2.md`], /builder did NOT return done/)
 
@@ -4480,9 +4484,9 @@ test('b476 RV1 a build verdict on a non-done round leaves the done-path triage a
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete', details: { questions: [{ id: 'q1', question: 'What is missing?' }] } }),
       'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
-      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete' }),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'the tree is still incomplete', details: { questions: [{ id: 'q2', question: 'What remains?' }] } }),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the partial diff is not evidence of a gate defect' } },
       'lead:2': leadEnv('bounce', 'complete the build before deciding the gate'),
       'builder:3': buildEnv(),
@@ -4492,8 +4496,9 @@ test('b476 RV1 a build verdict on a non-done round leaves the done-path triage a
     },
     runs: {
       'gate-bad:1': { ok: false, output: RED(3) }, // baseline
-      'gate-bad:2': { ok: false, output: RED(3) }, // round-2 observation
-      'gate-bad:3': { ok: false, output: RED(3) }, // round-3 done path
+      'gate-bad:2': { ok: true, output: '' }, // round-1 observation
+      'gate-bad:3': { ok: false, output: RED(3) }, // round-2 valve observation
+      'gate-bad:4': { ok: false, output: RED(3) }, // round-3 done path
       'gate-fixed': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
@@ -4516,7 +4521,7 @@ test('b476 D1 a red-gate insufficient still consults the lead and has its questi
   const io = fakeIo({
     envelopes: {
       'planner:1': plan,
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'first-round plan gap' }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'first-round plan gap', details: { questions: [{ id: 'q1', question: 'What plan gap?' }] } }),
       'lead:1': leadEnv('bounce', 'continue to the triage threshold'),
       'builder:2': buildEnv({ status: 'insufficient', summary: 'plan gap', details: { questions } }),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'the diff is partial' } },
@@ -4527,7 +4532,8 @@ test('b476 D1 a red-gate insufficient still consults the lead and has its questi
     runs: {
       'gate-cmd:1': { ok: false, output: RED(3) },
       'gate-cmd:2': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
-      'gate-cmd:3': { ok: true, output: '' },
+      'gate-cmd:3': { ok: false, output: 'expected valveX, found nothing, at crew/drive.mjs:5008' },
+      'gate-cmd:4': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -4545,7 +4551,7 @@ test('b476 D1 a red-gate insufficient still consults the lead and has its questi
   assert.match(bounce, /ANSWER: crew\/drive-build\.test\.mjs/)
   assert.match(bounce, /b1: Which helper should change\?/)
   assert.match(bounce, /UNANSWERED/)
-  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['b1'])
+  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers?.round === 2)?.question_answers.unanswered, ['b1'])
   assert.equal(Object.values(io.calls.writes).some((content) => /ACCEPTANCE GATE is red/.test(content)), false)
 })
 
@@ -8558,7 +8564,7 @@ function captureOneDoneStep({ outputs = [steppedGreen(), steppedRed('A2')], buil
 }
 
 test('C2 stepped-resume acceptance', () => {
-  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'full build paused' }) })
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'full build paused', details: { questions: [{ id: 'q1', question: 'May I ask for help?' }] } }) })
   addStepCheckpointWitness(io)
   const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'full', roles: ['planner', 'builder', 'reviewer'] }, io)
   assert.equal(result.details.escalation.where, 'build')
@@ -9611,4 +9617,77 @@ test('SD12', () => {
   const assignment = io.calls.assign.filter(({ role }) => role === 'builder')[1]
   const text = assignment ? io.calls.writes[assignment.briefFile] ?? '' : ''
   assert.equal(text.match(/step-c2-r1\.md/)?.[0] ?? null, 'step-c2-r1.md')
+})
+
+import { LEAD_CONSULT_TRIGGERS, failingCheckSet, driverBounceLines } from './drive.mjs'
+
+const LB_GREEN = { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` }
+const lbFail = (label) => ({ ok: false, output: `FAIL ${label}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` })
+const lbInsufficient = (details = {}) => buildEnv({ status: 'insufficient', summary: 'partial build', details })
+const lbQuestion = [{ id: 'q1', question: 'Which helper should change?' }]
+const lbFingerprint = (value) => ({ measured: true, checkout: CTX.checkout, at: 0, head: 'deadbeefcafe', entries: { 'a.mjs': `file:-:${value}` } })
+function lbScenario({ builders = [lbInsufficient()], gates = [lbFail('A1')], noGate = false, laneRed = false, fingerprints = null, buildRounds = 3, emit = false, throwJournal = false, statError = null } = {}) {
+  let io
+  const envelopes = { 'planner:1': planEnv({ details: { ...planEnv().details, ...(noGate ? {} : { gate_cmd: 'gate-cmd' }) } }) }
+  builders.forEach((env, i) => { envelopes[`builder:${i + 1}`] = env })
+  envelopes[`builder:${builders.length + 1}`] = buildEnv()
+  for (let n = 1; n <= 8; n++) {
+    envelopes[`lead:${n}`] = leadEnv('bounce', 'LEAD_BODY_MARK continue the build')
+    envelopes[`reviewer:${n}`] = () => io.calls.assign.at(-1)?.note === 'gate-triage' ? { status: 'done', role: 'reviewer', details: { defect: 'build', reason: 'partial tree' } } : reviewEnv('pass')
+  }
+  const runs = { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd': LB_GREEN, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, "git diff --stat 'deadbeefcafe'": { ok: true, output: 'a.mjs | 2 +-' } }
+  gates.forEach((gate, i) => { runs[`gate-cmd:${i + 2}`] = gate })
+  if (laneRed) runs['lane-cmd:1'] = { ok: false, output: 'LANE_MARK expected repaired result, found broken result' }
+  const witness = fingerprints ? (_checkout, calls) => lbFingerprint(fingerprints[Math.max(0, Math.min(fingerprints.length - 1, calls.assign.filter((x) => x.role === 'builder').length))]) : null
+  io = fakeIo({ envelopes, runs, fingerprints: witness, emit, writeThrough: true, changed: ['a.mjs', 'a.test.mjs'] })
+  if (throwJournal) { const log = io.log; io.log = (row) => { if (row.build_bounce) throw new Error('journal failed'); return log(row) } }
+  if (statError) { const run = io.run.bind(io); io.run = (cmd) => { if (String(cmd).startsWith('git diff --stat')) { if (statError === 'throw') throw new Error('stat interrupted'); return { ok: false, status: 128, output: '' } } return run(cmd) } }
+  const result = driveTask({ ...CTX, head: 'deadbeefcafe', limits: { build_rounds: buildRounds, lead_consults: 8 } }, io)
+  return { io, result }
+}
+const lbBounce = (s, r = 1) => s.io.calls.writes[`${TD}/build-bounce-r${r}.md`] ?? '(absent bounce)'
+const lbRow = (s, r = 1) => s.io.calls.logs.find((x) => x.build_bounce?.round === r)?.build_bounce ?? null
+const lbLeads = (s) => s.io.calls.assign.filter((x) => x.role === 'lead').length
+const lbHas = (text, needle, where) => assert.equal(text.includes(needle), true, `${where} lacks ${JSON.stringify(needle)}`)
+
+test('LB1', () => { /* MUTATION: route trigger-null to lead. */ const s = lbScenario(); assert.deepEqual({ leads: lbLeads(s), consults: s.result.details.consults, fail: lbBounce(s).includes('FAIL A1') }, { leads: 0, consults: 0, fail: true }) })
+test('LB2', () => { /* MUTATION: skip green-gate lane probe. */ const s = lbScenario({ gates: [LB_GREEN], laneRed: true }); assert.deepEqual({ leads: lbLeads(s), tail: /Validation lane failures:[\s\S]*LANE_MARK/.test(lbBounce(s)) }, { leads: 0, tail: true }) })
+test('LB3', () => { /* MUTATION: omit residual rendering. */ const s = lbScenario({ noGate: true, builders: [lbInsufficient({ residuals: [{ id: 'residual', type: 'cosmetic', summary: 'RESIDUAL_MARK' }] })] }); lbHas(lbBounce(s), 'RESIDUAL_MARK', 'build bounce') })
+test('LB4', () => { /* MUTATION: disable identical nonempty failing-set comparison. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [lbFail('A1'), lbFail('A1')], fingerprints: ['base', 'one', 'two', 'three'] }); assert.deepEqual({ leads: lbLeads(s), source: lbRow(s, 2)?.source, trigger: lbRow(s, 2)?.trigger }, { leads: 1, source: 'lead-consult', trigger: 'repeated-failure' }) })
+test('LB5', () => { /* MUTATION: accept any previous nonempty failing set. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [lbFail('A1'), lbFail('B2')], fingerprints: ['base', 'one', 'two', 'three'] }); assert.equal(lbLeads(s), 0) })
+test('LB6', () => { /* MUTATION: disable unchanged-fingerprint branch. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [LB_GREEN, LB_GREEN], fingerprints: ['base', 'one', 'one', 'two'] }); assert.deepEqual({ trigger: lbRow(s, 2)?.trigger, no_progress: lbRow(s, 2)?.no_progress }, { trigger: 'repeated-failure', no_progress: true }) })
+test('LB7', () => { /* MUTATION: map changed comparison to no progress. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [LB_GREEN, LB_GREEN], fingerprints: ['base', 'one', 'two', 'three'] }); assert.deepEqual({ leads: lbLeads(s), no_progress: lbRow(s, 2)?.no_progress }, { leads: 0, no_progress: false }) })
+test('LB8', () => { /* MUTATION: map unmeasurable comparison to unchanged. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [LB_GREEN, LB_GREEN] }); assert.deepEqual({ leads: lbLeads(s), no_progress: lbRow(s, 2)?.no_progress }, { leads: 0, no_progress: null }) })
+test('LB9', () => { /* MUTATION: disable final-round trigger. */ const s = lbScenario({ builders: [lbInsufficient(), lbInsufficient()], gates: [lbFail('A1'), lbFail('B2')], buildRounds: 2 }); assert.equal(lbRow(s, 2)?.trigger, 'final-round') })
+test('LB10', () => { /* MUTATION: disable builder-questions trigger. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion })] }); assert.equal(lbRow(s)?.trigger, 'shape-conflict') })
+test('LB11', () => { /* MUTATION: disable non-insufficient status trigger. */ const s = lbScenario({ builders: [buildEnv({ status: 'blocked' })] }); assert.equal(lbRow(s)?.trigger, 'shape-conflict') })
+test('LB12', () => { /* MUTATION: delete central build_bounce row write. */ const s = lbScenario(); assert.deepEqual(lbRow(s), { round: 1, note: 'build-fix', source: 'driver', trigger: null, failing_checks: ['A1'], no_progress: null }) })
+test('LB13', () => { /* MUTATION: emit a decision from driver-owned bounce. */ const s = lbScenario({ emit: true }); assert.deepEqual(s.io.calls.emits.filter((x) => x.kind === 'decision').map((x) => x.decided), []) })
+test('LB14', () => { /* MUTATION: restrict journal row to non-done route. */ const s = lbScenario({ noGate: true, builders: [buildEnv()], laneRed: true }); assert.deepEqual(lbRow(s), { round: 1, note: 'lane-fix', source: 'driver', trigger: null, failing_checks: null, no_progress: null }) })
+test('LB15', () => { /* MUTATION: always choose full leadContextDelivery. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; assert.deepEqual([text.includes('## Since your last consult (delivery mode: delta)'), text.includes('Last consult: 1'), text.includes(`${TD}/decision-1.md`), text.includes(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`), lbRow(s)?.source], [true, true, true, true, 'lead-consult']) })
+test('LB16', () => { /* MUTATION: inline context bodies in delta. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; assert.deepEqual([text.includes(`${TD}/build-bounce-r1.md`), text.includes('LEAD_BODY_MARK')], [true, false]) })
+test('LB17', () => { /* MUTATION: omit resumed-lead diff-stat probe. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); assert.equal(/Diff stat:[\s\S]*a\.mjs \| 2 \+-/.test(s.io.calls.writes[`${TD}/decision-2.md`] ?? ''), true) })
+
+test('LB extras pin trigger vocabulary, strict check labels, delta rows and journal failure tolerance', () => {
+  assert.deepEqual([...LEAD_CONSULT_TRIGGERS], ['shape-conflict', 'final-round', 'repeated-failure'])
+  assert.equal(Object.isFrozen(LEAD_CONSULT_TRIGGERS), true)
+  assert.deepEqual(failingCheckSet('FAIL Z9\nFAIL A1: detail\nFAIL A1\nFAIL A10: nope\nFAIL A1 extended\n# fail 4'), ['A1', 'A10', 'Z9'])
+  const lines = driverBounceLines({ round: 1, env: lbInsufficient({ residuals: [{ marker: 'R' }] }), gateCmd: null, gateRes: null, laneRes: null, planPath: '/plan' })
+  assert.ok(lines.includes(JSON.stringify([{ marker: 'R' }])))
+  const noGate = lbScenario({ noGate: true, builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })] })
+  assert.match(noGate.io.calls.writes[`${TD}/decision-2.md`], /no gate run since consult 1/)
+  assert.deepEqual(noGate.io.calls.logs.find((x) => x.lead_consult_context?.consult === 2)?.lead_consult_context, {
+    brief: `${TD}/decision-2.md`, consult: 2, round: 1, mode: 'delta',
+    sources: [`${TD}/build-bounce-r1.md`].map((path) => ({ path, mode: 'path', state: 'not-read', bytes: null, reason: 'delta' })),
+  })
+  const unavailable = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], statError: 'failed' })
+  assert.match(unavailable.io.calls.writes[`${TD}/decision-2.md`], /unavailable \(git diff --stat exited 128\)/)
+  const interrupted = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], statError: 'throw' })
+  assert.match(interrupted.io.calls.writes[`${TD}/decision-2.md`], /unavailable \(stat interrupted\)/)
+  const rejected = lbScenario({ builders: [lbInsufficient({ questions: [{ question: 'missing id' }] })] })
+  assert.equal(lbRow(rejected)?.trigger, 'shape-conflict')
+  const blockedFinal = lbScenario({ builders: [buildEnv({ status: 'blocked' })], buildRounds: 1 })
+  assert.equal(lbRow(blockedFinal)?.trigger, 'shape-conflict')
+  const s = lbScenario({ throwJournal: true })
+  assert.equal(s.io.calls.assign.filter((x) => x.role === 'builder').length, 2)
 })

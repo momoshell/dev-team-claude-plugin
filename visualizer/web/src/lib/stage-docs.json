@@ -206,6 +206,11 @@
         },
         {
           "callee": "stage",
+          "label": "gate:r${round}",
+          "occurrence": 3
+        },
+        {
+          "callee": "stage",
           "label": "gate:${step.id}:r${stepRound}",
           "occurrence": 1
         },

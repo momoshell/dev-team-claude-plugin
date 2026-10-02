@@ -800,7 +800,8 @@ test('lead timeout (no envelope) on a consult throws toward escalation, never si
 })
 
 test('a present stale or mis-addressed envelope emits one refusal and terminates at its dispatch', () => {
-  const io = fakeIo({ emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }), 'lead:1': leadEnv('escalate') } })
+  const stalePlanner = planEnv({ assignment_id: 'stale-planner' })
+  const io = fakeIo({ emit: true, envelopes: { 'planner:1': stalePlanner, 'planner1.id-reask.planner.json': stalePlanner, 'lead:1': leadEnv('escalate') } })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'plan')
@@ -808,14 +809,15 @@ test('a present stale or mis-addressed envelope emits one refusal and terminates
   assert.doesNotMatch(res.details.escalation.why, /no valid envelope/)
   assert.doesNotMatch(res.summary, /the driver crashed/)
   const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
-  assert.equal(refusalRows.length, 1)
+  assert.equal(refusalRows.length, 2)
   assert.deepEqual(refusalRows[0].envelope_refused, {
     role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
     field: 'assignment_id', expected: 'planner1', found: 'stale-planner',
-    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
+    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1', otherwise_valid: true,
   })
   assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope' && event.stage === 'envelope-refusal'))
   assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope' && event.id === 'planner1'), [
+    { kind: 'envelope', id: 'planner1', role: 'planner', status: 'insufficient' },
     { kind: 'envelope', id: 'planner1', role: 'planner', status: 'insufficient' },
   ])
 
@@ -841,7 +843,7 @@ function identityFixture(envelope, { variant = 'scout', role = 'planner', runId 
   const assign = io.assign.bind(io)
   io.assign = function (spec) {
     const assigned = assign(spec)
-    return { ...assigned, id, returnPath: `/tmp/returns/${runId}/${id}.${role}.json` }
+    return { ...assigned, id, returnPath: spec.reask?.returnPath ?? `/tmp/returns/${runId}/${id}.${role}.json` }
   }
   io.wait = () => envelope
   return { io, ctx: { ...CTX, variant, run_id: runId, roles: [role], seatedRoles: [role] } }
@@ -854,21 +856,106 @@ function rpcNoEnvelope(detail, over = {}) {
   }
 }
 
+const ID_REASK_RUN = 'run-id-reask'
+const idReaskScenario = ({ builders = [], spent = null } = {}) => {
+  const queues = {
+    planner: [planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: [leadEnv('escalate')],
+  }
+  const io = fakeIo({
+    emit: true, changed: ['a.mjs', 'a.test.mjs'],
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  const assign = io.assign.bind(io)
+  const identities = new Map()
+  const dispatches = []
+  io.assign = (spec) => {
+    const assigned = assign(spec)
+    const id = assigned.id
+    const returnPath = spec.reask?.returnPath ?? `/returns/${ID_REASK_RUN}/${id}.${spec.role}.json`
+    identities.set(returnPath, { role: spec.role, id })
+    dispatches.push({ ...spec, id, returnPath })
+    return { id, returnPath }
+  }
+  io.wait = (returnPath) => {
+    const identity = identities.get(returnPath)
+    const raw = queues[identity.role]?.shift()
+    if (!raw) return null
+    const env = typeof raw === 'function' ? raw(identity) : raw
+    return { ...env, assignment_id: env.assignment_id ?? identity.id, run_id: env.run_id ?? ID_REASK_RUN }
+  }
+  io.reaskGraceSpent = () => spent
+  return { io, dispatches, result: driveTask({ ...CTX, run_id: ID_REASK_RUN, limits: { plan_rounds: 1 } }, io) }
+}
+
+const builderDispatches = (scenario) => scenario.dispatches.filter(({ role }) => role === 'builder')
+const recoveryRows = (scenario, key) => scenario.io.calls.logs.filter((row) => row[key]).map((row) => row[key])
+const wrongBuilderId = () => buildEnv({ assignment_id: ID_REASK_RUN, run_id: ID_REASK_RUN })
+
+// MUTATION IDREASK: return the refused envelope instead of dispatching correction.
+test('IDREASK', () => {
+  const recovered = idReaskScenario({ builders: [wrongBuilderId()] })
+  const dispatches = builderDispatches(recovered)
+  assert.equal(dispatches.length, 2)
+  assert.equal(dispatches[1].id, dispatches[0].id)
+  assert.equal(dispatches[1].returnPath, `/returns/${ID_REASK_RUN}/${dispatches[0].id}.id-reask.builder.json`)
+  assert.match(recovered.io.calls.writes[dispatches[1].briefFile], new RegExp(`assignment_id=${JSON.stringify(dispatches[0].id)}`))
+  assert.equal(recovered.result.status, 'done')
+
+  const insufficient = idReaskScenario({ builders: [wrongBuilderId(), buildEnv({ status: 'insufficient', summary: 'blocking gaps' })] })
+  assert.equal(builderDispatches(insufficient).length, 2)
+  assert.equal(insufficient.result.status, 'escalation')
+  assert.match(insufficient.result.details.escalation.why, /blocking gaps/)
+})
+
+// MUTATION IDROW: replace the asked outcome expression with grace-spent.
+test('IDROW', () => {
+  const scenario = idReaskScenario({ builders: [wrongBuilderId()] })
+  assert.equal(recoveryRows(scenario, 'envelope_refused')[0].otherwise_valid, true)
+  assert.deepEqual(recoveryRows(scenario, 'envelope_id_reask').map(({ outcome }) => outcome), ['asked'])
+})
+
+// MUTATION IDINVALID: report otherwise_valid true for independently invalid envelopes.
+test('IDINVALID', () => {
+  for (const extra of [{ role: 'reviewer' }, { run_id: 'foreign-run' }, { status: null }]) {
+    const scenario = idReaskScenario({ builders: [({ id }) => ({ ...wrongBuilderId(), ...extra })] })
+    assert.equal(recoveryRows(scenario, 'envelope_refused')[0].otherwise_valid, false)
+    assert.equal(builderDispatches(scenario).length, 1)
+    assert.equal(recoveryRows(scenario, 'envelope_id_reask').length, 0)
+  }
+})
+
+// MUTATION IDGRACE: discard the shared re-ask grace lookup.
+test('IDGRACE', () => {
+  const scenario = idReaskScenario({ builders: [wrongBuilderId()], spent: 'caller-reask' })
+  assert.deepEqual(recoveryRows(scenario, 'envelope_id_reask').map(({ outcome }) => outcome), ['grace-spent'])
+  assert.equal(builderDispatches(scenario).length, 1)
+  assert.equal(scenario.result.status, 'escalation')
+})
+
+// MUTATION IDSECOND: return before the corrected dispatch can be refused.
+test('IDSECOND', () => {
+  const scenario = idReaskScenario({ builders: [wrongBuilderId(), wrongBuilderId()] })
+  assert.equal(builderDispatches(scenario).length, 2)
+  assert.equal(recoveryRows(scenario, 'envelope_refused').length, 2)
+  assert.equal(scenario.result.status, 'escalation')
+  assert.equal(scenario.io.calls.commits.length, 0)
+})
+
 test('A1 handled anti-replay refusal', () => {
   const cases = [
     ['plan', CTX, 'planner', () => fakeIo({
-      emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }), 'lead:1': leadEnv('escalate') },
+      emit: true, envelopes: { 'planner:1': planEnv({ assignment_id: 'stale-planner' }), 'planner1.id-reask.planner.json': planEnv({ assignment_id: 'stale-planner' }), 'lead:1': leadEnv('escalate') },
     })],
     ['build', CTX_DIRECTED, 'builder', () => fakeIo({
       emit: true, files: DIRECTED_FILES,
-      envelopes: { 'builder:1': buildEnv({ assignment_id: 'stale-builder' }), 'lead:1': leadEnv('escalate') },
+      envelopes: { 'builder:1': buildEnv({ assignment_id: 'stale-builder' }), 'builder1.id-reask.builder.json': buildEnv({ assignment_id: 'stale-builder' }), 'lead:1': leadEnv('escalate') },
       runs: { 'directed-gate': { ok: false, output: RED() } },
     })],
     ['reviewer', CTX, 'reviewer', () => fakeIo({
       emit: true,
       envelopes: {
         'planner:1': planEnv(), 'builder:1': buildEnv(),
-        'reviewer:1': { ...reviewEnv('pass'), assignment_id: 'stale-reviewer' }, 'reviewer:2': reviewEnv('pass'),
+        'reviewer:1': { ...reviewEnv('pass'), assignment_id: 'stale-reviewer' }, 'reviewer1.id-reask.reviewer.json': { ...reviewEnv('pass'), assignment_id: 'stale-reviewer' },
       },
       runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
       changed: ['a.mjs', 'a.test.mjs'],
@@ -884,15 +971,16 @@ test('A1 handled anti-replay refusal', () => {
     const io = makeIo()
     const result = driveTask(ctx, io)
     const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
-    assert.equal(refusalRows.length, 1, label)
-    assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, 1, label)
+    const mismatch = label === 'plan' || label === 'build' || label === 'reviewer'
+    assert.equal(refusalRows.length, mismatch ? 2 : 1, label)
+    assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, mismatch ? 2 : 1, label)
     assert.equal(io.calls.emits.find((event) => event.kind === 'cell-failure').stage, 'envelope-refusal', label)
     assert.doesNotMatch(result.summary, /the driver crashed/, label)
     assert.doesNotMatch(result.details.escalation?.why || '', /the driver crashed/, label)
     if (result.details.escalation) assert.notEqual(result.details.escalation.where, role, label)
     const dispatch = io.calls.assign.find((entry) => entry.role === role)
     const terminal = io.calls.emits.filter((event) => event.kind === 'envelope' && event.id === `${role}1`)
-    assert.deepEqual(terminal, [{ kind: 'envelope', id: `${role}1`, role, status: 'insufficient' }], label)
+    assert.deepEqual(terminal, Array.from({ length: mismatch ? 2 : 1 }, () => ({ kind: 'envelope', id: `${role}1`, role, status: 'insufficient' })), label)
     assert.equal(Object.hasOwn(terminal[0], 'review'), false, label)
     assert.equal(dispatch?.role, role, label)
   }
@@ -996,7 +1084,7 @@ test('H1 strict identity refusal precedes turn ceiling', () => {
   const result = driveTask({ ...ctx, turnCeilings: { reviewer: 1 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'envelope')
-  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 2)
   assert.equal(io.calls.logs.filter((row) => row.seat_turn_ceiling).length, 0)
   assert.equal(io.calls.logs.find((row) => row.envelope_refused).envelope_refused.reason, 'assignment-id-mismatch')
 })
@@ -1555,8 +1643,9 @@ test('an io without showDoc drives an identical loop (the additive pin)', () => 
 // class where lane-red/gate-red/builder-insufficient work reached commit.
 
 test('an envelope with a MISMATCHED assignment_id is rejected (stale-file replay guard)', () => {
+  const stale = planEnv({ assignment_id: 'd9-from-a-previous-run' })
   const io = fakeIo({
-    envelopes: { 'planner:1': planEnv({ assignment_id: 'd9-from-a-previous-run' }), 'lead:1': leadEnv('escalate') },
+    envelopes: { 'planner:1': stale, 'planner1.id-reask.planner.json': stale, 'lead:1': leadEnv('escalate') },
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')

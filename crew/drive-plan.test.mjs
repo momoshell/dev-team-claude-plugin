@@ -2792,7 +2792,10 @@ test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
   ]) {
     const io = fakeIo({
       files: { [journal]: journalText([json('planner1', 'planner', 137)]) },
-      envelopes: { 'planner:1': envelope }, runs: greenRuns, changed: ['a.mjs', 'a.test.mjs'],
+      envelopes: {
+        'planner:1': envelope,
+        ...(label === 'stale assignment' ? { 'planner1.id-reask.planner.json': envelope } : {}),
+      }, runs: greenRuns, changed: ['a.mjs', 'a.test.mjs'],
     })
     let journalReads = 0
     const readFile = io.readFile
@@ -3168,19 +3171,19 @@ test('A1 zero-turn non-start predicate validates the complete measured envelope'
   }
 
   const stale = zeroTurnEnvelope('stale-planner')
-  const io = fakeIo({ envelopes: { 'planner:1': stale, 'lead:1': leadEnv('escalate') } })
+  const io = fakeIo({ envelopes: { 'planner:1': stale, 'planner1.id-reask.planner.json': stale, 'lead:1': leadEnv('escalate') } })
   const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan')
   assert.match(result.details.escalation.why, /envelope-refusal: assignment-id-mismatch/)
   const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
-  assert.equal(refusalRows.length, 1)
+  assert.equal(refusalRows.length, 2)
   assert.deepEqual(refusalRows[0].envelope_refused, {
     role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
     field: 'assignment_id', expected: 'planner1', found: 'stale-planner',
-    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
+    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1', otherwise_valid: true,
   })
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
   assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
 })
 
@@ -3320,6 +3323,80 @@ test('G1 zero-turn re-ask brief names the non-start', () => {
   const brief = io.calls.writes[second.briefFile]
   assert.match(brief, /^Your previous dispatch produced no envelope and took no turns \(zero-turn-non-start\)\.$/m)
   assert.match(brief, /The same assignment is asked directly again/)
+})
+
+const NO_ENV_RUN = 'run-planner-no-envelope'
+const noEnvelopeCarrier = (detail) => ({ role, id }) => ({
+  assignment_id: id, role, status: 'insufficient', summary: 'rpc fallback', artifacts: [],
+  details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', ...detail },
+})
+const plannerNoEnvelopeScenario = ({ planners = [], builders = [] } = {}) => {
+  const queues = {
+    planner: [...planners, planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: [leadEnv('escalate')],
+  }
+  const io = fakeIo({
+    emit: true, changed: ['a.mjs', 'a.test.mjs'],
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  const assign = io.assign.bind(io)
+  const identities = new Map()
+  io.assign = (spec) => {
+    const assigned = assign(spec)
+    const id = assigned.id
+    const returnPath = spec.reask?.returnPath ?? `/returns/${NO_ENV_RUN}/${id}.${spec.role}.json`
+    identities.set(returnPath, { role: spec.role, id })
+    return { id, returnPath }
+  }
+  io.wait = (returnPath) => {
+    const identity = identities.get(returnPath)
+    const raw = queues[identity.role]?.shift()
+    if (!raw) return null
+    const env = typeof raw === 'function' ? raw(identity) : raw
+    return { ...env, assignment_id: env.assignment_id ?? identity.id, run_id: env.run_id ?? NO_ENV_RUN }
+  }
+  return { io, result: driveTask({ ...CTX, run_id: NO_ENV_RUN, limits: { plan_rounds: 1 } }, io) }
+}
+
+const noEnvelopeDispatches = (scenario, role) => scenario.io.calls.assign.filter((entry) => entry.role === role)
+const noEnvelopeRows = (scenario) => scenario.io.calls.logs.filter((row) => row.seat_enforcement).map((row) => row.seat_enforcement)
+const NO_ENVELOPE_DETAILS = Object.freeze([
+  { turns: 8, tool_calls: 40, absent_reason: null },
+  { turns: null, tool_calls: null, absent_reason: 'census-unavailable' },
+])
+
+// MUTATION NOENVREASK: remove plannerNoEnvelope from the direct retry condition.
+test('NOENVREASK', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail)] })
+    assert.equal(scenario.result.status, 'done')
+    assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
+    assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
+  }
+  const builder = plannerNoEnvelopeScenario({ builders: [noEnvelopeCarrier(NO_ENVELOPE_DETAILS[0])] })
+  assert.equal(noEnvelopeDispatches(builder, 'builder').length, 1)
+  assert.equal(builder.result.status, 'escalation')
+})
+
+// MUTATION NOENVPREAMBLE: count the direct retry as one plan round.
+test('NOENVPREAMBLE', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail)] })
+    const dispatches = noEnvelopeDispatches(scenario, 'planner')
+    assert.match(scenario.io.calls.writes[dispatches[1].briefFile], /planner-no-envelope/)
+    const applied = noEnvelopeRows(scenario).find((row) => row.kind === 'planner-no-envelope' && row.applied)
+    assert.deepEqual(applied.recovery, { reason: 'no-envelope', ...detail, seats: 1, rounds: 0 })
+  }
+})
+
+// MUTATION NOENVSECOND: allow a second direct no-envelope retry.
+test('NOENVSECOND', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail), noEnvelopeCarrier(detail)] })
+    assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
+    assert.equal(noEnvelopeDispatches(scenario, 'lead').length, 1)
+    assert.equal(scenario.result.status, 'escalation')
+    assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
+  }
 })
 
 test('A1 sourced dispatch admissions survive planner narrowing in full and triage runs', () => {

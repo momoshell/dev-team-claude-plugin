@@ -4,7 +4,7 @@ Declare a finite vocabulary as data that callers actually consult.
 Exhibit: `scripts/factory/ledger.mjs:528` (`CI_DECISIONS`).
 
 `DECISIONS` is frozen with `Object.freeze` at the export boundary.
-Exhibit: `crew/drive.mjs:524`.
+Exhibit: `crew/drive.mjs:550`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
 Exhibit: `scripts/factory/ledger.mjs:4297`.
@@ -41,7 +41,7 @@ Exhibit: `crew/drive-review.test.mjs:1628`.
 A mutation that adds a member must also make the literal expectation fail.
 Exhibit: `crew/drive-review.test.mjs:1629`.
 
-Read `docs/conventions.md:126` for the repo decision; this file owns the test
+Read `docs/conventions.md:130` for the repo decision; this file owns the test
 shape that keeps the decision observable.
 
 Unknown values should take the existing refusal path rather than being silently

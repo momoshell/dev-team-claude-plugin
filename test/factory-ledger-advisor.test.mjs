@@ -2107,6 +2107,8 @@ test('advisor-source S7 backfills only one eligible evidence match and preserves
     ['advisor-source-s7-dry', 'dry-lane', 'none', 'build', null, '["builder"]', null],
     ['advisor-source-s7-default-evidence', 'default-evidence-lane', 'none', 'build', 'prior-default-evidence', '["builder"]', 'default'],
     ['advisor-source-s7-ungranted', 'ungranted-lane', 'none', 'build', 'prior-evidence', '[]', 'rotation'],
+    ['advisor-source-s7-reused-early', 'reused-lane', 'none', 'build', null, '["builder"]', 'rotation'],
+    ['advisor-source-s7-reused-late', 'reused-lane', 'none', 'build', null, '["builder"]', null],
   ]
   for (const [id, lane, model, tier, evidence, granted, source] of rows) {
     seedConfigurationRun(ledger, id, '2024-01-02T00:00:00.000Z', { advisor_model: model, advisor_granted_json: granted, advisor_source: source, advisor_source_evidence: evidence })
@@ -2127,6 +2129,10 @@ test('advisor-source S7 backfills only one eligible evidence match and preserves
   const nullArm = evidence('null-arm.json', { lane: 'null-arm-lane', advisor_rotation: { source: 'rotation', arm: null } })
   const nonBuild = evidence('non-build.json', { lane: 'non-build-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
   const dry = evidence('dry.json', { lane: 'dry-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  // A reused lane name: the record cannot prove which run it describes, so the later unrecorded run stays unrecorded.
+  const reused = evidence('reused.dispatch.json', { lane: 'reused-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  assert.deepEqual(advisorSourceBackfill(ledger, [reused]), [{ path: reused, outcome: 'ambiguous' }])
+  assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-reused-late').advisor_source, null)
   // MUTATION S7-dry: allow dry-run to call the writer; outcome and stored source prove it is write-free.
   assert.deepEqual(advisorSourceBackfill(ledger, [dry], { dryRun: true }), [{ path: dry, outcome: 'would-backfill', adw_id: 'advisor-source-s7-dry' }])
   assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-dry').advisor_source, null)

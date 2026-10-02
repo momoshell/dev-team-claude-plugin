@@ -40,6 +40,6 @@
   "test/factory-ledger-cli.test.mjs:332": "refused.status, 2, refused.stderr",
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
   "scripts/factory/emit.mjs:1610": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:9929": "unknown verb: ${verb}",
-  "scripts/factory/ledger.mjs:4297": "requireEnum(input.decision, CI_DECISIONS"
+  "scripts/factory/ledger.mjs:4297": "requireEnum(input.decision, CI_DECISIONS",
+  "scripts/factory/ledger.mjs:9931": "unknown verb: ${verb}"
 }

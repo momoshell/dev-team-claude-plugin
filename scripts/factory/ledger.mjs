@@ -8353,6 +8353,8 @@ function backfillAdvisorSourcePath(ledger, path, { dryRun = false } = {}) {
   const configs = new Map(configurations.map((row) => [row.adw_id, row]))
   const candidates = sessions.filter((session) => session.tier === 'build' && session.task_slug === record.lane && configs.has(session.adw_id))
   if (!candidates.length) return { path, outcome: 'no-run' }
+  // A dispatch record names a lane, not a session: with a reused lane name it cannot prove which run it describes.
+  if (candidates.length > 1) return { path, outcome: 'ambiguous' }
   const unrecorded = candidates.filter((session) => configs.get(session.adw_id).advisor_source == null)
   if (!unrecorded.length) return { path, outcome: 'already-recorded' }
   const recordedArm = record.advisor_rotation?.arm

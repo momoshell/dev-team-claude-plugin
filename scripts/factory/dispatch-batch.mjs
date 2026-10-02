@@ -2163,7 +2163,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       return recordAdmission(row)
     }
     const requestedPaths = requestedSurface.map((file) => parseFenceScope(file).path).filter((path) => typeof path === 'string')
-    const matchOwn = scopeMatcher([...ownPaths, ...requestedPaths])
+    const matchOwn = scopeMatcher([...ownPaths, ...requestedSurface, ...requestedPaths])
     const hasTestSurface = ownPaths.some((path) => path.endsWith('.test.mjs'))
     const missingCensusCarriers = CENSUS_CARRIER_FILES.filter((carrier) => !matchOwn(carrier))
     const censusExposure = hasTestSurface && missingCensusCarriers.length > 0

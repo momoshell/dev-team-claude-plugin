@@ -252,11 +252,11 @@ test('DF1 citation-carrier admits an unheld pinned citing doc outside the fence'
 })
 
 test('DF2 data-file admits non-code literals read by surface tests', () => {
-  const fixture = ({ authored = ['test/owned.test.mjs'], requested = [], otherLane = false, reader = 'test/owned.test.mjs', literal = true, surfaceOnDisk = true } = {}) => {
+  const fixture = ({ authored = ['test/owned.test.mjs'], requested = [], otherLane = false, reader = 'test/owned.test.mjs' } = {}) => {
     const checkout = scratchDir('df2-')
     const files = ['test/owned.test.mjs', 'fixtures/data.json', 'lib/other.mjs']
     const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
-    if (surfaceOnDisk) write('test/owned.test.mjs', "test('surface', () => {})\n")
+    write('test/owned.test.mjs', "test('surface', () => {})\n")
     write('fixtures/data.json', '{}\\n'); write('lib/other.mjs', 'export const other = 1\\n')
     write(reader, `const data = ${JSON.stringify('fixtures/data.json')}; const code = ${JSON.stringify('lib/other.mjs')}\n`)
     const tracked = [...new Set([...files, reader])]
@@ -276,13 +276,23 @@ test('DF2 data-file admits non-code literals read by surface tests', () => {
   for (const options of [
     { authored: ['lib/other.mjs'], requested: ['test/owned.test.mjs'] }, { authored: ['lib/other.mjs'], requested: ['test/fixture/'], reader: 'test/fixture/owned.test.mjs' }, { authored: ['test/owned.test.mjs:1-2'] }, { reader: 'test/outside.test.mjs' },
     { authored: ['test/owned.test.mjs', 'fixtures/data.json'] }, { requested: ['fixtures/data.json'] },
-    { otherLane: true }, { authored: ['missing/absent.mjs'], requested: ['test/owned.test.mjs'], surfaceOnDisk: false },
+    { otherLane: true }, { authored: ['missing/absent.mjs'], requested: ['test/owned.test.mjs'] },
   ]) {
     const { result } = fixture(options)
     const rows = result.admissions.filter((row) => row.source === 'data-file' && row.lane === 'lane-a')
     if (options.reader === 'test/outside.test.mjs' || options.otherLane || options.authored?.[0] === 'missing/absent.mjs' || options.authored?.includes('fixtures/data.json') || options.requested?.includes('fixtures/data.json')) assert.equal(rows.length, 0)
     else assert.deepEqual(rows, [{ lane: 'lane-a', file: 'fixtures/data.json', source: 'data-file' }], JSON.stringify(options))
   }
+})
+
+test('RV2-1 raw span where remains inside an exact-file fence', () => {
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/drive.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/drive.mjs:10-20'] }],
+    deps: { readdirSync: () => [], log: () => {} },
+  })
+  assert.equal(report.observations.some(({ reason }) => reason === 'where-outside-fence'), false)
+  assert.equal(report.warnings.some(({ reason }) => reason === 'where-outside-fence'), false)
 })
 
 test('G1 preserves every scan blind spot byte-identically', () => {

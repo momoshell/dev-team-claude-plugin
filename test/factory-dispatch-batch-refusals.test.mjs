@@ -738,6 +738,7 @@ test('DF3 brief-summary derived= counts all six sources in order before report='
     const timeline = [], spawnedOut = []
     let dispatched
     try { dispatched = await dispatchFixture({ label: `df3-${label}`, names: ['lane-a'], checkout, fences: [entry('lane-a', ['test/census.test.mjs'])], timeline, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }), brief: '## Proposed tier\\nproposed tier: mechanical\\n', writeFile: (path, content) => put(path, content), spawnAsync: async () => rejected ? { status: 1, stdout: '', stderr: 'compiler refused' } : { status: 0, stdout: '', stderr: '' } }) } catch {}
+    if (!rejected) assert.ok(dispatched, 'fulfilled dispatch should produce a persisted fence report')
     const logs = timeline.filter((row) => row.kind === 'log').map((row) => row.line)
     const line = logs.find((text) => text.startsWith('dispatch-batch: brief-summary lane=lane-a '))
     assert.ok(line)

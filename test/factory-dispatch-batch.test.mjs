@@ -5021,6 +5021,8 @@ test('a brief without compiler intent records advisor source, not intent', async
   const result = await dispatchFixture({ label: 'intent-absent', names: ['lane-a'], brief: briefWithBlockOnly })
   assert.ok([...result.wrote.keys()].some((path) => path.endsWith('/crew.json')))
   assert.ok(result.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('advisor-source')))
+  assert.equal(result.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('lane-intent')), false)
+  assert.equal([...result.wrote].some(([path, text]) => path.endsWith('/crew.json') && Object.hasOwn(JSON.parse(text), 'intent')), false)
 })
 
 test('an unreadable crew.json still gets an intent journal row', async () => {

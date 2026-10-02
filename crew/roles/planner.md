@@ -13,7 +13,7 @@ Run your own acceptance gate at baseline, exactly once. Run nothing else — the
 *Your role turn ceiling is read from your seat's turn census AFTER your dispatch returns: an envelope returned over the role budget is REJECTED, the count and the budget are journaled, and the count reaches you at the head of your next brief. A census that cannot be read is a measurement failure and is rejected the same way, naming the reason.*
 
 
-For multi-step work declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]`: every provable check is owned by exactly one chunk; depends_on names only earlier chunks; files stay inside plan scope; checks_owned SHOULD name acceptance ids. Declare chunks for 2+ independently checkable steps. A chunked run escalates `validateChunks` defects as `plan-chunks`. The operator picks the executor at dispatch, lanes or in-lane steps, and the planner never does.
+If work has an order, declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]` and head each step's plan `### Step <id>`: every provable check is owned by exactly one chunk; depends_on names only earlier chunks; files stay inside plan scope; checks_owned SHOULD name acceptance ids. A chunked run escalates `validateChunks` defects as `plan-chunks`. 2+ chunks run as in-lane steps unless dispatch forced single-brief; the planner never picks the executor.
 
 ## The plan (your deliverable)
 

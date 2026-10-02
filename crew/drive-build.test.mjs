@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites,
+  staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
@@ -12,7 +12,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, planStepSection, stepBriefText, steppedExecutor } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT } from '../test/helpers.mjs'
@@ -9483,4 +9483,132 @@ test('RV1-2 stepped acceptance feedback runs diagnostics once', () => {
   driveTask({ ...CTX, variant: 'stepped', limits: { ...LIMITS, build_rounds: 3 } }, io)
   assert.match(io.calls.writes[`${TD}/step-c1-r2.md`], /ACTUAL_DF/)
   assert.deepEqual(io.calls.run.filter(({ cmd }) => cmd === command).map(({ cmd }) => cmd), [command])
+})
+
+test('execution selector and section helpers pin closed outcomes', () => {
+  assert.deepEqual(EXECUTION_DEFAULT_REASONS, ['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default'])
+  assert.equal(Object.isFrozen(EXECUTION_DEFAULT_REASONS), true)
+  assert.deepEqual(STEP_SECTION_UNAVAILABLE, ['plan-unreadable', 'section-absent'])
+  assert.equal(Object.isFrozen(STEP_SECTION_UNAVAILABLE), true)
+  const step = { id: 'a-b.1', files_in_scope: ['a.mjs'], checks_owned: ['A1'] }
+  assert.equal(planStepSection('### Step a-b.1\r\nwork\r\n#### retained\r\nmore\r\n### Step a-b.10\r\nother', step.id).section, '### Step a-b.1\nwork\n#### retained\nmore')
+  assert.equal(planStepSection('### Step a-b.1.extra\nwrong', step.id).reason, 'section-absent')
+  assert.deepEqual(planStepSection(null, step.id), { section: null, reason: 'plan-unreadable' })
+  assert.deepEqual(planStepSection('', step.id), { section: null, reason: 'section-absent' })
+  for (const depth of [1, 2, 3]) assert.equal(planStepSection(`### Step x\na\n${'#'.repeat(depth)} Next\nb`, 'x').section, '### Step x\na')
+  assert.match(stepBriefText({ step, round: 2, done: [], planPath: 'plan.md', planText: null, priorFailure: 'gate red' }), /Gate failure from prior attempt:\ngate red/)
+  const io = { now: () => 'now', log: () => {} }
+  const selection = (override = {}) => steppedExecutor(io, { variant: 'full', ctx: {}, details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: steppedMutations, gateCmd: 'gate', budget: 2, ...override })
+  assert.deepEqual(selection().executor, 'stepped')
+  assert.equal(selection({ variant: 'repair' }).reason, 'not-full')
+  assert.equal(selection({ ctx: { chunked: true } }).reason, 'chunked-lane')
+  assert.equal(selection({ ctx: { execution_source: 'alias' } }).reason, 'operator-single')
+  assert.equal(selection({ ctx: { execution_source: 'profile_recommendation' } }).reason, 'stepped-default')
+  assert.equal(selection({ stepCheckpoint: { kind: 'step' }, budget: 0 }).reason, 'step-checkpoint')
+  assert.equal(selection({ details: { chunks: [] } }).reason, 'fewer-than-two-chunks')
+  assert.equal(selection({ details: { chunks: [{ id: 'x', files_in_scope: [], checks_owned: [] }, steppedChunks[1]] } }).reason, 'chunks-invalid')
+  assert.equal(selection({ gateCmd: null }).reason, 'no-gate-cmd')
+  assert.equal(selection({ budget: 1 }).reason, 'steps-exceed-budget')
+  assert.equal(steppedExecutor({ now() { throw Error('clock') }, log() {} }, { variant: 'full', details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: steppedMutations, gateCmd: 'gate', budget: 2 }).reason, 'stepped-default')
+  assert.equal(steppedExecutor({ now: () => 'now', log() { throw Error('logger') } }, { variant: 'full', details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: steppedMutations, gateCmd: 'gate', budget: 2 }).reason, 'stepped-default')
+  assert.equal(runCmdFixture({}).ctx.execution_source, 'migration_default')
+  assert.equal(runCmdFixture({ execution: 'full' }).ctx.execution_source, 'explicit')
+  for (const details of [{}, { chunks: [] }]) {
+    const logs = []
+    steppedExecutor({ now: () => 'now', log: (entry) => logs.push(entry) }, { variant: 'full', details, ctx: {}, scope: [], mutations: [], gateCmd: null, budget: 0 })
+    assert.deepEqual(logs, [])
+  }
+  const steppedLogs = []
+  assert.deepEqual(steppedExecutor({ now: () => 'now', log: (entry) => steppedLogs.push(entry) }, { variant: 'stepped', details: {}, ctx: {}, budget: 0 }), { executor: 'stepped', reason: 'operator-stepped' })
+  assert.equal(steppedLogs[0].reason, 'operator-stepped')
+  const malformed = steppedAcceptanceIo({ chunks: [{ ...steppedChunks[0], checks_owned: 'A1' }, steppedChunks[1]] })
+  const malformedResult = driveTask({ ...CTX, variant: 'stepped' }, malformed.io)
+  assert.equal(malformedResult.details.escalation.where, 'plan-chunks')
+})
+
+const sdBriefs = (io) => io.calls.assign.filter(({ role }) => role === 'builder').map(({ briefFile }) => briefFile.split('/').pop())
+const sdRow = (io) => io.calls.logs.find(({ event }) => event === 'execution-default') ?? null
+const sdRun = (options = {}, ctx = {}) => {
+  const fixture = steppedAcceptanceIo(options)
+  driveTask({ ...CTX, ...ctx }, fixture.io)
+  return fixture
+}
+const SD_SEEDED_PLAN = '# p\n### Step c1\nEDIT ALPHA\n### Step c2\nEDIT BETA\n'
+const sdStepText = (io) => io.calls.writes[`${TD}/step-c1-r1.md`] ?? ''
+
+// MUTATION SD1: select single for the stepped-default finish.
+test('SD1', () => {
+  const { io } = sdRun({}, { limits: { build_rounds: 3 } })
+  assert.deepEqual(sdBriefs(io), ['step-c1-r1.md', 'step-c2-r1.md'])
+})
+
+// MUTATION SD2: remove the explicit or alias source override branch.
+test('SD2', () => {
+  const { io } = sdRun({}, { execution_source: 'explicit' })
+  const result = sdRow(io)
+  assert.deepEqual(result && { executor: result.executor, reason: result.reason }, { executor: 'single', reason: 'operator-single' })
+})
+
+// MUTATION SD3: compare the minimum chunks against 1 instead of 2.
+test('SD3', () => {
+  const { io } = sdRun({ chunks: [{ id: 'c1', files_in_scope: ['a.mjs', 'b.mjs'], checks_owned: ['A1', 'A2'] }] })
+  assert.equal(sdRow(io)?.reason ?? null, 'fewer-than-two-chunks')
+})
+
+// MUTATION SD4: route a validation defect to stepped-default.
+test('SD4', () => {
+  const { io } = sdRun({ chunks: [{ ...steppedChunks[0], checks_owned: 'A1' }, steppedChunks[1]] })
+  assert.equal(sdRow(io)?.reason ?? null, 'chunks-invalid')
+})
+
+// MUTATION SD5: delete the steps-exceed-budget branch.
+test('SD5', () => {
+  const { io } = sdRun({}, { limits: { build_rounds: 1 } })
+  assert.equal(sdRow(io)?.reason ?? null, 'steps-exceed-budget')
+})
+
+// MUTATION SD6: delete the step-checkpoint branch.
+test('SD6', () => {
+  const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  checkpoint.step.builder_attempts = 1
+  const { io } = sdRun({ resumeGateOutput: steppedGreen(), seedFiles: sourceIo.calls.writes }, { head: 'abcdef123456', limits: { build_rounds: 2 }, resume_checkpoint: checkpoint })
+  assert.deepEqual(sdBriefs(io), ['step-c2-r1.md'])
+})
+
+// MUTATION SD7: remove execution_source from runCmd ctx.
+test('SD7', () => assert.equal(runCmdFixture({}).ctx.execution_source ?? null, 'migration_default'))
+
+// MUTATION SD8: hard-code migration_default in runCmd ctx.
+test('SD8', () => assert.equal(runCmdFixture({ execution: 'full' }).ctx.execution_source ?? null, 'explicit'))
+
+// MUTATION SD9: inline the entire plan instead of selecting this section.
+test('SD9', () => {
+  const { io } = sdRun({ seedFiles: { [`${TD}/plan.md`]: SD_SEEDED_PLAN } }, { variant: 'stepped' })
+  const text = sdStepText(io)
+  const start = text.indexOf('## This step\n\n')
+  const end = text.indexOf('\n\nPlan of record', start)
+  assert.equal(start < 0 || end < 0 ? null : text.slice(start + '## This step\n\n'.length, end), '### Step c1\nEDIT ALPHA')
+})
+
+// MUTATION SD10: add the forbidden whole-plan instruction.
+test('SD10', () => {
+  const { io } = sdRun({ seedFiles: { [`${TD}/plan.md`]: SD_SEEDED_PLAN } }, { variant: 'stepped' })
+  const forbidden = sdStepText(io).split('\n').find((line) => line.includes('Read the whole plan at')) ?? null
+  assert.equal(forbidden, null)
+})
+
+// MUTATION SD11: replace the section-absent marker with an empty string.
+test('SD11', () => {
+  const { io } = sdRun({}, { variant: 'stepped' })
+  assert.equal(sdStepText(io).match(/PLAN SECTION UNAVAILABLE \([^)]*\)/)?.[0] ?? null, 'PLAN SECTION UNAVAILABLE (section-absent)')
+})
+
+// MUTATION SD12: restore variant === stepped when choosing steppedChunks.
+test('SD12', () => {
+  const { io } = steppedAcceptanceIo()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+  const assignment = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const text = assignment ? io.calls.writes[assignment.briefFile] ?? '' : ''
+  assert.equal(text.match(/step-c2-r1\.md/)?.[0] ?? null, 'step-c2-r1.md')
 })

@@ -5957,7 +5957,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
 }
 // runTask span report: before=4039/8440 after=3458/8460
 function runTask(ctx, io, crash) {
-  const variant = ctx.variant ?? DEFAULT_VARIANT
+  const variant = ctx.variant ?? DEFAULT_VARIANT; let steppedRun = variant === 'stepped'
   if (variant === 'stepped' && ctx.chunked === true) throw fail('variant', 'stepped cannot combine with --chunked')
   if (variant === 'stepped' && ctx.chunk != null) throw fail('variant', 'stepped cannot combine with --chunk')
   if (!VARIANT_NAMES.includes(variant)) {
@@ -6845,7 +6845,7 @@ function runTask(ctx, io, crash) {
     const frozenWhere = resumeTerminalWhere(details)
     const kind = resumeCheckpointFamily(frozenWhere)
     if (!kind || !activeGateCmd) return null
-    if (kind === 'step' && (variant !== 'stepped' || done.length === 0)) return null
+    if (kind === 'step' && (!steppedRun || done.length === 0)) return null
     if (kind === 'step' ? !S.returns.planner : !Object.values(S.returns).every((env) => env?.status === 'done')) return null
     const acceptedFiles = acceptedScope.length > 0 ? [...acceptedScope] : (Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : [])
     const concrete = (path) => typeof path === 'string' && path !== '' && !path.startsWith('/') && !path.startsWith('\\')
@@ -8650,7 +8650,7 @@ function runTask(ctx, io, crash) {
   const chunkPlanDetails = planEnv.details && typeof planEnv.details === 'object' ? planEnv.details : {}
   let validatedChunks = []
   let validatedExemptLabels = []
-  const steppedProgram = variant === 'stepped'
+  const steppedProgram = steppedRun = steppedExecutor(io, { variant, ctx, details: chunkPlanDetails, scope: scopeFiles, mutations: allMutations, gateCmd, budget: builderRemaining(), stepCheckpoint }).executor === 'stepped'
   if (steppedProgram || ctx.chunked === true || ctx.chunk != null) {
     const chunkGuard = steppedProgram ? null : refuseChunkWithoutChunked(ctx, chunkPlanDetails.chunks ?? null)
     if (chunkGuard) return escalate('plan-chunks', `chunk selection refused (${chunkGuard.defect}): ${chunkGuard.why}`, planEnv.artifacts || [])
@@ -10053,7 +10053,7 @@ function runTask(ctx, io, crash) {
     return handoffPath
   }
 
-  const steppedChunks = variant === 'stepped' ? validatedChunks : null
+  const steppedChunks = steppedRun ? validatedChunks : null
   const savedDone = stepCheckpoint ? stepCheckpoint.step.done : []
   const savedEnvelopes = stepCheckpoint ? stepCheckpoint.step.envelopes : []
   let reverifyIndex = savedDone.length
@@ -10083,7 +10083,7 @@ function runTask(ctx, io, crash) {
       stepRound += 1
       io.log(recordRow({ at: io.now(), event: 'step:start', step: step.id, round: stepRound, files: [...step.files_in_scope], owned: [...step.checks_owned], builder_attempt: builderAttempts + 1 }))
       const stepBrief = art(`step-${step.id}-r${stepRound}.md`)
-      io.writeFile(stepBrief, `# Stepped build ${step.id} (round ${stepRound})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\nRead the whole plan at ${planPath} before editing. Work only on this step's files and own checks.${priorStepFailure ? `\n\nGate failure from prior attempt:\n${priorStepFailure}` : ''}\n`)
+      io.writeFile(stepBrief, stepBriefText({ step, round: stepRound, done, planPath, planText: readOrNull(planPath), priorFailure: priorStepFailure }))
       stage(`build:${step.id}:r${stepRound}`)
       builderAttempts = builderAttempts + 1
       const env = assignAndWait('builder', prepareBuilderAssignment(stepBrief, 'step-build'), 'step-build')
@@ -10777,7 +10777,7 @@ function runTask(ctx, io, crash) {
   }
   build:
   for (;;) {
-    const seededBuild = variant === 'stepped' && seededStepEnv !== null
+    const seededBuild = steppedRun && seededStepEnv !== null
     if (!seededBuild && builderRemaining() <= 0) return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s); the global build budget is exhausted`)
     const round = seededStepEnv ? 1 : wholeBuildRound
     carriedRound = round
@@ -14866,4 +14866,57 @@ function carrierInventory(io, directories) {
   const untracked = [...carriers].filter((path) => !trackedSet.has(path)).sort()
   if (untracked.length > 0) return { ok: false, why: `anchor resolver carrier is not tracked: ${untracked.join(', ')}` }
   return { ok: true, carriers: [...carriers].sort(), tracked: trackedSet }
+}
+
+export const EXECUTION_DEFAULT_REASONS = Object.freeze(['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default'])
+
+export function steppedExecutor(io, { variant, ctx = {}, details = {}, scope = [], mutations = [], gateCmd = null, budget = 0, stepCheckpoint = null } = {}) {
+  const finish = (executor, reason) => {
+    if (!EXECUTION_DEFAULT_REASONS.includes(reason)) return { executor: 'single', reason: 'chunks-invalid' }
+    if ((Array.isArray(details.chunks) && details.chunks.length > 0) || executor === 'stepped') {
+      try {
+        const at = io.now()
+        const source = ctx.execution_source ?? 'migration_default'
+        // requested = ctx.variant, the effective shape; the resolver's requested value does not reach ctx
+        io.log(recordRow({ at, event: 'execution-default', requested: variant, source, executor, reason }))
+      } catch { /* instrumentation must not alter executor selection */ }
+    }
+    return { executor, reason }
+  }
+  try {
+    if (variant === 'stepped') return finish('stepped', 'operator-stepped')
+    if (variant !== 'full') return finish('single', 'not-full')
+    if (ctx.chunked || ctx.chunk != null) return finish('single', 'chunked-lane')
+    const source = ctx.execution_source ?? 'migration_default'
+    if (source === 'explicit' || source === 'alias') return finish('single', 'operator-single')
+    if (stepCheckpoint) return finish('stepped', 'step-checkpoint')
+    if (!Array.isArray(details.chunks) || details.chunks.length < 2) return finish('single', 'fewer-than-two-chunks')
+    const validated = validateChunks(details, { scope, checkLabels: mutations.map((mutation) => mutation?.check).filter((label) => typeof label === 'string'), mutations })
+    if (validated.defect) return finish('single', 'chunks-invalid')
+    if (!gateCmd) return finish('single', 'no-gate-cmd')
+    if (details.chunks.length > budget) return finish('single', 'steps-exceed-budget')
+    return finish('stepped', 'stepped-default')
+  } catch {
+    return finish('single', 'chunks-invalid')
+  }
+}
+
+export const STEP_SECTION_UNAVAILABLE = Object.freeze(['plan-unreadable', 'section-absent'])
+
+export function planStepSection(planText, id) {
+  if (typeof planText !== 'string') return { section: null, reason: STEP_SECTION_UNAVAILABLE[0] }
+  const lines = planText.split(/\r?\n/)
+  const header = `### Step ${id}`
+  const start = lines.findIndex((line) => line.startsWith(header) && (line.length === header.length || !/[A-Za-z0-9._-]/.test(line[header.length])))
+  if (start < 0) return { section: null, reason: STEP_SECTION_UNAVAILABLE[1] }
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) if (/^#{1,3}(?:\s|$)/.test(lines[index])) { end = index; break }
+  return { section: lines.slice(start, end).join('\n').trim(), reason: null }
+}
+
+export function stepBriefText({ step, round, done, planPath, planText, priorFailure }) {
+  const selected = planStepSection(planText, step.id)
+  const body = selected.section ?? `PLAN SECTION UNAVAILABLE (${selected.reason})`
+  const tail = `Plan of record, for reference only: ${planPath}. Work only on this step's files and owned checks.`
+  return `# Stepped build ${step.id} (round ${round})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\n## This step\n\n${body}\n\n${tail}${priorFailure ? `\n\nGate failure from prior attempt:\n${priorFailure}` : ''}\n`
 }

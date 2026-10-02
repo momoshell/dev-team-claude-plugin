@@ -1567,6 +1567,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at narration"],
   ["recordRow", "", "at published"],
   ["operationalRow", "", "at event kind queue_depth waited_ms slotted"],
+  ["recordRow", "event='execution-default'", "at requested source executor reason"],
 ])
 
 // ---------------------------------------------------------------------------

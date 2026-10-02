@@ -194,3 +194,13 @@ chunks-as-lanes or carve. Ledger ingestion of `step:*` rows. Making stepped the 
 
 At the floor, stepped lanes cost more wall clock with no fewer bounces or escalations than matched single-brief lanes.
 Then the stepped executor is deleted, and `details.chunks` keeps its inter-lane use.
+
+## Amendment 1 (2026-10-02, operator decision)
+
+At plan-accept, when the chunks first exist, a valid program of 2+ chunks with a gate command and enough remaining builder budget runs as ordered in-lane steps by default. `--execution full` or `--variant full` explicitly forces the single-brief executor. The operator drops dispatch-defaults.sh's full flag AFTER merge. An explicit stepped request remains supported and invalid chunk programs retain the existing `plan-chunks` refusal. A step brief contains only its matching `### Step <id>` section; the whole plan is named for reference only. A saved step checkpoint takes precedence over default selection on resume, and completed steps are reverified before continuation.
+
+The supplied motivating context is 149 multi-chunk envelopes / 396 planner envelopes across 282 lanes; 98 accepted / 149 multi-chunk envelopes, 50 malformed-check-array / 149, and 1 unbuildable-first / 149. Supplied carry-over / total builder context is 67% (underlying sample/token counts unreported), and round-start context is 7k→126k. PR 1664 merged; zero stepped runs and no post-change A/B benefit are measured. These are attributed supplied figures, not this implementation's results.
+
+Measurement: `ledger.mjs context` (builder first and peak context per assignment, denominators beside rates, `thin` below 12) is the instrument, but today it groups by role and model only and classifies executor from `effective_execution` (`scripts/factory/ledger.mjs:5170`), which stays `full` for a default-stepped lane; the by-executor split is therefore `unmeasured — reason: the ledger does not ingest the `execution-default` journal row`, and the reversal trigger below cannot fire until a follow-on lane ingests that row (`executor`, `reason`) into the ledger.
+
+This amendment supersedes the Measurement section and decision 5 above. Once that follow-on makes the split measurable, at 12 stepped lanes reverse if builder peak context is not lower OR escalations/lane rise. It also supersedes the Out of scope sentence's “Making stepped the default.” No savings are demonstrated by this amendment.

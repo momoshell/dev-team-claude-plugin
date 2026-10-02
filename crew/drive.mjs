@@ -9498,7 +9498,7 @@ function runTask(ctx, io, crash) {
     'A # in a check LABEL is refused outright by the pattern above, and a # in a TEST NAME a',
     "gate matches is worse: node's tap reporter ESCAPES it, so a test titled #945 is emitted",
     'as `ok 1 - \\#945` and a matcher looking for #945 never matches. The check then reports a',
-    'failure whose cause is the NAME, not the code (#958). Name checks and tests A1/B2/C3 and',
+    'failure whose cause is the NAME, not the code (#958). Label checks and tests with the declared acceptance ids of the brief, EXACTLY; use A1/B2/C3 only when none is declared, and',
     'put the issue number in the PROSE. Only # was measured, on Node v26.7.0.',
   ].join('\n')
 

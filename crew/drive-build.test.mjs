@@ -4614,6 +4614,29 @@ test('b476 F2 the stable-identifier note warns that a hash in a test name is unm
   assert.match(brief, /Node v26\.7\.0/)
 })
 
+test('L3', () => {
+  // MUTATION: restore stableIdentifierNote so custody guidance loses declared-id precedence.
+  const output = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }),
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: true, output }, 'gate-cmd:3': { ok: true, output }, 'gate-cmd:4': { ok: true, output },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/gate-discrimination-bounce.md`]
+  assert.match(brief, /declared acceptance ids of the brief, EXACTLY/)
+  assert.match(brief, /A1\/B2\/C3/)
+  assert.match(brief, /only when none is declared/)
+  assert.match(brief, /CHECK IDENTIFIERS STABLE/)
+  assert.match(brief, /tap reporter ESCAPES/)
+  assert.match(brief, /Node v26\.7\.0/)
+})
+
 const CENSUS_ROOT = '/tmp/census-fixture'
 const CENSUS_TOKEN = ['ls', 'files'].join('-')
 const CENSUS_FILE = CENSUS_QUALIFYING_FILES[0]

@@ -3521,3 +3521,33 @@ test('RV1-2 unresolved-parent rendering retains its reason', () => {
   const where = section(brief, '## Where').trim().split('\n')
   assert.match(where.at(-1), /^warning · created · nope\/new-widget\.mjs · reason: creates-parent-missing$/)
 })
+
+test('L1', () => {
+  // MUTATION: restore the old compiler sentence and remove declared-id precedence from MUTATION_CONTRACT_BLOCK.
+  const root = fixture('declared-acceptance-ids')
+  const { brief } = compile(root, { done_means: '(E392.1) A declared acceptance item.' })
+  const outputs = [section(brief, '## Per-check mutations'), MUTATION_CONTRACT_BLOCK]
+  const clauses = [
+    "Declared acceptance ids win: when the brief's `## Acceptance` declares ids such as `(E392.1)`",
+    'label each check AND each test name a gate adjudicates with EXACTLY those ids',
+  ]
+  const flat = (text) => text.replace(/\s+/g, ' ').trim()
+  for (const output of outputs) for (const clause of clauses) assert.ok(flat(output).includes(clause), clause)
+})
+
+test('L2', () => {
+  // MUTATION: remove the fallback qualifier from MUTATION_CONTRACT_BLOCK.
+  const root = fixture('undeclared-acceptance-ids')
+  const { brief } = compile(root)
+  const outputs = [section(brief, '## Per-check mutations'), MUTATION_CONTRACT_BLOCK]
+  const clauses = [
+    'Use `A1`, `B2`, `C3` only when none is declared',
+    'NEVER PUT A `#` IN A CHECK LABEL',
+    "Node's tap reporter ESCAPES a # inside a test title",
+    'a test named "#945 the valve opens"',
+    'Only `#` was measured, on Node v26.7.0',
+    '(#958)',
+  ]
+  const flat = (text) => text.replace(/\s+/g, ' ').trim()
+  for (const output of outputs) for (const clause of clauses) assert.ok(flat(output).includes(clause), clause)
+})

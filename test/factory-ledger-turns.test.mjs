@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, RUN_VARIANTS_WITHOUT_MARKER, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
+  openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, CONTEXT_ABSENT_REASONS, BOUNCE_SOURCES, NEXT_GATE_OUTCOMES, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, RUN_VARIANTS_WITHOUT_MARKER, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
@@ -32,6 +32,163 @@ import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, 
 
 
 
+
+function contextReadout(seed, args = ['context', '--json']) {
+  const dir = scratchDir('context-turns-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath })
+  try { seed(ledger) } finally { ledger.close() }
+  try {
+    return run(args, { DEVTEAM_LEDGER_DB: dbPath })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+}
+
+function contextCensus(ledger, { dispatch, at, session = 's', model = 'model', first, reason = null }) {
+  ledger.recordSeatTurnCensus({
+    adw_id: 'run', role: 'builder', dispatch_id: dispatch, transport: 'headless-rpc', at_ms: at,
+    session_id: session, model, context_first_tokens: first, context_peak_tokens: first,
+    context_mean_tokens: first, context_calls: first === null ? null : 1,
+    context_absent_reason: first === null ? (reason ?? 'not-captured') : null,
+  })
+}
+
+function contextBounces({ markers, decision = false, gates = [] }) {
+  return (ledger) => {
+    ledger.startSession({ adw_id: 'run', repo_slug: 'r', task_slug: 't', started_at: '2024-01-01T00:00:00.000Z' })
+    for (const marker of markers) {
+      ledger.recordEvent({ adw_id: 'run', type: 'log', payload: { level: 'info', message: marker } })
+      if (marker === 'build:r1' && decision) ledger.recordEvent({ adw_id: 'run', type: 'decision', payload: { decided: 'bounce', why: 'again' } })
+    }
+    for (const [gate_name, ok, attempt = 1] of gates) ledger.recordGateResult({ adw_id: 'run', phase_id: 1, gate_name, attempt, ok })
+  }
+}
+
+test('K7 legacy census ingest normalizes missing context to not-captured', { skip: SKIP }, () => {
+  const line = JSON.stringify({ at: 1704067200000, seat_turn_census: { role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', turns: 1 } })
+  const { ledger } = ingestJournalLine(line, 'k7-legacy')
+  try {
+    const row = ledger.dumpTable('seat_turn_census')[0]
+    assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [null, null, null, null, 'not-captured'])
+  } finally { ledger.close() }
+})
+
+test('context vocabularies are closed and reason consistency is enforced', { skip: SKIP }, () => {
+  assert.deepEqual(CONTEXT_ABSENT_REASONS, ['no-usage-frame', 'census-absent', 'not-captured'])
+  assert.equal(Object.isFrozen(CONTEXT_ABSENT_REASONS), true)
+  assert.deepEqual(BOUNCE_SOURCES, ['lead-consult', 'driver'])
+  assert.equal(Object.isFrozen(BOUNCE_SOURCES), true)
+  assert.deepEqual(NEXT_GATE_OUTCOMES, ['gate-pass', 'gate-red', 'gate-not-reached', 'gate-result-absent'])
+  assert.equal(Object.isFrozen(NEXT_GATE_OUTCOMES), true)
+  const ledger = openTestLedger()
+  try {
+    assert.throws(() => ledger.recordSeatTurnCensus({ role: 'builder', context_absent_reason: 'bad-reason' }), LedgerUsageError)
+    assert.throws(() => ledger.recordSeatTurnCensus({ role: 'builder', context_first_tokens: 0, context_absent_reason: 'not-captured' }), LedgerUsageError)
+  } finally { ledger.close() }
+})
+
+test('K8 carry-over excludes the baseline assignment', { skip: SKIP }, () => {
+  const result = contextReadout((l) => { contextCensus(l, { dispatch: 'd1', at: 1, first: 10000 }); contextCensus(l, { dispatch: 'd2', at: 2, first: 50000 }) })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout).by_role_model[0].carry_over, { mean: 40000, n: 1, excluded_no_session: 0 })
+})
+test('K9 carry-over groups independently by session identity', { skip: SKIP }, () => {
+  const result = contextReadout((l) => { contextCensus(l, { dispatch: 'd1', at: 1, session: 's1', first: 10000 }); contextCensus(l, { dispatch: 'd2', at: 2, session: 's2', first: 50000 }) })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).by_role_model[0].carry_over.n, 0)
+})
+test('K10 a bounce decision classifies lead-consult', { skip: SKIP }, () => {
+  const result = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2'], decision: true }))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).bounces.find((row) => row.source === 'lead-consult').n, 1)
+})
+test('K11 a bounce without a lead decision classifies driver', { skip: SKIP }, () => {
+  const result = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2'] }))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).bounces.find((row) => row.source === 'driver').n, 1)
+})
+test('K12 bounce reads the gate result for the same round', { skip: SKIP }, () => {
+  const result = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2', 'gate:r2'], gates: [['gate:r1', 1], ['gate:r2', 0]] }))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).bounces.find((row) => row.source === 'driver').next_gate['gate-red'], 1)
+})
+test('K13 an unmarked gate round is not reached', { skip: SKIP }, () => {
+  const result = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2', 'build:r3', 'gate:r3'], gates: [['gate:r3', 1]] }))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).bounces.find((row) => row.source === 'driver').next_gate['gate-not-reached'], 1)
+})
+
+test('context readout keeps null-model unmeasured rows and null metric denominators', { skip: SKIP }, () => {
+  const result = contextReadout((l) => contextCensus(l, { dispatch: 'd1', at: 1, session: 's', model: null, first: null }))
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout).by_role_model[0]
+  assert.equal(row.model, null)
+  assert.equal(row.unmeasured['not-captured'], 1)
+  assert.deepEqual(row.first, { mean: null, n: 0 })
+  assert.equal(row.peak.max, null)
+})
+
+test('context readout counts null-session exclusions and skips null carry baselines', { skip: SKIP }, () => {
+  const result = contextReadout((l) => {
+    contextCensus(l, { dispatch: 'd0', at: 0, session: null, first: 100 })
+    contextCensus(l, { dispatch: 'd1', at: 1, session: 's', first: null })
+    contextCensus(l, { dispatch: 'd2', at: 2, session: 's', first: 50000 })
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const carry = JSON.parse(result.stdout).by_role_model[0].carry_over
+  assert.equal(carry.excluded_no_session, 1)
+  assert.equal(carry.n, 0)
+})
+
+test('context --since filters census timestamps and session start times', { skip: SKIP }, () => {
+  const boundary = Date.now() - 60_000
+  const since = new Date(boundary).toISOString()
+  const result = contextReadout((l) => {
+    contextCensus(l, { dispatch: 'old', at: boundary - 1, first: 100 })
+    contextCensus(l, { dispatch: 'new', at: boundary, first: 200 })
+    for (const [id, started_at] of [['old-run', new Date(boundary - 1).toISOString()], ['new-run', since]]) {
+      l.startSession({ adw_id: id, repo_slug: 'r', task_slug: 't', started_at })
+      for (const marker of ['build:r1', 'build:r2']) l.recordEvent({ adw_id: id, type: 'log', payload: { level: 'info', message: marker } })
+    }
+  }, ['context', '--since', since, '--json'])
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.by_role_model[0].assignments, 1)
+  assert.equal(payload.bounces.find((row) => row.source === 'driver').n, 1)
+})
+
+test('context CLI refuses unknown, valueless, and positional arguments', { skip: SKIP }, () => {
+  for (const args of [['context', '--bogus'], ['context', '--since'], ['context', 'extra']]) {
+    const result = contextReadout(() => {}, args)
+    assert.equal(result.status, 2, result.stderr)
+  }
+})
+
+test('context text carries metric denominators, unmeasured counts, and blind spots', { skip: SKIP }, () => {
+  const result = contextReadout((l) => contextCensus(l, { dispatch: 'd1', at: 1, session: null, first: null }), ['context'])
+  assert.equal(result.status, 0, result.stderr)
+  for (const text of ['n=', 'unmeasured=', 'pane seats write no census', 'ACP and pre-lane rows read not-captured', 'only bounces cover history']) assert.ok(result.stdout.includes(text), text)
+})
+
+test('context bounces report absent and last-attempt gate results', { skip: SKIP }, () => {
+  const absent = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2', 'gate:r2'] }))
+  const passed = contextReadout(contextBounces({ markers: ['build:r1', 'build:r2', 'gate:r2'], gates: [['gate:r2', 0, 1], ['gate:r2', 1, 2]] }))
+  assert.equal(JSON.parse(absent.stdout).bounces.find((row) => row.source === 'driver').next_gate['gate-result-absent'], 1)
+  assert.equal(JSON.parse(passed.stdout).bounces.find((row) => row.source === 'driver').next_gate['gate-pass'], 1)
+})
+
+test('legacy database migration creates the census table with seven context columns', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(join(nextDir(), 'old-seat-census.db'))
+  try {
+    const censusMigration = MIGRATIONS.findIndex((sql) => /CREATE TABLE IF NOT EXISTS \"seat_turn_census\"/.test(sql))
+    assert.ok(censusMigration > 0, 'seat census is added by a migration')
+    applyMigrations(db, MIGRATIONS.slice(0, censusMigration))
+    assert.deepEqual(db.prepare('PRAGMA table_info(seat_turn_census)').all(), [])
+    applyMigrations(db)
+    const names = db.prepare('PRAGMA table_info(seat_turn_census)').all().map((row) => row.name)
+    assert.deepEqual(names.slice(-7), ['context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls', 'context_absent_reason', 'session_id', 'model'])
+  } finally { db.close() }
+})
 
 test('run variant markers and the closed no-marker set cover the enum', () => {
   assert.deepEqual([...Object.values(RUN_VARIANT_MARKERS), ...RUN_VARIANTS_WITHOUT_MARKER].sort(), [...RUN_VARIANTS].sort())

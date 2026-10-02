@@ -465,6 +465,10 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const EVAL_ENVELOPE_STATUSES = Object.freeze(['received', 'absent'])
+export const CONTEXT_ABSENT_REASONS = Object.freeze(['no-usage-frame', 'census-absent', 'not-captured'])
+export const BOUNCE_SOURCES = Object.freeze(['lead-consult', 'driver'])
+export const NEXT_GATE_OUTCOMES = Object.freeze(['gate-pass', 'gate-red', 'gate-not-reached', 'gate-result-absent'])
+
 export const EVAL_ABSENT_REASONS = Object.freeze(['no-envelope', 'boot-failed', 'boot-unreadable', 'assignment-failed', 'wait-failed', 'wait-empty', 'seat-runner-failed', 'gate-not-run', 'judge-not-briefed', 'gate-failed', 'judge-failed'])
 export const EVAL_INCOMPLETE_REASONS = Object.freeze([
   'no-cells', 'envelope-absent', 'gate-not-run', 'judge-absent',
@@ -1445,6 +1449,13 @@ export const TABLES = Object.freeze({
       { name: 'absent_reason', decl: 'TEXT' },
       { name: 'at_ms', decl: 'INTEGER' },
       { name: 'created_at', decl: 'TEXT' },
+      { name: 'context_first_tokens', decl: 'INTEGER' },
+      { name: 'context_peak_tokens', decl: 'INTEGER' },
+      { name: 'context_mean_tokens', decl: 'INTEGER' },
+      { name: 'context_calls', decl: 'INTEGER' },
+      { name: 'context_absent_reason', decl: 'TEXT' },
+      { name: 'session_id', decl: 'TEXT' },
+      { name: 'model', decl: 'TEXT' },
     ],
     unique: [['adw_id', 'role', 'dispatch_id', 'at_ms']],
     indexes: [],
@@ -3818,6 +3829,13 @@ export function openLedger({
 
   function recordSeatTurnCensus(input = {}) {
     requireFields(input, ['role'], 'recordSeatTurnCensus')
+    const contextFigures = ['context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls'].map((key) => integerOrNull(input[key], 'recordSeatTurnCensus', key))
+    let contextAbsentReason = input.context_absent_reason ?? null
+    if (contextFigures.every(value => value === null) && contextAbsentReason == null) contextAbsentReason = 'not-captured'
+    if (contextAbsentReason !== null) {
+      requireEnum(contextAbsentReason, CONTEXT_ABSENT_REASONS, 'recordSeatTurnCensus', 'context_absent_reason')
+      if (contextFigures.some(value => value !== null)) refuse('recordSeatTurnCensus: context absent reason conflicts with figures')
+    }
     const args = redact({
       adw_id: input.adw_id ?? null,
       role: textOrNull(input.role, 120),
@@ -3842,6 +3860,13 @@ export function openLedger({
       tool_spans_unmatched: integerOrNull(input.tool_spans_unmatched, 'recordSeatTurnCensus', 'tool_spans_unmatched'),
       tool_spans_same_poll: integerOrNull(input.tool_spans_same_poll, 'recordSeatTurnCensus', 'tool_spans_same_poll'),
       absent_reason: textOrNull(input.absent_reason, 1000),
+      context_first_tokens: contextFigures[0],
+      context_peak_tokens: contextFigures[1],
+      context_mean_tokens: contextFigures[2],
+      context_calls: contextFigures[3],
+      context_absent_reason: contextAbsentReason,
+      session_id: textOrNull(input.session_id, 1000),
+      model: textOrNull(input.model, 1000),
       at_ms: epochMsOrNull(input.at_ms),
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
@@ -5000,6 +5025,32 @@ export function openLedger({
     } catch {
       return []
     }
+  }
+
+  // `since` is windowBound's ISO text but `at_ms` is INTEGER epoch ms; SQLite orders
+  // every INTEGER below every TEXT, so an unconverted bound reads the window empty.
+  function contextCensusRows(since = null) {
+    const conn = ensureDb()
+    if (!conn) return []
+    const query = since == null
+      ? 'SELECT * FROM seat_turn_census ORDER BY adw_id, at_ms, dispatch_id'
+      : 'SELECT * FROM seat_turn_census WHERE at_ms >= ? ORDER BY adw_id, at_ms, dispatch_id'
+    return since == null ? conn.prepare(query).all() : conn.prepare(query).all(Date.parse(since))
+  }
+
+  function contextSessions(since = null) {
+    const conn = ensureDb()
+    if (!conn) return []
+    const query = `SELECT * FROM sessions WHERE ${excludeSynthetic()}${since == null ? '' : ' AND started_at >= ?'} ORDER BY adw_id`
+    return since == null ? conn.prepare(query).all() : conn.prepare(query).all(since)
+  }
+
+  function contextEvents(adwIds) {
+    const ids = [...new Set(adwIds || [])]
+    if (!ids.length) return []
+    const conn = ensureDb()
+    if (!conn) return []
+    return conn.prepare(`SELECT * FROM events WHERE adw_id IN (${ids.map(() => '?').join(',')}) ORDER BY adw_id, seq`).all(...ids)
   }
 
   function getSession(adwId) {
@@ -6748,7 +6799,7 @@ export function openLedger({
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, contextCensusRows, contextSessions, contextEvents, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -7044,6 +7095,13 @@ function journalFactArgs(writer, row, adwId, reask = null) {
       tool_spans_unmatched: census.tool_spans_unmatched ?? null,
       tool_spans_same_poll: census.tool_spans_same_poll ?? null,
       absent_reason: census.absent_reason ?? null,
+      context_first_tokens: census.context_first_tokens ?? null,
+      context_peak_tokens: census.context_peak_tokens ?? null,
+      context_mean_tokens: census.context_mean_tokens ?? null,
+      context_calls: census.context_calls ?? null,
+      context_absent_reason: census.context_absent_reason ?? null,
+      session_id: census.session_id ?? null,
+      model: census.model ?? null,
       at_ms: atMs,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
@@ -8014,6 +8072,7 @@ const VERB_FLAGS = Object.freeze({
   'screener-adoptions': new Set(['since', 'until']),
   'planner-symbols-holdout': new Set(['since', 'until']),
   turns: new Set(['since', 'until', 'adw-id', 'crew-root']),
+  context: new Set(['since', 'json']),
   task: new Set([]),
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
@@ -9418,6 +9477,101 @@ export function main(argv) {
         dispatches,
         absent: sweptWindow ? null : { intake_sweeps: 'no intake_sweeps rows in this window — not swept, never swept-and-empty; any refusal or dispatch rows are listed unaggregated beside this marker' },
       })}\n`)
+      return 0
+    }
+
+    if (verb === 'context') {
+      if (positional.length > 0) refuse('context: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const since = hasSince ? windowBound(flags.since, 'since', 'context') : null
+      const rows = ledger.contextCensusRows(since)
+      const sessions = ledger.contextSessions(since)
+      if (ledger.stats().degraded) refuse('context: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const groups = new Map()
+      const groupFor = (row) => {
+        const key = JSON.stringify([row.role ?? null, row.model ?? null])
+        if (!groups.has(key)) groups.set(key, { role: row.role ?? null, model: row.model ?? null, assignments: 0, measured: 0, unmeasured: Object.fromEntries(CONTEXT_ABSENT_REASONS.map(reason => [reason, 0])), first: [], mean_per_call: [], peak: [], calls: [], carry_over: [], excluded_no_session: 0 })
+        return groups.get(key)
+      }
+      for (const row of rows) {
+        const group = groupFor(row); group.assignments += 1
+        const figures = [row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls]
+        if (figures.some(value => value != null)) {
+          group.measured += 1
+          if (row.context_first_tokens != null) group.first.push(Number(row.context_first_tokens))
+          if (row.context_mean_tokens != null) group.mean_per_call.push(Number(row.context_mean_tokens))
+          if (row.context_peak_tokens != null) group.peak.push(Number(row.context_peak_tokens))
+          if (row.context_calls != null) group.calls.push(Number(row.context_calls))
+        } else group.unmeasured[CONTEXT_ABSENT_REASONS.includes(row.context_absent_reason) ? row.context_absent_reason : 'not-captured'] += 1
+        if (row.session_id == null) group.excluded_no_session += 1
+      }
+      const sessionsByKey = new Map()
+      for (const row of rows) {
+        const carryKey = JSON.stringify([row.adw_id, row.role, row.session_id])
+        if (!sessionsByKey.has(carryKey)) sessionsByKey.set(carryKey, [])
+        sessionsByKey.get(carryKey).push(row)
+      }
+      for (const sessionRows of sessionsByKey.values()) {
+        sessionRows.sort((a, b) => Number(a.at_ms ?? 0) - Number(b.at_ms ?? 0) || String(a.dispatch_id ?? '').localeCompare(String(b.dispatch_id ?? '')))
+        for (const [index, row] of sessionRows.entries()) {
+          if (index === 0) continue
+          if (row.session_id == null || row.context_first_tokens == null) continue
+          const baseline = sessionRows[0].context_first_tokens
+          if (baseline == null) continue
+          groupFor(row).carry_over.push(Number(row.context_first_tokens) - Number(baseline))
+        }
+      }
+      const mean = values => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null
+      const by_role_model = [...groups.values()].map(group => ({
+        role: group.role, model: group.model, assignments: group.assignments, measured: group.measured, unmeasured: group.unmeasured,
+        first: { mean: mean(group.first), n: group.first.length },
+        mean_per_call: { mean: mean(group.mean_per_call), n: group.mean_per_call.length },
+        peak: { mean: mean(group.peak), max: group.peak.length ? Math.max(...group.peak) : null, n: group.peak.length },
+        calls: { mean: mean(group.calls), n: group.calls.length },
+        carry_over: { mean: mean(group.carry_over), n: group.carry_over.length, excluded_no_session: group.excluded_no_session },
+      }))
+      const bounces = BOUNCE_SOURCES.map(source => ({ source, n: 0, next_gate: Object.fromEntries(NEXT_GATE_OUTCOMES.map(outcome => [outcome, 0])) }))
+      const sessionById = new Map(sessions.map(session => [session.adw_id, session]))
+      const events = ledger.contextEvents(sessions.map(session => session.adw_id))
+      const eventsById = new Map()
+      for (const event of events) {
+        if (!eventsById.has(event.adw_id)) eventsById.set(event.adw_id, [])
+        let payload = {}; try { payload = JSON.parse(event.payload_json ?? '{}') } catch { payload = {} }
+        eventsById.get(event.adw_id).push({ ...event, payload })
+      }
+      for (const [adwId, list] of eventsById) {
+        const markers = list.map((event, i) => ({ event, i, marker: event.type === 'log' ? String(event.payload.message ?? '') : '' })).filter(x => /^(build|gate):r\d+$/.test(x.marker))
+        const builds = markers.filter(x => x.marker.startsWith('build:'))
+        for (let bi = 1; bi < builds.length; bi++) {
+          const prev = builds[bi - 1], current = builds[bi]
+          const k = Number(/^build:r(\d+)$/.exec(current.marker)?.[1])
+          if (k < 2 || prev.marker !== `build:r${k - 1}`) continue
+          const between = list.slice(prev.i + 1, current.i)
+          const hasBounceDecision = between.some(event => event.type === 'decision' && String(event.payload.decided ?? '').startsWith('bounce'))
+          let source = 'driver'
+          if (hasBounceDecision) source = 'lead-consult'
+          const gateName = `gate:r${k}`
+          const nextBuild = builds[bi + 1]?.i ?? list.length
+          const gateReached = markers.some(x => x.marker === gateName && x.i > current.i && x.i < nextBuild)
+          let outcome
+          if (!gateReached) outcome = 'gate-not-reached'
+          else {
+            const attemptRows = ledger.gateResultsFor([adwId]).filter(row => row.gate_name === gateName)
+            attemptRows.sort((a, b) => Number(a.attempt ?? 0) - Number(b.attempt ?? 0) || String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')))
+            const latest = attemptRows.at(-1)
+            outcome = latest ? (Number(latest.ok) === 1 ? 'gate-pass' : 'gate-red') : 'gate-result-absent'
+          }
+          const bucket = bounces.find(row => row.source === source)
+          bucket.n += 1; bucket.next_gate[outcome] += 1
+        }
+      }
+      const blind_spots = ['pane seats write no census', 'ACP and pre-lane rows read not-captured', 'only bounces cover history']
+      if (flags.json) stdout.write(`${JSON.stringify({ since, by_role_model, bounces, blind_spots })}\n`)
+      else {
+        for (const row of by_role_model) stdout.write(`${row.role}/${row.model ?? 'null'} assignments=${row.assignments} measured=${row.measured} first=${row.first.mean} n=${row.first.n} mean_per_call=${row.mean_per_call.mean} n=${row.mean_per_call.n} peak=${row.peak.mean} max=${row.peak.max} n=${row.peak.n} calls=${row.calls.mean} n=${row.calls.n} carry_over=${row.carry_over.mean} n=${row.carry_over.n} excluded_no_session=${row.carry_over.excluded_no_session} unmeasured=${JSON.stringify(row.unmeasured)}\n`)
+        for (const row of bounces) stdout.write(`${row.source} n=${row.n} ${JSON.stringify(row.next_gate)}\n`)
+        stdout.write(`blind_spots: ${blind_spots.join('; ')}\n`)
+      }
       return 0
     }
 

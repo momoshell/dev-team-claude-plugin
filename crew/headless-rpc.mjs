@@ -354,6 +354,10 @@ export function newCensus() {
     span_ms: 0,
     clock_absent: null,
     _calls_this_turn: 0,
+    _context_calls: 0,
+    _context_first: null,
+    _context_peak: null,
+    _context_sum: 0,
     _open: Object.create(null),
     _files: new Set(),
     _first_at: null,
@@ -363,6 +367,14 @@ export function newCensus() {
 
 export function foldCensusFrame(census, frame, at) {
   if (!census || !frame || typeof frame !== 'object') return census
+  const contextUsage = carriesOwnSpend(frame) && ['input', 'cacheRead', 'cacheWrite'].some((key) => Number.isFinite(frame.message.usage?.[key])) ? usageObject(frame.message.usage) : null
+  if (contextUsage) {
+    const contextTokens = usageInt(contextUsage.input) + usageInt(contextUsage.cacheRead) + usageInt(contextUsage.cacheWrite)
+    if (census._context_calls === 0) census._context_first = contextTokens
+    census._context_peak = census._context_peak === null ? contextTokens : Math.max(census._context_peak, contextTokens)
+    census._context_sum += contextTokens
+    census._context_calls += 1
+  }
   if (Number.isFinite(at)) {
     if (census._first_at === null) census._first_at = at
     census._last_at = at
@@ -410,6 +422,15 @@ export function finaliseCensus(census) {
   for (const id of Object.keys(census._open || {})) census.tool_spans_unmatched += 1
   const firstAt = census._first_at
   const lastAt = census._last_at
+  census.context_first_tokens = census._context_calls > 0 ? census._context_first : null
+  census.context_peak_tokens = census._context_calls > 0 ? census._context_peak : null
+  census.context_mean_tokens = census._context_calls > 0 ? Math.round(census._context_sum / census._context_calls) : null
+  census.context_calls = census._context_calls > 0 ? census._context_calls : null
+  census.context_absent_reason = census._context_calls > 0 ? null : 'no-usage-frame'
+  delete census._context_calls
+  delete census._context_first
+  delete census._context_peak
+  delete census._context_sum
   delete census._open
   delete census._calls_this_turn
   delete census._files
@@ -832,6 +853,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         at: now(),
         seat_turn_census: {
           role: turn.role,
+          session_id: (seat.sessionId ?? null),
+          model: seat.model ?? null,
+          context_first_tokens: noFrames ? null : census?.context_first_tokens ?? null,
+          context_peak_tokens: noFrames ? null : census?.context_peak_tokens ?? null,
+          context_mean_tokens: noFrames ? null : census?.context_mean_tokens ?? null,
+          context_calls: noFrames ? null : census?.context_calls ?? null,
+          context_absent_reason: noFrames || !census ? 'census-absent' : census.context_absent_reason,
           dispatch_id: turn.id,
           transport: 'headless-rpc',
           turns: noFrames ? null : census?.turns ?? null,

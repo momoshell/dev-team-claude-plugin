@@ -2194,7 +2194,7 @@ test('excludeSynthetic re-probes a legacy read-only handle after the column is a
     migrator.close()
   }
 })
-test('source text wires synthetic exclusion into exactly twelve ordinary readers and leaves forensic reads unfiltered', () => {
+test('source text wires synthetic exclusion into exactly thirteen ordinary readers and leaves forensic reads unfiltered', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const block = (name) => {
     const start = source.indexOf(`  function ${name}(`)
@@ -2205,13 +2205,14 @@ test('source text wires synthetic exclusion into exactly twelve ordinary readers
   const ordinary = [
     'listSessions', 'sessionsFiltered', 'runsStartedWithin', 'gateReviewGap', 'escalations',
     'endedRuns', 'escalationWindow', 'eligibleTasks', 'runSet', 'taskReadout', 'cellFailures', 'cellAttempts',
+    'contextSessions',
   ]
-  assert.equal(new Set(ordinary).size, 12)
+  assert.equal(new Set(ordinary).size, 13)
   for (const name of ordinary) assert.match(block(name), /excludeSynthetic\(/, `${name} must consult the synthetic-session predicate`)
   for (const name of ['getSession', 'dumpTable', 'phantomSessions', 'unattributableCellFailures']) {
     assert.doesNotMatch(block(name), /excludeSynthetic\(/, `${name} must retain its forensic/non-session contract`)
   }
-  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 15, 'one helper declaration plus fourteen ordinary query sites')
+  assert.equal((source.match(/excludeSynthetic\(/g) ?? []).length, 16, 'one helper declaration plus fifteen ordinary query sites')
   const task = block('taskReadout')
   assert.match(task, /SELECT adw_id FROM sessions WHERE adw_id = \?/, 'direct forensic task lookup must remain visible')
   assert.match(task, /SELECT \* FROM sessions WHERE adw_id = \?/, 'resolved forensic task row must remain visible')

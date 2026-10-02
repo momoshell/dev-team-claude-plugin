@@ -5132,3 +5132,16 @@ test('U5 an unread stream journals result_frame null with its reason', () => {
 test('U4 an exit that already parses settles without a poll', () => {
   assert.deepEqual(settleRun({ exited: true }).sleeps, [])
 })
+
+test('Claude context ignores an assistant frame whose usage carries no token field', () => {
+  const frames = [{ type: 'assistant', message: { id: 'empty', usage: {}, content: [] } }].map((frame) => JSON.stringify(frame)).join('\n')
+  const census = claudeCensus(frames)
+  assert.deepEqual([census.context_first_tokens, census.context_peak_tokens, census.context_mean_tokens, census.context_calls, census.context_absent_reason], [null, null, null, null, 'no-usage-frame'])
+})
+
+test('Claude context peak survives a stream too long to spread into Math.max', () => {
+  const count = 150_000
+  const frames = Array.from({ length: count }, (_, i) => JSON.stringify({ type: 'assistant', message: { id: `m${i}`, usage: { input_tokens: i === 7 ? 9_000 : 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [] } })).join('\n')
+  const census = claudeCensus(frames)
+  assert.deepEqual([census.context_peak_tokens, census.context_calls], [9_000, count])
+})

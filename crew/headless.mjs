@@ -828,7 +828,7 @@ export function claudeCensus(text) {
     }
     if (frame?.type === 'assistant' && frame.message?.id != null) {
       const contextUsage = usageObject(frame.message.usage)
-      if (frame.parent_tool_use_id == null && contextUsage) {
+      if (frame.parent_tool_use_id == null && contextUsage && ['input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].some((key) => Number.isFinite(contextUsage[key]))) {
         contextMessages.set(frame.message.id, contextUsage)
       }
     }
@@ -879,7 +879,7 @@ export function claudeCensus(text) {
   const inToolTotal = Object.values(inTool).reduce((total, value) => total + value, 0)
   return {
     context_first_tokens: contextValues.length ? contextValues[0] : null,
-    context_peak_tokens: contextValues.length ? Math.max(...contextValues) : null,
+    context_peak_tokens: contextValues.length ? contextValues.reduce((peak, value) => Math.max(peak, value), 0) : null,
     context_mean_tokens: contextValues.length ? Math.round(contextSum / contextValues.length) : null,
     context_calls: contextValues.length || null,
     context_absent_reason: contextValues.length ? null : 'no-usage-frame',

@@ -3984,3 +3984,8 @@ test('C1 a measured rpc census journals no absent reason', () => {
 test('C2 an rpc stream with no parsable frame journals no_frames', () => {
   assert.equal(deliveredCensus('').absent_reason, CENSUS_ABSENT_CAUSES.no_frames)
 })
+
+test('RPC context ignores an assistant message_end whose usage carries no token field', () => {
+  const row = finaliseCensus(foldCensusFrame(newCensus(), { type: 'message_end', message: { role: 'assistant', usage: {} } }, null))
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [null, null, null, null, 'no-usage-frame'])
+})

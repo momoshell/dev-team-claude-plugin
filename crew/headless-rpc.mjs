@@ -367,7 +367,7 @@ export function newCensus() {
 
 export function foldCensusFrame(census, frame, at) {
   if (!census || !frame || typeof frame !== 'object') return census
-  const contextUsage = carriesOwnSpend(frame) ? usageObject(frame.message.usage) : null
+  const contextUsage = carriesOwnSpend(frame) && ['input', 'cacheRead', 'cacheWrite'].some((key) => Number.isFinite(frame.message.usage?.[key])) ? usageObject(frame.message.usage) : null
   if (contextUsage) {
     const contextTokens = usageInt(contextUsage.input) + usageInt(contextUsage.cacheRead) + usageInt(contextUsage.cacheWrite)
     if (census._context_calls === 0) census._context_first = contextTokens

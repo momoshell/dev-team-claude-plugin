@@ -1567,7 +1567,10 @@ test('run without a variant captures the same ctx as an explicit default', async
     })
     assert.equal(seen.length, 2)
     assert.equal(seen[1].variant, DEFAULT_VARIANT)
-    assert.deepEqual(seen[1], seen[0])
+    const { execution_source: firstSource, ...firstCtx } = seen[0]
+    const { execution_source: secondSource, ...secondCtx } = seen[1]
+    assert.deepEqual(secondCtx, firstCtx)
+    assert.deepEqual([firstSource, secondSource], ['alias', 'migration_default'])
   } finally {
     if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
     else process.env.DEVTEAM_LEDGER_DB = previousLedger

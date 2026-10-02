@@ -4021,7 +4021,7 @@ export function runCmd(args, deps = {}) {
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
-    roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
+    roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant, execution_source: runConfiguration.execution.source,
     publish: { branch: readBranch(checkout), base: crew.base_branch.branch },
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),

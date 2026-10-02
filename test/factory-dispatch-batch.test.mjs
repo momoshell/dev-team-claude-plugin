@@ -285,12 +285,15 @@ test('DF2 data-file admits non-code literals read by surface tests', () => {
   }
 })
 
-test('RV2-1 raw span where remains inside an exact-file fence', () => {
+// RV2-1 claimed a span `where` reaches matchOwn raw. It cannot: request scope drops
+// span entries before the fence comparison, so no span can be reported outside the fence.
+test('RV2-1 span where is dropped from request scope before the fence comparison', () => {
   const report = checkFences({
     fences: [entry('lane-a', ['crew/drive.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/drive.mjs:10-20'] }],
+    lanes: [{ lane: 'lane-a', where: ['crew/drive.mjs:10-20', 'crew/drive.mjs'] }],
     deps: { readdirSync: () => [], log: () => {} },
   })
+  assert.deepEqual(report.perLane['lane-a'].where, ['crew/drive.mjs'])
   assert.equal(report.observations.some(({ reason }) => reason === 'where-outside-fence'), false)
   assert.equal(report.warnings.some(({ reason }) => reason === 'where-outside-fence'), false)
 })

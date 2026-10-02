@@ -1275,7 +1275,7 @@ const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_
 const CRASH_WHY = 'builder: no valid envelope at builder:3 within 2400s'
 
 const CRASH_STAGES = [
-  'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'build:r2', 'scope-gate:r2',
+  'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'gate:r1', 'build:r2', 'scope-gate:r2',
   'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3',
 ]
 
@@ -1284,7 +1284,7 @@ const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7
 const crashIo = () => fakeIo({
   envelopes: {
     'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-    'builder:1': { status: 'insufficient', role: 'builder', summary: 'the plan leaves a gap', artifacts: [], details: {} },
+    'builder:1': { status: 'insufficient', role: 'builder', summary: 'the plan leaves a gap', artifacts: [], details: { questions: [{ id: 'q1', question: 'Which helper?' }] } },
     'lead:1': leadEnv('bounce'),
     'builder:2': buildEnv(),
     'reviewer:1': reviewEnv('changes-needed', CRASH_FINDINGS),
@@ -1554,6 +1554,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at auto_fix"],
   ["recordRow", "", "at auto_fix_revalidation"],
   ["recordRow", "", "at screener_proposal"],
+  ["recordRow", "", "at build_bounce"],
   ["recordRow", "", "at member_questions"],
   ["recordRow", "", "at question_answers"],
   ["recordRow", "", "at lane_red"],

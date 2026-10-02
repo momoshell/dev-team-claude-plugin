@@ -1267,7 +1267,7 @@ test('I1 lead two-file widening replay admits both unheld files', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(),
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'the build needs a wider test surface', details: {} }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'the build needs a wider test surface', details: { questions: [{ id: 'q1', question: 'May the lead widen this scope?' }] } }),
       'lead:1': { status: 'done', role: 'lead', summary: 'bounce builder', details: { decision: 'bounce', guidance: 'repair both files', ...request } },
       'builder:2': buildEnv({ details: { files_changed: ['one.mjs', 'two.mjs'], commit_message: 'repair' } }),
       'reviewer:1': reviewEnv('pass'),
@@ -1351,7 +1351,7 @@ test('a non-done lead scope request cannot mutate effective scope', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(),
-      'builder:1': buildEnv({ status: 'insufficient', summary: 'need lead help', details: {} }),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'need lead help', details: { questions: [{ id: 'q1', question: 'May the lead admit this path?' }] } }),
       'lead:1': { status: 'insufficient', role: 'lead', summary: 'cannot decide', details: { decision: 'bounce', ...request } },
     },
     runs: { 'lane-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
@@ -3028,7 +3028,7 @@ test('T1 — one shape, both exits', () => {
 test('T2 — gate payload and attempt count', () => {
   const { envelope } = crashRun()
   assert.equal(envelope.details.gate.cmd, 'gate-cmd')
-  assert.equal(envelope.details.gate_attempt_high_water, 3)
+  assert.equal(envelope.details.gate_attempt_high_water, 4)
 })
 
 test('T4 — the preserved crash values', () => {

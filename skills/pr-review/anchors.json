@@ -12,6 +12,6 @@
   "crew/drive.mjs:5453": "const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {",
   "crew/drive.mjs:5577": "const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)",
   "crew/drive.mjs:4903": "for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+/g)) {",
-  "crew/drive.mjs:11287": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
+  "crew/drive.mjs:11337": "        panelResult = runPanelReview({ round: roundNo, panel, io, dissents: S.dissents, setAcceptFindings: (value) => { S.acceptFindings = value }, setLastReview: (value) => { S.lastReview = value }, planPath, panelBriefText, panelStandingQuestion, art, stage, stageComplete, assignAndWait, carriedOpen, panelLog, panelDegraded, emit })",
   "crew/drive.mjs:10665": "const panel = ctx.continuation === true ? panelSeats(seatList) : null"
 }

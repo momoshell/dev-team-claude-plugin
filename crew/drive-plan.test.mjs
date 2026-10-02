@@ -502,7 +502,7 @@ test('planner questions make one consult and carry keyed answers into one bounce
   assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['q2'])
 })
 
-test('questionless planner and builder bounces remain byte-identical', () => {
+test('questionless planner bounce remains byte-identical and builder bounce is driver-owned', () => {
   const plannerIo = fakeIo({
     envelopes: {
       'planner:1': planEnv({ status: 'insufficient', summary: 'planner stuck', details: {} }),
@@ -526,7 +526,7 @@ test('questionless planner and builder bounces remain byte-identical', () => {
     changed: ['a.mjs', 'a.test.mjs'],
   })
   assert.equal(driveTask(CTX, builderIo).status, 'done')
-  assert.equal(builderIo.calls.writes[`${TD}/build-bounce-r1.md`], `# Build bounce (round 1)\n\nsteer\n\nPlan: ${TD}/plan.md`)
+  assert.match(builderIo.calls.writes[`${TD}/build-bounce-r1.md`], /^# Build bounce \(round 1\)\n\nStatus: insufficient\n\nSummary: builder stuck\n\nPlan: /)
 })
 
 test('malformed-only questions preserve the bounce and journal rejections', () => {
@@ -2905,7 +2905,7 @@ test('b433 driver validates the task-local gate path and keeps post-acceptance l
   assert.equal(custom.io.calls.assign.find((entry) => entry.role === 'builder').policy.gatePath, `${TD}/custom-gate.mjs`)
 
   const consulted = fakeIo({
-    envelopes: { 'planner:1': planEnv(), 'builder:1': { status: 'insufficient', role: 'builder', summary: 'stuck', artifacts: [], details: {} }, 'lead:1': leadEnv('escalate') },
+    envelopes: { 'planner:1': planEnv(), 'builder:1': { status: 'insufficient', role: 'builder', summary: 'stuck', artifacts: [], details: { questions: [{ id: 'q1', question: 'May I consult the lead?' }] } }, 'lead:1': leadEnv('escalate') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
   })
   const result = driveTask(CTX, consulted)

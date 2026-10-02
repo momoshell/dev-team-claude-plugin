@@ -33,6 +33,17 @@ import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, 
 
 
 
+// MUTATION: escape the newline in either CLI write; two paths and totals must remain three exact lines.
+test('advisor-source-backfill CLI prints exact newline-terminated totals and refuses invalid paths', () => {
+  const dir = scratchDir('advisor-source-cli-'), dbPath = join(dir, 'ledger.db'), record = join(dir, 'record.json'), missing = join(dir, 'missing.json')
+  writeFileSync(record, JSON.stringify({ lane: 'none', advisor_rotation: { source: 'default', arm: 'none' } }))
+  assert.equal(run(['advisor-source-backfill'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  assert.equal(run(['advisor-source-backfill', '--dry-rnu', record], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  const preview = run(['advisor-source-backfill', '--dry-run', record, missing], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.equal(preview.stdout, `${record}: not-rotation\n${missing}: unreadable\n{"unreadable":1,"not-rotation":1,"no-run":0,"already-recorded":0,"arm-mismatch":0,"ambiguous":0,"backfilled":0,"would-backfill":0}\n`)
+})
+
 test('shadow-picks CLI selects newest run per tier, tie-breaks, filters, and refuses absent/degraded input', { skip: SKIP }, () => {
   const dir = scratchDir('shadow-picks-cli-')
   const dbPath = join(dir, 'ledger.db')

@@ -19,7 +19,7 @@ import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mj
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
-import { ADVISOR_ARMS, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, ADVISOR_SOURCES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -861,7 +861,7 @@ export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {})
         dumpTable: (name, ...args) => {
           const rows = name === 'sessions' ? sessions : ledger.dumpTable(name, ...args)
           if (name === 'sessions') return [...rows, ...liveReservations.map((reservation, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, task_slug: reservation.lane, started_at: reservation.reserved_at, tier: 'build', ended_at: null }))]
-          if (name === 'run_configurations') return [...rows, ...liveReservations.map((reservation, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, advisor_model: reservation.arm, advisor_granted_json: '["builder"]' }))]
+          if (name === 'run_configurations') return [...rows, ...liveReservations.map((reservation, i) => ({ adw_id: `dispatch-wave-reservation-${i}`, advisor_model: reservation.arm, advisor_granted_json: '["builder"]', advisor_source: 'rotation' }))]
           return rows
         },
       }
@@ -3988,6 +3988,19 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
+// The dispatch-time advisor source reaches crew.json and the journal; both writes are best-effort instrumentation.
+function recordAdvisorSource({ advisorSource, crewPath, crewDir, lane, deps } = {}) {
+  const d = normalDeps(deps)
+  if (!ADVISOR_SOURCES.includes(advisorSource)) return null
+  try {
+    const crew = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8')))
+    if (crew && typeof crew === 'object' && !Array.isArray(crew)) d.writeFileSync(crewPath, JSON.stringify({ ...crew, advisor_source: advisorSource }, null, 2) + '\n')
+  } catch { /* missing or malformed crew is never recreated; instrumentation is best effort */ }
+  const row = { at: new Date().toISOString(), event: 'advisor-source', task: lane, lane, advisor_source: advisorSource }
+  try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* instrumentation is never load-bearing */ }
+  return { advisor_source: advisorSource }
+}
+
 export function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {}, charterArm = 'control' }) {
   const tierArgs = ['--assurance', ASSURANCE_ALIASES[tier]]
   return {
@@ -4580,11 +4593,13 @@ async function compileDispatchWave(prepared) {
       forceReason,
     })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    const advisorEligible = result.tier === 'build' && !Object.hasOwn(seats.advisor ?? {}, 'model')
+    const advisorExplicit = Object.hasOwn(seats.advisor ?? {}, 'model')
+    const advisorEligible = result.tier === 'build' && !advisorExplicit
     let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : 'explicit-model', waited_ms: 0 }
     if (advisorEligible) rotation = rotateAdvisorForLane(d, item.lane)
     if (rotation.reserved) advisorReservations.push(rotation.reserved)
     const arm = rotation.readout?.next_arm ?? null
+    const advisorSource = advisorExplicit ? 'explicit' : arm !== null ? 'rotation' : 'default'
     if (arm !== null) seats.advisor = { ...seats.advisor, model: arm }
     d.log(`dispatch-batch: lane=${item.lane} forced=${minimum || 'none'} prompt=${prompt.promptChange ? 'change' : 'code-only'} recommended=${item.proposal.recommendedAssuranceCanonical || 'none'} requested=${requested || 'none'} requested_from=${laneAssuranceSupplied ? 'lane' : (tier ? 'batch' : 'none')} execution=${laneExecution || 'none'} execution_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneExecutionSupplied ? 'lane' : (execution ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'} brief_bytes=${item.bytes} top_section=${sectionToken(item.topSection)}${recommendationNote(result)} granularity=${fenceGranularity(laneFence.files)} force_reason=${forceReason || 'none'} advisor_lease_waited=${rotation.waited_ms ?? 0} advisor_arm=${arm ?? 'unmeasured'} advisor_from=${arm ? 'rotation' : 'none'} advisor_reason=${arm ? 'none' : rotation.reason}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
@@ -4616,6 +4631,7 @@ async function compileDispatchWave(prepared) {
       },
       seats: (() => { const chain = seatChain(batchSeats, laneEntry?.seats); if (arm) (chain.advisor ??= {}).model = { batch: null, lane: null, settled: arm, from: 'rotation' }; return chain })(),
       advisor_rotation: arm ? { arm, source: 'rotation', reason: null } : { arm: null, source: null, reason: rotation.reason },
+      advisor_source: advisorSource,
       operator_spelling: {
         execution: { spelling: laneExecutionSpelling, unmeasured_reason: null },
         assurance: { spelling: laneAssuranceSpelling, unmeasured_reason: null },
@@ -4641,7 +4657,7 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       d,
     })
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, advisorSource, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -4770,6 +4786,7 @@ function launchDispatchWave(compiled, launchedLanes) {
     const adoption = adoptions.get(item.lane) ?? null
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+    recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
     if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     let run

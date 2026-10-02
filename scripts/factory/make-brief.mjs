@@ -353,8 +353,8 @@ Node's tap reporter ESCAPES a # inside a test title, so a test named "#945 the v
 is emitted as \`ok 1 - \\#945 the valve opens\` and a gate matching the title \`#945\` never
 matches it. The check then reports a failure whose cause is the NAME, not the code, and it
 reads to an operator exactly like a real red. A lane spent its last lead consult diagnosing
-that and escalated (#958). Use \`A1\`, \`B2\`, \`C3\` for check labels AND for the test names a
-gate adjudicates, and put the issue number in the check's PROSE. Only \`#\` was measured, on
+that and escalated (#958). Declared acceptance ids win: when the brief's \`## Acceptance\` declares ids such as \`(E392.1)\`, label each check AND each test name a
+gate adjudicates with EXACTLY those ids. Use \`A1\`, \`B2\`, \`C3\` only when none is declared, and put the issue number in the check's PROSE. Only \`#\` was measured, on
 Node v26.7.0, through \`node:test/reporters\`' tap; which other characters that reporter
 escapes is not enumerated here and may be version-dependent.
 

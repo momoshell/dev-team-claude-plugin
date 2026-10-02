@@ -58,19 +58,26 @@ export function matchGlob(glob, path) {
 }
 
 export function resolveSeatSkills({ map, role, files }) {
-  const roleRules = map.rules.filter((rule) => rule.when.roles?.includes(role))
-  const pathRules = files === null ? [] : map.rules.filter((rule) => rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
+  const roleRules = map.rules.filter((rule) => !own(rule.when, 'paths') && rule.when.roles?.includes(role))
+  const pathRules = files === null ? [] : map.rules.filter((rule) => (!own(rule.when, 'roles') || rule.when.roles.includes(role)) && rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
   const paths_unmeasured = files === null ? 'no-fence-register' : null
   const skills = new Set()
   for (const rule of [...roleRules, ...pathRules]) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
   return { skills: [...skills], paths_unmeasured }
 }
 
+export function reachableSeatSkills({ map, role }) {
+  const reachableRules = map.rules.filter((rule) => own(rule.when, 'paths') ? (!own(rule.when, 'roles') || rule.when.roles.includes(role)) : rule.when.roles.includes(role))
+  const skills = new Set()
+  for (const rule of reachableRules) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
+  return { skills: [...skills], paths_unmeasured: null }
+}
+
 export function requiredSkills(map, path) {
   if (map.exempt.some((g) => matchGlob(g, path))) return []
   const result = new Set()
   for (const rule of map.rules) {
-    if (own(rule.when, 'roles')) continue
+    if (!own(rule.when, 'paths')) continue
     if (rule.when.paths.some((g) => matchGlob(g, path))) for (const skill of rule.skills) result.add(skill)
   }
   return [...result].sort()
@@ -135,7 +142,7 @@ function emit(value) { process.stdout.write(`${JSON.stringify(value)}\n`) }
 function errorOut(reason) { process.stderr.write(`skill-gate: ${reason}\n`); process.exitCode = 1 }
 function contextFor(map) {
   const essential = 'Loading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
-  const rows = map.rules.filter((r) => !own(r.when, 'roles')).map((r) => `${r.when.paths.join(', ')} → ${r.skills.join(', ')}`).join('\n')
+  const rows = map.rules.filter((r) => own(r.when, 'paths')).map((r) => `${r.when.paths.join(', ')} → ${r.skills.join(', ')}`).join('\n')
   const budget = Math.max(0, 10000 - essential.length - 1)
   return `${rows.slice(0, budget)}\n${essential}`
 }

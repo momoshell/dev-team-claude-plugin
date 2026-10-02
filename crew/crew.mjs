@@ -83,7 +83,7 @@ export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBac
 import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 import { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
-import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
+import { loadMap, resolveSeatSkills, reachableSeatSkills } from '../hooks/skill-gate.mjs'
 import { parseFenceScope } from './fence-scope.mjs'
 export { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
@@ -2871,10 +2871,10 @@ export function fenceSkillFiles(entries, { checkout, listTracked = trackedUnder 
   return { files: [...new Set([...paths, ...tracked])], reason: null }
 }
 
-export function renderSeatSkills({ root, mapResult, role, files, filesReason = null, budget = SKILLS_BYTE_BUDGET, read = readFileSync }) {
+export function renderSeatSkills({ root, mapResult, role, files, filesReason = null, budget = SKILLS_BYTE_BUDGET, read = readFileSync, reachable = false }) {
   const records = []
   const bodies = []
-  const resolved = mapResult?.ok ? resolveSeatSkills({ map: mapResult.map, role, files }) : null
+  const resolved = mapResult?.ok ? (reachable ? reachableSeatSkills({ map: mapResult.map, role }) : resolveSeatSkills({ map: mapResult.map, role, files })) : null
   const reason = mapResult?.ok ? null : (mapResult?.reason || 'map-unreadable')
   if (resolved) {
     for (const path of resolved.skills) {
@@ -3434,7 +3434,7 @@ export async function bootCmd(args, deps = {}) {
     ownFiles = fenceSkillFiles(gathered.find((entry) => entry.lane === args.lane)?.files || [], { checkout })
   }
   const skillResults = Object.fromEntries(roles.map((role) => [role, renderSeatSkills({ root: dirname(HERE), mapResult, role, files: ownFiles.files, filesReason: ownFiles.reason })]))
-  const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section]))
+  const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section])); omitInlinedPiSkills(adapters, skillResults, dirname(HERE))
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm, skillsSections[role])
   const charter = charterBytesRecord(paths.taskDir, roles, memory.sections, {}, skillsSections)
   // Materialise every register-authoritative Claude MCP set before composing a
@@ -5267,4 +5267,51 @@ if (invokedDirectly) {
       : fn(parsed)
     if (r && typeof r.then === 'function') r.catch(fail)
   } catch (err) { fail(err) }
+}
+
+const SKILL_ROOT_BYTES = Buffer.byteLength(dirname(HERE), 'utf8')
+export const SKILL_BLOCK_CEILINGS = Object.freeze({
+  builder: 21659 + 6 * SKILL_ROOT_BYTES,
+  lead: 1704 + SKILL_ROOT_BYTES,
+  planner: 18102 + 5 * SKILL_ROOT_BYTES,
+  reviewer: 26219 + 7 * SKILL_ROOT_BYTES,
+  'tech-lead': 12656 + 3 * SKILL_ROOT_BYTES,
+})
+export const ROLE_PROMPT_CEILINGS = Object.freeze(Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, bytes + 2 + SKILL_BLOCK_CEILINGS[role]])))
+export const ROLE_PROMPT_REFUSAL = 'role-prompt-over-ceiling'
+export const ROLE_PROMPT_UNMEASURED_CAUSES = Object.freeze(['charter-unreadable', 'skill-map-unreadable', 'skill-unreadable'])
+
+export function rolePromptBytes(dir = ROLES_DIR, root = dirname(HERE), deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const mapResult = loadDeliveryMap(root)
+  const sizes = {}
+  for (const role of Object.keys(CHARTER_CEILINGS)) {
+    let shared, card
+    try { shared = read(join(dir, '_shared.md'), 'utf8'); card = read(join(dir, `${role}.md`), 'utf8') }
+    catch { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[0] }; continue }
+    if (!mapResult.ok) { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[1] }; continue }
+    const rendered = renderSeatSkills({ root, mapResult, role, files: [], reachable: true, budget: Number.MAX_SAFE_INTEGER, read })
+    if (rendered.skills.some((record) => record.status !== 'delivered')) { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[2] }; continue }
+    sizes[role] = { bytes: Buffer.byteLength(composeRolePrompt(shared, card, '', 'control', rendered.section), 'utf8'), skills_bytes: Buffer.byteLength(rendered.section, 'utf8'), reason: null }
+  }
+  return sizes
+}
+
+export function rolePromptRefusals(measured = rolePromptBytes()) {
+  const refusals = []
+  for (const [role, ceiling] of Object.entries(ROLE_PROMPT_CEILINGS)) {
+    const record = measured?.[role]
+    if (!record || record.bytes === null) { refusals.push(`${ROLE_PROMPT_REFUSAL}: compiled role prompt ${role} is unmeasured (${record?.reason || ROLE_PROMPT_UNMEASURED_CAUSES[0]})`); continue }
+    if (record.bytes > ceiling) refusals.push(`${ROLE_PROMPT_REFUSAL}: compiled role prompt ${role} is ${record.bytes} bytes, over its ${ceiling}-byte ceiling`)
+  }
+  return refusals
+}
+
+export function omitInlinedPiSkills(adapters, skillResults, root) {
+  for (const [role, entry] of Object.entries(adapters)) {
+    if (entry.name !== 'pi') continue
+    const delivered = (skillResults[role]?.skills || []).filter((record) => record.status === 'delivered').map((record) => `/${relative(root, record.path)}`)
+    const skills = (entry.grants?.skills || []).filter((skill) => !delivered.some((suffix) => skill.endsWith(suffix)))
+    adapters[role] = { ...entry, grants: { ...entry.grants, skills } }
+  }
 }

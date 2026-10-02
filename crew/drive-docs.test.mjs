@@ -295,7 +295,7 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   assert.equal(skillLines[0], '---')
   assert.equal(skillLines[1], 'name: lean-build')
   assert.match(skillLines[2] || '', /^description: .+_shared\.md.+$/)
-  assert.equal(skillLines[3], "compatibility: Delivered to pi seats via `--skill` and to claude seats via the seat's session plugin dir; the ladder still reaches every seat through `_shared.md`.")
+  assert.equal(skillLines[3], "compatibility: Delivered inline in every seat's role prompt (the `## Plugin skills` block), so a pi seat no longer loads it with `--skill`; the ladder still reaches every seat through `_shared.md`.")
   assert.equal(skillLines[4], '---')
   // The skill must NOT restate the ladder — one home.
   for (const rung of rungs) assert.equal(skill.includes(rung), false, `ladder duplicated in the skill: ${rung}`)

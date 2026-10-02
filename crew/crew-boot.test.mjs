@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED } from './crew.mjs'
+import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED, SKILL_BLOCK_CEILINGS, ROLE_PROMPT_CEILINGS, ROLE_PROMPT_UNMEASURED_CAUSES, rolePromptBytes, rolePromptRefusals, ROLE_PROMPT_REFUSAL, omitInlinedPiSkills } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -20,7 +20,7 @@ import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir, git } from '../test/helpers.mjs'
-import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
+import { loadMap, resolveSeatSkills, reachableSeatSkills, requiredSkills } from '../hooks/skill-gate.mjs'
 import { probeRepo, ProfileRefusal, checkoutBaseBranch } from '../scripts/factory/probe-repo.mjs'
 import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
@@ -2782,4 +2782,115 @@ test('P2 incomplete panes deadline', async () => {
   assert.ok(result.t >= BOOT_WORKSPACE_DEADLINE_MS)
   assert.ok(result.t <= BOOT_WORKSPACE_DEADLINE_MS + BOOT_WORKSPACE_POLL_MS)
   assert.equal(result.crew, null)
+})
+
+const SR_MAP = { version: 1, exempt: ['docs/audits/**'], rules: [
+  { when: { roles: ['builder'] }, skills: ['dev-team:base'] },
+  { when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:alpha'] },
+  { when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:alpha'] },
+] }
+test('SR1 lead cannot receive alpha from builder-only path rule', () => {
+  // MUTATION: drop path-rule role restrictions during resolution.
+  assert.equal(resolveSeatSkills({ map: SR_MAP, role: 'lead', files: ['crew/x.mjs'] }).skills.includes('skills/alpha/SKILL.md'), false)
+})
+test('SR2 builder cannot receive alpha outside matching path', () => {
+  // MUTATION: include role-scoped path rules without checking the fence.
+  assert.equal(resolveSeatSkills({ map: SR_MAP, role: 'builder', files: ['docs/x.md'] }).skills.includes('skills/alpha/SKILL.md'), false)
+})
+test('SR3 role-scoped path rule remains required and described', () => {
+  // MUTATION: skip every rule that carries a roles condition at the edit gate.
+  assert.deepEqual(requiredSkills(SR_MAP, 'crew/x.mjs'), ['dev-team:alpha'])
+})
+test('SR4 builder reachable union is ordered, deduplicated and unmeasured', () => {
+  // MUTATION: reachableRules drops its role-matching path branch.
+  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'builder' }), { skills: ['skills/base/SKILL.md', 'skills/alpha/SKILL.md'], paths_unmeasured: null })
+})
+test('SR5 lead reachable union is exactly empty', () => {
+  // MUTATION: reachableRules ignores role restrictions on path rules.
+  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'lead' }), { skills: [], paths_unmeasured: null })
+})
+test('SR6 shipped lead fence has only lean-build', () => {
+  // MUTATION: grant backend-node to lead in the shipped role matrix.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md'])
+})
+test('SR7 shipped planner fence has lean-build and qa-test-writing', () => {
+  // MUTATION: remove planner from the test-writing map rule.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'planner', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+})
+test('SR8 shipped tech-lead fence has lean-build, pr-review and qa-test-writing', () => {
+  // MUTATION: remove tech-lead from the test-writing map rule.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'tech-lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+})
+test('SR9 reachable compiled prompts fit pinned frozen ceilings', () => {
+  // MUTATION: lower one reachable skill-block ceiling by one byte.
+  const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 6, lead: 1, planner: 5, reviewer: 7, 'tech-lead': 3 }
+  const base = { builder: 21659, lead: 1704, planner: 18102, reviewer: 26219, 'tech-lead': 12656 }
+  const blocks = Object.fromEntries(Object.keys(base).map((role) => [role, base[role] + factors[role] * rootBytes]))
+  assert.deepEqual(SKILL_BLOCK_CEILINGS, blocks); assert.equal(Object.isFrozen(SKILL_BLOCK_CEILINGS), true)
+  const ceilings = Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, n]) => [role, n + 2 + blocks[role]]))
+  assert.deepEqual(ROLE_PROMPT_CEILINGS, ceilings); assert.equal(Object.isFrozen(ROLE_PROMPT_CEILINGS), true)
+  assert.deepEqual(ROLE_PROMPT_UNMEASURED_CAUSES, ['charter-unreadable', 'skill-map-unreadable', 'skill-unreadable']); assert.equal(Object.isFrozen(ROLE_PROMPT_UNMEASURED_CAUSES), true)
+  const measured = rolePromptBytes()
+  for (const role of Object.keys(ceilings)) {
+    const shared = readFileSync(join(ROOT, 'crew/roles/_shared.md'), 'utf8')
+    const card = readFileSync(join(ROOT, `crew/roles/${role}.md`), 'utf8')
+    const rendered = renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role, files: [], reachable: true, budget: Number.MAX_SAFE_INTEGER })
+    const expected = Buffer.byteLength(composeRolePrompt(shared, card, '', 'control', rendered.section), 'utf8')
+    assert.equal(measured[role].bytes, expected)
+    assert.equal(measured[role].skills_bytes, Buffer.byteLength(rendered.section, 'utf8'))
+    assert.ok(measured[role].bytes <= ceilings[role])
+  }
+  assert.deepEqual(rolePromptRefusals(measured), [])
+})
+test('SR10 equality passes and planner ceiling plus one refuses exactly', () => {
+  // MUTATION: use greater-than-or-equal for role prompt ceilings.
+  const at = Object.fromEntries(Object.entries(ROLE_PROMPT_CEILINGS).map(([role, bytes]) => [role, { bytes, reason: null }]))
+  assert.deepEqual(rolePromptRefusals(at), [])
+  const over = { ...at, planner: { bytes: ROLE_PROMPT_CEILINGS.planner + 1, reason: null } }
+  assert.deepEqual(rolePromptRefusals(over), [`${ROLE_PROMPT_REFUSAL}: compiled role prompt planner is ${ROLE_PROMPT_CEILINGS.planner + 1} bytes, over its ${ROLE_PROMPT_CEILINGS.planner}-byte ceiling`])
+})
+test('SR11 unreadable skills, charters and maps remain null with closed causes', () => {
+  // MUTATION: turn a failed reachable skill read into a measured numeric zero.
+  const read = (path, encoding) => { if (path.endsWith('SKILL.md')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return readFileSync(path, encoding) }
+  const unavailable = rolePromptBytes(undefined, ROOT, { readFileSync: read })
+  assert.ok(Object.values(unavailable).every((row) => row.bytes === null && row.reason === 'skill-unreadable'))
+  assert.ok(rolePromptRefusals(unavailable).every((row) => row.includes('skill-unreadable')))
+  assert.ok(Object.values(rolePromptBytes(join(ROOT, 'absent-charters'))).every((row) => row.bytes === null && row.reason === 'charter-unreadable'))
+  const root = scratchDir('sr11-map-'); mkdirSync(join(root, 'skills'), { recursive: true })
+  try { for (const text of ['', '{}']) { writeFileSync(join(root, 'skills/skill-map.json'), text); assert.ok(Object.values(rolePromptBytes(undefined, root)).every((row) => row.bytes === null && row.reason === 'skill-map-unreadable')) }
+    rmSync(join(root, 'skills/skill-map.json')); assert.ok(Object.values(rolePromptBytes(undefined, root)).every((row) => row.bytes === null && row.reason === 'skill-map-unreadable'))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+test('SR12 delivered inlined pi skills are omitted across installation roots', () => {
+  // MUTATION: compare absolute delivery record paths rather than plugin-relative suffixes.
+  // MUTATION: break after the first pi entry; drop the grants spread.
+  const entry = { name: 'pi', grants: { skills: ['/reg/skills/x/SKILL.md', '/reg/skills/y/SKILL.md'], extensions: ['keep'] } }
+  const adapters = { planner: entry, builder: { name: 'pi', grants: { skills: ['/reg/skills/x/SKILL.md', '/reg/skills/z/SKILL.md'], extensions: ['keep2'] } } }
+  omitInlinedPiSkills(adapters, {
+    planner: { skills: [{ path: '/plug/skills/x/SKILL.md', status: 'delivered' }, { path: '/plug/skills/y/SKILL.md', status: 'unreadable' }] },
+    builder: { skills: [{ path: '/plug/skills/x/SKILL.md', status: 'delivered' }] },
+  }, '/plug')
+  assert.deepEqual(adapters.planner.grants.skills, ['/reg/skills/y/SKILL.md']); assert.deepEqual(entry.grants.skills, ['/reg/skills/x/SKILL.md', '/reg/skills/y/SKILL.md'])
+  assert.deepEqual(adapters.builder.grants.skills, ['/reg/skills/z/SKILL.md'])
+  assert.deepEqual(adapters.planner.grants.extensions, ['keep']); assert.deepEqual(adapters.builder.grants.extensions, ['keep2'])
+  assert.notEqual(adapters.planner, entry)
+})
+test('SR13 over-budget inline pi skill stays granted', () => {
+  // MUTATION: omit pi skills without checking the delivered status.
+  const adapters = { planner: { name: 'pi', grants: { skills: ['/r/skills/x/SKILL.md'] } } }
+  omitInlinedPiSkills(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'over-budget' }] } }, '/p')
+  assert.deepEqual(adapters.planner.grants.skills, ['/r/skills/x/SKILL.md'])
+})
+test('SR14 Claude grants remain untouched', () => {
+  // MUTATION: apply omission to non-pi adapter grants.
+  const claude = { name: 'claude', grants: { skills: ['/r/skills/x/SKILL.md'] } }, adapters = { planner: claude }
+  omitInlinedPiSkills(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'delivered' }] } }, '/p')
+  assert.equal(adapters.planner, claude)
+})
+test('SR15 boot persists empty planner grants and emits no-skills', async () => {
+  // MUTATION: remove the pre-persistence pi inline-skill omission call.
+  const f = await bootPaneLaunchFixture('sr15-inline', { args: { 'agent-planner': 'pi' } })
+  try { assert.equal(f.error, null); const crew = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8')); const launcher = readFileSync(join(f.taskDir, 'launch-planner.sh'), 'utf8')
+    assert.deepEqual(persistedAdapters(crew).planner.grants.skills, []); assert.match(launcher, /--no-skills/)
+  } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
 })

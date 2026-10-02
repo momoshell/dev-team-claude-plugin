@@ -827,6 +827,8 @@ export const TABLES = Object.freeze({
       { name: 'created_at', decl: 'TEXT' },
       { name: 'advisor_model', decl: 'TEXT' },
       { name: 'advisor_granted_json', decl: 'TEXT' },
+      { name: 'advisor_source', decl: 'TEXT' },
+      { name: 'advisor_source_evidence', decl: 'TEXT' }
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -1704,12 +1706,14 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'seat-suite-policy': 'recordSuiteDecision',
 })
 
+export const ADVISOR_SOURCES = Object.freeze(['rotation', 'explicit', 'default'])
+export const ADVISOR_SOURCE_BACKFILL_OUTCOMES = Object.freeze(['unreadable', 'not-rotation', 'no-run', 'already-recorded', 'arm-mismatch', 'ambiguous', 'backfilled', 'would-backfill'])
 export const SHADOW_PICK_OUTCOMES = Object.freeze(['picked', 'stands', 'abstained', 'no-candidate', 'not-consulted'])
 export const SHADOW_PICK_EXCLUSION_REASONS = Object.freeze(['band-unknown', 'band-below-floor', 'capability-shortfall', 'agent-unresolved', 'breaker-open'])
 
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordAdvisorSourceBackfill', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordAdvisorAbWindow', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -1775,7 +1779,7 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
 // Writers whose mirror is an UPDATE of a row another writer created: they add
 // no row, so a JSONL line of one of these kinds is never a missing row.
 export const UPDATE_ONLY_WRITERS = Object.freeze([
-  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
+  'recordSessionRequest', 'recordAdvisorSourceBackfill', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
 ])
 
 // The doctor readout never repairs: replayJsonl is the deliberate remedy.
@@ -3255,6 +3259,7 @@ export function openLedger({
     if (input.advisor_model != null && (typeof input.advisor_model !== 'string' || input.advisor_model !== 'none' && (!input.advisor_model.trim() || input.advisor_model.length > ADVISOR_MODEL_MAX_CHARS))) {
       refuse('recordRunConfiguration: advisor_model must be a bounded nonblank string')
     }
+    if (input.advisor_source != null) requireEnum(input.advisor_source, ADVISOR_SOURCES, 'recordRunConfiguration', 'advisor_source')
     if (input.advisor_granted_json != null) {
       let grant
       try { grant = JSON.parse(input.advisor_granted_json) } catch { refuse('recordRunConfiguration: advisor_granted_json must be a JSON array of role names') }
@@ -3276,6 +3281,8 @@ export function openLedger({
       legacy_tier: short('legacy_tier'),
       advisor_model: input.advisor_model ?? null,
       advisor_granted_json: input.advisor_granted_json ?? null,
+      advisor_source: input.advisor_source ?? null,
+      advisor_source_evidence: input.advisor_source_evidence ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     appendJsonl('recordRunConfiguration', args)
@@ -3284,6 +3291,20 @@ export function openLedger({
       conn.prepare(`INSERT OR IGNORE INTO run_configurations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((column) => toBindable(args[column])))
     })
+    return args
+  }
+
+  function recordAdvisorSourceBackfill({ adw_id, advisor_source, evidence } = {}) {
+    requireFields({ adw_id, advisor_source, evidence }, ['adw_id', 'advisor_source', 'evidence'], 'recordAdvisorSourceBackfill')
+    requireEnum(advisor_source, ADVISOR_SOURCES, 'recordAdvisorSourceBackfill', 'advisor_source')
+    const args = redact({
+      adw_id: normaliseShortName(adw_id, 'recordAdvisorSourceBackfill', 'adw_id'),
+      advisor_source,
+      evidence: typeof evidence === 'string' && evidence.trim() && evidence.length <= 4096 ? evidence.trim() : refuse('recordAdvisorSourceBackfill: evidence must be nonblank text'),
+      created_at: isoMs(now()),
+    }, stats)
+    appendJsonl('recordAdvisorSourceBackfill', args)
+    mirror((conn) => conn.prepare('UPDATE run_configurations SET advisor_source = ?, advisor_source_evidence = ? WHERE adw_id = ? AND advisor_source IS NULL').run(args.advisor_source, args.evidence, args.adw_id))
     return args
   }
 
@@ -6793,7 +6814,7 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordAdvisorSourceBackfill, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
     recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordAdvisorAbWindow, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
@@ -8039,7 +8060,7 @@ function killVerb(ledger, { adwId, pid, yes }, stdout, stderr) {
 // ---------------------------------------------------------------------------
 
 // --yes is the one boolean (no-value) flag in this CLI's vocabulary.
-const BOOLEAN_FLAGS = new Set(['yes', 'json', 'start-window'])
+const BOOLEAN_FLAGS = new Set(['yes', 'json', 'start-window', 'dry-run'])
 
 // Every flag each verb accepts. A flag absent from its verb's set is REFUSED
 // (exit 2) rather than ignored: measured on 2026-08-21, `run-set --since X
@@ -8077,6 +8098,7 @@ const VERB_FLAGS = Object.freeze({
   request: new Set(['from-brief']),
   'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
   'advisor-arms': new Set(['arms', 'json', 'start-window', 'note', 'since']),
+  'advisor-source-backfill': new Set(['dry-run']),
   doctor: new Set([]),
   kill: new Set(['adw-id', 'pid', 'yes']),
   settle: new Set(['reason']),
@@ -8240,6 +8262,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   const configs = new Map(configurations.map((row) => [row.adw_id, row]))
   const armsMap = new Map()
   let unrecorded = 0, ungranted = 0, nonBuild = 0, beforeWindow = 0
+  let sourceDefault = 0, sourceExplicit = 0, sourceUnrecorded = 0, backfilled = 0
   for (const session of sessions) {
     if (session.tier !== 'build') { nonBuild++; continue }
     if (windowEpoch !== null && !Number.isFinite(Date.parse(session.started_at))) throw new Error('advisor-arms: malformed build-session timestamp')
@@ -8250,10 +8273,17 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const configuration = configs.get(session.adw_id)
     if (!configuration) { unrecorded++; continue }
     if (configuration.advisor_model == null) { unrecorded++; continue }
+    if (configuration.advisor_source !== 'rotation') {
+      if (configuration.advisor_source === 'default') sourceDefault++
+      else if (configuration.advisor_source === 'explicit') sourceExplicit++
+      else sourceUnrecorded++
+      continue
+    }
     let granted
     try { granted = JSON.parse(configuration.advisor_granted_json) } catch { granted = [] }
     if (!Array.isArray(granted) || !granted.every((role) => typeof role === 'string')) granted = []
     if (!granted.includes('builder')) { ungranted++; continue }
+    if (configuration.advisor_source_evidence != null) backfilled++
     const key = configuration.advisor_model
     const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
@@ -8304,7 +8334,42 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
   })
   let winner = null
   if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
-  return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild, before_window: beforeWindow }, window: { started_at: windowStart, source: since !== null ? 'since' : recordedStart !== null ? 'recorded' : null }, next_arm: winner?.arm ?? null }
+  return { schema: 1, arms: results, excluded: { unrecorded, ungranted, non_build_excluded: nonBuild, before_window: beforeWindow, source_default: sourceDefault, source_explicit: sourceExplicit, source_unrecorded: sourceUnrecorded }, backfilled, window: { started_at: windowStart, source: since !== null ? 'since' : recordedStart !== null ? 'recorded' : null }, next_arm: winner?.arm ?? null }
+}
+
+function backfillAdvisorSourcePath(ledger, path, { dryRun = false } = {}) {
+  let record
+  try {
+    record = JSON.parse(readFileSync(path, 'utf8'))
+    if (!record || typeof record !== 'object' || Array.isArray(record) || typeof record.lane !== 'string') throw new Error('invalid evidence')
+  } catch {
+    return { path, outcome: 'unreadable' }
+  }
+  if (record.advisor_rotation?.source !== 'rotation') return { path, outcome: 'not-rotation' }
+  const before = ledger.stats().mirror_errors
+  const sessions = ledger.dumpTable('sessions')
+  const configurations = ledger.dumpTable('run_configurations')
+  if (ledger.stats().degraded || ledger.stats().mirror_errors > before) throw new Error('advisor-source-backfill: ledger read degraded')
+  const configs = new Map(configurations.map((row) => [row.adw_id, row]))
+  const candidates = sessions.filter((session) => session.tier === 'build' && session.task_slug === record.lane && configs.has(session.adw_id))
+  if (!candidates.length) return { path, outcome: 'no-run' }
+  // A dispatch record names a lane, not a session: with a reused lane name it cannot prove which run it describes.
+  if (candidates.length > 1) return { path, outcome: 'ambiguous' }
+  const unrecorded = candidates.filter((session) => configs.get(session.adw_id).advisor_source == null)
+  if (!unrecorded.length) return { path, outcome: 'already-recorded' }
+  const recordedArm = record.advisor_rotation?.arm
+  const matches = typeof recordedArm === 'string'
+    ? unrecorded.filter((session) => configs.get(session.adw_id).advisor_model === recordedArm)
+    : []
+  if (matches.length === 0) return { path, outcome: 'arm-mismatch' }
+  const match = matches[0]
+  if (dryRun) return { path, outcome: 'would-backfill', adw_id: match.adw_id }
+  ledger.recordAdvisorSourceBackfill({ adw_id: match.adw_id, advisor_source: 'rotation', evidence: path })
+  return { path, outcome: 'backfilled', adw_id: match.adw_id }
+}
+
+export function advisorSourceBackfill(ledger, paths, { dryRun = false } = {}) {
+  return paths.map((path) => backfillAdvisorSourcePath(ledger, path, { dryRun }))
 }
 
 function loadPriceCatalog(path) {
@@ -8742,7 +8807,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill | settle <adw-id> --reason <text>')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | advisor-source-backfill [--dry-run] <dispatch-record.json>… | doctor | kill | settle <adw-id> --reason <text>')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -8852,6 +8917,18 @@ export function main(argv) {
     const dbPath = defaultDbPath()
     const ledger = openLedger({ dbPath, nodeVersion, stderr })
 
+    if (verb === 'advisor-source-backfill') {
+      if (!positional.length) refuse('advisor-source-backfill: requires one or more evidence paths')
+      const rows = advisorSourceBackfill(ledger, positional, { dryRun: !!flags['dry-run'] })
+      const totals = Object.fromEntries(ADVISOR_SOURCE_BACKFILL_OUTCOMES.map((outcome) => [outcome, 0]))
+      for (const row of rows) {
+        totals[row.outcome]++
+        stdout.write(`${row.path}: ${row.outcome}${row.adw_id ? ` ${row.adw_id}` : ''}\n`)
+      }
+      stdout.write(`${JSON.stringify(totals)}\n`)
+      return 0
+    }
+
     if (verb === 'advisor-arms') {
       if (positional.length) refuse('advisor-arms: takes no positional arguments')
       if (Object.hasOwn(flags, 'note') && !flags['start-window']) refuse('advisor-arms: --note requires --start-window')
@@ -8877,7 +8954,7 @@ export function main(argv) {
       if (flags.json) stdout.write(`${JSON.stringify(payload)}\n`)
       else {
         const windowLine = `window: ${payload.window.started_at ?? 'none'}; before-window=${payload.excluded.before_window}\n`
-        stdout.write(`advisor arms (schema 1)\n${windowLine}${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; rounds-unmeasured=${arm.rounds_unmeasured_runs}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
+        stdout.write(`advisor arms (schema 1)\n${windowLine}${payload.arms.map((arm) => `${arm.arm}: runs=${arm.runs}; rounds=${arm.build_rounds}/${arm.rounds_denominator}; rounds-unmeasured=${arm.rounds_unmeasured_runs}; reviews=${arm.changes_needed}/${arm.review_denominator}; escalations=${arm.escalations}/${arm.escalation_denominator}; rates=${arm.build_rounds_per_run},${arm.bounce_rate},${arm.escalation_rate}; lane-spend=${arm.lane_spend_usd}/${arm.lane_spend_denominator} (missing=${arm.lane_spend_missing_runs}); advisor-spend=${arm.advisor_spend.cost_usd} (${arm.advisor_spend.priced_consults}/${arm.advisor_spend.usage_count}; ${arm.advisor_spend.absent_reason ?? 'measured'})`).join('\n')}\nexcluded: unrecorded=${payload.excluded.unrecorded}; ungranted=${payload.excluded.ungranted}; non-build=${payload.excluded.non_build_excluded}; source_default=${payload.excluded.source_default}; source_explicit=${payload.excluded.source_explicit}; source_unrecorded=${payload.excluded.source_unrecorded}; backfilled=${payload.backfilled}\nnext_arm: ${payload.next_arm ?? 'null'}\n`)
       }
       return 0
     }

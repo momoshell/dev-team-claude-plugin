@@ -73,7 +73,7 @@ const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NO
 function bootTieredRun(tier, runConfiguration = null, advisorFixture = {}) {
   const stateDir = mkdtempSync(join(tmpdir(), 'factory-ledger-boot-'))
   writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
-    schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], ...(tier === null ? {} : { tier }),
+    schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], advisor_source: 'rotation', ...(Object.hasOwn(advisorFixture, 'advisor_source') ? { advisor_source: advisorFixture.advisor_source } : {}), ...(tier === null ? {} : { tier }),
     ...(Object.hasOwn(advisorFixture, 'seats') ? { seats: advisorFixture.seats } : {}),
     ...(Object.hasOwn(advisorFixture, 'granted') ? { advisor: { granted: advisorFixture.granted } } : {}),
     ...(runConfiguration ? { run_configuration: runConfiguration } : {}),
@@ -325,6 +325,8 @@ function makeUnenforcedSeatIndexDb() {
 
 function exerciseEveryWriter(ledger, adwId) {
   ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'task' })
+  ledger.recordRunConfiguration({ adw_id: adwId, schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit', requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit', requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit', legacy_variant: null, legacy_tier: 'build', advisor_source: null })
+  ledger.recordAdvisorSourceBackfill({ adw_id: adwId, advisor_source: 'rotation', evidence: '/tmp/advisor-source.json' })
   ledger.recordRunSeat({
     adw_id: adwId, role: 'planner', agent: 'claude', provider: 'anthropic', model_id: 'claude-sonnet',
     model: 'sonnet', effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
@@ -642,6 +644,8 @@ const MARKER_ADW = 'devteam-done-marker-should-never-persist-anywhere'
 function seedAllWritersWithMarker(ledger) {
   const ctx = 'marker-run'
   ledger.startSession({ adw_id: ctx, repo_slug: 'r', task_slug: 't', DEVTEAM_SECRET: MARKER_ADW })
+  ledger.recordRunConfiguration({ adw_id: ctx, schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit', requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit', requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit', legacy_variant: null, legacy_tier: 'build', advisor_source: null })
+  ledger.recordAdvisorSourceBackfill({ adw_id: ctx, advisor_source: 'rotation', evidence: MARKER_ADW })
   ledger.recordRunSeat({
     adw_id: ctx, role: 'builder', agent: MARKER_ADW, provider: 'anthropic', model_id: 'sonnet',
     model: 'sonnet', effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
@@ -1061,6 +1065,7 @@ function seedConfigurationRun(ledger, adwId, startedAt, overrides = {}) {
     assurance_source: 'explicit',
     legacy_variant: null,
     legacy_tier: null,
+    advisor_source: 'rotation',
     ...overrides,
   }
   ledger.recordRunConfiguration({ adw_id: adwId, ...values, created_at: values.created_at ?? startedAt })

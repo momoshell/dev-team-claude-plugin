@@ -14,7 +14,7 @@ import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
   openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, LANE_SPEND_ABSENT_REASONS, priceKeyForModel, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
-  advisorArmsReadout,
+  advisorArmsReadout, ADVISOR_SOURCES, ADVISOR_SOURCE_BACKFILL_OUTCOMES, advisorSourceBackfill,
   ADVISOR_ARMS,
 } from '../scripts/factory/ledger.mjs'
 
@@ -1542,7 +1542,7 @@ const windowView = ({ sessions = [], windows = [], configs = [] } = {}) => ({
   dumpTable: (name) => ({ sessions, advisor_ab_windows: windows, run_configurations: configs }[name] ?? []),
 })
 const windowSession = (adw_id, started_at, ended_at = '2024-01-03T00:00:00.000Z') => ({ adw_id, tier: 'build', started_at, ended_at })
-const windowConfig = (adw_id) => ({ adw_id, advisor_model: 'none', advisor_granted_json: '["builder"]' })
+const windowConfig = (adw_id) => ({ adw_id, advisor_model: 'none', advisor_granted_json: '["builder"]', advisor_source: 'rotation' })
 // MUTATION W1: remove the before-window continue; old completed and in-flight runs must both disappear.
 test('W1 advisor window excludes pre-window completed and in-flight sessions', () => {
   const readout = advisorArmsReadout(windowView({ sessions: [windowSession('old-done', '2024-01-01T00:00:00Z'), windowSession('old-live', '2024-01-01T00:00:00Z', null)], windows: [{ started_at: windowInstant }], configs: [windowConfig('old-done'), windowConfig('old-live')] }), { arms: ['none'] })
@@ -2043,6 +2043,125 @@ test('dispatcharms real read counts history and reservations and closes on succe
   const degraded = readDispatchAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: corruptPath } }, open: spy })
   assert.equal(degraded.reason, 'ledger-degraded')
   assert.equal(degraded.readout, null)
+})
+
+// MUTATION S3: hard-code a source in emission; crew provenance must survive without guessing or filling absence.
+test('advisor-source S3 emitted configuration preserves valid sources and absent source', () => {
+  assert.deepEqual(['rotation', 'explicit', 'default'].map((advisor_source) => bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { advisor_source }).configuration.advisor_source), ['rotation', 'explicit', 'default'])
+  assert.equal(bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { advisor_source: undefined }).configuration.advisor_source, null)
+  assert.equal(bootTieredRun('build', EXECUTION_AXIS_BOOT_CONFIGURATION, { advisor_source: 'guess' }).configuration.advisor_source, null)
+})
+
+// MUTATION S4: remove enum validation or skip additive pre-column migration; guessed input must refuse and legacy evidence remain absent.
+test('advisor-source S4 refuses guessed provenance and upgrades a pre-column table without guessing', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  assert.throws(() => ledger.recordRunConfiguration({ adw_id: 'source-guess', schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit', requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit', requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit', legacy_variant: null, legacy_tier: 'build', advisor_source: 'guess' }), /advisor_source/)
+  assert.deepEqual(ADVISOR_SOURCES, ['rotation', 'explicit', 'default'])
+  assert.equal(Object.isFrozen(ADVISOR_SOURCES), true)
+  assert.deepEqual(ADVISOR_SOURCE_BACKFILL_OUTCOMES, ['unreadable', 'not-rotation', 'no-run', 'already-recorded', 'arm-mismatch', 'ambiguous', 'backfilled', 'would-backfill'])
+  assert.equal(Object.isFrozen(ADVISOR_SOURCE_BACKFILL_OUTCOMES), true)
+  ledger.close()
+
+  const dbPath = join(scratchDir('advisor-source-s4-'), 'legacy.db')
+  const db = new (require('node:sqlite').DatabaseSync)(dbPath)
+  db.exec(`CREATE TABLE run_configurations (
+    adw_id TEXT PRIMARY KEY, schema_version INTEGER, task_profile TEXT, task_profile_source TEXT,
+    requested_execution TEXT, effective_execution TEXT, execution_source TEXT,
+    requested_assurance TEXT, effective_assurance TEXT, assurance_source TEXT,
+    legacy_variant TEXT, legacy_tier TEXT, created_at TEXT, advisor_model TEXT, advisor_granted_json TEXT
+  )`)
+  db.prepare('INSERT INTO run_configurations (adw_id) VALUES (?)').run('legacy-source-row')
+  db.close()
+  const upgraded = openLedger({ dbPath })
+  // MUTATION S4-upgrade: omit either additive column migration; both old-row projections must remain SQL NULL.
+  assert.ok(upgraded.columnNames('run_configurations').includes('advisor_source'))
+  assert.ok(upgraded.columnNames('run_configurations').includes('advisor_source_evidence'))
+  const legacy = upgraded.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'legacy-source-row')
+  assert.deepEqual([legacy.advisor_source, legacy.advisor_source_evidence], [null, null])
+  upgraded.close()
+})
+
+// MUTATION S5: remove the rotation source filter; only rotation is eligible.
+test('advisor-source S5 excludes non-rotated and unrecorded runs from arms', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  for (const [i, source] of ['rotation', 'default', 'explicit', null].entries()) {
+    seedConfigurationRun(ledger, `advisor-source-s5-${i}`, `2024-01-0${i + 1}T00:00:00.000Z`, { advisor_model: 'none', advisor_granted_json: '["builder"]', advisor_source: source })
+    const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath); db.prepare("UPDATE sessions SET tier='build' WHERE adw_id=?").run(`advisor-source-s5-${i}`); db.close()
+    ledger.endSession({ adw_id: `advisor-source-s5-${i}`, status: 'ok', outcome: 'success' })
+  }
+  const output = advisorArmsReadout(ledger, { arms: ['none'] })
+  assert.deepEqual([output.arms[0].runs, output.excluded.source_default, output.excluded.source_explicit, output.excluded.source_unrecorded, output.backfilled], [1, 1, 1, 1, 0])
+  ledger.close()
+})
+
+// MUTATION S7: bypass ambiguity, accept null-arm/non-build candidates, skip outcomes, or certify ineligible evidence.
+test('advisor-source S7 backfills only one eligible evidence match and preserves every outcome', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const rows = [
+    ['advisor-source-s7-unique', 'unique-lane', 'none', 'build', null, '["builder"]', null],
+    ['advisor-source-s7-a', 'ambiguous-lane', 'none', 'build', null, '["builder"]', null],
+    ['advisor-source-s7-b', 'ambiguous-lane', 'none', 'build', null, '["builder"]', null],
+    ['advisor-source-s7-mismatch', 'mismatch-lane', 'none', 'build', null, '["builder"]', null],
+    ['advisor-source-s7-null-arm', 'null-arm-lane', null, 'build', null, '["builder"]', null],
+    ['advisor-source-s7-non-build', 'non-build-lane', 'none', 'mechanical', null, '["builder"]', null],
+    ['advisor-source-s7-dry', 'dry-lane', 'none', 'build', null, '["builder"]', null],
+    ['advisor-source-s7-default-evidence', 'default-evidence-lane', 'none', 'build', 'prior-default-evidence', '["builder"]', 'default'],
+    ['advisor-source-s7-ungranted', 'ungranted-lane', 'none', 'build', 'prior-evidence', '[]', 'rotation'],
+    ['advisor-source-s7-reused-early', 'reused-lane', 'none', 'build', null, '["builder"]', 'rotation'],
+    ['advisor-source-s7-reused-late', 'reused-lane', 'none', 'build', null, '["builder"]', null],
+  ]
+  for (const [id, lane, model, tier, evidence, granted, source] of rows) {
+    seedConfigurationRun(ledger, id, '2024-01-02T00:00:00.000Z', { advisor_model: model, advisor_granted_json: granted, advisor_source: source, advisor_source_evidence: evidence })
+    const db = new (require('node:sqlite').DatabaseSync)(ledger._dbPath)
+    db.prepare('UPDATE sessions SET tier=?, task_slug=? WHERE adw_id=?').run(tier, lane, id)
+    db.close()
+    ledger.endSession({ adw_id: id, status: 'ok', outcome: 'success' })
+  }
+  const dir = scratchDir('advisor-source-s7-')
+  const evidence = (name, record) => { const path = join(dir, name); writeFileSync(path, typeof record === 'string' ? record : JSON.stringify(record)); return path }
+  const malformed = evidence('malformed.json', '{')
+  const array = evidence('array.json', [])
+  const badLane = evidence('bad-lane.json', { lane: 17, advisor_rotation: { source: 'rotation', arm: 'none' } })
+  const noRun = evidence('no-run.json', { lane: 'missing-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  const unique = evidence('unique.dispatch.json', { lane: 'unique-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  const ambiguous = evidence('ambiguous.dispatch.json', { lane: 'ambiguous-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  const mismatch = evidence('mismatch.json', { lane: 'mismatch-lane', advisor_rotation: { source: 'rotation', arm: 'other' } })
+  const nullArm = evidence('null-arm.json', { lane: 'null-arm-lane', advisor_rotation: { source: 'rotation', arm: null } })
+  const nonBuild = evidence('non-build.json', { lane: 'non-build-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  const dry = evidence('dry.json', { lane: 'dry-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  // A reused lane name: the record cannot prove which run it describes, so the later unrecorded run stays unrecorded.
+  const reused = evidence('reused.dispatch.json', { lane: 'reused-lane', advisor_rotation: { source: 'rotation', arm: 'none' } })
+  assert.deepEqual(advisorSourceBackfill(ledger, [reused]), [{ path: reused, outcome: 'ambiguous' }])
+  assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-reused-late').advisor_source, null)
+  // MUTATION S7-dry: allow dry-run to call the writer; outcome and stored source prove it is write-free.
+  assert.deepEqual(advisorSourceBackfill(ledger, [dry], { dryRun: true }), [{ path: dry, outcome: 'would-backfill', adw_id: 'advisor-source-s7-dry' }])
+  assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-dry').advisor_source, null)
+  // MUTATION S7-order: reorder or collapse path outcomes; this literal pins input order and every named branch.
+  assert.deepEqual(advisorSourceBackfill(ledger, [malformed, array, badLane, noRun, mismatch, nullArm, nonBuild, unique, unique, ambiguous]), [
+    { path: malformed, outcome: 'unreadable' },
+    { path: array, outcome: 'unreadable' },
+    { path: badLane, outcome: 'unreadable' },
+    { path: noRun, outcome: 'no-run' },
+    { path: mismatch, outcome: 'arm-mismatch' },
+    { path: nullArm, outcome: 'arm-mismatch' },
+    { path: nonBuild, outcome: 'no-run' },
+    { path: unique, outcome: 'backfilled', adw_id: 'advisor-source-s7-unique' },
+    { path: unique, outcome: 'already-recorded' },
+    { path: ambiguous, outcome: 'ambiguous' },
+  ])
+  // MUTATION S7-evidence: delete or move backfilled++ before source/grant eligibility; only this eligible row counts.
+  const readout = advisorArmsReadout(ledger, { arms: ['none'] })
+  assert.equal(readout.backfilled, 1)
+  assert.equal(readout.excluded.source_default, 1)
+  assert.equal(readout.excluded.ungranted, 1)
+  const uniqueRow = ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-unique')
+  const ungrantedRow = ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-ungranted')
+  assert.deepEqual([uniqueRow.advisor_source, uniqueRow.advisor_source_evidence], ['rotation', unique])
+  assert.deepEqual([ungrantedRow.advisor_source, ungrantedRow.advisor_source_evidence], ['rotation', 'prior-evidence'])
+  // MUTATION S7-replay: omit update-writer replay; evidence must reproduce into an independent ledger.
+  const replay = openTestLedger(); replayJsonl(ledger._jsonlPath, replay)
+  assert.equal(replay.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'advisor-source-s7-unique').advisor_source_evidence, unique)
+  replay.close(); ledger.close()
 })
 
 test('A9', () => {

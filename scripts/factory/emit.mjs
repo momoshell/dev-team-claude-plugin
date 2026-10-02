@@ -90,7 +90,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import {
-  openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded,
+  openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded, ADVISOR_SOURCES,
 } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
@@ -876,6 +876,7 @@ function openRunInner({
         legacy_tier: legacyTier,
         advisor_model: advisorModel,
         advisor_granted_json: crew.advisor?.granted == null ? null : JSON.stringify(crew.advisor.granted),
+        advisor_source: ADVISOR_SOURCES.includes(crew.advisor_source) ? crew.advisor_source : null,
       }
     } catch {
       return null

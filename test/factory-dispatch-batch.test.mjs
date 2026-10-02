@@ -3214,6 +3214,41 @@ test('advisor-lease L3 lease contention reports advisor lease wait', async () =>
   const result = await dispatchFixture({ label: 'lease-l3', names: ['lane-a'], batchTier: 'build', rotationDeps: lease.deps, readAdvisorArms: testRotationRead })
   assert.match(result.logs.find((line) => line.startsWith('dispatch-batch: lane=')) ?? '', /advisor_lease_waited=50(?: |$)/)
 })
+// MUTATION S1: changing the rotated source to default must break the dispatch record and both provenance surfaces.
+test('advisor-source S1 records rotation in dispatch, crew and journal', async () => {
+  const result = await dispatchFixture({ label: 'advisor-source-s1', names: ['lane-a'], batchTier: 'build', readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }) })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  const crew = JSON.parse([...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json')).at(-1)[1])
+  const journal = result.appended.flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
+  assert.deepEqual([record.advisor_source, crew.advisor_source, journal.some((row) => row.event === 'advisor-source' && row.advisor_source === 'rotation')], ['rotation', 'rotation', true])
+})
+
+// MUTATION S2: deriving explicitness after rotation makes the rotated control look explicit.
+test('advisor-source S2 distinguishes explicit none, default abstention and rotated control', async () => {
+  const explicit = await dispatchFixture({ label: 'advisor-source-s2-explicit', names: ['lane-a'], batchTier: 'build', requests: { 'lane-a': requestFor('lane-a', { seats: { advisor: { model: 'none' } } }) } })
+  const abstain = await dispatchFixture({ label: 'advisor-source-s2-abstain', names: ['lane-a'], batchTier: 'build', readAdvisorArms: () => ({ readout: null, reason: 'ledger-absent' }) })
+  const control = await dispatchFixture({ label: 'advisor-source-s2-control', names: ['lane-a'], batchTier: 'build', readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }) })
+  const nonBuild = await dispatchFixture({ label: 'advisor-source-s2-non-build', names: ['lane-a'], batchTier: 'mechanical' })
+  const source = (result) => JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8')).advisor_source
+  assert.deepEqual([source(explicit), source(abstain), source(control)], ['explicit', 'default', 'rotation'])
+  // MUTATION S2-non-build: derive default from build status alone; non-build without override is still default.
+  assert.equal(source(nonBuild), 'default')
+})
+
+// MUTATION S6: omit source on a synthetic reservation so it cannot supply the next arm.
+test('advisor-source S6 reservation counts as a rotated in-flight arm', () => {
+  const home = scratchDir('advisor-source-s6-'), dbPath = join(home, 'ledger.db')
+  const ledger = openLedger({ dbPath })
+  for (let i = 0; i < 5; i++) {
+    const id = `advisor-source-s6-${i}`
+    ledger.startSession({ adw_id: id, repo_slug: 'r', task_slug: id, tier: 'build', started_at: new Date(Date.now() + i).toISOString() })
+    ledger.recordRunConfiguration({ adw_id: id, schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit', requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit', requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit', legacy_variant: null, legacy_tier: 'build', advisor_model: 'openai/gpt-5.6-terra', advisor_granted_json: '["builder"]', advisor_source: 'default' })
+  }
+  ledger.close()
+  const result = readAdvisorArms({ deps: { env: { DEVTEAM_LEDGER_DB: dbPath }, home, now: () => Date.now() + 1000 }, inFlight: [{ lane: 'pending', arm: 'none', reserved_at: new Date().toISOString() }] })
+  assert.deepEqual([result.readout.next_arm, result.readout.arms.find(({ arm }) => arm === 'none').in_flight], ['openai/gpt-6-luna', 1])
+})
+
 // MUTATION L4: release before writing; the snapshot must be written while its capacity-one handle is held.
 test('advisor-lease L4 reservation snapshot is written before lease release', async () => {
   const home = leasedDispatchHome('l4'), events = [], lease = leasedRotationDeps(home, events)
@@ -3232,7 +3267,7 @@ test('advisor-lease L5 matching session prunes its reservation and counts only t
   const lease = leasedRotationDeps(home, [], { value: Date.parse(reservedAt) })
   let observed
   const sessions = [{ adw_id: 'existing', task_slug: 'already-started', tier: 'build', started_at: reservedAt, ended_at: null }]
-  const configs = [{ adw_id: 'existing', advisor_model: 'none', advisor_granted_json: '["builder"]' }]
+  const configs = [{ adw_id: 'existing', advisor_model: 'none', advisor_granted_json: '["builder"]', advisor_source: 'rotation' }]
   const read = ({ deps, inFlight }) => {
     observed = readAdvisorArms({ deps: { ...deps, existsSync: () => true }, inFlight, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? sessions : name === 'run_configurations' ? configs : [], close() {} }) })
     return observed
@@ -3247,7 +3282,7 @@ test('advisor-lease L5 matching session prunes its reservation and counts only t
 // MUTATION L6b: drop the arm comparison; a session must not clear a same-lane reservation for another arm.
 test('advisor-lease L6 one session acknowledges exactly one same-lane reservation of its own arm', () => {
   const at = (s) => `2026-09-30T12:00:${String(s).padStart(2, '0')}.000Z`
-  const read = (inFlight) => readAdvisorArms({ deps: { existsSync: () => true, now: () => Date.parse(at(30)) }, inFlight, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'first', task_slug: 'twice', tier: 'build', started_at: at(20), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'first', advisor_model: 'none', advisor_granted_json: '["builder"]' }] : [], close() {} }) })
+  const read = (inFlight) => readAdvisorArms({ deps: { existsSync: () => true, now: () => Date.parse(at(30)) }, inFlight, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'first', task_slug: 'twice', tier: 'build', started_at: at(20), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'first', advisor_model: 'none', advisor_granted_json: '["builder"]', advisor_source: 'rotation' }] : [], close() {} }) })
   const sameArm = [{ lane: 'twice', arm: 'none', reserved_at: at(1) }, { lane: 'twice', arm: 'none', reserved_at: at(2) }]
   assert.deepEqual(read(sameArm).reservations, [sameArm[1]])
   const otherArm = [{ lane: 'twice', arm: 'openai/gpt-6-luna', reserved_at: at(1) }, { lane: 'twice', arm: 'none', reserved_at: at(2) }]
@@ -3502,7 +3537,7 @@ test('advisor reservation R1 retracts a failed boot before a later pick', async 
   await dispatchFixture({ ...options, label: 'reservation-r1-second' })
   const rows = JSON.parse(readFileSync(path, 'utf8'))
   assert.deepEqual(rows.map(({ id }) => id), ['R1-2'])
-  const result = readAdvisorArms({ deps: { ...normalDeps({ home, env: { DEVTEAM_LEDGER_DIR: dirname(path) }, now }), existsSync: () => true }, inFlight: rows, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'live', task_slug: 'twice', tier: 'build', started_at: new Date(now()).toISOString(), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'live', advisor_model: 'none', advisor_granted_json: '["builder"]' }] : [], close() {} }) })
+  const result = readAdvisorArms({ deps: { ...normalDeps({ home, env: { DEVTEAM_LEDGER_DIR: dirname(path) }, now }), existsSync: () => true }, inFlight: rows, open: () => ({ stats: () => ({ degraded: false, mirror_errors: 0 }), tableNames: () => ['sessions'], dumpTable: (name) => name === 'sessions' ? [{ adw_id: 'live', task_slug: 'twice', tier: 'build', started_at: new Date(now()).toISOString(), ended_at: null }] : name === 'run_configurations' ? [{ adw_id: 'live', advisor_model: 'none', advisor_granted_json: '["builder"]', advisor_source: 'rotation' }] : [], close() {} }) })
   assert.deepEqual(result.reservations, [])
 })
 
@@ -4255,8 +4290,9 @@ test('multi-experiment enrollment draws in fixed order and records plural metada
   ])
   assert.deepEqual(result.appended.map(({ content }) => {
     const row = JSON.parse(content)
+    if (row.event !== PLANNER_SYMBOLS_ARM_EVENT) return null
     return { event: row.event, role: row.role, experiment: row.experiment, arm: row.arm, fraction: row.fraction }
-  }), [
+  }).filter(Boolean), [
     { event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: PLANNER_SYMBOLS_EXPERIMENT, arm: 'control', fraction: 0.5 },
     { event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: CHARTER_TERSE_EXPERIMENT, arm: 'terse-tail', fraction: 0.5 },
   ])
@@ -4526,7 +4562,7 @@ test('HoldB1', async () => {
   assert.equal(compilerCalls.filter(({ args }) => (args || []).includes('--out')).length, 1)
   assert.equal(runCalls.length, 1)
   assert.equal(compilerCalls.some(({ args }) => (args || []).includes('--pack-omission')), false)
-  assert.equal(result.appended.length, 0)
+  assert.equal(result.appended.filter(({ content }) => content.includes(PLANNER_SYMBOLS_ARM_EVENT)).length, 0)
   assert.equal(selectPlannerSymbolsArm(null, () => { throw new Error('null arm selector must not draw') }), null)
   const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
   assert.equal(Object.hasOwn(record, 'experiment'), false)
@@ -4558,7 +4594,7 @@ test('HoldB2', async () => {
     const lane = call.args[call.args.indexOf('--task') + 1]
     assert.equal(call.args[call.args.indexOf('--brief-file') + 1], join(result.out, `${lane}.brief.md`))
   }
-  assert.equal(result.appended.length, 3)
+  assert.equal(result.appended.length, 6)
 })
 
 test('HoldB3', async () => {
@@ -4603,8 +4639,8 @@ test('HoldB4', async () => {
       return { status: 0, stdout: '', stderr: '' }
     },
   })
-  assert.deepEqual(trace, ['boot', 'arm', 'run'])
-  assert.equal(result.appended.length, 1)
+  assert.deepEqual(trace, ['boot', 'arm', 'arm', 'run'])
+  assert.equal(result.appended.length, 2)
 })
 
 test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', async () => {
@@ -4926,7 +4962,7 @@ test('dispatch records compiler intent in crew.json and the journal', async () =
   const result = await dispatchFixture({ label: 'intent-surfaces', names: ['lane-a'], brief })
   const crewWrites = [...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json'))
   assert.equal(crewWrites.length, 1)
-  const crew = JSON.parse(crewWrites[0][1])
+  const crew = JSON.parse(crewWrites.at(-1)[1])
   assert.equal(crew.intent, intent)
   assert.equal(crew.lane_name, 'lane-a')
   assert.deepEqual(crew.lane_fence, [])
@@ -4935,14 +4971,15 @@ test('dispatch records compiler intent in crew.json and the journal', async () =
   const rows = result.appended
     .filter(({ path }) => path.endsWith('journal.jsonl'))
     .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].event, 'lane-intent')
-  assert.equal(rows[0].task, 'lane-a')
-  assert.equal(rows[0].lane, 'lane-a')
-  assert.equal(rows[0].intent, intent)
+  const intentRows = rows.filter((row) => row.event === 'lane-intent')
+  assert.equal(intentRows.length, 1)
+  assert.equal(intentRows[0].task, 'lane-a')
+  assert.equal(intentRows[0].lane, 'lane-a')
+  assert.equal(intentRows[0].intent, intent)
+  assert.ok(rows.some((row) => row.event === 'advisor-source' && row.advisor_source === 'default'))
 })
 
-test('compiler-owned intent outranks an Intent heading quoted by the ask', async () => {
+test('compiler intent wins; older briefs record advisor source without authored intent', async () => {
   const canonical = 'Canonical authored intent.'
   const spoofed = 'Spoofed journal value.'
   const prefix = 'Carry the authored intent into dispatch surfaces.'
@@ -4959,12 +4996,13 @@ test('compiler-owned intent outranks an Intent heading quoted by the ask', async
     requests: { 'lane-a': request },
     brief,
   })
-  const crew = JSON.parse([...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))[1])
+  const crew = JSON.parse([...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json')).at(-1)[1])
   assert.equal(crew.intent, canonical)
   assert.notEqual(crew.intent, spoofed)
   const row = result.appended
     .filter(({ path }) => path.endsWith('journal.jsonl'))
-    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))[0]
+    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
+    .find((entry) => entry.event === 'lane-intent')
   assert.equal(row.intent, canonical)
   assert.notEqual(row.intent, spoofed)
 
@@ -4975,14 +5013,16 @@ test('compiler-owned intent outranks an Intent heading quoted by the ask', async
     requests: { 'lane-a': request },
     brief: olderBrief,
   })
-  assert.equal([...older.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
-  assert.equal(older.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+  assert.ok([...older.wrote.keys()].some((path) => path.endsWith('/crew.json')))
+  assert.ok(older.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('advisor-source')))
 })
 
-test('a brief without compiler intent leaves crew.json and journal untouched', async () => {
+test('a brief without compiler intent records advisor source, not intent', async () => {
   const result = await dispatchFixture({ label: 'intent-absent', names: ['lane-a'], brief: briefWithBlockOnly })
-  assert.equal([...result.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
-  assert.equal(result.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+  assert.ok([...result.wrote.keys()].some((path) => path.endsWith('/crew.json')))
+  assert.ok(result.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('advisor-source')))
+  assert.equal(result.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && content.includes('lane-intent')), false)
+  assert.equal([...result.wrote].some(([path, text]) => path.endsWith('/crew.json') && Object.hasOwn(JSON.parse(text), 'intent')), false)
 })
 
 test('an unreadable crew.json still gets an intent journal row', async () => {
@@ -5004,9 +5044,43 @@ test('an unreadable crew.json still gets an intent journal row', async () => {
   const rows = result.appended
     .filter(({ path }) => path.endsWith('journal.jsonl'))
     .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].event, 'lane-intent')
-  assert.equal(rows[0].intent, intent)
+  assert.equal(rows.filter((row) => row.event === 'lane-intent').length, 1)
+  assert.equal(rows.find((row) => row.event === 'lane-intent').intent, intent)
+  assert.ok(rows.some((row) => row.event === 'advisor-source'))
+})
+
+// MUTATION RV1-4a: remove the crew-write try/catch; denied persistence must not stop journal evidence or spawning.
+test('advisor-source write denial leaves crew source absent but still journals and spawns', async () => {
+  let denied = 0, persistedCrewSource = null
+  const result = await dispatchFixture({
+    label: 'advisor-source-write-denied', names: ['lane-a'], batchTier: 'build',
+    readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }),
+    writeFile: (path, content) => {
+      if (String(path).endsWith('/crew.json')) {
+        denied++
+        if (denied === 1) throw new Error('crew write denied')
+        persistedCrewSource = JSON.parse(content).advisor_source
+      }
+    },
+  })
+  const rows = result.appended.filter(({ path }) => path.endsWith('journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
+  assert.equal(denied, 1)
+  // MUTATION RV1-4a-state: record a crew source despite the denied write; no source was persisted.
+  assert.equal(persistedCrewSource, null)
+  assert.equal(rows.some((row) => row.event === 'advisor-source' && row.advisor_source === 'rotation'), true)
+  assert.equal(result.spawned.some(({ args }) => args.map(String).includes('run')), true)
+})
+
+// MUTATION RV1-4b: remove the journal-append try/catch; an append fault must not lose the crew source or spawn.
+test('advisor-source journal denial leaves crew source written and still spawns', async () => {
+  const result = await dispatchFixture({
+    label: 'advisor-source-journal-denied', names: ['lane-a'], batchTier: 'build',
+    readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }),
+    appendFile: (_path, content) => { if (String(content).includes('"event":"advisor-source"')) throw new Error('journal append denied') },
+  })
+  const crewText = [...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json')).at(-1)?.[1]
+  assert.equal(JSON.parse(crewText).advisor_source, 'rotation')
+  assert.equal(result.spawned.some(({ args }) => args.map(String).includes('run')), true)
 })
 
 test('a compile that fails after discovery remains compile-refused', async () => {
@@ -6140,12 +6214,12 @@ test('the boot-retried row carries the FIRST failure\'s reason', async () => {
   const rows = result.appended
     .filter(({ path }) => path.endsWith('journal.jsonl'))
     .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].event, 'boot-retried')
-  assert.equal(rows[0].lane, 'lane-a')
-  assert.equal(rows[0].attempts, 2)
-  assert.match(rows[0].first_failure, new RegExp(first))
-  assert.doesNotMatch(rows[0].first_failure, new RegExp(second))
+  const retry = rows.find((row) => row.event === 'boot-retried')
+  assert.equal(rows.filter((row) => row.event === 'boot-retried').length, 1)
+  assert.equal(retry.lane, 'lane-a')
+  assert.equal(retry.attempts, 2)
+  assert.match(retry.first_failure, new RegExp(first))
+  assert.doesNotMatch(retry.first_failure, new RegExp(second))
 })
 
 test('teardownVerdict treats a seats: null payload at exit 0 as unproven', () => {

@@ -2983,9 +2983,8 @@ export function renderProposalBlock(proposal) {
   return ['```' + PROPOSAL_BLOCK, JSON.stringify({ recommended_assurance, recommended_model_band, minimum_assurance }, null, 2), '```'].join('\n')
 }
 
-// The plan renders in EXACTLY ONE place. `ask` and `done_means` each render twice on
-// purpose and that is not changing (#657); this key exists so a plan never has to
-// ride inside a field that does.
+// The plan renders in EXACTLY ONE place. `ask` and `done_means` each render once;
+// this key exists so a plan never has to ride inside a field that does.
 function renderDirectedPlan(plan) {
   const body = {}
   for (const key of DIRECTED_KEYS) body[key] = plan[key]
@@ -2997,11 +2996,19 @@ function directedSection(plan) {
   return ['## Directed plan', renderDirectedPlan(plan)]
 }
 
-function renderFences(fences) {
+function renderFences(fences, writeSurface, pack) {
   if (fences == null) return 'no fence register supplied (`--fences` not given)'
+  const collapsedFiles = new Set(Array.isArray(pack?.lineCounts) ? pack.lineCounts.filter((row) => row.label === 'in fence').map((row) => row.file) : [])
   const lines = []
   for (const lane of fences) {
-    for (const file of lane.files) lines.push(`${lane.lane} owns ${file}`)
+    const collapsed = pack != null && lane.lane === writeSurface?.lane ? lane.files.filter((file) => collapsedFiles.has(file)) : []
+    let emittedPointer = false
+    for (const file of lane.files) {
+      if (collapsed.includes(file)) {
+        if (!emittedPointer) lines.push(`${lane.lane} owns the ${collapsed.length} file(s) marked "in fence" under ## Context pack line counts`)
+        emittedPointer = true
+      } else lines.push(`${lane.lane} owns ${file}`)
+    }
   }
   return lines.length ? lines.join('\n') : '(fence register is empty)'
 }
@@ -3219,7 +3226,7 @@ function renderSymbolSidecar(index) {
   return ['symbol index (full static scan):', ...rows].join('\n')
 }
 
-export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath, omission = null } = {}) {
+export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath, proposal, where, omission = null } = {}) {
   const packOmission = omission ?? null
   if (packOmission !== null && !PACK_OMISSIONS.includes(packOmission)) {
     throw new Error(`unknown pack omission ${JSON.stringify(packOmission)}; expected one of ${PACK_OMISSIONS.join(', ')}`)
@@ -3233,6 +3240,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     fixture: null,
     symbols: join(directory, `${name}.symbols.md`),
     coupled: join(directory, `${name}.coupled.md`),
+    proposal: join(directory, `${name}.proposal.md`),
   }
   const issue = issueFor(request, issueBodyPath)
   const journal = journalFor(request, directory, name)
@@ -3259,6 +3267,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     paths.rows = null
   }
   writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
+  writeFileSync(paths.proposal, `${renderProposedTier(proposal ?? proposeTier({ where: where ?? request?.where ?? [], discovery }))}\n`)
   if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
   } else {
@@ -3320,7 +3329,9 @@ function renderCoupledPointer(coupling, pack) {
 function renderConventionsPointer(writeSurface, pack) {
   if (pack == null) return renderWriteSurface(writeSurface, writeSurface?.__discovery || null)
   const files = Array.isArray(writeSurface?.files) ? writeSurface.files : []
-  const listedFiles = files.length ? files.join(', ') : '(none)'
+  const inFenceFiles = new Set(Array.isArray(pack.lineCounts) ? pack.lineCounts.filter((row) => row.label === 'in fence').map((row) => row.file) : [])
+  const covered = files.length > 0 && files.every((file) => inFenceFiles.has(file))
+  const listedFiles = covered ? `${writeSurface?.basis === 'fences' ? 'owns' : 'expects to write'} the ${files.length} file(s) marked "in fence" under ## Context pack line counts` : files.length ? files.join(', ') : '(none)'
   const basis = writeSurface?.basis === 'fences'
     ? `fence register, lane "${writeSurface.lane}"`
     : 'authored where paths, no lane fence applied'
@@ -3451,20 +3462,20 @@ function renderBriefSections(gathered) {
   const writeSurface = { ...(baseWriteSurface || {}), __discovery: discovery }
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
+  const tierLines = pack == null ? [renderProposedTier(proposal)] : [`proposal rationale: ${pack.proposal} — read it once with: cat ${pack.proposal}`, ...renderProposedTier(proposal).split('\n').filter((line) => line.startsWith(MISCLASSIFIED_PREFIX))]
   const sections = [
-    briefSection('task', 'ask', [`# Task: ${request.ask}`], request.ask),
-    briefSection('the ask', 'ask', ['## The ask', request.ask], request.ask),
+    briefSection('task', null, ['# Task']),
     briefSection('intent', null, ['## Intent', resolveIntent(request)]),
-    briefSection('proposed tier', null, ['## Proposed tier', renderProposedTier(proposal), renderProposalBlock(proposal)]),
+    briefSection('the ask', 'ask', ['## The ask', request.ask], request.ask),
+    briefSection('proposed tier', null, ['## Proposed tier', ...tierLines, renderProposalBlock(proposal)]),
     briefSection('where', null, ['## Where', renderWhere(where, creates)]),
     briefSection('premise check', null, ['## Premise check', renderPremiseCheck(premise)]),
     ...(pack == null ? [] : [briefSection('context pack', null, renderContextPack(pack))]),
-    briefSection('done means', 'done_means', ['## Done means', request.done_means], request.done_means),
     briefSection('tripwires', null, ['## Tripwires', renderTripwireSlot(discovery, pack)]),
     briefSection('coupled sources', null, ['## Coupled sources', renderCoupledPointer(coupling, pack)]),
     briefSection('baseline', null, ['## Baseline', formatBaseline(baseline, profile, supplied)]),
     briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
-    briefSection('fences', null, ['## Fences', renderFences(fences)]),
+    briefSection('fences', null, ['## Fences', renderFences(fences, writeSurface, pack)]),
     briefSection('what the crew decides', null, ['## What the crew decides', SLOT_MARKER]),
     briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`], request.done_means),
     briefSection('acceptance gate', null, ['## Acceptance gate', standingBlocks().acceptance]),
@@ -3482,7 +3493,7 @@ function renderBriefSections(gathered) {
     ]),
   ]
   if (request.directed) {
-    const index = sections.findIndex((section) => section.name === 'intent')
+    const index = sections.findIndex((section) => section.name === 'the ask')
     sections.splice(index + 1, 0, briefSection('directed plan', null, directedSection(request.directed)))
   }
   return { request, sections }
@@ -3569,7 +3580,7 @@ export function admitBrief(content, sections) {
   if (measured.bytes > BRIEF_BYTE_LIMIT) {
     const largest = measured.largestContributor
     refuseUsage(
-      `brief candidate is ${measured.bytes} bytes; limit is ${BRIEF_BYTE_LIMIT} bytes (51,200-byte limit); largest contributor is ${largest.name} at ${largest.bytes} bytes x ${largest.occurrences} ${largest.occurrences === 1 ? 'occurrence' : 'occurrences'} = ${largest.contributionBytes} bytes (the ask and done_means are each emitted twice; out_of_scope once)`,
+      `brief candidate is ${measured.bytes} bytes; limit is ${BRIEF_BYTE_LIMIT} bytes (51,200-byte limit); largest contributor is ${largest.name} at ${largest.bytes} bytes x ${largest.occurrences} ${largest.occurrences === 1 ? 'occurrence' : 'occurrences'} = ${largest.contributionBytes} bytes (the ask, done_means and out_of_scope are each emitted once)`,
       BRIEF_TOO_LARGE,
     )
   }
@@ -3740,6 +3751,7 @@ function compile(flags) {
     coupling,
     profile,
     issueBodyPath: flags['issue-body'],
+    proposal,
     omission: flags['pack-omission'] ?? null,
   })
   const rendered = renderBriefResult({

@@ -2894,13 +2894,20 @@ export function proposalFromBrief(text) {
 
 const INTENT_EVENT = 'lane-intent'
 
-// Reads back what the compiler already decided, exactly as proposalFromBrief
-// does. The compiler echoes the authored ask in the title and `## The ask`;
-// that framing identifies its own intent section instead of one an ask quotes.
-// A brief with no intent section records null — an older brief keeps producing
-// the bytes it always did.
+// Reads back compiler-framed intent where available, while retaining the legacy
+// echoed-title framing and generic older-brief fallback. A brief with no framed
+// intent records null.
 function intentFromBrief(text) {
   if (typeof text !== 'string') return null
+  if (text.startsWith('# Task\n')) {
+    const prefix = '# Task\n## Intent\n'
+    if (!text.startsWith(prefix)) return null
+    const bodyStart = prefix.length
+    const end = text.indexOf('\n## ', bodyStart)
+    const body = text.slice(bodyStart, end < 0 ? text.length : end)
+    const value = body.split('\n').find((line) => line.trim() !== '')
+    return value ? value.trim() : null
+  }
   const titlePrefix = '# Task: '
   const askHeading = '\n## The ask\n'
   const intentHeading = '\n## Intent\n'

@@ -655,12 +655,13 @@ test('each migrated rule has exactly one prose owner', () => {
 // Mutation killed: adding a dry-run step to the numbered recipe must make its absence assertion fail.
 test('the batch recipe prescribes no dry run', () => {
   const text = readText(join(HERE, 'references/batch.md'))
-  const start = text.indexOf('1. Create one worktree per lane.')
+  const start = text.indexOf('1. Create one detached worktree per lane;')
   const end = text.indexOf('\nParallelise through isolated worktrees', start)
   assert.notEqual(start, -1, 'the numbered recipe is missing')
   assert.notEqual(end, -1, 'the recipe terminator is missing')
   assert.doesNotMatch(text.slice(start, end), /dry[ -]?run/i)
   assert.ok(text.includes('The sequence above prescribes no dry run'))
+  assert.ok(text.includes('a refusal before boot removes every worktree the dispatch created'))
 })
 
 // Mutation killed: deleting the dry-run use cases or changing the blind-spot quote must make the doctrine assertion fail.
@@ -683,6 +684,8 @@ test('the flag reference records what a dry run is and is not for', () => {
     sentence,
   ]) assert.ok(text.includes(token), `flags.md must carry ${token}`)
   assert.ok(DRY_RUN_BLIND_SPOT.includes(sentence))
+  assert.ok(text.includes('Branches attach only after compilation and every pre-boot check succeed.'))
+  assert.equal(text.includes('Every check capable of catching something already fires\nbefore a worktree exists.'), false)
 })
 
 // Mutation killed: removing the dry-run routing row or critical rule must make the skill route assertion fail.

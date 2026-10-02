@@ -117,6 +117,9 @@ import {
   readRegister,
   resolveRequestedExecution,
   resolveRequestedTier,
+  createWorktrees,
+  attachBranches,
+  removeWorktrees,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
@@ -696,4 +699,84 @@ test('suite-cost D1 carries its own blind spot', () => {
   assert.equal(warning.blind_spot, SUITE_COST_BLIND_SPOT)
   assert.notEqual(warning.blind_spot, CENSUS_CARRIER_BLIND_SPOT)
   assert.equal(warning.text.endsWith(warning.blind_spot), true)
+})
+
+async function summaryFixture(label, rejected = false) {
+  const timeline = [], spawnedOut = []
+  let error
+  try { await dispatchFixture({ label, timeline, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }), brief: '## Proposed tier\nproposed tier: mechanical\n', spawnAsync: async (call) => compilerLane(call.args) === 'lane-a' && rejected ? { status: 1, stdout: '', stderr: 'compiler refused' } : { status: 0, stdout: '', stderr: '' } }) } catch (caught) { error = caught }
+  return { timeline, spawnedOut, error, logs: timeline.filter(row => row.kind === 'log').map(row => row.line) }
+}
+// MUTATION R1: restore eager branch creation.
+test('R1', async () => { const f = await summaryFixture('r1', true); assert.equal(f.error?.reason, 'compile-refused'); assert.equal(f.spawnedOut.some(c => c.args.includes('-b')), false) })
+// MUTATION R2: remove rollback from compile refusal.
+test('R2', async () => { const f = await summaryFixture('r2', true); assert.equal(f.spawnedOut.filter(c => c.args.includes('remove') && c.args.includes('--force')).length, 2) })
+// MUTATION R3: skip rollback on a pre-boot floor refusal.
+test('R3', async () => { const spawnedOut = []; let error; try { await dispatchFixture({ label: 'r3-floor', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { assurance: 'quick', where: ['crew/drive.mjs'] }) }, fences: [entry('lane-a', ['crew/drive.mjs'])], spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught } assert.equal(error?.reason, 'tier-floor-conflict'); const adds = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('add')); assert.equal(adds.length, 1); assert.deepEqual(spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1)), adds.map(c => c.args.at(-2))) })
+// MUTATION R4: switch branch creation to a detached branch command.
+test('R4', () => { const attached = []; const plans = [{ lane: 'a', branch: 'a', dir: '/tmp/a' }]; attachBranches({ plans, attached, deps: { spawn: () => ({ status: 0 }) } }); assert.deepEqual(attached, plans) })
+// MUTATION R5: moving attachBranches directly after createWorktrees must fail this compile-only order pin.
+test('R5', async () => { const f = await summaryFixture('r5'); const calls=f.spawnedOut; const switches = calls.map((c,i) => c.args.includes('switch') && c.args.includes('-c') ? i : -1).filter(i => i >= 0); const compiles = calls.map((c,i) => c.args.includes('--request') ? i : -1).filter(i => i >= 0); const boot = calls.findIndex(c => c.args.includes('boot')); assert.equal(switches.length,2); assert.ok(compiles.length > 0 && boot >= 0); assert.ok(switches.every(i => i > Math.max(...compiles) && i < boot), JSON.stringify({switches, compiles, boot})) })
+// MUTATION S1: suppress fulfilled summaries; census warning ensures count comparison is not all zero.
+test('S1', async () => {
+  const checkout = namedReachFixture('summary-census', { 'test/census.test.mjs': 'const census = true\\n' })
+  const timeline = [], spawnedOut = []
+  const f = await dispatchFixture({ label: 's1-warning', names: ['lane-a'], checkout, fences: [entry('lane-a', ['test/census.test.mjs'])], timeline, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }), brief: '## Proposed tier\\nproposed tier: mechanical\\n', spawnAsync: async () => ({ status: 0, stdout: '', stderr: '' }) })
+  const warning = f.logs.find(x => x.startsWith('dispatch-batch: WARNING-SUMMARY lane=lane-a '))
+  const summary = f.logs.filter(x => x.startsWith('dispatch-batch: brief-summary lane=lane-a '))
+  assert.equal(summary.length, 1)
+  const value = (text, key) => text.match(new RegExp(`${key}=([^ ·]+)`))?.[1]
+  const counts = ['anchor-pin', 'citation-carrier', 'census-carrier', 'test-reach']
+  assert.ok(counts.some(key => Number(value(warning, key)) > 0), warning)
+  for (const key of counts) assert.equal(value(summary[0], key), value(warning, key), key)
+  assert.equal(value(summary[0], 'report'), value(warning, 'report'))
+})
+// MUTATION S2: discard measured compiler refusal bytes.
+test('S2', async () => { const timeline=[]; try { await dispatchFixture({ label:'s2', timeline, assertQuiet:()=>{}, baseBranch:()=>({branch:'main'}), spawnAsync:async c=>compilerLane(c.args)==='lane-a'?{status:1,stderr:'brief candidate is 52001 bytes; limit is 51200 bytes'}:{status:0,stderr:''} }) } catch {} assert.ok(timeline.some(x=>x.line?.includes('brief-summary lane=lane-a brief_bytes=52001/51200'))) })
+// MUTATION S3: fabricate zero bytes for an unmeasured refusal.
+test('S3', async () => { const f=await summaryFixture('s3',true); assert.ok(f.logs.some(x=>x.includes('brief_bytes=unmeasured'))) })
+// MUTATION S4: omit summaries for rejected waves.
+test('S4', async () => { const f=await summaryFixture('s4',true); assert.ok(f.logs.some(x=>x.startsWith('dispatch-batch: brief-summary lane=lane-b '))) })
+
+test('partial worktree creation rolls back only successfully created lanes', async () => {
+  const calls=[]
+  await assert.rejects(() => dispatchFixture({ label:'partial-create', spawnedOut:calls, assertQuiet:()=>{}, baseBranch:()=>({branch:'main'}), spawnResult:(args)=>args.includes('worktree') && args.includes('add') && args.at(-2).includes('lane-b') ? {status:1,stdout:'',stderr:'create denied'} : {status:0,stdout:'',stderr:''} }), e => e instanceof BatchRefusal && e.reason==='worktree-failed')
+  assert.equal(calls.filter(c=>c.args.includes('worktree')&&c.args.includes('add')).length,2)
+  assert.equal(calls.filter(c=>c.args.includes('worktree')&&c.args.includes('remove')).length,1)
+  assert.equal(calls.some(c=>c.args.includes('branch')&&c.args.includes('-D')),false)
+})
+
+test('partial attachment failure removes both worktrees and only attached branch', async () => {
+  const calls=[]
+  await assert.rejects(() => dispatchFixture({ label:'partial-attach', spawnedOut:calls, assertQuiet:()=>{}, baseBranch:()=>({branch:'main'}), spawnResult:(args)=>args.includes('switch')&&args.at(-1)==='lane-b'?{status:1,stdout:'',stderr:'switch denied'}:{status:0,stdout:'',stderr:''} }), e => e instanceof BatchRefusal && e.reason==='worktree-failed')
+  assert.equal(calls.filter(c=>c.args.includes('worktree')&&c.args.includes('remove')).length,2)
+  const deletions=calls.filter(c=>c.args.includes('branch')&&c.args.includes('-D'))
+  assert.equal(deletions.length,1)
+  assert.equal(deletions[0].args.at(-1),'lane-a')
+})
+
+test('cleanup failures are reported and do not stop later removal or branch deletion attempts', () => {
+  const plans=['a','b','c'].map(lane=>({lane,dir:`/tmp/${lane}`,branch:`branch-${lane}`})), calls=[], logs=[]
+  const deps={log:line=>logs.push(line),spawn:call=>{calls.push(call);const args=call.args;if(args.includes('remove')){const n=calls.filter(x=>x.args.includes('remove')).length;return n===1?{status:1,stderr:''}:n===2?null:(()=>{throw Object.assign(new Error('EPERM'),{code:'EPERM'})})()}if(args.includes('-D'))return {status:1,stderr:''};return {status:0,stderr:''}}}
+  removeWorktrees({plans,branches:plans.slice(0,1),checkout:'/tmp/root',deps})
+  assert.equal(calls.filter(c=>c.args.includes('remove')).length,3)
+  assert.equal(calls.filter(c=>c.args.includes('-D')).length,1)
+  assert.equal(logs.filter(line=>line.includes('removed=false')&&/reason=.+/.test(line)).length,3)
+  assert.equal(logs.some(line=>line.includes('branch-deleted=false')&&/reason=.+/.test(line)),true)
+})
+
+test('cleanup errors do not mask the original compile refusal or delete unowned branches', async () => {
+  const calls=[]
+  await assert.rejects(() => dispatchFixture({label:'preserve-refusal',spawnedOut:calls,assertQuiet:()=>{},baseBranch:()=>({branch:'main'}),spawnResult:(args)=>{if(args.includes('remove'))throw Object.assign(new Error('EPERM'),{code:'EPERM'});return {status:0,stdout:'',stderr:''}},spawnAsync:async c=>compilerLane(c.args)==='lane-a'?{status:1,stdout:'',stderr:'compiler refused'}:{status:0,stdout:'',stderr:''}}),e=>e instanceof BatchRefusal&&e.reason==='compile-refused'&&e.message.includes('lane-a'))
+  assert.equal(calls.some(c=>c.args.includes('-D')),false)
+  assert.equal(calls.filter(c=>c.args.includes('remove')).length,2)
+})
+
+test('directed-brief and seat refusals do not boot lanes', async () => {
+  const directed=[]
+  await assert.rejects(()=>dispatchFixture({label:'no-boot-directed',names:['lane-a'],spawnedOut:directed,requests:{'lane-a':requestFor('lane-a',{variant:'directed'})},runFlags:{'validation-lane':'npm test'},brief:'## Proposed tier\\nproposed tier: mechanical\\n',assertQuiet:()=>{},baseBranch:()=>({branch:'main'})}),e=>e instanceof BatchRefusal&&e.reason==='directed-brief-invalid')
+  assert.equal(directed.some(c=>c.args.includes('boot')),false)
+  const seats=[]
+  await assert.rejects(()=>dispatchFixture({label:'no-boot-seat',names:['lane-a'],spawnedOut:seats,requests:{'lane-a':requestFor('lane-a',{seats:{'tech-lead':{agent:'pi'}}})},assertQuiet:()=>{},baseBranch:()=>({branch:'main'})}))
+  assert.equal(seats.some(c=>c.args.includes('boot')),false)
 })

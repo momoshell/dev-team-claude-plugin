@@ -4,7 +4,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 
 ADR-045 makes a fence and request scope **context**, not write enforcement. They tell a lane what to read and preserve useful observations; they are never a lock or an authority to refuse a write.
 
-1. Create one worktree per lane.
+1. Create one detached worktree per lane; compile and run all pre-boot checks there. Branches attach only after every pre-boot check succeeds, and a refusal before boot removes every worktree the dispatch created.
 2. Read one authored fence register for the batch, sanitize every request and register scope value, and record excluded unsafe or malformed entries as observations. Only valid survivors reach authority surfaces.
 3. Always materialize `dispatch.fences.json` as the effective sanitized register used for compilation and the lane-specific runtime register.
 4. Ask the compiler once with `--discover-reads <lane>` and perform one compile. Discovery failures, unacknowledged discovered reads, coupled sources outside a fence, stale acknowledgements, absent `where` paths, and absent create parents are warning context; they do not rewrite a register or stop dispatch. Unsafe paths, malformed request objects, protected floors, proof obligations, and compiler failures unrelated to this context remain hard checks. An unreadable adopted plan or gate still refuses **`plan-adopt-unreadable`**; an adopted `gate.mjs` with an absolute repository resolution still refuses **`plan-adopt-gate-absolute-path`**.
@@ -12,7 +12,7 @@ ADR-045 makes a fence and request scope **context**, not write enforcement. They
 6. Check the protected floor with **`protectedHitsIn`** over **`resolveProtectedPaths`** (`crew/protected-paths.mjs:27`); the floor evidence is in `references/tier.md`.
 
 The compiler's contextual coupling and stale-read labels remain cited at `scripts/factory/make-brief.mjs:135` and `scripts/factory/make-brief.mjs:136`; the present-created-leaf guard remains `scripts/factory/make-brief.mjs:142`.
-7. After compilation, boot each lane with its generated effective entry. Runtime `lane_fence` is empty and the unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then background `run`.
+7. Attach each branch after compilation and every pre-boot check, then boot each lane with its generated effective entry. Runtime `lane_fence` is empty and the unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then background `run`.
 8. A missing, unreadable, unparsable, or non-object `crew.json` is **`boot-failed`**. A `lane_name` or `lane_fence` mismatch is a durable `fence-observation` journal row, not a dispatch refusal. **`fence=NONE`** in a write lane still means a boot-only flag went to the wrong verb.
 9. Run the `document` stage after `commit` and before `publish`.
 
@@ -28,10 +28,7 @@ subagent fan-out explicitly on a read-everything sweep and ask for incremental
 findings, because two scouts finished measuring and escalated with the envelope
 unwritten.
 
-**The sequence above prescribes no dry run.** `checkFences` and `resolveAdoptions`
-run before `createWorktrees`, so a bad register refuses before a branch exists;
-`references/flags.md` records what `--dry-run` is for and what a green one does
-not mean.
+**The sequence above prescribes no dry run.** Fence and adoption checks run before worktrees; compilation, directed-brief, floor, and seat checks run in detached worktrees; branches attach last. A refusal before boot removes every worktree the dispatch created. Each compiled lane emits a `brief-summary` with measured brief bytes and fence counts; rejected bytes are `unmeasured` unless compiler text provides a safe byte measurement. `references/flags.md` records what `--dry-run` is for and what a green one does not mean.
 
 ## Chunked plans
 

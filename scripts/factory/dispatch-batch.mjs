@@ -20,7 +20,7 @@ import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
 import { ADVISOR_ARMS, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
-import { LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -2371,6 +2371,10 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
   }
   for (const state of summaryLanes) {
     const movement = state.movement
+    if (perLane[state.lane]) {
+      perLane[state.lane].counts = { ...state.counts }
+      perLane[state.lane].citation = citation
+    }
     const surfaceMoved = movement.reason ? 'unmeasured' : movement.moved ? 1 : 0
     d.log(warningSummary({
       lane: state.lane,
@@ -2416,7 +2420,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     files: perLane[entry.lane]?.files ? [...perLane[entry.lane].files] : [...entry.files],
   }))
   Object.defineProperty(effectiveFences, 'observations', { value: observations, enumerable: false })
-  return { perLane, authoredPerLane, warnings, observations, fences: effectiveFences, admissions }
+  return { perLane, authoredPerLane, warnings, observations, fences: effectiveFences, admissions, citation }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
@@ -2537,7 +2541,7 @@ export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
   return plans
 }
 
-export function createWorktrees({ plans, checkout, deps } = {}) {
+export function createWorktrees({ plans, checkout, created = [], deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const worktreeBaseRef = resolveDispatchBase(root, d).branch
@@ -2546,7 +2550,7 @@ export function createWorktrees({ plans, checkout, deps } = {}) {
     try {
       result = d.spawn({
         file: 'git',
-        args: ['-C', root, 'worktree', 'add', '-b', plan.branch, plan.dir, worktreeBaseRef],
+        args: ['-C', root, 'worktree', 'add', '--detach', plan.dir, worktreeBaseRef],
         cwd: root,
       })
     } catch (err) {
@@ -2555,8 +2559,44 @@ export function createWorktrees({ plans, checkout, deps } = {}) {
     if (!result || result.status !== 0) {
       refuse(`worktree creation failed for ${plan.lane}: ${JSON.stringify(childFailure(result))}`, WORKTREE_FAILED)
     }
+    created.push(plan)
   }
   return plans
+}
+
+export function attachBranches({ plans, attached = [], deps } = {}) {
+  const d = normalDeps(deps)
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    let result
+    try {
+      result = d.spawn({ file: 'git', args: ['-C', plan.dir, 'switch', '-c', plan.branch], cwd: plan.dir })
+    } catch (err) {
+      refuse(`worktree branch attachment failed for ${plan.lane}: ${err?.message || String(err)}`, WORKTREE_FAILED)
+    }
+    if (!result || result.status !== 0) refuse(`worktree branch attachment failed for ${plan.lane}: ${JSON.stringify(childFailure(result))}`, WORKTREE_FAILED)
+    attached.push(plan)
+  }
+  return plans
+}
+
+export function removeWorktrees({ plans, branches = [], checkout, deps } = {}) {
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const logFailure = (line) => { try { d.log(line) } catch {} }
+  for (const plan of Array.isArray(plans) ? plans : []) {
+    let result, reason
+    try { result = d.spawn({ file: 'git', args: ['-C', root, 'worktree', 'remove', '--force', plan.dir], cwd: root }) }
+    catch (err) { reason = err?.message || String(err) }
+    if (!reason && (!result || result.status !== 0)) reason = result ? textOf(result.stderr) || `git exited ${result.status}` : 'git returned no result'
+    if (reason) logFailure(`dispatch-batch: rollback lane=${plan.lane} dir=${plan.dir} removed=false reason=${reason}`)
+  }
+  for (const plan of Array.isArray(branches) ? branches : []) {
+    let result, reason
+    try { result = d.spawn({ file: 'git', args: ['-C', root, 'branch', '-D', plan.branch], cwd: root }) }
+    catch (err) { reason = err?.message || String(err) }
+    if (!reason && (!result || result.status !== 0)) reason = result ? textOf(result.stderr) || `git exited ${result.status}` : 'git returned no result'
+    if (reason) logFailure(`dispatch-batch: rollback lane=${plan.lane} dir=${plan.dir} branch-deleted=false reason=${reason}`)
+  }
 }
 
 export function readsFromRefusal(stderr) {
@@ -4355,6 +4395,8 @@ function prepareDispatchContext(options) {
 async function compileDispatchWave(prepared) {
   const {
     advisorReservations = [],
+    createdWorktrees = [],
+    attachedBranches = [],
     batchDir,
     fences,
     execution,
@@ -4386,7 +4428,7 @@ async function compileDispatchWave(prepared) {
     }
   }
 
-  createWorktrees({ plans, checkout: root, deps: d })
+  createWorktrees({ plans, checkout: root, created: createdWorktrees, deps: d })
   const heads = laneHeads({ plans, deps: d })
   const supplied = typeof runFlags.baseline === 'string' && runFlags.baseline.trim() ? resolve(runFlags.baseline) : null
   if (supplied) d.log(`dispatch-batch: operator supplied baseline path=${supplied}`)
@@ -4479,6 +4521,20 @@ async function compileDispatchWave(prepared) {
 
   const compiled = []
   const results = await Promise.allSettled(plans.map((plan) => startCompile(plan)))
+  for (const [index, result] of results.entries()) {
+    const lane = plans[index].lane
+    const fenceReportForLane = fenceReport.perLane[lane]
+    const counts = fenceReportForLane.counts
+    const match = result.status === 'rejected' && typeof result.reason?.message === 'string'
+      ? result.reason.message.match(/brief candidate is (\d+) bytes; limit is (\d+) bytes/)
+      : null
+    const refusedBytes = match ? Number(match[1]) : null
+    const measuredRefusalBytes = Number.isSafeInteger(refusedBytes) ? refusedBytes : null
+    const briefBytes = result.status === 'fulfilled' ? result.value.bytes : measuredRefusalBytes
+    const byteLabel = briefBytes === null ? 'unmeasured' : `${briefBytes}/${BRIEF_BYTE_LIMIT}`
+    const summaryLine = `dispatch-batch: brief-summary lane=${lane} brief_bytes=${byteLabel} anchor-pin=${counts.anchorPin} citation-carrier=${counts.citationCarrier} census-carrier=${counts.censusCarrier} test-reach=${counts.testReach} report=${fenceReport.citation}${result.status === 'rejected' ? ` refused=${result.reason.reason}` : ''}`
+    if (result.status === 'fulfilled' || result.status === 'rejected') d.log(summaryLine)
+  }
   for (const settled of results) {
     if (settled.status === 'rejected') throw settled.reason
     compiled.push(settled.value)
@@ -4599,6 +4655,7 @@ async function compileDispatchWave(prepared) {
     }
   }
 
+  attachBranches({ plans, attached: attachedBranches, deps: d })
   return { ...prepared, plannerSymbolsArms, settled }
 }
 
@@ -4783,8 +4840,10 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   })
   if (prepared.kind === 'terminal') return prepared.result
   const advisorReservations = []
+  const createdWorktrees = [], attachedBranches = []
   let compiled
-  try { compiled = await compileDispatchWave({ ...prepared, advisorReservations }) } catch (error) {
+  try { compiled = await compileDispatchWave({ ...prepared, advisorReservations, createdWorktrees, attachedBranches }) } catch (error) {
+    removeWorktrees({ plans: createdWorktrees, branches: attachedBranches, checkout: prepared.root, deps: prepared.d })
     if (advisorReservations.length > 0) retractAdvisorReservations(prepared.d, advisorReservations)
     throw error
   }

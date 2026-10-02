@@ -1597,7 +1597,7 @@ DIRECT && test('checkFences returns an empty external result contract', () => {
     externals: ['external-lane'],
     deps: { home: join(root, 'external-empty-contract-home'), log: () => {} },
   })
-  assert.deepEqual(Object.keys(report).sort(), ['admissions', 'authoredPerLane', 'fences', 'observations', 'perLane', 'warnings'])
+  assert.deepEqual(Object.keys(report).sort(), ['admissions', 'authoredPerLane', 'citation', 'fences', 'observations', 'perLane', 'warnings'])
 })
 
 DIRECT && test('path reach admits a rooted planner charter literal when unheld', () => {

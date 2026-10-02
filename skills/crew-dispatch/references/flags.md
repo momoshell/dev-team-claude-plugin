@@ -145,11 +145,10 @@ It cannot see a compiler refusal for a concrete reason: the dry-run branch
 returns before `measureBatchBaseline` and before any lane is compiled at all.
 
 Nor is a dry run what keeps a bad register from leaving branches behind.
-`checkFences` and `resolveAdoptions`
-all run before `createWorktrees`, and `resolveAdoptions` says why in its own
-comment: a partial adoption is worse than none, so a refusal there has copied
-nothing anywhere. Every check capable of catching something already fires
-before a worktree exists.
+`checkFences` and `resolveAdoptions` run before worktrees, and `resolveAdoptions`
+says why in its own comment: a partial adoption is worse than none, so a refusal
+there has copied nothing anywhere. Compilation and every remaining pre-boot
+check run in detached worktrees. Branches attach only after compilation and every pre-boot check succeed.
 
 So reach for it only where the branch-creation itself is the thing you are not
 ready for:

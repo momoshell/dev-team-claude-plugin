@@ -5327,12 +5327,54 @@ test('PV7 preservation refuses every input it cannot read or measure', () => {
   }
 })
 
-// The normalisation is exactly what the code comment names: CRLF, trailing blanks and
-// trailing whitespace are ignored; indentation is not.
-test('PV8 top-level statements normalise line endings and trailing space but never indentation', () => {
-  assert.deepEqual(topLevelStatements(PIN_WITNESSED.replace(/\n/g, '  \r\n')), topLevelStatements(PIN_WITNESSED))
+// The normalisation is exactly what the code comment names: CRLF, and blank lines in code
+// at a statement's end. Indentation, trailing spaces and blank lines inside a template
+// literal are content.
+test('PV8 top-level statements normalise only CRLF and blank lines in code', () => {
+  assert.deepEqual(topLevelStatements(PIN_WITNESSED.replace(/\n/g, '\r\n')), topLevelStatements(PIN_WITNESSED))
+  const appendedTight = `${PIN_IMPORTS}\n${PIN_EXISTING}${PIN_TOP_GUARD}`
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: appendedTight }, run: () => 'ok 1 - existing check' }).reason, null)
   const reindented = `${PIN_IMPORTS}\n  ${PIN_EXISTING.replace(/\n(?!$)/g, '\n  ')}`
   assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: reindented }, run: () => 'ok 1 - existing check' }).reason, 'witnessed-test-altered')
+  const trailing = (text) => witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: `${PIN_WITNESSED}${text}` }, run: () => 'ok 1 - existing check' }).reason
+  assert.equal(trailing('\n\n\n'), null)
+  assert.deepEqual(topLevelStatements('const x = `a\n\nb`\nconst y = 1\n'), ['const x = `a\n\nb`', 'const y = 1'])
+  assert.equal(topLevelStatements('const x = `open\n'), null)
+})
+
+// Kills the normalisation Sol refuted (pass 1, must-fix 1): a trailing space inside a template
+// literal the witnessed assertion compares against is content, so removing it is refused.
+test('PV9 trailing whitespace inside a witnessed template literal is content', () => {
+  const witnessed = `${PIN_IMPORTS}\ntest('existing check', () => {\n  assert.equal(render(), \`row  \nnext\`)\n})\n`
+  const edited = witnessed.replace('row  \n', 'row\n')
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes: edited }, run: () => 'ok 1 - existing check' })
+  assert.equal(verdict.reason, 'witnessed-test-altered')
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes: witnessed }, run: () => 'ok 1 - existing check' }).reason, null)
+})
+
+// Kills P5 (Sol pass 1, must-fix 2): swapping the witnessed assertion import for a no-op
+// module leaves every test body identical and is still refused; extending it is not.
+test('PV10 a witnessed import binding must still come from the same module', () => {
+  const swapped = PIN_WITNESSED.replace("import assert from 'node:assert/strict'", "import assert from './noop-assert.mjs'")
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: swapped }, run: () => 'ok 1 - existing check' })
+  assert.equal(verdict.reason, 'witnessed-test-altered')
+  assert.deepEqual(verdict.lost_bindings, ['node:assert/strict::default=>assert'])
+  const extended = PIN_WITNESSED.replace("import { test } from 'node:test'", "import { test, before } from 'node:test'")
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: extended }, run: () => 'ok 1 - existing check' }).reason, null)
+})
+
+// Kills P6 (Sol pass 1, must-fix 3): a prescribed finding cannot close through an
+// invocation guard; it needs the new top-level node test(...) its brief named.
+test('PV11 a prescribed finding declared through an invocation is refused', () => {
+  const invocation = { finding: 'F1', invocation: 'node --test a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
+  const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files: { ...B376_FILES, [testAbs]: PIN_WITNESSED }, hardened: [invocation] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.notEqual(result.status, 'done')
+  const row = pinRows(io).find((entry) => entry.finding === 'F1')
+  assert.equal(row?.outcome, 'name-absent')
+  assert.match(row?.why ?? '', /must close with a new top-level node test\(\.\.\.\) named F1 guard, not an invocation/)
 })
 
 // Kills singleton detection or per-finding patch suppression by routing every conflict separately.

@@ -5903,6 +5903,9 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   const proveEntry = (entry) => {
     let active = null
     const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
+    // MUTATION P6: let a prescribed finding close through an invocation and it is closed by
+    // a runner that is not the new top-level test(...) its brief required.
+    if (entry.invocation !== undefined && prescribed?.has(entry.finding) === true) return row('name-absent', `a pinned-test-prescription finding must close with a new top-level node test(...) named ${entry.name}, not an invocation`)   // ANCHOR P6
     if (entry.invocation !== undefined) { const proof = proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }); fatal = proof.fatal; return proof.row }
     try {
       const witness = hardenWitness?.get(entry.finding)
@@ -14364,36 +14367,154 @@ export function topLevelNameVerdict(output, name) {
 // statement, and every literal top-level test name still runs as a top-level test and
 // passes. Anything that cannot be read or measured is refused, never passed.
 export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
-// A top-level statement starts on a column-0 line that does not begin with whitespace or a
-// closing `}`, `)` or `]`; it runs to the next such line. Normalised, and ONLY these:
-// CRLF → LF, trailing spaces/tabs per line, trailing blank lines per statement. None of
-// them changes what node executes or asserts. Indentation is NOT normalised: re-indenting
-// a check is how it gets nested inside another test.
+// Lexical state at the START of every line: 'code', 'comment' (inside /* */) or
+// 'template' (inside a template literal). It is what lets a column-0 line inside a
+// template or a block comment stay part of the statement around it, so splitting never
+// cuts a literal. Strings, comments, templates with ${} nesting and regex literals are
+// tracked; a `/` that does not close on its own line is division. Anything left open at
+// end of file returns null — unmeasured, never guessed.
+const REGEX_PRECEDERS = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^'])
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'yield', 'await', 'instanceof'])
+export function lineStartStates(text) {
+  const src = String(text)
+  const states = ['code']
+  const holes = []                         // brace depth inside each open ${ }
+  let mode = 'code'
+  let prev = ''
+  let word = ''
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]
+    const n = src[i + 1]
+    if (c === '\n') {
+      if (mode === 'line-comment') mode = 'code'
+      if (mode === 'sq' || mode === 'dq') return null           // a raw newline cannot sit in a string
+      states.push(mode === 'block-comment' ? 'comment' : mode === 'template' ? 'template' : 'code')
+      continue
+    }
+    if (mode === 'line-comment') continue
+    if (mode === 'block-comment') { if (c === '*' && n === '/') { mode = 'code'; i++ } continue }
+    if (mode === 'sq' || mode === 'dq') {
+      if (c === '\\') { i++; if (src[i] === '\n') states.push('code'); continue }
+      if ((mode === 'sq' && c === "'") || (mode === 'dq' && c === '"')) { mode = 'code'; prev = c; word = '' }
+      continue
+    }
+    if (mode === 'template') {
+      if (c === '\\') { i++; if (src[i] === '\n') states.push('template'); continue }
+      if (c === '`') { mode = 'code'; prev = '`'; word = '' } else if (c === '$' && n === '{') { holes.push(0); mode = 'code'; prev = '{'; word = ''; i++ }
+      continue
+    }
+    if (/\s/.test(c)) continue
+    if (c === '/' && n === '/') { mode = 'line-comment'; i++; continue }
+    if (c === '/' && n === '*') { mode = 'block-comment'; i++; continue }
+    if (c === "'") { mode = 'sq'; continue }
+    if (c === '"') { mode = 'dq'; continue }
+    if (c === '`') { mode = 'template'; continue }
+    if (c === '/' && (REGEX_PRECEDERS.has(prev) || (word !== '' && REGEX_KEYWORDS.has(word)))) {
+      let j = i + 1
+      let inClass = false
+      for (; j < src.length && src[j] !== '\n'; j++) {
+        if (src[j] === '\\') { j++; continue }
+        if (src[j] === '[') inClass = true
+        else if (src[j] === ']') inClass = false
+        else if (src[j] === '/' && !inClass) break
+      }
+      if (j < src.length && src[j] === '/') { i = j; prev = '/'; word = ''; continue }
+    }
+    if (c === '{' && holes.length > 0) holes[holes.length - 1] += 1
+    if (c === '}' && holes.length > 0) {
+      if (holes[holes.length - 1] === 0) { holes.pop(); mode = 'template'; continue }
+      holes[holes.length - 1] -= 1
+    }
+    if (/[\w$]/.test(c)) word = /[\w$]/.test(prev) ? word + c : c
+    else word = ''
+    prev = c
+  }
+  return mode === 'code' || mode === 'line-comment' ? states : null
+}
+// A top-level statement starts on a column-0 line, in code (not inside a template literal
+// or block comment), that does not begin with whitespace or a closing `}`, `)` or `]`; it
+// runs to the next such line. Normalised, and ONLY these: CRLF → LF, which ECMAScript
+// itself applies inside template literals and which is whitespace everywhere else; and
+// blank lines at the END of a statement whose line starts in code — a blank line in code
+// is whitespace. Trailing spaces and blank lines inside a template literal are content
+// and are kept. Indentation is never normalised: re-indenting a check is how it gets
+// nested inside another test. Returns null when the text cannot be lexed.
 export function topLevelStatements(text) {
-  const lines = String(text).replace(/\r\n/g, '\n').split('\n').map((line) => line.replace(/[ \t]+$/, ''))
+  const normal = String(text).replace(/\r\n/g, '\n')
+  const states = lineStartStates(normal)
+  if (states === null) return null
+  const lines = normal.split('\n')
   const statements = []
   let current = []
-  for (const line of lines) {
-    if (/^[^\s})\]]/.test(line)) {
+  lines.forEach((line, at) => {
+    if (states[at] === 'code' && /^[^\s})\]]/.test(line)) {
       if (current.length > 0) statements.push(current)
-      current = [line]
-    } else current.push(line)
-  }
+      current = [{ line, at }]
+    } else current.push({ line, at })
+  })
   if (current.length > 0) statements.push(current)
   return statements
-    .map((statement) => { while (statement.length > 0 && statement.at(-1) === '') statement.pop(); return statement.join('\n') })
+    .map((statement) => {
+      while (statement.length > 0 && statement.at(-1).line === '' && states[statement.at(-1).at] === 'code') statement.pop()
+      return statement.map(({ line }) => line).join('\n')
+    })
     .filter((statement) => statement !== '')
 }
 const PRESERVED_IMPORT = /^import\b/
+// The bindings one import declaration creates, as `specifier::imported=>local` keys (a
+// bare import is `specifier::side-effect`). null when the declaration is not one of the
+// plain forms; such a witnessed import must then survive verbatim.
+export function importBindings(statement) {
+  const flat = String(statement).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ').replace(/\s+/g, ' ').trim().replace(/;$/, '').trim()
+  const bare = /^import (['"])([^'"]+)\1$/.exec(flat)
+  if (bare) return [`${bare[2]}::side-effect`]
+  const m = /^import (.+?) from (['"])([^'"]+)\2$/.exec(flat)
+  if (!m) return null
+  const spec = m[3]
+  const ID = '[A-Za-z_$][\\w$]*'
+  const keys = []
+  let clause = m[1].trim()
+  const def = new RegExp(`^(${ID})\\s*(?:,\\s*(.*))?$`).exec(clause)
+  if (def && !clause.startsWith('{') && !clause.startsWith('*')) { keys.push(`${spec}::default=>${def[1]}`); clause = (def[2] || '').trim(); if (clause === '') return keys }
+  const ns = new RegExp(`^\\*\\s*as\\s+(${ID})$`).exec(clause)
+  if (ns) { keys.push(`${spec}::*=>${ns[1]}`); return keys }
+  const named = /^\{(.*)\}$/.exec(clause)
+  if (!named) return null
+  for (const part of named[1].split(',').map((entry) => entry.trim()).filter(Boolean)) {
+    const pm = new RegExp(`^(${ID}|(['"])[^'"]*\\2)(?:\\s+as\\s+(${ID}))?$`).exec(part)
+    if (!pm) return null
+    const imported = pm[1].replace(/^['"]|['"]$/g, '')
+    keys.push(`${spec}::${imported}=>${pm[3] || imported}`)
+  }
+  return keys
+}
 const LITERAL_TEST_NAME = /^test\((['"])((?:(?!\1)[^\\])*)\1\s*[,)]/
 export function witnessedTestPreservation({ file, witnessed, built, run }) {
   const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
   if (typeof witnessed !== 'string') return refuse('witnessed-test-unverifiable', `the review-time bytes of ${file} were not captured, so its existing checks cannot be compared`)
   if (!built || built.state === 'unreadable' || (built.state === 'read' && typeof built.bytes !== 'string')) return refuse('witnessed-test-unverifiable', `the built ${file} could not be read${built?.why ? `: ${built.why}` : ''}`)
   if (built.state !== 'read') return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its witnessed checks are gone`)
+  const witnessedStatements = topLevelStatements(witnessed)
+  if (witnessedStatements === null) return refuse('witnessed-test-unverifiable', `the review-time ${file} could not be lexed into top-level statements`)
+  const builtStatements = topLevelStatements(built.bytes)
+  if (builtStatements === null) return refuse('witnessed-test-unverifiable', `the built ${file} could not be lexed into top-level statements`)
   const remaining = new Map()
-  for (const statement of topLevelStatements(built.bytes)) remaining.set(statement, (remaining.get(statement) || 0) + 1)
-  const kept = topLevelStatements(witnessed).filter((statement) => !PRESERVED_IMPORT.test(statement))
+  for (const statement of builtStatements) remaining.set(statement, (remaining.get(statement) || 0) + 1)
+  // An import may be extended in place, so imports are compared by BINDING: every binding
+  // a witnessed import created must still come from the same specifier. A form the
+  // binding reader does not know must survive verbatim instead.
+  const builtBindings = new Set(builtStatements.filter((statement) => PRESERVED_IMPORT.test(statement)).flatMap((statement) => importBindings(statement) ?? []))
+  const kept = []
+  const lostBindings = []
+  for (const statement of witnessedStatements) {
+    if (!PRESERVED_IMPORT.test(statement)) { kept.push(statement); continue }
+    const bindings = importBindings(statement)
+    // MUTATION P5: skip the binding comparison and a witnessed assertion import can be
+    // swapped for a no-op module while every test body stays byte-identical.
+    if (bindings === null) kept.push(statement)
+    else lostBindings.push(...bindings.filter((key) => !builtBindings.has(key)))      // ANCHOR P5
+  }
+  if (lostBindings.length > 0) return refuse('witnessed-test-altered', `${lostBindings.length} witnessed import binding(s) of ${file} are no longer imported from the same module: ${lostBindings.slice(0, 3).join(', ')}`, { lost_bindings: lostBindings })
   const missing = []
   // MUTATION P2: skip this comparison and a builder may delete or rewrite a witnessed check.
   for (const statement of kept) {                                                       // ANCHOR P2
@@ -14754,7 +14875,7 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary, prescription }) => {
-    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were (verified before acceptance: every review-time top-level statement of that file except imports must remain verbatim at top level, and its top-level tests must still pass as top-level tests)` : ''
+    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were (verified before acceptance: every review-time top-level statement of that file must remain verbatim at top level, every import binding it had must still come from the same module, and its top-level tests must still pass as top-level tests)` : ''
     return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
   }))
   lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',

@@ -5738,10 +5738,10 @@ function builderReversionWhy(paths) {
   return `builder edits reverted to the pre-build baseline: ${paths.join(', ')}; the workspace is retained for human inspection`
 }
 
-function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier = null, sensitivityFloor = null, flooredProtectedPaths = null }) {
+function runScopeGate({ round, finalRound, builderDetails, builderObservation, acceptBuilderBaseline, hasAcceptanceGate, ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier = null, sensitivityFloor = null, flooredProtectedPaths = null, observeChanged = null }) {
   stage(`scope-gate:r${round}`)
   let changed
-  try { changed = io.changedFiles() }
+  try { changed = io.changedFiles(); observeChanged?.(changed) }
   catch (err) {
     if (typeof frozenVerifier === 'function') {
       stageComplete()
@@ -10845,7 +10845,7 @@ function runTask(ctx, io, crash) {
       // MUTATION A1: neutralise this call and a bounced round again reaches no scope
       // gate — the b363-seatreask defect, restored.
       stageComplete()
-      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })                                    // ANCHOR A1
+      const bounced = runScopeGate({ round, finalRound, builderDetails: undefined, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths, observeChanged: (paths) => { S.scopeChanged = paths } })                                    // ANCHOR A1
       if (bounced.escalation) return bounced.escalation
       if (bounced.pendingReversion) pendingReversion = bounced.pendingReversion
       if (bounced.bounce) { buildBrief = bounced.bounce; buildNote = 'scope-fix'; continue }
@@ -10882,7 +10882,7 @@ function runTask(ctx, io, crash) {
     if (!seededBuild) stageComplete()
 
     const mergedScope = mergeCarriedCorrections(carriedCorrections, env.details, mutations)
-    const scoped = runScopeGate({ round, finalRound, builderDetails: mergedScope.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: mergedScope.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths, observeChanged: (paths) => { S.scopeChanged = paths } })
     const scopeCorrections = scoped.corrections ?? { entries: [], refusals: [] }
     processCarried({ carried: mergedScope.carried.filter((entry) => scopeCorrections.entries.some((used) => used.check === entry.check)), drops: [...mergedScope.drops, ...scopeCorrections.refusals.filter((refusal) => mergedScope.carried.some((entry) => entry.check === refusal.check))] }, 'scope')
     for (const entry of scopeCorrections.entries) rememberCorrection(entry, round, mutations)
@@ -11272,7 +11272,7 @@ function runTask(ctx, io, crash) {
         // Before the diff-mutant findings: that section ends the brief with a JSON array,
         // and a reader (and a test) takes everything after its heading as that array.
         ...falsificationLines(io, PLUGIN_ROOT),
-        ...diffFindingLines(report),
+        ...heldAssertionLines({ io, ctx, changed: S.scopeChanged, round: roundNo }), ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       let review
@@ -14919,4 +14919,366 @@ export function stepBriefText({ step, round, done, planPath, planText, priorFail
   const body = selected.section ?? `PLAN SECTION UNAVAILABLE (${selected.reason})`
   const tail = `Plan of record, for reference only: ${planPath}. Work only on this step's files and owned checks.`
   return `# Stepped build ${step.id} (round ${round})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\n## This step\n\n${body}\n\n${tail}${priorFailure ? `\n\nGate failure from prior attempt:\n${priorFailure}` : ''}\n`
+}
+
+export const HELD_ASSERTION_UNMEASURED_REASONS = Object.freeze(['no-changed-inventory', 'base-commit-blank', 'base-unreadable', 'diff-unreadable', 'current-unreadable', 'test-call-uncertain'])
+// Why the change totals are null: a total over an unknown or incomplete held-file set is not a measurement.
+export const HELD_ASSERTION_TOTALS_ABSENT_REASONS = Object.freeze(['no-changed-inventory', 'held-file-unmeasured'])
+
+// A `/` after one of these words starts a regex; after `if (…)`-style heads too. Any other word reads as a value.
+const HELD_REGEX_AFTER_WORD = new Set(['return', 'typeof', 'case', 'void', 'yield', 'await', 'in', 'delete', 'instanceof', 'new', 'throw', 'else', 'do'])
+const HELD_CONTROL_WORD = new Set(['if', 'while', 'for', 'with'])
+// One pass: comments and the CONTENTS of string, template and regex literals become spaces of the same length (newlines,
+// quote/backtick/slash delimiters and `${…}` code stay), so every structural check reads code only, at the source's own
+// offsets and line numbers. state 'unreadable': a comment, literal or bracket never closes; 'ambiguous': a `/` this pass
+// cannot call regex or division with certainty (after `}`, `++`/`--` or `of`). literals maps a literal's start to its end.
+function heldMask(source) {
+  const literals = new Map(), stack = []
+  let code = '', i = 0, last = 'start', word = '', previous = ''
+  const blank = (from, to) => source.slice(from, to).replace(/[^\n]/g, ' ')
+  const result = (state) => ({ state, code, literals })
+  // Template text from j to its closing backtick (closed) or its next `${`; -1 when it never ends.
+  const templateText = (j, start) => {
+    for (let k = j; k < source.length; k += 1) {
+      if (source[k] === '\\') { k += 1; continue }
+      if (source[k] === '`') { code += `${blank(j, k)}\``; const entry = literals.get(start); if (!entry.interpolated) entry.end = k + 1; return { next: k + 1, closed: true } }
+      if (source[k] === '$' && source[k + 1] === '{') { code += `${blank(j, k)}\${`; literals.get(start).interpolated = true; stack.push({ open: '${', start }); return { next: k + 2, closed: false } }
+    }
+    return null
+  }
+  while (i < source.length) {
+    const c = source[i], n = source[i + 1]
+    if (/\s/.test(c)) { code += c; i += 1; continue }
+    if ((c === '/' && n === '/') || (i === 0 && c === '#' && n === '!')) {
+      const end = source.indexOf('\n', i), stop = end < 0 ? source.length : end
+      code += blank(i, stop); i = stop; continue
+    }
+    if (c === '/' && n === '*') {
+      const end = source.indexOf('*/', i + 2)
+      if (end < 0) return result('unreadable')
+      code += blank(i, end + 2); i = end + 2; continue
+    }
+    const token = (kind, text = c) => { code += text; i += text.length; last = kind; word = ''; previous = text.at(-1) }
+    if (c === '\'' || c === '"') {
+      let k = i + 1
+      for (; k < source.length && source[k] !== c && source[k] !== '\n'; k += 1) if (source[k] === '\\') k += source[k + 1] === '\r' && source[k + 2] === '\n' ? 2 : 1
+      if (source[k] !== c) return result('unreadable')
+      literals.set(i, { end: k + 1, interpolated: false })
+      token('value', `${c}${blank(i + 1, k)}${c}`); continue
+    }
+    if (c === '`' || (c === '}' && stack.at(-1)?.open === '${')) {
+      const start = c === '`' ? i : stack.pop().start
+      if (c === '`') literals.set(i, { end: -1, interpolated: false })
+      code += c
+      const chunk = templateText(i + 1, start)
+      if (!chunk) return result('unreadable')
+      i = chunk.next; last = chunk.closed ? 'value' : 'start'; word = ''; previous = ''; continue
+    }
+    if (c === '/') {
+      const regex = last === 'start' || last === 'punct' || last === 'keyword' || last === 'control-close'
+      if (!regex && last !== 'value') return result('ambiguous')
+      if (!regex) { token('punct'); continue }
+      let k = i + 1, inClass = false
+      for (; k < source.length; k += 1) {
+        const r = source[k]
+        if (r === '\n' || r === '\r' || (r === '\\' && /[\n\r]/.test(source[k + 1] || ''))) return result('ambiguous')
+        if (r === '\\') { k += 1; continue }
+        if (r === '[') inClass = true
+        else if (r === ']') inClass = false
+        else if (r === '/' && !inClass) break
+      }
+      if (k >= source.length) return result('ambiguous')
+      let f = k + 1
+      while (f < source.length && /[A-Za-z]/.test(source[f])) f += 1
+      token('value', `/${blank(i + 1, k)}${source.slice(k, f)}`); continue
+    }
+    if (/[A-Za-z_$#\u0080-￿]/.test(c)) {
+      let k = i + 1
+      while (k < source.length && /[\w$\u0080-￿]/.test(source[k])) k += 1
+      const text = source.slice(i, k), property = previous === '.'
+      token(property ? 'value' : HELD_REGEX_AFTER_WORD.has(text) ? 'keyword' : text === 'of' ? 'of' : 'value', text)
+      word = property ? '' : text; continue
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(n || ''))) {
+      let k = i + 1
+      while (k < source.length && /[\w.]/.test(source[k])) k += 1
+      token('value', source.slice(i, k)); continue
+    }
+    if (c === '(' || c === '[' || c === '{') { stack.push({ open: c, control: c === '(' && HELD_CONTROL_WORD.has(word) }); token('punct'); continue }
+    if (c === ')' || c === ']' || c === '}') {
+      const top = stack.pop()
+      if (top?.open !== { ')': '(', ']': '[', '}': '{' }[c]) return result('unreadable')
+      token(c === '}' ? 'brace-close' : top.control ? 'control-close' : 'value'); continue
+    }
+    if ((c === '+' || c === '-') && n === c) { token('incdec', c + c); continue }
+    token('punct')
+  }
+  return result(stack.length > 0 ? 'unreadable' : 'ok')
+}
+
+// A file is measured only when every test(/it(/describe(/t.test( call parses with certainty: a literal title, two or three
+// plain arguments, and a function LAST argument whose body span is found. Anything else names the file test-call-uncertain.
+// Every structural check reads the masked code; the source itself is read only for evidence lines and literal titles.
+function heldLexical(source, path, reason) {
+  const tests = [], assertions = [], bodies = [], delimiters = []
+  const lines = source.split('\n')
+  const lineAt = (offset) => source.slice(0, offset).split('\n').length
+  const fail = () => ({ path, measured: false, reason })
+  const uncertain = () => ({ path, measured: false, reason: 'test-call-uncertain' })
+  const masked = heldMask(source)
+  if (masked.state === 'unreadable') return fail()
+  if (masked.state === 'ambiguous') return uncertain()
+  const code = masked.code
+  const PAIRS = { '(': ')', '[': ']', '{': '}' }
+  // The index just past the delimiter matching code[start], or -1.
+  const balanced = (start) => {
+    const stack = [code[start]]
+    for (let i = start + 1; i < code.length; i += 1) {
+      if (PAIRS[code[i]]) stack.push(code[i])
+      else if (code[i] === ')' || code[i] === ']' || code[i] === '}') {
+        if (PAIRS[stack.pop()] !== code[i]) return -1
+        if (stack.length === 0) return i + 1
+      }
+    }
+    return -1
+  }
+  // Whitespace only (comments are already blank), from index; returns the first other index (or limit).
+  const trivia = (index, limit) => {
+    let i = index
+    while (i < limit && /\s/.test(code[i])) i += 1
+    return Math.min(i, limit)
+  }
+  const callOpen = (index) => {
+    let i = index
+    while (/\s/.test(code[i] || '')) i += 1
+    while (code[i] === '.') {
+      i += 1
+      while (/[\w$]/.test(code[i] || '')) i += 1
+      while (/\s/.test(code[i] || '')) i += 1
+    }
+    return code[i] === '(' ? i : -1
+  }
+  // The callee after a test name: null when it is not a call, 'uncertain' when it is one this scan cannot read, else the '(' index.
+  const testOpen = (index) => {
+    if (/(?:^|[^\w$.])function\s*\*?\s*$/.test(code.slice(Math.max(0, index - 40), index).replace(/[\w$.]+$/, ''))) return null
+    let i = index, modifiersOnly = true
+    for (;;) {
+      i = trivia(i, code.length)
+      if (code[i] === '(') return modifiersOnly ? i : 'uncertain'
+      if (code[i] === '[' || (code[i] === '?' && code[i + 1] === '.')) return 'uncertain'
+      if (code[i] !== '.') return null
+      const member = code.slice(i + 1).match(/^\s*([\w$]+)/)
+      if (!member) return 'uncertain'
+      if (!['skip', 'only', 'todo'].includes(member[1])) modifiersOnly = false
+      i += 1 + member[0].length
+    }
+  }
+  // Top-level argument ranges of the call whose '(' is at open and whose ')' is at close - 1, or null.
+  const argumentsOf = (open, close) => {
+    const ranges = []
+    let from = open + 1, depth = 0
+    for (let p = open + 1; p < close - 1; p += 1) {
+      if (PAIRS[code[p]]) depth += 1
+      else if (code[p] === ')' || code[p] === ']' || code[p] === '}') depth -= 1
+      else if (code[p] === ',' && depth === 0) { ranges.push([from, p]); from = p + 1 }
+    }
+    ranges.push([from, close - 1])
+    const trimmed = []
+    for (const [a, b] of ranges) {
+      const start = trivia(a, b)
+      let end = b
+      while (end > start && /\s/.test(code[end - 1])) end -= 1
+      trimmed.push([start, end])
+    }
+    if (trimmed.length > 1 && trimmed.at(-1)[0] === trimmed.at(-1)[1]) trimmed.pop()
+    return trimmed
+  }
+  // The literal's extent comes from the mask; its value, from the source.
+  const literalTitle = ([start, end]) => {
+    const literal = masked.literals.get(start)
+    if (!literal || literal.interpolated || trivia(literal.end, end) !== end) return null
+    return source.slice(start + 1, literal.end - 1)
+  }
+  // The body span of a function last argument, or null: { start, end } inside the braces, or the whole expression body.
+  const callbackBody = ([start, end]) => {
+    let p = start
+    const word = (text) => code.startsWith(text, p) && !/[\w$]/.test(code[p + text.length] || '')
+    if (word('async')) p = trivia(p + 5, end)
+    const braceBody = (q) => {
+      if (code[q] !== '{') return null
+      const close = balanced(q)
+      if (close < 0 || trivia(close, end) !== end) return null
+      return { start: q + 1, end: close - 1 }
+    }
+    if (word('function')) {
+      p = trivia(p + 8, end)
+      if (code[p] === '*') p = trivia(p + 1, end)
+      const name = code.slice(p, end).match(/^[A-Za-z_$][\w$]*/)
+      if (name) p = trivia(p + name[0].length, end)
+      if (code[p] !== '(') return null
+      const params = balanced(p)
+      if (params < 0 || params > end) return null
+      return braceBody(trivia(params, end))
+    }
+    if (code[p] === '(') { const params = balanced(p); if (params < 0 || params > end) return null; p = params }
+    else { const name = code.slice(p, end).match(/^[A-Za-z_$][\w$]*/); if (!name) return null; p += name[0].length }
+    p = trivia(p, end)
+    if (!code.startsWith('=>', p)) return null
+    p = trivia(p + 2, end)
+    if (p >= end) return null
+    if (code[p] === '{') return braceBody(p)
+    return { start: p, end }
+  }
+  for (let index = 0; index < code.length;) {
+    const character = code[index]
+    if (character === '(' || character === '[' || character === '{') delimiters.push(character)
+    else if (character === ')' || character === ']' || character === '}') {
+      const expected = character === ')' ? '(' : character === ']' ? '[' : '{'
+      if (delimiters.pop() !== expected) return fail()
+    }
+    let name = null, endName = index
+    if (code.startsWith('t.test', index) && !/[\w$.]/.test(code[index - 1] || '') && !/[\w$]/.test(code[index + 6] || '')) { name = 't.test'; endName = index + 6 }
+    else {
+      const match = code.slice(index, index + 9).match(/^(test|it|describe)(?![\w$])/)
+      if (match && !/[\w$.]/.test(code[index - 1] || '')) { name = match[1]; endName = index + match[1].length }
+      else if (code.startsWith('assert', index) && !/[\w$]/.test(code[index - 1] || '') && !/[\w$]/.test(code[index + 6] || '')) {
+        const open = callOpen(index + 6)
+        if (open < 0) { index += 6; continue }
+        const end = balanced(open)
+        if (end < 0) return fail()
+        assertions.push({ start: open, end }); index = endName = end; continue
+      }
+    }
+    if (name) {
+      const open = testOpen(endName)
+      if (open === 'uncertain') return uncertain()
+      if (open !== null) {
+        const close = balanced(open)
+        if (close < 0) return fail()
+        const args = argumentsOf(open, close)
+        if (!args || args.length < 2 || args.length > 3 || args.some(([a, b]) => a === b || code.startsWith('...', a))) return uncertain()
+        const title = literalTitle(args[0])
+        const body = title === null ? null : callbackBody(args.at(-1))
+        if (!body) return uncertain()
+        const test = { test: title, start: index, end: close, line: lineAt(index), headEndLine: lineAt(args[0][1]), text: lines[lineAt(index) - 1] || '', bodyStart: body.start, bodyEnd: body.end }
+        tests.push(test)
+        bodies.push({ start: test.bodyStart, end: test.bodyEnd, test })
+        index = endName; continue
+      }
+    }
+    index += 1
+  }
+  if (delimiters.length > 0) return fail()
+  return { tests, assertions, bodies, lineAt, lines }
+}
+
+// lean: lexical direct-call test and assertion scan; use a JS parser if alias resolution or runtime-generated tests become required
+export function heldAssertionChanges({ path, base, diff, current }) {
+  if (typeof base !== 'string') return { path, measured: false, reason: 'base-unreadable' }
+  if (typeof diff !== 'string') return { path, measured: false, reason: 'diff-unreadable' }
+  if (typeof current !== 'string') return { path, measured: false, reason: 'current-unreadable' }
+  const before = heldLexical(base, path, 'base-unreadable')
+  if (before.measured === false) return before
+  const after = heldLexical(current, path, 'current-unreadable')
+  if (after.measured === false) return after
+  const entries = [], baseLines = before.lines
+  const removed = []
+  let oldCursor = 1, inHunk = false
+  for (const line of diff.split('\n')) {
+    const header = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
+    if (line.startsWith('@@') && !header) return { path, measured: false, reason: 'diff-unreadable' }
+    if (header) { oldCursor = Number(header[1]); inHunk = true; continue }
+    if (!inHunk || line.startsWith('\\')) {
+      if (line.startsWith('-') && !line.startsWith('---')) return { path, measured: false, reason: 'diff-unreadable' }
+      continue
+    }
+    if (line.startsWith('-')) { removed.push({ line: oldCursor, text: line.slice(1) }); oldCursor += 1 }
+    else if (line.startsWith(' ')) oldCursor += 1
+    else if (line.startsWith('+')) continue
+    else if (line) return { path, measured: false, reason: 'diff-unreadable' }
+  }
+  for (const row of removed) if (row.line < 1 || row.line > baseLines.length || baseLines[row.line - 1] !== row.text) return { path, measured: false, reason: 'diff-unreadable' }
+  for (const { line, text } of removed) {
+    const start = baseLines.slice(0, line - 1).join('\n').length + (line > 1 ? 1 : 0), end = start + text.length
+    const assertionSpans = before.assertions
+    const inAssertion = assertionSpans.some((span) => start < span.end && end > span.start)
+    const containing = before.bodies.filter((body) => start >= body.start && start <= body.end).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]
+    if (inAssertion) entries.push({ test: containing?.test.test || '(no test)', class: 'assertion', line, text })
+    else if (containing) entries.push({ test: containing.test.test, class: 'body', line, text })
+  }
+  const currentCounts = new Map()
+  for (const entry of after.tests) currentCounts.set(entry.test, (currentCounts.get(entry.test) || 0) + 1)
+  const currentTitles = new Set(currentCounts.keys())
+  const baseTests = before.tests
+  const removedTests = baseTests.filter((entry) => !currentTitles.has(entry.test))
+  // Titles are a multiset: a title kept with fewer occurrences lost its surplus base occurrences. WHICH occurrences
+  // comes from the diff: those whose head (call line through title) lost a line; any other count is a guess.
+  const removedLines = new Set(removed.map((row) => row.line))
+  const surplusTitles = new Set(baseTests.filter((entry) => currentTitles.has(entry.test)).map((entry) => entry.test))
+  for (const title of surplusTitles) {
+    const occurrences = baseTests.filter((entry) => entry.test === title)
+    const surplus = occurrences.length - currentCounts.get(title)
+    if (surplus <= 0) continue
+    const touched = occurrences.filter((entry) => { for (let line = entry.line; line <= entry.headEndLine; line += 1) if (removedLines.has(line)) return true; return false })
+    if (touched.length !== surplus) return { path, measured: false, reason: 'test-call-uncertain' }
+    removedTests.push(...touched)
+  }
+  for (const entry of removedTests) entries.push({ test: entry.test, class: 'removed-or-renamed', line: entry.line, text: entry.text })
+  const assertionsChanged = entries.filter((entry) => entry.class === 'assertion').length
+  const bodyLinesChanged = entries.filter((entry) => entry.class === 'body').length
+  return { path, measured: true, lane_added: false, entries, assertions_changed: assertionsChanged, body_lines_changed: bodyLinesChanged, tests_removed: removedTests.length }
+}
+
+export function heldAssertionLines({ io, ctx, changed, round }) {
+  const inventoryKnown = Array.isArray(changed)
+  const unmeasured = [], records = []
+  const unmeasuredRecords = unmeasured
+  const unmeasuredRecord = (path, reason) => ({ path, measured: false, reason })
+  const paths = inventoryKnown ? [...new Set(changed.filter((path) => typeof path === 'string' && path.endsWith('.test.mjs')))] : []
+  if (!inventoryKnown) unmeasured.push(unmeasuredRecord('<changed-files>', 'no-changed-inventory'))
+  const readPath = (path) => {
+    const unmeasuredPath = (reason) => { const record = unmeasuredRecord(path, reason); unmeasuredRecords.push({ path, reason }); return record }
+    // The AG7 anchor calls unmeasured(...) here; it shadows the outer array, so pushes go through unmeasuredRecords.
+    const unmeasured = unmeasuredPath
+    if (!scopedPath(path)) return unmeasuredPath('current-unreadable')
+    if (typeof ctx?.head !== 'string' || !ctx.head.trim()) return unmeasuredPath('base-commit-blank')
+    let baseRead
+    try { baseRead = io.run(`git show ${shellArg(`${ctx.head}:${path}`)}`) } catch { baseRead = null }
+    const baseEvidence = baseRead?.ok === true ? '' : `${baseRead?.output || ''} ${baseRead?.stderr || ''}`
+    const laneAdded = /does not exist in|exists on disk, but not in/.test(baseEvidence)
+    if (baseRead?.ok !== true || typeof baseRead.output !== 'string') {
+      if (!laneAdded) return unmeasuredPath('base-unreadable')
+    }
+    let diffRead
+    try { diffRead = io.run(`git diff --unified=0 --no-color ${shellArg(ctx.head)} -- ${shellArg(path)}`) } catch { diffRead = null }
+    if (diffRead?.ok !== true || typeof diffRead.output !== 'string') return unmeasured('diff-unreadable')
+    let current
+    try { current = io.readFile(join(ctx.checkout, path)) } catch { return unmeasuredPath('current-unreadable') }
+    if (typeof current !== 'string') return unmeasuredPath('current-unreadable')
+    if (laneAdded) return { path, measured: true, lane_added: true, entries: [], assertions_changed: 0, body_lines_changed: 0, tests_removed: 0 }
+    const record = heldAssertionChanges({ path, base: baseRead.output, diff: diffRead.output, current })
+    if (!record.measured) { unmeasuredRecords.push({ path: record.path, reason: record.reason }); return record }
+    records.push(record); return record
+  }
+  for (const path of paths) { const record = readPath(path); if (record.measured && record.lane_added) records.push(record) }
+  const entries = records.flatMap((record) => record.entries.map((entry) => ({ ...entry, path: record.path })))
+  const laneAddedCount = records.filter((record) => record.lane_added).length
+  const assertions = records.reduce((sum, record) => sum + record.assertions_changed, 0)
+  const body = records.reduce((sum, record) => sum + record.body_lines_changed, 0)
+  const tests = records.reduce((sum, record) => sum + record.tests_removed, 0)
+  const testFiles = inventoryKnown ? paths.length : null
+  const status = unmeasured.length === 0 ? 'measured' : 'unmeasured'
+  const totalsAbsent = !inventoryKnown ? 'no-changed-inventory' : status === 'measured' ? null : 'held-file-unmeasured'
+  const total = (count) => (totalsAbsent ? null : count)
+  const listed = entries.slice(0, 40)
+  const lines = ['', '## Pre-existing assertions changed', `Held test files: ${testFiles ?? 'unmeasured'}; lane-added: ${inventoryKnown ? laneAddedCount : 'unmeasured'}; assertions changed: ${total(assertions) ?? 'unmeasured'}; body lines changed: ${total(body) ?? 'unmeasured'}; tests removed or renamed: ${total(tests) ?? 'unmeasured'}.`]
+  if (totalsAbsent === 'held-file-unmeasured') lines.push(`Totals unmeasured (${totalsAbsent}): ${unmeasured.length} of ${testFiles} held test file(s) unmeasured; entries below cover only the measured files.`)
+  for (const entry of listed) lines.push(`- ${entry.path}:${entry.line} | ${entry.test} | ${entry.class} | ${JSON.stringify(entry.text)}`)
+  if (entries.length > listed.length) lines.push(`${entries.length - listed.length} more not listed`)
+  if (unmeasured.length) { lines.push('PRE-EXISTING ASSERTIONS UNMEASURED'); for (const record of unmeasured) lines.push(`- ${record.path}: ${record.reason}`) }
+  else if (assertions === 0 && body === 0 && tests === 0) lines.push(`No pre-existing assertion or test changed in ${testFiles} held test file(s).`)
+  lines.push('Evidence, not a refusal: for each entry cite the plan step or ask item that requires it, or raise a must-fix finding.')
+  const guard = { round, status, test_files: testFiles, lane_added: inventoryKnown ? laneAddedCount : null, assertions_changed: total(assertions), body_lines_changed: total(body), tests_removed: total(tests), totals_absent: totalsAbsent, unmeasured }
+  try { io.log(recordRow({ at: io.now(), assertion_guard: guard })) } catch {}
+  return lines
 }

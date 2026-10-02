@@ -1144,6 +1144,7 @@ const ZERO_CAPACITY_LOGS = Object.freeze([
   { stage: 'lane:r1', channel: 'record' },
   { stage_done: 'lane:r1', channel: 'record' },
   { stage: 'review:r1', channel: 'record' },
+  { assertion_guard: { round: 1, status: 'unmeasured', test_files: 1, lane_added: 0, assertions_changed: null, body_lines_changed: null, tests_removed: null, totals_absent: 'held-file-unmeasured', unmeasured: [{ path: 'a.test.mjs', reason: 'base-commit-blank' }] }, channel: 'record' },
   { assign: 'reviewer1', role: 'reviewer', brief: '/tmp/fake-task/review-brief-1.md', channel: 'record' },
   { review_outcome: { dispatch: 'reviewer1', verdict: 'pass', must_fix: 0, should_fix: null, consider: null }, channel: 'record' },
   { envelope: 'reviewer1', role: 'reviewer', status: 'done', channel: 'record' },
@@ -1568,6 +1569,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at published"],
   ["operationalRow", "", "at event kind queue_depth waited_ms slotted"],
   ["recordRow", "event='execution-default'", "at requested source executor reason"],
+  ["recordRow", "", "at assertion_guard"],
 ])
 
 // ---------------------------------------------------------------------------

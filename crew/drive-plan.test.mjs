@@ -1831,6 +1831,13 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
     // brief SAYS so rather than leaving the reviewer to assume it was told everything.
     '',
     `${FALSIFICATION_ABSENT}: ${FALSIFICATION_PATH} is empty or unreadable — judge findings on the verdict contract alone.`,
+    '',
+    '## Pre-existing assertions changed',
+    'Held test files: 1; lane-added: 0; assertions changed: unmeasured; body lines changed: unmeasured; tests removed or renamed: unmeasured.',
+    'Totals unmeasured (held-file-unmeasured): 1 of 1 held test file(s) unmeasured; entries below cover only the measured files.',
+    'PRE-EXISTING ASSERTIONS UNMEASURED',
+    '- a.test.mjs: base-commit-blank',
+    'Evidence, not a refusal: for each entry cite the plan step or ask item that requires it, or raise a must-fix finding.',
     '## Diff-mutant findings',
     '[]',
   ].join('\n'))

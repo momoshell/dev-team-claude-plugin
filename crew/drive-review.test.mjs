@@ -5953,3 +5953,250 @@ test('B5 panel permission preserves ordinary lead execute consult', async () => 
 })
 
 const { EXECUTOR_TOPOLOGIES } = await import('./shape-validator.mjs')
+
+import { HELD_ASSERTION_TOTALS_ABSENT_REASONS, HELD_ASSERTION_UNMEASURED_REASONS, heldAssertionChanges, heldAssertionLines } from './drive.mjs'
+
+const heldBase = "test('keeps one', () => {\n  assert.equal(value, 1)\n})\n"
+const heldDiff = "@@ -2 +2 @@\n-  assert.equal(value, 1)\n+  assert.equal(value, 2)\n"
+const heldScenario = ({ changed = ['a.test.mjs'], bases = { 'a.test.mjs': { ok: true, output: heldBase } }, diffs = { 'a.test.mjs': { ok: true, output: heldDiff } }, files = { [`${CTX.checkout}/a.test.mjs`]: heldBase.replace('value, 1', 'value, 2') } } = {}) => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed, fenceBases: bases, fenceDiffs: diffs, files })
+  driveTask({ ...CTX, head: 'base-head' }, io)
+  return { io, brief: io.calls.writes[`${TD}/review-brief-1.md`] || '', rows: io.calls.logs.filter((row) => row.assertion_guard).map((row) => row.assertion_guard) }
+}
+
+test('AG1 lists removed assertions in the ordinary review brief and truncates only rendering', () => {
+  // MUTATION: replacing listed entries with [] must hide the removed assertion.
+  const { brief, rows } = heldScenario()
+  assert.match(brief, /## Pre-existing assertions changed[\s\S]*a\.test\.mjs:\d+ \| keeps one \| assertion \| "  assert\.equal\(value, 1\)"/)
+  assert.equal(rows.length, 1)
+  assert.equal(heldAssertionChanges({ path: 'a.test.mjs', base: heldBase, diff: heldDiff, current: heldBase.replace('value, 1', 'value, 2') }).assertions_changed, 1)
+  const manyBase = `test('bulk', () => {\n${Array.from({ length: 42 }, (_, i) => `  assert.ok(${i})`).join('\n')}\n})\n`
+  const manyDiff = `@@ -2,42 +1,0 @@\n${Array.from({ length: 42 }, (_, i) => `-${`  assert.ok(${i})`}`).join('\n')}\n`
+  const many = heldAssertionChanges({ path: 'a.test.mjs', base: manyBase, diff: manyDiff, current: "test('bulk', () => {})\n" })
+  assert.equal(many.assertions_changed, 42)
+  const manyReport = heldScenario({ bases: { 'a.test.mjs': { ok: true, output: manyBase } }, diffs: { 'a.test.mjs': { ok: true, output: manyDiff } }, files: { [`${CTX.checkout}/a.test.mjs`]: "test('bulk', () => {})\n" } }).brief
+  assert.match(manyReport, /2 more not listed/)
+  assert.equal((manyReport.match(/- a\.test\.mjs:/g) || []).length, 40)
+  const rendered = heldAssertionLines({ io: fakeIo(), ctx: { ...CTX, head: 'base-head' }, changed: [], round: 1 }).join('\n')
+  assert.match(rendered, /No pre-existing assertion or test changed in 0 held test file\(s\)\./)
+  const outside = heldAssertionChanges({ path: 'a.test.mjs', base: 'assert.ok(true)\n', diff: '@@ -1 +0,0 @@\n-assert.ok(true)\n', current: '' })
+  assert.equal(outside.entries[0].test, '(no test)')
+})
+
+test('AG2 continuation removals intersect the complete assertion call', () => {
+  // MUTATION: requiring the removed line itself to contain assert loses continuation lines.
+  const base = "test('archive row', () => {\n  assert.deepEqual(row, {\n    archive: '/archive/x',\n    value: 1,\n  })\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -3 +2,0 @@\n-    archive: '/archive/x',\n", current: base.replace("    archive: '/archive/x',\n", '') })
+  assert.equal(record.entries[0].class, 'assertion')
+  assert.equal(heldAssertionChanges({ path: 'a.test.mjs', base: 'const x = `unterminated\nassert.ok(1)\n', diff: '', current: '' }).reason, 'base-unreadable')
+  assert.equal(heldAssertionChanges({ path: 'a.test.mjs', base: '', diff: '', current: 'const x = `unterminated' }).reason, 'current-unreadable')
+  const templ = "const label = `${`inner`}-x`\ntest('x', () => {\n  assert.equal(x, 1)\n})\n"
+  const tmplRecord = heldAssertionChanges({ path: 'a.test.mjs', base: templ, diff: '@@ -3 +2,0 @@\n-  assert.equal(x, 1)\n', current: templ.replace('  assert.equal(x, 1)\n', '') })
+  assert.equal(tmplRecord.entries[0].class, 'assertion')
+})
+
+test('AG3 reports removed or renamed base tests even when their body remains', () => {
+  // MUTATION: disabling current-title comparison suppresses removed-test evidence.
+  const base = "test('leaves journal untouched', () => {\n  work()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1 +1 @@\n-test('leaves journal untouched', () => {\n+test('records source', () => {\n", current: base.replace('leaves journal untouched', 'records source') })
+  assert.deepEqual(record.entries.filter((entry) => entry.class === 'removed-or-renamed').map((entry) => entry.test), ['leaves journal untouched'])
+})
+
+test('RV1-4 await t.test subtests are recognised as tests', () => {
+  // MUTATION: checking source[index - 6] for the t.test word boundary drops awaited subtests.
+  const nestedBase = "test('outer', async (t) => {\n  await t.test('inner', () => work())\n})\n"
+  const nestedCurrent = nestedBase.replace("t.test('inner'", "t.test('moved'")
+  const nested = heldAssertionChanges({ path: 'a.test.mjs', base: nestedBase, diff: '', current: nestedCurrent })
+  assert.deepEqual(nested.entries.filter((entry) => entry.class === 'removed-or-renamed').map((entry) => entry.test), ['inner'])
+})
+
+test('AG4 ignores additions when reporting removed assertions', () => {
+  // MUTATION: counting plus-prefixed lines invents changed assertions for new tests.
+  const added = "test('new test', () => {\n assert.equal(value, 9)\n})\n"
+  const { brief, rows } = heldScenario({ diffs: { 'a.test.mjs': { ok: true, output: "@@ -3,0 +4,3 @@\n+test('new test', () => {\n+ assert.equal(value, 9)\n+})\n" } }, files: { [`${CTX.checkout}/a.test.mjs`]: heldBase + added } })
+  assert.equal(rows[0].assertions_changed, 0)
+  assert.match(brief, /No pre-existing assertion or test changed in 1 held test file\(s\)\./)
+})
+
+test('AG5 proves lane-added only from the exact missing-base diagnostic', () => {
+  // MUTATION: rejecting the diagnostic loses the positive lane-added classification.
+  const { rows } = heldScenario({ changed: ['new.test.mjs'], bases: { 'new.test.mjs': { ok: false, output: "fatal: path 'new.test.mjs' exists on disk, but not in 'base-head'" } }, diffs: { 'new.test.mjs': { ok: true, output: '@@ -0,0 +1 @@\n+assert.ok(true)\n' } }, files: { [`${CTX.checkout}/new.test.mjs`]: 'assert.ok(true)\n' } })
+  assert.equal(rows[0].lane_added, 1)
+  assert.deepEqual(rows[0].unmeasured, [])
+})
+
+test('RV1-2 successful base prose does not classify as lane-added', () => {
+  // MUTATION: deriving the lane-added evidence from a successful base read's stdout reports this file clean.
+  const base = "// does not exist in historical prose\ntest('kept', () => {\n  assert.equal(value, 1)\n})\n"
+  const { rows } = heldScenario({ bases: { 'a.test.mjs': { ok: true, output: base } }, diffs: { 'a.test.mjs': { ok: true, output: "@@ -3 +2,0 @@\n-  assert.equal(value, 1)\n" } }, files: { [`${CTX.checkout}/a.test.mjs`]: base.replace('  assert.equal(value, 1)\n', '') } })
+  assert.deepEqual([rows[0].lane_added, rows[0].assertions_changed], [0, 1])
+})
+
+test('AG6 treats a failed blank base as unmeasured, not lane-added', () => {
+  // MUTATION: treating every failed base as lane-added fabricates a clean result.
+  assert.equal(Object.isFrozen(HELD_ASSERTION_UNMEASURED_REASONS), true)
+  assert.deepEqual(HELD_ASSERTION_UNMEASURED_REASONS, ['no-changed-inventory', 'base-commit-blank', 'base-unreadable', 'diff-unreadable', 'current-unreadable', 'test-call-uncertain'])
+  const { brief, rows } = heldScenario({ bases: {} })
+  assert.match(brief, /PRE-EXISTING ASSERTIONS UNMEASURED[\s\S]*base-unreadable/)
+  assert.equal(rows[0].lane_added, 0)
+})
+
+test('AG7 refuses a non-ok diff even when its output is empty', () => {
+  // MUTATION: accepting a failed empty diff emits a false clean result.
+  const { brief } = heldScenario({ diffs: { 'a.test.mjs': { ok: false, output: '' } } })
+  assert.match(brief, /diff-unreadable/)
+  assert.doesNotMatch(brief, /No pre-existing assertion or test changed/)
+})
+
+test('AG8 preserves measured files beside unreadable paths and labels the aggregate', () => {
+  // MUTATION: deriving status from any measured record hides the unreadable denominator.
+  const { brief, rows } = heldScenario({ changed: ['a.test.mjs', 'b.test.mjs'], bases: { 'a.test.mjs': { ok: true, output: heldBase }, 'b.test.mjs': { ok: true, output: heldBase } }, diffs: { 'a.test.mjs': { ok: true, output: '' }, 'b.test.mjs': { ok: false, output: '' } }, files: { [`${CTX.checkout}/a.test.mjs`]: heldBase, [`${CTX.checkout}/b.test.mjs`]: heldBase } })
+  assert.equal(rows[0].status, 'unmeasured')
+  assert.deepEqual(rows[0].unmeasured, [{ path: 'b.test.mjs', reason: 'diff-unreadable' }])
+  assert.doesNotMatch(brief, /No pre-existing assertion or test changed/)
+})
+
+test('RV1-1 unreadable held base is journaled and review proceeds', () => {
+  // MUTATION: pushing onto the shadowed unmeasured closure throws out of the review brief builder.
+  const { io, brief, rows } = heldScenario({ bases: { 'a.test.mjs': { ok: true, output: 'const label = `unterminated' } }, diffs: { 'a.test.mjs': { ok: true, output: '' } } })
+  assert.deepEqual(rows, [{ round: 1, status: 'unmeasured', test_files: 1, lane_added: 0, assertions_changed: null, body_lines_changed: null, tests_removed: null, totals_absent: 'held-file-unmeasured', unmeasured: [{ path: 'a.test.mjs', reason: 'base-unreadable' }] }])
+  assert.match(brief, /## Pre-existing assertions changed[\s\S]*PRE-EXISTING ASSERTIONS UNMEASURED\n- a\.test\.mjs: base-unreadable[\s\S]*## Diff-mutant findings/)
+  assert.ok(io.calls.logs.some((row) => row.review_outcome), 'the review stage ran after the unmeasured guard row')
+})
+
+test('AG9 keeps absent changed inventory distinct from an empty inventory', () => {
+  // MUTATION: coercing null to [] invents an observed zero denominator.
+  const lines = heldAssertionLines({ io: fakeIo(), ctx: { ...CTX, head: 'base-head' }, changed: null, round: 1 }).join('\n')
+  assert.match(lines, /no-changed-inventory/)
+  assert.doesNotMatch(lines, /No pre-existing assertion or test changed/)
+})
+
+test('AG10 writes exactly one measured journal record for one held file', () => {
+  // MUTATION: omitting the journal call leaves no per-round measurement.
+  const { rows } = heldScenario()
+  assert.deepEqual(rows.map(({ round, status, test_files, assertions_changed, tests_removed }) => ({ round, status, test_files, assertions_changed, tests_removed })), [{ round: 1, status: 'measured', test_files: 1, assertions_changed: 1, tests_removed: 0 }])
+  assert.equal(rows.length, 1)
+})
+
+test('a held file whose base is unreadable leaves the change totals null, not zero', () => {
+  // MUTATION: totalling only the measured files reports 0 assertions changed beside an unreadable file.
+  const changedBase = "test('kept', () => {\n  assert.equal(value, 1)\n})\n"
+  const { brief, rows } = heldScenario({ changed: ['a.test.mjs', 'b.test.mjs'], bases: { 'a.test.mjs': { ok: true, output: heldBase } }, diffs: { 'a.test.mjs': { ok: true, output: '' }, 'b.test.mjs': { ok: true, output: '@@ -2 +1,0 @@\n-  assert.equal(value, 1)\n' } }, files: { [`${CTX.checkout}/a.test.mjs`]: heldBase, [`${CTX.checkout}/b.test.mjs`]: changedBase.replace('  assert.equal(value, 1)\n', '') } })
+  assert.deepEqual(rows.map(({ status, test_files, assertions_changed, body_lines_changed, tests_removed, totals_absent, unmeasured }) => ({ status, test_files, assertions_changed, body_lines_changed, tests_removed, totals_absent, unmeasured })), [{ status: 'unmeasured', test_files: 2, assertions_changed: null, body_lines_changed: null, tests_removed: null, totals_absent: 'held-file-unmeasured', unmeasured: [{ path: 'b.test.mjs', reason: 'base-unreadable' }] }])
+  assert.match(brief, /assertions changed: unmeasured; body lines changed: unmeasured; tests removed or renamed: unmeasured\./)
+  assert.match(brief, /Totals unmeasured \(held-file-unmeasured\): 1 of 2 held test file\(s\) unmeasured/)
+  assert.deepEqual(HELD_ASSERTION_TOTALS_ABSENT_REASONS, ['no-changed-inventory', 'held-file-unmeasured'])
+})
+
+test('deleting one of two tests that share a title counts one removed test', () => {
+  // MUTATION: title-set membership sees the surviving duplicate and reports no removed test.
+  const base = "test('same title', () => {\n  first()\n})\ntest('same title', () => {\n  second()\n})\n"
+  const current = "test('same title', () => {\n  first()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -4,3 +3,0 @@\n-test('same title', () => {\n-  second()\n-})\n", current })
+  assert.equal(record.tests_removed, 1)
+  assert.deepEqual(record.entries.filter((entry) => entry.class === 'removed-or-renamed').map((entry) => [entry.test, entry.line]), [['same title', 4]])
+})
+
+test('an assertion changed inside a template interpolation is counted as an assertion', () => {
+  // MUTATION: skipping the whole template literal hides the interpolated assertion.
+  const base = "const note = `${\n  assert.equal(value, 1)\n}`\ntest('kept', () => {\n  work()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '@@ -2 +2 @@\n-  assert.equal(value, 1)\n+  assert.equal(value, 2)\n', current: base.replace('value, 1', 'value, 2') })
+  assert.equal(record.measured, true)
+  assert.equal(record.assertions_changed, 1)
+  assert.deepEqual(record.entries.map((entry) => [entry.class, entry.text]), [['assertion', '  assert.equal(value, 1)']])
+})
+
+test('a deleted setup line inside a function callback counts as a changed body line', () => {
+  // MUTATION: accepting only arrow callbacks leaves function callbacks with no body.
+  const base = "test('function body', function () {\n  setup()\n  run()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '@@ -2 +1,0 @@\n-  setup()\n', current: base.replace('  setup()\n', '') })
+  assert.equal(record.body_lines_changed, 1)
+  assert.deepEqual(record.entries.map((entry) => [entry.test, entry.class, entry.text]), [['function body', 'body', '  setup()']])
+})
+
+test('the test callback is the last argument, so a function inside the options object is not taken for it', () => {
+  // MUTATION: reading the callback from args[1] instead of the last argument takes the options object for it.
+  const base = "test('x', { custom: function () {} }, () => {\n  setup()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '@@ -2 +1,0 @@\n-  setup()\n', current: base.replace('  setup()\n', '') })
+  assert.equal(record.measured, true)
+  assert.equal(record.body_lines_changed, 1)
+  assert.deepEqual(record.entries.map((entry) => [entry.test, entry.class, entry.line, entry.text]), [['x', 'body', 2, '  setup()']])
+  // A callback that is NOT the last argument is not guessed at: the file is unmeasured.
+  const late = "test('x', () => {\n  setup()\n}, { timeout: 1 })\n"
+  assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base: late, diff: '@@ -2 +1,0 @@\n-  setup()\n', current: late.replace('  setup()\n', '') }), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('deleting the first of two same-title tests points the removal at the deleted occurrence, not the survivor', () => {
+  // MUTATION: picking surplus occurrences in title order points the removal at the surviving second test.
+  const base = "test('same title', () => {\n  first()\n})\ntest('same title', () => {\n  second()\n})\n"
+  const current = "test('same title', () => {\n  second()\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1,3 +0,0 @@\n-test('same title', () => {\n-  first()\n-})\n", current })
+  assert.equal(record.tests_removed, 1)
+  assert.deepEqual(record.entries.filter((entry) => entry.class === 'removed-or-renamed').map((entry) => [entry.test, entry.line]), [['same title', 1]])
+  // Both heads edited and one occurrence gone: which one went is not in the diff, so the file is unmeasured.
+  const edited = "test('same title', async () => {\n  second()\n})\n"
+  const ambiguous = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1,4 +1 @@\n-test('same title', () => {\n-  first()\n-})\n-test('same title', () => {\n+test('same title', async () => {\n", current: edited })
+  assert.deepEqual(ambiguous, { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('a test call the scan cannot parse with certainty leaves the file unmeasured and the totals null', () => {
+  // MUTATION: skipping an unparseable call (or giving a non-literal title a placeholder) reports the file measured.
+  const wrap = (call) => `${call}\ntest('kept', () => {\n  assert.equal(value, 1)\n})\n`
+  const variants = {
+    'non-literal title': "test(`${name} works`, () => {\n  work()\n})",
+    'identifier title': 'it(name, () => {\n  work()\n})',
+    'spread arguments': "test('x', ...options, () => {\n  work()\n})",
+    'computed callee': "test['only']('x', () => {\n  work()\n})",
+    'unrecognised member': "describe.each(rows)('x', () => {\n  work()\n})",
+    'one argument': "t.test('x')",
+    'four arguments': "test('x', {}, {}, () => {\n  work()\n})",
+    'callback not a function': "test('x', handler)",
+    'trailing member on the callback': "test('x', function () {\n  work()\n}.bind(this))",
+  }
+  for (const [label, call] of Object.entries(variants)) {
+    const base = wrap(call)
+    const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base })
+    assert.deepEqual(record, { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' }, label)
+  }
+  const base = wrap(variants['non-literal title'])
+  const { brief, rows } = heldScenario({ bases: { 'a.test.mjs': { ok: true, output: base } }, diffs: { 'a.test.mjs': { ok: true, output: '' } }, files: { [`${CTX.checkout}/a.test.mjs`]: base } })
+  assert.deepEqual(rows.map(({ status, assertions_changed, body_lines_changed, tests_removed, totals_absent, unmeasured }) => ({ status, assertions_changed, body_lines_changed, tests_removed, totals_absent, unmeasured })), [{ status: 'unmeasured', assertions_changed: null, body_lines_changed: null, tests_removed: null, totals_absent: 'held-file-unmeasured', unmeasured: [{ path: 'a.test.mjs', reason: 'test-call-uncertain' }] }])
+  assert.match(brief, /PRE-EXISTING ASSERTIONS UNMEASURED\n- a\.test\.mjs: test-call-uncertain/)
+  assert.doesNotMatch(brief, /No pre-existing assertion or test changed/)
+})
+
+test('a comment ending in function before a held test does not hide the test, so a deleted setup line is reported', () => {
+  // MUTATION: scanning raw source instead of the masked code reads the comment's "function" as a declaration and skips the test.
+  const base = "// shared setup lives in this helper function\ntest('x', () => {\n  setup()\n  assert.ok(run())\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '@@ -3 +2,0 @@\n-  setup()\n', current: base.replace('  setup()\n', '') })
+  assert.equal(record.measured, true)
+  assert.equal(record.body_lines_changed, 1)
+  assert.deepEqual(record.entries.map((entry) => [entry.test, entry.class, entry.line, entry.text]), [['x', 'body', 3, '  setup()']])
+})
+
+test('a block comment holding a test call neither creates nor hides a test', () => {
+  // MUTATION: scanning raw source instead of the masked code reads the commented call as code and loses the real test.
+  const base = "/* test('fake', () => { */\ntest('real', () => {\n  setup()\n  assert.ok(run())\n})\n"
+  const current = "test('real', () => {\n  assert.ok(run())\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1 +0,0 @@\n-/* test('fake', () => { */\n@@ -3 +2,0 @@\n-  setup()\n", current })
+  assert.equal(record.measured, true)
+  assert.equal(record.tests_removed, 0)
+  assert.deepEqual(record.entries.map((entry) => [entry.test, entry.class, entry.line, entry.text]), [['real', 'body', 3, '  setup()']])
+})
+
+test('an assertion call written inside a string literal is not counted as an assertion', () => {
+  // MUTATION: scanning raw source instead of the masked code counts the quoted call as a changed assertion.
+  const base = "test('quoted', () => {\n  const label = 'assert.equal(a, b)'\n  assert.ok(label)\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -2 +1,0 @@\n-  const label = 'assert.equal(a, b)'\n", current: base.replace("  const label = 'assert.equal(a, b)'\n", '') })
+  assert.equal(record.measured, true)
+  assert.equal(record.assertions_changed, 0)
+  assert.deepEqual(record.entries.map((entry) => [entry.test, entry.class, entry.text]), [['quoted', 'body', "  const label = 'assert.equal(a, b)'"]])
+})
+
+test('an unterminated block comment leaves the held file unmeasured', () => {
+  // MUTATION: treating an unclosed comment as running to end of file reports the file measured with no changes.
+  const base = "test('x', () => {\n  setup()\n})\n/* never closed\n"
+  assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), { path: 'a.test.mjs', measured: false, reason: 'base-unreadable' })
+  const good = "test('x', () => {\n  setup()\n})\n"
+  assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base: good, diff: '', current: `${good}/* never closed\n` }), { path: 'a.test.mjs', measured: false, reason: 'current-unreadable' })
+})

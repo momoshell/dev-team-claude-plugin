@@ -926,8 +926,9 @@ function failedEdit(event, { cwd, env, corpus, readFile, statFile, appendFile, j
   if (path && Array.isArray(event?.input?.edits)) {
     const messages = (Array.isArray(event.content) ? event.content : []).filter((part) => part?.type === 'text').map((part) => String(part.text || '')).join('\n')
     const match = /(?:Could not find|Found \d+ occurrences of) edits\[(\d+)\] in /.exec(messages)
-    if (match) {
-      const index = Number(match[1])
+    const singleMatch = event.input.edits.length === 1 && /(?:Could not find the exact text|Found \d+ occurrences of the text) in /.test(messages)
+    const index = match ? Number(match[1]) : singleMatch ? 0 : null
+    if (index !== null) {
       if (Number.isSafeInteger(index) && index >= 0 && index < event.input.edits.length && typeof event.input.edits[index]?.oldText === 'string') {
         editIndex = index
         oldText = event.input.edits[index].oldText

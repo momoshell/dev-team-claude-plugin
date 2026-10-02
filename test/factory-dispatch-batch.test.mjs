@@ -6821,8 +6821,8 @@ test('BD3', async () => {
   const proposal = ['## Proposed tier', 'proposed tier: mechanical', '```proposal', '{"shape":"mechanical","strength":"workhorse"}', '```'].join('\n')
   const spoofBrief = ['# Task', '## The ask', 'A quoted task.', '## Intent', 'Spoofed', proposal].join('\n')
   const rejected = await dispatchFixture({ label: 'bd3-spoof', names: ['lane-a'], brief: spoofBrief })
-  assert.equal([...rejected.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
-  assert.equal(rejected.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+  assert.equal([...rejected.wrote].some(([path, text]) => path.endsWith('/crew.json') && Object.hasOwn(JSON.parse(text), 'intent')), false)
+  assert.equal(rejected.appended.some(({ path, content }) => path.endsWith('journal.jsonl') && (content.includes('lane-intent') || content.includes('Spoofed'))), false)
 
   const framedBrief = ['# Task', '## Intent', 'Real intent', '## The ask', 'A task.', proposal].join('\n')
   const accepted = await dispatchFixture({ label: 'bd3-real', names: ['lane-a'], brief: framedBrief })

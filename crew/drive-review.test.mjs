@@ -2868,16 +2868,16 @@ test('#800 §7b 44 — divergent collisions preserve reviewer A ids and refuse a
   const first = dPanelOutcomes(io)[0]
   const adjudication = io.calls.writes[`${TD}/panel-adjudication-1.md`] || ''
   const patch = dPatchWrite(io)?.[1] || ''
-  const conflict = result.details.hardening_prescription_conflict
-  assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.where, 'harden')
+  const conflict = io.calls.logs.find((row) => row.hardening_prescription_conflict)?.hardening_prescription_conflict
+  assert.equal(result.status, 'done')
   assert.ok(first.findings.some(({ id, reviewer }) => id === 'RV1-1' && reviewer === 'reviewer'))
   assert.ok(first.findings.some(({ id, reviewer }) => id === 'panel-remint-1' && reviewer === 'tech-lead'))
   assert.match(adjudication, /panel-remint-1/)
   assert.equal(conflict.finding.id, 'panel-remint-1')
   assert.equal(conflict.file, 'a.test.mjs')
-  assert.equal(dGitApplies(io).length, 0)
-  assert.equal(patch, '')
+  assert.equal(conflict.resolution, 'new-guard-requirement')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.notEqual(patch, '')
 })
 
 test('RV1-1 reviewer hardening survives a reminted one-sided split', () => {
@@ -2917,7 +2917,7 @@ test('#800 §7b 45 — each reminted final id has one auditable remint join', ()
   ]
   for (const [io, original] of cases) {
     const result = driveTask(D_COLLISION_CTX, io)
-    assert.equal(result.status, original === 'RV1-1' ? 'escalation' : 'done')
+    assert.equal(result.status, 'done')
     const reminted = dPanelOutcomes(io)[0].findings.filter(({ id }) => id.startsWith('panel-remint-')).map(({ id }) => id)
     const rows = dRemintRows(io)
     assert.deepEqual(reminted, ['panel-remint-1'])
@@ -5145,24 +5145,96 @@ const prescriptionFinding = (over = {}) => ({
 
 const readWitness = (file = 'a.test.mjs') => new Map([[file, { state: 'read', bytes: 'export const witnessed = true\n' }]])
 
-test('A1 hardening prescription conflict stops at review accept', () => {
+// Kills PT1 prescription conversion by restoring review-accept escalation.
+test('PT1', () => {
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
   const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  const conflict = result.details.hardening_prescription_conflict
-  assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.where, 'harden')
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = io.calls.logs.find((row) => row.hardening_prescription_conflict)?.hardening_prescription_conflict
+  assert.equal(conflict?.resolution, 'new-guard-requirement')
+  assert.equal(conflict?.finding.id, finding.id)
+  assert.equal(conflict?.file, 'a.test.mjs')
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(io.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`], B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`])
+  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 2), true)
+})
+
+// Kills PT2 per-finding builder instruction by removing the prescription requirement.
+test('PT2', () => {
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const builder = io.calls.assign.find(({ role, n }) => role === 'builder' && n === 2)
+  const brief = io.calls.writes[builder?.briefFile] || ''
+  const line = brief.split('\n').find((entry) => entry.startsWith('- F1 (')) || ''
+  assert.match(line, /NEW top-level test\(\.\.\.\)/)
+  assert.match(line, /name is absent from the review-time tree/)
+  assert.match(line, /leaving the existing checks of a\.test\.mjs as they were/)
+})
+
+// Kills PT3 location-only detection by removing location candidates.
+test('PT3', () => {
+  const finding = { ...B376_FINDING, location: 'a.test.mjs:1', disposition: 'auto-fix', patch: '' }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = io.calls.logs.find((row) => row.hardening_prescription_conflict)?.hardening_prescription_conflict
+  assert.equal(conflict?.resolution, 'new-guard-requirement')
+  assert.equal(conflict?.file, 'a.test.mjs')
+  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 2), true)
+})
+
+// Kills singleton detection or per-finding patch suppression by routing every conflict separately.
+test('hardening prescription conversion journals every conflict and suppresses each patch', () => {
+  const findings = [
+    { ...B376_FINDING, id: 'F1', location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') },
+    { ...B376_FINDING, id: 'F2', location: 'a.mjs:2', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') },
+  ]
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', findings) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.deepEqual(io.calls.logs.flatMap((row) => row.hardening_prescription_conflict ? [row.hardening_prescription_conflict.finding.id] : []), ['F1', 'F2'])
+  assert.equal(dGitApplies(io).length, 0)
+})
+
+// Kills whole-finding suppression by allowing a source hunk from a conflicted multi-target patch.
+test('hardening prescription conversion suppresses a conflicted multi-target patch whole', () => {
+  const patch = `${prescriptionPatch('a.mjs')}${prescriptionPatch('a.test.mjs')}`
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(io.calls.files[`${CTX.checkout}/a.mjs`], B376_FILES[`${CTX.checkout}/a.mjs`])
+})
+
+// Kills blanket auto-fix suppression by preserving unrelated source-only auto-fixes.
+test('hardening prescription conversion applies unrelated source-only auto-fixes', () => {
+  const findings = [
+    { ...B376_FINDING, id: 'F1', location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') },
+    { ...B376_FINDING, id: 'F2', location: 'a.mjs:2', disposition: 'auto-fix', patch: prescriptionPatch('a.mjs') },
+  ]
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', findings) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(dGitApplies(io).length, 1)
+  assert.match(dGitApplies(io)[0].cmd, /auto-fix-r1-F2\.patch/)
+  assert.equal(io.calls.writes[`${TD}/auto-fix-r1-F1.patch`], undefined)
+})
+
+test('A1 hardening prescription conflict routes to a new guard', () => {
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = io.calls.logs.find((row) => row.hardening_prescription_conflict)?.hardening_prescription_conflict
   assert.equal(conflict.reason, 'pinned-test-prescription')
+  assert.equal(conflict.resolution, 'new-guard-requirement')
   assert.equal(conflict.file, 'a.test.mjs')
   assert.equal(conflict.finding.id, 'F1')
   assert.equal(dGitApplies(io).length, 0)
-  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 2), false)
+  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 2), true)
 })
 
 test('B1 hardening prescription conflict has a closed reason', () => {
   assert.deepEqual(HARDENING_PRESCRIPTION_REASONS, ['pinned-test-prescription'])
   assert.equal(Object.isFrozen(HARDENING_PRESCRIPTION_REASONS), true)
-  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'refuse-prescription')
+  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'new-guard-requirement')
   for (const reason of ['build', 'harden', 'review-unresolved', 'anchor-absent']) {
     assert.equal(HARDENING_PRESCRIPTION_REASONS.includes(reason), false)
   }
@@ -5182,12 +5254,12 @@ test('D1 pinned test edits cannot substitute for implementation repair', () => {
   assert.equal(row.outcome, 'pre-repair-green')
 })
 
-test('E1 conflict records the chosen prescription refusal', () => {
+test('E1 conflict records the new guard requirement', () => {
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch('a.test.mjs') }
   const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]) })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  const conflict = result.details.hardening_prescription_conflict
-  assert.equal(conflict.resolution, 'refuse-prescription')
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const conflict = io.calls.logs.find((row) => row.hardening_prescription_conflict)?.hardening_prescription_conflict
+  assert.equal(conflict.resolution, 'new-guard-requirement')
   assert.equal(conflict.finding.id, finding.id)
   assert.equal(conflict.file, 'a.test.mjs')
 })
@@ -5482,7 +5554,7 @@ test('E1 existing pinned prescription contracts remain unchanged', () => {
   const ordinary = { findings: [prescriptionFinding({ location: `${path}:1` })] }
   assert.deepEqual(HARDENING_PRESCRIPTION_REASONS, ['pinned-test-prescription'])
   assert.equal(Object.isFrozen(HARDENING_PRESCRIPTION_REASONS), true)
-  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'refuse-prescription')
+  assert.equal(HARDENING_PRESCRIPTION_RESOLUTION, 'new-guard-requirement')
   assert.equal(hardeningPrescriptionConflict(ordinary, witness)?.resolution, HARDENING_PRESCRIPTION_RESOLUTION)
   for (const location of [undefined, '', ':bad', 'unrelated prose']) {
     assert.equal(hardeningPrescriptionConflict({ findings: [prescriptionFinding({ location })] }, witness), null)

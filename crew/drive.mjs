@@ -5916,8 +5916,8 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
       if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
       const testAbs = `${ctx.checkout}/${entry.test}`
       const fileAbs = `${ctx.checkout}/${entry.file}`
-      const cmd = hardenCommand(entry.test, entry.name)
-      const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: see hardenWitnessCommand
+      let cmd = hardenCommand(entry.test, entry.name)
+      const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: nested test names can require descendant registration
       const repairedTest = io.readFile(testAbs)
       if (repairedTest === null) return row('unapplied', `${entry.test} does not exist in the built tree`)
       let witnessRun = null
@@ -5946,7 +5946,8 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
         // measured nothing and is never read as `new`.
         if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
       }
-      const control = nameVerdict(hardenRun(cmd)?.output, entry.name)
+      let control = nameVerdict(hardenRun(cmd)?.output, entry.name)
+      if (control === 'absent') { cmd = witnessCmd; control = nameVerdict(hardenRun(cmd)?.output, entry.name) }
       if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
       if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
       if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
@@ -5959,18 +5960,23 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
       // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
       // the behavioural proof again — the deadlock three finished lanes paid for.
       if (hardeningClassOf(entry) === 'coverage') {
-        // The claim is NOT taken on trust. A coverage repair asserts the implementation
-        // was ALREADY correct at review time, so the witnessed bytes and the built bytes
-        // must be the same bytes. This is the conjunct that closes the dishonest route:
-        // a builder that REGRESSED the implementation to manufacture a red pre-repair is
-        // refused here by name, and a builder that did not has nothing to gain from
-        // regressing it, because this arm certifies without a red pre-repair at all.
-        // Everything that makes the guard REAL still holds: the name was absent on the
-        // witnessed tree, it passes on the repaired tree, and the declared mutation must
-        // still kill it below.
-        // MUTATION D1: drop the byte-identity conjunct and the coverage arm certifies a
-        // declaration whose implementation changed — the regression route this closes.
-        if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)   // ANCHOR HC2
+        // Coverage is certified per finding: unchanged bytes take the fast path; changed
+        // bytes must retain the declared region and pass the named check on review-time code.
+        // MUTATION D1: restore whole-file refusal and changed-code coverage cannot certify.
+        if (repairedFile !== S.bytes) {                                                   // ANCHOR HC2
+          const reviewBound = applyMutationAnchor(S.bytes, entry.find, entry.replace)
+          if (reviewBound.text === null) return row('source-regressed', `source-regressed: declared find ${JSON.stringify(entry.find)} is ${reviewBound.mode} in review-time file ${entry.file}`)
+          let reviewResult
+          active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+          try {
+            active.writeAttempted = true
+            io.writeFile(fileAbs, S.bytes)
+            reviewResult = hardenRun(cmd)
+          } finally { io.writeFile(fileAbs, repairedFile) }
+          active = null
+          const reviewVerdict = nameVerdict(reviewResult?.output, entry.name)
+          if (reviewVerdict !== 'passed') return row('source-regressed', `source-regressed: the review-time ${entry.file} check ${entry.name} was ${reviewVerdict}`)
+        }
       } else {
         let pre = null
         active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
@@ -11527,10 +11533,25 @@ function runTask(ctx, io, crash) {
           }
           hardenOwed = { owed: hardenOwed.owed, exempt: debt.exempt }
           const prescriptionAuthored = prescriptionAuthorshipEvidence(review.details, tree, ctx, io)
-          const prescriptionConflict = hardeningPrescriptionConflict(review.details, tree, prescriptionAuthored, tree)
-          if (prescriptionConflict) {
-            stageComplete()
-            return escalate('harden', `[pinned-test-prescription] finding ${prescriptionConflict.finding.id} prescribes a change to hardening-witnessed ${prescriptionConflict.file}; refusing the prescription`, [], { hardening_prescription_conflict: prescriptionConflict })
+          const rawById = acceptedRawById(review.details)
+          const conflicted = new Set()
+          for (const finding of debt.owed) {
+            const prescriptionConflict = hardeningPrescriptionConflict(
+              { ...review.details, findings: [rawById.get(finding.id)] }, tree, prescriptionAuthored, tree,
+            )
+            if (prescriptionConflict) {
+              conflicted.add(finding.id)
+              const carried = hardenOwed.owed.find((entry) => entry.id === finding.id)
+              if (carried) carried.prescription = prescriptionConflict
+              panelLog({ hardening_prescription_conflict: prescriptionConflict })
+            }
+          }
+          if (conflicted.size > 0) {
+            const blocked = disposed.autoFix.filter(({ id }) => conflicted.has(id))
+            disposed.autoFix = disposed.autoFix.filter(({ id }) => !conflicted.has(id))
+            for (const entry of blocked) {
+              if (!disposed.needsSeat.includes(entry.id)) disposed.needsSeat.push(entry.id)
+            }
           }
           for (const { id, why } of debt.exempt) {
             logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
@@ -14210,7 +14231,7 @@ export function hardeningAppealRequest(entry) {
 }
 
 export const HARDENING_PRESCRIPTION_REASONS = Object.freeze(['pinned-test-prescription'])
-export const HARDENING_PRESCRIPTION_RESOLUTION = 'refuse-prescription'
+export const HARDENING_PRESCRIPTION_RESOLUTION = 'new-guard-requirement'
 
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
@@ -14432,9 +14453,9 @@ export function hardenCommand(testFile, name) {
 //   --test-name-pattern='outer|F1 guard'    → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
 //   no filter at all                        → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
 // The unfiltered run exists ONLY so node registers nested descendants; the exact declared
-// name is still the sole adjudicator, through `nameVerdict`. The repaired control, the
-// witnessed pre-repair and the mutant runs stay FILTERED — they ask whether one named
-// check passes, not what names exist.
+// name is still the sole adjudicator, through `nameVerdict`. Proof normally filters the
+// repaired control, pre-repair and mutant; an absent filtered control retries unfiltered
+// so Node registers nested descendants before exact-name adjudication.
 export function hardenWitnessCommand(testFile) {
   // MUTATION B5f: filter the witness run to the declared child name and node suppresses
   // the nested line, so an already-existing nested check reads `absent` and is credited
@@ -14635,9 +14656,12 @@ export function hardeningBriefLines(owed, exempt) {
   const findings = Array.isArray(owed) ? owed : []
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
-  lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
+  lines.push(...findings.map(({ id, location, summary, prescription }) => {
+    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were` : ''
+    return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
+  }))
   lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
-    'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, so editing the implementation to manufacture one is refused as source-regressed.',
+    'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, or its find must bind there and its named check must pass with those review-time implementation bytes restored; otherwise it is refused as source-regressed.',
     'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)
   if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))

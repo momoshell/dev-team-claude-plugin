@@ -3756,11 +3756,14 @@ test('b376 A1 a bounced build round runs its scope gate with rounds remaining', 
 })
 
 
-const b376SetBuiltImplementation = (io, content) => {
+const b376SetBuiltImplementation = (io, content, testContent = null) => {
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
-    if (returnPath === 'builder:2') this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] = content
+    if (returnPath === 'builder:2') {
+      this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] = content
+      if (testContent !== null) this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`] = testContent
+    }
     return env
   }
   return io
@@ -3804,7 +3807,8 @@ test('#910 a behavioural repair certifies with the witnessed-red proof', () => {
   assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
 })
 
-test('#910 a coverage claim over a changed implementation is source-regressed', () => {
+// Kills CV2 review-time binding validation by making an absent anchor certify.
+test('CV2', () => {
   const entry = { ...B376_HARDENED, class: 'coverage', find: 'const guard = true', replace: 'const guard = false' }
   const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES } }), 'const guard = true\n')
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
@@ -3812,7 +3816,256 @@ test('#910 a coverage claim over a changed implementation is source-regressed', 
   assert.equal(result.details.escalation.where, 'harden')
   const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
   assert.equal(row.outcome, 'source-regressed')
-  assert.match(row.why, /source-regressed/)
+  assert.match(row.why, /declared find.*absent/)
+})
+
+// Kills CV1 whole-file refusal when the builder's review-time anchor still binds.
+test('CV1', () => {
+  const built = 'const guard = false\n// unrelated builder edit\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [{ ...B376_HARDENED, class: 'coverage' }], files: { ...B376_FILES } }), built)
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')) {
+      const implementation = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+      if (implementation === 'const guard = false\n') return { ok: true, output: 'ok 1 - F1 guard\n# pass 1\n# fail 0' }
+      if (implementation === 'const guard = true\n// unrelated builder edit\n') return { ok: false, output: 'not ok 1 - F1 guard\n# pass 0\n# fail 1' }
+      return { ok: true, output: 'ok 1 - F1 guard\n# pass 1\n# fail 0' }
+    }
+    return run.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built)
+})
+
+// Kills CV3 review-time exact-name validation by accepting its failed verdict.
+test('CV3', () => {
+  const entry = { ...B376_HARDENED, class: 'coverage' }
+  const built = 'const guard = false\n// changed\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES } }), built)
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard') && this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] === 'const guard = false\n') {
+      return { ok: false, output: 'not ok 1 - F1 guard\n# pass 0\n# fail 1' }
+    }
+    return run.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(result.status, 'escalation')
+  assert.equal(row.outcome, 'source-regressed')
+  assert.match(row.why, /review-time/)
+  assert.match(row.why, /failed/)
+  assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built)
+})
+
+// Kills normalized review binding by refusing changed coverage before its built-tree mutation.
+test('changed coverage certifies a normalized review-time binding', () => {
+  const review = 'const guard =  false\n'
+  const built = 'const guard = false\n// changed\n'
+  const mutant = 'const guard = true\n// changed\n'
+  const entry = { ...B376_HARDENED, class: 'coverage' }
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_IMPL_FILE}`]: review } }), built)
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenCommand(B376_TEST_FILE, entry.name)) {
+      const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+      if (source === built || source === review) return B376_GREEN
+      if (source === mutant) return B376_MUT_RED
+    }
+    return run.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((row) => row.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built)
+})
+
+// Kills changed-coverage binding refusal by accepting ambiguous or unsafe review-time anchors.
+test('changed coverage refuses ambiguous and unsafe review-time bindings', () => {
+  const cases = [
+    ['ambiguous', { ...B376_HARDENED, class: 'coverage', find: 'call(first, second)', replace: 'call(second)' }, 'const one = call(first,\n  second)\nconst two = call(first,\n  second)\n'],
+    ['unsafe', { ...B376_HARDENED, class: 'coverage', find: '// load-bearing const guard = false', replace: 'const guard = true' }, '// load-bearing\nconst guard = false\n'],
+  ]
+  for (const [mode, entry, review] of cases) {
+    const built = 'const guard = false\n// changed\n'
+    const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_IMPL_FILE}`]: review } }), built)
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = io.calls.logs.find((event) => event.finding_hardened)?.finding_hardened
+    assert.equal(result.status, 'escalation', mode)
+    assert.equal(row.outcome, 'source-regressed', mode)
+    assert.match(row.why, new RegExp(`declared find.*${mode}`), mode)
+    assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built, mode)
+  }
+})
+
+// Kills CV3's exact passed verdict by allowing another review-time name verdict to certify.
+test('changed coverage refuses every non-passed review-time exact-name verdict', () => {
+  const outputs = {
+    skipped: 'ok 1 - F1 guard # SKIP unavailable\n# pass 1\n# fail 0',
+    absent: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0',
+    ambiguous: 'ok 1 - F1 guard\nok 2 - F1 guard\n# pass 2\n# fail 0',
+  }
+  for (const [verdict, output] of Object.entries(outputs)) {
+    const review = 'const guard = false\n'
+    const built = 'const guard = false\n// changed\n'
+    const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [{ ...B376_HARDENED, class: 'coverage' }], files: { ...B376_FILES, [`${CTX.checkout}/${B376_IMPL_FILE}`]: review } }), built)
+    const run = io.run
+    io.run = function (cmd) {
+      if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard') && this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] === review) return { ok: true, output }
+      return run.call(this, cmd)
+    }
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = io.calls.logs.find((event) => event.finding_hardened)?.finding_hardened
+    assert.equal(result.status, 'escalation', verdict)
+    assert.equal(row.outcome, 'source-regressed', verdict)
+    assert.match(row.why, new RegExp(`was ${verdict}`), verdict)
+    assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built, verdict)
+  }
+})
+
+// Kills restoration by allowing an interrupted review-time run to leave changed coverage bytes behind.
+test('changed coverage restores built bytes after a review-time runner error', () => {
+  const review = 'const guard = false\n'
+  const built = 'const guard = false\n// changed\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [{ ...B376_HARDENED, class: 'coverage' }], files: { ...B376_FILES, [`${CTX.checkout}/${B376_IMPL_FILE}`]: review } }), built)
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard') && this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] === review) throw new Error('review-time runner interrupted')
+    return run.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = io.calls.logs.find((event) => event.finding_hardened)?.finding_hardened
+  assert.equal(result.status, 'done')
+  assert.equal(row.outcome, 'unproven')
+  assert.match(row.why, /review-time runner interrupted/)
+  assert.equal(io.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`], built)
+})
+
+// Kills NN1 unfiltered fallback by leaving a nested exact name absent from filtered output.
+test('NN1', () => {
+  const entry = { ...B376_HARDENED, name: 'nested guard' }
+  const filtered = hardenCommand(B376_TEST_FILE, entry.name)
+  const witness = hardenWitnessCommand(B376_TEST_FILE)
+  const reviewTest = 'export const reviewTime = true\n'
+  const builtTest = 'export const nestedGuard = true\n'
+  const reviewSource = 'const guard = false\n'
+  const builtSource = 'const guard = false\n// built\n'
+  const mutant = 'const guard = true\n// built\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: reviewTest } }), builtSource, builtTest)
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+    const check = this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`]
+    if (cmd === filtered && source === builtSource && check === builtTest) return { ok: true, output: 'ok 1 - outer\n# pass 1\n# fail 0' }
+    if (cmd !== witness) return result
+    if (source === builtSource && check === reviewTest) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if (source === builtSource && check === builtTest) return { ok: true, output: '    ok 1 - nested guard\n# pass 1\n# fail 0' }
+    if ((source === reviewSource || source === mutant) && check === builtTest) return { ok: false, output: '    not ok 1 - nested guard\n# pass 0\n# fail 1' }
+    throw new Error(`unexpected NN1 proof state ${JSON.stringify({ cmd, source, check })}`)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === filtered).length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === witness).length, 4)
+})
+
+// Kills NN2 exact-name mutant adjudication by allowing a passing nested mutant to certify.
+test('NN2', () => {
+  const entry = { ...B376_HARDENED, name: 'nested guard' }
+  const filtered = hardenCommand(B376_TEST_FILE, entry.name)
+  const witness = hardenWitnessCommand(B376_TEST_FILE)
+  const reviewTest = 'export const reviewTime = true\n'
+  const builtTest = 'export const nestedGuard = true\n'
+  const reviewSource = 'const guard = false\n'
+  const builtSource = 'const guard = false\n// built\n'
+  const mutant = 'const guard = true\n// built\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: reviewTest } }), builtSource, builtTest)
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+    const check = this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`]
+    if (cmd === filtered && source === builtSource && check === builtTest) return { ok: true, output: 'ok 1 - outer\n# pass 1\n# fail 0' }
+    if (cmd !== witness) return result
+    if (source === builtSource && check === reviewTest) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if (source === builtSource && check === builtTest) return { ok: true, output: '    ok 1 - nested guard\n# pass 1\n# fail 0' }
+    if (source === reviewSource && check === builtTest) return { ok: false, output: '    not ok 1 - nested guard\n# pass 0\n# fail 1' }
+    if (source === mutant && check === builtTest) return { ok: true, output: '    ok 1 - nested guard\n# pass 1\n# fail 0' }
+    throw new Error(`unexpected NN2 proof state ${JSON.stringify({ cmd, source, check })}`)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
+  assert.equal(result.status, 'escalation')
+  assert.equal(row.outcome, 'survived')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === filtered).length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === witness).length, 4)
+})
+
+// Kills coverage command propagation by using the selected unfiltered nested command at review time.
+test('nested changed coverage uses the selected unfiltered command throughout proof', () => {
+  const entry = { ...B376_HARDENED, class: 'coverage', name: 'nested guard' }
+  const filtered = hardenCommand(B376_TEST_FILE, entry.name)
+  const witness = hardenWitnessCommand(B376_TEST_FILE)
+  const reviewTest = 'export const reviewTime = true\n'
+  const builtTest = 'export const nestedGuard = true\n'
+  const reviewSource = 'const guard = false\n'
+  const builtSource = 'const guard = false\n// built\n'
+  const mutant = 'const guard = true\n// built\n'
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: reviewTest } }), builtSource, builtTest)
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+    const check = this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`]
+    if (cmd === filtered && source === builtSource && check === builtTest) return { ok: true, output: 'ok 1 - outer\n# pass 1\n# fail 0' }
+    if (cmd !== witness) return result
+    if (source === builtSource && check === reviewTest) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+    if ((source === builtSource || source === reviewSource) && check === builtTest) return { ok: true, output: '    ok 1 - nested guard\n# pass 1\n# fail 0' }
+    if (source === mutant && check === builtTest) return { ok: false, output: '    not ok 1 - nested guard\n# pass 0\n# fail 1' }
+    throw new Error(`unexpected nested coverage proof state ${JSON.stringify({ cmd, source, check })}`)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.logs.find((event) => event.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === filtered).length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === witness).length, 4)
+})
+
+// Kills control refusal by treating any unfiltered nested-name verdict as certifying.
+test('nested unfiltered ambiguous, skipped, and absent controls never certify', () => {
+  const verdicts = [
+    ['ambiguous', '    ok 1 - nested guard\n    ok 2 - nested guard\n# pass 2\n# fail 0', 'name-ambiguous'],
+    ['skipped', '    ok 1 - nested guard # SKIP unavailable\n# pass 1\n# fail 0', 'control-skipped'],
+    ['absent', 'ok 1 - a.test.mjs\n# pass 1\n# fail 0', 'name-absent'],
+  ]
+  for (const [label, controlOutput, outcome] of verdicts) {
+    const entry = { ...B376_HARDENED, name: 'nested guard' }
+    const filtered = hardenCommand(B376_TEST_FILE, entry.name)
+    const witness = hardenWitnessCommand(B376_TEST_FILE)
+    const reviewTest = 'export const reviewTime = true\n'
+    const builtTest = 'export const nestedGuard = true\n'
+    const builtSource = 'const guard = false\n// built\n'
+    const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: reviewTest } }), builtSource, builtTest)
+    const run = io.run
+    io.run = function (cmd) {
+      const result = run.call(this, cmd)
+      const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
+      const check = this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`]
+      if (cmd === filtered && source === builtSource && check === builtTest) return { ok: true, output: 'ok 1 - outer\n# pass 1\n# fail 0' }
+      if (cmd !== witness) return result
+      if (source === builtSource && check === reviewTest) return { ok: true, output: 'ok 1 - a.test.mjs\n# pass 1\n# fail 0' }
+      if (source === builtSource && check === builtTest) return { ok: true, output: controlOutput }
+      throw new Error(`unexpected nested ${label} control state ${JSON.stringify({ cmd, source, check })}`)
+    }
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = io.calls.logs.find((event) => event.finding_hardened)?.finding_hardened
+    assert.equal(result.status, 'escalation', label)
+    assert.equal(row.outcome, outcome, label)
+  }
 })
 
 test('#910 an unrecognised hardening class is refused by name', () => {

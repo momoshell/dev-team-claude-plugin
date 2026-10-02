@@ -13,10 +13,10 @@ const ROOT = new URL('..', import.meta.url).pathname
 const ids = ['lean-build', 'backend-node', 'qa-test-writing', 'frontend-svelte', 'ui-design', 'ux']
 const pathRules = [
   { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs', 'test/**/*.mjs', 'skills/**/*.mjs', 'visualizer/**/*.mjs', 'visualizer/**/*.js', 'visualizer/**/*.svelte'] }, skills: ['dev-team:lean-build'] },
-  { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'] }, skills: ['dev-team:backend-node'] },
-  { when: { paths: ['**/*.test.mjs'] }, skills: ['dev-team:qa-test-writing'] },
-  { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'] }, skills: ['dev-team:frontend-svelte'] },
-  { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
+  { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:backend-node'] },
+  { when: { paths: ['**/*.test.mjs'], roles: ['planner', 'builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:qa-test-writing'] },
+  { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
+  { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
 ]
 function fixture() {
   const dir = scratchDir('skill-gate-')

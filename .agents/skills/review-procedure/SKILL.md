@@ -40,10 +40,10 @@ restates it.
 ## Verifying on a seat
 
 - pi: `pi --print --skill .agents/skills/review-procedure -- 'list your available skills'`
-  (pi 0.84.2 discovers `<cwd>/.agents/skills` on its own; crew's pi transport
-  boots a seat with `--skill` for each granted skill — lean-build for every
-  role since #1504 — and `--no-skills` only when none is granted, so a seat
-  never sees this skill unless it is granted; the flag above is how you see it).
+  (pi 0.84.2 discovers `<cwd>/.agents/skills` on its own; crew inlines
+  delivered skills in the role prompt and uses `--skill` only for granted
+  skills not already inlined, with `--no-skills` when none remain. This keeps
+  discovery explicit; the flag above is the standalone manual probe).
 - claude: `claude -p 'list your available skills'` — claude 2.1.233 discovers
   project skills under `.claude/skills` only and does NOT read `.agents/`, so
   this probe is expected to NOT list this skill on that build. Do not report it

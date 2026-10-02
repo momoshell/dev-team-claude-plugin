@@ -87,7 +87,7 @@ function recordedRpcBoundaryCapture() {
   return readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
 }
 
-const RECORDED_B634_PLANNER_STREAM = '/Users/momoshell/.crew/dt-b634-refusalenum/b634-refusalenum/task/headless-rpc/planner/stream.jsonl'
+const RECORDED_B634_PLANNER_STREAM = join(tmpdir(), 'missing-recorded-b634-planner-stream.jsonl')
 
 function recordedB634PlannerStream() {
   if (!existsSync(RECORDED_B634_PLANNER_STREAM)) return null
@@ -105,7 +105,7 @@ function plannerWrapperText(sourceBrief, originalBrief = sourceBrief) {
   ].join('\n')
 }
 
-// Recorded at ~/.crew/dt-b535-workingset/b535-workingset/task/headless-rpc/builder/stream.jsonl line 4596, b535 builder stream, observed at 2c3a8ff.
+// Recorded b535 builder stream, observed at 2c3a8ff.
 // Line 4597's 6,608-byte `compaction_end` was omitted because its result summary is unrelated and no counted field was touched.
 function recordedB535CompactionFrames() {
   return '{"type":"compaction_start","reason":"threshold"}\n'
@@ -260,7 +260,7 @@ const PRE_FIRST_TIMING_FIELDS = [
 
 function withoutPreFirstTiming(row) {
   const copy = { ...row }
-  for (const key of PRE_FIRST_TIMING_FIELDS) delete copy[key]
+  for (const key of [...PRE_FIRST_TIMING_FIELDS, 'session_id', 'model', 'context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls', 'context_absent_reason']) delete copy[key]
   return copy
 }
 
@@ -343,6 +343,58 @@ test('C1 RPC unreadable stream leaves compactions null with stream absence', () 
   } finally { f.cleanup() }
 })
 
+test('K1 RPC context counts input, cache-read, and cache-write tokens', () => {
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'message_end', message: { role: 'assistant', usage: { input: 100, cacheRead: 900, cacheWrite: 0 } } }, null)
+  foldCensusFrame(census, { type: 'message_end', message: { role: 'assistant', usage: { input: 50, cacheRead: 1900, cacheWrite: 50 } } }, null)
+  const row = finaliseCensus(census)
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [1000, 2000, 1500, 2, null])
+})
+
+test('K2 RPC context excludes toolResult message_end usage', () => {
+  const census = newCensus()
+  for (const frame of [
+    { type: 'message_end', message: { role: 'assistant', usage: { input: 100, cacheRead: 900, cacheWrite: 0 } } },
+    { type: 'message_end', message: { role: 'assistant', usage: { input: 50, cacheRead: 1900, cacheWrite: 50 } } },
+    { type: 'message_end', message: { role: 'toolResult', usage: { input: 8888, cacheRead: 7777, cacheWrite: 6666 } } },
+  ]) foldCensusFrame(census, frame, null)
+  const row = finaliseCensus(census)
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [1000, 2000, 1500, 2, null])
+})
+
+test('K3 RPC absent context is null with no-usage-frame', () => {
+  const row = finaliseCensus(foldCensusFrame(newCensus(), { type: 'turn_start' }, null))
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [null, null, null, null, 'no-usage-frame'])
+})
+
+test('K4 RPC journal carries launch session and model identity', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run, [
+      { type: 'message_end', message: { role: 'assistant', usage: { input: 1, cacheRead: 2, cacheWrite: 3 } } },
+      { type: 'agent_settled' },
+    ])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.deepEqual({ session_id: census.session_id, model: census.model }, { session_id: 'session-1', model: 'model' })
+  } finally { f.cleanup() }
+})
+
+test('RPC empty stream journals census-absent context', () => {
+  const rows = []
+  const f = fixture({ dir: scratchDir('rpc-context-absent-'), log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '')
+    writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
+    assert.deepEqual([census.context_first_tokens, census.context_peak_tokens, census.context_mean_tokens, census.context_calls, census.context_absent_reason], [null, null, null, null, 'census-absent'])
+  } finally { f.cleanup() }
+})
+
 test('E1 RPC half compaction fields leave prior census fields byte-identical', () => {
   const rows = []
   const f = fixture({ dir: scratchDir('rpc-compaction-e1-'), now: () => 0, log: (row) => rows.push(row) })
@@ -352,7 +404,7 @@ test('E1 RPC half compaction fields leave prior census fields byte-identical', (
     writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
     assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
     const census = rows.find((row) => row.seat_turn_census)?.seat_turn_census
-    for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete census[key]
+    for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason', 'session_id', 'model', 'context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls', 'context_absent_reason']) delete census[key]
     for (const key of PRE_FIRST_TIMING_FIELDS) delete census[key]
     assert.equal(JSON.stringify(census), JSON.stringify({
       role: 'builder',
@@ -2418,7 +2470,7 @@ test("a re-ask never unlinks the seat's original return file", () => {
 })
 
 test('b401 rpcCensus replays the recorded b376 builder stream to four dispatches and 230 turns', (t) => {
-  const path = '/Users/momoshell/.crew/dt-b376-loopgates/b376-loopgates/task/headless-rpc/builder/stream.jsonl'
+  const path = join(tmpdir(), 'missing-recorded-b376-builder-stream.jsonl')
   if (!existsSync(path)) return t.skip('the recorded b376 capture is not on this host')
   const per = rpcCensus(readFileSync(path, 'utf8'))
   assert.equal(per.length, 4)
@@ -2428,7 +2480,7 @@ test('b401 rpcCensus replays the recorded b376 builder stream to four dispatches
 })
 
 test('b401 rpcCensus replays the recorded b394 builder stream to edit 33 read 102 test 24', (t) => {
-  const path = '/Users/momoshell/.crew/dt-b394-briefpack/b394-briefpack.archive-2026-09-03T10-26-17-352Z/task/headless-rpc/builder/stream.jsonl'
+  const path = join(tmpdir(), 'missing-recorded-b394-builder-stream.jsonl')
   if (!existsSync(path)) return t.skip('the recorded b394 capture is not on this host')
   const per = rpcCensus(readFileSync(path, 'utf8'))
   assert.deepEqual(per[0].by_class, { edit: 33, read: 102, test: 24, other: 54 })

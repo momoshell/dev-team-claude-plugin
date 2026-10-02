@@ -28,6 +28,26 @@ import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { CTX as DRIVE_CTX, driveTask, fakeIo, reconEnv } from './drive-fixtures.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
+test('K5 Claude context deduplicates message ids with last occurrence wins', () => {
+  const frames = [
+    { type: 'assistant', message: { id: 'one', usage: { input_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [] } },
+    { type: 'assistant', message: { id: 'one', usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 }, content: [] } },
+    { type: 'assistant', message: { id: 'two', usage: { input_tokens: 50, cache_read_input_tokens: 1900, cache_creation_input_tokens: 50 }, content: [] } },
+  ].map((frame) => JSON.stringify(frame)).join('\n')
+  const census = claudeCensus(frames)
+  assert.deepEqual([census.context_first_tokens, census.context_peak_tokens, census.context_mean_tokens, census.context_calls, census.context_absent_reason], [1000, 2000, 1500, 2, null])
+})
+
+test('K6 Claude context excludes nested parent tool usage', () => {
+  const frames = [
+    { type: 'assistant', message: { id: 'one', usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 }, content: [] } },
+    { type: 'assistant', message: { id: 'two', usage: { input_tokens: 50, cache_read_input_tokens: 1900, cache_creation_input_tokens: 50 }, content: [] } },
+    { type: 'assistant', parent_tool_use_id: 'parent', message: { id: 'nested', usage: { input_tokens: 777, cache_read_input_tokens: 888, cache_creation_input_tokens: 999 }, content: [] } },
+  ].map((frame) => JSON.stringify(frame)).join('\n')
+  const census = claudeCensus(frames)
+  assert.deepEqual([census.context_first_tokens, census.context_peak_tokens, census.context_mean_tokens, census.context_calls, census.context_absent_reason], [1000, 2000, 1500, 2, null])
+})
+
 test('skill-read classifier counts only plugin skill documents from read tools', () => {
   assert.deepEqual(skillReadsOf('read', { path: '/abs/plugin/skills/lean-build/SKILL.md' }), ['skills/lean-build/SKILL.md'])
   assert.deepEqual(skillReadsOf('read', { path: 'skills/qa/references/gates.md' }), ['skills/qa/references/gates.md'])
@@ -3006,7 +3026,7 @@ test('H1 JSON census keeps unchanged structured rereads', () => {
 })
 
 test('b401 census replays the recorded b381 planner stream to 173 turns and 173 tool calls', (t) => {
-  const path = '/Users/momoshell/.crew/dt-b381-journalfacts/b381-journalfacts/task/headless/d1/stream.jsonl'
+  const path = join(tmpdir(), 'missing-recorded-b381-planner-stream.jsonl')
   if (!existsSync(path)) return t.skip('the recorded b381 capture is not on this host')
   const census = claudeCensus(readFileSync(path, 'utf8'))
   assert.equal(census.turns, 173)
@@ -3016,7 +3036,7 @@ test('b401 census replays the recorded b381 planner stream to 173 turns and 173 
 })
 
 test("b401 the claude census clocks the tool boundary from the frames' own stamps", (t) => {
-  const path = '/Users/momoshell/.crew/dt-b381-journalfacts/b381-journalfacts/task/headless/d1/stream.jsonl'
+  const path = join(tmpdir(), 'missing-recorded-b381-planner-stream.jsonl')
   if (!existsSync(path)) return t.skip('the recorded b381 capture is not on this host')
   const census = claudeCensus(readFileSync(path, 'utf8'))
   assert.equal(census.tool_spans_matched, 173)
@@ -3217,6 +3237,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
   // existed BEFORE them is byte-identical, so each new family is deleted here
   // deliberately rather than folded into the expectation below.
   for (const key of [
+    'session_id', 'model', 'context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls', 'context_absent_reason',
     'compactions', 'compaction_frame', 'compactions_absent_reason',
     'pre_first_turn_span_ms', 'seat_boot_ms', 'seat_boot_absent_reason',
     'prompt_delivery_ms', 'prompt_delivery_absent_reason',
@@ -3257,7 +3278,7 @@ test('E1 compaction fields leave every prior census field byte-identical', () =>
     assert.equal(json.io.wait(json.assigned.returnPath, 60).status, 'done')
     jsonCensus = json.rows.find((row) => row.seat_turn_census)?.seat_turn_census
   } finally { json.cleanup() }
-  for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason']) delete jsonCensus[key]
+  for (const key of ['compactions', 'compaction_frame', 'compactions_absent_reason', 'session_id', 'model', 'context_first_tokens', 'context_peak_tokens', 'context_mean_tokens', 'context_calls', 'context_absent_reason']) delete jsonCensus[key]
   assert.equal(JSON.stringify(jsonCensus), JSON.stringify({
     role: 'builder',
     dispatch_id: 'd1',

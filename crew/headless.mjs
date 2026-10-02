@@ -807,6 +807,7 @@ export function claudeCensus(text) {
   const files = new Set()
   const skillReads = new Set()
   const starts = new Map()
+  const contextMessages = new Map()
   let turns = 0
   let toolCalls = 0
   let reReads = 0
@@ -824,6 +825,12 @@ export function claudeCensus(text) {
     if (stamp !== null) {
       if (firstStamp === null) firstStamp = stamp
       lastStamp = stamp
+    }
+    if (frame?.type === 'assistant' && frame.message?.id != null) {
+      const contextUsage = usageObject(frame.message.usage)
+      if (frame.parent_tool_use_id == null && contextUsage) {
+        contextMessages.set(frame.message.id, contextUsage)
+      }
     }
     if (frame?.type === 'assistant') {
       const content = Array.isArray(frame.message?.content) ? frame.message.content : []
@@ -867,8 +874,15 @@ export function claudeCensus(text) {
   }
   unmatched += starts.size
   const spanMs = firstStamp === null || lastStamp === null ? null : lastStamp - firstStamp
+  const contextValues = [...contextMessages.values()].map((usage) => usageInt(usage.input_tokens) + usageInt(usage.cache_read_input_tokens) + usageInt(usage.cache_creation_input_tokens))
+  const contextSum = contextValues.reduce((sum, value) => sum + value, 0)
   const inToolTotal = Object.values(inTool).reduce((total, value) => total + value, 0)
   return {
+    context_first_tokens: contextValues.length ? contextValues[0] : null,
+    context_peak_tokens: contextValues.length ? Math.max(...contextValues) : null,
+    context_mean_tokens: contextValues.length ? Math.round(contextSum / contextValues.length) : null,
+    context_calls: contextValues.length || null,
+    context_absent_reason: contextValues.length ? null : 'no-usage-frame',
     turns,
     tool_calls: toolCalls,
     by_class: byClass,
@@ -1554,6 +1568,13 @@ function censusRow(run, transport, stream) {
   if (!census || stream?.census_absent) {
     return {
       role: run?.role ?? null,
+      session_id: run?.sessionId ?? null,
+      model: run?.model ?? null,
+      context_first_tokens: null,
+      context_peak_tokens: null,
+      context_mean_tokens: null,
+      context_calls: null,
+      context_absent_reason: 'census-absent',
       dispatch_id: run?.id ?? null,
       transport,
       turns: null,
@@ -1577,6 +1598,13 @@ function censusRow(run, transport, stream) {
   }
   return {
     role: run?.role ?? null,
+    session_id: run?.sessionId ?? null,
+    model: run?.model ?? null,
+    context_first_tokens: census.context_first_tokens,
+    context_peak_tokens: census.context_peak_tokens,
+    context_mean_tokens: census.context_mean_tokens,
+    context_calls: census.context_calls,
+    context_absent_reason: census.context_absent_reason,
     dispatch_id: run?.id ?? null,
     transport,
     turns: census.turns,

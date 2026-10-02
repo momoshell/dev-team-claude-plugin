@@ -209,7 +209,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
   'crew/roster-refresh.test.mjs': '2aa9146c3330b5c5773d4684efd4c90ce38221dcadc17e59bf439413866f6138',
   'test/factory-emit.test.mjs': '5ca5cdeed06f294acfad8d574e295b4371dc74eb6560d82a94df0fe9614dc229',
-  'test/factory-make-brief.test.mjs': '64cec6180e42bee5f96e3b1ab50bf2e1c0f83dfdc2d2cf68256b1299da1bf684',
+  'test/factory-make-brief.test.mjs': 'ecd2aaadfa1df545d23fcea917dba2eff97ea846184088266c50206a1c1c3a21',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
   'test/visualizer-server.test.mjs': 'd4cc5536f152b4fb37a37c0fb8b1f7115038d833fc21423504357b5c1a43c2e6',
   'test/visualizer-shape.test.mjs': '3c85e3ffb2128727d5fbdcbb6f87b46660b72fd021f66b73caff202346fa4fc0',

@@ -347,7 +347,7 @@ test('pack mode moves boilerplate to sidecars and preserves the inline verdict',
   assert.ok(packed.includes(vocabulary))
   assert.ok(packed.includes(`grep -rn -f ${vocabulary}`))
   assert.ok(packed.includes(rows))
-  assert.ok(packed.includes(`cat ${rows}`))
+  assert.ok(packed.includes(`rows: ${rows} — the inventory of tests that may assert what you change (every candidate, tripwire test with its keys, and broad key); fence what it names. Look rows up, do not read it whole: grep -n -F -- '- <file> · ' ${rows} for a file you touch, or grep -n -F '<key>' ${rows}`))
   assert.ok(packed.includes(conventions))
   assert.ok(packed.includes(`cat ${conventions}`))
   assert.equal(packed.split(issueBody).length - 1, 1)
@@ -413,7 +413,7 @@ test('a packed brief names its symbol sidecar path', () => {
   const { brief } = compile(root, { where: ['lib/pointer.mjs'] }, ['--pack', pack], 'pointer.brief.md')
   const context = section(brief, '## Context pack')
   const symbols = join(pack, 'pointer.symbols.md')
-  assert.equal(context.includes(`symbol index: ${symbols} — full static scan; read it once with: cat ${symbols}`), true)
+  assert.equal(context.includes(`symbol index: ${symbols} — full static scan, one row per file and kind with name:line entries; look up, do not read it whole: grep -o -E '<name>:[0-9]+' ${symbols} for one symbol, or grep -n -F -- '- <file> · ' ${symbols} | cut -c1-4000 for a file`), true)
 
   assert.equal(existsSync(symbols), true)
 })
@@ -1092,7 +1092,7 @@ test('context pack records complete source data beyond argv limits', () => {
     .sort()
   assert.ok(context.includes(`- lib/ · ${entries.join(', ')}`))
   const rows = join(pack, 'context-at-scale.tripwires.md')
-  assert.ok(packed.includes(`cat ${rows}`))
+  assert.ok(packed.includes(`rows: ${rows} — the inventory of tests that may assert what you change (every candidate, tripwire test with its keys, and broad key); fence what it names. Look rows up, do not read it whole: grep -n -F -- '- <file> · ' ${rows} for a file you touch, or grep -n -F '<key>' ${rows}`))
 })
 
 test('tracked symlinks and deleted entries do not block brief discovery', () => {
@@ -2775,7 +2775,7 @@ test('A1 packed coupled sources point to a complete sidecar', () => {
   ], 'a1.brief.md')
   const body = section(brief, '## Coupled sources')
   const sidecar = join(packDir, 'a1.coupled.md')
-  const pointer = `enumeration: ${sidecar} — every coupled file listed in full; read it once with: cat ${sidecar}`
+  const pointer = `enumeration: ${sidecar} — every coupled file listed in full; look rows up: grep -n -F -- '- <file> · ' ${sidecar}`
   assert.equal(existsSync(sidecar), true)
   assert.match(body, /coupling rule: a coupled source is a non-test \.js\/.mjs file/)
   assert.match(body, /coupled sources: 1 file\(s\)/)
@@ -3712,4 +3712,54 @@ test('a packed brief with no fence register does not claim the lane owns its fil
   assert.ok(line, 'files_in_scope line present')
   assert.match(line, /no lane fence applied/)
   assert.doesNotMatch(line, /\bowns\b/)
+})
+
+function packedPointer(label, heading, sidecarSuffix, args = []) {
+  const root = fixture(label, { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  const packDir = join(root, `${label}-pack`)
+  mkdirSync(packDir)
+  const { brief } = compile(root, {}, ['--pack', packDir, ...args], `${label}.brief.md`)
+  const sidecar = join(packDir, `${label}.${sidecarSuffix}.md`)
+  const line = section(brief, heading).split('\n').find((entry) => entry.includes(sidecar)) || ''
+  assert.ok(line.length > 0, `correct pointer line for ${sidecar}`)
+  return { line, sidecar }
+}
+
+test('SF1', () => {
+  // MUTATION: restore cat wording in the packed symbol pointer.
+  const { line, sidecar } = packedPointer('sf1', '## Context pack', 'symbols')
+  assert.equal(line.includes(`cat ${sidecar}`), false)
+})
+
+test('SF2', () => {
+  // MUTATION: remove grep guidance from the packed symbol pointer.
+  const { line, sidecar } = packedPointer('sf2', '## Context pack', 'symbols')
+  const grep = line.indexOf('grep')
+  assert.ok(grep >= 0 && line.indexOf(sidecar, grep) > grep)
+})
+
+test('SF3', () => {
+  // MUTATION: restore cat wording in the packed rows pointer.
+  const { line, sidecar } = packedPointer('sf3', '## Tripwires', 'tripwires')
+  assert.equal(line.includes(`cat ${sidecar}`), false)
+})
+
+test('SF4', () => {
+  // MUTATION: remove grep guidance from the packed rows pointer.
+  const { line, sidecar } = packedPointer('sf4', '## Tripwires', 'tripwires')
+  const grep = line.indexOf('grep')
+  assert.ok(grep >= 0 && line.indexOf(sidecar, grep) > grep)
+})
+
+test('SF5', () => {
+  // MUTATION: restore cat wording in the packed coupled pointer.
+  const { line, sidecar } = packedPointer('sf5', '## Coupled sources', 'coupled')
+  assert.equal(line.includes(`cat ${sidecar}`), false)
+})
+
+test('SF6', () => {
+  // MUTATION: remove grep guidance from the packed coupled pointer.
+  const { line, sidecar } = packedPointer('sf6', '## Coupled sources', 'coupled')
+  const grep = line.indexOf('grep')
+  assert.ok(grep >= 0 && line.indexOf(sidecar, grep) > grep)
 })

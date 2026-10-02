@@ -3433,6 +3433,19 @@ test('NOENVRETIRE exhausted planner-no-envelope preamble never reaches the next 
   assert.equal(noEnvelopeRows(scenario).filter((row) => row.kind === 'planner-no-envelope' && row.applied).length, 1)
 })
 
+// MUTATION: drop the retirement after an assignment-id correction; the carrier's preamble then leaks into plan:r2.
+test('NOENVIDRETIRE a no-envelope carrier returned by an id correction leaves no preamble for the next plan round', () => {
+  const wrongId = () => ({ ...planEnv(), assignment_id: NO_ENV_RUN, run_id: NO_ENV_RUN })
+  const scenario = plannerNoEnvelopeScenario({
+    planners: [wrongId, noEnvelopeCarrier(NO_ENVELOPE_DETAILS[0])], leads: [leadEnv('bounce')], planRounds: 2,
+  })
+  const dispatches = noEnvelopeDispatches(scenario, 'planner')
+  assert.equal(dispatches.length, 3)
+  assert.doesNotMatch(scenario.io.calls.writes[dispatches[2].briefFile], /planner-no-envelope/)
+  assert.equal(noEnvelopeRows(scenario).some((row) => row.kind === 'planner-no-envelope' && row.applied), false)
+  assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1', 'plan:r2'])
+})
+
 // Both mixed orders share the one direct retry: a zero-turn and a no-envelope carrier spend it together.
 test('NOENVMIXED zero-turn and planner no-envelope share one direct retry in either order', () => {
   const zeroTurn = { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }

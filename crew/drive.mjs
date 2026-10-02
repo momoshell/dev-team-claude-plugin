@@ -6661,7 +6661,12 @@ function runTask(ctx, io, crash) {
           briefBuilder: ({ id, runId }) => `${preamble}\n\n${typeof opts.briefBuilder === 'function' ? opts.briefBuilder({ id, role, runId }) : `Original brief: ${briefFile}`}\n`,
           reask: { id: identity.id, returnPath: retryPath },
         }
-        return dispatchOnce(role, retryBrief, note, correctionOpts)
+        try {
+          return dispatchOnce(role, retryBrief, note, correctionOpts)
+        } finally {
+          // The correction buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.
+          if ([ZERO_TURN_NON_START, 'planner-no-envelope'].includes(pendingEnforcement.get(role)?.kind)) pendingEnforcement.delete(role)
+        }
       }
       const nonStart = zeroTurnNonStartOf(env)
       const plannerNoEnvelope = role === 'planner' ? plannerNoEnvelopeOf(env) : null

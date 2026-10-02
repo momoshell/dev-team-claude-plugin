@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -10104,7 +10104,7 @@ function runTask(ctx, io, crash) {
       if (verdict.ok) doneEnvelopes.push(env)
       if (verdict.ok) break
       io.log(recordRow({ at: io.now(), event: 'step:red', step: step.id, round: stepRound, failed: verdict.failed, regressed: verdict.regressed }))
-      priorStepFailure = `failed: ${verdict.failed.join(', ') || '(unattributed)'}${verdict.defect ? `; defect: ${verdict.defect}` : ''}\n${String(output || '').slice(-2000)}`
+      priorStepFailure = `failed: ${verdict.failed.join(', ') || '(unattributed)'}${verdict.defect ? `; defect: ${verdict.defect}` : ''}\n${String(output || '').slice(-2000)}` + stepFailureDiagnostics(io, verdict.failed, [...done, step], shellArg)
       if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted after red gate for ${step.id}: ${verdict.failed.join(', ')}`)
     }
     lastStepEnv = stepEnv
@@ -10908,7 +10908,7 @@ function runTask(ctx, io, crash) {
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
       const laneOutput = typeof laneRes.output === 'string' ? laneRes.output : ''
-      const laneTail = laneOutput.slice(-LANE_RED_TAIL_CHARS); const laneFailures = failingTestsSection(laneOutput)
+      const laneTail = dropPassingLines(laneOutput).slice(-LANE_RED_TAIL_CHARS); const laneFailures = failingTestsSection(laneOutput)
       const laneRedArtifact = art(`lane-red-r${round}.md`)
       io.writeFile(laneRedArtifact, `# Red validation lane (round ${round})\n\nCommand:\n    ${lane}\n\nFailing tests (${laneFailures.found} found):\n${laneFailures.text}\n\nFailures:\n${laneTail || 'the lane produced no output'}\n`)
       const laneRedRow = { round, artifact: laneRedArtifact, output_bytes: Buffer.byteLength(laneOutput, 'utf8'), truncated: laneOutput.length > LANE_RED_TAIL_CHARS, tail: laneTail }

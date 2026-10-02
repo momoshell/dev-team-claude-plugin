@@ -2068,3 +2068,61 @@ test('gaps C4 (the tool description says how a program returns its value)', () =
   assert.match(tool.description, /export default <value>/)
   assert.match(tool.description, /program-returned-nothing/)
 })
+
+// MUTATION: replace const result = await imported.default with const result = imported.default.
+test('NV1', async () => {
+  const run = await realTool('export default Promise.resolve(5)', gapsRepo().repo)
+  assert.equal(run.details.outcome, 'ok')
+  assert.equal(run.details.result, 5)
+  assert.equal(run.content[0].text, '5')
+})
+
+// MUTATION: replace const result = await imported.default with const result = imported.default.
+test('NV2', async () => {
+  const run = await realTool('export default (async () => { console.log("x") })()', gapsRepo().repo)
+  assert.equal(run.details.outcome, 'refused')
+  assert.equal(run.details.refused, 'program-returned-nothing')
+  assert.match(run.details.stdout, /(?:^|\n)x(?:\n|$)/)
+  assert.equal(Object.hasOwn(run.details, 'result'), false)
+})
+
+// MUTATION: replace const result = await imported.default with const result = imported.default.
+test('NV3', async () => {
+  const run = await realTool('export default Promise.reject(new Error("boom"))', gapsRepo().repo)
+  assert.equal(run.details.outcome, 'refused')
+  assert.equal(run.details.refused, 'child-failed')
+  assert.equal(Object.hasOwn(run.details, 'result'), false)
+  assert.match(run.details.error, /boom/)
+})
+
+// MUTATION: replace const result = await imported.default with const result = imported.default.
+test('NV4', async () => {
+  const cases = [
+    ...[
+      ['no default', 'console.log("no default")'],
+      ['undefined', 'export default undefined'],
+      ['promise undefined', 'export default Promise.resolve(undefined)'],
+      ['thenable undefined', 'export default ({ then(resolve) { resolve(undefined) } })'],
+      ['rejected promise', 'export default Promise.reject(new Error("no value"))'],
+    ].map(([label, program]) => ({ label, program, outcome: 'refused' })),
+    ...[
+      ['null', 'export default null', null],
+      ['zero', 'export default 0', 0],
+      ['empty string', 'export default ""', ''],
+      ['false', 'export default false', false],
+      ['array', 'export default []', []],
+      ['promise null', 'export default Promise.resolve(null)', null],
+      ['thenable seven', 'export default ({ then(resolve) { resolve(7) } })', 7],
+    ].map(([label, program, expected]) => ({ label, program, outcome: 'ok', expected })),
+  ]
+  const results = await Promise.all(cases.map(async (item) => {
+    const run = await realTool(item.program, gapsRepo().repo)
+    return { item, details: run.details }
+  }))
+  for (const { item, details } of results) {
+    const message = `${item.label}: ${item.program}`
+    assert.equal(details.outcome, item.outcome, message)
+    if (item.outcome === 'refused') assert.equal(Object.hasOwn(details, 'result'), false, message)
+    else assert.deepEqual(details.result, item.expected, message)
+  }
+})

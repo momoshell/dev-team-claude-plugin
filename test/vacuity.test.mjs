@@ -204,7 +204,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/io-contract.test.mjs': '743c026942435b9fb1e8e27f2edeeb1bd07c886c3181e3c72ab4f26aabca9f89',
   'crew/memory.test.mjs': '45453b430c297cfd38c2361137cb1de5fec7f1ce44905ebc968b3d56cd13cc0b',
   'crew/pi/extensions/advisor.test.mjs': 'ead2c23e878f9d14d477029bf9b66a075b4e1ff331d6e510ef41f56175010043',
-  'crew/pi/extensions/lab.test.mjs': '103e8a9259002962fb0094fcef011a3d99a5e1fa89f6c59007a9caef33ea440c',
+  'crew/pi/extensions/lab.test.mjs': '4d1a2e042341ec8a3eb581299d58eda1dcf4a2110f7672139974d89280e849fb',
   'crew/pi/extensions/subagent.test.mjs': 'd17c9cc3cae62362a8f3ed93713b53a1cd6b201f77b9c1271816adf9c5c3c6c6',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
   'crew/roster-refresh.test.mjs': '2aa9146c3330b5c5773d4684efd4c90ce38221dcadc17e59bf439413866f6138',

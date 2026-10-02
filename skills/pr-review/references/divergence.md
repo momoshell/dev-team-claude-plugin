@@ -13,11 +13,11 @@ becomes `verified` only after one side is re-read against the built tree.
 
 ```json
 {
-  "summary": "two reviewers disagree on crew/drive.mjs:4929",
+  "summary": "two reviewers disagree on crew/drive.mjs:4924",
   "findings": [
     {
       "claim": "reviewer A reads the scope diff as exhaustive; reviewer B cites a path the matcher lets through",
-      "evidence": ["crew/drive.mjs:2200", "crew/drive.mjs:4929"],
+      "evidence": ["crew/drive.mjs:2195", "crew/drive.mjs:4924"],
       "confidence": "assumed"
     }
   ],

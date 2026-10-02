@@ -39,7 +39,7 @@
   "scripts/factory/emit.mjs:1610": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:4297": "requireEnum(input.decision, CI_DECISIONS",
   "scripts/factory/ledger.mjs:9930": "unknown verb: ${verb}",
-  "crew/drive.mjs:550": "export const DECISIONS = Object.freeze",
   "docs/conventions.md:130": "A frozen exported enum's drift guard needs",
-  "docs/conventions.md:53": "first TypeScript file on main, and every file under"
+  "docs/conventions.md:53": "first TypeScript file on main, and every file under",
+  "crew/drive.mjs:545": "export const DECISIONS = Object.freeze"
 }

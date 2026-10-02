@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -16,13 +16,13 @@ import {
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
-  laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
+  laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
-import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
-import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
-import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, createsFromBrief, parseDirectedBrief } from '../crew/drive.mjs'
+import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS, parseProposalBrief } from '../scripts/factory/emit.mjs'
+import { defaultProfilePath, probeRepo, profileProtectedPaths } from '../scripts/factory/probe-repo.mjs'
+import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, acceptanceIds, createsFromBrief, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
@@ -550,8 +550,8 @@ test('A1 authored-source declarations', () => {
     else if (match[1] === "'done_means'") counts.done_means += 1
     else if (match[1] === "'out_of_scope'") counts.out_of_scope += 1
   }
-  assert.deepEqual(counts, { ask: 2, done_means: 2, out_of_scope: 1 })
-  assert.ok(source.includes("briefSection('task', 'ask', ["))
+  assert.deepEqual(counts, { ask: 1, done_means: 1, out_of_scope: 1 })
+  assert.ok(source.includes("briefSection('task', null, ['# Task'])"))
 })
 
 test('B1 grouped contributor maximum', () => {
@@ -572,7 +572,7 @@ test('B1 grouped contributor maximum', () => {
 
 test('C1 contributor occurrence arithmetic', () => {
   const root = fixture('oversized-ask-arithmetic')
-  const ask = `Please ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
+  const ask = `Please shrink this. ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
   const requestPath = request(root, { ask })
   const outPath = join(root, 'oversized.md')
   const result = run(root, ['--request', requestPath, '--checkout', root, '--out', outPath])
@@ -580,7 +580,7 @@ test('C1 contributor occurrence arithmetic', () => {
   assert.match(result.stderr, /\[reason: brief-too-large\]/)
   assert.equal(existsSync(outPath), false)
   const raw = Buffer.byteLength(ask, 'utf8')
-  const expected = `largest contributor is the ask at ${raw} bytes x 2 occurrences = ${raw * 2} bytes (the ask and done_means are each emitted twice; out_of_scope once)`
+  const expected = `largest contributor is the ask at ${raw} bytes x 1 occurrence = ${raw} bytes (the ask, done_means and out_of_scope are each emitted once)`
   assert.ok(result.stderr.includes(expected), `missing contributor arithmetic:\n${result.stderr}`)
 })
 
@@ -595,7 +595,7 @@ test('D1 multiplicity beats authored size', () => {
   assert.equal(result.status, 2)
   assert.match(result.stderr, /\[reason: brief-too-large\]/)
   assert.equal(existsSync(outPath), false)
-  assert.match(result.stderr, /largest contributor is the ask at /)
+  assert.match(result.stderr, /largest contributor is out_of_scope at /)
 })
 
 test('an under-limit brief writes the rendered bytes unchanged', () => {
@@ -677,7 +677,7 @@ test('intent resolves one collapsed sentence, accepts authored text, and validat
 
   const brief = renderBrief({ request: { ...base, intent: 'specific intent' }, where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } })
   assert.equal((brief.match(/^## Intent$/gm) || []).length, 1)
-  assert.ok(brief.indexOf('## The ask') < brief.indexOf('## Intent'))
+  assert.ok(brief.indexOf('## Intent') < brief.indexOf('## The ask'))
   assert.ok(brief.indexOf('## Intent') < brief.indexOf('## Proposed tier'))
 })
 
@@ -827,6 +827,9 @@ test('omitting the plan renders the brief byte-identically', () => {
   })
   assert.equal(without.includes('## Directed plan'), false)
   assert.equal(without.split('\n').filter((line) => line.trim() === '```directed').length, 0)
+  // MUTATION: splice the directed plan after `intent` instead of `the ask`; it then lands
+  // between Intent and The ask and this placement check goes red.
+  assert.deepEqual(withPlan.match(/^## .+$/gm).slice(0, 3), ['## Intent', '## The ask', '## Directed plan'])
   const lines = withPlan.split('\n')
   const start = lines.findIndex((line) => line.trim() === '## Directed plan')
   const rest = lines.slice(start + 1)
@@ -2474,7 +2477,7 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
     proposal,
   })
   assert.deepEqual(brief.match(/^## .+$/gm), [
-    '## The ask', '## Intent', '## Proposed tier', '## Where', '## Premise check', '## Done means', '## Tripwires',
+    '## Intent', '## The ask', '## Proposed tier', '## Where', '## Premise check', '## Tripwires',
     '## Coupled sources', '## Baseline', '## Out of scope', '## Fences',
     '## What the crew decides', '## Acceptance', '## Acceptance gate',
     '## Per-check mutations', '## Validation lane', '## Conventions',
@@ -3196,7 +3199,7 @@ test('B1 present quoted code compiles unchanged', () => {
   assert.equal(section(brief, '## Premise check').trim(), 'verified · premise · lib/widget.mjs:2-5')
   assert.equal(clean.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 1/1')
   assert.equal(section(brief, '## The ask'), ask)
-  assert.equal(section(brief, '## Done means'), 'The widget behavior is correct.')
+  assert.equal(section(brief, '## Acceptance'), `The widget behavior is correct. · Full suite green. · ${SLOT_MARKER}`)
   assert.equal(section(brief, '## Out of scope'), 'The surrounding dispatch remains unchanged.')
   assert.equal(canonicalisePremiseText('  first  \n\n    last\t\n'), 'first  \n\n  last\t')
 
@@ -3550,4 +3553,139 @@ test('L2', () => {
   ]
   const flat = (text) => text.replace(/\s+/g, ' ').trim()
   for (const output of outputs) for (const clause of clauses) assert.ok(flat(output).includes(clause), clause)
+})
+
+// MUTATION: restore the echoed task title; BD1 must see the second-sentence token twice.
+test('BD1', () => {
+  const root = fixture('bd1')
+  mkdirSync(join(root, 'pack'))
+  const ask = 'First sentence. Distinctive-second-sentence-token.'
+  const fencesPath = put(root, 'fences.json', JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'config/thing.yml'] }] }))
+  const { brief } = compile(root, { ask }, ['--pack', join(root, 'pack'), '--lane', 'own', '--fences', fencesPath, '--profile', join(root, 'missing-profile')])
+  assert.ok(brief.startsWith('# Task\n## Intent\n'))
+  assert.equal(brief.split('Distinctive-second-sentence-token').length - 1, 1)
+})
+
+// MUTATION: restore the Done means section; BD2 pins single authored acceptance data.
+test('BD2', () => {
+  const root = fixture('bd2')
+  const done = '(BD_DONE) exact authored acceptance.'
+  const { brief } = compile(root, { done_means: done })
+  assert.equal((brief.match(/^## Done means$/gm) || []).length, 0)
+  assert.equal((section(brief, '## Acceptance').match(/\(BD_DONE\) exact authored acceptance\./g) || []).length, 1)
+  assert.deepEqual(acceptanceIds(brief), ['BD_DONE'])
+})
+
+// MUTATION: empty collapsedFiles; BD4 pins the authoritative in-fence row pointer.
+test('BD4', () => {
+  const root = fixture('bd4')
+  mkdirSync(join(root, 'pack'))
+  const fencesPath = put(root, 'fences.json', JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'config/thing.yml'] }] }))
+  const { brief } = compile(root, {}, ['--pack', join(root, 'pack'), '--lane', 'own', '--fences', fencesPath, '--profile', join(root, 'missing-profile')])
+  const matches = brief.match(/own owns the 2 file\(s\) marked "in fence" under ## Context pack line counts/g) || []
+  assert.equal(matches.length, 1)
+  assert.doesNotMatch(brief, /own owns (?:lib\/widget\.mjs|config\/thing\.yml)/)
+
+  // MUTATION: collapse every lane (`lane.lane === writeSurface?.lane` -> `true`); the
+  // overlapping `other` lane then folds into a false pointer and this exact list goes red.
+  // The own-lane span entry is not a raw lineCounts row, so it stays listed as well.
+  const overlap = fixture('bd4-overlap')
+  mkdirSync(join(overlap, 'pack'))
+  const overlapFences = put(overlap, 'fences.json', JSON.stringify({ lanes: [
+    { lane: 'own', files: ['lib/widget.mjs:1-1', 'config/thing.yml'] },
+    { lane: 'other', files: ['config/thing.yml'] },
+  ] }))
+  git(overlap, 'add', '-A')
+  git(overlap, 'commit', '-q', '-m', 'fixture')
+  const shared = compile(overlap, {}, ['--pack', join(overlap, 'pack'), '--lane', 'own', '--fences', overlapFences, '--profile', join(overlap, 'missing-profile')]).brief
+  assert.deepEqual(section(shared, '## Fences').trim().split('\n'), [
+    'other owns config/thing.yml',
+    'own owns the 1 file(s) marked "in fence" under ## Context pack line counts',
+    'own owns lib/widget.mjs:1-1',
+  ])
+})
+
+function packedGathered(root, { label, fences = null, lane = null, proposal }) {
+  const checkout = realpathSync(root)
+  const where = verifyWhere({ checkout, where: ['lib/widget.mjs', 'config/thing.yml'], allowUnresolved: true })
+  const discovery = discoverTripwires({ checkout, files: where, lane: null })
+  const writeSurface = resolveWriteSurface({ fences, lane, where })
+  const coupling = crossCheckCoupling({ discovery, writeSurface, enforce: false })
+  const request = { ask: ASK, done_means: DONE, out_of_scope: OUT }
+  const packDir = join(root, `${label}-pack`)
+  mkdirSync(packDir)
+  const pack = writePack({ packDir, taskName: label, checkout, request, discovery, writeSurface, coupling, profile: null, proposal })
+  return { gathered: { request, where, discovery, coupling, fences, lane, writeSurface, proposal }, pack }
+}
+
+// MUTATION: restore the full files_in_scope list; BD5 pins packed output.
+test('BD5', () => {
+  const root = fixture('bd5')
+  mkdirSync(join(root, 'pack'))
+  const fencesPath = put(root, 'fences.json', JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'config/thing.yml'] }] }))
+  const { brief } = compile(root, {}, ['--pack', join(root, 'pack'), '--lane', 'own', '--fences', fencesPath, '--profile', join(root, 'missing-profile')])
+  const line = brief.split('\n').find((value) => value.startsWith('files_in_scope '))
+  assert.ok(line)
+  assert.match(line, /owns the 2 file\(s\) marked "in fence"/)
+  assert.doesNotMatch(line, /lib\/widget\.mjs|config\/thing\.yml/)
+
+  // MUTATION: treat a pack without lineCounts as fully in fence (the `: []` fallback of
+  // collapsedFiles -> `: (writeSurface?.files ?? [])`, or of inFenceFiles -> `: files`);
+  // the bare pack then collapses and the preserved Fences and files_in_scope lists go red.
+  const fences = gatherFences({ fencesPath, checkout: realpathSync(root) })
+  const { gathered, pack } = packedGathered(root, { label: 'bd5', fences, lane: 'own', proposal: undefined })
+  const counted = renderBrief({ ...gathered, pack })
+  assert.match(section(counted, '## Fences'), /own owns the 2 file\(s\) marked "in fence"/)
+  const bare = renderBrief({ ...gathered, pack: { ...pack, lineCounts: undefined } })
+  assert.deepEqual(section(bare, '## Fences').trim().split('\n'), ['own owns config/thing.yml', 'own owns lib/widget.mjs'])
+  const bareLine = bare.split('\n').find((value) => value.startsWith('files_in_scope '))
+  assert.equal(bareLine, `files_in_scope (expected write surface; basis: fence register, lane "own"): ${gathered.writeSurface.files.join(', ')}`)
+  assert.equal(gathered.writeSurface.files.length, 2)
+})
+
+// MUTATION: inline all proposal rationale; BD6 pins omission while retaining a parseable block.
+test('BD6', () => {
+  const root = fixture('bd6')
+  mkdirSync(join(root, 'pack'))
+  const { brief } = compile(root, {}, ['--pack', join(root, 'pack'), '--profile', join(root, 'missing-profile')])
+  assert.doesNotMatch(section(brief, '## Proposed tier'), /^because:/m)
+  assert.equal(parseProposalBrief(brief).defect, null)
+
+  // MUTATION: drop the packed misclassification arm (`.filter((line) =>
+  // line.startsWith(MISCLASSIFIED_PREFIX))` -> `.filter(() => false)`); the packed brief then
+  // loses its exact `misclassified · …` line and this check goes red.
+  const proposal = proposalFor(5)
+  const expected = section(compiledProposal(proposal), '## Proposed tier').split('\n').filter((value) => value.startsWith('misclassified · '))
+  assert.equal(expected.length, 1)
+  const { gathered, pack } = packedGathered(root, { label: 'bd6', proposal })
+  const packed = section(renderBrief({ ...gathered, pack }), '## Proposed tier').split('\n')
+  assert.ok(packed.includes(`proposal rationale: ${pack.proposal} — read it once with: cat ${pack.proposal}`))
+  assert.deepEqual(packed.filter((value) => value.startsWith('misclassified')), expected)
+})
+
+// MUTATION: suppress the proposal sidecar write; BD7 compares exact bytes.
+test('BD7', () => {
+  const root = fixture('bd7')
+  mkdirSync(join(root, 'pack'))
+  const pack = join(root, 'pack')
+  const missing = join(root, 'missing-profile')
+  const { brief } = compile(root, {}, ['--pack', pack, '--profile', missing])
+  const checkout = realpathSync(root)
+  const where = verifyWhere({ checkout, where: ['lib/widget.mjs', 'config/thing.yml'], allowUnresolved: true })
+  const discovery = discoverTripwires({ checkout, files: where, lane: null })
+  const fromProfile = profileProtectedPaths(null, { path: missing })
+  const protectedPaths = gatherProtectedPaths({ extra: fromProfile.paths })
+  const proposal = proposeTier({ where, discovery, protectedPaths, protectedBasis: fromProfile.basis })
+  assert.equal(readFileSync(join(pack, 'brief.proposal.md'), 'utf8'), `${renderProposedTier(proposal)}\n`)
+  assert.equal(parseProposalBrief(brief).defect, null)
+})
+
+// MUTATION: restore duplicate accounting; BD8 pins status, occurrence count, and suffix.
+test('BD8', () => {
+  const root = fixture('bd8')
+  const ask = `Please shrink this. ${'x'.repeat(BRIEF_BYTE_LIMIT)} authored section`
+  const requestPath = request(root, { ask })
+  const result = run(root, ['--request', requestPath, '--checkout', root, '--out', join(root, 'large.md')])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /largest contributor is the ask at .* bytes x 1 occurrence = .* bytes \(the ask, done_means and out_of_scope are each emitted once\)/)
 })

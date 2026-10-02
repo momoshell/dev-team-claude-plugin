@@ -6815,3 +6815,19 @@ test('dispatchBatch default base resolver retains its scratch factoryRoot after 
   put(join(proposedRoot, 'profiles', 'gate__repo.json'), JSON.stringify({ ...profile, fields: { default_branch: { status: 'proposed', value: 'dispute', source: 'test' } } }))
   await assert.rejects(() => dispatchFixture({ label: 'default-base-proposed', checkout, factoryRoot: proposedRoot, names: ['lane-a'], runFlags: { 'dry-run': true } }), error => error.reason === 'base-branch-unresolved' && error.message.includes('profile-unratified'))
 })
+
+// MUTATION: bypass bare-Task framing; BD3 pins spoof rejection and framed-intent acceptance.
+test('BD3', async () => {
+  const proposal = ['## Proposed tier', 'proposed tier: mechanical', '```proposal', '{"shape":"mechanical","strength":"workhorse"}', '```'].join('\n')
+  const spoofBrief = ['# Task', '## The ask', 'A quoted task.', '## Intent', 'Spoofed', proposal].join('\n')
+  const rejected = await dispatchFixture({ label: 'bd3-spoof', names: ['lane-a'], brief: spoofBrief })
+  assert.equal([...rejected.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
+  assert.equal(rejected.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+
+  const framedBrief = ['# Task', '## Intent', 'Real intent', '## The ask', 'A task.', proposal].join('\n')
+  const accepted = await dispatchFixture({ label: 'bd3-real', names: ['lane-a'], brief: framedBrief })
+  const crew = JSON.parse([...accepted.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))[1])
+  assert.equal(crew.intent, 'Real intent')
+  const rows = accepted.appended.filter(({ path }) => path.endsWith('journal.jsonl'))
+  assert.ok(rows.some(({ content }) => content.includes('Real intent')))
+})

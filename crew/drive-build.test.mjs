@@ -8472,11 +8472,11 @@ const steppedMutations = [
   { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
   { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
 ]
-function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false, resumeGateOutput = null, builder1 = null, builder2 = null, seedFiles = {}, reviewer = reviewEnv('pass') } = {}) {
+function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mjs', 'b.mjs'], mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false, resumeGateOutput = null, builder1 = null, builder2 = null, builder3 = null, seedFiles = {}, reviewer = reviewEnv('pass') } = {}) {
   const checks = mutations.map(({ check }) => check)
   const plan = planEnv({ details: {
     ...planEnv().details,
-    files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'stepped-gate',
+    files_in_scope: planFilesInScope, gate_cmd: 'stepped-gate',
     mutations, ...(omitChunks ? {} : { chunks: empty ? [] : chunks }),
   } })
   const red = checks.map((id) => `FAIL ${id}: pristine red`).join('\n')
@@ -8510,6 +8510,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, mutations = steppedMutati
       'planner:1': plan,
       'builder:1': builder1 || buildEnv({ artifacts: [`${TD}/step-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], ...(corrected ? { mutation_corrections: [correction] } : {}) } }),
       'builder:2': builder2 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+      'builder:3': builder3 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
       'reviewer:1': reviewer,
     },
     runs,
@@ -8902,7 +8903,7 @@ test('R4 envelopefreeze restore plan before gate', () => {
   assert.equal(row.action, 'restored')
 })
 
-import { failingTestsSection } from './lane-red.mjs'
+import { failingTestsSection, dropPassingLines, labelledFailures, stepFailureDiagnostics } from './lane-red.mjs'
 
 const laneRedCapture = (() => {
   const dir = scratchDir('lane-red-capture-')
@@ -8932,7 +8933,7 @@ test('T1 lane-red artifact reports early TAP failures after long output', () => 
   driveTask(CTX, io)
   const artifact = io.calls.writes[`${CTX.taskDir}/lane-red-r1.md`]
   const failures = failingTestsSection(laneRedLongOutput)
-  assert.equal(artifact, `# Red validation lane (round 1)\n\nCommand:\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${laneRedLongOutput.slice(-4000)}\n`)
+  assert.equal(artifact, `# Red validation lane (round 1)\n\nCommand:\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${dropPassingLines(laneRedLongOutput).slice(-4000)}\n`)
   assert.ok(artifact.includes(laneRedFailure), artifact)
 })
 test('T2 lane-red builder bounce reports early TAP failures', () => {
@@ -8940,7 +8941,7 @@ test('T2 lane-red builder bounce reports early TAP failures', () => {
   driveTask(CTX, io)
   const bounce = io.calls.writes[`${CTX.taskDir}/build-bounce-r1.md`]
   const failures = failingTestsSection(laneRedLongOutput)
-  assert.equal(bounce, `# Lane bounce (round 1)\n\nThe validation lane is RED. Make it green:\n\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${laneRedLongOutput.slice(-4000)}\n\nPlan: ${CTX.taskDir}/plan.md`)
+  assert.equal(bounce, `# Lane bounce (round 1)\n\nThe validation lane is RED. Make it green:\n\n    lane-cmd\n\nFailing tests (${failures.found} found):\n${failures.text}\n\nFailures:\n${dropPassingLines(laneRedLongOutput).slice(-4000)}\n\nPlan: ${CTX.taskDir}/plan.md`)
   assert.ok(bounce.includes(laneRedFailure), bounce)
 })
 test('T3 lane-red auto-fix revalidation bounce reports early failures', () => {
@@ -9340,4 +9341,146 @@ test('fresh builder handoff reports failed and throwing diff probes', () => {
   const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
   assert.match(io.calls.writes[second.briefFile], /unavailable: boom/)
   assert.match(io.calls.writes[`${TD}/builder-diff-2.patch`], /^unavailable: kaboom/)
+})
+
+
+const diagnosticCapture = (titles, actual = 'ACTUAL_DF', expected = 'EXPECTED_DF') => {
+  const dir = scratchDir('driver-diagnostic-capture-')
+  const fixture = join(dir, 'diag.test.mjs')
+  writeFileSync(fixture, `import { test } from 'node:test'\nimport assert from 'node:assert/strict'\n${titles.map((title) => `test(${JSON.stringify(title)}, () => assert.equal(${JSON.stringify(actual)}, ${JSON.stringify(expected)}))`).join('\n')}\n`)
+  const env = { ...process.env, NO_COLOR: '1' }
+  delete env.FORCE_COLOR; delete env.CLICOLOR_FORCE; delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', fixture], { encoding: 'utf8', env, timeout: 15000, maxBuffer: 4 * 1024 * 1024 })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 1)
+  return result.stdout
+}
+const diagnosticPair = diagnosticCapture(['A1 diag fixture', 'B9 other fixture'])
+const diagnosticOther = diagnosticCapture(['B9 other fixture'])
+const diagnosticMany = diagnosticCapture(Array.from({ length: 20 }, (_, index) => `A1 ${String(index).padEnd(1900, 'x')}`))
+const quotedTestPath = (value) => `'${value.replaceAll("'", "'\\''")}'`
+
+// MUTATION: restore the raw lane tail in the lane red artifact.
+test('DF1', () => {
+  const passing = laneRedCapture.tap.split('\n').find((line) => /^ok \d+ - passing fixture/.test(line))
+  const output = laneRedCapture.tap + (passing + '\n').repeat(1000) + 'LANE_RED_FINAL_LINE\n'
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() }, runs: { 'lane-cmd:1': { ok: false, output }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  driveTask(CTX, io)
+  const tail = io.calls.writes[`${CTX.taskDir}/lane-red-r1.md`].split('\nFailures:\n')[1]
+  assert.doesNotMatch(tail, /^ok \d+ - /m)
+  assert.ok(tail.includes('LANE_RED_FINAL_LINE'))
+})
+// MUTATION: omit the single diagnostic run for a red step.
+test('DF2', () => {
+  const calls = []
+  const text = stepFailureDiagnostics({ run: (command) => { calls.push(command); return { output: diagnosticPair } } }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath)
+  assert.ok(text.includes('ACTUAL_DF'))
+  assert.deepEqual(calls, ["node --test --test-reporter=tap 'a.test.mjs'"])
+})
+// MUTATION: select failures by substring or include every failure.
+test('DF3', () => {
+  const text = stepFailureDiagnostics({ run: () => ({ output: diagnosticPair }) }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath)
+  assert.match(text, /Failing tests titled with A1 \(1 found\):/)
+  assert.match(text, /A1 diag fixture/)
+  assert.doesNotMatch(text, /B9 other fixture/)
+})
+// MUTATION: omit the all-failure fallback when no title matches.
+test('DF4', () => {
+  const text = stepFailureDiagnostics({ run: () => ({ output: diagnosticOther }) }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath)
+  assert.match(text, /Failing tests \(none titled with A1; 1 found\):/)
+  assert.match(text, /B9 other fixture/)
+})
+// MUTATION: remove the bounded section packing for labelled failures.
+test('DF5', () => {
+  const text = stepFailureDiagnostics({ run: () => ({ output: diagnosticMany }) }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath)
+  assert.match(text, /more failing tests omitted: section bound 12288 bytes\]/)
+})
+
+// MUTATION: retain only a late diagnostic window.
+test('RV1-1 HEAD packing retains the first diagnostic lines', () => {
+  const frames = Array.from({ length: 28 }, (_, index) => `  frame-${String(index).padStart(2, '0')} ${'x'.repeat(85)}`)
+  const result = failingTestsSection(['not ok 1 - long', '  ---', '  error: HEAD_ERROR_MESSAGE', ...frames].join('\n'))
+  assert.match(result.text, /HEAD_ERROR_MESSAGE/)
+  assert.match(result.text, /frame-00/)
+  assert.match(result.text, /frame-19/)
+  assert.doesNotMatch(result.text, /frame-20/)
+  assert.ok(result.text.endsWith('[cut: 8 more diagnostic lines]'))
+})
+
+// MUTATION: break when a labelled diagnostic line exceeds the byte bound.
+test('RV1-1 labelled packing retains a UTF-8 safe prefix', () => {
+  const long = `  ${'🙂'.repeat(600)}`
+  const result = failingTestsSection(`not ok 1 - A1 long\n  head survives\n${long}`, ['A1'])
+  const diagnostics = result.text.split('\n').filter((line) => !line.startsWith('not ok ') && !line.includes('[cut:'))
+  assert.equal(diagnostics[0], '  head survives')
+  assert.ok(diagnostics[1].startsWith('  🙂'))
+  assert.equal(diagnostics[1].endsWith('�'), false)
+  assert.ok(Buffer.byteLength(diagnostics.join('\n')) <= 2048)
+})
+
+// MUTATION: match labels with title.includes.
+test('RV1-3 label selection uses whole title tokens', () => {
+  const near = diagnosticCapture(['A10', 'XA1', 'A1-other', 'other fixture'])
+  const assertionOnly = diagnosticCapture(['other fixture'], 'A1', 'B9')
+  const real = diagnosticCapture(['A1 x'])
+  assert.equal(labelledFailures(near, ['A1']).found, 0)
+  assert.equal(labelledFailures(assertionOnly, ['A1']).found, 0)
+  assert.equal(labelledFailures(real, ['A1']).found, 1)
+})
+
+// MUTATION: pack failures before filtering labels.
+test('RV1-3 labelled failures retain a late matching title', () => {
+  const unrelated = Array.from({ length: 10 }, (_, index) => `B9 ${String(index).padEnd(1900, 'x')}`)
+  const output = diagnosticCapture([...unrelated, 'A1 late'])
+  const result = labelledFailures(output, ['A1'])
+  assert.equal(result.found, 1)
+  assert.match(result.text, /A1 late/)
+})
+
+// MUTATION: omit first-seen deduplication or shell quoting.
+test('RV1-3 step diagnostics quote distinct test paths in order', () => {
+  const calls = []
+  stepFailureDiagnostics({ run: (command) => { calls.push(command); return { output: diagnosticPair } } }, ['A1'], [{ files_in_scope: ['a.test.mjs', 'space name.test.mjs'] }, { files_in_scope: ['a.test.mjs', "quote'test.test.mjs", '*.test.mjs'] }], quotedTestPath)
+  assert.deepEqual(calls, ["node --test --test-reporter=tap 'a.test.mjs' 'space name.test.mjs' 'quote'\\''test.test.mjs' '*.test.mjs'"])
+})
+
+// MUTATION: remove either early return before io.run.
+test('RV1-3 step diagnostics make no call without labels or test paths', () => {
+  const calls = []
+  const io = { run: (command) => { calls.push(command); return { output: diagnosticPair } } }
+  assert.equal(stepFailureDiagnostics(io, [], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath), '')
+  assert.equal(stepFailureDiagnostics(io, ['A1'], [{ files_in_scope: ['a.mjs'] }], quotedTestPath), '')
+  assert.equal(calls.length, 0)
+})
+
+// MUTATION: remove the io.run catch.
+test('RV1-3 step diagnostics reports thrown commands', () => {
+  assert.match(stepFailureDiagnostics({ run: () => { throw Error('diagnostic boom') } }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath), /^\ndiagnostics unavailable: diagnostic boom/)
+})
+
+// MUTATION: accept non-text diagnostic output.
+test('RV1-3 step diagnostics reports non-text output', () => {
+  assert.equal(stepFailureDiagnostics({ run: () => ({ output: null }) }, ['A1'], [{ files_in_scope: ['a.test.mjs'] }], quotedTestPath), '\ndiagnostics unavailable: test command returned non-text output')
+})
+
+// MUTATION: omit the diagnostic append from the red stepped feedback.
+test('RV1-2 stepped acceptance feedback runs diagnostics once', () => {
+  const c1 = { id: 'c1', files_in_scope: ['a.mjs', 'a.test.mjs'], checks_owned: ['A1'] }
+  const c2 = { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] }
+  const retry = buildEnv({ artifacts: [`${TD}/step-c1-r2.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'] } })
+  const { io } = steppedAcceptanceIo({
+    chunks: [c1, c2], planFilesInScope: ['a.mjs', 'a.test.mjs', 'b.mjs'],
+    outputs: [steppedRed('A1'), steppedGreen(), steppedGreen()],
+    builder2: retry,
+    builder3: buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+  })
+  const command = "node --test --test-reporter=tap 'a.test.mjs'"
+  const run = io.run
+  io.run = (value) => {
+    const result = run(value)
+    return value === command ? { ok: false, output: diagnosticCapture(['A1 driver fixture']) } : result
+  }
+  driveTask({ ...CTX, variant: 'stepped', limits: { ...LIMITS, build_rounds: 3 } }, io)
+  assert.match(io.calls.writes[`${TD}/step-c1-r2.md`], /ACTUAL_DF/)
+  assert.deepEqual(io.calls.run.filter(({ cmd }) => cmd === command).map(({ cmd }) => cmd), [command])
 })

@@ -47,6 +47,43 @@ function bytes(value) {
   return Buffer.byteLength(String(value ?? ''), 'utf8')
 }
 
+function dropPassingLines(text) {
+  const raw = typeof text === 'string' ? text : ''
+  // lean: retain one reporter output; stream segments if test-output volume becomes material
+  const segments = raw.match(/[^\n]*\n|[^\n]+$/g) || []
+  const remove = new Set()
+  const suites = new Map()
+  const subtests = new Map()
+  const plainAt = (index) => segments[index].replace(/\x1b\[[0-9;]*m/g, '').replace(/\r?\n$/, '')
+  for (let i = 0; i < segments.length; i += 1) {
+    const plain = plainAt(i)
+    const indent = plain.match(/^\s*/)[0].length
+    if (/^\s*▶ /.test(plain)) suites.set(indent, i)
+    if (/^\s*# Subtest:/.test(plain)) subtests.set(indent, i)
+    if (/^\s*✔ /.test(plain)) remove.add(i)
+    if (/^\s*✔ /.test(plain)) {
+      if (suites.has(indent)) { remove.add(suites.get(indent)); suites.delete(indent) }
+      if (subtests.has(indent)) subtests.delete(indent)
+    }
+    if (/^\s*ok \d+(?:\s|$)/.test(plain)) {
+      remove.add(i)
+      if (subtests.has(indent)) { remove.add(subtests.get(indent)); subtests.delete(indent) }
+      let yamlEnd = -1
+      let yamlStarted = false
+      for (let k = i + 1; k < segments.length; k += 1) {
+        const yaml = plainAt(k)
+        const yamlIndent = yaml.match(/^\s*/)[0].length
+        if (yaml.trim() && yamlIndent <= indent) break
+        if (yamlIndent > indent && /^\s*---$/.test(yaml)) yamlStarted = true
+        if (yamlStarted && yamlIndent > indent && /^\s*\.\.\.$/.test(yaml)) { yamlEnd = k; break }
+      }
+      if (yamlEnd >= 0) for (let k = i + 1; k <= yamlEnd; k += 1) remove.add(k)
+    }
+    if (/^\s*not ok \d+(?:\s|$)/.test(plain)) subtests.delete(indent)
+  }
+  return segments.filter((_, index) => !remove.has(index)).join('')
+}
+
 function boundedText(value, cap = MAX_METADATA_BYTES) {
   const text = String(value ?? '')
   if (bytes(text) <= cap) return text
@@ -685,7 +722,7 @@ function laneResultPart(result, args) {
   const exit = result.code === null || result.code === undefined ? 'exit unknown' : `exit ${result.code}`
   const signal = result.signal ? ` signal ${result.signal}` : ''
   const header = `Builder fenced Node lane ${status}: node --test ${tests.join(' ')} (${exit}${signal})`
-  const text = `${header}\n${result.tail}`
+  const text = `${header}\n${dropPassingLines(result.tail)}`
   return { type: 'text', text }
 }
 
@@ -813,6 +850,41 @@ export function createBuilderLoop(value = {}) {
   }
 
   async function onToolResult(event, ctx) {
+    if (role === 'builder' && event?.toolName === 'bash') {
+      saveCorpus(event)
+      const command = typeof event?.input?.command === 'string' ? event.input.command : ''
+      const content = event?.content
+      if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
+        const visible = content[0].text
+        const nodeTestCommand = /\bnode\b[\s\S]*?(?:^|\s)--test(?:\s|$)/.test(command)
+        const testSummary = /^(?:ℹ|#) tests \d+\b/m.test(visible.replace(/\x1b\[[0-9;]*m/g, ''))
+        if (nodeTestCommand && testSummary) {
+          let source = visible
+          const fullOutputPath = event.details?.fullOutputPath
+          if (typeof fullOutputPath === 'string') {
+            try {
+              const stats = statFile(fullOutputPath)
+              if (Number.isFinite(stats?.size) && stats.size <= 8 * 1024 * 1024) {
+                const full = readFile(fullOutputPath, 'utf8')
+                if (typeof full === 'string' && bytes(full) <= 8 * 1024 * 1024) {
+                  const candidate = dropPassingLines(full)
+                  if (bytes(candidate) <= 51200) source = full
+                }
+              }
+            } catch {}
+          }
+          const filtered = dropPassingLines(source)
+          const ansi = source.replace(/\x1b\[[0-9;]*m/g, '')
+          const passingCount = ansi.split(/\r?\n/).filter((line) => /^\s*(?:✔ |ok \d+(?:\s|$))/.test(line)).length
+          const notice = `[test output filtered: dropped ${passingCount} passing-test lines, ${bytes(source) - bytes(filtered)} bytes]`
+          const text = `${filtered}\n${notice}`
+          const patch = { content: [{ type: 'text', text }] }
+          if (event.structuredContent !== undefined) patch.structuredContent = { ...event.structuredContent, output: text }
+          return patch
+        }
+      }
+      return undefined
+    }
     if (role !== 'builder' || event?.toolName !== 'edit' || !event?.isError) {
       saveCorpus(event)
       return normalToolResult(event, ctx)

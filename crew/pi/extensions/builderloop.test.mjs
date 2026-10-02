@@ -620,3 +620,147 @@ test('a run-start that carries no run_id names no returns directory, so the hook
   writeFileSync(join(f.root, 'returns', 'd1.planner.json'), JSON.stringify({ assignment_id: 'd1', role: 'planner', status: 'done', details: { files_in_scope: ['flat.mjs'], validation_lane: 'node --test flat.test.mjs', gate_cmd: 'node task/gate.mjs' } }))
   assert.equal(mod.loadPlannerContext({ taskDir: f.taskDir }), null)
 })
+
+const tfCapture = (() => {
+  const dir = scratchDir('builder-test-capture-')
+  const fixturePath = join(dir, 'recorded.test.mjs')
+  writeFileSync(fixturePath, `import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('TFPASS', () => {})\ntest('TFSUITE', async t => { await t.test('TFPASS child', () => {}) })\ntest('TFFAIL', () => assert.equal('ACTUAL_TF', 'EXPECTED_TF'))\n`)
+  const env = { ...process.env, NO_COLOR: '1' }
+  delete env.FORCE_COLOR; delete env.CLICOLOR_FORCE; delete env.NODE_TEST_CONTEXT
+  const capture = (reporter) => {
+    const result = realSpawnSync(process.execPath, ['--test', `--test-reporter=${reporter}`, fixturePath], { encoding: 'utf8', env, timeout: 15000, maxBuffer: 4 * 1024 * 1024 })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    return result.stdout
+  }
+  return { spec: capture('spec'), tap: capture('tap') }
+})()
+
+function bashResult(loop, command, visible, extra = {}) {
+  return loop.onToolResult({ toolName: 'bash', input: { command }, content: [{ type: 'text', text: visible }], ...extra }, {})
+}
+function filterLoop(options = {}) {
+  const f = fixture()
+  const loop = loopFor(f, options)
+  return { f, loop }
+}
+
+// MUTATION: remove the spec passing-line removal branch.
+test('TF1', async () => {
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.spec)
+  assert.ok(patch)
+  assert.doesNotMatch(patch.content[0].text, /^\s*✔ /m)
+  assert.doesNotMatch(patch.content[0].text, /^▶ TFSUITE$/m)
+})
+// MUTATION: stop removing TAP ok result records.
+test('TF2', async () => {
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap)
+  assert.ok(patch)
+  assert.doesNotMatch(patch.content[0].text, /^\s*ok \d+/m)
+})
+// MUTATION: discard indented failing spec diagnostics.
+test('TF3', async () => {
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.spec)
+  const failure = tfCapture.spec.split(/\r?\n/).filter((line) => /TFFAIL|ACTUAL_TF|EXPECTED_TF/.test(line)).at(-1)
+  assert.ok(patch.content[0].text.includes(failure))
+})
+// MUTATION: strip a failing TAP YAML block.
+test('TF4', async () => {
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap)
+  const failure = tfCapture.tap.slice(tfCapture.tap.indexOf('not ok '), tfCapture.tap.indexOf('\nnot ok ', tfCapture.tap.indexOf('not ok ') + 1) < 0 ? undefined : tfCapture.tap.indexOf('\nnot ok ', tfCapture.tap.indexOf('not ok ') + 1))
+  assert.ok(patch.content[0].text.includes(failure.trimEnd()))
+})
+// MUTATION: alter the independently visible passing count.
+test('TF5', async () => {
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap)
+  const text = patch.content[0].text
+  const body = text.slice(0, text.lastIndexOf('\n[test output filtered:'))
+  const count = tfCapture.tap.split(/\r?\n/).filter((line) => /^\s*(?:✔ |ok \d+(?:\s|$))/.test(line)).length
+  assert.match(text, new RegExp(`dropped ${count} passing-test lines, ${Buffer.byteLength(tfCapture.tap) - Buffer.byteLength(body)} bytes`))
+})
+// MUTATION: admit output without requiring a node test command.
+test('TF6', async (t) => {
+  const { loop } = filterLoop()
+  assert.ok(await bashResult(loop, 'node --test x.test.mjs', tfCapture.spec))
+  assert.equal(await bashResult(loop, 'cat x.test.mjs', tfCapture.spec), undefined)
+  // MUTATION: bypass the builder and bash admission checks.
+  await t.test('ineligible roles tools and content preserve visible results', async () => {
+    assert.equal(await bashResult(filterLoop({ role: 'reviewer' }).loop, 'node --test x.test.mjs', tfCapture.spec), undefined)
+    assert.equal(await filterLoop().loop.onToolResult({ toolName: 'read', input: { command: 'node --test x.test.mjs' }, content: [{ type: 'text', text: tfCapture.spec }] }, {}), undefined)
+    assert.equal(await filterLoop().loop.onToolResult({ toolName: 'bash', input: { command: 'node --test x.test.mjs' }, content: [{ type: 'text', text: tfCapture.spec }, { type: 'text', text: tfCapture.spec }] }, {}), undefined)
+    assert.equal(await filterLoop().loop.onToolResult({ toolName: 'bash', input: { command: 'node --test x.test.mjs' }, content: [{ type: 'image', data: 'x' }] }, {}), undefined)
+  })
+})
+// MUTATION: admit output without a Node test summary.
+test('TF7', async (t) => {
+  const { loop } = filterLoop()
+  assert.ok(await bashResult(loop, 'node --test x.test.mjs', tfCapture.spec))
+  assert.equal(await bashResult(loop, 'node --test x.test.mjs', tfCapture.spec.replace(/^ℹ tests .*$/m, '')), undefined)
+  // Empty commands cannot satisfy the Node test command admission.
+  await t.test('missing command retains visible text', async () => {
+    assert.equal(await bashResult(loop, '', tfCapture.spec), undefined)
+  })
+  // MUTATION: normalize filtered source line endings.
+  await t.test('CRLF and zero passing lines retain visible output', async () => {
+    const visible = '# tests 1\r\nnot ok 1 - CRLF_FAIL\r\n'
+    const patch = await bashResult(loop, 'node --test x.test.mjs', visible)
+    assert.ok(patch.content[0].text.startsWith(visible))
+    assert.match(patch.content[0].text, /dropped 0 passing-test lines, 0 bytes/)
+  })
+})
+// MUTATION: omit structured output while patching visible output.
+test('TF8', async () => {
+  const { loop } = filterLoop()
+  const structuredContent = { other: 3, output: 'old' }
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap, { structuredContent })
+  assert.deepEqual(patch.structuredContent, { ...structuredContent, output: patch.content[0].text })
+  assert.equal(Object.hasOwn(patch, 'isError'), false)
+})
+// MUTATION: disable full output recovery after visible eligibility.
+test('TF9', async (t) => {
+  const f = fixture()
+  const fullPath = join(f.root, 'full.out')
+  writeFileSync(fullPath, tfCapture.tap)
+  const loop = loopFor(f, { deps: { stat: (path) => ({ size: readFileSync(path).length }) } })
+  const patch = await loop.onToolResult({ toolName: 'bash', input: { command: 'node --test x.test.mjs' }, content: [{ type: 'text', text: '# tests 1\n' }], details: { fullOutputPath: fullPath } }, {})
+  assert.match(patch.content[0].text, /not ok .*TFFAIL/)
+  // MUTATION: replace visible output after a failed full-output read.
+  await t.test('full-output recovery failures retain visible structured output', async () => {
+    const visible = '# tests 1\nnot ok 1 - VISIBLE_FAILURE\n'
+    const cases = [
+      { deps: { stat: () => ({ size: 1 }), readFile: () => { throw Error('EPERM') } }, path: 'unreadable.out' },
+      { deps: { stat: () => ({ size: 8 * 1024 * 1024 + 1 }), readFile: () => '# tests 1\nnot ok 1 - FULL_MARKER\n' }, path: 'oversized.out', excluded: 'FULL_MARKER' },
+      { deps: { stat: () => ({ size: 1 }), readFile: () => '# tests 1\n' + 'ok 1 - FULL_PASS\n'.repeat(493448) }, path: 'post-read-oversized.out' },
+      { deps: { stat: () => ({ size: 1 }), readFile: () => `# tests 1\nnot ok 1 - ${'x'.repeat(51201)}\n` }, path: 'filtered-large.out' },
+    ]
+    for (const { deps, path, excluded } of cases) {
+      const local = loopFor(fixture(), { deps })
+      const structuredContent = { retained: true, output: 'old' }
+      const result = await local.onToolResult({ toolName: 'bash', input: { command: 'node --test x.test.mjs' }, content: [{ type: 'text', text: visible }], details: { fullOutputPath: path }, structuredContent }, {})
+      assert.ok(result.content[0].text.startsWith(visible))
+      if (excluded) assert.doesNotMatch(result.content[0].text, new RegExp(excluded))
+      assert.deepEqual(result.structuredContent, { retained: true, output: result.content[0].text })
+      assert.equal(Object.hasOwn(result, 'isError'), false)
+    }
+  })
+})
+// MUTATION: append the unfiltered fenced lane tail.
+test('TF10', async () => {
+  const f = fixture()
+  const loop = loopFor(f, { runner: async () => ({ code: 0, signal: null, tail: tfCapture.spec }) })
+  const result = await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  assert.doesNotMatch(appendedText(result), /^\s*✔ /m)
+})
+// MUTATION: let the private builder reducer retain TAP passing YAML.
+test('TF11', async () => {
+  const lane = await import(`../../${['lane', 'red.mjs'].join('-')}`)
+  const { loop } = filterLoop()
+  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap)
+  const notice = patch.content[0].text.lastIndexOf('\n[test output filtered:')
+  assert.equal(patch.content[0].text.slice(0, notice), lane.dropPassingLines(tfCapture.tap))
+})

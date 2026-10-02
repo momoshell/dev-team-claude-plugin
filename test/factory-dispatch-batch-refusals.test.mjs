@@ -731,6 +731,36 @@ test('S1', async () => {
   for (const key of counts) assert.equal(value(summary[0], key), value(warning, key), key)
   assert.equal(value(summary[0], 'report'), value(warning, 'report'))
 })
+test('DF3 brief-summary derived= counts all six sources in order before report=', async () => {
+  const expectedSources = ['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost', 'citation-carrier', 'data-file']
+  const check = async (label, rejected = false) => {
+    const checkout = namedReachFixture(`df3-${label}`, { 'test/census.test.mjs': 'const census = true\\n' })
+    const timeline = [], spawnedOut = []
+    let dispatched
+    try { dispatched = await dispatchFixture({ label: `df3-${label}`, names: ['lane-a'], checkout, fences: [entry('lane-a', ['test/census.test.mjs'])], timeline, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }), brief: '## Proposed tier\\nproposed tier: mechanical\\n', writeFile: (path, content) => put(path, content), spawnAsync: async () => rejected ? { status: 1, stdout: '', stderr: 'compiler refused' } : { status: 0, stdout: '', stderr: '' } }) } catch {}
+    if (!rejected) assert.ok(dispatched, 'fulfilled dispatch should produce a persisted fence report')
+    const logs = timeline.filter((row) => row.kind === 'log').map((row) => row.line)
+    const line = logs.find((text) => text.startsWith('dispatch-batch: brief-summary lane=lane-a '))
+    assert.ok(line)
+    const derived = line.match(/ derived=([^ ]+) report=/)
+    assert.ok(derived, line)
+    const pairs = derived[1].split(',')
+    assert.deepEqual(pairs.map((pair) => pair.slice(0, pair.lastIndexOf(':'))), expectedSources)
+    if (dispatched) {
+      const persisted = JSON.parse(readFileSync(join(dispatched.out, FENCE_REPORT_FILE), 'utf8'))
+      const admissions = persisted.lanes.find((row) => row.lane === 'lane-a')?.fence_admissions || []
+      for (const source of expectedSources) {
+        const count = admissions.filter((row) => row.source === source).length
+        assert.equal(Number(pairs.find((pair) => pair.startsWith(`${source}:`)).split(':')[1]), count, source)
+      }
+      assert.ok(admissions.filter((row) => row.source === 'census-carrier').length > 0)
+    }
+    if (rejected) assert.ok(line.includes('refused=compile-refused'))
+  }
+  await check('fulfilled')
+  await check('rejected', true)
+})
+
 // MUTATION S2: discard measured compiler refusal bytes.
 test('S2', async () => { const timeline=[]; try { await dispatchFixture({ label:'s2', timeline, assertQuiet:()=>{}, baseBranch:()=>({branch:'main'}), spawnAsync:async c=>compilerLane(c.args)==='lane-a'?{status:1,stderr:'brief candidate is 52001 bytes; limit is 51200 bytes'}:{status:0,stderr:''} }) } catch {} assert.ok(timeline.some(x=>x.line?.includes('brief-summary lane=lane-a brief_bytes=52001/51200'))) })
 // MUTATION S3: fabricate zero bytes for an unmeasured refusal.

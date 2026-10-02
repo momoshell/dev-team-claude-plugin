@@ -1000,13 +1000,13 @@ test('the default claude planner pane command is pinned byte for byte across the
   writeSeatSkills({ taskDir, role: 'planner', grants: grantedReal })
     assert.equal(
       seatCommand({ ...seat, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --plugin-dir "${skillsPluginDir({ taskDir, role: 'planner' })}" --tools "Read,Glob,Grep,Bash,Write,Task,Skill" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --plugin-dir "${skillsPluginDir({ taskDir, role: 'planner' })}" --tools "Read,Glob,Grep,Bash,Write,Task,Skill" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
     // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
     // (no Task, no plugin dir), so the granted assertion above is not vacuous.
     assert.equal(
       seatCommand({ ...seat, model: 'opus', grants: EMPTY_GRANTS }),
-      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
     // The by_agent overlay now carries the claude planner's lean-build skill, so
     // stripping it removes exactly the session plugin dir and nothing else: the
@@ -1017,7 +1017,7 @@ test('the default claude planner pane command is pinned byte for byte across the
     assert.deepEqual(strippedGrants.skills, [])
     assert.equal(
       seatCommand({ ...seat, model: 'opus', grants: strippedGrants }),
-      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write,Task" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write,Task" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
   } finally {
     rmSync(taskDir, { recursive: true, force: true })

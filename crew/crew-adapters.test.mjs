@@ -151,7 +151,7 @@ test('adapter-claude.seatCommand pins the pane command with the per-seat usage s
   // Captured from main BEFORE the adapter refactor — do not regenerate this
   // from the new code; it is the compatibility bar, now including the
   // independently derived per-seat usage settings path.
-  const EXPECTED = `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Edit,Write,Glob,Grep,Bash" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
+  const EXPECTED = `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model sonnet --permission-mode bypassPermissions --strict-mcp-config --mcp-config "/tmp/crew-task/mcp/builder.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Edit,Write,Glob,Grep,Bash" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent,mcp__*" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
   assert.equal(seatCommand(SAMPLE), EXPECTED)
 })
 
@@ -190,6 +190,22 @@ test('K7', () => {
   // MUTATION K7: omit the pane tools pair.
   const pane = seatCommand({ ...BOOT_BASE, grants: BOOT_GRANTS })
   assert.deepEqual([paneBootValue(pane, '--tools'), paneBootValue(pane, '--allowedTools')], ['Read,Bash,mcp__search__find', 'Read,Bash,mcp__search__find'])
+})
+test('CS1', () => {
+  // MUTATION: remove the headless --disable-slash-commands operand.
+  assert.equal(claudeHeadlessCommand(BOOT_BASE).args.includes('--disable-slash-commands'), true)
+})
+test('CS2', () => {
+  // MUTATION: remove the pane --disable-slash-commands operand.
+  assert.match(seatCommand(BOOT_BASE), /(?:^| )--disable-slash-commands(?: |$)/)
+})
+test('CS3', () => {
+  // MUTATION: remove the headless CLAUDE_CODE_DISABLE_CLAUDE_MDS environment entry.
+  assert.equal(claudeHeadlessCommand(BOOT_BASE).env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1')
+})
+test('CS4', () => {
+  // MUTATION: remove the pane CLAUDE_CODE_DISABLE_CLAUDE_MDS assignment.
+  assert.match(seatCommand(BOOT_BASE).split(' claude ')[0], /(?:^| )CLAUDE_CODE_DISABLE_CLAUDE_MDS=1(?: |$)/)
 })
 test('pane skill tool is appended only with a materialised skill grant', () => {
   const taskDir = scratchDir('claude-pane-skill-')
@@ -2039,14 +2055,14 @@ test('claude headless without the router switch matches the pre-change command s
       '--permission-mode', 'bypassPermissions',
       '--strict-mcp-config',
       '--mcp-config', '/tmp/task/mcp/builder.json',
-      '--setting-sources', 'project', '--settings', CLAUDE_USAGE_SETTINGS,
+      '--disable-slash-commands', '--setting-sources', 'project', '--settings', CLAUDE_USAGE_SETTINGS,
       '--tools', 'Read',
       '--allowedTools', 'Read',
       '--disallowedTools', 'Task,Agent,mcp__*',
       '--append-system-prompt-file', '/tmp/role-builder.md',
       '--session-id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     ],
-    env: { DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' },
+    env: { DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' },
   }
   const unset = claudeHeadlessCommand({ ...base, env: {} })
   assert.deepEqual(unset, EXPECTED)

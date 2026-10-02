@@ -28,7 +28,7 @@ subagent fan-out explicitly on a read-everything sweep and ask for incremental
 findings, because two scouts finished measuring and escalated with the envelope
 unwritten.
 
-**The sequence above prescribes no dry run.** Fence and adoption checks run before worktrees; compilation, directed-brief, floor, and seat checks run in detached worktrees; branches attach last. A refusal before boot removes every worktree the dispatch created. Each compiled lane emits a `brief-summary` with measured brief bytes and fence counts; rejected bytes are `unmeasured` unless compiler text provides a safe byte measurement. `references/flags.md` records what `--dry-run` is for and what a green one does not mean.
+**The sequence above prescribes no dry run.** Fence and adoption checks run before worktrees; compilation, directed-brief, floor, and seat checks run in detached worktrees; branches attach last. A refusal before boot removes every worktree the dispatch created. Each compiled lane emits a `brief-summary` with measured brief bytes and fence counts; `derived=<source>:<n>,...` appears before `report=` and counts admissions separately from unchanged warning counts. Rejected bytes are `unmeasured` unless compiler text provides a safe byte measurement. `references/flags.md` records what `--dry-run` is for and what a green one does not mean.
 
 ## Chunked plans
 
@@ -107,13 +107,16 @@ rewrites the citing doc, so citation carriers no longer have to be fenced either
 A lane that DOES change a manifest still has to leave it consistent, and rot and
 ambiguity stay fatal in the skill's own `exhibits.test.mjs`.
 
-`citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only. Carrier warnings remain evidence and do not widen a fence by themselves.
+`citation-carrier-unfenced` names every pinned carrier; only an **unpinned** path:line citation — one with no manifest keys — is hand-only. Carrier warnings remain evidence; eligible citation docs outside the lane's own/requested surface are automatically admitted unless held by another lane. Owned, requested, or held docs are not newly admitted.
 
 ### Sourced fence admission
 
 The authored register is the scan floor. Every concrete unheld candidate from the
-three scans is admitted to its owning lane's effective fence exactly once, with one
-source: `test-reach`, `anchor-pin`, or `census-carrier`. The admission is written to
+six sources is admitted to its owning lane's effective fence exactly once, in source
+order: `test-reach`, `anchor-pin`, `census-carrier`, `suite-cost`, `citation-carrier`,
+`data-file`. Data-file candidates are tracked non-code paths named by static literals
+in authored or requested surface tests; `.mjs`/`.js` code paths and runtime-built paths are excluded.
+BLIND SPOT: data-file admission sees only tracked non-code paths named by static literals in surface or authored-fence tests; paths built at runtime are invisible. The admission is written to
 `perLane[name].files`, the effective `dispatch.fences.json` when widening occurred,
 `dispatch.warnings.json`, bounded normal and dry-run output, and the lane journal
 after boot. Admitted paths widen the effective contextual register and brief, but never
@@ -127,7 +130,7 @@ unrelated lane scanning the same candidate receives a `fence-admission-arbitrate
 warning naming the first lane and file, does not widen its own effective fence, and
 continues through dispatch. Related dependency lanes can each retain their own
 automatic admission. A candidate held by an unrelated same-batch authored register
-entry is not admitted: held anchor and census candidates stay outside the effective
+entry is not admitted: held anchor, census, citation-carrier, and data-file candidates stay outside the effective
 fence with their existing warnings, and held test reach retains
 `test-reach-unfenced`. An explicit `allow_test_reach` entry always keeps its named
 test outside the effective fence; a held test records its authored-holder context,

@@ -64,7 +64,7 @@ const BASE_BRANCH_UNRESOLVED = 'base-branch-unresolved'
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
-export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost'])
+export const FENCE_ADMISSION_SOURCES = Object.freeze(['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost', 'citation-carrier', 'data-file'])
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -332,6 +332,7 @@ export const CENSUS_CARRIER_FILES = Object.freeze(['skills/crew-dispatch/referen
 export const CENSUS_CARRIER_WARNING_PREFIX = 'dispatch-batch: WARNING census-carrier-unfenced:'
 export const CENSUS_CARRIER_REPAIR = "No repair is OWEd: the census is DERIVED from git discovery, so there is no stated number this lane cannot reach from outside its fence. This names the carriers a test-file edit can move; re-measure with the command in batch.md."
 export const CENSUS_CARRIER_BLIND_SPOT = 'BLIND SPOT: this warning fires on the POSSIBILITY that a fenced *.test.mjs edit moves either repository-wide census, not on the fact; dispatch cannot inspect bytes the builder has not written and cannot predict whether either census will move.'
+export const DATA_FILE_BLIND_SPOT = 'BLIND SPOT: data-file admission sees only tracked non-code paths named by static literals in surface or authored-fence tests; paths built at runtime are invisible.'
 export const SUITE_COST_SUITE = 'test/factory-suite-cost.test.mjs'
 export const SUITE_COST_WARNING_PREFIX = 'dispatch-batch: WARNING suite-cost-unfenced:'
 export const SUITE_COST_REPAIR = 'No repair is OWED by dispatch: the lane inserts the created suite into test/factory-suite-cost.test.mjs D1 in sorted position.'
@@ -2161,7 +2162,8 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       if (!admissionOwner) admissionOwners.set(row.file, { lane: name, file: row.file, source })
       return recordAdmission(row)
     }
-    const matchOwn = scopeMatcher([...ownPaths, ...requestedSurface])
+    const requestedPaths = requestedSurface.map((file) => parseFenceScope(file).path).filter((path) => typeof path === 'string')
+    const matchOwn = scopeMatcher([...ownPaths, ...requestedPaths])
     const hasTestSurface = ownPaths.some((path) => path.endsWith('.test.mjs'))
     const missingCensusCarriers = CENSUS_CARRIER_FILES.filter((carrier) => !matchOwn(carrier))
     const censusExposure = hasTestSurface && missingCensusCarriers.length > 0
@@ -2235,12 +2237,16 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
     }
 
-    // The docs that CITE the lines this lane moves. The post-merge pass rewrites the
-    // manifest and its carriers together; this warning names those docs so an operator
-    // can fence them when correct line numbers are needed at merge time.
+    // The docs that CITE the lines this lane moves. Eligible unheld docs are admitted;
+    // requested, owned, and held docs are not newly admitted.
     const unfencedCarriers = citationCarriersOutsideFence({ surface: ownSurface, fenceFiles: ownPaths, carriers: carriersFor() })
     if (unfencedCarriers.length > 0) {
       const docs = [...new Set(unfencedCarriers.map(({ doc }) => doc))]
+      for (const doc of docs) {
+        if (matchOwn(doc)) continue
+        const holder = holderFor(name, doc)
+        if (!holder) automaticAdmission('citation-carrier', doc)
+      }
       const listed = unfencedCarriers.slice(0, CITATION_CARRIER_ROW_LIMIT)
         .map(({ doc, file, keys }) => `${doc} cites ${file} at ${keys.join(', ')}`).join('; ')
       const omitted = unfencedCarriers.length - Math.min(unfencedCarriers.length, CITATION_CARRIER_ROW_LIMIT)
@@ -2248,9 +2254,19 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       warnings.push(warning)
       deferredWarnings.push(() => {
         const tail = reportTail(omitted, citation)
-        const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. ${CITATION_CARRIER_POST_MERGE}. Fence these docs if you want them correct at merge time: ${docs.join(', ')}. ${CITATION_CARRIER_BLIND_SPOT}`
+        const carrierText = `${CITATION_CARRIER_WARNING_PREFIX} lane ${name} moves lines in file(s) cited by ${docs.length} doc(s) outside its fence (listing at most ${CITATION_CARRIER_ROW_LIMIT}): ${listed}${tail}. ${CITATION_CARRIER_POST_MERGE}. Fence these docs if you want them correct at merge time: ${docs.join(', ')}. Eligible unheld docs are automatically admitted; requested, owned, and held docs are not newly admitted. ${CITATION_CARRIER_BLIND_SPOT}`
         warning.text = carrierText
       })
+    }
+
+    if (fenceHasSurface) {
+      const reach = reachFor()
+      for (const [file, tests] of reach.pathByFile) {
+        if (CODE_SUFFIX.test(file) || matchOwn(file)) continue
+        if (![...tests].some(matchOwn)) continue
+        if (holderFor(name, file)) continue
+        automaticAdmission('data-file', file)
+      }
     }
 
     const droppedReachRows = []
@@ -4552,7 +4568,8 @@ async function compileDispatchWave(prepared) {
     const measuredRefusalBytes = Number.isSafeInteger(refusedBytes) ? refusedBytes : null
     const briefBytes = result.status === 'fulfilled' ? result.value.bytes : measuredRefusalBytes
     const byteLabel = briefBytes === null ? 'unmeasured' : `${briefBytes}/${BRIEF_BYTE_LIMIT}`
-    const summaryLine = `dispatch-batch: brief-summary lane=${lane} brief_bytes=${byteLabel} anchor-pin=${counts.anchorPin} citation-carrier=${counts.citationCarrier} census-carrier=${counts.censusCarrier} test-reach=${counts.testReach} report=${fenceReport.citation}${result.status === 'rejected' ? ` refused=${result.reason.reason}` : ''}`
+    const derived = FENCE_ADMISSION_SOURCES.map(source => `${source}:${fenceReport.admissions.filter(row => row.lane === lane && row.source === source).length}`).join(',')
+    const summaryLine = `dispatch-batch: brief-summary lane=${lane} brief_bytes=${byteLabel} anchor-pin=${counts.anchorPin} citation-carrier=${counts.citationCarrier} census-carrier=${counts.censusCarrier} test-reach=${counts.testReach} derived=${derived} report=${fenceReport.citation}${result.status === 'rejected' ? ` refused=${result.reason.reason}` : ''}`
     if (result.status === 'fulfilled' || result.status === 'rejected') d.log(summaryLine)
   }
   for (const settled of results) {

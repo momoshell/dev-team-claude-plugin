@@ -155,7 +155,7 @@ test('E1 journals sourced admissions and refuses an unsourced admission', async 
     assert.throws(() => fenceAdmission({ lane: 'lane-a', file: './src/owned.mjs', source }), (error) => error instanceof BatchRefusal && error.reason === 'fence-admission-unsourced')
   }
   assert.equal(REFUSAL_REASONS.includes('fence-admission-unsourced'), true)
-  assert.deepEqual(FENCE_ADMISSION_SOURCES, ['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost'])
+  assert.deepEqual(FENCE_ADMISSION_SOURCES, ['test-reach', 'anchor-pin', 'census-carrier', 'suite-cost', 'citation-carrier', 'data-file'])
   for (const source of FENCE_ADMISSION_SOURCES) {
     const row = fenceAdmission({ lane: 'lane-a', file: './src/owned.mjs', source })
     assert.deepEqual(row, { lane: 'lane-a', file: 'src/owned.mjs', source })
@@ -214,6 +214,75 @@ test('E1 journals sourced admissions and refuses an unsourced admission', async 
   assert.ok(journalRows.length > 0)
   assert.ok(journalRows.every((row) => FENCE_ADMISSION_SOURCES.includes(row.source)))
   assert.ok(journalResult.logs.some((line) => line.includes(FENCE_ADMISSION_EVENT) && line.includes('source=test-reach')))
+})
+
+test('DF1 citation-carrier admits an unheld pinned citing doc outside the fence', () => {
+  const fixture = ({ authored = [], requested = [], held = [], duplicate = false } = {}) => {
+    const checkout = scratchDir('df1-')
+    const files = ['lib/owned.mjs', 'skills/example/anchors.json', 'skills/example/references/citing.md']
+    const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+    write(files[0], 'export const OWNED = 1\n')
+    write(files[1], JSON.stringify({ 'lib/owned.mjs:1': 'export const OWNED = 1' }))
+    const doc = files[2]
+    write(doc, 'See `lib/owned.mjs:1`.' + (duplicate ? ' Also `lib/owned.mjs:1`.' : '') + '\n')
+    const tracked = [...files, ...held]
+    for (const file of held) if (!files.includes(file)) write(file, 'held\\n')
+    const outDir = join(checkout, 'out')
+    const result = checkFences({
+      fences: [{ lane: 'lane-a', files: ['lib/owned.mjs', 'skills/example/anchors.json', ...authored] }, ...(held.length ? [{ lane: 'lane-b', files: held }] : [])],
+      lanes: [{ lane: 'lane-a', where: ['lib/owned.mjs', ...requested] }, ...(held.length ? [{ lane: 'lane-b', where: [] }] : [])],
+      checkout, outDir,
+      deps: { home: checkout, log: () => {}, spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: tracked.join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } },
+    })
+    return { result, doc, authored: ['lib/owned.mjs', 'skills/example/anchors.json', ...authored] }
+  }
+  const ordinary = fixture()
+  assert.deepEqual(ordinary.result.admissions.filter((row) => row.source === 'citation-carrier'), [{ lane: 'lane-a', file: ordinary.doc, source: 'citation-carrier' }])
+  assert.ok(ordinary.result.perLane['lane-a'].files.includes(ordinary.doc))
+  assert.deepEqual(ordinary.result.perLane['lane-a'].files.slice(0, ordinary.authored.length), ordinary.authored)
+  assert.ok(ordinary.result.warnings.some((row) => row.kind === 'citation-carrier'))
+  for (const options of [{ authored: ['skills/example/references/citing.md'] }, { requested: ['skills/example/references/citing.md'] }, { held: ['skills/example/references/citing.md'] }, { duplicate: true }]) {
+    const { result, doc, authored } = fixture(options)
+    if (!options.authored) assert.ok(result.warnings.some((row) => row.kind === 'citation-carrier'), JSON.stringify(options))
+    const rows = result.admissions.filter((row) => row.source === 'citation-carrier' && row.lane === 'lane-a')
+    assert.equal(rows.length, options.duplicate ? 1 : 0)
+    if (options.requested) assert.equal(result.perLane['lane-a'].files.includes(doc), false)
+    if (options.authored) assert.deepEqual(result.perLane['lane-a'].files.slice(0, authored.length), authored)
+  }
+})
+
+test('DF2 data-file admits non-code literals read by surface tests', () => {
+  const fixture = ({ authored = ['test/owned.test.mjs'], requested = [], otherLane = false, reader = 'test/owned.test.mjs', literal = true, surfaceOnDisk = true } = {}) => {
+    const checkout = scratchDir('df2-')
+    const files = ['test/owned.test.mjs', 'fixtures/data.json', 'lib/other.mjs']
+    const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+    if (surfaceOnDisk) write('test/owned.test.mjs', "test('surface', () => {})\n")
+    write('fixtures/data.json', '{}\\n'); write('lib/other.mjs', 'export const other = 1\\n')
+    write(reader, `const data = ${JSON.stringify('fixtures/data.json')}; const code = ${JSON.stringify('lib/other.mjs')}\n`)
+    const tracked = [...new Set([...files, reader])]
+    const outDir = join(checkout, 'out')
+    const result = checkFences({
+      fences: [{ lane: 'lane-a', files: authored }, ...(otherLane ? [{ lane: 'lane-b', files: ['fixtures/data.json'] }] : [])],
+      lanes: [{ lane: 'lane-a', where: requested }, ...(otherLane ? [{ lane: 'lane-b', where: [] }] : [])], checkout, outDir,
+      deps: { home: checkout, log: () => {}, spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: tracked.join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } },
+    })
+    return { result, authored }
+  }
+  const ordinary = fixture()
+  assert.deepEqual(ordinary.result.admissions.filter((row) => row.source === 'data-file'), [{ lane: 'lane-a', file: 'fixtures/data.json', source: 'data-file' }])
+  assert.equal(ordinary.result.admissions.some((row) => row.file === 'lib/other.mjs' && row.source === 'data-file'), false)
+  assert.deepEqual(ordinary.result.perLane['lane-a'].files.slice(0, ordinary.authored.length), ordinary.authored)
+  assert.ok(ordinary.result.perLane['lane-a'].files.includes('fixtures/data.json'))
+  for (const options of [
+    { authored: ['lib/other.mjs'], requested: ['test/owned.test.mjs'] }, { authored: ['lib/other.mjs'], requested: ['test/fixture/'], reader: 'test/fixture/owned.test.mjs' }, { authored: ['test/owned.test.mjs:1-2'] }, { reader: 'test/outside.test.mjs' },
+    { authored: ['test/owned.test.mjs', 'fixtures/data.json'] }, { requested: ['fixtures/data.json'] },
+    { otherLane: true }, { authored: ['missing/absent.mjs'], requested: ['test/owned.test.mjs'], surfaceOnDisk: false },
+  ]) {
+    const { result } = fixture(options)
+    const rows = result.admissions.filter((row) => row.source === 'data-file' && row.lane === 'lane-a')
+    if (options.reader === 'test/outside.test.mjs' || options.otherLane || options.authored?.[0] === 'missing/absent.mjs' || options.authored?.includes('fixtures/data.json') || options.requested?.includes('fixtures/data.json')) assert.equal(rows.length, 0)
+    else assert.deepEqual(rows, [{ lane: 'lane-a', file: 'fixtures/data.json', source: 'data-file' }], JSON.stringify(options))
+  }
 })
 
 test('G1 preserves every scan blind spot byte-identically', () => {

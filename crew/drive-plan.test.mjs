@@ -3372,9 +3372,18 @@ test('NOENVREASK', () => {
     assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
     assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
   }
-  const builder = plannerNoEnvelopeScenario({ builders: [noEnvelopeCarrier(NO_ENVELOPE_DETAILS[0])] })
-  assert.equal(noEnvelopeDispatches(builder, 'builder').length, 1)
-  assert.equal(builder.result.status, 'escalation')
+  // The same tuple on a builder is not a planner recovery: HEAD's ordinary handling bounces it
+  // with build-fix, and a zero-turn non-start keeps its one direct re-ask before that bounce.
+  const zeroTurn = { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }
+  for (const [builders, notes] of [
+    ...NO_ENVELOPE_DETAILS.map((detail) => [[noEnvelopeCarrier(detail)], ['build', 'build-fix']]),
+    [[noEnvelopeCarrier(zeroTurn), noEnvelopeCarrier(zeroTurn)], ['build', 'build', 'build-fix']],
+  ]) {
+    const builder = plannerNoEnvelopeScenario({ builders })
+    assert.deepEqual(noEnvelopeDispatches(builder, 'builder').map(({ note }) => note), notes)
+    assert.equal(builder.result.status, 'done')
+    assert.equal(noEnvelopeRows(builder).some((row) => row.kind === 'planner-no-envelope'), false)
+  }
 })
 
 // MUTATION NOENVPREAMBLE: count the direct retry as one plan round.

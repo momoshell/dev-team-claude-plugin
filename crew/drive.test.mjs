@@ -901,10 +901,16 @@ test('IDREASK', () => {
   assert.match(recovered.io.calls.writes[dispatches[1].briefFile], new RegExp(`assignment_id=${JSON.stringify(dispatches[0].id)}`))
   assert.equal(recovered.result.status, 'done')
 
-  const insufficient = idReaskScenario({ builders: [wrongBuilderId(), buildEnv({ status: 'insufficient', summary: 'blocking gaps' })] })
-  assert.equal(builderDispatches(insufficient).length, 2)
-  assert.equal(insufficient.result.status, 'escalation')
-  assert.match(insufficient.result.details.escalation.why, /blocking gaps/)
+  // A corrected insufficient takes HEAD's ordinary builder handling: never done, then the
+  // build-fix bounce, exactly as the same insufficient returned without an id slip.
+  const blocking = () => buildEnv({ status: 'insufficient', summary: 'blocking gaps' })
+  const direct = idReaskScenario({ builders: [blocking()] })
+  const insufficient = idReaskScenario({ builders: [wrongBuilderId(), blocking()] })
+  assert.deepEqual(builderDispatches(direct).map(({ note }) => note), ['build', 'build-fix'])
+  assert.deepEqual(builderDispatches(insufficient).map(({ note }) => note), ['build', 'build', 'build-fix'])
+  assert.deepEqual(insufficient.io.calls.logs.filter((row) => row.envelope && row.role === 'builder').map(({ status }) => status), ['insufficient', 'done'])
+  assert.equal(insufficient.result.status, 'done')
+  assert.deepEqual(insufficient.result.details.stages, direct.result.details.stages)
 })
 
 // MUTATION IDROW: replace the asked outcome expression with grace-spent.

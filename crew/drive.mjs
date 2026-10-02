@@ -348,7 +348,6 @@ function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
 }
 
 const HANDLED_ENVELOPE_REFUSAL = Symbol('handled-envelope-refusal')
-const HANDLED_ASSIGNMENT_ID_CORRECTION = Symbol('handled-assignment-id-correction')
 
 function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison, otherwiseValid }) {
   const envelope = {
@@ -374,10 +373,6 @@ function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison, other
 
 function handledEnvelopeRefusalOf(env) {
   return env?.[HANDLED_ENVELOPE_REFUSAL] === true ? env.details?.envelope_refusal : null
-}
-
-function assignmentIdCorrectionOf(env) {
-  return env?.[HANDLED_ASSIGNMENT_ID_CORRECTION] === true
 }
 
 function runtimeTransportNoEnvelopeCarrier(env) {
@@ -6539,7 +6534,7 @@ function runTask(ctx, io, crash) {
     return null
   }
 
-  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null, reask = null, onDispatch = null, assignmentIdCorrection = false } = {}) {
+  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null, reask = null, onDispatch = null } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -6632,7 +6627,6 @@ function runTask(ctx, io, crash) {
     }
     io.log(recordRow({ at: io.now(), envelope: id, role, status: env.status }))
     if (Object.hasOwn(S.returns, role) && env.status === 'done') S.returns[role] = env
-    if (assignmentIdCorrection) Object.defineProperty(env, HANDLED_ASSIGNMENT_ID_CORRECTION, { value: true })
     return env
   }
 
@@ -6662,7 +6656,6 @@ function runTask(ctx, io, crash) {
           onDispatch: (current) => { identity = current; callerOnDispatch?.(current) },
           briefBuilder: ({ id, runId }) => `${preamble}\n\n${typeof opts.briefBuilder === 'function' ? opts.briefBuilder({ id, role, runId }) : `Original brief: ${briefFile}`}\n`,
           reask: { id: identity.id, returnPath: retryPath },
-          assignmentIdCorrection: true,
         }
         return dispatchOnce(role, retryBrief, note, correctionOpts)
       }
@@ -10864,10 +10857,6 @@ function runTask(ctx, io, crash) {
     if (refusalWhy) {
       stageComplete()
       return escalate('build', refusalWhy, env.artifacts || [])
-    }
-    if (env.status !== 'done' && (assignmentIdCorrectionOf(env) || runtimeTransportNoEnvelopeCarrier(env))) {
-      stageComplete()
-      return escalate('build', env.summary || env.status, env.artifacts || [])
     }
     const builderObservation = observeBuilderEndpoint()
     const immediatePreviousBuilderEndpoint = previousBuilderEndpoint

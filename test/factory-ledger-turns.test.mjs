@@ -2288,8 +2288,8 @@ test('b381 F6 the recorded b368 plan-adopted row round-trips journal to ledger t
     assert.deepEqual(result, { applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null })
     assert.deepEqual({ ...ledger.dumpTable('plan_adoptions')[0] }, {
       task_slug: 'b368-scopesubset', lane: 'b368-scopesubset',
-      archive: '/archive/dt-b365-scopesubset',
-      source: '/archive/dt-b365-scopesubset/task',
+      archive: '/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset',
+      source: '/Users/momoshell/.crew/dt-b365-scopesubset/b365-scopesubset/task',
       plan_sha: 'db151a63f9133b26e351a99a1a2b20bcd9a2d724fd540aab8129737f645578bb',
       files: 3, findings: 1, adopt_from: 'cli', at_ms: Date.parse('2026-09-01T17:34:33.665Z'),
       created_at: '2026-09-01T17:34:33.665Z',

@@ -5027,21 +5027,21 @@ export function openLedger({
     }
   }
 
+  // `since` is windowBound's ISO text but `at_ms` is INTEGER epoch ms; SQLite orders
+  // every INTEGER below every TEXT, so an unconverted bound reads the window empty.
   function contextCensusRows(since = null) {
     const conn = ensureDb()
     if (!conn) return []
     const query = since == null
       ? 'SELECT * FROM seat_turn_census ORDER BY adw_id, at_ms, dispatch_id'
       : 'SELECT * FROM seat_turn_census WHERE at_ms >= ? ORDER BY adw_id, at_ms, dispatch_id'
-    return since == null ? conn.prepare(query).all() : conn.prepare(query).all(since)
+    return since == null ? conn.prepare(query).all() : conn.prepare(query).all(Date.parse(since))
   }
 
   function contextSessions(since = null) {
     const conn = ensureDb()
     if (!conn) return []
-    const query = since == null
-      ? `SELECT * FROM sessions WHERE ${excludeSynthetic()} ORDER BY adw_id`
-      : `SELECT * FROM sessions WHERE ${excludeSynthetic()} AND started_at >= ? ORDER BY adw_id`
+    const query = `SELECT * FROM sessions WHERE ${excludeSynthetic()}${since == null ? '' : ' AND started_at >= ?'} ORDER BY adw_id`
     return since == null ? conn.prepare(query).all() : conn.prepare(query).all(since)
   }
 

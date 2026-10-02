@@ -9195,3 +9195,149 @@ test('D1-D7 driver resolves plugin-owned tools and resources from the plugin, ne
   // The lead adjudicator gets the same seat brief, and so the same falsification rules, as the other panel seats.
   assert.deepEqual([uses('${ANCHOR_PIN_COMMAND}'), uses('${PROVE_MUTATIONS_COMMAND}'), uses('readFile(CAPABILITIES_PATH)'), uses('modulePath: SCREENER_MODULE'), uses('falsificationLines(io, PLUGIN_ROOT)'), uses("panelSeatBrief('lead'")], [4, 1, 3, 1, 2, 1])
 })
+
+function builderBounceFixture() {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
+      'gate-cmd:2': { ok: false, output: 'expected exportX, found nothing, at a.mjs:12' },
+      'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const run = io.run
+  io.run = (cmd) => cmd === "git diff --stat 'HEAD'"
+    ? { ok: true, output: 'STAT LINE ONE\nSTAT LINE TWO\n' }
+    : cmd === "git diff 'HEAD'"
+      ? { ok: true, output: 'DIFF LINE ONE\nDIFF LINE TWO\n' }
+      : cmd === ['git', 'ls' + '-files', '--others', '--exclude-standard'].join(' ')
+        ? { ok: true, output: '' }
+        : run(cmd)
+  return io
+}
+function traceBuilderRenewal(io, trace, renewal) {
+  const assign = io.assign
+  io.assign = (spec) => { if (spec.role === 'builder') trace.push(`assign:${spec.note}:${spec.briefFile}`); return assign(spec) }
+  io.freshSession = (role) => { trace.push(`freshSession:${role}`); return typeof renewal === 'function' ? renewal() : renewal }
+}
+
+// MUTATION FB1: replace only the whole-build helper call with builderAssignmentBrief.
+test('FB1 whole-build bounce renews between builder assignments', () => {
+  const io = builderBounceFixture(), trace = []
+  traceBuilderRenewal(io, trace, { session: 'fresh' })
+  driveTask(CTX, io)
+  assert.deepEqual(trace.map((item) => item.split(':')[0]), ['assign', 'freshSession', 'assign'])
+})
+
+// MUTATION FB2: replace only the stepped helper call with builderAssignmentBrief.
+test('FB2 stepped assignments renew between successful steps', () => {
+  const { io } = steppedAcceptanceIo(), trace = []
+  traceBuilderRenewal(io, trace, { session: 'fresh' })
+  addStepCheckpointWitness(io)
+  driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  assert.deepEqual(trace.map((item) => item.split(':')[0]), ['assign', 'freshSession', 'assign'])
+  assert.match(trace[0], /step-c1-r1\.md/)
+  assert.match(trace[2], /builder-handoff-2\.md/)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  assert.match(io.calls.writes[second.briefFile], /step-c2-r1\.md/)
+})
+
+// MUTATION FB3: return wrappedPath instead of handoffPath.
+test('FB3 fresh second assignment receives the brief and plan handoff', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  assert.match(second.briefFile, /builder-handoff-2\.md$/)
+  const handoff = io.calls.writes[second.briefFile]
+  assert.match(handoff, /Read the current builder brief at .*build-bounce-r1\.md\./)
+  assert.match(handoff, /Plan: .*plan\.md/)
+})
+
+// MUTATION FB4: replace stat.output with an empty string on its array line.
+test('FB4 handoff preserves the git diff stat output verbatim', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  assert.ok(io.calls.writes[second.briefFile].includes('Diff stat:\n\nSTAT LINE ONE\nSTAT LINE TWO\n\n'))
+})
+
+// MUTATION FB5: replace the full-diff write with void diffPath.
+test('FB5 handoff full-diff artifact preserves git output verbatim', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const fullDiff = /Full diff: (.+)/.exec(io.calls.writes[second.briefFile])
+  assert.ok(fullDiff)
+  assert.equal(io.calls.writes[fullDiff[1]], 'DIFF LINE ONE\nDIFF LINE TWO\n')
+})
+
+// MUTATION FB6: map held to fresh only in the recorded row.
+test('FB6 held renewal records its closed outcome, attempt and note', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'held', why: 'worker-adoptable' })
+  driveTask(CTX, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'builder-session' && row.outcome === 'held' && row.attempt === 2 && row.note === 'gate-fix'))
+})
+
+// MUTATION FB7: bypass the fresh-only handoff condition.
+test('FB7 held renewal assigns the unchanged gate bounce brief', () => {
+  const io = builderBounceFixture(), trace = []
+  traceBuilderRenewal(io, trace, { session: 'held', why: 'worker-adoptable' })
+  driveTask(CTX, io)
+  assert.deepEqual(trace.map((item) => item.split(':')[0]), ['assign', 'freshSession', 'assign'])
+  assert.match(trace[2], /build-bounce-r1\.md/)
+})
+
+// MUTATION FB8: guard logging on method availability.
+test('FB8 missing freshSession logs kept and continues dispatch', () => {
+  const io = builderBounceFixture()
+  driveTask(CTX, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'builder-session' && row.outcome === 'kept' && row.attempt === 2))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+test('throwing freshSession is kept and the bounce still dispatches', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => { throw new Error('fresh session probe interrupted') }
+  driveTask(CTX, io)
+  assert.ok(io.calls.logs.some((row) => row.event === 'builder-session' && row.outcome === 'kept' && row.why === 'fresh session probe interrupted'))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+// MUTATION RV1-1: delete the untracked section from the handoff array.
+test('fresh builder handoff names untracked files separately from the diff', () => {
+  const io = builderBounceFixture()
+  const run = io.run
+  io.run = (cmd) => cmd === ['git', 'ls' + '-files', '--others', '--exclude-standard'].join(' ')
+    ? { ok: true, output: 'crew/new.mjs\ncrew/new.test.mjs\n' }
+    : run(cmd)
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const handoff = io.calls.writes[second.briefFile]
+  assert.match(handoff, /crew\/new\.mjs\ncrew\/new\.test\.mjs\n/)
+})
+
+// MUTATION RV1-2: both unavailable arms return { output: '' }.
+test('fresh builder handoff reports failed and throwing diff probes', () => {
+  const io = builderBounceFixture()
+  const run = io.run
+  io.run = (cmd) => {
+    if (cmd === "git diff --stat 'HEAD'") return { ok: false, error: 'boom' }
+    if (cmd === "git diff 'HEAD'") throw new Error('kaboom')
+    return run(cmd)
+  }
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  assert.match(io.calls.writes[second.briefFile], /unavailable: boom/)
+  assert.match(io.calls.writes[`${TD}/builder-diff-2.patch`], /^unavailable: kaboom/)
+})

@@ -3199,7 +3199,7 @@ test('B1 present quoted code compiles unchanged', () => {
   assert.equal(section(brief, '## Premise check').trim(), 'verified · premise · lib/widget.mjs:2-5')
   assert.equal(clean.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 1/1')
   assert.equal(section(brief, '## The ask'), ask)
-  assert.equal(section(brief, '## Acceptance'), `The widget behavior is correct. · Full suite green. · ${SLOT_MARKER}`)
+  assert.equal(section(brief, '## Acceptance'), `The widget behavior is correct. · Full suite green — measured by the driver's suite stage, never by a seat. · ${SLOT_MARKER}`)
   assert.equal(section(brief, '## Out of scope'), 'The surrounding dispatch remains unchanged.')
   assert.equal(canonicalisePremiseText('  first  \n\n    last\t\n'), 'first  \n\n  last\t')
 
@@ -3763,4 +3763,33 @@ test('SF6', () => {
   const { line, sidecar } = packedPointer('sf6', '## Coupled sources', 'coupled')
   const grep = line.indexOf('grep')
   assert.ok(grep >= 0 && line.indexOf(sidecar, grep) > grep)
+})
+
+test('P1 compiled Acceptance assigns full-suite measurement to the driver', () => {
+  // MUTATION: restore `Full suite green.` without the driver/seat ownership clause.
+  const brief = renderBrief({
+    request: { ask: ASK, done_means: DONE, out_of_scope: OUT },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    baseline: { lane: 'npm test', pass: 2, fail: 0, status: 'measured' },
+  })
+  assert.match(section(brief, '## Acceptance'), /measured by the driver's suite stage, never by a seat/)
+})
+
+test('P2 compiled Validation lane labels the full suite driver-owned', () => {
+  // MUTATION: remove ` · driver-owned: no seat runs it` from renderValidation.
+  for (const baseline of [
+    { lane: 'npm test', pass: 2, fail: 0, status: 'measured' },
+    { lane: 'npm test', pass: 2, fail: 0, status: 'measured', reused: true },
+    { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+  ]) {
+    const brief = renderBrief({
+      request: { ask: ASK, done_means: DONE, out_of_scope: OUT },
+      where: [],
+      discovery: { candidates: [], tripwires: [], broadKeys: [] },
+      baseline,
+    })
+    const full = section(brief, '## Validation lane').split('\n').find((line) => line.startsWith('full:'))
+    assert.match(full, /· driver-owned: no seat runs it$/)
+  }
 })

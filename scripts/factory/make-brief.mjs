@@ -3438,7 +3438,7 @@ function renderValidation(baseline, discovery, pack) {
     ? `unknown (${baseline.reason})`
     : `pass ${baseline.pass}, fail ${baseline.fail}`
   const basis = baseline.reused === true ? 'reused baseline' : 'measured baseline'
-  return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count}`
+  return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count} · driver-owned: no seat runs it`
 }
 
 function briefSection(name, source, lines, authored = null) {
@@ -3477,7 +3477,7 @@ function renderBriefSections(gathered) {
     briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
     briefSection('fences', null, ['## Fences', renderFences(fences, writeSurface, pack)]),
     briefSection('what the crew decides', null, ['## What the crew decides', SLOT_MARKER]),
-    briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green. · ${SLOT_MARKER}`], request.done_means),
+    briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green — measured by the driver's suite stage, never by a seat. · ${SLOT_MARKER}`], request.done_means),
     briefSection('acceptance gate', null, ['## Acceptance gate', standingBlocks().acceptance]),
     briefSection('per-check mutations', null, ['## Per-check mutations', standingBlocks().mutations]),
     briefSection('validation lane', null, ['## Validation lane', renderValidation(baseline, discovery, pack)]),

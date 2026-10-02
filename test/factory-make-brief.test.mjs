@@ -3689,3 +3689,27 @@ test('BD8', () => {
   assert.equal(result.status, 2)
   assert.match(result.stderr, /largest contributor is the ask at .* bytes x 1 occurrence = .* bytes \(the ask, done_means and out_of_scope are each emitted once\)/)
 })
+
+test('a pack written without a proposal derives the same proposal the brief renders', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/variants.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const writeSurface = resolveWriteSurface({ fences: null, lane: null, where })
+  const request = { ask: 'Derive the pack proposal.', done_means: 'The sidecar agrees with the brief.', out_of_scope: 'Nothing else.' }
+  const pack = writePack({ packDir: scratchDir('factory-pack-proposal-'), taskName: 'pp', checkout: ROOT, request, where, discovery, writeSurface, coupling: null, profile: null })
+  const sidecar = readFileSync(pack.proposal, 'utf8')
+  assert.doesNotMatch(sidecar, /no proposal/)
+  assert.match(sidecar, new RegExp(`proposed tier: ${proposeTier({ where, discovery }).tier}`))
+})
+
+test('a packed brief with no fence register does not claim the lane owns its files', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/variants.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const writeSurface = resolveWriteSurface({ fences: null, lane: null, where })
+  const request = { ask: 'Render an unfenced packed brief.', done_means: 'The pointer says expects to write.', out_of_scope: 'Nothing else.' }
+  const pack = writePack({ packDir: scratchDir('factory-pack-unfenced-'), taskName: 'pu', checkout: ROOT, request, where, discovery, writeSurface, coupling: null, profile: null })
+  const brief = renderBrief({ request, where, discovery, coupling: null, baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }, fences: null, lane: null, writeSurface, pack })
+  const line = brief.split('\n').find((text) => text.startsWith('files_in_scope ('))
+  assert.ok(line, 'files_in_scope line present')
+  assert.match(line, /no lane fence applied/)
+  assert.doesNotMatch(line, /\bowns\b/)
+})

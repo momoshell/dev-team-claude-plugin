@@ -3226,7 +3226,7 @@ function renderSymbolSidecar(index) {
   return ['symbol index (full static scan):', ...rows].join('\n')
 }
 
-export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath, proposal, omission = null } = {}) {
+export function writePack({ packDir, taskName, checkout, request, discovery, writeSurface, coupling, profile, issueBodyPath, proposal, where, omission = null } = {}) {
   const packOmission = omission ?? null
   if (packOmission !== null && !PACK_OMISSIONS.includes(packOmission)) {
     throw new Error(`unknown pack omission ${JSON.stringify(packOmission)}; expected one of ${PACK_OMISSIONS.join(', ')}`)
@@ -3267,7 +3267,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     paths.rows = null
   }
   writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
-  writeFileSync(paths.proposal, `${renderProposedTier(proposal)}\n`)
+  writeFileSync(paths.proposal, `${renderProposedTier(proposal ?? proposeTier({ where: where ?? request?.where ?? [], discovery }))}\n`)
   if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
   } else {
@@ -3331,7 +3331,7 @@ function renderConventionsPointer(writeSurface, pack) {
   const files = Array.isArray(writeSurface?.files) ? writeSurface.files : []
   const inFenceFiles = new Set(Array.isArray(pack.lineCounts) ? pack.lineCounts.filter((row) => row.label === 'in fence').map((row) => row.file) : [])
   const covered = files.length > 0 && files.every((file) => inFenceFiles.has(file))
-  const listedFiles = covered ? `owns the ${files.length} file(s) marked "in fence" under ## Context pack line counts` : files.length ? files.join(', ') : '(none)'
+  const listedFiles = covered ? `${writeSurface?.basis === 'fences' ? 'owns' : 'expects to write'} the ${files.length} file(s) marked "in fence" under ## Context pack line counts` : files.length ? files.join(', ') : '(none)'
   const basis = writeSurface?.basis === 'fences'
     ? `fence register, lane "${writeSurface.lane}"`
     : 'authored where paths, no lane fence applied'

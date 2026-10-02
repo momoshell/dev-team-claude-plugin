@@ -1,5 +1,5 @@
-// The builder-seat pre-call read gate. It refuses only oversized whole-file reads
-// and simple direct cat/head/tail commands; every other tool call is untouched.
+// The builder-seat read gate refuses oversized whole-file reads and caps UTF-8 result bytes.
+// Direct cat operands also have a byte refusal; other tool calls are untouched.
 // This extension intentionally has no pi or package dependency so checkout-pinned
 // pi can load it through its erasable TypeScript loader.
 
@@ -9,6 +9,8 @@ import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 
 export const DEFAULT_MAX_LINES = 350
 export const MAX_LINES_ENV = 'CREW_READGATE_MAX_LINES'
+export const DEFAULT_MAX_BYTES = 24576
+export const MAX_BYTES_ENV = 'CREW_READGATE_MAX_BYTES'
 // Measured after landing: 10 sessions, 558 ranged reads; 15% would refuse 192/558 (34.4%).
 // | Threshold | Would refuse | Fraction |
 // |---:|---:|---:|
@@ -96,6 +98,46 @@ function parseMaxLines(value) {
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${MAX_LINES_ENV} must be a positive integer`)
   return parsed
+}
+
+function parseMaxBytes(value) {
+  if (value === undefined) return DEFAULT_MAX_BYTES
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) throw new Error(`${MAX_BYTES_ENV} must be a positive integer`)
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${MAX_BYTES_ENV} must be a positive integer`)
+  return parsed
+}
+
+function utf8Prefix(text, maxBytes) {
+  const bytes = Buffer.from(text)
+  let end = Math.min(bytes.length, maxBytes)
+  while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end -= 1
+  return bytes.subarray(0, end).toString('utf8')
+}
+
+function capReadText(text, maxBytes, start, path) {
+  const totalBytes = Buffer.byteLength(text, 'utf8')
+  if (totalBytes <= maxBytes) return undefined
+  let wholeLines = 0
+  let prefixEnd = 0
+  let lineStart = 0
+  let usedBytes = 0
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '\n') continue
+    const size = Buffer.byteLength(text.slice(lineStart, index + 1), 'utf8')
+    if (usedBytes + size > maxBytes) break
+    usedBytes += size; prefixEnd = index + 1; wholeLines += 1; lineStart = index + 1
+  }
+  if (lineStart < text.length) {
+    const size = Buffer.byteLength(text.slice(lineStart), 'utf8')
+    if (usedBytes + size <= maxBytes) { prefixEnd = text.length; wholeLines += 1 }
+  }
+  const prefix = wholeLines > 0 ? text.slice(0, prefixEnd) : utf8Prefix(text, maxBytes)
+  const nextOffset = start + wholeLines
+  const range = wholeLines ? `${start}-${nextOffset - 1}` : `0 lines from ${start}`
+  const notice = `\n\n[read gate: ${String(path)} delivered ${wholeLines} whole line(s) (${range}); ${totalBytes} UTF-8 bytes total, cap ${maxBytes}. Continue with read { path: ${JSON.stringify(String(path))}, offset: ${nextOffset} } or targeted grep.]`
+  return { text: prefix + notice, wholeLines }
 }
 
 function hasRange(input) {
@@ -530,8 +572,32 @@ export function createReadGate(options = {}) {
   function onToolResult(event) {
     try {
       if (event?.toolName !== 'read') return undefined
+      if (event?.isError) { pendingReads.delete(event.toolCallId); return undefined }
+      const parts = event?.content
+      const allText = Array.isArray(parts) && parts.length > 0 && parts.every((part) => part?.type === 'text' && typeof part.text === 'string')
+      let capped
+      let start
+      if (allText) {
+        const text = parts.map((part) => part.text).join('\n')
+        start = Number.isSafeInteger(event.input?.offset) && event.input.offset > 0 ? event.input.offset : 1
+        const maxBytes = parseMaxBytes(env[MAX_BYTES_ENV])
+        capped = capReadText(text, maxBytes, start, event.input?.path)
+      }
       const pending = pendingReads.get(event.toolCallId)
       pendingReads.delete(event.toolCallId)
+      if (capped !== undefined) {
+        if (pending && capped.wholeLines > 0) {
+          try {
+            const snapshot = validSnapshot(snapshotFile(pending.resolved))
+            rememberDelivery(pending.resolved, snapshot.fingerprint, {
+              start: pending.requested.start,
+              end: Math.min(pending.requested.end, start + capped.wholeLines - 1),
+              turn: pending.turn,
+            })
+          } catch (error) { recordTrackerFailure(error, event) }
+        }
+        return { content: [{ type: 'text', text: capped.text }] }
+      }
       if (event?.isError || !pending) return undefined
       const { resolved } = pending
       const snapshot = validSnapshot(snapshotFile(resolved))
@@ -566,6 +632,11 @@ export function createReadGate(options = {}) {
     const program = basename(words[0])
     for (const path of shellOperands(words, program)) {
       if (path === '-') continue
+      if (program === 'cat') {
+        const catMaxBytes = parseMaxBytes(env[MAX_BYTES_ENV])
+        const fileBytes = readFileSync(resolveFile(cwd, path)).length
+        if (fileBytes > catMaxBytes) return { block: true, reason: `Refusing cat of ${path}: ${fileBytes} bytes exceeds ${catMaxBytes}. Use a ranged read or grep -n.` }
+      }
       const result = inspectPath(path, cwd, maxLines)
       if (result !== undefined) return result
     }

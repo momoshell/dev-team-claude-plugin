@@ -673,7 +673,7 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   assert.ok(imports.length > 0)
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
-  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram'].sort())
+  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'DEFAULT_MAX_BYTES', 'MAX_BYTES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram'].sort())
 
   const registrations = []
   const gate = mod.attachReadGate({ on: (...args) => registrations.push(args) }, { env: {} })
@@ -686,4 +686,164 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
     onToolResult: gate.onToolResult,
     onTurnStart: gate.onTurnStart,
   })
+})
+
+function byteFixture({ lines = 300, width = 100, env = {} } = {}) {
+  const f = fixture()
+  const path = join(f.root, `bytes-${lines}-${width}.txt`)
+  const text = Array.from({ length: lines }, () => `${'x'.repeat(width - 1)}\n`).join('')
+  writeFileSync(path, text)
+  return { ...f, path, text, gate: mod.createReadGate({ cwd: f.root, env, taskDir: f.taskDir }) }
+}
+
+function resultFor(d, { range = true, offset = 1, limit = 300, id = `bytes-${++nextToolCallId}`, content } = {}) {
+  const input = range ? { path: d.path, offset, limit } : { path: d.path }
+  if (range) assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: id, input }, { cwd: d.root }), undefined)
+  const result = d.gate.onToolResult({ toolName: 'read', toolCallId: id, input, isError: false, content: content || [{ type: 'text', text: d.text }] })
+  return { input, result, output: result?.content?.[0]?.text ?? d.text }
+}
+
+const readGateMarker = '\n\n[read gate: '
+
+test('RB1', () => {
+  // MUTATION: remove the oversized-result cap decision.
+  const d = byteFixture()
+  const { output } = resultFor(d)
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  assert.equal(mod.DEFAULT_MAX_BYTES, 24576)
+  assert.ok(Buffer.byteLength(prefix, 'utf8') <= 24576)
+})
+
+test('RB2', () => {
+  // MUTATION: replace complete-line selection with a raw byte prefix.
+  const d = byteFixture()
+  const { output } = resultFor(d)
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  const expected = d.text.slice(0, Math.floor(24576 / 100) * 100)
+  assert.ok(prefix.length > 0)
+  assert.equal(prefix, expected)
+  assert.ok(prefix.endsWith('\n'))
+})
+
+test('RB3', () => {
+  // MUTATION: report the requested end rather than delivered whole lines.
+  const d = byteFixture()
+  const { output } = resultFor(d)
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  const wholeLines = prefix.split('\n').length - 1
+  assert.match(output.slice(output.indexOf(readGateMarker)), new RegExp(`offset: ${wholeLines + 1}`))
+})
+
+test('RB4', () => {
+  // MUTATION: remember every requested line as delivered.
+  const d = byteFixture()
+  resultFor(d)
+  const next = { path: d.path, offset: 246, limit: 55 }
+  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'rb4-next', input: next }, { cwd: d.root }), undefined)
+})
+
+test('RB5', () => {
+  // MUTATION: ignore the byte environment override.
+  const d = byteFixture({ lines: 20, env: { CREW_READGATE_MAX_BYTES: '1000' } })
+  const { output } = resultFor(d, { limit: 20 })
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  assert.ok(Buffer.byteLength(prefix, 'utf8') <= 1000)
+  assert.equal(prefix, d.text.slice(0, 1000))
+})
+
+test('RB6', () => {
+  // MUTATION: remove direct cat byte refusal.
+  const d = byteFixture({ lines: 100, width: 300 })
+  const blocked = call(d.gate, 'bash', { command: `cat '${d.path}'` }, d.root)
+  assert.equal(blocked?.block, true)
+  assert.match(blocked.reason, /30000 bytes/)
+})
+
+test('RB7', () => {
+  // MUTATION: return the full oversized first line.
+  const d = byteFixture({ lines: 1, width: 30000 })
+  const { output } = resultFor(d, { limit: 1 })
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  assert.ok(Buffer.byteLength(prefix, 'utf8') > 0)
+  assert.ok(Buffer.byteLength(prefix, 'utf8') <= 24576)
+  assert.ok(Buffer.from(prefix).toString('utf8') === prefix)
+})
+
+test('RB8', () => {
+  // MUTATION: apply the result cap only when a ranged read is pending.
+  const d = byteFixture({ lines: 100, width: 300 })
+  const { output } = resultFor(d, { range: false, id: 'rb8-no-pending' })
+  assert.ok(output.length < d.text.length)
+  assert.ok(output.includes(readGateMarker))
+})
+
+test('read result exactly at byte cap is unchanged', () => {
+  const f = fixture()
+  const path = join(f.root, 'exact-byte-cap.txt')
+  const text = 'z'.repeat(24576)
+  writeFileSync(path, text)
+  const gate = mod.createReadGate({ cwd: f.root, env: {} })
+  const input = { path, offset: 1, limit: 1 }
+  assert.equal(gate.onToolCall({ toolName: 'read', toolCallId: 'exact-cap', input }, { cwd: f.root }), undefined)
+  assert.equal(gate.onToolResult({ toolName: 'read', toolCallId: 'exact-cap', input, content: [{ type: 'text', text }], isError: false }), undefined)
+})
+
+test('invalid byte config logs and leaves result untouched', () => {
+  const d = byteFixture({ env: { CREW_READGATE_MAX_BYTES: '01' } })
+  const entries = []
+  const gate = mod.createReadGate({ cwd: d.root, env: { CREW_READGATE_MAX_BYTES: '01' }, taskDir: d.taskDir, recordFailure: (entry) => entries.push(entry) })
+  const input = { path: d.path, offset: 1, limit: 300 }
+  assert.equal(gate.onToolCall({ toolName: 'read', toolCallId: 'invalid-bytes', input }, { cwd: d.root }), undefined)
+  assert.equal(gate.onToolResult({ toolName: 'read', toolCallId: 'invalid-bytes', input, content: [{ type: 'text', text: d.text }], isError: false }), undefined)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].read_gate_failure.reason.includes('CREW_READGATE_MAX_BYTES'), true)
+})
+
+test('multibyte oversized first line ends at a valid UTF-8 boundary', () => {
+  const d = byteFixture({ lines: 1, width: 1 })
+  // MUTATION: drop the continuation-byte backoff in utf8Prefix; the cap then lands inside an emoji.
+  const text = 'a' + '😀'.repeat(7000)
+  const input = { path: d.path, offset: 1, limit: 1 }
+  const result = d.gate.onToolResult({ toolName: 'read', toolCallId: 'unicode', input, content: [{ type: 'text', text }], isError: false })
+  const prefix = result.content[0].text.split(readGateMarker)[0]
+  assert.equal(prefix, 'a' + '😀'.repeat(6143))
+  assert.ok(Buffer.byteLength(prefix, 'utf8') <= 24576)
+})
+
+test('multiple text parts are joined before byte capping', () => {
+  const d = byteFixture({ lines: 300, width: 100 })
+  const parts = [{ type: 'text', text: 'a'.repeat(15000) }, { type: 'text', text: 'b'.repeat(15000) }]
+  const input = { path: d.path, offset: 1, limit: 300 }
+  const result = d.gate.onToolResult({ toolName: 'read', toolCallId: 'parts', input, content: parts, isError: false })
+  assert.ok(result.content[0].text.includes(readGateMarker))
+  assert.ok(result.content[0].text.startsWith('a'.repeat(15000) + '\n'))
+})
+
+test('errors and mixed content are not byte-capped', () => {
+  const d = byteFixture()
+  const input = { path: d.path, offset: 1, limit: 300 }
+  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'error-content', input }, { cwd: d.root }), undefined)
+  assert.equal(d.gate.onToolResult({ toolName: 'read', toolCallId: 'error-content', input, isError: true, content: [{ type: 'text', text: d.text }] }), undefined)
+  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'mixed-content', input }, { cwd: d.root }), undefined)
+  assert.equal(d.gate.onToolResult({ toolName: 'read', toolCallId: 'mixed-content', input, isError: false, content: [{ type: 'text', text: d.text }, { type: 'image', data: 'x' }] }), undefined)
+})
+
+test('offset greater than one advances by delivered lines and head or tail remain unchanged', () => {
+  const d = byteFixture({ lines: 300, width: 100 })
+  const { output } = resultFor(d, { offset: 20, limit: 300, id: 'offset-20' })
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  const delivered = prefix.split('\n').length - 1
+  assert.match(output.slice(output.indexOf(readGateMarker)), new RegExp(`offset: ${20 + delivered}`))
+  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'offset-next', input: { path: d.path, offset: 20 + delivered, limit: 300 } }, { cwd: d.root }), undefined)
+  assert.equal(call(d.gate, 'bash', { command: `head '${d.path}'` }, d.root), undefined)
+  assert.equal(call(d.gate, 'bash', { command: `tail '${d.path}'` }, d.root), undefined)
+})
+
+test('missing cat operand fails open and records failure', () => {
+  const f = fixture()
+  const entries = []
+  const gate = mod.createReadGate({ cwd: f.root, env: {}, taskDir: f.taskDir, recordFailure: (entry) => entries.push(entry) })
+  assert.equal(call(gate, 'bash', { command: "cat 'missing.txt'" }, f.root), undefined)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].read_gate_failure.tool, 'bash')
 })

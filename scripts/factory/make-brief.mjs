@@ -3307,7 +3307,7 @@ function renderTripwirePointer(discovery, pack) {
   return [
     `tripwires: ${counts.candidates ?? 0} candidate(s) · ${counts.tripwires ?? 0} tripwire test(s) · ${counts.broadKeys ?? 0} broad key(s) · ${counts.keys ?? 0} vocabulary key(s)`,
     `vocabulary: ${paths.vocabulary} — consume it once with: grep -rn -f ${paths.vocabulary} crew/ test/ scripts/ docs/`,
-    `rows: ${paths.rows} — every candidate, tripwire test with its keys, and broad key; read it once with: cat ${paths.rows}`,
+    `rows: ${paths.rows} — the inventory of tests that may assert what you change (every candidate, tripwire test with its keys, and broad key); fence what it names. Look rows up, do not read it whole: grep -n -F -- '- <file> · ' ${paths.rows} for a file you touch, or grep -n -F '<key>' ${paths.rows}`,
   ].join('\n')
 }
 
@@ -3322,7 +3322,7 @@ function renderCoupledPointer(coupling, pack) {
   return [
     rule,
     `coupled sources: ${count} file(s)`,
-    `enumeration: ${pack.coupled} — every coupled file listed in full; read it once with: cat ${pack.coupled}`,
+    `enumeration: ${pack.coupled} — every coupled file listed in full; look rows up: grep -n -F -- '- <file> · ' ${pack.coupled}`,
   ].join('\n')
 }
 
@@ -3348,7 +3348,7 @@ function renderConventionsSlot(writeSurface, pack) {
 
 function renderSymbolPointer(pack) {
   if (pack?.symbols == null) return []
-  return [`symbol index: ${pack.symbols} — full static scan; read it once with: cat ${pack.symbols}`]
+  return [`symbol index: ${pack.symbols} — full static scan, one row per file and kind with name:line entries; look up, do not read it whole: grep -o -E '<name>:[0-9]+' ${pack.symbols} for one symbol, or grep -n -F -- '- <file> · ' ${pack.symbols} | cut -c1-4000 for a file`]
 }
 
 function renderSymbolIndex(pack) {

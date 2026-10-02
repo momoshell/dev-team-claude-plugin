@@ -10017,6 +10017,42 @@ function runTask(ctx, io, crash) {
     ].join('\n'))
     return wrapperPath
   }
+  function prepareBuilderAssignment(briefPath, note) {
+    const wrappedPath = builderAssignmentBrief(briefPath)
+    if (builderAttempts <= 1) return wrappedPath
+    let renewal = { session: 'kept', why: 'io.freshSession is unavailable' }
+    if (typeof io.freshSession === 'function') {
+      try { renewal = io.freshSession('builder') } catch (err) { renewal = { session: 'kept', why: err?.message || String(err) } }
+    }
+    const outcome = renewal?.session === 'fresh' ? 'fresh' : renewal?.session === 'held' ? 'held' : 'kept'
+    const why = outcome === 'fresh' ? null : (typeof renewal?.why === 'string' && renewal.why ? renewal.why : outcome === 'held' ? 'worker-adoptable' : 'fresh session was not granted')
+    try { io.log(recordRow({ at: io.now(), event: 'builder-session', attempt: builderAttempts, note, outcome, why })) } catch { /* journal diagnostics are not load-bearing */ }
+    if (outcome !== 'fresh') return wrappedPath
+    const handoffPath = art(`builder-handoff-${builderAttempts}.md`)
+    const diffPath = art(`builder-diff-${builderAttempts}.patch`)
+    const base = shellArg(ctx.head || 'HEAD')
+    const probe = (cmd) => {
+      try {
+        const result = io.run(cmd)
+        if (result?.ok === true && typeof result.output === 'string') return { output: result.output }
+        return { output: `unavailable: ${result?.error || result?.stderr || 'probe failed'}` }
+      } catch (err) { return { output: `unavailable: ${err?.message || String(err)}` } }
+    }
+    const stat = probe(`git diff --stat ${base}`)
+    const diff = probe(`git diff ${base}`)
+    const untracked = probe('git ls-files --others --exclude-standard')
+    io.writeFile(diffPath, diff.output)
+    io.writeFile(handoffPath, [
+      '# Fresh builder handoff', '',
+      `Read the current builder brief at ${wrappedPath}.`,
+      `Plan: ${planPath}`, '',
+      'Diff stat:', '', stat.output, '',
+      `Full diff: ${diffPath}`,
+      '', 'Untracked files (new files are not in the diff above; read them in the tree):', '', untracked.output || '(none)',
+    ].join('\n'))
+    return handoffPath
+  }
+
   const steppedChunks = variant === 'stepped' ? validatedChunks : null
   const savedDone = stepCheckpoint ? stepCheckpoint.step.done : []
   const savedEnvelopes = stepCheckpoint ? stepCheckpoint.step.envelopes : []
@@ -10050,7 +10086,7 @@ function runTask(ctx, io, crash) {
       io.writeFile(stepBrief, `# Stepped build ${step.id} (round ${stepRound})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\nRead the whole plan at ${planPath} before editing. Work only on this step's files and own checks.${priorStepFailure ? `\n\nGate failure from prior attempt:\n${priorStepFailure}` : ''}\n`)
       stage(`build:${step.id}:r${stepRound}`)
       builderAttempts = builderAttempts + 1
-      const env = assignAndWait('builder', builderAssignmentBrief(stepBrief), 'step-build')
+      const env = assignAndWait('builder', prepareBuilderAssignment(stepBrief, 'step-build'), 'step-build')
       if (env?.status !== 'done' || handledEnvelopeRefusalWhy(env)) {
         stageComplete()
         return escalate('build', `stepped builder ${step.id} returned ${env?.status || 'no envelope'}: ${env?.summary || handledEnvelopeRefusalWhy(env) || 'invalid builder result'}`, env?.artifacts || [])
@@ -10751,7 +10787,7 @@ function runTask(ctx, io, crash) {
       builderAttempts += 1
       wholeBuildRound += 1
     }
-    const env = seededBuild ? seededStepEnv : assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)
+    const env = seededBuild ? seededStepEnv : assignAndWait('builder', prepareBuilderAssignment(buildBrief, buildNote), buildNote)
     if (seededBuild) { seededStepEnv = null; wholeBuildRound = 2 }
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {

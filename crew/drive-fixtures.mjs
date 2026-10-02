@@ -1542,6 +1542,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
   ["recordRow", "", "at gate_discrimination_carry"],
   ["recordRow", "event='mutation-check-coverage'", "at ...reconciliation"],
+  ["recordRow", "event='builder-session'", "at attempt note outcome why"],
   ["recordRow", "event='step:start'", "at step round files owned builder_attempt"],
   ["recordRow", "event='step:done'", "at step round passed"],
   ["recordRow", "event='step:red'", "at step round failed regressed"],

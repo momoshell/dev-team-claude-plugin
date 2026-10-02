@@ -1165,3 +1165,61 @@ test('F9 a failed session reset after retirement applies the reseat and keeps th
   assert.equal(f.spawns(), 2, 'the retired worker is replaced, not adopted')
   assert.equal(index >= 0 && args[index + 1] === 'old-session', true, JSON.stringify(args))
 })
+
+// Fresh assignment retirement uses the real settled boundary and preserves refusals.
+test('FS1 freshSession retires a settled RPC worker before the next spawn', () => {
+  const f = seatFreshFixture()
+  const result = f.io.freshSession('builder')
+  assert.equal(result.session, 'fresh')
+  assert.equal(isFreshSession(seatFreshArgs(f)), true)
+})
+
+test('FS2 freshSession clears persisted member identity after retirement', () => {
+  const f = seatFreshFixture()
+  assert.equal(f.io.freshSession('builder').session, 'fresh')
+  const disk = JSON.parse(fsReadFileSync(f.diskPath, 'utf8'))
+  assert.equal(disk.members.builder.session_id, null)
+  assert.equal(disk.members.builder.started, false)
+})
+
+test('FS3 freshSession holds a live adoptable restart', () => {
+  const f = seatFreshFixture({ restart: 'live' })
+  assert.equal(f.io.freshSession('builder').session, 'held')
+})
+
+test('FS4 in-flight freshSession refusal preserves memory and persisted bytes', () => {
+  const f = seatFreshFixture({ inFlight: true })
+  const result = f.io.freshSession('builder')
+  assert.deepEqual({ session: result.session, state: { member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') } }, { session: 'kept', state: f.before })
+})
+
+test('freshSession keeps identity and bytes when the transport cannot reset its saved session', () => {
+  const f = seatFreshFixture({ failSessionWrite: true })
+  const result = f.io.freshSession('builder')
+  assert.equal(result.session, 'kept')
+  assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, f.before)
+})
+
+test('freshSession handles a missing retire seam, thrown retirement and non-rpc seats', () => {
+  const missing = seatFreshFixture()
+  missing.rpc.retire = undefined
+  const missingResult = missing.io.freshSession('builder')
+  assert.equal(missingResult.session, 'kept')
+  assert.match(missingResult.why, /no retire operation/)
+  assert.deepEqual({ member: missing.crew.members.builder, seat: missing.crew.seats.builder, disk: fsReadFileSync(missing.diskPath, 'utf8'), saved: fsReadFileSync(missing.savedPath, 'utf8') }, missing.before)
+
+  const thrown = seatFreshFixture()
+  thrown.rpc.retire = () => { throw new Error('retirement interrupted') }
+  const thrownResult = thrown.io.freshSession('builder')
+  assert.deepEqual(thrownResult, { session: 'kept', why: 'retirement interrupted' })
+  assert.deepEqual({ member: thrown.crew.members.builder, seat: thrown.crew.seats.builder, disk: fsReadFileSync(thrown.diskPath, 'utf8'), saved: fsReadFileSync(thrown.savedPath, 'utf8') }, thrown.before)
+
+  for (const transport of ['pane', 'headless-json', 'acp']) {
+    const f = seatFreshFixture()
+    f.crew.members.builder.transport = transport
+    f.crew.seats.builder.transport = transport
+    const before = { member: structuredClone(f.crew.members.builder), seat: structuredClone(f.crew.seats.builder), disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }
+    assert.equal(f.io.freshSession('builder').session, 'kept')
+    assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, before)
+  }
+})

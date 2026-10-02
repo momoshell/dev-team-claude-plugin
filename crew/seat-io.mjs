@@ -3785,6 +3785,31 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     transportArgs.deps.permissionLead = lead
     transportArgs.deps.permissionTimeoutMs = lead == null ? undefined : timeoutMs
   }
+  io.freshSession = (role) => {
+    const member = crew.members?.[role]
+    if (!member) return { session: 'kept', why: `role ${role} is not seated in this crew` }
+    if (member.transport !== HEADLESS_RPC_TRANSPORT) return { session: 'kept', why: `transport ${String(member.transport)} does not support fresh sessions` }
+    try {
+      const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
+      if (typeof transport?.retire !== 'function') return { session: 'kept', why: `headless-rpc seat ${role} has no retire operation` }
+      const retired = transport.retire(role, { freshSession: true })
+      if (retired?.session === 'held') return { session: 'held', why: retired.why || 'worker-adoptable' }
+      if (retired?.session !== 'fresh') return { session: 'kept', why: retired?.why || retired?.reason || 'headless-rpc retirement did not grant a fresh session' }
+      const persisted = updateCrewJson(paths, (disk) => {
+        for (const target of [disk.members?.[role], disk.seats?.[role]]) {
+          if (target) Object.assign(target, { session_id: null, started: false })
+        }
+        return true
+      }, { writeFileSync, renameSync, readFileSync, existsSync })
+      if (!persisted.ok && persisted.reason !== 'absent') return { session: 'kept', why: `crew.json session reset failed (${persisted.reason}${persisted.error ? `: ${persisted.error}` : ''})` }
+      for (const target of [member, crew.seats?.[role]]) {
+        if (target) Object.assign(target, { session_id: null, started: false })
+      }
+      return { session: 'fresh' }
+    } catch (err) {
+      return { session: 'kept', why: err?.message || String(err) }
+    }
+  }
   return io
 }
 

@@ -6,6 +6,6 @@ the quote occurs verbatim in the named source file.
 
 | sentence | subject | class | source | quote |
 | --- | --- | --- | --- | --- |
-| **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2130 planAcceptContractLines; enforcement crew/drive.mjs:7105 settleAccept and crew/drive.mjs:2148 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
+| **`correctness-unverified` is code-refused into escalation.** | into escalation | enforced | crew/drive.mjs:2134 planAcceptContractLines; enforcement crew/drive.mjs:7109 settleAccept and crew/drive.mjs:2152 ACCEPT_REFUSALS | A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in. |
 <!-- END-ROWS -->
 <!-- END-DOC -->

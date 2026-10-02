@@ -41,5 +41,5 @@
   "scripts/factory/ledger.mjs:9930": "unknown verb: ${verb}",
   "docs/conventions.md:130": "A frozen exported enum's drift guard needs",
   "docs/conventions.md:53": "first TypeScript file on main, and every file under",
-  "crew/drive.mjs:545": "export const DECISIONS = Object.freeze"
+  "crew/drive.mjs:549": "export const DECISIONS = Object.freeze"
 }

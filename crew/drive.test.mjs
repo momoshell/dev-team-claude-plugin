@@ -857,7 +857,7 @@ function rpcNoEnvelope(detail, over = {}) {
 }
 
 const ID_REASK_RUN = 'run-id-reask'
-const idReaskScenario = ({ builders = [], spent = null } = {}) => {
+const idReaskScenario = ({ builders = [], spent = null, rejectLog = null } = {}) => {
   const queues = {
     planner: [planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: [leadEnv('escalate')],
   }
@@ -884,6 +884,10 @@ const idReaskScenario = ({ builders = [], spent = null } = {}) => {
     return { ...env, assignment_id: env.assignment_id ?? identity.id, run_id: env.run_id ?? ID_REASK_RUN }
   }
   io.reaskGraceSpent = () => spent
+  if (rejectLog) {
+    const log = io.log.bind(io)
+    io.log = (row) => { if (rejectLog(row)) throw new Error('journal sink rejected the row'); return log(row) }
+  }
   return { io, dispatches, result: driveTask({ ...CTX, run_id: ID_REASK_RUN, limits: { plan_rounds: 1 } }, io) }
 }
 
@@ -911,6 +915,13 @@ test('IDREASK', () => {
   assert.deepEqual(insufficient.io.calls.logs.filter((row) => row.envelope && row.role === 'builder').map(({ status }) => status), ['insufficient', 'done'])
   assert.equal(insufficient.result.status, 'done')
   assert.deepEqual(insufficient.result.details.stages, direct.result.details.stages)
+})
+
+// MUTATION: let the envelope_id_reask journal write throw; the correction is never sent and the lane crashes.
+test('IDJOURNAL a failed id re-ask journal write never blocks the correction', () => {
+  const scenario = idReaskScenario({ builders: [wrongBuilderId()], rejectLog: (row) => Boolean(row?.envelope_id_reask) })
+  assert.equal(builderDispatches(scenario).length, 2)
+  assert.equal(scenario.result.status, 'done')
 })
 
 // MUTATION IDROW: replace the asked outcome expression with grace-spent.

@@ -338,13 +338,17 @@ function transportNoEnvelopeCarrier(env) {
   return zeroTurn || measuredNonzero || unavailable
 }
 
+// Set only here, on the received carrier that lacked a run_id: a seat-authored
+// envelope that copies the tuple AND carries a run_id never gains it.
+const RUNTIME_NO_ENVELOPE_CARRIER = Symbol('runtime-no-envelope-carrier')
+
 function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
   if (runId === undefined || !env || typeof env !== 'object' || env.run_id !== undefined) return env
   if (env.assignment_id !== id || env.role !== role) return env
   const ceilingBudget = Number.isFinite(budget) ? budget : env.details?.turn_ceiling?.budget
   if (suiteRefusalOf(env) || turnCeilingOf(env, ceilingBudget)) return { ...env, run_id: runId }
   if (!transportNoEnvelopeCarrier(env)) return env
-  return { ...env, run_id: runId }
+  return { ...env, run_id: runId, [RUNTIME_NO_ENVELOPE_CARRIER]: true }
 }
 
 const HANDLED_ENVELOPE_REFUSAL = Symbol('handled-envelope-refusal')
@@ -376,7 +380,7 @@ function handledEnvelopeRefusalOf(env) {
 }
 
 function runtimeTransportNoEnvelopeCarrier(env) {
-  return transportNoEnvelopeCarrier({ ...env, run_id: undefined })
+  return env?.[RUNTIME_NO_ENVELOPE_CARRIER] === true
 }
 
 function handledEnvelopeRefusalWhy(env) {
@@ -6642,7 +6646,7 @@ function runTask(ctx, io, crash) {
       const refusalDetail = handledEnvelopeRefusalOf(env)
       if (refusalDetail?.reason === 'assignment-id-mismatch' && refusalDetail.otherwise_valid === true) {
         const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(identity.returnPath) : null
-        io.log(recordRow({ at: io.now(), envelope_id_reask: { role, dispatch: identity.id, path: identity.returnPath, outcome: graceSpentBy ? 'grace-spent' : 'asked' } }))
+        try { io.log(recordRow({ at: io.now(), envelope_id_reask: { role, dispatch: identity.id, path: identity.returnPath, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* the id re-ask journal is never load-bearing */ }
         if (graceSpentBy) return env
         const retryPath = join(dirname(identity.returnPath), `${identity.id}.id-reask.${role}.json`)
         const preamble = `Your envelope was refused. Return assignment_id=${JSON.stringify(identity.id)}. run_id is never the assignment_id.`

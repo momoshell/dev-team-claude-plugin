@@ -3053,7 +3053,7 @@ const JOURNAL_UNREADABLE = 'journal-unreadable'
 export const PACK_ABSENT_REASONS = Object.freeze([NO_ISSUE_CITED, NO_ISSUE_BODY, ISSUE_BODY_UNREADABLE, NO_JOURNAL_NAMED, JOURNAL_UNREADABLE])
 const TREE_ENTRY_LIMIT = 40
 const FIXTURE_ROW_LIMIT = 500
-const ISSUE_CITATION = /#(\d{1,6})\b/
+const ISSUE_CITATION = /\bCloses:?\s+#(\d{1,6})\b/i
 const JOURNAL_CITATION = /\/[A-Za-z0-9._\-/]+\.jsonl\b/g
 
 function readAndKeepGreenFiles(writeSurface, discovery) {
@@ -3072,10 +3072,28 @@ function conventionsFile(discovery, writeSurface, profile, tripwiresOmitted = fa
   return [surface, renderConventions(profile?.conventions), CONVENTIONS_BLOCK].join('\n')
 }
 
-function issueFor(request, issueBodyPath) {
+export function issueBindingFor(request) {
   const match = typeof request?.ask === 'string' ? ISSUE_CITATION.exec(request.ask) : null
-  if (!match) return { number: null, body: null, reason: NO_ISSUE_CITED }
-  const number = Number(match[1])
+  const prose = match ? Number(match[1]) : null
+  let declared = null
+  const doneMeans = typeof request?.done_means === 'string' ? request.done_means : ''
+  for (const declaration of doneMeans.matchAll(/details\.closes\s*=\s*\[([^\]]*)\]/g)) {
+    const firstInteger = /\d+/.exec(declaration[1])
+    if (!firstInteger) continue
+    const value = Number(firstInteger[0])
+    if (Number.isSafeInteger(value)) {
+      declared = value
+      break
+    }
+  }
+  const issue = declared ?? prose
+  const source = declared !== null ? 'declared' : prose !== null ? 'closes' : null
+  return { issue, source, declared, prose, disagreement: declared !== null && prose !== null && declared !== prose }
+}
+
+function issueFor(request, issueBodyPath) {
+  const number = issueBindingFor(request).issue
+  if (number === null) return { number: null, body: null, reason: NO_ISSUE_CITED }
   if (typeof issueBodyPath !== 'string' || issueBodyPath.length === 0) {
     return { number, body: null, reason: NO_ISSUE_BODY }
   }

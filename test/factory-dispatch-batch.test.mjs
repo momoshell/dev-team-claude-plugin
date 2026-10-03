@@ -146,7 +146,7 @@ import { promptSurfacePaths } from '../crew/protected-paths.mjs'
 import { slotStore } from '../crew/reclaim.mjs'
 import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { crossCheckCoupling, discoverTripwires, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
+import { crossCheckCoupling, discoverTripwires, issueBindingFor, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { git, scratchDir } from './helpers.mjs'
 import { ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 
@@ -5014,6 +5014,48 @@ async function runIssueBodyCompile({ label, ask, doneMeans, body = 'Fetched body
   return { lane, requestPath, out, calls, writes, logs, result }
 }
 
+test('issueBindingFor accepts only explicit Closes citations and preserves declared precedence', () => {
+  const cases = [
+    [{ ask: 'background #910; cLoSeS: #1676' }, { issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false }],
+    [{ ask: 'Closes #1676 after background #910' }, { issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false }],
+    ...['Fixes #1676', 'Resolves #1676', 'Issue: #1676', 'Encloses #1676'].map((ask) => [{ ask }, { issue: null, source: null, declared: null, prose: null, disagreement: false }]),
+    [{}, { issue: null, source: null, declared: null, prose: null, disagreement: false }],
+    [{ ask: 1676 }, { issue: null, source: null, declared: null, prose: null, disagreement: false }],
+    [{ ask: 'Closes #1676' }, { issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false }],
+    [{ ask: 'Closes #1676', done_means: 'details.closes=[]' }, { issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false }],
+    [{ ask: 'Closes #1676', done_means: 'details.closes=[A]' }, { issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false }],
+    [{ ask: 'Closes #1676', done_means: 'details.closes=[73]' }, { issue: 73, source: 'declared', declared: 73, prose: 1676, disagreement: true }],
+  ]
+  for (const [input, expected] of cases) assert.deepEqual(issueBindingFor(input), expected)
+})
+
+test('IB5 background-only issue does not fetch and logs exact absence', async () => {
+  const fixture = await runIssueBodyCompile({ label: 'ib5-background', ask: 'Background #910 only.' })
+  assert.equal(fixture.calls.some(({ file }) => file === 'gh'), false)
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=none status=unavailable reason=no-issue-cited`])
+})
+
+test('IB6 Closes citation fetches exact issue and logs exact bytes', async () => {
+  const body = 'Fetched body.\\n'
+  const fixture = await runIssueBodyCompile({ label: 'ib6-closes', ask: 'Background #910. Closes: #1676.', body })
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.deepEqual(gh.args, ['issue', 'view', '1676', '--json', 'body', '--jq', '.body'])
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=1676 source=closes status=available bytes=${Buffer.byteLength(body)}`])
+})
+
+test('IB7 dispatch uses declared close after placeholder like compiled binding', async () => {
+  const fixture = await runIssueBodyCompile({
+    label: 'ib7-dispatch',
+    ask: 'Background #910 only.',
+    doneMeans: 'details.closes=[A] is illustrative; details.closes=[73] is the declared close.',
+  })
+  const gh = fixture.calls.find(({ file }) => file === 'gh')
+  assert.ok(gh)
+  assert.deepEqual(gh.args, ['issue', 'view', '73', '--json', 'body', '--jq', '.body'])
+  assert.ok(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=73 source=declared status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`))
+})
+
 test('A1 declared issue wins over prose background', async () => {
   const fixture = await runIssueBodyCompile({
     label: 'issue-a1',
@@ -5035,7 +5077,7 @@ test('A1 declared issue wins over prose background', async () => {
 test('RV1-1 scans later closes declarations after an illustrative placeholder', async () => {
   const fixture = await runIssueBodyCompile({
     label: 'issue-rv1-1',
-    ask: 'Use #1146 only as background context.',
+    ask: 'Closes #1146 only as background context.',
     doneMeans: 'A1 names details.closes=[A] only as a gate label.\nThe actual close is details.closes=[1155].',
   })
   const gh = fixture.calls.find(({ file }) => file === 'gh')
@@ -5047,12 +5089,12 @@ test('RV1-1 scans later closes declarations after an illustrative placeholder', 
 
 test('B1 successful issue-body fetch logs issue and bytes', async () => {
   const body = 'é declared body\\n'
-  const fixture = await runIssueBodyCompile({ label: 'issue-b1', ask: 'Fetch #1124 for this lane.', body })
-  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1124 source=prose status=available bytes=${Buffer.byteLength(body)}`), true)
+  const fixture = await runIssueBodyCompile({ label: 'issue-b1', ask: 'Fetch Closes #1124 for this lane.', body })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1124 source=closes status=available bytes=${Buffer.byteLength(body)}`), true)
 })
 
 test('C1a prose fallback still fetches an issue body', async () => {
-  const fixture = await runIssueBodyCompile({ label: 'issue-c1a', ask: 'Fetch #1146 for this lane.', doneMeans: 'No close declaration is present.' })
+  const fixture = await runIssueBodyCompile({ label: 'issue-c1a', ask: 'Fetch Closes #1146 for this lane.', doneMeans: 'No close declaration is present.' })
   const gh = fixture.calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.equal(gh.args[2], '1146')
@@ -5060,8 +5102,8 @@ test('C1a prose fallback still fetches an issue body', async () => {
 })
 
 test('C1b prose fallback records prose source', async () => {
-  const fixture = await runIssueBodyCompile({ label: 'issue-c1b', ask: 'Fetch #1146 for this lane.', doneMeans: 'details.closes=[] leaves the prose citation in charge.' })
-  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1146 source=prose status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`), true)
+  const fixture = await runIssueBodyCompile({ label: 'issue-c1b', ask: 'Fetch Closes #1146 for this lane.', doneMeans: 'details.closes=[] leaves the prose citation in charge.' })
+  assert.equal(fixture.logs.includes(`dispatch-batch: issue-body lane=${fixture.lane} issue=1146 source=closes status=available bytes=${Buffer.byteLength('Fetched body.\\n')}`), true)
 })
 
 test('C2 declared binding records declared source', async () => {
@@ -5072,7 +5114,7 @@ test('C2 declared binding records declared source', async () => {
 test('D1 disagreement names declared and prose issues', async () => {
   const fixture = await runIssueBodyCompile({
     label: 'issue-d1',
-    ask: 'Use the quoted background (#1146, unlanded) only as context.',
+    ask: 'Use the quoted background (#1146, unlanded) only as context. Closes #1146.',
     doneMeans: 'details.closes=[1124] selects the issue context for this lane.',
     body: 'Declared issue body.\\n',
   })
@@ -5088,17 +5130,17 @@ test('E1a historical binding report carries its denominator', () => {
   const home = scratchDir('factory-issue-history-')
   const batch = join(home, 'batch-mini')
   put(join(batch, 'lane-match.request.json'), JSON.stringify({
-    ...request('#100 declared match', ['crew/owned.mjs']),
+    ...request('Closes #100 declared match', ['crew/owned.mjs']),
     done_means: 'details.closes=[100] declares the matching issue.',
   }))
   put(join(batch, 'lane-mismatch.request.json'), JSON.stringify({
-    ...request('Quoted background (#1146, unlanded)'),
+    ...request('Quoted background (#1146, unlanded). Closes #1146'),
     done_means: 'details.closes=[1124] declares the fetched issue.',
   }))
   put(join(batch, 'out', 'lane-mismatch.issue.md'), 'Fetched mismatch artifact.\\n')
-  put(join(batch, 'lane-fallback.request.json'), JSON.stringify(request('Use prose #103 when no close is declared.')))
+  put(join(batch, 'lane-fallback.request.json'), JSON.stringify(request('Use prose #103 when no close is declared. Closes #103')))
   put(join(batch, 'nested', 'batch-archived', 'lane-empty.request.json'), JSON.stringify({
-    ...request('Use prose #104 when closes is empty.'),
+    ...request('Use prose #104 when closes is empty. Closes #104'),
     done_means: 'details.closes=[] leaves prose fallback.',
   }))
   const report = historicalIssueBindings({ home, deps: { existsSync: fsExistsSync, readFileSync, readdirSync: fsReaddirSync } })
@@ -5142,7 +5184,7 @@ test('compileLane soft-fails an unavailable issue body without refusing or passi
   const lane = 'lane-gh'
   const batch = makeBatch([lane])
   const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
-    '#867 Carry the cited issue context into this lane brief',
+    'Closes #867 Carry the cited issue context into this lane brief',
     ['crew/owned.mjs'],
   )))
   const out = join(root, 'compile-gh-out')
@@ -5170,7 +5212,7 @@ test('compileLane soft-fails an unavailable issue body without refusing or passi
   const gh = calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.deepEqual(gh.args, ['issue', 'view', '867', '--json', 'body', '--jq', '.body'])
-  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 source=prose status=unavailable reason=gh-failed'])
+  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 source=closes status=unavailable reason=gh-failed'])
   assert.equal(result.topSection, 'Proposed tier')
 })
 
@@ -5178,7 +5220,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
   const lane = 'lane-gh-ok'
   const batch = makeBatch([lane])
   const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
-    '#42 Carry the cited issue context into this lane brief',
+    'Closes #42 Carry the cited issue context into this lane brief',
     ['crew/owned.mjs'],
   )))
   const out = join(root, 'compile-gh-ok-out')
@@ -5208,7 +5250,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
   const issuePath = compile.args[issueFlag + 1]
   assert.equal(issuePath, join(out, `${lane}.issue.md`))
   assert.equal(writes.get(issuePath), 'Fetched body.\n')
-  assert.deepEqual(logs, [`dispatch-batch: issue-body lane=${lane} issue=42 source=prose status=available bytes=${Buffer.byteLength('Fetched body.\n')}`])
+  assert.deepEqual(logs, [`dispatch-batch: issue-body lane=${lane} issue=42 source=closes status=available bytes=${Buffer.byteLength('Fetched body.\n')}`])
   assert.equal(result.bytes, Buffer.byteLength(briefWithTierAndShape))
 })
 

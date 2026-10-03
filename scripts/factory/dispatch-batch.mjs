@@ -20,7 +20,7 @@ import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
 import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
-import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, issueBindingFor, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -3213,22 +3213,7 @@ function emptyIssueBinding() {
 }
 
 function issueBindingFromRecord(request) {
-  const proseMatch = typeof request?.ask === 'string' ? /#(\d{1,6})\b/.exec(request.ask) : null
-  const prose = proseMatch ? Number(proseMatch[1]) : null
-  let declared = null
-  const doneMeans = typeof request?.done_means === 'string' ? request.done_means : ''
-  for (const declaration of doneMeans.matchAll(/details\.closes\s*=\s*\[([^\]]*)\]/g)) {
-    const firstInteger = /\d+/.exec(declaration[1])
-    if (!firstInteger) continue
-    const value = Number(firstInteger[0])
-    if (Number.isSafeInteger(value)) {
-      declared = value
-      break
-    }
-  }
-  const issue = declared ?? prose
-  const source = declared !== null ? 'declared' : prose !== null ? 'prose' : null
-  return { issue, source, declared, prose, disagreement: declared !== null && prose !== null && declared !== prose }
+  return issueBindingFor(request)
 }
 
 export function issueBindingFrom(requestPath, deps) {

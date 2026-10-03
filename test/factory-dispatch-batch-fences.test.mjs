@@ -117,6 +117,10 @@ import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/facto
 import { scratchDir } from './helpers.mjs'
 import { fileURLToPath } from 'node:url'
 
+// Keep the dispatch suites hermetic inside an edit-assist builder seat, whose env carries CREW_EDIT_ASSIST:
+// a dispatchBatch call with no deps.env reads process.env and would refuse. The batch and refusals suites import this module.
+delete process.env.CREW_EDIT_ASSIST
+
 const DIRECT = Boolean(process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
 const root = scratchDir('factory-dispatch-batch-')
 const repoRoot = dirname(dirname(new URL(import.meta.url).pathname))

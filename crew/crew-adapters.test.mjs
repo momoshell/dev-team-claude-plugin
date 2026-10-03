@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
+import { mcpConfigDocument, effectiveDeny, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny, piSeatAgentDir } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -2104,4 +2104,38 @@ test('claude headless routing changes only the base-URL env entry', () => {
   const unset = claudeHeadlessCommand({ ...base, env: {} }).env
   const { ANTHROPIC_BASE_URL: _ignored, ...withoutRouter } = claudeHeadlessCommand({ ...base, env: { CREW_ROUTER_ATTEMPT_URL: url } }).env
   assert.deepEqual(withoutRouter, unset)
+})
+
+// b1103 native pi delivery: NP2/NP4 pinned in the suite, not only in the lane's task gate.
+const NP_FFF_BIN = '/opt/homebrew/bin/fff-mcp'
+const NP_FFF_TOOLS = ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep']
+const npShipped = () => JSON.parse(readFileSync(join(ROOT, 'crew/capabilities.json'), 'utf8'))
+const npExists = (available) => (path) => path === NP_FFF_BIN ? available : existsSync(path)
+const npPiBuilder = async (env = {}, available = true) => (await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: npShipped(), env, exists: npExists(available) })).builder
+
+// Kills: the codemode default restored to opt-in (piCodemode === 'on').
+test('NP2 default pi seats get codemode and the builder gets native fff search with Glob/Grep denied', async () => {
+  const entry = await npPiBuilder()
+  assert.equal(entry.grants.extensions.includes('builtin:codemode'), true)
+  assert.equal(entry.grants.extensions.includes('builtin:mcp'), true)
+  assert.deepEqual(entry.search.tools, NP_FFF_TOOLS); assert.equal(entry.search.fff, 'granted')
+  assert.deepEqual(effectiveDeny('builder', entry.search).split(',').slice(-2), ['Glob', 'Grep'])
+  for (const role of ['lead', 'planner', 'reviewer', 'tech-lead']) {
+    const resolved = await resolveAdapters([role], { [`agent-${role}`]: 'pi' }, null, { env: {} })
+    assert.equal(resolved[role].grants.extensions.includes('builtin:codemode'), true, role)
+  }
+  await assert.rejects(npPiBuilder({ CREW_PI_CODEMODE: 'maybe' }), /invalid CREW_PI_CODEMODE/)
+})
+
+// Kills: the shared binary-absent fallback neutralised.
+test('NP4 an absent fff-mcp strips the server, keeps codemode and restores built-in search in both adapters', async () => {
+  const entry = await npPiBuilder({}, false)
+  assert.equal(entry.grants.extensions.includes('builtin:codemode'), true)
+  assert.equal(entry.grants.extensions.includes('builtin:mcp'), false)
+  assert.deepEqual(entry.grants.mcp_servers, [])
+  assert.deepEqual(entry.search, { tools: ['grep', 'find'], fff: 'withheld', reason: 'binary-absent' })
+  assert.equal(effectiveDeny('builder', entry.search).includes('Grep'), false)
+  const claude = (await resolveAdapters(['builder'], {}, null, { env: {}, exists: npExists(false) })).builder
+  assert.deepEqual(claude.grants.mcp_servers, [])
+  assert.deepEqual(claude.search, { tools: ['Glob', 'Grep'], fff: 'withheld', reason: 'binary-absent' })
 })

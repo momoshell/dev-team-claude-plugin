@@ -943,3 +943,26 @@ test('a pane seat ignores legacy advisor endpoint fields in favor of manifest co
   assert.equal(env.CREW_ADVISOR_ENDPOINT, undefined)
   assert.equal(env.CREW_ADVISOR, '1')
 })
+
+// Kills: piFffEnv's granted CREW_FFF changed from 1 to 0 (RV1-1: readgate stops refusing bash grep/find).
+test('NP7 the grant decides CREW_FFF for rpc, pane and acp, and readgate points at native fff tools', async () => {
+  const { createReadGate } = await import('./pi/extensions/readgate.ts')
+  const grants = { tools: [], extensions: ['builtin:mcp'], agents: [], skills: [], advisor: false, mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] }
+  const base = { role: 'builder', taskDir: '/np/task', model: 'openai-codex/model', promptFile: '/np/role.md', bootBrief: 'boot', env: {}, grants }
+  const parts = piRpcSeatParts(base); const pane = seatCommand(base)
+  assert.equal(parts.env.CREW_FFF, '1'); assert.match(pane, /\bCREW_FFF=1\b/)
+  assert.equal(parts.env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
+  assert.match(pane, /PI_CODING_AGENT_DIR="\/np\/task\/pi-agent\/builder"/)
+  assert.equal(acpLaunch({ ...base, bin: '/np/pi', cwd: '/np/checkout' }).env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
+  const ungranted = { ...base, grants: { ...grants, extensions: [], mcp_servers: [] } }
+  assert.equal(piRpcSeatParts(ungranted).env.CREW_FFF, '0')
+  assert.match(seatCommand(ungranted), /\bCREW_FFF=0\b/)
+  const hostile = { ...ungranted, env: { CREW_FFF: '1' } }
+  assert.equal(piRpcSeatParts(hostile).env.CREW_FFF, '0')
+  assert.match(seatCommand(hostile), /\bCREW_FFF=0\b/)
+  const gate = createReadGate({ env: parts.env, hasUnquotedPipe: () => false })
+  for (const [program, replacement] of [['grep', 'mcp__fff__grep'], ['find', 'mcp__fff__find_files']]) {
+    const result = gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/np/checkout' })
+    assert.equal(result?.block, true, program); assert.match(result.reason, new RegExp(replacement))
+  }
+})

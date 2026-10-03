@@ -5370,3 +5370,17 @@ test('RV1-2 the plan claim survives a builder body that repeats the commit subje
   const kept = composeCommitMessage({ task: 't', planEnv: planEnvelope, builderEnv: { details: { commit_message: 'moved the thing' } } })
   assert.equal(kept, `feat: move\n\nmoved the thing\n\n${PC_PLAN}`)
 })
+
+// Sol pass 2 (b1096). Mutation: at either publish site, pass the rendered PR body (which still
+// carries a stale builder claim under `## What`) to promptMeasurementDefect instead of the selected
+// claim — the resume path then publishes with no `## Prompt measurement` section. Watched red.
+test('RV1-2 a stale builder claim in a resumed commit message never satisfies the prompt measurement check', () => {
+  for (const promptDiff of [{ unreadable: true }, pcPatch(PC_PROMPT, 'old wording', 'new wording')]) {
+    const io = pcIo({ promptDiff })
+    const checkpoint = pcCheckpoint({})
+    checkpoint.commit.message = `feat: resume\n\n${PC_BUILDER}`
+    const result = pcResume(io, checkpoint)
+    assert.deepEqual({ status: result.status, refused: result.details?.publish?.refused, creates: io.calls.run.filter((cmd) => cmd.startsWith('gh pr create')).length },
+      { status: 'escalation', refused: PUBLISH_REFUSALS.promptMeasurement, creates: 0 }, JSON.stringify(promptDiff))
+  }
+})

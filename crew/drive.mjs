@@ -8074,7 +8074,7 @@ function runTask(ctx, io, crash) {
       const resumeBriefText = (() => { try { const value = resumeIo.readFile(resumeCtx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
       const resumeIssueDefect = issueStatementDefect({ brief: resumeBriefText, details: checkpoint.returns?.planner?.details })
       if (resumeIssueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, resumeIssueDefect)
-      const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: resumePromptClaim?.citation_only ?? null, body: composePrBody({ intent: commitIntent(checkpoint.commit.message), ...(resumePromptClaim ? { prompt_claim: resumePromptClaim.claim } : {}) }) })
+      const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: resumePromptClaim?.citation_only ?? null, body: resumePromptClaim ? (resumePromptClaim.claim ?? '') : composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
       if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
       try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
@@ -12641,7 +12641,7 @@ function runTask(ctx, io, crash) {
     if (branch === publishBase) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${publishBase}`)
     const issueDefect = issueStatementDefect({ brief: briefText, details: planEnv?.details })
     if (issueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, issueDefect)
-    const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: promptClaim?.citation_only ?? null, body: composePrBody({ intent: commitIntent(message), ...(promptClaim ? { prompt_claim: promptClaim.claim } : {}) }) })
+    const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: promptClaim?.citation_only ?? null, body: promptClaim ? (promptClaim.claim ?? '') : composePrBody({ intent: commitIntent(message) }) })
     if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
 
     let ghMissing

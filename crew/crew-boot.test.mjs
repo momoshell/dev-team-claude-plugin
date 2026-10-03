@@ -2995,14 +2995,14 @@ test('NP6 an MCP-only pi seat refuses a project .pi/mcp.json before any write', 
 })
 
 // Kills: the boot row's pi_codemode expression replaced with null.
-test('NP9 the boot journal records pi_codemode on/default when unset and off/env when off', async () => {
+test('NP9 the boot journal records pi_codemode on/default when unset, on/env when on and off/env when off', async () => {
   const root = scratchDir('np9-native-'); const home = join(root, 'home'); const checkout = join(root, 'checkout')
   mkdirSync(home); mkdirSync(checkout)
   const prior = process.env.HOME; const priorDb = process.env.DEVTEAM_LEDGER_DB
   process.env.HOME = home; process.env.DEVTEAM_LEDGER_DB = join(root, 'uncreated.db')
   try {
     const records = []
-    for (const [task, env] of [['default', {}], ['off', { CREW_PI_CODEMODE: 'off' }]]) {
+    for (const [task, env] of [['default', {}], ['on', { CREW_PI_CODEMODE: 'on' }], ['off', { CREW_PI_CODEMODE: 'off' }]]) {
       const register = npShipped()
       for (const role of ['lead', 'builder']) { register.roles[role].advisor = false; register.roles[role].by_agent = {} }
       await bootCmd({ task, checkout, roles: 'lead,builder', 'agent-lead': 'pi', 'agent-builder': 'pi', 'headless-all': true }, {
@@ -3013,7 +3013,7 @@ test('NP9 the boot journal records pi_codemode on/default when unset and off/env
       const rows = readFileSync(join(home, '.crew', 'checkout', task, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
       records.push(rows.find((row) => row.event === 'boot')?.pi_codemode)
     }
-    assert.deepEqual(records, [{ value: 'on', source: 'default' }, { value: 'off', source: 'env' }])
+    assert.deepEqual(records, [{ value: 'on', source: 'default' }, { value: 'on', source: 'env' }, { value: 'off', source: 'env' }])
   } finally {
     if (prior === undefined) delete process.env.HOME; else process.env.HOME = prior
     if (priorDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = priorDb

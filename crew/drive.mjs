@@ -13673,7 +13673,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   // A clock that does not advance is not a measurement, so the loop is bounded by scans
   // as well as by time; neither bound alone can wedge a lane.
   const maxScans = Math.max(1, Math.ceil(ceiling / interval) + 1)
-  let depth = null
+  let depth = null, lockContended = 0, lockHolder = null
   let handle = null
   for (let scan = 0; scan < maxScans; scan += 1) {
     // NO catch here, deliberately. A store that cannot answer is not admission:
@@ -13682,7 +13682,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
     // throw on purpose (crew/reclaim.mjs:1260-1264) and #825's wrapper does not swallow
     // it either (crew/host-load.mjs:115-133). Only a COMPLETED wait that reaches the
     // ceiling runs unslotted.
-    const attempt = pool.acquire({ owner })
+    const attempt = pool.acquire({ owner }); if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
     if (attempt?.handle) { handle = attempt.handle; break }
     depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
     // The driver is ALIVE and this completed scan is the observation that proves it.
@@ -13699,7 +13699,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   // The optional-call spelling is deliberate: the driver's source inventory recognizes
   // this helper sink and therefore accounts for the operational row below.
   const recordWait = () => log?.(operationalRow({ at: now(), event: PHASE_SLOT_WAIT_EVENT, kind: phase,
-    queue_depth: depth, waited_ms: now() - startedAt, slotted: handle !== null }))
+    queue_depth: depth, waited_ms: now() - startedAt, slotted: handle !== null, lock_contended: lockContended, lock_holder: lockHolder }))
   // A queue is not a refusal (crew/reclaim.mjs:1140): a ceiling REACHED — and only that
   // — hands the caller its phase back unslotted rather than failing a run that would
   // have succeeded. Nothing is held on this path, so the row is written outside any

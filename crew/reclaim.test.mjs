@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LEASE_PHASES, SUCCESSOR_STATES, PARK_STATES, LAUNCH_STATES, CONFLICT_REASONS, LIVENESS, markerLockName, leaseKey, parkLockName, slotCapacity, slotStore, slotLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS } from './reclaim.mjs'
+import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LEASE_PHASES, SUCCESSOR_STATES, PARK_STATES, LAUNCH_STATES, CONFLICT_REASONS, LIVENESS, markerLockName, leaseKey, parkLockName, slotCapacity, slotStore, slotLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS, LOCK_BACKOFF_CAP_MS, SLOT_RELEASE_LOCK_DEADLINE_MS } from './reclaim.mjs'
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'reclaim-'))
@@ -47,7 +47,7 @@ function authority(map = {}) {
 test('exports closed enums', () => { assert.deepEqual(PHASES, { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }); assert.deepEqual(VERDICTS, { FREE: 'free', RECLAIMABLE: 'reclaimable', BUSY: 'busy', UNRESOLVABLE: 'unresolvable' }) })
 test('evidence enum includes successor authority', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid', SUCCESSOR: 'successor' }))
 test('liveness enum is tri-state', () => assert.deepEqual(LIVENESS, { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }))
-test('lock constants are bounded', () => { assert.equal(LOCK_ATTEMPTS, 20); assert.equal(LOCK_INTERVAL_MS, 50) })
+test('lock constants are bounded', () => { assert.equal(LOCK_ATTEMPTS, 20); assert.equal(LOCK_INTERVAL_MS, 50); assert.equal(LOCK_BACKOFF_CAP_MS, 1000) })
 test('marker lock names are stable and safe', () => { assert.equal(markerLockName('x'), markerLockName('x')); assert.notEqual(markerLockName('x'), markerLockName('y')); assert.match(markerLockName('x'), /^[0-9a-f]+$/) })
 test('free reconciliation', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
 test('an absent marker is free', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
@@ -227,7 +227,87 @@ test('F1 retirement unlink failure does not fail acquisition or release', () => 
   assert.equal(readdirSync(join(dir, 'locks')).some((entry) => entry.includes('.tmp')), false)
 }))
 
-test('bounded lock acquisition returns contended', () => { const f = fixture(); try { f.s.acquire('x'); let sleeps = 0; const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, sleep: () => { sleeps += 1 } } }); const r = s.acquire('x'); assert.equal(r.reason, 'contended'); assert.ok(sleeps <= LOCK_ATTEMPTS) } finally { f.done() } })
+test('bounded lock acquisition returns contended', () => { const f = fixture(); try { f.s.acquire('x'); let sleeps = 0; const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, sleep: () => { sleeps += 1 } } }); const r = s.acquire('x'); assert.equal(r.reason, 'contended'); assert.ok(sleeps <= LOCK_ATTEMPTS); assert.equal(r.waited_ms, 0); assert.equal(r.holder.pid, 700) } finally { f.done() } })
+
+test('LW1 bounded wait backs off, forwards deadline and releases callback lock', () => each(({ dir, deps }) => {
+  let now = 0
+  const sleeps = []
+  const holder = reclaimStore({ dir, actor: 'holder', deps: { ...deps, pid: 701, now: () => now } })
+  const held = holder.acquire('bounded')
+  const waiter = reclaimStore({ dir, actor: 'waiter', deps: { ...deps, pid: 702, now: () => now, sleep(ms) { sleeps.push(ms); now += ms; if (now > 3000) holder.release(held.handle) } } })
+  let callbacks = 0
+  const result = waiter.withLock('bounded', (handle) => { callbacks += 1; assert.equal(waiter.checkFence(handle), true); return 'ok' }, { deadlineMs: 10000 })
+  assert.equal(result, 'ok')
+  assert.equal(callbacks, 1)
+  assert.deepEqual(sleeps, [50, 100, 200, 400, 800, 1000, 1000])
+  assert.equal(waiter.checkFence(waiter.acquire('after').handle), true)
+  let races = 0
+  const raceSleeps = []
+  const racer = reclaimStore({ dir, actor: 'racer', deps: { ...deps, pid: 704, now: () => now, sleep(ms) { raceSleeps.push(ms); now += ms }, linkSync(from, to) {
+    if (String(to).endsWith('exclusive-race.lock.1') && races++ < 2) { const err = Error('raced'); err.code = 'EEXIST'; throw err }
+    return fsLink(from, to)
+  } } })
+  const raced = racer.acquire('exclusive-race', { deadlineMs: 10000 })
+  assert.equal(raced.ok, true)
+  assert.equal(raced.attempts, 2)
+  assert.deepEqual(raceSleeps, [50, 100])
+  const defaultWait = reclaimStore({ dir, actor: 'default', deps: { ...deps, pid: 703, now: () => now, sleep(ms) { now += ms } } })
+  holder.acquire('default-budget')
+  assert.throws(() => defaultWait.withLock('default-budget', () => {}, {}), (err) => err.reason === 'contended' && err.waited_ms === 1000)
+  let throws = 0
+  assert.throws(() => waiter.withLock('throws', () => { throws += 1; throw Error('callback') }, { deadlineMs: 0 }), /callback/)
+  assert.equal(throws, 1)
+}))
+
+test('LW2 deadline failure reports observed holder and measured wait', () => each(({ dir, deps }) => {
+  let now = 0
+  const holder = reclaimStore({ dir, actor: 'holder', deps: { ...deps, pid: 811, now: () => now } })
+  holder.acquire('diagnostic')
+  const waits = []
+  const waiter = reclaimStore({ dir, actor: 'waiter', deps: { ...deps, pid: 812, now: () => now, sleep(ms) { waits.push(ms); now += ms } } })
+  assert.throws(() => waiter.withLock('diagnostic', () => assert.fail('held lock callback'), { deadlineMs: 2000 }), (err) => {
+    assert.equal(err.stage, 'reclaim-lock-unavailable'); assert.equal(err.reason, 'contended')
+    assert.deepEqual(err.holder, { pid: 811, started_at: 0, actor: 'holder', fence: 1 })
+    assert.equal(err.waited_ms, 2000)
+    assert.match(err.message, /pid=811.*actor=holder.*fence=1.*waited_ms=2000/)
+    return true
+  })
+  assert.equal(waits.reduce((a, b) => a + b, 0), 2000)
+  for (const value of [-1, Infinity, NaN, '10']) assert.throws(() => waiter.acquire('bad', { deadlineMs: value }), TypeError)
+  assert.equal(waiter.acquire('zero', { deadlineMs: 0 }).ok, true)
+}))
+
+test('LW3 contended pool lock queues without claiming depth or a row', () => each(({ dir, deps }) => {
+  const poolDir = join(dir, 'lw3')
+  const first = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...deps, pid: 830 } })
+  const second = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...deps, pid: 831, sleep() {} } })
+  const lock = reclaimStore({ dir: join(poolDir, 'slots'), actor: 'lock-holder', deps: { ...deps, pid: 832 } })
+  const lockName = slotLockName('suite')
+  lock.acquire(lockName)
+  const waiting = second.acquire({ owner: 'queued' })
+  assert.deepEqual(waiting, { waiting: true, depth: null, contended: { holder: { pid: 832, started_at: 1, actor: 'lock-holder', fence: 1 }, waited_ms: 0 } })
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
+  assert.throws(() => first.acquire({ owner: '' }), /non-blank owner/)
+}))
+
+test('LW4 slot release waits beyond the default lock budget and preserves row on exhausted bound', () => each(({ dir, deps }) => {
+  assert.equal(SLOT_RELEASE_LOCK_DEADLINE_MS, 60000)
+  let now = 0
+  const poolDir = join(dir, 'lw4')
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...deps, now: () => now } })
+  const acquired = pool.acquire({ owner: 'lane' })
+  const lock = reclaimStore({ dir: join(poolDir, 'slots'), actor: 'holder', deps: { ...deps, pid: 901, now: () => now } })
+  const held = lock.acquire(slotLockName('suite'))
+  const releasePool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...deps, now: () => now, sleep(ms) { now += ms; if (now > 5000) lock.release(held.handle) } } })
+  assert.equal(releasePool.release(acquired.handle), true)
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
+  const next = pool.acquire({ owner: 'next' })
+  const permanent = reclaimStore({ dir: join(poolDir, 'slots'), actor: 'permanent', deps: { ...deps, pid: 902, now: () => now } })
+  permanent.acquire(slotLockName('suite'))
+  const bounded = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...deps, now: () => now, sleep(ms) { now += ms } } })
+  assert.equal(bounded.release(next.handle), false)
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), true)
+}))
 test('ESRCH holder is displaced', () => { const f = fixture(); try { const a = f.s.acquire('x'); const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, kill: () => { const e = Error(); e.code = 'ESRCH'; throw e } } }); assert.equal(s.acquire('x').ok, true); assert.equal(s.checkFence(a.handle), false) } finally { f.done() } })
 test('unattested lock override does not unblock', () => each(({ s }) => { const a = s.acquire('x'); assert.throws(() => s.overrideLock('x', { actor: 'ops', reason: 'x', fence: a.handle.fence, token: a.handle.token })); assert.equal(s.checkFence(a.handle), true) }))
 test('digest lock override recovers corrupt maximum', () => { const f = fixture(); try { const p = join(f.dir, 'locks', 'x.lock.1'); writeFileSync(p, 'corrupt'); const d = awaitDigest(Buffer.from('corrupt')); f.s.overrideLock('x', { actor: 'ops', reason: 'repair', fence: 1, digest: d, attestation: { quiesced: true, method: 'stopped' } }) } catch (err) { assert.fail(err) } finally { f.done() } })
@@ -1229,7 +1309,10 @@ test('a readable live pool lock maximum remains contended', () => each((f) => {
   const name = slotLockName('suite')
   writeFileSync(join(poolDir, 'slots', 'locks', `${name}.lock.7`), JSON.stringify({ fence: 7, token: 'held-7', owner: { pid: 999, startedAt: 1 }, actor: 'other', at: 1, released: false }))
   const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
-  assert.throws(() => pool.acquire({ owner: 'lane-a' }), (err) => err.reason === 'contended')
+  const queued = pool.acquire({ owner: 'lane-a' })
+  assert.equal(queued.waiting, true)
+  assert.equal(queued.depth, null)
+  assert.deepEqual(queued.contended.holder, { pid: 999, started_at: 1, actor: 'other', fence: 7 })
   assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
   const epochs = readdirSync(join(poolDir, 'slots', 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`))
   assert.equal(epochs.includes(`${name}.lock.8`), false)

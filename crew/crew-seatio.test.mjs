@@ -727,7 +727,7 @@ test('chunk gate events reach recordGateResult with ledger checks', () => {
 // roster (crew.members[role].transport) instead of the dispatch-time seatFor record;
 // the RPC assignment then reports 'acp' after the roster is rewritten below.
 test('DT1 dispatchTransport reports the dispatch-time transport after the roster changes', () => {
-  const root = mkdtempSync(join(tmpdir(), 'dispatch-transport-'))
+  const root = scratchDir('dispatch-transport-')
   try {
     const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
     mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)

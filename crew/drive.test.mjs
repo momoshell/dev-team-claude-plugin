@@ -857,7 +857,7 @@ function rpcNoEnvelope(detail, over = {}) {
 }
 
 const ID_REASK_RUN = 'run-id-reask'
-const idReaskScenario = ({ builders = [], spent = null, rejectLog = null } = {}) => {
+const idReaskScenario = ({ builders = [], spent = null, rejectLog = null, runId = ID_REASK_RUN } = {}) => {
   const queues = {
     planner: [planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: [leadEnv('escalate')],
   }
@@ -871,7 +871,7 @@ const idReaskScenario = ({ builders = [], spent = null, rejectLog = null } = {})
   io.assign = (spec) => {
     const assigned = assign(spec)
     const id = assigned.id
-    const returnPath = spec.reask?.returnPath ?? `/returns/${ID_REASK_RUN}/${id}.${spec.role}.json`
+    const returnPath = spec.reask?.returnPath ?? `/returns/${runId}/${id}.${spec.role}.json`
     identities.set(returnPath, { role: spec.role, id })
     dispatches.push({ ...spec, id, returnPath })
     return { id, returnPath }
@@ -881,14 +881,14 @@ const idReaskScenario = ({ builders = [], spent = null, rejectLog = null } = {})
     const raw = queues[identity.role]?.shift()
     if (!raw) return null
     const env = typeof raw === 'function' ? raw(identity) : raw
-    return { ...env, assignment_id: env.assignment_id ?? identity.id, run_id: env.run_id ?? ID_REASK_RUN }
+    return { ...env, assignment_id: env.assignment_id ?? identity.id, ...(Object.hasOwn(env, 'run_id') ? { run_id: env.run_id } : { run_id: runId }) }
   }
   io.reaskGraceSpent = () => spent
   if (rejectLog) {
     const log = io.log.bind(io)
     io.log = (row) => { if (rejectLog(row)) throw new Error('journal sink rejected the row'); return log(row) }
   }
-  return { io, dispatches, result: driveTask({ ...CTX, run_id: ID_REASK_RUN, limits: { plan_rounds: 1 } }, io) }
+  return { io, dispatches, result: driveTask({ ...CTX, run_id: runId, limits: { plan_rounds: 1 } }, io) }
 }
 
 const builderDispatches = (scenario) => scenario.dispatches.filter(({ role }) => role === 'builder')
@@ -918,6 +918,51 @@ test('IDREASK', () => {
 })
 
 // MUTATION: let the envelope_id_reask journal write throw; the correction is never sent and the lane crashes.
+test('RM1 present wrong run ID receives one same-assignment correction', () => {
+  const runId = '2ea67686-4a3f-4cf3-846c-b6eabdc7dbf6'
+  const foreignRun = '2ea67686-4a3f-4a3f-846c-b6eabdc7dbf6'
+  const scenario = idReaskScenario({ runId, builders: [() => buildEnv({ run_id: foreignRun })] })
+  const dispatches = builderDispatches(scenario)
+  assert.equal(dispatches.length, 2)
+  assert.equal(dispatches[1].returnPath, `/returns/${runId}/${dispatches[0].id}.id-reask.builder.json`)
+  assert.match(scenario.io.calls.writes[dispatches[1].briefFile], new RegExp(`Return run_id=${JSON.stringify(runId)}\\.`))
+  assert.deepEqual(recoveryRows(scenario, 'envelope_id_reask').map(({ outcome }) => outcome), ['asked'])
+  assert.equal(recoveryRows(scenario, 'envelope_refused')[0].otherwise_valid, true)
+  assert.deepEqual(scenario.io.calls.logs.filter((row) => row.envelope && row.role === 'builder').map(({ status }) => status), ['done'])
+  assert.equal(scenario.result.status, 'done')
+})
+
+test('RM2 second wrong run ID escalates without accepting or committing', () => {
+  const scenario = idReaskScenario({ builders: [() => buildEnv({ run_id: 'foreign-run' }), () => buildEnv({ run_id: 'foreign-run' })] })
+  assert.equal(recoveryRows(scenario, 'envelope_refused').length, 2)
+  assert.deepEqual(recoveryRows(scenario, 'envelope_id_reask').map(({ outcome }) => outcome), ['asked'])
+  assert.equal(scenario.result.status, 'escalation')
+  assert.equal(scenario.io.calls.commits.length, 0)
+  assert.equal(scenario.io.calls.logs.filter((row) => row.envelope && row.role === 'builder').length, 0)
+  assert.equal(scenario.io.calls.logs.filter((row) => row.review_outcome).length, 0)
+})
+
+test('RM3 wrong run ID cannot spend a previously used shared grace', () => {
+  const scenario = idReaskScenario({ builders: [() => buildEnv({ run_id: 'foreign-run' })], spent: 'caller-reask' })
+  assert.deepEqual(recoveryRows(scenario, 'envelope_id_reask').map(({ outcome }) => outcome), ['grace-spent'])
+  assert.equal(builderDispatches(scenario).length, 1)
+  assert.equal(scenario.result.status, 'escalation')
+  assert.equal(scenario.io.calls.commits.length, 0)
+})
+
+test('RM4 otherwise-invalid and absent wrong run IDs get no correction', () => {
+  for (const input of [
+    { status: null, run_id: 'foreign-run' },
+    { run_id: undefined }, { run_id: null }, { run_id: '' }, { run_id: '   ' }, { run_id: 7 },
+  ]) {
+    const scenario = idReaskScenario({ builders: [() => buildEnv(input)] })
+    assert.equal(recoveryRows(scenario, 'envelope_refused')[0].otherwise_valid, false, JSON.stringify(input))
+    assert.equal(builderDispatches(scenario).length, 1, JSON.stringify(input))
+    assert.equal(recoveryRows(scenario, 'envelope_id_reask').length, 0, JSON.stringify(input))
+    assert.equal(scenario.io.calls.commits.length, 0, JSON.stringify(input))
+  }
+})
+
 test('IDJOURNAL a failed id re-ask journal write never blocks the correction', () => {
   const scenario = idReaskScenario({ builders: [wrongBuilderId()], rejectLog: (row) => Boolean(row?.envelope_id_reask) })
   assert.equal(builderDispatches(scenario).length, 2)
@@ -1051,9 +1096,12 @@ test('C1 genuine replay remains refused as run-mismatch', () => {
   assert.equal(io.calls.logs.filter((row) => row.review_outcome).length, 0)
   assert.equal(io.calls.logs.filter((row) => row.review_findings_note).length, 0)
   assert.equal(result.details.accept_findings, null)
-  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 1)
+  assert.equal(io.calls.logs.filter((row) => row.envelope_refused).length, 2)
   assert.equal(io.calls.logs.find((row) => row.envelope_refused).envelope_refused.reason, 'run-mismatch')
-  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope'), [{ kind: 'envelope', id: 'd1', role: 'reviewer', status: 'insufficient' }])
+  assert.deepEqual(io.calls.logs.filter((row) => row.envelope_id_reask).map((row) => row.envelope_id_reask.outcome), ['asked'])
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'envelope'), Array.from({ length: 2 }, () => ({ kind: 'envelope', id: 'd1', role: 'reviewer', status: 'insufficient' })))
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.logs.filter((row) => row.envelope && row.role === 'reviewer').length, 0)
 })
 
 test('D1 anti-replay refusal reasons remain a frozen closed four', () => {
@@ -1130,8 +1178,10 @@ test('K1 malformed transport rpc-no-envelope lookalikes remain refused', () => {
     const result = driveTask(ctx, io)
     const rows = io.calls.logs.filter((entry) => entry.envelope_refused)
     assert.equal(result.status, 'escalation', label)
-    assert.equal(rows.length, 1, label)
+    assert.equal(rows.length, label === 'foreign run' ? 2 : 1, label)
     assert.equal(rows[0].envelope_refused.reason, reason, label)
+    assert.equal(io.calls.logs.filter((entry) => entry.envelope_id_reask).length, label === 'foreign run' ? 1 : 0, label)
+    assert.equal(io.calls.logs.filter((entry) => entry.review_outcome).length, 0, label)
   }
 })
 

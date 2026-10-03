@@ -942,8 +942,8 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   assert.deepEqual(configured.args, c.args)
   assert.deepEqual(nullConfig.args, c.args)
   assert.deepEqual(undefinedConfig.args, c.args)
-  assert.deepEqual(c.env, { X: '1' })
-  assert.deepEqual(configured.env, { X: '1', PI_CODING_AGENT_DIR: '/checkout/crew/pi' })
+  assert.deepEqual(c.env, { X: '1', CREW_FFF: '0' })
+  assert.deepEqual(configured.env, { X: '1', CREW_FFF: '0', PI_CODING_AGENT_DIR: '/checkout/crew/pi' })
   assert.equal(Object.hasOwn(nullConfig.env, 'PI_CODING_AGENT_DIR'), false)
   assert.equal(Object.hasOwn(undefinedConfig.env, 'PI_CODING_AGENT_DIR'), false)
   assert.equal(Object.hasOwn(c.env, 'CREW_PI_AGENTS'), false)
@@ -988,7 +988,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
     '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(ROOT, 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
   ])
   assert.deepEqual(completeGrant.env, {
-    X: '1', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
+    X: '1', CREW_FFF: '0', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
   })
 
   const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }

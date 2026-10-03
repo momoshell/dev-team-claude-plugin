@@ -659,7 +659,7 @@ export function createReadGate(options = {}) {
       if (fffEnabled(env)) {
         const searchProgram = fffSearchProgram(command)
         if (searchProgram !== undefined) {
-          const tool = searchProgram === 'grep' || searchProgram === 'rg' ? 'fff_grep' : 'fff_find'
+          const tool = searchProgram === 'grep' || searchProgram === 'rg' ? 'mcp__fff__grep' : 'mcp__fff__find_files'
           return { block: true, reason: `Refusing direct ${searchProgram}: use ${tool} instead.` }
         }
       }

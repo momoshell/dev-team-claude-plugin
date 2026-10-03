@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY } from './adapters/adapter-claude.mjs'
-import { capabilitiesFor as piCapabilitiesFor, translateDeny } from './adapters/adapter-pi.mjs'
+import { capabilitiesFor as piCapabilitiesFor, translateDeny, piSeatAgentDir } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
@@ -20,27 +20,28 @@ import { shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-test('K1 K3 K4 resolve opt-in pi grants without ambient leakage', async () => {
+test('K1 K3 K4 resolve default-on pi grants without ambient leakage', async () => {
   // MUTATION: unset-as-on (K1), read process.env (K3: ambient on must reach neither off nor unset), or omit builtin:codemode (K4).
   const prior = process.env.CREW_PI_CODEMODE
   process.env.CREW_PI_CODEMODE = 'on'
   try {
     const absent = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'off' } })
     const defaulted = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: {} })
-    assert.deepEqual(defaulted.builder.grants, absent.builder.grants)
-    for (const seat of [absent, defaulted]) assert.equal(seat.builder.grants.extensions.some((e) => e.startsWith('builtin:')), false)
+    assert.equal(absent.builder.grants.extensions.includes('builtin:codemode'), false)
+    assert.equal(defaulted.builder.grants.extensions.includes('builtin:codemode'), true)
     const on = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: capabilityRegister(), env: { CREW_PI_CODEMODE: 'on' } })
     assert.ok(on.builder.grants.extensions.includes('builtin:codemode'))
     assert.ok(Object.isFrozen(on.builder.grants) && Object.isFrozen(on.builder.grants.extensions))
     assert.equal(Object.hasOwn(on.builder.grants, 'mcp_servers'), true)
   } finally { if (prior === undefined) delete process.env.CREW_PI_CODEMODE; else process.env.CREW_PI_CODEMODE = prior }
 })
-test('K9 off MCP grants retain the adapter delivery refusal; K10 on resolves MCP profile', async () => {
+test('K9 off MCP grants resolve independently; K10 on resolves MCP profile', async () => {
   // MUTATION: remove the mcp_servers delivery check or withhold the MCP profile claim.
   const register = capabilityRegister({ coding_agents: { pi: { ...capabilityRegister().coding_agents.pi, refuses: [] } } })
   const fff = { name: 'fff', command: { bin: '/opt/fff-mcp', args: [] }, url: null }
   register.roles.builder.by_agent = { pi: { mcp_servers: [fff] } }
-  await assert.rejects(resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'off' } }), (error) => error.reason === 'grant-unsupported' && /cannot express mcp_servers/.test(error.message))
+  const off = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'off' } })
+  assert.ok(off.builder.grants.extensions.includes('builtin:mcp'))
   const on = await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'on' } })
   assert.ok(on.builder.grants.extensions.includes('builtin:mcp'))
   assert.equal(on.builder.adapter.capabilitiesFor({ transport: 'pane', grants: on.builder.grants }).mcp_servers, true)
@@ -867,6 +868,7 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
     join(ROOT, 'crew/pi/extensions/lab.ts'),
     join(ROOT, 'crew/pi/extensions/readgate.ts'),
     join(ROOT, 'crew/pi/extensions/submit.ts'),
+    'builtin:codemode',
   ])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })
@@ -1374,7 +1376,7 @@ test('A1 raw local override resolves its config directory', async () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('B1 raw local override passes PI_CODING_AGENT_DIR to its seat command', async () => {
+test('B1 raw local override remains the config source while codemode selects the seat agent directory', async () => {
   const root = scratchDir('crew-raw-local-b1-')
   try {
     const settings = join(root, 'crew/pi/settings.json')
@@ -1393,11 +1395,12 @@ test('B1 raw local override passes PI_CODING_AGENT_DIR to its seat command', asy
       bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
     })
     assert.equal(command.match(/PI_CODING_AGENT_DIR=/g)?.length, 1)
-    assert.ok(command.includes(`PI_CODING_AGENT_DIR="${dirname(settings)}"`))
+    assert.ok(command.includes(`PI_CODING_AGENT_DIR="${piSeatAgentDir({ taskDir: root, role: 'builder' })}"`))
+    assert.notEqual(piSeatAgentDir({ taskDir: root, role: 'builder' }), dirname(settings))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('C1 hosted raw override carries no PI_CODING_AGENT_DIR', async () => {
+test('C1 hosted raw override uses the default codemode agent directory, not the raw override', async () => {
   const root = scratchDir('crew-raw-hosted-c1-')
   try {
     const probed = []
@@ -1414,7 +1417,8 @@ test('C1 hosted raw override carries no PI_CODING_AGENT_DIR', async () => {
       tools: SEAT_DEFAULTS.builder.tools, deny: SEAT_DEFAULTS.builder.deny, taskDir: root,
       bootBrief: 'boot', effort: 'max', grants: adapters.builder.grants, configDir: adapters.builder.configDir,
     })
-    assert.equal(command.includes('PI_CODING_AGENT_DIR='), false)
+    assert.ok(command.includes(`PI_CODING_AGENT_DIR="${piSeatAgentDir({ taskDir: root, role: 'builder' })}"`))
+    assert.notEqual(adapters.builder.configDir, piSeatAgentDir({ taskDir: root, role: 'builder' }))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

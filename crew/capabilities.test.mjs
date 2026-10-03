@@ -36,7 +36,6 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/lab.ts': ['lab'],
     'crew/pi/extensions/skeletonread.ts': ['retrieve'],
     'crew/pi/extensions/subagent.ts': ['agent'],
-    'crew/pi/extensions/fff.ts': ['fff_grep', 'fff_find', 'fff_multi_grep'],
     'crew/pi/extensions/submit.ts': ['submit_envelope'],
     'crew/pi/extensions/reminders.ts': [],
   }
@@ -721,18 +720,19 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
-    join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
   const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
+  assert.deepEqual(pi.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.deepEqual(pi.skills, expectedSkills)
   for (const path of [...expected, ...expectedSkills]) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
   const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
   assert.deepEqual(claude.extensions, [])
+  assert.deepEqual(claude.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.deepEqual(claude.skills, expectedSkills)
   assert.doesNotThrow(() => assertGrantsBacked('builder', claude, loaded, { agent: 'claude' }))
   const forged = { ...pi, extensions: [...pi.extensions, join(REGISTER_ROOT, 'crew/pi/extensions/forged.ts')] }

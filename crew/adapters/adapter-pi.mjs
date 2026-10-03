@@ -221,7 +221,6 @@ export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/lab.ts': Object.freeze(['lab']),
   'crew/pi/extensions/skeletonread.ts': Object.freeze(['retrieve']),
   'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
-  'crew/pi/extensions/fff.ts': Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep']),
   'crew/pi/extensions/submit.ts': Object.freeze(['submit_envelope']),
   'crew/pi/extensions/reminders.ts': Object.freeze([]),
 })
@@ -312,9 +311,18 @@ export const EDIT_ASSIST_VALUES = Object.freeze(['on', 'off'])
 export const PI_CODEMODE_ENV = 'CREW_PI_CODEMODE'
 export const PI_CODEMODE_VALUES = Object.freeze(['on', 'off'])
 
+function piFffEnv(grants) {
+  const granted = grants?.extensions?.includes('builtin:mcp') && grants?.mcp_servers?.some((server) => server?.name === 'fff' && server?.command?.bin === '/opt/homebrew/bin/fff-mcp')
+  return { CREW_FFF: granted ? '1' : '0' }
+}
+
+function hasPiAgentDir(grants) {
+  return grants?.extensions?.some((extension) => ['builtin:codemode', 'builtin:mcp'].includes(extension))
+}
+
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, editAssist = null, role, taskDir } = spec
-  const agentDir = grants?.extensions?.includes('builtin:codemode') ? piSeatAgentDir({ taskDir, role }) : configDir
+  const agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
   const piDeny = translateDeny(deny)
   const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
@@ -329,7 +337,8 @@ export function piRpcSeatParts(spec = {}) {
       ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
     ],
     env: {
-      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV)),
+      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV && key !== 'CREW_FFF')),
+      ...piFffEnv(grants),
       ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),
       ...(role === 'builder' && EDIT_ASSIST_VALUES.includes(editAssist) ? { [PI_EDIT_ASSIST_ENV]: editAssist } : {}),
@@ -373,17 +382,17 @@ const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills:
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null, env = process.env }) {
   const routerUrl = routerAttemptUrl(env)
   let router = null
-  let agentDir = grants?.extensions?.includes('builtin:codemode') ? piSeatAgentDir({ taskDir, role }) : configDir
+  let agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
   if (routerUrl !== null) {
     let provider = null
     for (const candidate of Object.values(PI_PROVIDERS)) {
       if (String(model).startsWith(`${candidate}/`) && (provider === null || candidate.length > provider.length)) provider = candidate
     }
     if (provider === null) throw new Error(`adapter-pi: no pi provider for router model "${model}" — refusing a guessed endpoint`)
-    const codemode = grants?.extensions?.includes('builtin:codemode')
-    const routerDir = codemode ? agentDir : mkdtempSync(join(taskDir, 'router-pi-'))
+    const seatAgentDir = hasPiAgentDir(grants)
+    const routerDir = seatAgentDir ? agentDir : mkdtempSync(join(taskDir, 'router-pi-'))
     const modelsPath = join(routerDir, 'models.json')
-    if (codemode) {
+    if (seatAgentDir) {
       const temporary = `${modelsPath}.tmp-${process.pid}`
       let created = false
       try {
@@ -394,7 +403,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     } else writeFileSync(modelsPath, `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`)
     const preRouterDir = configDir !== null && configDir !== undefined ? configDir : join(homedir(), '.pi', 'agent')
     const authSrc = join(preRouterDir, 'auth.json')
-    if (!codemode && existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
+    if (!seatAgentDir && existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
     router = { provider, dir: routerDir }
     agentDir = routerDir
   }
@@ -476,6 +485,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   return [
     'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
+    `CREW_FFF=${piFffEnv(grants).CREW_FFF}`,
     // Advisor activation is the sole CREW_ADVISOR* value; the manifest owns the cell.
     ...(paneAdvisor ? [`${PI_ADVISOR_ENV}=1`] : []),
     // The register-resolved allowlist, transported to the extension. Emitted

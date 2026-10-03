@@ -50,7 +50,7 @@ test('K11 K12 K13 K14 materialises a settings-only codemode profile and granted 
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')), { theme: 'dark', codemode: { timeout: 7, mode: 'only' } })
   assert.equal(readlinkSync(join(dir, 'auth.json')), join(base, 'auth.json'))
   writeMcpConfigs({ taskDir, roles: ['builder'], adapters })
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [] } } })
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [], exposure: 'direct' } } })
 })
 test('a pi MCP seat refuses while the checkout carries a project .pi/mcp.json; a codemode-only seat does not', () => {
   // MUTATION: `if (false)` for the project-MCP refusal — pi would load that file after the seat's and let it win by name.

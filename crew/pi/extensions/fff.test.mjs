@@ -1,14 +1,10 @@
 import assert from 'node:assert/strict'
 import { after, test } from 'node:test'
-import { EventEmitter } from 'node:events'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync as fsExists, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
-import {
-  FFF_MCP_BIN, FFF_TOOL_DEFINITIONS, FFF_TIMEOUT_MS, attachFff, createMcpCall,
-} from './fff.ts'
 import { createReadGate } from './readgate.ts'
 import {
   bootCmd, effectiveDeny, FFF_SEARCH_WITHHOLDINGS, FFF_SEARCH_WITHHOLDING_LIMITS,
@@ -45,8 +41,9 @@ after(() => {
   rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
 })
 
-const present = (path) => path === FFF_MCP_BIN || fsExists(path)
-const absent = (path) => path !== FFF_MCP_BIN && fsExists(path)
+const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
+const present = (path) => path === FFF_BIN || fsExists(path)
+const absent = (path) => path !== FFF_BIN && fsExists(path)
 
 function piEntry(exists = present) {
   return resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { exists }).then((resolved) => resolved.builder)
@@ -59,8 +56,7 @@ function claudeEntry(exists = present) {
 function ungrantedBuilderRegister() {
   const register = JSON.parse(readFileSync(new URL('../../capabilities.json', import.meta.url), 'utf8'))
   delete register.roles.builder.by_agent.claude
-  register.roles.builder.by_agent.pi.extensions = register.roles.builder.by_agent.pi.extensions
-    .filter((extension) => !extension.endsWith('/crew/pi/extensions/fff.ts'))
+  register.roles.builder.by_agent.pi.mcp_servers = []
   return register
 }
 
@@ -110,46 +106,7 @@ function runHook(command, env, payload) {
 function fffGrant() {
   return {
     tools: [], extensions: [], agents: [], skills: [], advisor: false,
-    mcp_servers: [{ name: 'fff', command: { bin: FFF_MCP_BIN, args: [] }, url: null }],
-  }
-}
-
-class FakeChild extends EventEmitter {
-  constructor(mode, onKill = () => {}, onRequest = () => {}) {
-    super()
-    this.mode = mode
-    this.onKill = onKill
-    this.onRequest = onRequest
-    this.stdout = new EventEmitter()
-    this.stderr = new EventEmitter()
-    this.stdin = { write: (chunk) => this.write(chunk), destroy() {} }
-  }
-
-  write(chunk) {
-    const request = JSON.parse(String(chunk).trim())
-    this.onRequest(request)
-    if (request.id === 1) {
-      const response = `${JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} })}\n`
-      this.stdout.emit('data', Buffer.from(response.slice(0, 11)))
-      this.stdout.emit('data', response.slice(11))
-      return
-    }
-    if (request.id !== 2) return
-    if (this.mode === 'malformed') {
-      this.stdout.emit('data', 'not-json\n')
-    } else if (this.mode === 'empty') {
-      this.stdout.emit('data', `${JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [] } })}\n`)
-    } else if (this.mode === 'error') {
-      this.stdout.emit('data', `${JSON.stringify({ jsonrpc: '2.0', id: 2, error: { code: -1, message: 'fake failure' } })}\n`)
-    } else if (this.mode === 'close') {
-      this.emit('close', 1, null)
-    } else if (this.mode === 'success') {
-      this.stdout.emit('data', `${JSON.stringify({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'found' }], structuredContent: { count: 1 } } })}\n`)
-    }
-  }
-
-  kill() {
-    this.onKill()
+    mcp_servers: [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }],
   }
 }
 
@@ -157,10 +114,12 @@ async function bootRecord({ agent = null, available = true, register = null } = 
   const home = scratchDir('fff-record-home-')
   const checkout = scratchDir('fff-record-checkout-')
   const previousHome = process.env.HOME
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR
   const previousWrite = process.stdout.write
   process.env.HOME = home
+  process.env.PI_CODING_AGENT_DIR = ''
   process.stdout.write = () => true
-  const exists = (path) => path === FFF_MCP_BIN ? available : fsExists(path)
+  const exists = (path) => path === FFF_BIN ? available : fsExists(path)
   const args = {
     task: 'fff-record', checkout, roles: 'builder', 'headless-all': true,
     'claude-bin': process.execPath,
@@ -181,6 +140,8 @@ async function bootRecord({ agent = null, available = true, register = null } = 
     process.stdout.write = previousWrite
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir
     rmSync(home, { recursive: true, force: true })
     rmSync(checkout, { recursive: true, force: true })
   }
@@ -189,8 +150,8 @@ async function bootRecord({ agent = null, available = true, register = null } = 
 test('fff-A1-extension', async () => {
   const entry = await piEntry()
   const command = piCommand(entry)
-  assert.match(command, /-e ".*\/crew\/pi\/extensions\/fff\.ts"/)
-  assert.match(command, /fff_grep,fff_find,fff_multi_grep/)
+  assert.match(command, /mcp__fff__find_files,mcp__fff__grep,mcp__fff__multi_grep/)
+  assert.match(command, /-e 'builtin:mcp'/)
   assert.equal(command.includes('--exclude-tools "find,grep"'), true)
 })
 
@@ -201,40 +162,11 @@ test('fff-A1-deny', async () => {
   assert.equal(effectiveDeny('builder', entry.search).endsWith(',Glob,Grep'), true)
 })
 
-test('fff-A1-registers-tools', (t) => {
-  const previousFff = process.env.CREW_FFF
-  t.after(() => {
-    if (previousFff === undefined) delete process.env.CREW_FFF
-    else process.env.CREW_FFF = previousFff
-  })
-  const registered = []
-  const tools = attachFff({ registerTool: (tool) => registered.push(tool) }, { call: async () => ({ content: [{ type: 'text', text: 'ok' }] }) })
-  assert.deepEqual(registered.map((tool) => tool.name), ['fff_grep', 'fff_find', 'fff_multi_grep'])
-  assert.deepEqual(tools.map((tool) => tool.name), FFF_TOOL_DEFINITIONS.map((tool) => tool.name))
-})
-
-test('fff-A1-forwards-tools', async () => {
-  const methods = [
-    ['fff_grep', 'grep'],
-    ['fff_find', 'find_files'],
-    ['fff_multi_grep', 'multi_grep'],
-  ]
-  for (const [toolName, method] of methods) {
-    const requests = []
-    const call = createMcpCall({
-      spawn: () => new FakeChild('success', () => {}, (request) => requests.push(request)),
-    })
-    await call(toolName, { query: 'needle' }, { cwd: '/tmp' })
-    assert.deepEqual(requests.map((request) => request.method), ['initialize', 'notifications/initialized', 'tools/call'])
-    assert.equal(requests.at(-1).params.name, method)
-  }
-})
-
 test('fff-B1-mcp', async () => {
   const entry = await claudeEntry()
-  assert.deepEqual(entry.grants.mcp_servers, [{ name: 'fff', command: { bin: FFF_MCP_BIN, args: [] }, url: null }])
-  assert.deepEqual(mcpConfigDocument(entry.grants), {
-    mcpServers: { fff: { command: FFF_MCP_BIN, args: [] } },
+  assert.deepEqual(entry.grants.mcp_servers, [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }])
+  assert.deepEqual(mcpConfigDocument(entry.grants, 'pi'), {
+    mcpServers: { fff: { command: FFF_BIN, args: [], exposure: 'direct' } },
   })
 })
 
@@ -261,10 +193,10 @@ test('fff-C1', async () => {
 test('fff-D1-search', async () => {
   const entry = await piEntry(absent)
   assert.deepEqual(entry.search, { tools: ['grep', 'find'], fff: 'withheld', reason: 'binary-absent' })
-  assert.equal(entry.grants.extensions.some((path) => path.endsWith('/crew/pi/extensions/fff.ts')), false)
+  assert.equal(entry.grants.mcp_servers.some((server) => server.name === 'fff'), false)
   const command = piCommand(entry)
-  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope"/)
-  assert.doesNotMatch(command, /fff_(grep|find|multi_grep)/)
+  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope,codemode"/)
+  assert.doesNotMatch(command, /mcp__fff__(grep|find_files|multi_grep)/)
   assert.doesNotMatch(command, /--exclude-tools "find,grep"/)
 })
 
@@ -282,7 +214,7 @@ test('A1 granted seat record names withholding and its measured limit', async ()
   const pi = await bootRecord({ agent: 'pi', available: true })
   const claude = await bootRecord({ available: true })
   const piExpected = {
-    tools: ['fff_grep', 'fff_find', 'fff_multi_grep'], fff: 'granted',
+    tools: ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'], fff: 'granted',
     withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
   }
   const claudeExpected = {
@@ -316,7 +248,7 @@ test('C1 ungranted seat search record remains byte-identical', async () => {
 
 test('fff-E1-refuse', () => {
   const gate = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
-  for (const [program, recommendation] of [['grep', 'fff_grep'], ['rg', 'fff_grep'], ['find', 'fff_find'], ['fd', 'fff_find']]) {
+  for (const [program, recommendation] of [['grep', 'mcp__fff__grep'], ['rg', 'mcp__fff__grep'], ['find', 'mcp__fff__find_files'], ['fd', 'mcp__fff__find_files']]) {
     const result = gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/tmp' })
     assert.equal(result?.block, true, program)
     assert.match(result?.reason || '', new RegExp(recommendation), program)
@@ -395,11 +327,11 @@ test('B1 ungranted claude Bash search remains untouched', async () => {
 
 test('D1 direct and listed-wrapper search refusals remain enforced', () => {
   const cases = [
-    ['git grep needle', 'fff_grep', 'mcp__fff__grep'],
-    ['xargs grep needle', 'fff_grep', 'mcp__fff__grep'],
-    ['env rg needle', 'fff_grep', 'mcp__fff__grep'],
-    ['command find .', 'fff_find', 'mcp__fff__find_files'],
-    ['cd src && rg needle', 'fff_grep', 'mcp__fff__grep'],
+    ['git grep needle', 'mcp__fff__grep', 'mcp__fff__grep'],
+    ['xargs grep needle', 'mcp__fff__grep', 'mcp__fff__grep'],
+    ['env rg needle', 'mcp__fff__grep', 'mcp__fff__grep'],
+    ['command find .', 'mcp__fff__find_files', 'mcp__fff__find_files'],
+    ['cd src && rg needle', 'mcp__fff__grep', 'mcp__fff__grep'],
   ]
   const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
   for (const [command, piReplacement, claudeReplacement] of cases) {
@@ -425,13 +357,13 @@ test('D1 direct and listed-wrapper search refusals remain enforced', () => {
 
 test('RV1-1 quoted and escaped direct fff searches remain withheld', () => {
   const cases = [
-    ["'grep' needle", 'fff_grep', 'mcp__fff__grep'],
-    ['"rg" needle', 'fff_grep', 'mcp__fff__grep'],
-    [String.raw`g\rep needle`, 'fff_grep', 'mcp__fff__grep'],
-    [String.raw`\grep needle`, 'fff_grep', 'mcp__fff__grep'],
-    ["gr'ep' needle", 'fff_grep', 'mcp__fff__grep'],
-    ['"find" .', 'fff_find', 'mcp__fff__find_files'],
-    ["'fd' x", 'fff_find', 'mcp__fff__find_files'],
+    ["'grep' needle", 'mcp__fff__grep', 'mcp__fff__grep'],
+    ['"rg" needle', 'mcp__fff__grep', 'mcp__fff__grep'],
+    [String.raw`g\rep needle`, 'mcp__fff__grep', 'mcp__fff__grep'],
+    [String.raw`\grep needle`, 'mcp__fff__grep', 'mcp__fff__grep'],
+    ["gr'ep' needle", 'mcp__fff__grep', 'mcp__fff__grep'],
+    ['"find" .', 'mcp__fff__find_files', 'mcp__fff__find_files'],
+    ["'fd' x", 'mcp__fff__find_files', 'mcp__fff__find_files'],
   ]
   const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
   for (const [command, piReplacement, claudeReplacement] of cases) {
@@ -471,27 +403,15 @@ test('D1 claude fff grant refuses boot when its hook is absent', () => {
   assert.equal(reads, 0)
 })
 
-test('fff-F1', async () => {
-  let kills = 0
-  const call = createMcpCall({
-    timeoutMs: 20,
-    spawn: () => new FakeChild('silent', () => { kills += 1 }),
-  })
-  const outer = new Promise((_, reject) => setTimeout(() => reject(new Error('outer bound exceeded')), 250))
-  await assert.rejects(Promise.race([call('fff_grep', { query: 'needle' }, { cwd: '/tmp' }), outer]), /timed out/)
-  assert.equal(kills, 1)
-  assert.equal(FFF_TIMEOUT_MS > 0, true)
-})
-
 test('fff-G1-pi-record', async () => {
   const { crew, journal } = await bootRecord({ agent: 'pi', available: true })
   const member = crew.members.builder
   assert.deepEqual(member.search, {
-    tools: ['fff_grep', 'fff_find', 'fff_multi_grep'], fff: 'granted',
+    tools: ['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'], fff: 'granted',
     withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
   })
   assert.deepEqual(journal.search.builder, member.search)
-  assert.equal(member.grant_snapshot.grants.extensions.filter((path) => path.split('/').slice(-3).join('/') === 'pi/extensions/fff.ts').length, 1)
+  assert.deepEqual(member.grant_snapshot.grants.mcp_servers, [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }])
 })
 
 test('fff-G1-claude-record', async () => {
@@ -502,7 +422,7 @@ test('fff-G1-claude-record', async () => {
     withholding: 'direct-and-listed-wrappers-refused', limit: 'arbitrary-shell-indirection-not-refused',
   })
   assert.deepEqual(journal.search.builder, member.search)
-  assert.deepEqual(member.mcp_servers, [{ name: 'fff', command: { bin: FFF_MCP_BIN, args: [] }, url: null }])
+  assert.deepEqual(member.mcp_servers, [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }])
 })
 
 test('fff-H1-headless-grant', async () => {
@@ -545,18 +465,3 @@ test('fff-H1-headless-grant', async () => {
   }
 })
 
-test('fff transport handles chunking and bounded failure modes', async () => {
-  const modes = ['malformed', 'empty', 'error', 'close']
-  for (const mode of modes) {
-    let kills = 0
-    const call = createMcpCall({ timeoutMs: 40, spawn: () => new FakeChild(mode, () => { kills += 1 }) })
-    await assert.rejects(call('fff_find', { query: '*.ts' }, { cwd: '/tmp' }), /fff-mcp/)
-    assert.equal(kills, 1, mode)
-  }
-  let kills = 0
-  const success = createMcpCall({ timeoutMs: 40, spawn: () => new FakeChild('success', () => { kills += 1 }) })
-  assert.deepEqual(await success('fff_grep', { query: 'needle' }, { cwd: '/tmp' }), {
-    content: [{ type: 'text', text: 'found' }], structuredContent: { count: 1 },
-  })
-  assert.equal(kills, 1)
-})

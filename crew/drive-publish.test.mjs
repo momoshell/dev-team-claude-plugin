@@ -9,7 +9,11 @@ import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
+<<<<<<< HEAD
 import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8 } from './drive.mjs'
+=======
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
+>>>>>>> a5555114 (fix(crew): verify prescription pins by running a snapshot, not by reading text)
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -95,6 +99,50 @@ test('A1 resume retries frozen rebase without restarting plan or build and reach
   assert.equal(result.status, 'done')
   assert.equal(io.calls.assign.length, 0)
   assert.equal(io.calls.runCold.length, 1)
+})
+
+// A resumed run of a lane whose prescription pins were persisted to the lane state dir.
+const PIN_SNAPSHOT = "import { test } from 'node:test'\n\ntest('existing check', () => {})\n"
+const PIN_STATE = JSON.stringify({ version: 1, pins: { 'a.test.mjs': { finding: 'F1', source: 'base', bytes: PIN_SNAPSHOT, names: ['existing check'] } } })
+function resumeWithPins(pinsText, built) {
+  const checkpoint = resumeCheckpointFixture()
+  const testAbs = `${CTX.checkout}/a.test.mjs`
+  const files = { [`${TD}/${PRESCRIPTION_PINS_FILE}`]: pinsText, [testAbs]: built }
+  const io = fakeIo({ files, writeThrough: true, runs: {
+    [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+    [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+    [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+    'git rev-parse HEAD': { ok: true, output: 'pre1111\n' },
+    'suite-cmd': { ok: true, output: '# pass 1\n# fail 0\n' },
+  } })
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd !== hardenWitnessCommand('a.test.mjs')) return result
+    const names = [...String(files[testAbs]).matchAll(/^test\('([^']+)'/gm)].map((m) => m[1])
+    return { ok: true, output: `${names.map((name, i) => `ok ${i + 1} - ${name}`).join('\n')}\n# pass ${names.length}\n# fail 0` }
+  }
+  return { io, result: resumeTask({ ...CTX, task: 'resume-rebase', publish: { branch: null }, files_in_scope: ['a.mjs'] }, io, checkpoint) }
+}
+
+// Kills P14 (pins not reloaded on resume): a resumed run reads the persisted pins; a
+// compliant tree passes the resume check, and an unreadable pins file is refused as
+// unverifiable, never treated as "no pins".
+test('PV21 a resumed run reloads the persisted prescription pins', () => {
+  const kept = resumeWithPins(PIN_STATE, `${PIN_SNAPSHOT}\ntest('F1 guard', () => {})\n`)
+  assert.equal(kept.result.status, 'done')
+  assert.deepEqual(kept.io.calls.logs.flatMap((row) => row.hardening_preservation ? [[row.hardening_preservation.when, row.hardening_preservation.reason]] : []), [['resume', null]])
+  const unreadable = resumeWithPins('{not json', `${PIN_SNAPSHOT}\ntest('F1 guard', () => {})\n`)
+  assert.equal(unreadable.result.status, 'escalation')
+  assert.match(unreadable.result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding \(unknown\) \(resume\): the persisted prescription pins were unparseable/)
+})
+
+// Kills P16 (no check on the resume path): a resumed run whose shipped file dropped a
+// pinned check is refused before its suite and publication.
+test('PV22 a resumed run refuses a shipped file that dropped a pinned check', () => {
+  const dropped = resumeWithPins(PIN_STATE, "import { test } from 'node:test'\n\ntest('F1 guard', () => {})\n")
+  assert.equal(dropped.result.status, 'escalation')
+  assert.match(dropped.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(resume\): the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
 })
 
 test('RVR1-2 gate resume preserves typed gate escalation when pending commit fails', () => {

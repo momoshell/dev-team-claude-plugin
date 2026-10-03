@@ -6112,6 +6112,73 @@ function runTask(ctx, io, crash) {
   // dirtiness, stash behaviour, S.commit, or the suite-cycle number.
   let committedBaseline = false
   const art = (name) => `${ctx.taskDir}/${name}`
+  // Sub-class 1 pins (verifyPrescriptionPin): Map<repo-relative test path, {finding, source,
+  // bytes, names}>. Lane-long — a suite-cycle repair round may not undo what an earlier
+  // conversion pinned — and persisted to the lane state dir, so a resumed run keeps them.
+  // MUTATION P10: clear this map on every suite cycle and a post-suite repair round
+  // weakens a pinned test with no check left to see it.
+  const prescriptionPins = new Map()                                                    // ANCHOR P10
+  let prescriptionPinsDefect = null
+  // MUTATION P14: skip the reload and a crash-resumed run accepts with no pin to check.
+  if (ctx.resume_checkpoint) {                                                          // ANCHOR P14
+    let text = null
+    try { text = io.readFile(art(PRESCRIPTION_PINS_FILE)) } catch (err) { prescriptionPinsDefect = `the persisted prescription pins could not be read: ${err?.message || String(err)}` }
+    if (typeof text === 'string') {
+      try {
+        const parsed = JSON.parse(text)
+        if (!parsed || typeof parsed.pins !== 'object' || parsed.pins === null) throw new Error('no pins object')
+        for (const [file, pin] of Object.entries(parsed.pins)) prescriptionPins.set(file, pin)
+      } catch (err) { prescriptionPinsDefect = `the persisted prescription pins were unparseable: ${err?.message || String(err)}` }
+    }
+  }
+  const persistPrescriptionPins = () => io.writeFile(art(PRESCRIPTION_PINS_FILE), `${JSON.stringify({ version: 1, pins: Object.fromEntries(prescriptionPins) }, null, 2)}\n`)
+  // Snapshot what a conversion pins: the file's version on the lane BASE when the base
+  // carries it, else its review-time bytes. A builder may have edited the witnessed test
+  // before review, so the review-time bytes can carry its own damage; the base version is
+  // what the lane may not weaken. The checks are MEASURED by running that snapshot against
+  // the review-time tree, not guessed from its source.
+  const capturePrescriptionPin = (file, finding, cell) => {
+    const pin = { finding, source: null, bytes: null, names: null }
+    if (typeof ctx.head !== 'string' || ctx.head.trim() === '') return { ...pin, why: 'the lane base commit was blank' }
+    let tree
+    try { tree = io.run(`git ls-tree -z --full-tree ${shellArg(ctx.head)} -- ${shellArg(file)}`) } catch (err) { return { ...pin, why: `the base-tree query threw: ${err?.message || String(err)}` } }
+    const existence = tree?.ok === true ? parsePrescriptionBaseTree(tree.output, file) : { present: null, reason: 'the base-tree query returned non-ok output' }
+    if (existence.present === null) return { ...pin, why: existence.reason }
+    // MUTATION P15: snapshot the review-time bytes although the base carries the file and a
+    // builder that damaged the witnessed test before review freezes its own damage.
+    if (existence.present === true) {                                                   // ANCHOR P15
+      let shown
+      try { shown = io.run(`git show ${shellArg(`${ctx.head}:${file}`)}`) } catch { shown = null }
+      if (shown?.ok !== true || typeof shown.output !== 'string') return { ...pin, why: 'the base version could not be read' }
+      pin.source = 'base'
+      pin.bytes = shown.output
+    } else {
+      if (cell?.state !== 'read' || typeof cell.bytes !== 'string') return { ...pin, why: 'the review-time bytes were unreadable' }
+      pin.source = 'review'
+      pin.bytes = cell.bytes
+    }
+    const measured = runBytesInPlace({ abs: `${ctx.checkout}/${file}`, bytes: pin.bytes, io, run: () => io.run(hardenWitnessCommand(file))?.output })
+    if (measured.fatal) return { ...pin, fatal: measured.fatal }
+    if (measured.absent || measured.error) return { ...pin, why: measured.absent ? 'the file was absent at conversion' : measured.error }
+    // MUTATION P11: keep no measured names and every pinned check reads as preserved.
+    pin.names = topLevelCheckNames(measured.output)                                       // ANCHOR P11
+    return pin
+  }
+  // One verification of every pin; the first refusal is returned as its journal record.
+  const verifyPrescriptionPins = (when) => {
+    const checks = prescriptionPinsDefect
+      ? [{ file: PRESCRIPTION_PINS_FILE, record: { finding: null, file: PRESCRIPTION_PINS_FILE, when, source: null, reason: 'witnessed-test-unverifiable', why: prescriptionPinsDefect } }]
+      : [...prescriptionPins].map(([file, pin]) => {
+        const verdict = verifyPrescriptionPin({ file, pin, abs: `${ctx.checkout}/${file}`, io, run: () => io.run(hardenWitnessCommand(file))?.output })
+        return { file, record: { finding: pin?.finding ?? null, file, when, source: pin?.source ?? null, reason: verdict.reason, why: verdict.why, ...(Number.isInteger(verdict.checks) ? { checks: verdict.checks } : {}) } }
+      })
+    for (const { record } of checks) {
+      try { io.log(recordRow({ at: io.now(), hardening_preservation: record })) } catch { /* evidence is never load-bearing */ }
+      if (record.reason !== null) return record
+    }
+    return null
+  }
+  const preservationWhy = (record) => `[${record.reason}] finding ${record.finding ?? '(unknown)'} (${record.when}): ${record.why}`
   // These gate cells are initialised before the resume branch so its canonical
   // gate and the ordinary escalation composer have the same state vocabulary.
   let activeGateCmd = null
@@ -7929,6 +7996,11 @@ function runTask(ctx, io, crash) {
       if (!publishFiles) return resumeEscalate('rebase', 'the authoritative publication diff could not be read from the verified base')
     }
 
+    // On the tree the resumed suite runs and publication ships (after any resumed commit
+    // and rebase), the persisted pins are verified like the accept and suite checks.
+    // MUTATION P16: skip this and a resumed run publishes a tree whose pinned checks nobody ran.
+    const pinnedOnResume = verifyPrescriptionPins('resume')                                // ANCHOR P16
+    if (pinnedOnResume) return resumeEscalate('harden', preservationWhy(pinnedOnResume), { hardening_preservation: pinnedOnResume })
     const warmFailure = runWarmSuite()
     if (warmFailure) return warmFailure
 
@@ -10275,13 +10347,6 @@ function runTask(ctx, io, crash) {
   // re-enters suiteCycle (suite red, census, rebase conflict) must not erase what an earlier
   // hardening round could not measure — only a later `killed` or `ungateable` settles one.
   let hardenBlindSpots = []   // ANCHOR B5g
-  // Map<repo-relative test path, {finding, bytes, names}> — the review-time bytes, and the
-  // top-level checks a run of them reported, of every witnessed test a pinned-test-
-  // prescription conversion told the builder to leave as it was. Lane-long like the blind
-  // spots above: a suite-cycle repair round may not undo what an earlier conversion pinned.
-  // MUTATION P10: re-create this map inside suiteCycle and a post-suite repair round
-  // weakens a pinned test with no check left to see it.
-  const prescriptionPins = new Map()                                                    // ANCHOR P10
   const fullOidFromResult = (result) => {
     if (result?.ok !== true || typeof result.output !== 'string') return null
     const oid = result.output.trim()
@@ -11562,15 +11627,16 @@ function runTask(ctx, io, crash) {
               const carried = hardenOwed.owed.find((entry) => entry.id === finding.id)
               if (carried) carried.prescription = prescriptionConflict
               if (!prescriptionPins.has(prescriptionConflict.file)) {
-                const cell = tree.get(prescriptionConflict.file)
-                // The checks to preserve are MEASURED on the review-time tree, not guessed from
-                // syntax: whatever form calls them, these are the top-level names the file ran.
-                // MUTATION P11: guess the names from source text instead and a check called
-                // through an alias is never run, yet reads as preserved.
-                let reviewRun
-                try { reviewRun = hardenRun(hardenWitnessCommand(prescriptionConflict.file))?.output } catch { reviewRun = null }
-                const names = topLevelCheckNames(reviewRun)                                  // ANCHOR P11
-                prescriptionPins.set(prescriptionConflict.file, { finding: finding.id, bytes: cell?.state === 'read' ? cell.bytes : null, names })
+                const pin = capturePrescriptionPin(prescriptionConflict.file, finding.id, tree.get(prescriptionConflict.file))
+                if (pin.fatal) {
+                  stageComplete()
+                  return escalate('harden', `[witnessed-test-unverifiable] the snapshot run of ${prescriptionConflict.file} could not restore it: ${pin.fatal}`)
+                }
+                prescriptionPins.set(prescriptionConflict.file, pin)
+                try { persistPrescriptionPins() } catch (err) {
+                  stageComplete()
+                  return escalate('harden', `[witnessed-test-unverifiable] the prescription pin for ${prescriptionConflict.file} could not be persisted: ${err?.message || String(err)}`)
+                }
               }
               panelLog({ hardening_prescription_conflict: prescriptionConflict })
             }
@@ -11738,25 +11804,11 @@ function runTask(ctx, io, crash) {
   }
 
   // Sub-class 1's conversion is verified where every accepted path converges before the
-  // commit, and again on the tree the suite runs: no lane is accepted while a witnessed
-  // test a conversion pinned has lost a top-level statement, an import binding or a
-  // top-level check. Unreadable is refused, never passed.
-  const pinnedTestEscalation = (when) => {
-    for (const [file, pin] of prescriptionPins) {
-      let built
-      try { const bytes = io.readFile(`${ctx.checkout}/${file}`); built = bytes === null ? { state: 'absent' } : { state: 'read', bytes } }
-      catch (err) { built = { state: 'unreadable', why: err?.message || String(err) } }
-      const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, names: pin.names, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
-      const record = { finding: pin.finding, file, when, reason: preserved.reason, why: preserved.why, ...(preserved.runtime ? { runtime: preserved.runtime } : {}) }
-      panelLog({ hardening_preservation: record })
-      if (preserved.reason !== null) return escalate('harden', `[${preserved.reason}] finding ${pin.finding} (${when}): ${preserved.why}`, [], { hardening_preservation: record })
-    }
-    return null
-  }
+  // commit, again on the tree the suite runs, and on a resumed run before its commit.
   // MUTATION P4: skip this check and the builder's promise to leave the witnessed checks
   // as they were is taken on trust — the false clean Sol reproduced on b1074.
-  const pinnedBeforeCommit = pinnedTestEscalation('accept')                              // ANCHOR P4
-  if (pinnedBeforeCommit) return pinnedBeforeCommit
+  const pinnedBeforeCommit = verifyPrescriptionPins('accept')                             // ANCHOR P4
+  if (pinnedBeforeCommit) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit })
 
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
@@ -12266,8 +12318,8 @@ function runTask(ctx, io, crash) {
   // A rebase (or a suite-cycle build round) rewrites the tree after the accept-time
   // check; re-verify on the tree the suite runs and publication ships.
   // MUTATION P8: drop this re-check and a rebase that weakens a pinned test ships green.
-  const pinnedAfterRebase = pinnedTestEscalation(rebased ? 'rebased' : 'suite')           // ANCHOR P8
-  if (pinnedAfterRebase) return pinnedAfterRebase
+  const pinnedAfterRebase = verifyPrescriptionPins(rebased ? 'rebased' : 'suite')        // ANCHOR P8
+  if (pinnedAfterRebase) return escalate('harden', preservationWhy(pinnedAfterRebase), [], { hardening_preservation: pinnedAfterRebase })
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   if (!suiteRes?.ok && (S.suiteAnchorRepairs ?? 0) < ANCHOR_SUITE_REPAIR_MAX) {
@@ -14382,134 +14434,15 @@ export function topLevelNameVerdict(output, name) {
 
 // A pinned-test-prescription conversion (sub-class 1) suppresses a review patch to a
 // hardening-witnessed test and tells the builder to leave that file's existing checks as
-// they were. This verifies that instruction, and its invariant is the CLASS: no lane is
-// accepted unless every witnessed top-level statement of the file (each test(...), helper
-// and fixture; import declarations excepted) is still present verbatim as a top-level
-// statement, and every literal top-level test name still runs as a top-level test and
-// passes. Anything that cannot be read or measured is refused, never passed.
+// they were. The verification RUNS the checks rather than reading source text: a snapshot
+// of the pinned file, which the builder never supplies, is run in place of the built file
+// against the built implementation, so a text trick in the built copy cannot hide a broken
+// implementation and imported modules run for real. Every snapshotted top-level check must
+// report and pass, and must still run and pass as a top-level test of the built file.
+// Anything that cannot be read, run or measured is refused, never passed.
 export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
-// Lexical state at the START of every line: 'code' (at bracket depth 0), 'nested' (in code
-// inside an open `(`, `[` or `{`), 'comment' (inside /* */), 'template' (inside a template
-// literal) or 'string' (after a line continuation). Only a 'code' line can start a
-// top-level statement, so a column-0 line inside a block, a template or a comment stays
-// part of the statement around it: `if (false) {` above an unindented test(...) makes
-// that test nested, not top-level. Strings, comments, templates with ${} nesting and regex literals are
-// tracked; a `/` that does not close on its own line is division. Anything left open at
-// end of file returns null — unmeasured, never guessed.
-const REGEX_PRECEDERS = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^'])
-const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'yield', 'await', 'instanceof'])
-export function lineStartStates(text) {
-  const src = String(text)
-  const states = ['code']
-  const holes = []                         // the bracket depth at which each open ${ } began
-  let depth = 0
-  let mode = 'code'
-  let prev = ''
-  let word = ''
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i]
-    const n = src[i + 1]
-    if (c === '\n') {
-      if (mode === 'line-comment') mode = 'code'
-      if (mode === 'sq' || mode === 'dq') return null           // a raw newline cannot sit in a string
-      states.push(mode === 'block-comment' ? 'comment' : mode === 'template' ? 'template' : depth > 0 ? 'nested' : 'code')
-      continue
-    }
-    if (mode === 'line-comment') continue
-    if (mode === 'block-comment') { if (c === '*' && n === '/') { mode = 'code'; i++ } continue }
-    if (mode === 'sq' || mode === 'dq') {
-      if (c === '\\') { i++; if (src[i] === '\n') states.push('string'); continue }
-      if ((mode === 'sq' && c === "'") || (mode === 'dq' && c === '"')) { mode = 'code'; prev = c; word = '' }
-      continue
-    }
-    if (mode === 'template') {
-      if (c === '\\') { i++; if (src[i] === '\n') states.push('template'); continue }
-      if (c === '`') { mode = 'code'; prev = '`'; word = '' } else if (c === '$' && n === '{') { holes.push(depth); mode = 'code'; prev = '{'; word = ''; i++ }
-      continue
-    }
-    if (/\s/.test(c)) continue
-    if (c === '/' && n === '/') { mode = 'line-comment'; i++; continue }
-    if (c === '/' && n === '*') { mode = 'block-comment'; i++; continue }
-    if (c === "'") { mode = 'sq'; continue }
-    if (c === '"') { mode = 'dq'; continue }
-    if (c === '`') { mode = 'template'; continue }
-    if (c === '/' && (REGEX_PRECEDERS.has(prev) || (word !== '' && REGEX_KEYWORDS.has(word)))) {
-      let j = i + 1
-      let inClass = false
-      for (; j < src.length && src[j] !== '\n'; j++) {
-        if (src[j] === '\\') { j++; continue }
-        if (src[j] === '[') inClass = true
-        else if (src[j] === ']') inClass = false
-        else if (src[j] === '/' && !inClass) break
-      }
-      if (j < src.length && src[j] === '/') { i = j; prev = '/'; word = ''; continue }
-    }
-    if (c === '}' && holes.length > 0 && holes[holes.length - 1] === depth) { holes.pop(); mode = 'template'; continue }
-    if (c === '(' || c === '[' || c === '{') depth += 1
-    if (c === ')' || c === ']' || c === '}') { depth -= 1; if (depth < 0) return null }
-    if (/[\w$]/.test(c)) word = /[\w$]/.test(prev) ? word + c : c
-    else word = ''
-    prev = c
-  }
-  return (mode === 'code' || mode === 'line-comment') && depth === 0 && holes.length === 0 ? states : null
-}
-// A top-level statement starts on a column-0 line, in code (not inside a template literal
-// or block comment), that does not begin with whitespace or a closing `}`, `)` or `]`; it
-// runs to the next such line. Normalised, and ONLY these: CRLF → LF, which ECMAScript
-// itself applies inside template literals and which is whitespace everywhere else; and
-// blank lines at the END of a statement whose line starts in code — a blank line in code
-// is whitespace. Trailing spaces and blank lines inside a template literal are content
-// and are kept. Indentation is never normalised: re-indenting a check is how it gets
-// nested inside another test. Returns null when the text cannot be lexed.
-export function topLevelStatements(text) {
-  const normal = String(text).replace(/\r\n/g, '\n')
-  const states = lineStartStates(normal)
-  if (states === null) return null
-  const lines = normal.split('\n')
-  const statements = []
-  let current = []
-  lines.forEach((line, at) => {
-    if (states[at] === 'code' && /^[^\s})\]]/.test(line)) {
-      if (current.length > 0) statements.push(current)
-      current = [{ line, at }]
-    } else current.push({ line, at })
-  })
-  if (current.length > 0) statements.push(current)
-  return statements
-    .map((statement) => {
-      while (statement.length > 0 && statement.at(-1).line === '' && states[statement.at(-1).at] === 'code') statement.pop()
-      return statement.map(({ line }) => line).join('\n')
-    })
-    .filter((statement) => statement !== '')
-}
-const PRESERVED_IMPORT = /^import\b/
-// The bindings one import declaration creates, as `specifier::imported=>local` keys (a
-// bare import is `specifier::side-effect`). null when the declaration is not one of the
-// plain forms; such a witnessed import must then survive verbatim.
-export function importBindings(statement) {
-  const flat = String(statement).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ').replace(/\s+/g, ' ').trim().replace(/;$/, '').trim()
-  const bare = /^import (['"])([^'"]+)\1$/.exec(flat)
-  if (bare) return [`${bare[2]}::side-effect`]
-  const m = /^import (.+?) from (['"])([^'"]+)\2$/.exec(flat)
-  if (!m) return null
-  const spec = m[3]
-  const ID = '[A-Za-z_$][\\w$]*'
-  const keys = []
-  let clause = m[1].trim()
-  const def = new RegExp(`^(${ID})\\s*(?:,\\s*(.*))?$`).exec(clause)
-  if (def && !clause.startsWith('{') && !clause.startsWith('*')) { keys.push(`${spec}::default=>${def[1]}`); clause = (def[2] || '').trim(); if (clause === '') return keys }
-  const ns = new RegExp(`^\\*\\s*as\\s+(${ID})$`).exec(clause)
-  if (ns) { keys.push(`${spec}::*=>${ns[1]}`); return keys }
-  const named = /^\{(.*)\}$/.exec(clause)
-  if (!named) return null
-  for (const part of named[1].split(',').map((entry) => entry.trim()).filter(Boolean)) {
-    const pm = new RegExp(`^(${ID}|(['"])[^'"]*\\2)(?:\\s+as\\s+(${ID}))?$`).exec(part)
-    if (!pm) return null
-    const imported = pm[1].replace(/^['"]|['"]$/g, '')
-    keys.push(`${spec}::${imported}=>${pm[3] || imported}`)
-  }
-  return keys
-}
+// The lane-state file the pins persist to, so a crash-resumed run keeps them.
+export const PRESCRIPTION_PINS_FILE = 'prescription-pins.json'
 // The top-level checks one unfiltered run reported, by exact name, or null when the run is
 // not a parseable node:test summary — unmeasured, never an empty list.
 export function topLevelCheckNames(output) {
@@ -14521,52 +14454,58 @@ export function topLevelCheckNames(output) {
   }
   return [...names]
 }
-export function witnessedTestPreservation({ file, witnessed, names, built, run }) {
+// Run `bytes` in place of the file at `abs`, then put the file's own bytes back and prove
+// they read back. A file that is absent cannot host the run (nothing could restore an
+// absence). `fatal` means the restore failed and the tree may still carry the snapshot.
+export function runBytesInPlace({ abs, bytes, io, run }) {
+  let current
+  try { current = io.readFile(abs) } catch (err) { return { error: `it could not be read: ${err?.message || String(err)}` } }
+  if (current === null) return { absent: true }
+  if (typeof current !== 'string') return { error: 'it did not read as text' }
+  let output = null
+  let runError = null
+  let restoreError = null
+  try {
+    if (current !== bytes) io.writeFile(abs, bytes)
+    output = run()
+  } catch (err) { runError = err } finally {
+    if (current !== bytes) { try { io.writeFile(abs, current) } catch (err) { restoreError = err } }
+  }
+  if (restoreError) return { fatal: `restoring it after the snapshot run failed: ${restoreError?.message || String(restoreError)}` }
+  let after
+  try { after = io.readFile(abs) } catch { after = null }
+  if (after !== current) return { fatal: 'it did not read back as its own bytes after the snapshot run' }
+  if (runError) return { error: `the snapshot run threw: ${runError?.message || String(runError)}` }
+  return { output, current }
+}
+export function verifyPrescriptionPin({ file, pin, abs, io, run }) {
   const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
-  if (typeof witnessed !== 'string') return refuse('witnessed-test-unverifiable', `the review-time bytes of ${file} were not captured, so its existing checks cannot be compared`)
-  if (!Array.isArray(names)) return refuse('witnessed-test-unverifiable', `the review-time run of ${file} was not a parseable node:test summary, so its top-level checks were never measured`)
-  if (!built || built.state === 'unreadable' || (built.state === 'read' && typeof built.bytes !== 'string')) return refuse('witnessed-test-unverifiable', `the built ${file} could not be read${built?.why ? `: ${built.why}` : ''}`)
-  if (built.state !== 'read') return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its witnessed checks are gone`)
-  const witnessedStatements = topLevelStatements(witnessed)
-  if (witnessedStatements === null) return refuse('witnessed-test-unverifiable', `the review-time ${file} could not be lexed into top-level statements`)
-  const builtStatements = topLevelStatements(built.bytes)
-  if (builtStatements === null) return refuse('witnessed-test-unverifiable', `the built ${file} could not be lexed into top-level statements`)
-  const remaining = new Map()
-  for (const statement of builtStatements) remaining.set(statement, (remaining.get(statement) || 0) + 1)
-  // An import may be extended in place, so imports are compared by BINDING: every binding
-  // a witnessed import created must still come from the same specifier. A form the
-  // binding reader does not know must survive verbatim instead.
-  const builtBindings = new Set(builtStatements.filter((statement) => PRESERVED_IMPORT.test(statement)).flatMap((statement) => importBindings(statement) ?? []))
-  const kept = []
-  const lostBindings = []
-  for (const statement of witnessedStatements) {
-    if (!PRESERVED_IMPORT.test(statement)) { kept.push(statement); continue }
-    const bindings = importBindings(statement)
-    // MUTATION P5: skip the binding comparison and a witnessed assertion import can be
-    // swapped for a no-op module while every test body stays byte-identical.
-    if (bindings === null) kept.push(statement)
-    else lostBindings.push(...bindings.filter((key) => !builtBindings.has(key)))      // ANCHOR P5
-  }
-  if (lostBindings.length > 0) return refuse('witnessed-test-altered', `${lostBindings.length} witnessed import binding(s) of ${file} are no longer imported from the same module: ${lostBindings.slice(0, 3).join(', ')}`, { lost_bindings: lostBindings })
-  const missing = []
-  // MUTATION P2: skip this comparison and a builder may delete or rewrite a witnessed check.
-  for (const statement of kept) {                                                       // ANCHOR P2
-    const left = remaining.get(statement) || 0
-    if (left > 0) remaining.set(statement, left - 1)
-    else missing.push(statement.split('\n')[0])
-  }
-  if (missing.length > 0) return refuse('witnessed-test-altered', `${missing.length} of ${kept.length} witnessed top-level statement(s) of ${file} are no longer present verbatim at top level: ${missing.slice(0, 3).map((line) => JSON.stringify(line.slice(0, 120))).join(', ')}`, { missing })
-  if (names.length === 0) return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim; its review-time run reported no top-level check`, runtime: 'not-run: no review-time top-level check' }
-  let output
-  try { output = run() } catch (err) { return refuse('witnessed-test-unverifiable', `the run of ${file} threw: ${err?.message || String(err)}`) }
-  if (typeof output !== 'string' || !/^(?:not ok|ok) \d+ - /m.test(output)) return refuse('witnessed-test-unverifiable', `the run of ${file} produced no top-level TAP result line, so the witnessed names were not measured`)
-  // MUTATION P3: adjudicate with nameVerdict (indented lines too) and a witnessed check
+  if (!pin || typeof pin.bytes !== 'string') return refuse('witnessed-test-unverifiable', `no snapshot of ${file} was captured${pin?.why ? `: ${pin.why}` : ''}`)
+  if (!Array.isArray(pin.names)) return refuse('witnessed-test-unverifiable', `the ${pin.source ?? 'snapshot'} run of ${file} at conversion was not a parseable node:test summary, so its checks were never measured`)
+  // MUTATION P12: run the built file in place of the snapshot and a built copy whose
+  // assertions were neutered vouches for its own broken implementation.
+  const snap = runBytesInPlace({ abs, bytes: pin.bytes, io, run })                         // ANCHOR P12
+  if (snap.fatal) return refuse('witnessed-test-unverifiable', `${file}: ${snap.fatal}`, { fatal: true })
+  if (snap.absent) return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its pinned checks are gone`)
+  if (snap.error) return refuse('witnessed-test-unverifiable', `${file}: ${snap.error}`)
+  if (parseSuiteCounts(snap.output) === null) return refuse('witnessed-test-unverifiable', `the ${pin.source} snapshot of ${file} did not run to a parseable node:test summary against the built tree`)
+  // MUTATION P3: adjudicate with nameVerdict (indented lines too) and a pinned check
   // nested inside another test reads as still top-level.
-  for (const name of names) {
-    const verdict = topLevelNameVerdict(output, name)                                   // ANCHOR P3
-    if (verdict !== 'passed') return refuse('witnessed-test-altered', `the witnessed check ${JSON.stringify(name)} in ${file} is ${verdict} as a top-level test of the built tree`, { name, verdict })
+  for (const name of pin.names) {
+    const verdict = topLevelNameVerdict(snap.output, name)                                 // ANCHOR P3
+    if (verdict !== 'passed') return refuse('witnessed-test-altered', `the ${pin.source} check ${JSON.stringify(name)} of ${file} is ${verdict} when its snapshot runs against the built implementation`, { name, verdict, run: 'snapshot' })
   }
-  return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim and all ${names.length} top-level check(s) its review-time run reported pass at top level`, runtime: 'measured' }
+  if (pin.names.length === 0) return { reason: null, why: `the ${pin.source} snapshot of ${file} reported no top-level check at conversion, and it still runs`, checks: 0 }
+  let builtOutput
+  try { builtOutput = run() } catch (err) { return refuse('witnessed-test-unverifiable', `the run of the built ${file} threw: ${err?.message || String(err)}`) }
+  if (parseSuiteCounts(builtOutput) === null) return refuse('witnessed-test-unverifiable', `the run of the built ${file} was not a parseable node:test summary`)
+  // MUTATION P13: skip the built-file run and the pinned checks may be deleted from, or
+  // nested inside another test of, the file the lane actually ships.
+  for (const name of pin.names) {
+    const verdict = topLevelNameVerdict(builtOutput, name)                                 // ANCHOR P13
+    if (verdict !== 'passed') return refuse('witnessed-test-altered', `the ${pin.source} check ${JSON.stringify(name)} is ${verdict} as a top-level test of the built ${file}`, { name, verdict, run: 'built' })
+  }
+  return { reason: null, why: `all ${pin.names.length} ${pin.source} check(s) of ${file} pass against the built implementation from the snapshot, and as top-level tests of the built file`, checks: pin.names.length }
 }
 
 // The findings that OWE a permanent guard, and the ones the reviewer exempted. Derived
@@ -14907,7 +14846,7 @@ export function hardeningBriefLines(owed, exempt) {
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
   lines.push(...findings.map(({ id, location, summary, prescription }) => {
-    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were (verified before acceptance: every review-time top-level statement of that file must remain verbatim at top level, every import binding it had must still come from the same module, and its top-level tests must still pass as top-level tests)` : ''
+    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, leaving the existing checks of ${prescription.file} as they were (verified before acceptance by RUNNING them: the file's base version, or its review-time version when the base lacks it, runs in its place against your implementation and every top-level check it reported must pass, and those checks must still run and pass as top-level tests of your file)` : ''
     return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
   }))
   lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',

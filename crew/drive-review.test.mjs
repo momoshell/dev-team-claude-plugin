@@ -6,9 +6,9 @@ import assert from 'node:assert/strict'
 import { cpSync, mkdirSync } from 'node:fs'
 import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, topLevelStatements, witnessedTestPreservation } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, verifyPrescriptionPin, runBytesInPlace } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -2862,9 +2862,22 @@ test('#800 §7b 43 — panel class findings remint around a reviewer-origin coll
   assert.equal(dGitApplies(io).length, 1)
 })
 
+// A lane base that carries a.test.mjs unchanged: the pinned snapshot is its base version.
+const withBaseTree = (io, bytes = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`]) => {
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd === `git ls-tree -z --full-tree ${shellArg('base-head')} -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `100644 blob ${'a'.repeat(40)}\t${B376_TEST_FILE}\0` }
+    if (cmd === `git show ${shellArg(`base-head:${B376_TEST_FILE}`)}`) return { ok: true, output: bytes }
+    if (cmd === `git diff --unified=0 ${shellArg('base-head')} -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: '' }
+    return result
+  }
+  return io
+}
+
 test('#800 §7b 44 — divergent collisions preserve reviewer A ids and refuse a pinned optional prescription', () => {
-  const io = divergentCollisionIo()
-  const result = driveTask(D_COLLISION_CTX, io)
+  const io = withBaseTree(divergentCollisionIo())
+  const result = driveTask({ ...D_COLLISION_CTX, head: 'base-head' }, io)
   const first = dPanelOutcomes(io)[0]
   const adjudication = io.calls.writes[`${TD}/panel-adjudication-1.md`] || ''
   const patch = dPatchWrite(io)?.[1] || ''
@@ -2916,7 +2929,7 @@ test('#800 §7b 45 — each reminted final id has one auditable remint join', ()
     [divergentCollisionIo(), 'RV1-1'],
   ]
   for (const [io, original] of cases) {
-    const result = driveTask(D_COLLISION_CTX, io)
+    const result = driveTask({ ...D_COLLISION_CTX, head: 'base-head' }, withBaseTree(io))
     assert.equal(result.status, 'done')
     const reminted = dPanelOutcomes(io)[0].findings.filter(({ id }) => id.startsWith('panel-remint-')).map(({ id }) => id)
     const rows = dRemintRows(io)
@@ -5184,22 +5197,22 @@ test('PT3', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Sub-class 1 class invariant (Sol, b1074 hand-finish): a pinned-test-prescription
-// conversion is never accepted unless the witnessed test is intact — every review-time
-// top-level statement but imports verbatim at top level, every literal top-level check
-// still a passing top-level test — and the guard that closes the finding is itself a
-// top-level test. Unreadable or unmeasured is refused, never passed.
+// Sub-class 1 class invariant (b1074 hand-finish, run-based redesign): a pinned-test-
+// prescription conversion is never accepted unless the pinned checks still hold — a
+// snapshot of the pinned file (its BASE version when the lane base carries it, else its
+// review-time bytes), which the builder never supplies, runs in place of the built file
+// against the built implementation and every check it reported at conversion passes; and
+// those checks still run and pass as top-level tests of the built file. The guard that
+// closes the finding is a top-level test. Unreadable, unrunnable or unmeasured is refused.
 const PIN_IMPORTS = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\n"
 const PIN_EXISTING = "test('existing check', () => {\n  assert.equal(1, 1)\n})\n"
 const PIN_WITNESSED = `${PIN_IMPORTS}\n${PIN_EXISTING}`
 const PIN_TOP_GUARD = "test('F1 guard', () => {\n  assert.equal(2, 2)\n})\n"
-// Sol's reproduction: the existing check is replaced by a nested guard under an outer test
-// whose name the filtered control also matches, so the nested line does appear in it.
 const PIN_NESTED = `${PIN_IMPORTS}\ntest('F1 guard suite', async (t) => {\n  await t.test('F1 guard', () => {\n    assert.equal(2, 2)\n  })\n})\n`
 const PIN_TAP_NESTED = { ok: true, output: '    ok 1 - F1 guard\nok 1 - F1 guard suite\n# pass 2\n# fail 0' }
 const PIN_TAP_NESTED_RED = { ok: false, output: '    not ok 1 - F1 guard\nnot ok 1 - F1 guard suite\n# pass 0\n# fail 2' }
-// The unfiltered run is derived from the CURRENT bytes, so the witness run and the
-// acceptance run each see the tree they are asked about.
+// Fake runs derived from the CURRENT bytes, so the snapshot run and the built run each see
+// the file they are asked about (the real-node scenarios below do not need this).
 const pinTap = (bytes) => {
   const lines = []
   let n = 0
@@ -5217,6 +5230,7 @@ function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null 
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
   const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, ...(proofOutputs ? { proofOutputs } : {}) })
   let reviewed = false
+  const head = { rebased: false }
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
@@ -5233,238 +5247,266 @@ function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null 
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
     if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return pinTap(files[testAbs])
-    // A publication run: a real rebase moves HEAD and the merge base, and here it also
-    // rewrites the pinned test the way a clean rebase onto a moved main can.
     if (cmd === `git rev-parse ${shellArg('origin/main')}`) return { ok: true, output: 'base1111\n' }
     if (cmd === `git merge-base HEAD ${shellArg('origin/main')}`) return { ok: true, output: `${head.rebased ? 'base1111' : 'older000'}\n` }
     if (cmd === `git rebase ${shellArg('origin/main')}`) { head.rebased = true; if (onRebase) files[testAbs] = onRebase(files[testAbs]); return { ok: true, output: '' } }
     if (cmd === 'git rev-parse HEAD') return { ok: true, output: head.rebased ? 'post2222\n' : 'pre1111\n' }
     return result
   }
-  const head = { rebased: false }
   return io
 }
 const pinRows = (io) => io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : [])
 const pinPreservation = (io) => io.calls.logs.flatMap((row) => row.hardening_preservation ? [row.hardening_preservation] : [])
 
+// A real checkout: a git repo whose commit is the lane base, real node:test runs, so the
+// snapshot and the built file execute against the real built implementation.
+const REAL_IMPL = (add, guard) => `export const add = ${add}\nexport const guard = ${guard}\n`
+const REAL_HEAD = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add, guard } from './a.mjs'\n"
+const REAL_EXISTING = "test('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n"
+const REAL_BASE_TEST = `${REAL_HEAD}\n${REAL_EXISTING}`
+const REAL_GUARD = "test('F1 guard', () => {\n  assert.equal(guard, true)\n})\n"
+function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest, builtAdd = '(a, b) => a + b', location = 'a.test.mjs:1' }) {
+  const checkout = scratchDir('b1074-pin-')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  delete env.FORCE_COLOR
+  const sh = (cmd) => spawnSync('sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', env })
+  writeFileSync(join(checkout, 'a.mjs'), REAL_IMPL('(a, b) => a + b', 'false'))
+  writeFileSync(join(checkout, 'a.test.mjs'), baseTest)
+  for (const cmd of ['git init -q', 'git add -A', 'git -c user.name=t -c user.email=t@t commit -q -m base']) assert.equal(sh(cmd).status, 0, cmd)
+  const head = sh('git rev-parse HEAD').stdout.trim()
+  writeFileSync(join(checkout, 'a.test.mjs'), reviewTest)
+  const finding = { ...B376_FINDING, location, disposition: 'auto-fix', patch: '' }
+  const hardened = { finding: 'F1', test: 'a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'export const guard = true', replace: 'export const guard = false' }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), hardened: [hardened], files: {} })
+  const inCheckout = (path) => path.startsWith(`${checkout}/`)
+  const baseRead = io.readFile
+  io.readFile = function (path) { return inCheckout(path) ? (existsSync(path) ? readFileSync(path, 'utf8') : null) : baseRead.call(this, path) }
+  const baseWrite = io.writeFile
+  io.writeFile = function (path, content) { if (inCheckout(path)) { writeFileSync(path, content); return } return baseWrite.call(this, path, content) }
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const envelope = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'a.mjs'), REAL_IMPL(builtAdd, 'true'))
+      writeFileSync(join(checkout, 'a.test.mjs'), builtTest)
+    }
+    return envelope
+  }
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const fake = baseRun.call(this, cmd)
+    if (!/^(node --test|git (ls-tree|show|diff --unified=0) )/.test(cmd)) return fake
+    const r = sh(cmd)
+    return { ok: r.status === 0, output: r.stdout, stderr: r.stderr, status: r.status }
+  }
+  const result = driveTask({ ...CTX, checkout, head, limits: { build_rounds: 2 } }, io)
+  if (process.env.PIN_PROBE) console.log('PROBE', JSON.stringify({ status: result.status, why: String(result.details?.escalation?.why).slice(0, 500), stages: result.details?.stages?.slice(-8), rows: pinRows(io), pres: pinPreservation(io) }))
+  return { result, io, checkout, rows: pinRows(io), preservation: pinPreservation(io) }
+}
+
 // Kills P1 (prescription guard adjudicated like any other) — Sol's reproduction: a nested
 // guard replacing the witnessed check is never credited killed and the lane is never done.
 test('PV1 a nested guard replacing a witnessed check never closes a pinned-test prescription', () => {
   const io = pinIo({ built: PIN_NESTED, proofOutputs: [PIN_TAP_NESTED, PIN_TAP_NESTED_RED, PIN_TAP_NESTED_RED] })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
   assert.notEqual(result.status, 'done')
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), false)
   const nested = pinRows(io).find((row) => row.finding === 'F1' && row.outcome === 'name-absent')
   assert.match(nested?.why ?? '', /TOP-LEVEL test named F1 guard/)
 })
 
-// Kills P4 (acceptance-time verification skipped): a TOP-LEVEL guard that is proven killed
-// does not buy acceptance while the witnessed check it replaced is gone.
-test('PV2 a proven top-level guard does not accept a lane whose witnessed check was removed', () => {
+// Kills P13 (built-file run skipped) and P4 (acceptance check skipped): a proven top-level
+// guard does not buy acceptance while the pinned check is gone from the shipped file.
+test('PV2 a proven top-level guard does not accept a lane whose pinned check was removed', () => {
   const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_TOP_GUARD}` })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), true)
   assert.notEqual(result.status, 'done')
   assert.equal(result.details.escalation.where, 'harden')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): /)
-  assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the review check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
 })
 
-// Kills P2 (verbatim comparison skipped): the witnessed check keeps its name and still runs
-// green at top level, but its assertion text was weakened.
-test('PV3 a witnessed check whose assertion text changed refuses acceptance', () => {
-  const weakened = `${PIN_IMPORTS}\ntest('existing check', () => {\n  assert.ok(true)\n})\n\n${PIN_TOP_GUARD}`
-  const io = pinIo({ built: weakened })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  assert.notEqual(result.status, 'done')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): 1 of 1 witnessed top-level statement/)
-})
-
-// Kills P4 on the unreadable route: a witnessed test that cannot be read at acceptance is
-// refused with its closed reason, never passed and never recorded as a null pass.
-test('PV4 an unreadable witnessed test refuses acceptance as unverifiable', () => {
+// Kills the unreadable route: a pinned file that cannot be read at acceptance is refused
+// with its closed reason, never passed and never recorded as a null pass.
+test('PV4 an unreadable pinned test refuses acceptance as unverifiable', () => {
   const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`, throwAfterReview: true })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
   assert.notEqual(result.status, 'done')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding F1 \(accept\): the built a\.test\.mjs could not be read: EACCES/)
+  assert.match(result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding F1 \(accept\): a\.test\.mjs: it could not be read: EACCES/)
   assert.deepEqual(pinPreservation(io).map(({ reason }) => reason), ['witnessed-test-unverifiable'])
 })
 
-// The over-refusal side: a builder that leaves the witnessed check verbatim, extends the
-// imports and adds a top-level guard is accepted, and the run that said so is recorded.
-test('PV5 a compliant conversion is accepted with a measured preservation record', () => {
-  const compliant = `${PIN_IMPORTS}import { strict } from 'node:assert'\n\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
-  const io = pinIo({ built: compliant })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+// The over-refusal side, and the persistence: a compliant conversion is accepted, both
+// checks are journalled, and the pin is on disk in the lane state dir.
+test('PV5 a compliant conversion is accepted and its pin is persisted', () => {
+  const io = pinIo({ built: `${PIN_IMPORTS}import { strict } from 'node:assert'\n\n${PIN_EXISTING}\n${PIN_TOP_GUARD}` })
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(pinPreservation(io).map(({ when, reason, runtime }) => ({ when, reason, runtime })), [{ when: 'accept', reason: null, runtime: 'measured' }, { when: 'suite', reason: null, runtime: 'measured' }])
+  assert.deepEqual(pinPreservation(io).map(({ when, reason, checks }) => ({ when, reason, checks })), [{ when: 'accept', reason: null, checks: 1 }, { when: 'suite', reason: null, checks: 1 }])
+  const persisted = JSON.parse(io.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`])
+  assert.deepEqual(persisted.pins['a.test.mjs'].names, ['existing check'])
+  assert.equal(persisted.pins['a.test.mjs'].bytes, PIN_WITNESSED)
 })
 
-// Kills P3 (indented lines accepted): the witnessed statement is byte-identical, but the
-// run reports its check only as a nested line, so it is not a top-level test any more.
-test('PV6 a witnessed check that runs only as a nested line is refused', () => {
-  const built = { state: 'read', bytes: PIN_WITNESSED }
-  const nested = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
-  assert.equal(nested.reason, 'witnessed-test-altered')
-  assert.match(nested.why, /"existing check" in a\.test\.mjs is absent as a top-level test/)
-  const red = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'not ok 1 - existing check\n# fail 1' })
-  assert.equal(red.reason, 'witnessed-test-altered')
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - existing check\n# pass 1' }).reason, null)
+// Kills P3 (indented lines accepted): a snapshot check that runs only as a nested line is
+// not a passing top-level check.
+test('PV6 a pinned check reported only as a nested line is refused', () => {
+  const files = { '/c/a.test.mjs': 'built' }
+  const io = { readFile: (path) => files[path] ?? null, writeFile: (path, content) => { files[path] = content } }
+  const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
+  const run = () => (files['/c/a.test.mjs'] === 'snapshot' ? 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' : 'ok 1 - existing check\n# pass 1\n# fail 0')
+  const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io, run })
+  assert.equal(verdict.reason, 'witnessed-test-altered')
+  assert.match(verdict.why, /"existing check" of a\.test\.mjs is absent when its snapshot runs against the built implementation/)
+  assert.equal(files['/c/a.test.mjs'], 'built')
 })
 
-// Every unmeasurable input is a refusal with a closed reason; none is a pass.
-test('PV7 preservation refuses every input it cannot read or measure', () => {
+// Every unmeasurable input is a refusal with a closed reason; none is a pass. A restore
+// that does not read back is fatal.
+test('PV7 pin verification refuses every input it cannot read, run or measure', () => {
   assert.deepEqual(HARDENING_PRESERVATION_REFUSALS, ['witnessed-test-altered', 'witnessed-test-unverifiable'])
-  const read = { state: 'read', bytes: PIN_WITNESSED }
-  const ok = () => 'ok 1 - existing check'
+  const green = 'ok 1 - existing check\n# pass 1\n# fail 0'
+  const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
+  const ioWith = (over = {}) => { const files = { '/c/a.test.mjs': 'built' }; return { files, readFile: (path) => files[path] ?? null, writeFile: (path, content) => { files[path] = content }, ...over } }
   const cases = [
-    [{ witnessed: null, built: read, run: ok }, 'witnessed-test-unverifiable'],
-    [{ names: null, built: read, run: ok }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: { state: 'unreadable', why: 'EIO' }, run: ok }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: { state: 'read', bytes: null }, run: ok }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: undefined, run: ok }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: read, run: () => null }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: read, run: () => '# pass 0\n# fail 0' }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: read, run: () => { throw new Error('spawn failed') } }, 'witnessed-test-unverifiable'],
-    [{ witnessed: PIN_WITNESSED, built: { state: 'absent' }, run: ok }, 'witnessed-test-altered'],
+    [{ pin: { ...pin, bytes: null } }, 'witnessed-test-unverifiable'],
+    [{ pin: { ...pin, names: null } }, 'witnessed-test-unverifiable'],
+    [{ pin: null }, 'witnessed-test-unverifiable'],
+    [{ io: ioWith({ readFile: () => { throw new Error('EIO') } }) }, 'witnessed-test-unverifiable'],
+    [{ io: ioWith({ readFile: () => null }) }, 'witnessed-test-altered'],
+    [{ run: () => { throw new Error('spawn failed') } }, 'witnessed-test-unverifiable'],
+    [{ run: () => null }, 'witnessed-test-unverifiable'],
+    [{ run: () => 'garbage' }, 'witnessed-test-unverifiable'],
+    [{ run: (() => { let n = 0; return () => (++n === 1 ? green : 'garbage') })() }, 'witnessed-test-unverifiable'],
   ]
-  for (const [input, reason] of cases) {
-    const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], ...input })
-    assert.equal(verdict.reason, reason, JSON.stringify(input.built))
-    assert.ok(HARDENING_PRESERVATION_REFUSALS.includes(verdict.reason))
+  for (const [over, reason] of cases) {
+    const io = over.io ?? ioWith()
+    const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin: 'pin' in over ? over.pin : pin, abs: '/c/a.test.mjs', io, run: over.run ?? (() => green) })
+    assert.equal(verdict.reason, reason, JSON.stringify(Object.keys(over)))
   }
+  const stuck = ioWith()
+  stuck.writeFile = (path, content) => { if (content === 'snapshot') stuck.files[path] = content; else throw new Error('EROFS') }
+  const fatal = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io: stuck, run: () => green })
+  assert.equal(fatal.reason, 'witnessed-test-unverifiable')
+  assert.equal(fatal.fatal, true)
+  assert.deepEqual(runBytesInPlace({ abs: '/c/x', bytes: 'b', io: ioWith(), run: () => green }), { absent: true })
 })
 
-// The normalisation is exactly what the code comment names: CRLF, and blank lines in code
-// at a statement's end. Indentation, trailing spaces and blank lines inside a template
-// literal are content.
-test('PV8 top-level statements normalise only CRLF and blank lines in code', () => {
-  assert.deepEqual(topLevelStatements(PIN_WITNESSED.replace(/\n/g, '\r\n')), topLevelStatements(PIN_WITNESSED))
-  const appendedTight = `${PIN_IMPORTS}\n${PIN_EXISTING}${PIN_TOP_GUARD}`
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: appendedTight }, run: () => 'ok 1 - existing check' }).reason, null)
-  const reindented = `${PIN_IMPORTS}\n  ${PIN_EXISTING.replace(/\n(?!$)/g, '\n  ')}`
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: reindented }, run: () => 'ok 1 - existing check' }).reason, 'witnessed-test-altered')
-  const trailing = (text) => witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: `${PIN_WITNESSED}${text}` }, run: () => 'ok 1 - existing check' }).reason
-  assert.equal(trailing('\n\n\n'), null)
-  assert.deepEqual(topLevelStatements('const x = `a\n\nb`\nconst y = 1\n'), ['const x = `a\n\nb`', 'const y = 1'])
-  assert.equal(topLevelStatements('const x = `open\n'), null)
-})
-
-// Kills the normalisation Sol refuted (pass 1, must-fix 1): a trailing space inside a template
-// literal the witnessed assertion compares against is content, so removing it is refused.
-test('PV9 trailing whitespace inside a witnessed template literal is content', () => {
-  const witnessed = `${PIN_IMPORTS}\ntest('existing check', () => {\n  assert.equal(render(), \`row  \nnext\`)\n})\n`
-  const edited = witnessed.replace('row  \n', 'row\n')
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed, built: { state: 'read', bytes: edited }, run: () => 'ok 1 - existing check' })
-  assert.equal(verdict.reason, 'witnessed-test-altered')
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed, built: { state: 'read', bytes: witnessed }, run: () => 'ok 1 - existing check' }).reason, null)
-})
-
-// Kills P5 (Sol pass 1, must-fix 2): swapping the witnessed assertion import for a no-op
-// module leaves every test body identical and is still refused; extending it is not.
-test('PV10 a witnessed import binding must still come from the same module', () => {
-  const swapped = PIN_WITNESSED.replace("import assert from 'node:assert/strict'", "import assert from './noop-assert.mjs'")
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: swapped }, run: () => 'ok 1 - existing check' })
-  assert.equal(verdict.reason, 'witnessed-test-altered')
-  assert.deepEqual(verdict.lost_bindings, ['node:assert/strict::default=>assert'])
-  const extended = PIN_WITNESSED.replace("import { test } from 'node:test'", "import { test, before } from 'node:test'")
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: extended }, run: () => 'ok 1 - existing check' }).reason, null)
-})
-
-// Kills P6 (Sol pass 1, must-fix 3): a prescribed finding cannot close through an
-// invocation guard; it needs the new top-level node test(...) its brief named.
+// Kills P6 (Sol pass 1): a prescribed finding cannot close through an invocation guard; it
+// needs the new top-level node test(...) its brief named.
 test('PV11 a prescribed finding declared through an invocation is refused', () => {
   const invocation = { finding: 'F1', invocation: 'node --test a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
   const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files: { ...B376_FILES, [testAbs]: PIN_WITNESSED }, hardened: [invocation] })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
   assert.notEqual(result.status, 'done')
   const row = pinRows(io).find((entry) => entry.finding === 'F1')
   assert.equal(row?.outcome, 'name-absent')
   assert.match(row?.why ?? '', /must close with a new top-level node test\(\.\.\.\) named F1 guard, not an invocation/)
 })
 
-// Kills P9 (bracket depth ignored) — Sol pass 2: a byte-identical witnessed test(...)
-// enclosed in `if (false) {` is not a top-level statement any more.
-test('PV12 a witnessed check enclosed in a block is not a top-level statement', () => {
-  const enclosed = `${PIN_IMPORTS}\nif (false) {\n${PIN_EXISTING};}\n\n${PIN_TOP_GUARD}`
-  assert.equal(topLevelStatements(enclosed).includes(PIN_EXISTING.trimEnd()), false)
-  assert.equal(topLevelStatements(PIN_WITNESSED).includes(PIN_EXISTING.trimEnd()), true)
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: enclosed }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
-  assert.equal(verdict.reason, 'witnessed-test-altered')
-})
-
-// Kills P11 (names guessed from syntax) — Sol pass 3: a witnessed check called through an
-// alias is measured by the name the review-time run reported, so neutering the alias with
-// every witnessed statement left verbatim is refused.
-test('PV13 a witnessed check called through an alias is measured by its review-time name', () => {
-  const witnessed = `${PIN_IMPORTS}\nlet check = test\ncheck('existing check', () => {\n  assert.equal(1, 1)\n})\n`
-  const neutered = `${PIN_IMPORTS}\nlet check = test\ncheck = () => {}\ncheck('existing check', () => {\n  assert.equal(1, 1)\n})\n\n${PIN_TOP_GUARD}`
-  const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
-  const files = { ...B376_FILES, [testAbs]: witnessed }
-  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files })
-  const baseWait = io.wait
-  io.wait = function (returnPath, timeoutS) {
-    const env = baseWait.call(this, returnPath, timeoutS)
-    if (returnPath === 'builder:2') files[testAbs] = neutered
-    return env
-  }
-  const baseRun = io.run
-  io.run = function (cmd) {
-    const result = baseRun.call(this, cmd)
-    if (cmd !== hardenWitnessCommand(B376_TEST_FILE)) return result
-    // What node reports: the alias call runs at review time; once neutered it runs nothing.
-    if (files[testAbs] === witnessed) return { ok: true, output: 'ok 1 - existing check\n# pass 1\n# fail 0' }
-    if (files[testAbs] === neutered) return { ok: true, output: 'ok 1 - F1 guard\n# pass 1\n# fail 0' }
-    return { ok: true, output: '# pass 0\n# fail 0' }
-  }
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  assert.notEqual(result.status, 'done')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the witnessed check "existing check" in a\.test\.mjs is absent as a top-level test/)
-})
-
-// Kills P8 (no re-check after rebase) — Sol pass 2: a rebase that weakens the pinned test
-// after the accept-time check is refused on the tree the suite would run.
-test('PV14 a rebase that weakens a pinned test is refused before the suite', () => {
-  const compliant = `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
-  const io = pinIo({ built: compliant, onRebase: (bytes) => bytes.replace('assert.equal(1, 1)', 'assert.ok(true)') })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 2 }, publish: { base: 'main' } }, io)
+// Kills P8 (no re-check after rebase): a rebase that drops a pinned check after the
+// accept-time check is refused on the tree the suite would run.
+test('PV14 a rebase that drops a pinned check is refused before the suite', () => {
+  const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`, onRebase: (bytes) => bytes.replace(PIN_EXISTING, '') })
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 }, publish: { base: 'main' } }, io)
   assert.notEqual(result.status, 'done')
   assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(rebased\): /)
   assert.deepEqual(pinPreservation(io).map(({ when, reason }) => ({ when, reason })), [{ when: 'accept', reason: null }, { when: 'rebased', reason: 'witnessed-test-altered' }])
   assert.equal(result.details.stages.includes('suite'), false)
 })
 
-// Kills P10 (pins re-created per suite cycle) — Sol pass 3: after a red suite sends the lane
-// back to the builder, a repair round that weakens the pinned test is still refused.
-test('PV15 a suite-cycle repair round that weakens a pinned test is refused', () => {
+// Kills P10 (pins cleared per suite cycle): after a red suite sends the lane back to the
+// builder, a repair round that drops the pinned check is still refused.
+test('PV15 a suite-cycle repair round that drops a pinned check is refused', () => {
   const compliant = `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
-  const weakened = compliant.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const dropped = `${PIN_IMPORTS}\n${PIN_TOP_GUARD}`
   const io = pinIo({ built: compliant })
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  let builder3 = false
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
-    if (returnPath === 'builder:3') this.calls.writes[testAbs] = weakened
+    if (returnPath === 'builder:3') builder3 = true
     return env
   }
   const baseRead = io.readFile
   io.readFile = function (path) {
-    if (path === testAbs && this.calls.writes[testAbs] === weakened) return weakened
-    return baseRead.call(this, path)
+    const bytes = baseRead.call(this, path)
+    return path === testAbs && builder3 && bytes === compliant ? dropped : bytes
   }
   let suites = 0
   const baseRun = io.run
   io.run = function (cmd) {
+    if (cmd === hardenWitnessCommand(B376_TEST_FILE) && builder3) {
+      const bytes = io.readFile(testAbs)
+      return pinTap(bytes === compliant ? dropped : bytes)
+    }
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
     return baseRun.call(this, cmd)
   }
-  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 3, review_rounds: 3 } }, io)
   assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 3), true)
   assert.notEqual(result.status, 'done')
   assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
+})
+
+// Kills P12 (the built file runs in place of the snapshot): neutering the assertions at the
+// top of the SHIPPED copy cannot vouch for a broken implementation, because the snapshot,
+// which the builder never supplies, runs against it.
+test('PV16 a top-level assert.equal = () => {} in the built copy does not hide a broken implementation', () => {
+  const builtTest = `${REAL_HEAD}assert.equal = () => {}\n\n${REAL_EXISTING}\n${REAL_GUARD}`
+  const run = realPinRun({ builtTest, builtAdd: '(a, b) => a * b' })
+  assert.notEqual(run.result.status, 'done')
+  assert.match(run.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the base check "existing check" of a\.test\.mjs is failed when its snapshot runs against the built implementation/)
+})
+
+// Kills P12 too, through an imported module: the helper the pinned check imports is
+// weakened and the shipped copy's expectation is edited to match; the snapshot runs the real
+// weakened helper and fails.
+test('PV17 a weakened imported helper is caught by the snapshot running the real module', () => {
+  const builtTest = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(1, 2), 2)')}\n${REAL_GUARD}`
+  const run = realPinRun({ builtTest, builtAdd: '(a, b) => a * b' })
+  assert.notEqual(run.result.status, 'done')
+  assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed when its snapshot runs against the built implementation/)
+})
+
+// Kills P15 (review-time bytes snapshotted although the base carries the file): the builder
+// weakened the witnessed check BEFORE review and keeps the weakened copy while breaking the
+// implementation; the base version's check is what must still pass.
+test('PV18 a witnessed check the builder weakened before review is held to its base version', () => {
+  const damaged = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.ok(add(1, 2))')}`
+  const run = realPinRun({ reviewTest: damaged, builtTest: `${damaged}\n${REAL_GUARD}`, builtAdd: '(a, b) => a * b' })
+  assert.notEqual(run.result.status, 'done')
+  assert.equal(run.preservation[0]?.source, 'base')
+  assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed/)
+})
+
+// The edit the b1078 reviewer asked for is allowed: a witnessed test the builder damaged
+// before review is restored to its base bytes, and the snapshot still passes.
+test('PV19 restoring a pre-review-damaged witnessed test to its base bytes is accepted', () => {
+  const damaged = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.ok(add(1, 2))')}`
+  const run = realPinRun({ reviewTest: damaged, builtTest: `${REAL_BASE_TEST}\n${REAL_GUARD}` })
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.preservation.map(({ when, source, reason, checks }) => ({ when, source, reason, checks })), [
+    { when: 'accept', source: 'base', reason: null, checks: 1 }, { when: 'suite', source: 'base', reason: null, checks: 1 },
+  ])
+  assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), `${REAL_BASE_TEST}\n${REAL_GUARD}`)
+})
+
+// Kills P11 (no measured names) and P13 — Sol passes 2 and 3: a pinned check called through
+// an alias, or enclosed in a block, is measured by the name its base run reported; neutering
+// the alias or the block leaves that name unrun in the shipped file and is refused.
+test('PV20 a pinned check neutered through an alias or an enclosing block is refused', () => {
+  const aliasBase = `${REAL_HEAD}let check = test\n\ncheck('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n`
+  const alias = realPinRun({ baseTest: aliasBase, builtTest: aliasBase.replace("let check = test\n", "let check = test\ncheck = () => {}\n") + `\n${REAL_GUARD}` })
+  assert.notEqual(alias.result.status, 'done')
+  assert.match(alias.result.details.escalation.why, /the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
+  const block = realPinRun({ builtTest: `${REAL_HEAD}\nif (false) {\n${REAL_EXISTING}}\n\n${REAL_GUARD}` })
+  assert.notEqual(block.result.status, 'done')
+  assert.match(block.result.details.escalation.why, /the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
 })
 
 // Kills singleton detection or per-finding patch suppression by routing every conflict separately.

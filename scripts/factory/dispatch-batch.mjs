@@ -19,7 +19,8 @@ import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mj
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
-import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, issueBindingFor, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -160,7 +161,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', 'base_commit', 'edit_assist', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', 'base_commit', 'edit_assist', 'pi_codemode', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -1679,6 +1680,7 @@ function splitDispatchKeys(parsed, requestPath) {
     else request[key] = value
   }
   if (Object.hasOwn(dispatch, 'edit_assist') && !EDIT_ASSIST_VALUES.includes(dispatch.edit_assist)) refuse(`request ${requestPath}: invalid edit_assist; expected on or off`, BATCH_UNREADABLE)
+  if (Object.hasOwn(dispatch, 'pi_codemode') && !PI_CODEMODE_VALUES.includes(dispatch.pi_codemode)) refuse(`request ${requestPath}: invalid pi_codemode; expected on or off`, BATCH_UNREADABLE)
   const executionSupplied = dispatch.execution !== undefined && dispatch.execution !== null
   const variantSupplied = dispatch.variant !== undefined && dispatch.variant !== null
   const tierSupplied = dispatch.tier !== undefined && dispatch.tier !== null
@@ -1783,6 +1785,7 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       scope_observations: scoped.observations,
       authored_request: request,
       edit_assist: dispatch.edit_assist ?? null,
+      pi_codemode: dispatch.pi_codemode ?? null,
       base_commit: typeof dispatch.base_commit === 'string' ? dispatch.base_commit : null,
       execution: execution ?? null,
       assurance: assurance ?? null,
@@ -4060,6 +4063,24 @@ function recordEditAssist({ editAssist, crewPath, crewDir, lane, deps } = {}) {
   return { edit_assist: value }
 }
 
+function recordPiCodemode({ piCodemode, crewPath, crewDir, lane, deps } = {}) {
+  const d = normalDeps(deps)
+  const value = piCodemode ?? null
+  let codemodeSeats = null
+  let crew = null
+  try {
+    const parsed = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8')))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) crew = parsed
+  } catch { /* unreadable recorder input keeps attribution unknown */ }
+  if (crew) {
+    try { codemodeSeats = Object.entries(crew.members ?? {}).filter(([, member]) => member?.grant_snapshot?.grants?.extensions?.includes('builtin:codemode')).map(([role]) => role).sort() } catch { /* grant evidence is best-effort */ }
+    try { d.writeFileSync(crewPath, JSON.stringify({ ...crew, pi_codemode: value }, null, 2) + '\n') } catch { /* crew instrumentation is best-effort */ }
+  }
+  const row = { at: new Date().toISOString(), event: 'pi-codemode', task: lane, lane, pi_codemode: value, source: value === null ? 'unset' : 'request', codemode_seats: codemodeSeats }
+  try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* instrumentation is never load-bearing */ }
+  return { pi_codemode: value }
+}
+
 // The dispatch-time advisor source reaches crew.json and the journal; both writes are best-effort instrumentation.
 function recordAdvisorSource({ advisorSource, crewPath, crewDir, lane, deps } = {}) {
   const d = normalDeps(deps)
@@ -4116,7 +4137,11 @@ function bootOnce({ item, registerPath, transport, runFlags, deps }) {
   const d = normalDeps(deps)
   let result
   const laneRegisterPath = item.runtimeRegisterPath || registerPath
-  try { result = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags, charterArm: item.charterArm })) } catch (err) {
+  try {
+    const command = bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath: laneRegisterPath, transport, seats: item.seats, runFlags, charterArm: item.charterArm })
+    if (item.piCodemode !== null) command.env = { ...d.env, [PI_CODEMODE_ENV]: item.piCodemode }
+    result = d.spawn(command)
+  } catch (err) {
     return { ok: false, result: null, floorReason: null, why: err?.message || String(err) }
   }
   if (result && result.status === 0) return { ok: true, result, floorReason: null, why: null }
@@ -4318,6 +4343,7 @@ function prepareDispatchContext(options) {
   const d = normalDeps(deps)
   // The operator env is read through the d.env seam: an edit-assist builder seat's own env must not refuse its tests.
   if (Object.hasOwn(d.env, 'CREW_EDIT_ASSIST')) refuse('CREW_EDIT_ASSIST is dispatcher-controlled; request edit_assist in the lane request', BATCH_UNREADABLE)
+  if (Object.hasOwn(d.env, PI_CODEMODE_ENV)) refuse('CREW_PI_CODEMODE is dispatcher-controlled; request pi_codemode in the lane request', BATCH_UNREADABLE)
   const transport = resolveTransport({ runFlags })
   const batchExecutionSpelling = runFlagSpelling(runFlags, 'execution', 'variant', '--execution', '--variant')
   const batchAssuranceSpelling = runFlagSpelling(runFlags, 'assurance', 'tier', '--assurance', '--tier')
@@ -4709,6 +4735,7 @@ async function compileDispatchWave(prepared) {
       advisor_rotation: arm ? { arm, source: 'rotation', reason: null } : { arm: null, source: null, reason: rotation.reason },
       advisor_source: advisorSource,
       edit_assist: laneEntry?.edit_assist ?? null,
+      pi_codemode: laneEntry?.pi_codemode ?? null,
       operator_spelling: {
         execution: { spelling: laneExecutionSpelling, unmeasured_reason: null },
         assurance: { spelling: laneAssuranceSpelling, unmeasured_reason: null },
@@ -4734,7 +4761,7 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       d,
     })
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, advisorSource, editAssist: laneEntry?.edit_assist ?? null, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, advisorSource, editAssist: laneEntry?.edit_assist ?? null, piCodemode: laneEntry?.pi_codemode ?? null, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -4865,6 +4892,7 @@ function launchDispatchWave(compiled, launchedLanes) {
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+    recordPiCodemode({ piCodemode: item.piCodemode, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
     if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     let run

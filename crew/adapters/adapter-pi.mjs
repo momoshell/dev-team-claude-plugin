@@ -309,6 +309,8 @@ export function mcpConfigPath(spec) { return join(piSeatAgentDir(spec), 'mcp.jso
 
 export const PI_EDIT_ASSIST_ENV = 'CREW_EDIT_ASSIST'
 export const EDIT_ASSIST_VALUES = Object.freeze(['on', 'off'])
+export const PI_CODEMODE_ENV = 'CREW_PI_CODEMODE'
+export const PI_CODEMODE_VALUES = Object.freeze(['on', 'off'])
 
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, editAssist = null, role, taskDir } = spec

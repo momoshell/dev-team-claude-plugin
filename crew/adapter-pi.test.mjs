@@ -7,12 +7,13 @@ import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync,
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, PI_CODEMODE_ENV, PI_CODEMODE_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir, ROOT } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 import { EDIT_ASSIST_ENV } from './pi/extensions/builderloop.ts'
+import { PI_CODEMODE_VALUES as LEDGER_PI_CODEMODE_VALUES } from '../scripts/factory/ledger.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -91,6 +92,14 @@ test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
   assert.match(pane, /CREW_ADVISOR=1/)
   assert.doesNotMatch(pane, /CREW_ADVISOR_(?:MODEL|ENDPOINT|PROVENANCE)=/)
   assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
+})
+
+// MUTATION PC11: change the public pi codemode enum values.
+test('PC11', () => {
+  assert.equal(PI_CODEMODE_ENV, 'CREW_PI_CODEMODE')
+  assert.deepEqual(PI_CODEMODE_VALUES, ['on', 'off'])
+  assert.equal(Object.isFrozen(PI_CODEMODE_VALUES), true)
+  assert.equal(LEDGER_PI_CODEMODE_VALUES, PI_CODEMODE_VALUES)
 })
 
 test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP', () => {

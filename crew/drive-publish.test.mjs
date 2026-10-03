@@ -104,10 +104,10 @@ test('A1 resume retries frozen rebase without restarting plan or build and reach
 // A resumed run of a lane whose prescription pins were persisted to the lane state dir.
 const PIN_SNAPSHOT = "import { test } from 'node:test'\n\ntest('existing check', () => {})\n"
 const PIN_STATE = JSON.stringify({ version: 1, pins: { 'a.test.mjs': { finding: 'F1', source: 'base', bytes: PIN_SNAPSHOT, names: ['existing check'] } } })
-function resumeWithPins(pinsText, built) {
+function resumeWithPins(pinsText, built, journalText = undefined) {
   const checkpoint = resumeCheckpointFixture()
   const testAbs = `${CTX.checkout}/a.test.mjs`
-  const files = { [`${TD}/${PRESCRIPTION_PINS_FILE}`]: pinsText, [testAbs]: built }
+  const files = { [testAbs]: built, ...(pinsText === null ? {} : { [`${TD}/${PRESCRIPTION_PINS_FILE}`]: pinsText }), ...(journalText === undefined ? {} : { [CTX.journal || `${TD}/journal.jsonl`]: journalText }) }
   const io = fakeIo({ files, writeThrough: true, runs: {
     [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
     [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
@@ -129,10 +129,10 @@ function resumeWithPins(pinsText, built) {
 // compliant tree passes the resume check, and an unreadable pins file is refused as
 // unverifiable, never treated as "no pins".
 test('PV21 a resumed run reloads the persisted prescription pins', () => {
-  const kept = resumeWithPins(PIN_STATE, `${PIN_SNAPSHOT}\ntest('F1 guard', () => {})\n`)
+  const kept = resumeWithPins(PIN_STATE, PIN_SNAPSHOT)
   assert.equal(kept.result.status, 'done')
   assert.deepEqual(kept.io.calls.logs.flatMap((row) => row.hardening_preservation ? [[row.hardening_preservation.when, row.hardening_preservation.reason]] : []), [['resume', null]])
-  const unreadable = resumeWithPins('{not json', `${PIN_SNAPSHOT}\ntest('F1 guard', () => {})\n`)
+  const unreadable = resumeWithPins('{not json', PIN_SNAPSHOT)
   assert.equal(unreadable.result.status, 'escalation')
   assert.match(unreadable.result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding \(unknown\) \(resume\): the persisted prescription pins were unparseable/)
 })
@@ -142,7 +142,19 @@ test('PV21 a resumed run reloads the persisted prescription pins', () => {
 test('PV22 a resumed run refuses a shipped file that dropped a pinned check', () => {
   const dropped = resumeWithPins(PIN_STATE, "import { test } from 'node:test'\n\ntest('F1 guard', () => {})\n")
   assert.equal(dropped.result.status, 'escalation')
-  assert.match(dropped.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(resume\): the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
+  assert.match(dropped.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(resume\): a\.test\.mjs must ship byte-identical to its base version/)
+})
+
+// Kills P17 (missing pin state read as "no pins"): the journal's durable marker that a
+// conversion happened makes an absent pins file a refusal; without the marker, a lane that
+// never converted resumes as before.
+test('PV24 a resume whose journal records a pin but whose pins file is absent is refused', () => {
+  const marker = `${JSON.stringify({ at: 1, hardening_prescription_pinned: { finding: 'F1', file: 'a.test.mjs', source: 'base', pins: PRESCRIPTION_PINS_FILE } })}\n`
+  const missing = resumeWithPins(null, "import { test } from 'node:test'\n\ntest('F1 guard', () => {})\n", marker)
+  assert.equal(missing.result.status, 'escalation')
+  assert.match(missing.result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding \(unknown\) \(resume\): the journal records a prescription pin, but prescription-pins\.json is absent from the lane state dir/)
+  const never = resumeWithPins(null, PIN_SNAPSHOT, `${JSON.stringify({ at: 1, stage: 'review:r1' })}\n`)
+  assert.equal(never.result.status, 'done')
 })
 
 test('RVR1-2 gate resume preserves typed gate escalation when pending commit fails', () => {

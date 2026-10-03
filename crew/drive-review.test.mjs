@@ -2874,9 +2874,26 @@ const withBaseTree = (io, bytes = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`
   }
   return io
 }
+// The pinned a.test.mjs must ship unchanged, so the prescribed guard moves to b.test.mjs,
+// which the plan scopes; its proof runs answer exactly as the a.test.mjs ones did.
+const withGuardElsewhere = (io) => {
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const env = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'planner:1') return { ...env, details: { ...env.details, files_in_scope: [...env.details.files_in_scope, 'b.test.mjs'] } }
+    if (/^builder:/.test(returnPath) && Array.isArray(env?.details?.hardened)) return { ...env, details: { ...env.details, hardened: env.details.hardened.map((entry) => entry.test === B376_TEST_FILE ? { ...entry, test: 'b.test.mjs' } : entry) } }
+    return env
+  }
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const moved = /^node --test --test-reporter=tap --test-name-pattern=(.*) 'b\.test\.mjs'$/.exec(cmd)
+    return baseRun.call(this, moved ? cmd.replace("'b.test.mjs'", shellArg(B376_TEST_FILE)) : cmd)
+  }
+  return io
+}
 
 test('#800 §7b 44 — divergent collisions preserve reviewer A ids and refuse a pinned optional prescription', () => {
-  const io = withBaseTree(divergentCollisionIo())
+  const io = withGuardElsewhere(withBaseTree(divergentCollisionIo()))
   const result = driveTask({ ...D_COLLISION_CTX, head: 'base-head' }, io)
   const first = dPanelOutcomes(io)[0]
   const adjudication = io.calls.writes[`${TD}/panel-adjudication-1.md`] || ''
@@ -2929,7 +2946,7 @@ test('#800 §7b 45 — each reminted final id has one auditable remint join', ()
     [divergentCollisionIo(), 'RV1-1'],
   ]
   for (const [io, original] of cases) {
-    const result = driveTask({ ...D_COLLISION_CTX, head: 'base-head' }, withBaseTree(io))
+    const result = driveTask({ ...D_COLLISION_CTX, head: 'base-head' }, withGuardElsewhere(withBaseTree(io)))
     assert.equal(result.status, 'done')
     const reminted = dPanelOutcomes(io)[0].findings.filter(({ id }) => id.startsWith('panel-remint-')).map(({ id }) => id)
     const rows = dRemintRows(io)
@@ -5197,44 +5214,44 @@ test('PT3', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Sub-class 1 class invariant (b1074 hand-finish, run-based redesign): a pinned-test-
-// prescription conversion is never accepted unless the pinned checks still hold — a
-// snapshot of the pinned file (its BASE version when the lane base carries it, else its
-// review-time bytes), which the builder never supplies, runs in place of the built file
-// against the built implementation and every check it reported at conversion passes; and
-// those checks still run and pass as top-level tests of the built file. The guard that
-// closes the finding is a top-level test. Unreadable, unrunnable or unmeasured is refused.
+// Sub-class 1 class invariant (b1074 hand-finish, operator decision 2026-10-03, option a):
+// a pinned-test-prescription conversion is accepted only when the pinned test file ships
+// BYTE-IDENTICAL to its snapshot (its BASE version when the lane base carries it, else its
+// review-time bytes) and its checks pass against the built implementation; the prescribed
+// new guard is a top-level test in a DIFFERENT test file the lane may write. Unreadable,
+// unrunnable or unmeasured is refused, never passed.
 const PIN_IMPORTS = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\n"
 const PIN_EXISTING = "test('existing check', () => {\n  assert.equal(1, 1)\n})\n"
 const PIN_WITNESSED = `${PIN_IMPORTS}\n${PIN_EXISTING}`
-const PIN_TOP_GUARD = "test('F1 guard', () => {\n  assert.equal(2, 2)\n})\n"
-const PIN_NESTED = `${PIN_IMPORTS}\ntest('F1 guard suite', async (t) => {\n  await t.test('F1 guard', () => {\n    assert.equal(2, 2)\n  })\n})\n`
+const PIN_GUARD_FILE = 'b.test.mjs'
+const PIN_TOP_GUARD = `${PIN_IMPORTS}\ntest('F1 guard', () => {\n  assert.equal(2, 2)\n})\n`
+const PIN_NESTED_GUARD = `${PIN_IMPORTS}\ntest('F1 guard suite', async (t) => {\n  await t.test('F1 guard', () => {\n    assert.equal(2, 2)\n  })\n})\n`
 const PIN_TAP_NESTED = { ok: true, output: '    ok 1 - F1 guard\nok 1 - F1 guard suite\n# pass 2\n# fail 0' }
 const PIN_TAP_NESTED_RED = { ok: false, output: '    not ok 1 - F1 guard\nnot ok 1 - F1 guard suite\n# pass 0\n# fail 2' }
-// Fake runs derived from the CURRENT bytes, so the snapshot run and the built run each see
-// the file they are asked about (the real-node scenarios below do not need this).
+const PIN_SCOPE = ['a.mjs', 'a.test.mjs', PIN_GUARD_FILE]
+// Fake runs derived from the CURRENT bytes of the pinned file.
 const pinTap = (bytes) => {
   const lines = []
   let n = 0
   for (const line of String(bytes).split('\n')) {
     const top = /^test\('([^']+)'/.exec(line)
-    const nested = /^\s+await t\.test\('([^']+)'/.exec(line)
     if (top) lines.push(`ok ${++n} - ${top[1]}`)
-    if (nested) lines.push(`    ok 1 - ${nested[1]}`)
   }
   return { ok: true, output: `${lines.join('\n')}\n# pass ${n}\n# fail 0` }
 }
-function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null }) {
+function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, onRebase = null, hardened = null }) {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  const guardAbs = `${CTX.checkout}/${guardFile}`
   const files = { ...B376_FILES, [testAbs]: PIN_WITNESSED }
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, ...(proofOutputs ? { proofOutputs } : {}) })
+  const declared = hardened ?? [{ ...B376_HARDENED, test: guardFile }]
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, hardened: declared, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE })
   let reviewed = false
   const head = { rebased: false }
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
-    if (returnPath === 'builder:2') files[testAbs] = built
+    if (returnPath === 'builder:2') { files[testAbs] = built; files[guardAbs] = guard }
     if (returnPath === 'reviewer:2') reviewed = true
     return env
   }
@@ -5247,6 +5264,10 @@ function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null 
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
     if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return pinTap(files[testAbs])
+    if (cmd === hardenCommand(guardFile, 'F1 guard')) {
+      const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      return proofOutputs[count - 1] ?? proofOutputs.at(-1)
+    }
     if (cmd === `git rev-parse ${shellArg('origin/main')}`) return { ok: true, output: 'base1111\n' }
     if (cmd === `git merge-base HEAD ${shellArg('origin/main')}`) return { ok: true, output: `${head.rebased ? 'base1111' : 'older000'}\n` }
     if (cmd === `git rebase ${shellArg('origin/main')}`) { head.rebased = true; if (onRebase) files[testAbs] = onRebase(files[testAbs]); return { ok: true, output: '' } }
@@ -5257,15 +5278,16 @@ function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null 
 }
 const pinRows = (io) => io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : [])
 const pinPreservation = (io) => io.calls.logs.flatMap((row) => row.hardening_preservation ? [row.hardening_preservation] : [])
+const PIN_CTX = { ...CTX, head: 'base-head', limits: { build_rounds: 2 } }
 
 // A real checkout: a git repo whose commit is the lane base, real node:test runs, so the
-// snapshot and the built file execute against the real built implementation.
+// pinned file's checks execute against the real built implementation.
 const REAL_IMPL = (add, guard) => `export const add = ${add}\nexport const guard = ${guard}\n`
 const REAL_HEAD = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add, guard } from './a.mjs'\n"
 const REAL_EXISTING = "test('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n"
 const REAL_BASE_TEST = `${REAL_HEAD}\n${REAL_EXISTING}`
-const REAL_GUARD = "test('F1 guard', () => {\n  assert.equal(guard, true)\n})\n"
-function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest, builtAdd = '(a, b) => a + b', location = 'a.test.mjs:1' }) {
+const REAL_GUARD_TEST = `${REAL_HEAD}\ntest('F1 guard', () => {\n  assert.equal(guard, true)\n})\n`
+function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b' }) {
   const checkout = scratchDir('b1074-pin-')
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
@@ -5276,9 +5298,9 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
   for (const cmd of ['git init -q', 'git add -A', 'git -c user.name=t -c user.email=t@t commit -q -m base']) assert.equal(sh(cmd).status, 0, cmd)
   const head = sh('git rev-parse HEAD').stdout.trim()
   writeFileSync(join(checkout, 'a.test.mjs'), reviewTest)
-  const finding = { ...B376_FINDING, location, disposition: 'auto-fix', patch: '' }
-  const hardened = { finding: 'F1', test: 'a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'export const guard = true', replace: 'export const guard = false' }
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), hardened: [hardened], files: {} })
+  const finding = { ...B376_FINDING, location: 'a.test.mjs:1', disposition: 'auto-fix', patch: '' }
+  const hardened = { finding: 'F1', test: PIN_GUARD_FILE, name: 'F1 guard', file: 'a.mjs', find: 'export const guard = true', replace: 'export const guard = false' }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), hardened: [hardened], files: {}, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE })
   const inCheckout = (path) => path.startsWith(`${checkout}/`)
   const baseRead = io.readFile
   io.readFile = function (path) { return inCheckout(path) ? (existsSync(path) ? readFileSync(path, 'utf8') : null) : baseRead.call(this, path) }
@@ -5290,6 +5312,7 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
     if (returnPath === 'builder:2') {
       writeFileSync(join(checkout, 'a.mjs'), REAL_IMPL(builtAdd, 'true'))
       writeFileSync(join(checkout, 'a.test.mjs'), builtTest)
+      writeFileSync(join(checkout, PIN_GUARD_FILE), REAL_GUARD_TEST)
     }
     return envelope
   }
@@ -5298,120 +5321,108 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
     const fake = baseRun.call(this, cmd)
     if (!/^(node --test|git (ls-tree|show|diff --unified=0) )/.test(cmd)) return fake
     const r = sh(cmd)
-    return { ok: r.status === 0, output: r.stdout, stderr: r.stderr, status: r.status }
+    return { ok: r.status === 0, output: `${r.stdout}${r.stderr}`, stderr: r.stderr, status: r.status }
   }
   const result = driveTask({ ...CTX, checkout, head, limits: { build_rounds: 2 } }, io)
-  if (process.env.PIN_PROBE) console.log('PROBE', JSON.stringify({ status: result.status, why: String(result.details?.escalation?.why).slice(0, 500), stages: result.details?.stages?.slice(-8), rows: pinRows(io), pres: pinPreservation(io) }))
   return { result, io, checkout, rows: pinRows(io), preservation: pinPreservation(io) }
 }
 
-// Kills P1 (prescription guard adjudicated like any other) — Sol's reproduction: a nested
-// guard replacing the witnessed check is never credited killed and the lane is never done.
-test('PV1 a nested guard replacing a witnessed check never closes a pinned-test prescription', () => {
-  const io = pinIo({ built: PIN_NESTED, proofOutputs: [PIN_TAP_NESTED, PIN_TAP_NESTED_RED, PIN_TAP_NESTED_RED] })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+// Kills P1 (prescription guard adjudicated like any other) — Sol's original reproduction:
+// a nested guard is never credited killed and the lane is never done.
+test('PV1 a nested guard never closes a pinned-test prescription', () => {
+  const io = pinIo({ guard: PIN_NESTED_GUARD, proofOutputs: [PIN_TAP_NESTED, PIN_TAP_NESTED_RED, PIN_TAP_NESTED_RED] })
+  const result = driveTask(PIN_CTX, io)
   assert.notEqual(result.status, 'done')
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), false)
-  const nested = pinRows(io).find((row) => row.finding === 'F1' && row.outcome === 'name-absent')
-  assert.match(nested?.why ?? '', /TOP-LEVEL test named F1 guard/)
+  assert.match(pinRows(io).find((row) => row.finding === 'F1' && row.outcome === 'name-absent')?.why ?? '', /TOP-LEVEL test named F1 guard/)
 })
 
-// Kills P13 (built-file run skipped) and P4 (acceptance check skipped): a proven top-level
-// guard does not buy acceptance while the pinned check is gone from the shipped file.
-test('PV2 a proven top-level guard does not accept a lane whose pinned check was removed', () => {
-  const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_TOP_GUARD}` })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+// Kills P12 (byte identity) and, through the suite backstop, nothing else: an edited
+// pinned file is refused even when its checks still run and pass.
+test('PV2 an edited pinned file is refused even when its checks still pass', () => {
+  const io = pinIo({ built: PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)') })
+  const result = driveTask(PIN_CTX, io)
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), true)
   assert.notEqual(result.status, 'done')
   assert.equal(result.details.escalation.where, 'harden')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the review check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its review version; it was edited/)
 })
 
-// Kills the unreadable route: a pinned file that cannot be read at acceptance is refused
-// with its closed reason, never passed and never recorded as a null pass.
+// The unreadable route: a pinned file that cannot be read at acceptance is refused with its
+// closed reason, never passed and never recorded as a null pass.
 test('PV4 an unreadable pinned test refuses acceptance as unverifiable', () => {
-  const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`, throwAfterReview: true })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+  const io = pinIo({ throwAfterReview: true })
+  const result = driveTask(PIN_CTX, io)
   assert.notEqual(result.status, 'done')
   assert.match(result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding F1 \(accept\): a\.test\.mjs: it could not be read: EACCES/)
   assert.deepEqual(pinPreservation(io).map(({ reason }) => reason), ['witnessed-test-unverifiable'])
 })
 
-// The over-refusal side, and the persistence: a compliant conversion is accepted, both
-// checks are journalled, and the pin is on disk in the lane state dir.
-test('PV5 a compliant conversion is accepted and its pin is persisted', () => {
-  const io = pinIo({ built: `${PIN_IMPORTS}import { strict } from 'node:assert'\n\n${PIN_EXISTING}\n${PIN_TOP_GUARD}` })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+// Kills P4 (acceptance check skipped): the accepted shape — the pinned file byte-identical,
+// the guard in another in-scope test file — is accepted, checked at accept and at the
+// suite, and its pin and marker are durable.
+test('PV5 a byte-identical pinned file with the guard in another in-scope file is accepted', () => {
+  const io = pinIo({})
+  const result = driveTask(PIN_CTX, io)
   assert.equal(result.status, 'done')
   assert.deepEqual(pinPreservation(io).map(({ when, reason, checks }) => ({ when, reason, checks })), [{ when: 'accept', reason: null, checks: 1 }, { when: 'suite', reason: null, checks: 1 }])
   const persisted = JSON.parse(io.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`])
   assert.deepEqual(persisted.pins['a.test.mjs'].names, ['existing check'])
   assert.equal(persisted.pins['a.test.mjs'].bytes, PIN_WITNESSED)
+  assert.deepEqual(io.calls.logs.flatMap((row) => row.hardening_prescription_pinned ? [row.hardening_prescription_pinned.file] : []), ['a.test.mjs'])
 })
 
-// Kills P3 (indented lines accepted): a snapshot check that runs only as a nested line is
-// not a passing top-level check.
+// Kills P3 (indented lines accepted): a pinned check that runs only as a nested line is not
+// a passing top-level check, even in a byte-identical file.
 test('PV6 a pinned check reported only as a nested line is refused', () => {
-  const files = { '/c/a.test.mjs': 'built' }
-  const io = { readFile: (path) => files[path] ?? null, writeFile: (path, content) => { files[path] = content } }
+  const io = { readFile: () => 'snapshot' }
   const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
-  const run = () => (files['/c/a.test.mjs'] === 'snapshot' ? 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' : 'ok 1 - existing check\n# pass 1\n# fail 0')
-  const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io, run })
+  const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io, run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
   assert.equal(verdict.reason, 'witnessed-test-altered')
-  assert.match(verdict.why, /"existing check" of a\.test\.mjs is absent when its snapshot runs against the built implementation/)
-  assert.equal(files['/c/a.test.mjs'], 'built')
+  assert.match(verdict.why, /"existing check" of a\.test\.mjs is absent against the built implementation/)
 })
 
-// Every unmeasurable input is a refusal with a closed reason; none is a pass. A restore
-// that does not read back is fatal.
+// Every unmeasurable input is a refusal with a closed reason; none is a pass.
 test('PV7 pin verification refuses every input it cannot read, run or measure', () => {
   assert.deepEqual(HARDENING_PRESERVATION_REFUSALS, ['witnessed-test-altered', 'witnessed-test-unverifiable'])
   const green = 'ok 1 - existing check\n# pass 1\n# fail 0'
   const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
-  const ioWith = (over = {}) => { const files = { '/c/a.test.mjs': 'built' }; return { files, readFile: (path) => files[path] ?? null, writeFile: (path, content) => { files[path] = content }, ...over } }
+  const same = { readFile: () => 'snapshot' }
   const cases = [
     [{ pin: { ...pin, bytes: null } }, 'witnessed-test-unverifiable'],
     [{ pin: { ...pin, names: null } }, 'witnessed-test-unverifiable'],
     [{ pin: null }, 'witnessed-test-unverifiable'],
-    [{ io: ioWith({ readFile: () => { throw new Error('EIO') } }) }, 'witnessed-test-unverifiable'],
-    [{ io: ioWith({ readFile: () => null }) }, 'witnessed-test-altered'],
+    [{ io: { readFile: () => { throw new Error('EIO') } } }, 'witnessed-test-unverifiable'],
+    [{ io: { readFile: () => null } }, 'witnessed-test-altered'],
+    [{ io: { readFile: () => 'snapshot\n' } }, 'witnessed-test-altered'],
     [{ run: () => { throw new Error('spawn failed') } }, 'witnessed-test-unverifiable'],
     [{ run: () => null }, 'witnessed-test-unverifiable'],
     [{ run: () => 'garbage' }, 'witnessed-test-unverifiable'],
-    [{ run: (() => { let n = 0; return () => (++n === 1 ? green : 'garbage') })() }, 'witnessed-test-unverifiable'],
   ]
   for (const [over, reason] of cases) {
-    const io = over.io ?? ioWith()
-    const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin: 'pin' in over ? over.pin : pin, abs: '/c/a.test.mjs', io, run: over.run ?? (() => green) })
+    const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin: 'pin' in over ? over.pin : pin, abs: '/c/a.test.mjs', io: over.io ?? same, run: over.run ?? (() => green) })
     assert.equal(verdict.reason, reason, JSON.stringify(Object.keys(over)))
   }
-  const stuck = ioWith()
-  stuck.writeFile = (path, content) => { if (content === 'snapshot') stuck.files[path] = content; else throw new Error('EROFS') }
-  const fatal = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io: stuck, run: () => green })
-  assert.equal(fatal.reason, 'witnessed-test-unverifiable')
-  assert.equal(fatal.fatal, true)
-  assert.deepEqual(runBytesInPlace({ abs: '/c/x', bytes: 'b', io: ioWith(), run: () => green }), { absent: true })
+  const files = {}
+  assert.deepEqual(runBytesInPlace({ abs: '/c/x', bytes: 'b', io: { readFile: (path) => files[path] ?? null, writeFile: (path, content) => { files[path] = content } }, run: () => green }), { absent: true })
 })
 
-// Kills P6 (Sol pass 1): a prescribed finding cannot close through an invocation guard; it
-// needs the new top-level node test(...) its brief named.
+// Kills P6: a prescribed finding cannot close through an invocation guard.
 test('PV11 a prescribed finding declared through an invocation is refused', () => {
-  const invocation = { finding: 'F1', invocation: 'node --test a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
-  const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
-  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files: { ...B376_FILES, [testAbs]: PIN_WITNESSED }, hardened: [invocation] })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 } }, io)
+  const invocation = { finding: 'F1', invocation: 'node --test b.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
+  const io = pinIo({ hardened: [invocation] })
+  const result = driveTask(PIN_CTX, io)
   assert.notEqual(result.status, 'done')
   const row = pinRows(io).find((entry) => entry.finding === 'F1')
   assert.equal(row?.outcome, 'name-absent')
   assert.match(row?.why ?? '', /must close with a new top-level node test\(\.\.\.\) named F1 guard, not an invocation/)
 })
 
-// Kills P8 (no re-check after rebase): a rebase that drops a pinned check after the
+// Kills P8 (no re-check after rebase): a rebase that edits the pinned file after the
 // accept-time check is refused on the tree the suite would run.
-test('PV14 a rebase that drops a pinned check is refused before the suite', () => {
-  const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`, onRebase: (bytes) => bytes.replace(PIN_EXISTING, '') })
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 2 }, publish: { base: 'main' } }, io)
+test('PV14 a rebase that edits the pinned file is refused before the suite', () => {
+  const io = pinIo({ onRebase: (bytes) => bytes.replace(PIN_EXISTING, '') })
+  const result = driveTask({ ...PIN_CTX, publish: { base: 'main' } }, io)
   assert.notEqual(result.status, 'done')
   assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(rebased\): /)
   assert.deepEqual(pinPreservation(io).map(({ when, reason }) => ({ when, reason })), [{ when: 'accept', reason: null }, { when: 'rebased', reason: 'witnessed-test-altered' }])
@@ -5419,12 +5430,11 @@ test('PV14 a rebase that drops a pinned check is refused before the suite', () =
 })
 
 // Kills P10 (pins cleared per suite cycle): after a red suite sends the lane back to the
-// builder, a repair round that drops the pinned check is still refused.
-test('PV15 a suite-cycle repair round that drops a pinned check is refused', () => {
-  const compliant = `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
-  const dropped = `${PIN_IMPORTS}\n${PIN_TOP_GUARD}`
-  const io = pinIo({ built: compliant })
+// builder, a repair round that edits the pinned file is still refused.
+test('PV15 a suite-cycle repair round that edits the pinned file is refused', () => {
+  const io = pinIo({})
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
   let builder3 = false
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
@@ -5435,78 +5445,74 @@ test('PV15 a suite-cycle repair round that drops a pinned check is refused', () 
   const baseRead = io.readFile
   io.readFile = function (path) {
     const bytes = baseRead.call(this, path)
-    return path === testAbs && builder3 && bytes === compliant ? dropped : bytes
+    return path === testAbs && builder3 ? edited : bytes
   }
   let suites = 0
   const baseRun = io.run
   io.run = function (cmd) {
-    if (cmd === hardenWitnessCommand(B376_TEST_FILE) && builder3) {
-      const bytes = io.readFile(testAbs)
-      return pinTap(bytes === compliant ? dropped : bytes)
-    }
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
     return baseRun.call(this, cmd)
   }
-  const result = driveTask({ ...CTX, head: 'base-head', limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
   assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 3), true)
   assert.notEqual(result.status, 'done')
   assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
 })
 
-// Kills P12 (the built file runs in place of the snapshot): neutering the assertions at the
-// top of the SHIPPED copy cannot vouch for a broken implementation, because the snapshot,
-// which the builder never supplies, runs against it.
-test('PV16 a top-level assert.equal = () => {} in the built copy does not hide a broken implementation', () => {
-  const builtTest = `${REAL_HEAD}assert.equal = () => {}\n\n${REAL_EXISTING}\n${REAL_GUARD}`
-  const run = realPinRun({ builtTest, builtAdd: '(a, b) => a * b' })
+// Kills P12 for Sol's last open bypass: `assert.equal = () => {}` at the top of the
+// shipped copy is an edit, so it is refused before anything runs.
+test('PV16 a top-level assert.equal = () => {} in the shipped pinned file is refused', () => {
+  const run = realPinRun({ builtTest: `${REAL_HEAD}assert.equal = () => {}\n\n${REAL_EXISTING}`, builtAdd: '(a, b) => a * b' })
   assert.notEqual(run.result.status, 'done')
-  assert.match(run.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the base check "existing check" of a\.test\.mjs is failed when its snapshot runs against the built implementation/)
+  assert.match(run.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its base version/)
 })
 
-// Kills P12 too, through an imported module: the helper the pinned check imports is
-// weakened and the shipped copy's expectation is edited to match; the snapshot runs the real
-// weakened helper and fails.
-test('PV17 a weakened imported helper is caught by the snapshot running the real module', () => {
-  const builtTest = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(1, 2), 2)')}\n${REAL_GUARD}`
-  const run = realPinRun({ builtTest, builtAdd: '(a, b) => a * b' })
+// Kills P19 (the pinned file is not run) and P11 (no measured checks): the pinned file is
+// byte-identical, but the helper its check imports was weakened; running it against the
+// real built module fails.
+test('PV17 a weakened imported helper fails the byte-identical pinned file', () => {
+  const run = realPinRun({ builtAdd: '(a, b) => a * b' })
   assert.notEqual(run.result.status, 'done')
-  assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed when its snapshot runs against the built implementation/)
+  assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed against the built implementation/)
 })
 
-// Kills P15 (review-time bytes snapshotted although the base carries the file): the builder
-// weakened the witnessed check BEFORE review and keeps the weakened copy while breaking the
-// implementation; the base version's check is what must still pass.
+// Kills P15 (review-time bytes snapshotted although the base carries the file): the
+// builder weakened the witnessed check BEFORE review and ships that copy with a broken
+// implementation; the base version is what the file must ship as.
 test('PV18 a witnessed check the builder weakened before review is held to its base version', () => {
   const damaged = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.ok(add(1, 2))')}`
-  const run = realPinRun({ reviewTest: damaged, builtTest: `${damaged}\n${REAL_GUARD}`, builtAdd: '(a, b) => a * b' })
+  const run = realPinRun({ reviewTest: damaged, builtTest: damaged, builtAdd: '(a, b) => a * b' })
   assert.notEqual(run.result.status, 'done')
   assert.equal(run.preservation[0]?.source, 'base')
-  assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed/)
+  assert.match(run.result.details.escalation.why, /a\.test\.mjs must ship byte-identical to its base version/)
 })
 
 // The edit the b1078 reviewer asked for is allowed: a witnessed test the builder damaged
-// before review is restored to its base bytes, and the snapshot still passes.
+// before review is restored to its base bytes, the guard lives in another file, accepted.
 test('PV19 restoring a pre-review-damaged witnessed test to its base bytes is accepted', () => {
   const damaged = `${REAL_HEAD}\n${REAL_EXISTING.replace('assert.equal(add(1, 2), 3)', 'assert.ok(add(1, 2))')}`
-  const run = realPinRun({ reviewTest: damaged, builtTest: `${REAL_BASE_TEST}\n${REAL_GUARD}` })
+  const run = realPinRun({ reviewTest: damaged, builtTest: REAL_BASE_TEST })
   assert.equal(run.result.status, 'done')
   assert.deepEqual(run.preservation.map(({ when, source, reason, checks }) => ({ when, source, reason, checks })), [
     { when: 'accept', source: 'base', reason: null, checks: 1 }, { when: 'suite', source: 'base', reason: null, checks: 1 },
   ])
-  assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), `${REAL_BASE_TEST}\n${REAL_GUARD}`)
+  assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), REAL_BASE_TEST)
 })
 
-// Kills P11 (no measured names) and P13 — Sol passes 2 and 3: a pinned check called through
-// an alias, or enclosed in a block, is measured by the name its base run reported; neutering
-// the alias or the block leaves that name unrun in the shipped file and is refused.
-test('PV20 a pinned check neutered through an alias or an enclosing block is refused', () => {
-  const aliasBase = `${REAL_HEAD}let check = test\n\ncheck('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n`
-  const alias = realPinRun({ baseTest: aliasBase, builtTest: aliasBase.replace("let check = test\n", "let check = test\ncheck = () => {}\n") + `\n${REAL_GUARD}` })
-  assert.notEqual(alias.result.status, 'done')
-  assert.match(alias.result.details.escalation.why, /the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
-  const block = realPinRun({ builtTest: `${REAL_HEAD}\nif (false) {\n${REAL_EXISTING}}\n\n${REAL_GUARD}` })
-  assert.notEqual(block.result.status, 'done')
-  assert.match(block.result.details.escalation.why, /the base check "existing check" is absent as a top-level test of the built a\.test\.mjs/)
+// Kills P18 (placement rule skipped): the prescribed guard may not live in the pinned file,
+// nor in a test file outside the lane scope; the refusal says where it must go.
+test('PV23 a prescribed guard in the pinned file or outside the lane scope is refused', () => {
+  const inPinned = pinIo({ guardFile: B376_TEST_FILE, guard: `${PIN_WITNESSED}\ntest('F1 guard', () => {})\n` })
+  const pinned = driveTask(PIN_CTX, inPinned)
+  assert.notEqual(pinned.status, 'done')
+  assert.match(pinRows(inPinned).find((row) => row.finding === 'F1')?.why ?? '', /a\.test\.mjs, the pinned file that must ship unchanged; put the new top-level test in a different test file/)
+  assert.equal(pinRows(inPinned).find((row) => row.finding === 'F1')?.outcome, 'guard-misplaced')
+  const outside = pinIo({ guardFile: 'elsewhere/c.test.mjs' })
+  const result = driveTask(PIN_CTX, outside)
+  assert.notEqual(result.status, 'done')
+  const row = pinRows(outside).find((entry) => entry.finding === 'F1')
+  assert.equal(row?.outcome, 'guard-misplaced')
+  assert.match(row?.why ?? '', /elsewhere\/c\.test\.mjs, which is outside the lane scope and not declared in creates; put it in a test file that is in scope \(b\.test\.mjs\) or declared in creates/)
 })
 
 // Kills singleton detection or per-finding patch suppression by routing every conflict separately.

@@ -4507,7 +4507,7 @@ test('#839 reviewer hardening marks preserve the five-key finding shape unless v
   assert.deepEqual(HARDENING_OUTCOMES, [
     'killed', 'survived', 'ungateable',
     'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
-    'pre-repair-green', 'source-regressed', 'witness-missing', 'witness-absent', 'witness-unreadable',
+    'pre-repair-green', 'source-regressed', 'guard-misplaced', 'witness-missing', 'witness-absent', 'witness-unreadable',
     'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
   ])
   const marked = { ...base, hardening: 'ungateable', hardening_why: ' documented exception ' }

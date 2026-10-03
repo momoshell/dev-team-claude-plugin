@@ -6083,7 +6083,7 @@ function runTask(ctx, io, crash) {
   const stepEnvelopes = []
   const doneEnvelopes = []
   let lastStepEnv = null
-  let grantedBuildAllowance = 0
+  let grantedBuildAllowance = 0; const grantSteppedAllowance = steps => { grantedBuildAllowance += steppedBudget({ buildRounds: limits.build_rounds, steps }) - limits.build_rounds }
   let lateRepairSpent = false
   const builderRemaining = () => limits.build_rounds + grantedBuildAllowance - builderAttempts
   const grantBuilderAllowance = () => {
@@ -8918,9 +8918,9 @@ function runTask(ctx, io, crash) {
     if (steppedProgram) {
       if (validatedChunks.length === 0) return escalate('plan-chunks', 'stepped plan declares no chunks')
       if (!gateCmd) return escalate('plan-chunks', 'stepped requires a gate_cmd to adjudicate step ownership')
-      // One global builder budget (ADR-048): every step costs at least one assignment, so a
-      // program longer than the budget can never finish and is refused before any is spent.
-      if (!stepCheckpoint && validatedChunks.length > builderRemaining()) return escalate('plan-chunks', `stepped plan declares ${validatedChunks.length} steps but the builder budget is ${builderRemaining()}`)
+      // One scaled builder budget (ADR-048 Amendment 2); existing attempts remain the sole spend.
+      // Resume recomputes the same allowance from the accepted program and checkpoint attempts.
+      grantSteppedAllowance(validatedChunks.length)
     }
     const selectedChunk = steppedProgram ? null : selectActiveChunk(ctx, validatedChunks)
     if (selectedChunk && selectedChunk.defect) return escalate('plan-chunks', `chunk selection refused (${selectedChunk.defect}): ${selectedChunk.why}` , planEnv.artifacts || [])
@@ -10308,14 +10308,14 @@ function runTask(ctx, io, crash) {
   let mergedStepEnv = null
   let seededStepEnv = null
   let wholeBuildRound = 1
-  if (steppedChunks) for (const [index, step] of steppedChunks.entries()) {
+  if (steppedChunks) stepLoop: for (const [index, step] of steppedChunks.entries()) {
     if (index < reverifyIndex) doneEnvelopes.push(savedEnvelopes[index])
     if (index < reverifyIndex) { done.push(step); stepEnvelopes.push(savedEnvelopes[index]); lastStepEnv = savedEnvelopes[index]; continue }
     let stepRound = 0
     let stepEnv = null
     let priorStepFailure = null
     for (;;) {
-      if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted before ${step.id} completed`)
+      if (stepAllowance({ total: limits.build_rounds + grantedBuildAllowance, spent: builderAttempts, later: steppedChunks.length - index - 1 }) <= 0 && builderRemaining() > 0) { io.log(recordRow({ at: io.now(), event: 'step:degrade', step: step.id, reason: STEP_DEGRADE_REASONS[0], remaining: steppedChunks.slice(index).map(({ id }) => id), budget: builderRemaining() })); steppedRun = false; break stepLoop } if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted before ${step.id} completed`)
       stepRound += 1
       io.log(recordRow({ at: io.now(), event: 'step:start', step: step.id, round: stepRound, files: [...step.files_in_scope], owned: [...step.checks_owned], builder_attempt: builderAttempts + 1 }))
       const stepBrief = art(`step-${step.id}-r${stepRound}.md`)
@@ -10324,7 +10324,7 @@ function runTask(ctx, io, crash) {
       builderAttempts = builderAttempts + 1
       const env = assignAndWait('builder', prepareBuilderAssignment(stepBrief, 'step-build'), 'step-build')
       if (!handledEnvelopeRefusalWhy(env) && (env?.status === 'insufficient' || env?.status === 'blocked')) {
-        stageComplete()
+        stageComplete(); const acceptGate = runGate(`gate:${step.id}:r${stepRound}`, gateCmd); const acceptVerdict = steppedGateVerdict(acceptGate.output, step, done, steppedChunks, validatedExemptLabels, acceptGate.ok === true); if (acceptVerdict.ok) { io.log(recordRow({ at: io.now(), event: 'step:accepted-by-gate', step: step.id, round: stepRound, status: env.status, reason: STEP_ACCEPT_REASONS[0], passed: step.checks_owned })); const acceptedEnv = { ...env, status: 'done' }; S.returns.builder = acceptedEnv; stepEnvelopes.push(acceptedEnv); stepEnv = acceptedEnv; done.push(step); doneEnvelopes.push(acceptedEnv); break }
         priorStepFailure = [`${env.status}: ${env.summary || '(no summary)'}`, ...(parseQuestions(env.details)?.questions || []).map(({ id, question }) => `${id}: ${question}`)].join('\n')
         io.log(recordRow({ at: io.now(), event: 'step:bounce', step: step.id, round: stepRound, status: env.status }))
         if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted after ${env.status} for ${step.id}: ${env.summary || '(no summary)'}`, env.artifacts || [])
@@ -10352,7 +10352,7 @@ function runTask(ctx, io, crash) {
     }
     lastStepEnv = stepEnv
   }
-  if (steppedChunks) {
+  if (steppedRun && steppedChunks) {
     const corrections = new Map()
     for (const env of stepEnvelopes) for (const correction of env.details?.mutation_corrections || []) {
       if (correction && typeof correction.check === 'string') corrections.set(correction.check, correction)
@@ -15902,4 +15902,18 @@ export function suiteRedLocations(output, checkout, runner = 'node') {
   const cargo = suiteRedCargoLocations(output, checkout)
   const files = [...new Set([...nodeFiles, ...cargo.files])]
   return { files, test_names: cargo.test_names, reason: files.length > 0 ? null : SUITE_RUNNER_UNPARSED }
+}
+
+// ADR-048 Amendment 2: a selected stepped program's sole builder budget, scaled so each later step keeps
+// STEP_ALLOWANCE attempts in reserve; the closed enums name the step:accepted-by-gate and step:degrade reasons.
+export const STEP_ALLOWANCE = 2
+export const STEP_ACCEPT_REASONS = Object.freeze(['owned-checks-green'])
+export const STEP_DEGRADE_REASONS = Object.freeze(['step-allowance-exhausted'])
+
+export function steppedBudget({ buildRounds, steps }) {
+  return Math.max(buildRounds, steps * STEP_ALLOWANCE + 1)
+}
+
+export function stepAllowance({ total, spent, later }) {
+  return total - spent - later * STEP_ALLOWANCE
 }

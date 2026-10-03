@@ -3550,6 +3550,17 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
   assert.equal(operationalRow({ channel: 'record' }).channel, 'operational')
 })
 
+test('SA7 step journal contract matches both inventory tuples and emit sites', () => {
+  const wanted = [
+    ['recordRow', "event='step:degrade'", 'at step reason remaining budget'],
+    ['recordRow', "event='step:accepted-by-gate'", 'at step round status reason passed'],
+  ]
+  for (const tuple of wanted) assert.ok(DRIVE_JOURNAL_EXPECTED.some((entry) => JSON.stringify(entry) === JSON.stringify(tuple)))
+  const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const sites = driveJournalSites(text)
+  for (const tuple of wanted) assert.ok(sites.some(({ wrapper, events, keys }) => JSON.stringify([wrapper, events, keys]) === JSON.stringify(tuple)))
+})
+
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)

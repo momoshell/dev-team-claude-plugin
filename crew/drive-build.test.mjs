@@ -12,7 +12,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
@@ -8811,7 +8811,7 @@ const steppedMutations = [
   { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
   { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
 ]
-function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mjs', 'b.mjs'], mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false, resumeGateOutput = null, builder1 = null, builder2 = null, builder3 = null, builder4 = null, seedFiles = {}, reviewer = reviewEnv('pass') } = {}) {
+function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mjs', 'b.mjs'], mutations = steppedMutations, outputs = [], exits = [], empty = false, omitChunks = false, corrected = false, resumeGateOutput = null, builder1 = null, builder2 = null, builder3 = null, builder4 = null, builders = null, seedFiles = {}, reviewer = reviewEnv('pass'), lead = null } = {}) {
   const checks = mutations.map(({ check }) => check)
   const plan = planEnv({ details: {
     ...planEnv().details,
@@ -8851,7 +8851,9 @@ function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mj
       'builder:2': builder2 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
       'builder:3': builder3 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
       'builder:4': builder4 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+      ...(builders ? Object.fromEntries(builders.map((env, index) => [`builder:${index + 1}`, env])) : {}),
       'reviewer:1': reviewer,
+      ...(lead ? { 'lead:1': lead } : {}),
     },
     runs,
     cleanRuns: { 'stepped-gate': { ok: false, output: baseline } },
@@ -8861,7 +8863,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mj
 }
 
 test('C1 stepped-resume acceptance', () => {
-  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2')] })
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2'), steppedRed('A2'), steppedRed('A2'), steppedRed('A2')], builders: Array.from({ length: 5 }, () => buildEnv()) })
   io.indexOid = () => 'tree1234'
   const fileBytes = (text) => `file:-:${createHash('sha256').update(text).digest('hex')}`
   io.fingerprintTree = () => ({ measured: true, entries: {
@@ -8873,7 +8875,7 @@ test('C1 stepped-resume acceptance', () => {
   assert.ok(checkpoint, JSON.stringify({ details: result.details, logs: io.calls.logs.slice(-10) }))
   assert.equal(checkpoint.kind, 'step')
   assert.deepEqual(checkpoint.step.done, ['c1'])
-  assert.equal(checkpoint.step.builder_attempts, 2)
+  assert.equal(checkpoint.step.builder_attempts, 5)
   assert.equal(checkpoint.step.envelopes.length, 1)
   assert.equal(checkpoint.step.envelopes[0].role, 'builder')
   assert.equal(checkpoint.step.brief_file, CTX.briefFile)
@@ -8888,18 +8890,20 @@ function addStepCheckpointWitness(io) {
   } })
 }
 
-function captureOneDoneStep({ outputs = [steppedGreen(), steppedRed('A2')], buildRounds = 2, seedBuilder = null } = {}) {
-  const { io } = steppedAcceptanceIo({ outputs, builder1: seedBuilder })
+function captureOneDoneStep({ outputs = [steppedGreen(), steppedRed('A2'), steppedRed('A2'), steppedRed('A2'), steppedRed('A2')], buildRounds = 2, seedBuilder = null } = {}) {
+  const { io } = steppedAcceptanceIo({ outputs, builder1: seedBuilder, builders: Array.from({ length: 5 }, () => buildEnv()) })
   addStepCheckpointWitness(io)
   const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: buildRounds } }, io)
-  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(result.details.escalation.where, 'build', JSON.stringify(result.details.escalation))
   assert.ok(result.details.resume_checkpoint)
   return { checkpoint: result.details.resume_checkpoint, result, io }
 }
 
 test('C2 stepped-resume acceptance', () => {
   const insufficient = buildEnv({ status: 'insufficient', summary: 'full build paused' })
-  const { io } = steppedAcceptanceIo({ builder1: insufficient, builder2: insufficient })
+  const chunks = [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: ['A1', 'A2'] }]
+  const mutations = [{ check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' }, { check: 'A2', file: 'a.mjs', find: 'alpha', replace: 'ALPHA2' }]
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs'], builders: [insufficient, insufficient, buildEnv()], outputs: [steppedRed('A1'), steppedRed('A1'), steppedRed('A1')] })
   addStepCheckpointWitness(io)
   const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'full', roles: ['planner', 'builder', 'reviewer'], limits: { build_rounds: 2 } }, io)
   assert.equal(result.details.escalation.where, 'build')
@@ -8909,7 +8913,7 @@ test('C2 stepped-resume acceptance', () => {
 // Kills SB1: omit priorFailure from the next same-step brief; the first envelope's text must survive the bounce.
 test('SB1 insufficient envelope bounces with normalized questions', () => {
   const first = buildEnv({ status: 'insufficient', summary: 'b1081: cannot validate yet', details: { questions: [{ id: 'clarify-a1', question: 'Which fixture defines the retry boundary?' }, { id: 'clarify-a1', question: 'Duplicate question must not replay.' }, { id: '', question: 'Malformed question must not replay.' }] } })
-  const { io } = steppedAcceptanceIo({ builder1: first, outputs: [steppedGreen(), steppedGreen()] })
+  const { io } = steppedAcceptanceIo({ builder1: first, outputs: [steppedRed('A1'), steppedGreen(), steppedGreen()] })
   const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
   assert.notEqual(result.details.escalation?.where, 'build')
   const second = io.calls.assign.find(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c1-r2.md'))
@@ -8928,7 +8932,7 @@ test('SB1 insufficient envelope bounces with normalized questions', () => {
 
 // Kills SB2: disable insufficient bouncing; the later-owned A2 failure cannot block c1's owned-green result.
 test('SB2 insufficient retry completes only its owned checks', () => {
-  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'b1083: retry A1' }), outputs: [steppedRed('A2'), steppedGreen()] })
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'b1083: retry A1' }), outputs: [steppedRed('A1'), steppedRed('A2'), steppedGreen()] })
   driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
   const events = io.calls.logs.filter(({ event, step }) => ['step:done', 'step:start'].includes(event) && (step === 'c1' || step === 'c2')).map(({ event, step, round }) => `${event} ${step} r${round}`)
   assert.ok(events.indexOf('step:done c1 r2') >= 0)
@@ -8939,7 +8943,7 @@ test('SB2 insufficient retry completes only its owned checks', () => {
 
 // Kills SB3: disable blocked bouncing; missing envelopes and handled role refusals remain immediate failures.
 test('SB3 blocked envelope bounces but invalid and refused envelopes do not', () => {
-  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'blocked', summary: 'worker paused' }), outputs: [steppedGreen(), steppedGreen()] })
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'blocked', summary: 'worker paused' }), outputs: [steppedRed('A1'), steppedGreen(), steppedGreen()] })
   driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
   assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c1-r2.md')))
   assert.match(io.calls.writes[`${TD}/step-c1-r2.md`], /blocked: worker paused/)
@@ -8957,14 +8961,15 @@ test('SB3 blocked envelope bounces but invalid and refused envelopes do not', ()
 })
 
 // Kills SB4: exhaust after one attempt; the lane-shared allowance permits exactly two assignments.
-test('SB4 insufficient and blocked exhaustion respect the shared builder budget', () => {
+test('SB4 insufficient and blocked exhaustion respect the scaled shared builder budget', () => {
   for (const status of ['insufficient', 'blocked']) {
     const env = buildEnv({ status, summary: 'budget case' })
-    const { io } = steppedAcceptanceIo({ builder1: env, builder2: env })
+    const outputs = [steppedGreen(), ...Array.from({ length: 4 }, () => steppedRed('A2'))]
+    const { io } = steppedAcceptanceIo({ builders: [buildEnv(), env, env, env, env], outputs })
     const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 2 } }, io)
-    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 5)
     assert.equal(result.details.escalation.where, 'build')
-    assert.match(result.details.escalation.why, /c1/)
+    assert.match(result.details.escalation.why, /c2/)
     assert.match(result.details.escalation.why, new RegExp(status))
   }
 })
@@ -8984,7 +8989,7 @@ test('SB5 emitted step brief defines scoped done-means', () => {
 
 // Kills SB7: rename the emitted event; each retry attempt has one journalled status row.
 test('SB7 bounce journal rows and inventory stay aligned', () => {
-  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'first' }), builder2: buildEnv({ status: 'blocked', summary: 'second' }), outputs: [steppedGreen(), steppedGreen()] })
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'first' }), builder2: buildEnv({ status: 'blocked', summary: 'second' }), outputs: [steppedRed('A1'), steppedRed('A1'), steppedGreen()] })
   driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)
   assert.deepEqual(io.calls.logs.filter(({ event }) => event === 'step:bounce').map(({ channel, step, round, status }) => ({ channel, step, round, status })), [
     { channel: 'record', step: 'c1', round: 1, status: 'insufficient' }, { channel: 'record', step: 'c1', round: 2, status: 'blocked' },
@@ -9020,7 +9025,7 @@ test('R2 stepped-resume acceptance', () => {
 
 test('R3 stepped-resume acceptance', () => {
   const { checkpoint, io: sourceIo } = captureOneDoneStep()
-  checkpoint.step.builder_attempts = 1
+  checkpoint.step.builder_attempts = 4
   const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), seedFiles: sourceIo.calls.writes })
   driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 }, resume_checkpoint: checkpoint }, io)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner' || role === 'tech-lead').length, 0)
@@ -9029,13 +9034,14 @@ test('R3 stepped-resume acceptance', () => {
 
 test('B1 stepped-resume acceptance', () => {
   const { checkpoint, io: sourceIo } = captureOneDoneStep()
+  checkpoint.step.builder_attempts = 4
   checkpoint.step.limits.build_rounds = 3
   const { io } = steppedAcceptanceIo({ resumeGateOutput: steppedGreen(), outputs: [steppedRed('A2')], seedFiles: sourceIo.calls.writes })
   addStepCheckpointWitness(io)
   const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 3 }, resume_checkpoint: checkpoint }, io)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
   assert.equal(result.details.escalation.where, 'build')
-  assert.equal(result.details.resume_checkpoint.step.builder_attempts, 3)
+  assert.equal(result.details.resume_checkpoint.step.builder_attempts, 5)
   assert.deepEqual(result.details.resume_checkpoint.step.done, ['c1'])
 })
 
@@ -9062,7 +9068,7 @@ test('a stepped resume refuses an absent or mismatched accepted-plan snapshot', 
 // Kills: capture hashing whatever the snapshot holds at escalation. A seat that rewrites
 // plan.accepted.md after acceptance must leave no checkpoint, so the rewrite can never be resumed.
 test('a step checkpoint is not captured when the accepted-plan snapshot changed after acceptance', () => {
-  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2')] })
+  const { io } = steppedAcceptanceIo({ outputs: [steppedGreen(), steppedRed('A2'), steppedRed('A2'), steppedRed('A2'), steppedRed('A2')], builders: Array.from({ length: 5 }, () => buildEnv()) })
   addStepCheckpointWitness(io)
   const assign = io.assign.bind(io)
   io.assign = (spec) => {
@@ -9075,7 +9081,9 @@ test('a step checkpoint is not captured when the accepted-plan snapshot changed 
 })
 
 test('C3 stepped-resume acceptance', () => {
-  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
+  const oneStep = [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: ['A1', 'A2'] }]
+  const allOwnedMutations = [{ check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' }, { check: 'A2', file: 'a.mjs', find: 'alpha', replace: 'ALPHA2' }]
+  const { io } = steppedAcceptanceIo({ chunks: oneStep, mutations: allOwnedMutations, outputs: [steppedRed('A1'), steppedRed('A1'), steppedRed('A1')] })
   // Kills: dropping the done-step requirement from the capture guard. The witness and head
   // make the checkpoint otherwise capturable, so only that guard keeps it absent.
   addStepCheckpointWitness(io)
@@ -9162,10 +9170,12 @@ test('G3 stepped-executor acceptance', () => {
 })
 
 test('B1 stepped-executor acceptance', () => {
-  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1')] })
+  const chunks = [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: ['A1', 'A2'] }]
+  const mutations = [{ check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' }, { check: 'A2', file: 'a.mjs', find: 'alpha', replace: 'ALPHA2' }]
+  const { io } = steppedAcceptanceIo({ chunks, mutations, outputs: [steppedRed('A1'), steppedRed('A1'), steppedRed('A1')] })
   const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 2 } }, io)
   assert.equal(result.details.escalation.where, 'build')
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 3)
 })
 
 test('J1 stepped-executor acceptance', () => {
@@ -9219,14 +9229,135 @@ test('a stepped gate that exits nonzero with a green summary does not complete i
   assert.deepEqual(steps.slice(0, 4), ['step:start c1 r1', 'step:red c1 r1', 'step:start c1 r2', 'step:done c1 r2'])
 })
 
-// Kills: the plan-acceptance budget check deleted. Two steps cannot fit a one-assignment budget,
-// so the plan is refused before any builder is assigned rather than stranded after step one.
-test('a stepped plan with more steps than the builder budget is refused before any assignment', () => {
-  const { io } = steppedAcceptanceIo()
-  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 1 } }, io)
-  assert.equal(result.details.escalation.where, 'plan-chunks')
-  assert.match(result.details.escalation.why, /declares 2 steps but the builder budget is 1/)
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+// Kills SA6: reintroduce plan-length refusal before an explicitly selected stepped assignment.
+test('SA6 explicit stepped program is boosted beyond its base budget', () => {
+  const { io } = steppedAcceptanceIo({ outputs: [steppedRed('A1'), steppedRed('A1'), steppedRed('A1'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 1 } }, io)
+  assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c1-r1.md')))
+})
+
+test('SA1 scaled budget arithmetic and closed reason enums', () => {
+  assert.equal(STEP_ALLOWANCE, 2)
+  assert.deepEqual([steppedBudget({ buildRounds: 2, steps: 0 }), steppedBudget({ buildRounds: 4, steps: 2 }), steppedBudget({ buildRounds: 3, steps: 5 }), steppedBudget({ buildRounds: 1, steps: 4 }), stepAllowance({ total: 7, spent: 4, later: 0 })], [2, 5, 11, 9, 3])
+  assert.deepEqual(STEP_ACCEPT_REASONS, ['owned-checks-green'])
+  assert.deepEqual(STEP_DEGRADE_REASONS, ['step-allowance-exhausted'])
+  assert.equal(Object.isFrozen(STEP_ACCEPT_REASONS), true)
+  assert.equal(Object.isFrozen(STEP_DEGRADE_REASONS), true)
+})
+
+test('SA2 scaled attempts carry early retries and reach later steps', () => {
+  const insufficient = buildEnv({ status: 'insufficient', summary: 'retry owned red' })
+  const { io } = steppedAcceptanceIo({ builders: [insufficient, insufficient, buildEnv(), insufficient, insufficient], outputs: [steppedRed('A1'), steppedRed('A1'), steppedGreen(), steppedRed('A2'), steppedRed('A2')] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'builder').map(({ briefFile }) => briefFile.split('/').pop()), ['step-c1-r1.md', 'step-c1-r2.md', 'step-c1-r3.md', 'step-c2-r1.md', 'step-c2-r2.md'])
+})
+
+test('SA3 later-step reserve degrades after three early attempts', () => {
+  const chunks = ['c1', 'c2', 'c3'].map((id, i) => ({ id, files_in_scope: ['a.mjs'], checks_owned: [`A${i + 1}`] }))
+  const mutations = chunks.map((chunk, i) => ({ check: `A${i + 1}`, file: 'a.mjs', find: `alpha${i}`, replace: `ALPHA${i}` }))
+  const insufficient = buildEnv({ status: 'insufficient', summary: 'owned check red' })
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs'], builders: [insufficient, insufficient, insufficient], outputs: [steppedRed('A1', 3), steppedRed('A1', 3), steppedRed('A1', 3)] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 5 } }, io)
+  assert.equal(io.calls.logs.filter(({ event, step }) => event === 'step:start' && step === 'c1').length, 3)
+  assert.equal(io.calls.logs.some(({ event, step }) => event === 'step:start' && ['c2', 'c3'].includes(step)), false)
+})
+
+test('SA4 exhaustion degrades instead of escalating an early step', () => {
+  const chunks = ['c1', 'c2', 'c3'].map((id, i) => ({ id, files_in_scope: ['a.mjs'], checks_owned: [`A${i + 1}`] }))
+  const mutations = chunks.map((chunk, i) => ({ check: `A${i + 1}`, file: 'a.mjs', find: `alpha${i}`, replace: `ALPHA${i}` }))
+  const insufficient = buildEnv({ status: 'insufficient', summary: 'owned check red' })
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs'], builders: [insufficient, insufficient, insufficient, buildEnv()], outputs: [steppedRed('A1', 3), steppedRed('A1', 3), steppedRed('A1', 3)] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 5 } }, io)
+  const rows = io.calls.logs.filter(({ event }) => event === 'step:degrade')
+  assert.equal(rows.length, 1)
+  assert.deepEqual([rows[0].step, rows[0].reason, rows[0].remaining, rows[0].budget], ['c1', 'step-allowance-exhausted', ['c1', 'c2', 'c3'], 4])
+  const firstBuilder = io.calls.assign.findIndex(({ role }) => role === 'builder')
+  assert.equal(io.calls.assign.slice(firstBuilder + 3).some(({ briefFile }) => /step-c\d/.test(briefFile)), false)
+  assert.doesNotMatch(io.calls.assign[firstBuilder + 3].briefFile, /step-/)
+})
+
+// Kills RV1-1: remove !steppedRun || from the step checkpoint capture guard after a completed prefix degrades.
+test('SA4 completed prefix degrades without a step checkpoint', () => {
+  const chunks = ['c1', 'c2', 'c3'].map((id, i) => ({ id, files_in_scope: [i === 0 ? 'a.mjs' : 'b.mjs'], checks_owned: [`A${i + 1}`] }))
+  const mutations = chunks.map((chunk, i) => ({ check: `A${i + 1}`, file: i === 0 ? 'a.mjs' : 'b.mjs', find: `alpha${i}`, replace: `ALPHA${i}` }))
+  const insufficient = buildEnv({ status: 'insufficient', summary: 'owned check red' })
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs', 'b.mjs'], builders: [buildEnv(), insufficient, insufficient, insufficient, insufficient, insufficient, insufficient], outputs: [steppedGreen(3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3)], lead: leadEnv('escalate') })
+  addStepCheckpointWitness(io)
+  const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 5, gate_fails_to_triage: 99 } }, io)
+  const rows = io.calls.logs.filter(({ event }) => event === 'step:degrade')
+  assert.deepEqual(rows.map(({ step }) => step), ['c2'])
+  assert.equal(io.calls.files[`${CTX.checkout}/a.mjs`], 'alpha\n')
+  const builders = io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.doesNotMatch(builders[5].briefFile, /step-/)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.notEqual(result.details.resume_checkpoint?.kind, 'step')
+})
+
+test('SA5 degraded full builds spend the shared scaled budget', () => {
+  const chunks = ['c1', 'c2', 'c3'].map((id, i) => ({ id, files_in_scope: ['a.mjs'], checks_owned: [`A${i + 1}`] }))
+  const mutations = chunks.map((chunk, i) => ({ check: `A${i + 1}`, file: 'a.mjs', find: `alpha${i}`, replace: `ALPHA${i}` }))
+  const insufficient = buildEnv({ status: 'insufficient', summary: 'continue' })
+  const fullBuilders = Array.from({ length: 7 }, () => insufficient)
+  const alternating = Array.from({ length: 12 }, (_, i) => steppedRed(i % 2 ? 'A2' : 'A1', 3))
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs'], builders: fullBuilders, outputs: [steppedRed('A1', 3), steppedRed('A1', 3), steppedRed('A1', 3), ...alternating], lead: leadEnv('escalate') })
+  const result = driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 5 } }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 7)
+  assert.equal(result.details.escalation.where, 'build')
+  assert.equal(io.calls.logs.some(({ extra_round_granted }) => extra_round_granted?.where === 'build'), false)
+})
+
+test('SA9 green insufficient and blocked steps accept from the ownership gate', () => {
+  for (const status of ['insufficient', 'blocked']) {
+    const env = buildEnv({ status, summary: 'work landed', details: { ...buildEnv().details, files_changed: ['a.mjs'], questions: [{ id: 'q1', question: 'why?' }] } })
+    const { io } = steppedAcceptanceIo({ builders: [env, env], outputs: [steppedGreen(), steppedGreen()] })
+    driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)
+    const accepted = io.calls.logs.find(({ event }) => event === 'step:accepted-by-gate')
+    assert.equal(accepted?.status, status)
+    assert.equal(accepted?.reason, 'owned-checks-green')
+    assert.deepEqual(accepted?.passed, ['A1'])
+    assert.equal(io.calls.assign.some(({ briefFile }) => briefFile.endsWith('/step-c1-r2.md')), false)
+    assert.ok(io.calls.assign.some(({ briefFile }) => briefFile.endsWith('/step-c2-r1.md')))
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+    assert.equal(io.calls.writes[`${TD}/build-bounce-r1.md`], undefined)
+  }
+})
+
+// Kills Sol RV-pass1: drop S.returns.builder = acceptedEnv and a gate-accepted final step loses the suite checkpoint.
+test('SA10 gate-accepted steps keep the suite resume checkpoint', () => {
+  const checkpointAfterRedColdSuite = (env) => {
+    const { io } = steppedAcceptanceIo({ builders: [env, env], outputs: [steppedGreen(), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')], lead: leadEnv('escalate') })
+    io.runCold = () => ({ ok: false, output: 'not ok 1 - a.test.mjs\n# fail 1\n', path: '/zz/cold', kept: null })
+    addStepCheckpointWitness(io)
+    const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 4 } }, io)
+    return { result, io }
+  }
+  const control = checkpointAfterRedColdSuite(buildEnv({ details: { ...buildEnv().details, files_changed: ['a.mjs'] } }))
+  assert.equal(control.result.details.resume_checkpoint?.kind, 'suite', JSON.stringify(control.result.details.escalation))
+  const accepted = checkpointAfterRedColdSuite(buildEnv({ status: 'insufficient', summary: 'work landed', details: { ...buildEnv().details, files_changed: ['a.mjs'] } }))
+  assert.ok(accepted.io.calls.logs.some(({ event }) => event === 'step:accepted-by-gate'))
+  assert.equal(accepted.result.details.escalation?.where, control.result.details.escalation?.where)
+  assert.equal(accepted.result.details.resume_checkpoint?.kind, 'suite')
+})
+
+test('SA10 later-owned red is deferred when accepting an insufficient step', () => {
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'later work pending' }), outputs: [steppedRed('A2'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)
+  assert.ok(io.calls.logs.some(({ event }) => event === 'step:accepted-by-gate'))
+  assert.equal(io.calls.assign.some(({ briefFile }) => briefFile.endsWith('/step-c1-r2.md')), false)
+})
+
+test('SA11 owned red does not accept an insufficient step', () => {
+  const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'owned red' }), outputs: [steppedRed('A1'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)
+  assert.equal(io.calls.logs.some(({ event }) => event === 'step:accepted-by-gate'), false)
+  assert.ok(io.calls.assign.some(({ briefFile }) => briefFile.endsWith('/step-c1-r2.md')))
+})
+
+test('SA12 prior-step regression blocks current-step acceptance', () => {
+  const { io } = steppedAcceptanceIo({ builder2: buildEnv({ status: 'insufficient', summary: 'A1 regressed' }), outputs: [steppedGreen(), steppedRed('A1'), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 5 } }, io)
+  assert.equal(io.calls.logs.filter(({ event }) => event === 'step:accepted-by-gate').length, 0)
+  assert.ok(io.calls.assign.some(({ briefFile }) => briefFile.endsWith('/step-c2-r2.md')))
 })
 
 const EF_BUILD_PLAN = '# accepted build plan π\n'

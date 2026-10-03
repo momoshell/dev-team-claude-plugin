@@ -204,3 +204,26 @@ The supplied motivating context is 149 multi-chunk envelopes / 396 planner envel
 Measurement: `ledger.mjs context` (builder first and peak context per assignment, denominators beside rates, `thin` below 12) is the instrument, but today it groups by role and model only and classifies executor from `effective_execution` (`scripts/factory/ledger.mjs:5170`), which stays `full` for a default-stepped lane; the by-executor split is therefore `unmeasured — reason: the ledger does not ingest the `execution-default` journal row`, and the reversal trigger below cannot fire until a follow-on lane ingests that row (`executor`, `reason`) into the ledger.
 
 This amendment supersedes the Measurement section and decision 5 above. Once that follow-on makes the split measurable, at 12 stepped lanes reverse if builder peak context is not lower OR escalations/lane rise. It also supersedes the Out of scope sentence's “Making stepped the default.” No savings are demonstrated by this amendment.
+
+## Amendment 2 (2026-10-03, operator decision)
+
+This amendment supersedes decision 4's uncapped shared-budget rule, the Out of scope exclusion of a per-step builder budget, and Amendment 1's requirement that a selected stepped program fit the existing build-round budget. The default-selection rule that a program longer than the budget remains single-brief is unchanged.
+
+A selected stepped program receives one scaled allowance: `STEP_ALLOWANCE = 2` and `max(buildRounds, steps * 2 + 1)`. The allowance is part of the lane's sole builder budget, not a per-step budget or persisted field. Two attempts are held back for every later step; the shared reserve is recomputed from the accepted program and checkpoint's existing attempt count, and early completion frees unused reserve. Explicit full execution and chunks-as-lanes retain their existing budget.
+
+An `insufficient` or `blocked` step envelope is accepted as done only when the shared gate adjudicator proves that step's owned checks green, with event `step:accepted-by-gate`; later-owned reds remain deferred and the existing prior-step regression guard still applies. Exhaustion of an early step's fair allowance records `step:degrade` and enters the existing full-build loop using the remaining shared allowance. Final-step exhaustion still escalates as before. Checkpoint shape and capture rules are unchanged; only completed, non-degraded step programs can seed a step checkpoint.
+
+The supplied eight-lane evidence is attributed operator evidence, not measured by this code change. Source: every `~/.crew/dt-*/*/journal.jsonl` with an `execution-default` row whose `executor` is `stepped`, archives included and recovery copies excluded (8 lanes; the 3 recovery copies would make 11); attempts are `step:start` rows and budget is the `limits` row's `build_rounds`.
+
+| lane | driver | budget | steps | attempts per step | end |
+|---|---|---|---|---|---|
+| b1081 | before PR 1697 | 4 | 2 | server x1 | escalate:build, first insufficient |
+| b1083 | before PR 1697 | 4 | 3 | dispatch x1 | escalate:build, first insufficient |
+| t555a | before PR 1697 | 8 | 5 | types x1, floor x1, ledger x1, splice x1 | escalate:build, first insufficient (4 of 8 spent) |
+| b1099 | after | 4 | 2 | S1 x3, S2 x1 | escalate:build, budget exhausted on S2 |
+| t526 | after | 5 | 3 | route x4, answers x1 | escalate:build, budget exhausted; `decision` never started |
+| t519 | after | 8 | 5 | manifests x1, flow-fields x2, config-check x1, limits-plan x4 | escalate:build, budget exhausted; `liveness` never started |
+| t525 | after | 4 | 2 | owner x1, snapshot x3 | escalate:build, budget exhausted |
+| t517 | after | 6 | 2 | handshake x2, call x2 | every step done; escalate:harden (not a step failure) |
+
+0/8 lanes were done. The completed-step histogram was 6+3+1+2=12 and two-attempt coverage was 9/12. The four post-PR-1697 budget deaths all had budget left for later steps that never ran. Counterfactually, 3 of the 12 completed steps (b1099 S1, t526 route, t517 handshake) would have been accepted at their first attempt; together that is 6/15 insufficient bounces after PR 1697 and 6 attempts saved. A fourth case, t519 limits-plan r3, rests only on the builder's own claim. The supplied measurement notes that untracked files are not hashed and assumes a deterministic gate. These are not measured improvements from this change.

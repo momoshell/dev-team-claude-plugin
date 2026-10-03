@@ -1591,3 +1591,13 @@ test('SD14 ADR-048 records the operator amendment', () => {
   assert.ok(adr.split('\n').includes('## Amendment 1 (2026-10-02, operator decision)'))
   assert.ok(adr.includes('the by-executor split is therefore `unmeasured — reason: the ledger does not ingest the `execution-default` journal row`'))
 })
+
+// MUTATION SA8 removes the exact new Amendment 2 heading.
+test('SA8 ADR-048 Amendment 2 pins the scaled budget and attributed denominators', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-048-ordered-build-steps.md', import.meta.url), 'utf8')
+  const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')
+  assert.ok(adr.split('\n').includes('## Amendment 2 (2026-10-03, operator decision)'))
+  for (const text of ['STEP_ALLOWANCE = 2', 'max(buildRounds, steps * 2 + 1)', 'step:accepted-by-gate', 'step:degrade', 'supersedes decision 4', '0/8', '6+3+1+2=12', '9/12', '6/15', 'untracked files are not hashed', 'deterministic gate']) assert.ok(adr.includes(text), text)
+  assert.match(index, /^\| 048 \|[^\n]*amended 2026-10-03/m)
+  assert.match(index, /^- \*\*ADR-048[^\n]*amended 2026-10-03/m)
+})

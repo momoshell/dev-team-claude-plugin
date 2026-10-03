@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
+import { acceptanceIds, parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { slotStore } from '../../crew/reclaim.mjs'
@@ -3366,6 +3366,37 @@ function issueBodyFor({ requestPath, lane, checkout, outDir, d }) {
   return path
 }
 
+// lean: duplicates the acceptanceIds section/fence scanner in crew/drive.mjs; export a shared scanner when drive.mjs line citations can move
+function declaredAcceptanceIds(briefText) {
+  const body = []
+  let declarationFence = null
+  let inside = false
+  for (const line of String(briefText ?? '').split('\n')) {
+    const mark = /^ {0,3}(?<mark>`{3,}|~{3,})/.exec(line)?.groups.mark
+    if (declarationFence) {
+      if (mark && mark[0] === declarationFence[0] && mark.length >= declarationFence.length && line.trim() === mark) declarationFence = null
+      if (declarationFence) { continue }
+      continue
+    }
+    if (mark) { declarationFence = mark; continue }
+    if (/^#{1,2}\s+/.test(line)) {
+      if (inside) break
+      inside = /^##\s+Acceptance\s*$/.test(line)
+      continue
+    }
+    if (inside) body.push(line)
+  }
+  if (!inside && body.length === 0) return null
+  const text = body.join('\n')
+  for (const match of text.matchAll(/GATE LABELS ARE EXACTLY/g)) {
+    const rest = text.slice(match.index + match[0].length)
+    const declaration = rest.split(/—|\(|\.(?=\s|$)|;|\n/, 1)[0]
+    const tokens = declaration.split(/,|\s+/).filter((t) => t && t !== 'and')
+    if (tokens.length > 0 && tokens.every((id) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))) return [...new Set(tokens)]
+  }
+  return null
+}
+
 export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, packOmission = null, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
@@ -3432,6 +3463,10 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
   try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
     refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
+  const parsed = acceptanceIds(brief), declared = declaredAcceptanceIds(brief)
+  const parsedText = (parsed ?? []).join(',') || 'none', declaredText = (declared ?? []).join(',') || 'none'
+  d.log(`dispatch-batch: acceptance-ids lane=${name} parsed=${parsedText} declared=${declaredText}`)
+  if (declared !== null && (parsed === null || parsed.length !== declared.length || declared.some((id) => !parsed.includes(id)))) refuse(`acceptance ids disagree for lane ${name}: parsed=${parsedText} declared=${declaredText}`, COMPILE_REFUSED)
   const measured = briefMeasure(brief)
   const proposal = proposalFromBrief(brief)
   return { lane: name, brief: briefPath, registerPath: currentRegister, proposal, staffing: proposal.staffing, intent: intentFromBrief(brief), bytes: measured.bytes, topSection: measured.topSection, ...(compileWarnings.length > 0 ? { warnings: compileWarnings } : {}) }

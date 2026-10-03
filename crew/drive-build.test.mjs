@@ -15,7 +15,7 @@ import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, planStepSection, stepBriefText, steppedExecutor } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT } from '../test/helpers.mjs'
+import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll } from '../test/helpers.mjs'
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
 const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
@@ -7869,6 +7869,59 @@ test('acceptance ids are check labels at the head of an item, from the Acceptanc
   assert.deepEqual(acceptanceIds('# T\n\n## Acceptance\n(A1) first, as described in (B1) above\n'), ['A1'])
   // A fence that contains its own heading does not end the section early either.
   assert.deepEqual(acceptanceIds(['# T', '', '## Acceptance', '```', '(F9) an example', '```', '(G1) a real item'].join('\n')), ['G1'])
+})
+
+// MUTATION AI1: admitting same-line lowercase enumerator continuations leaks a/b from S1.
+test('AI1 acceptance ids keep lowercase enumerator continuations out of LABEL heads', () => {
+  const S1 = '## Acceptance\n(LR5) unit cases. (a) one fixture. (b) another.\n'
+  assert.deepEqual(acceptanceIds(S1), ['LR5'])
+})
+
+// MUTATION AI2: admitting continuations with no head of their class leaks a/b from S2.
+test('AI2 acceptance ids require a matching head class', () => {
+  const S2 = '## Acceptance\n- LR5 (crew/x.test.mjs): unit cases. (a) one fixture. (b) another.\n'
+  assert.equal(acceptanceIds(S2), null)
+})
+
+// MUTATION AI3: admitting multi-letter lowercase roman continuations leaks ii from S3.
+test('AI3 acceptance ids classify multi-letter lowercase roman enumerators', () => {
+  const S3 = '## Acceptance\n(L1) first; (i) one. (ii) two\n'
+  assert.deepEqual(acceptanceIds(S3), ['L1'])
+})
+
+test('acceptance continuation shape grammar preserves cross-line heads and matching classes', () => {
+  assert.deepEqual(acceptanceIds('## Acceptance\n(A1) first;\n(a) second\n'), ['A1', 'a'])
+  assert.deepEqual(acceptanceIds('## Acceptance\n(A1) first; (RV1-2) second. (B1c) third'), ['A1', 'RV1-2', 'B1c'])
+  assert.deepEqual(acceptanceIds('## Acceptance\n(1) first; (2) second. (3) third'), ['1', '2', '3'])
+  assert.deepEqual(acceptanceIds('## Acceptance\n(i) first; (v) second. (x) third'), ['i', 'v', 'x'])
+  assert.deepEqual(acceptanceIds('## Acceptance\n(A.B_C-2) first; (Z.2) second'), ['A.B_C-2', 'Z.2'])
+  assert.deepEqual(acceptanceIds('## Acceptance\n(L1) first; (a) admitted by later enumerator head;\n(b) head; (c) kept'), ['L1', 'a', 'b', 'c'])
+  // MUTATION: drop |\d+ from shape to admit numeric sub-items under LABEL heads.
+  assert.deepEqual(acceptanceIds('## Acceptance\n(A1) first; (1) sub-item'), ['A1'])
+  // MUTATION: drop |\d+ from shape to reject numeric heads before LABEL mentions.
+  assert.deepEqual(acceptanceIds('## Acceptance\n(1) head; (A1) mention'), ['1'])
+})
+
+test('acceptance item shape grammar agrees across generated serialized inputs', () => {
+  const enumerators = ['a', 'A', 'viix', '12']
+  const labels = ['A.B_C-2', 'B-2', 'C_3', 'Z9']
+  forAll((random) => {
+    const indentStart = Math.floor(random() * 4), bulletStart = Math.floor(random() * 4)
+    const separators = [random() < 0.5 ? ';' : '.', random() < 0.5 ? ';' : '.']
+    const bullets = ['', '- ', '+ ', '* ']
+    const head = (id, index) => `${' '.repeat((indentStart + index) % 4)}${bullets[(bulletStart + index) % 4]}(${id})`
+    const cases = [
+      ...enumerators.map((id, index) => ({ text: `## Acceptance\n${head('L1', index)} head${separators[index % 2]} (${id}) continuation`, expected: ['L1'] })),
+      ...labels.map((id, index) => ({ text: `## Acceptance\n${head('1', index)} head${separators[index % 2]} (${id}) continuation`, expected: ['1'] })),
+      { text: `## Acceptance\n${head('1', 0)} enum head\n${head('L1', 1)} label head`, expected: ['1', 'L1'] },
+      { text: `## Acceptance\n${head('L1', 2)} label head${separators[0]}\n(${enumerators[0]}) newline head`, expected: ['L1', enumerators[0]] },
+      { text: `## Acceptance\n${head('1', 3)} duplicate head${separators[1]} (1) duplicate`, expected: ['1'] },
+      { text: '## Acceptance\n- LR5 prose with no parenthesized head', expected: null },
+    ]
+    return { cases }
+  }, ({ cases }) => {
+    for (const { text, expected } of cases) assert.deepEqual(acceptanceIds(text), expected)
+  }, { runs: 40, seed: 1673 })
 })
 
 // Pass 2 of the #1407 review. A heading is structure only OUTSIDE a fence, and a fence

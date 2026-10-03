@@ -337,7 +337,7 @@ export function piRpcSeatParts(spec = {}) {
       ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
     ],
     env: {
-      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV && key !== 'CREW_FFF')),
+      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV)),
       ...piFffEnv(grants),
       ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),

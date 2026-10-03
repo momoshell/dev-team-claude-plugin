@@ -4,10 +4,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
+  B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, ACCEPT_FINDINGS_SOFT, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LATE_REPAIR_CAUSES, lateRepairDecision, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256 } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefect } from './drive.mjs'
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
@@ -1229,35 +1229,92 @@ test('D1 suite red with no safe admission escalates exact trailing output', () =
   assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
 })
 
-test('C1 repeated suite red uses remaining build rounds then exhausts the global budget', () => {
+// Mutation: replace the reserve guard with the old exhausted-budget guard; builder 4 vanishes.
+test('LR1 exhausted accepted suite red dispatches one late-repair builder', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: `FAIL ${CTX.checkout}/one.test.mjs:1\nred` },
+      'suite-cmd:2': { ok: false, output: `FAIL ${CTX.checkout}/two.test.mjs:1\nred` },
+      'suite-cmd:3': { ok: false, output: `FAIL ${CTX.checkout}/three.test.mjs:1\nred` },
+      'suite-cmd:4': { ok: true, output: 'green' },
+    },
+    changed: [['a.mjs', 'a.test.mjs'], ['one.test.mjs'], ['two.test.mjs'], ['three.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.equal(io.calls.assign.find(({ role, n }) => role === 'builder' && n === 4)?.note, 'suite-red-fix')
+  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
+  ])
+})
+
+test('LR3 lead acceptance without review pass refuses the suite-red reserve', () => {
+  const io = exhaustionAcceptIo({ residuals: [], refuted: [{ id: 'RV1-2', evidence: 'bounded cosmetic residual is safe to defer' }] }, {
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: false, output: `FAIL ${CTX.checkout}/a.test.mjs:1\\nred` },
+    },
+  }, ACCEPT_FINDINGS_SOFT)
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'suite-red', outcome: 'refused', reason: 'not-accepted', builder_attempts: 1 },
+  ])
+})
+
+test('LR3 late repair decisions are closed, strict, and defer to ordinary budget', () => {
+  assert.equal(Object.isFrozen(LATE_REPAIR_CAUSES), true)
+  assert.deepEqual(LATE_REPAIR_CAUSES, ['suite-red', 'frozen-inventory', 'rebase-conflict'])
+  assert.deepEqual(lateRepairDecision({ accepted: false, spent: true, remaining: 1 }), { grant: false, reason: null })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: 0 }), { grant: true, reason: null })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: true, remaining: 0 }), { grant: false, reason: 'spent' })
+  assert.deepEqual(lateRepairDecision({ accepted: false, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
+  assert.deepEqual(lateRepairDecision({ accepted: 1, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: 0, remaining: 0 }), { grant: false, reason: 'spent' })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: -1 }), { grant: true, reason: null })
+})
+
+// Mutation: restore the old remaining-budget guard; the fourth dispatch must disappear.
+test('LR2 repeated suite red uses remaining build rounds then exhausts the global budget', () => {
   const first = `FAIL ${CTX.checkout}/new.test.mjs:1\nfirst`
   const second = `FAIL ${CTX.checkout}/other.test.mjs:2\nsecond`
   const third = `FAIL ${CTX.checkout}/last.test.mjs:3\nthird`
+  const fourth = `FAIL ${CTX.checkout}/final.test.mjs:4\nfourth`
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'builder:1': buildEnv(),
       'builder:2': buildEnv({ details: { files_changed: ['new.test.mjs'], commit_message: 'repair new' } }),
       'builder:3': buildEnv({ details: { files_changed: ['other.test.mjs'], commit_message: 'repair other' } }),
-      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'),
+      'builder:4': buildEnv({ details: { files_changed: ['last.test.mjs'], commit_message: 'repair last' } }),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
     },
     runs: {
       'lane-cmd': { ok: true, output: '' },
-      'suite-cmd:1': { ok: false, output: first }, 'suite-cmd:2': { ok: false, output: second }, 'suite-cmd:3': { ok: false, output: third },
+      'suite-cmd:1': { ok: false, output: first }, 'suite-cmd:2': { ok: false, output: second }, 'suite-cmd:3': { ok: false, output: third }, 'suite-cmd:4': { ok: false, output: fourth },
     },
-    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs'], ['other.test.mjs']],
+    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs']],
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'suite')
-  assert.match(res.details.escalation.why, /global builder budget is exhausted after 3 attempt/)
+  assert.match(res.details.escalation.why, /global builder budget is exhausted after 4 attempt/)
   assert.deepEqual(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'suite-red').map((entry) => entry.scope_admission.files), [
-    ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs'],
+    ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs'], ['final.test.mjs'],
   ])
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 3)
-  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 4), false)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.late_repair).map((entry) => entry.late_repair), [
+    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
+    { cause: 'suite-red', outcome: 'refused', reason: 'spent', builder_attempts: 4 },
+  ])
 })
-
-
 
 test('C1 census repair coupling is one declared existing-file unit', () => {
   assert.equal(Object.isFrozen(RUNTIME_CENSUS_CARRIER_FILES), true)
@@ -4786,4 +4843,25 @@ test('L3: leadless tiers do not wire a permission callback and reject_once', () 
 test('L7: a reviewer requesting a second opinion is excluded from the perspective assignment', () => {
   const h = drivePermissionHarness({ roles: ['lead', 'planner', 'builder', 'reviewer'], answer: SECOND_OPINION, from: 'reviewer', askingRole: 'reviewer' })
   assert.equal(h.selected, 'r'); assert.equal(h.reviewerDuringPermission, 0)
+})
+
+// RV1-1 guard: the LR tests are top-level tests, each registered exactly once, so
+// `--test-name-pattern '^LR'` selects every one of them. A test() call nested inside
+// another test's body registers as a subtest, once per enclosing iteration, and a
+// name filter that does not match the parent never reaches it.
+// Mutation: nest one LR test inside another test's body; its top-level ok disappears.
+test('RV1-1 every LR test registers exactly once as a top-level test', () => {
+  const names = [
+    'LR1 exhausted accepted suite red dispatches one late-repair builder',
+    'LR2 repeated suite red uses remaining build rounds then exhausts the global budget',
+    'LR3 late repair decisions are closed, strict, and defer to ordinary budget',
+    'LR3 lead acceptance without review pass refuses the suite-red reserve',
+  ]
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern', '^LR', 'crew/drive.test.mjs'], { cwd: REPO_ROOT, encoding: 'utf8', env })
+  const oks = [...String(run.stdout).matchAll(/^( *)(?:not )?ok \d+ - (.*)$/gm)].map(([, indent, name]) => ({ indent, name }))
+  assert.equal(run.status, 0, String(run.stdout).slice(-2000))
+  assert.deepEqual(oks.filter(({ indent }) => indent === '').map(({ name }) => name).sort(), names)
+  for (const name of names) assert.equal(oks.filter((ok) => ok.name === name).length, 1, name)
 })

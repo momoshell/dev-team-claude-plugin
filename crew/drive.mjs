@@ -4428,6 +4428,18 @@ export function eofAppendResolution(diff3Text, stage2Bytes, stage3Bytes) {
   return { ok: true, merged: before + ours + theirs }
 }
 
+// An EOF append is written back as the concatenation of strings the driver read through
+// io.run/io.readFile, which decode as lossy UTF-8: an invalid byte sequence (a Latin-1
+// file, say) is already U+FFFD by the time it reaches here, so writing the merge would
+// commit corrupted bytes. A fatal TextDecoder cannot see that loss after the fact; the
+// replacement character it leaves can. A file that legitimately contains U+FFFD is
+// refused too, which only costs it the ordinary builder route.
+export const EOF_APPEND_ENCODING_REFUSAL = 'not-strict-utf8'
+export function eofAppendStrictUtf8(text) {
+  // MUTATION: return true and a lossily decoded Latin-1 merge is written and staged.
+  return typeof text === 'string' && !text.includes('\uFFFD') && text.isWellFormed()
+}
+
 export function journalRowsSinceRunStart(text) {
   const rows = []
   for (const line of String(text || '').split('\n')) {
@@ -11923,6 +11935,7 @@ function runTask(ctx, io, crash) {
         }
         const eofAppendRecovery = () => {
           if (classifiedMechanical || !evidenceMeasured) return { ok: false, why: classifiedMechanical ? 'mechanical anchor recovery route was unavailable' : 'conflict is not mechanically anchor-resolvable' }
+          const eofJournal = (fields) => { try { io.log(recordRow({ at: io.now(), rebase_eof_append: { paths: [...conflicted], ...fields } })) } catch {} }
           const merged = []
           for (const path of conflicted) {
             const quoted = shellArg(path)
@@ -11933,6 +11946,10 @@ function runTask(ctx, io, crash) {
             try { text = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `eof-append read failed for ${path}: ${err?.message ?? String(err)}` } }
             const resolved = eofAppendResolution(text, stageBytes.get(`2:${path}`), stageBytes.get(`3:${path}`))
             if (!resolved.ok) return { ok: false, why: `eof-append refused for ${path}: ${resolved.reason}` }
+            if (![text, stageBytes.get(`2:${path}`), stageBytes.get(`3:${path}`)].every(eofAppendStrictUtf8)) {
+              eofJournal({ outcome: 'refused', reason: EOF_APPEND_ENCODING_REFUSAL, path })
+              return { ok: false, why: `eof-append refused for ${path}: ${EOF_APPEND_ENCODING_REFUSAL}` }
+            }
             merged.push([path, resolved.merged])
           }
           for (const [path, bytes] of merged) {
@@ -11952,7 +11969,7 @@ function runTask(ctx, io, crash) {
             try { continued = io.run('git -c core.editor=true rebase --continue') } catch (err) { continued = { ok: false, output: err?.message ?? String(err) } }
           }
           const ok = added?.ok === true && continued?.ok === true
-          try { io.log(recordRow({ at: io.now(), rebase_eof_append: { paths: [...conflicted], outcome: ok ? 'resolved' : 'failed' } })) } catch {}
+          eofJournal({ outcome: ok ? 'resolved' : 'failed' })
           if (!ok) return { ok: false, why: added?.ok !== true ? `eof-append add failed${added?.output ? `: ${String(added.output).slice(-1000)}` : ''}` : `eof-append continue failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}` }
           return { ok: true }
         }

@@ -6480,17 +6480,23 @@ test('LR3 frozen-inventory repair spends one reserve across causes and tolerates
   assert.equal(fixture.io.calls.logs.filter((row) => row.frozen_inventory_repair).length, 1)
 })
 
+// Mutation: latch the reserve per cause (a frozen-inventory request ignores a suite-red
+// spend); the frozen-inventory request is then granted and a third builder is dispatched.
 test('LR3 frozen-inventory reserve refuses after suite-red already spent it', () => {
   const fixture = frozenCycleIo({
-    suite: [frozenRed(), frozenRed()],
-    builder2: (files, path, current) => { files[path] = current },
+    suite: [{ ok: false, output: `FAIL ${CTX.checkout}/one.test.mjs:1\nred` }, frozenRed(), frozenGreen()],
+    builder3: (files, path, current) => { files[path] = current },
+    changed: [['a.mjs'], ['a.mjs'], ['one.test.mjs'], ['one.test.mjs'], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE], [FROZEN_INVENTORY_FILE]],
   })
   fixture.ctx.limits = { build_rounds: 1 }
   const result = driveTask(fixture.ctx, fixture.io)
   assert.equal(result.status, 'escalation')
-  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /frozen inventory repair was recorded but the global builder budget is exhausted after 2 attempt/)
+  assert.deepEqual(fixture.io.calls.assign.filter(({ role }) => role === 'builder').map(({ n, note }) => [n, note ?? null]), [[1, 'build'], [2, 'suite-red-fix']])
   assert.deepEqual(fixture.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
-    { cause: 'frozen-inventory', outcome: 'granted', reason: null, builder_attempts: 1 },
+    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 1 },
+    { cause: 'frozen-inventory', outcome: 'refused', reason: 'spent', builder_attempts: 2 },
   ])
 })
 

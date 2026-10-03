@@ -1229,6 +1229,93 @@ test('D1 suite red with no safe admission escalates exact trailing output', () =
   assert.equal(io.calls.logs.filter((entry) => entry.scope_admission).length, 0)
 })
 
+// Mutation: replace the reserve guard with the old exhausted-budget guard; builder 4 vanishes.
+test('LR1 exhausted accepted suite red dispatches one late-repair builder', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: `FAIL ${CTX.checkout}/one.test.mjs:1\nred` },
+      'suite-cmd:2': { ok: false, output: `FAIL ${CTX.checkout}/two.test.mjs:1\nred` },
+      'suite-cmd:3': { ok: false, output: `FAIL ${CTX.checkout}/three.test.mjs:1\nred` },
+      'suite-cmd:4': { ok: true, output: 'green' },
+    },
+    changed: [['a.mjs', 'a.test.mjs'], ['one.test.mjs'], ['two.test.mjs'], ['three.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.equal(io.calls.assign.find(({ role, n }) => role === 'builder' && n === 4)?.note, 'suite-red-fix')
+  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
+  ])
+})
+
+test('LR3 lead acceptance without review pass refuses the suite-red reserve', () => {
+  const io = exhaustionAcceptIo({ residuals: [], refuted: [{ id: 'RV1-2', evidence: 'bounded cosmetic residual is safe to defer' }] }, {
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': { ok: false, output: `FAIL ${CTX.checkout}/a.test.mjs:1\\nred` },
+    },
+  }, ACCEPT_FINDINGS_SOFT)
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'suite-red', outcome: 'refused', reason: 'not-accepted', builder_attempts: 1 },
+  ])
+})
+
+test('LR3 late repair decisions are closed, strict, and defer to ordinary budget', () => {
+  assert.equal(Object.isFrozen(LATE_REPAIR_CAUSES), true)
+  assert.deepEqual(LATE_REPAIR_CAUSES, ['suite-red', 'frozen-inventory', 'rebase-conflict'])
+  assert.deepEqual(lateRepairDecision({ accepted: false, spent: true, remaining: 1 }), { grant: false, reason: null })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: 0 }), { grant: true, reason: null })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: true, remaining: 0 }), { grant: false, reason: 'spent' })
+  assert.deepEqual(lateRepairDecision({ accepted: false, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
+  assert.deepEqual(lateRepairDecision({ accepted: 1, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: 0, remaining: 0 }), { grant: false, reason: 'spent' })
+  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: -1 }), { grant: true, reason: null })
+})
+
+// Mutation: restore the old remaining-budget guard; the fourth dispatch must disappear.
+test('LR2 repeated suite red uses remaining build rounds then exhausts the global budget', () => {
+  const first = `FAIL ${CTX.checkout}/new.test.mjs:1\nfirst`
+  const second = `FAIL ${CTX.checkout}/other.test.mjs:2\nsecond`
+  const third = `FAIL ${CTX.checkout}/last.test.mjs:3\nthird`
+  const fourth = `FAIL ${CTX.checkout}/final.test.mjs:4\nfourth`
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'builder:2': buildEnv({ details: { files_changed: ['new.test.mjs'], commit_message: 'repair new' } }),
+      'builder:3': buildEnv({ details: { files_changed: ['other.test.mjs'], commit_message: 'repair other' } }),
+      'builder:4': buildEnv({ details: { files_changed: ['last.test.mjs'], commit_message: 'repair last' } }),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd:1': { ok: false, output: first }, 'suite-cmd:2': { ok: false, output: second }, 'suite-cmd:3': { ok: false, output: third }, 'suite-cmd:4': { ok: false, output: fourth },
+    },
+    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs']],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'suite')
+  assert.match(res.details.escalation.why, /global builder budget is exhausted after 4 attempt/)
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'suite-red').map((entry) => entry.scope_admission.files), [
+    ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs'], ['final.test.mjs'],
+  ])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.late_repair).map((entry) => entry.late_repair), [
+    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
+    { cause: 'suite-red', outcome: 'refused', reason: 'spent', builder_attempts: 4 },
+  ])
+})
+
 test('C1 census repair coupling is one declared existing-file unit', () => {
   assert.equal(Object.isFrozen(RUNTIME_CENSUS_CARRIER_FILES), true)
   assert.equal(Object.isFrozen(DISPATCH_CENSUS_CARRIER_FILES), true)
@@ -1454,94 +1541,6 @@ test('the wrapped gate command sees the same shell contract as the bare runner',
   const probe = 'echo "0=$0 #=$# 1=${1-UNSET}"'
   const bare = spawnSync('/bin/sh', ['-c', probe], { encoding: 'utf8' })
   for (const shell of ['/bin/bash', '/path/that/does/not/exist']) {
-
-// Mutation: replace the reserve guard with the old exhausted-budget guard; builder 4 vanishes.
-test('LR1 exhausted accepted suite red dispatches one late-repair builder', () => {
-  const io = fakeIo({
-    envelopes: {
-      'planner:1': planEnv(),
-      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
-      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
-    },
-    runs: {
-      'lane-cmd': { ok: true, output: '' },
-      'suite-cmd:1': { ok: false, output: `FAIL ${CTX.checkout}/one.test.mjs:1\nred` },
-      'suite-cmd:2': { ok: false, output: `FAIL ${CTX.checkout}/two.test.mjs:1\nred` },
-      'suite-cmd:3': { ok: false, output: `FAIL ${CTX.checkout}/three.test.mjs:1\nred` },
-      'suite-cmd:4': { ok: true, output: 'green' },
-    },
-    changed: [['a.mjs', 'a.test.mjs'], ['one.test.mjs'], ['two.test.mjs'], ['three.test.mjs']],
-  })
-  const result = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
-  assert.equal(result.status, 'done')
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
-  assert.equal(io.calls.assign.find(({ role, n }) => role === 'builder' && n === 4)?.note, 'suite-red-fix')
-  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
-    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
-  ])
-})
-
-test('LR3 lead acceptance without review pass refuses the suite-red reserve', () => {
-  const io = exhaustionAcceptIo({ residuals: [], refuted: [{ id: 'RV1-2', evidence: 'bounded cosmetic residual is safe to defer' }] }, {
-    runs: {
-      'lane-cmd': { ok: true, output: '' },
-      'suite-cmd': { ok: false, output: `FAIL ${CTX.checkout}/a.test.mjs:1\\nred` },
-    },
-  }, ACCEPT_FINDINGS_SOFT)
-  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
-  assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.where, 'suite')
-  assert.deepEqual(io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
-    { cause: 'suite-red', outcome: 'refused', reason: 'not-accepted', builder_attempts: 1 },
-  ])
-})
-
-test('LR3 late repair decisions are closed, strict, and defer to ordinary budget', () => {
-  assert.equal(Object.isFrozen(LATE_REPAIR_CAUSES), true)
-  assert.deepEqual(LATE_REPAIR_CAUSES, ['suite-red', 'frozen-inventory', 'rebase-conflict'])
-  assert.deepEqual(lateRepairDecision({ accepted: false, spent: true, remaining: 1 }), { grant: false, reason: null })
-  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: 0 }), { grant: true, reason: null })
-  assert.deepEqual(lateRepairDecision({ accepted: true, spent: true, remaining: 0 }), { grant: false, reason: 'spent' })
-  assert.deepEqual(lateRepairDecision({ accepted: false, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
-  assert.deepEqual(lateRepairDecision({ accepted: 1, spent: false, remaining: 0 }), { grant: false, reason: 'not-accepted' })
-  assert.deepEqual(lateRepairDecision({ accepted: true, spent: 0, remaining: 0 }), { grant: false, reason: 'spent' })
-  assert.deepEqual(lateRepairDecision({ accepted: true, spent: false, remaining: -1 }), { grant: true, reason: null })
-})
-
-// Mutation: restore the old remaining-budget guard; the fourth dispatch must disappear.
-test('LR2 repeated suite red uses remaining build rounds then exhausts the global budget', () => {
-  const first = `FAIL ${CTX.checkout}/new.test.mjs:1\nfirst`
-  const second = `FAIL ${CTX.checkout}/other.test.mjs:2\nsecond`
-  const third = `FAIL ${CTX.checkout}/last.test.mjs:3\nthird`
-  const fourth = `FAIL ${CTX.checkout}/final.test.mjs:4\nfourth`
-  const io = fakeIo({
-    envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(),
-      'builder:2': buildEnv({ details: { files_changed: ['new.test.mjs'], commit_message: 'repair new' } }),
-      'builder:3': buildEnv({ details: { files_changed: ['other.test.mjs'], commit_message: 'repair other' } }),
-      'builder:4': buildEnv({ details: { files_changed: ['last.test.mjs'], commit_message: 'repair last' } }),
-      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'), 'reviewer:4': reviewEnv('pass'),
-    },
-    runs: {
-      'lane-cmd': { ok: true, output: '' },
-      'suite-cmd:1': { ok: false, output: first }, 'suite-cmd:2': { ok: false, output: second }, 'suite-cmd:3': { ok: false, output: third }, 'suite-cmd:4': { ok: false, output: fourth },
-    },
-    changed: [['a.mjs', 'a.test.mjs'], ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs']],
-  })
-  const res = driveTask(CTX, io)
-  assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.where, 'suite')
-  assert.match(res.details.escalation.why, /global builder budget is exhausted after 4 attempt/)
-  assert.deepEqual(io.calls.logs.filter((entry) => entry.scope_admission?.source === 'suite-red').map((entry) => entry.scope_admission.files), [
-    ['new.test.mjs'], ['other.test.mjs'], ['last.test.mjs'], ['final.test.mjs'],
-  ])
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 4)
-  assert.deepEqual(io.calls.logs.filter((entry) => entry.late_repair).map((entry) => entry.late_repair), [
-    { cause: 'suite-red', outcome: 'granted', reason: null, builder_attempts: 3 },
-    { cause: 'suite-red', outcome: 'refused', reason: 'spent', builder_attempts: 4 },
-  ])
-})
-
     const run = b127InvokeGate({ cmd: probe, overrides: { shell } })
     assert.equal(run.stdout, String(bare.stdout))
     assert.equal(run.status, bare.status)
@@ -4844,4 +4843,25 @@ test('L3: leadless tiers do not wire a permission callback and reject_once', () 
 test('L7: a reviewer requesting a second opinion is excluded from the perspective assignment', () => {
   const h = drivePermissionHarness({ roles: ['lead', 'planner', 'builder', 'reviewer'], answer: SECOND_OPINION, from: 'reviewer', askingRole: 'reviewer' })
   assert.equal(h.selected, 'r'); assert.equal(h.reviewerDuringPermission, 0)
+})
+
+// RV1-1 guard: the LR tests are top-level tests, each registered exactly once, so
+// `--test-name-pattern '^LR'` selects every one of them. A test() call nested inside
+// another test's body registers as a subtest, once per enclosing iteration, and a
+// name filter that does not match the parent never reaches it.
+// Mutation: nest one LR test inside another test's body; its top-level ok disappears.
+test('RV1-1 every LR test registers exactly once as a top-level test', () => {
+  const names = [
+    'LR1 exhausted accepted suite red dispatches one late-repair builder',
+    'LR2 repeated suite red uses remaining build rounds then exhausts the global budget',
+    'LR3 late repair decisions are closed, strict, and defer to ordinary budget',
+    'LR3 lead acceptance without review pass refuses the suite-red reserve',
+  ]
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern', '^LR', 'crew/drive.test.mjs'], { cwd: REPO_ROOT, encoding: 'utf8', env })
+  const oks = [...String(run.stdout).matchAll(/^( *)(?:not )?ok \d+ - (.*)$/gm)].map(([, indent, name]) => ({ indent, name }))
+  assert.equal(run.status, 0, String(run.stdout).slice(-2000))
+  assert.deepEqual(oks.filter(({ indent }) => indent === '').map(({ name }) => name).sort(), names)
+  for (const name of names) assert.equal(oks.filter((ok) => ok.name === name).length, 1, name)
 })

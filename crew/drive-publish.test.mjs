@@ -7,7 +7,7 @@ import { forAll } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_REFUSALS, eofAppendResolution } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_REFUSALS, eofAppendResolution, eofAppendStrictUtf8 } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -861,6 +861,120 @@ test('LR4 non-EOF conflict respects the exhausted conflict-recovery cap', () => 
   assert.match(fixture.result.details.escalation.why, /conflict-recovery budget is exhausted/)
   assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
   assert.equal(fixture.io.calls.logs.filter((row) => row.late_repair).length, 0)
+})
+
+const eofSpec = (paths, overrides = {}) => {
+  const stage2 = {}, stage3 = {}, worktree = {}
+  for (const [index, path] of paths.entries()) {
+    const ours = `ours-${index}\n`, theirs = `theirs-${index}\n`
+    stage2[path] = `head\n${ours}`
+    stage3[path] = `head\n${theirs}`
+    worktree[path] = `before\n<<<<<<< ours\n${ours}||||||| base\n=======\n${theirs}>>>>>>> theirs\n`
+  }
+  return { paths, stage2, stage3, worktree, hunk: anchorHunk(paths), ...overrides }
+}
+
+// RV1-3. Mutation: restore only the failed path; the all-path restore command disappears.
+test('RV1-3 a merged-write failure restores every conflicted path from the index and stages nothing', () => {
+  const paths = ['src/first.mjs', 'src/second.mjs']
+  const restore = `git checkout --conflict=diff3 -- 'src/first.mjs' 'src/second.mjs'`
+  for (const restoreOk of [true, false]) {
+    const spec = eofSpec(paths, {
+      diff3WriteFailure: paths[1],
+      diff3CheckoutResult: (state) => state.diff3CheckoutCommands.length < 3 || restoreOk ? { ok: true } : { ok: false, output: 'restore denied' },
+    })
+    const { io, result } = runAnchorPublication({ specs: [spec], scope: paths, limits: { build_rounds: 1 } })
+    assert.equal(result.status, 'escalation')
+    assert.deepEqual(io.state.diff3CheckoutCommands, [`git checkout --conflict=diff3 -- 'src/first.mjs'`, `git checkout --conflict=diff3 -- 'src/second.mjs'`, restore])
+    assert.match(result.details.escalation.why, /eof-append write failed for src\/second\.mjs/)
+    if (restoreOk) assert.doesNotMatch(result.details.escalation.why, /restoration checkout failed/)
+    else assert.match(result.details.escalation.why, /eof-append write failed for src\/second\.mjs; restoration checkout failed: restore denied/)
+    assert.equal(io.state.addCommands.length, 0)
+    assert.equal(io.state.continueCount, 0)
+  }
+})
+
+// RV1-4. Mutation: drop the try/catch around the rebase_eof_append journal write; the
+// throw escapes driveTask after a successful continue.
+test('RV1-4 a throwing EOF journal write never changes a resolved continuation', () => {
+  const paths = ['src/first.mjs', 'src/second.mjs']
+  const io = anchorPublicationIo({ specs: [eofSpec(paths)], scope: paths, limits: { build_rounds: 1 } })
+  const baseLog = io.log
+  io.log = function (row) {
+    if (row?.rebase_eof_append) throw new Error('journal unavailable')
+    return baseLog.call(this, row)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 }, publish: { branch: 'feature/ship', base: 'main' } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.state.continueCount, 1)
+  assert.deepEqual(paths.map((path) => io.state.worktreeBytes[`${CTX.checkout}/${path}`]), ['before\nours-0\ntheirs-0\n', 'before\nours-1\ntheirs-1\n'])
+})
+
+test('RV1-4 empty or unreadable stage evidence never reaches an EOF merge', () => {
+  const path = 'src/first.mjs'
+  const unreadable = eofSpec([path])
+  delete unreadable.stage2[path]
+  const missing = runAnchorPublication({ specs: [unreadable], scope: [path], limits: { build_rounds: 1 } })
+  assert.equal(missing.result.status, 'escalation')
+  assert.match(missing.result.details.escalation.why, /conflict evidence was empty or unmeasurable; no builder was dispatched/)
+  assert.deepEqual(missing.io.state.diff3CheckoutCommands, [])
+  assert.equal(missing.io.state.addCommands.length, 0)
+
+  const empty = eofSpec([path])
+  empty.stage3[path] = ''
+  const blank = runAnchorPublication({ specs: [empty], scope: [path], limits: { build_rounds: 1 } })
+  assert.equal(blank.result.status, 'escalation')
+  assert.match(blank.result.details.escalation.why, /eof-append refused for src\/first\.mjs: stage-suffix/)
+  assert.equal(blank.io.calls.writes[`${CTX.checkout}/${path}`], undefined)
+  assert.equal(blank.io.state.addCommands.length, 0)
+})
+
+// RV1-5. Mutation: bypass the post-rebase proof after an EOF continue; the gate run
+// between the continue and the warm suite disappears.
+test('RV1-5 an EOF continue is followed by the post-rebase gate, then the warm suite, then the cold suite', () => {
+  const paths = ['src/first.mjs', 'src/second.mjs']
+  const { io, result } = runAnchorPublication({ gate: { details: { gate_cmd: 'gate-cmd' } }, specs: [eofSpec(paths)], scope: paths, limits: { build_rounds: 1 } })
+  assert.equal(result.status, 'done')
+  const order = io.calls.order
+  const continued = order.indexOf('run:git -c core.editor=true rebase --continue')
+  const gate = order.findIndex((entry, index) => index > continued && entry.startsWith('run:') && entry.includes('gate-cmd'))
+  const warm = order.indexOf('run:suite-cmd', continued + 1)
+  const cold = order.indexOf('runCold', continued + 1)
+  assert.ok(continued >= 0 && gate > continued && warm > gate && cold > warm, JSON.stringify(order))
+  assert.equal(io.calls.runCold.length, 1)
+})
+
+// RV1-7. Mutation: make eofAppendStrictUtf8 return true; the lossily decoded Latin-1
+// merge is written, staged and continued.
+test('RV1-7 a Latin-1 EOF conflict is never auto-merged and keeps its bytes', () => {
+  const lossy = (text) => Buffer.from(text, 'latin1').toString('utf8')
+  assert.equal(EOF_APPEND_ENCODING_REFUSAL, 'not-strict-utf8')
+  assert.equal(eofAppendStrictUtf8(lossy('caf\xe9\n')), false)
+  assert.equal(eofAppendStrictUtf8('café ✓\n'), true)
+  assert.equal(eofAppendStrictUtf8('\ud800'), false)
+  assert.equal(eofAppendStrictUtf8(null), false)
+  const path = 'src/latin1.txt'
+  const spec = {
+    paths: [path],
+    stage2: { [path]: lossy('head\nours caf\xe9\n') },
+    stage3: { [path]: lossy('head\ntheirs na\xefve\n') },
+    worktree: { [path]: lossy('head\n<<<<<<< ours\nours caf\xe9\n||||||| base\n=======\ntheirs na\xefve\n>>>>>>> theirs\n') },
+    hunk: anchorHunk([path]),
+    builderEdits: { [path]: 'resolved by builder\n' },
+  }
+  const { io, result } = runAnchorPublication({ specs: [spec], scope: [path], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.writes[`${CTX.checkout}/${path}`], undefined)
+  assert.deepEqual(io.calls.logs.filter((row) => row.rebase_eof_append).map((row) => row.rebase_eof_append), [
+    { paths: [path], outcome: 'refused', reason: 'not-strict-utf8', path },
+  ])
+  const builders = io.calls.assign.filter(({ role }) => role === 'builder')
+  assert.equal(builders.length, 2)
+  assert.equal(builders.at(-1).note, 'rebase-conflict-fix')
+  assert.equal(io.state.addCommands.length, 1)
+  assert.match(io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`], /eof-append refused for src\/latin1\.txt: not-strict-utf8/)
 })
 
 test('A1 retained rebase state reaches conflict resolver before any abort', () => {

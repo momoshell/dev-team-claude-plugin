@@ -5897,12 +5897,19 @@ function runScopeGate({ round, finalRound, builderDetails, builderObservation, a
   return { bounce: b, corrections: refusal.corrections }
 }
 
-function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure }) {
+function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure, prescribed = null, placement = null }) {
   const rows = []
   let fatal = null
   const proveEntry = (entry) => {
     let active = null
     const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
+    // MUTATION P6: let a prescribed finding close through an invocation and it is closed by
+    // a runner that is not the new top-level test(...) its brief required.
+    // MUTATION P18: skip the placement rule and a prescribed guard may live in the pinned
+    // file (which must ship unchanged) or in a file outside the lane's scope.
+    const misplaced = prescribed?.has(entry.finding) === true && entry.invocation === undefined ? placement?.(entry) ?? null : null   // ANCHOR P18
+    if (misplaced) return row('guard-misplaced', misplaced)
+    if (entry.invocation !== undefined && prescribed?.has(entry.finding) === true) return row('name-absent', `a pinned-test-prescription finding must close with a new top-level node test(...) named ${entry.name}, not an invocation`)   // ANCHOR P6
     if (entry.invocation !== undefined) { const proof = proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }); fatal = proof.fatal; return proof.row }
     try {
       const witness = hardenWitness?.get(entry.finding)
@@ -5916,8 +5923,8 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
       if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
       const testAbs = `${ctx.checkout}/${entry.test}`
       const fileAbs = `${ctx.checkout}/${entry.file}`
-      const cmd = hardenCommand(entry.test, entry.name)
-      const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: see hardenWitnessCommand
+      let cmd = hardenCommand(entry.test, entry.name)
+      const witnessCmd = hardenWitnessCommand(entry.test)   // UNFILTERED: nested test names can require descendant registration
       const repairedTest = io.readFile(testAbs)
       if (repairedTest === null) return row('unapplied', `${entry.test} does not exist in the built tree`)
       let witnessRun = null
@@ -5946,8 +5953,16 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
         // measured nothing and is never read as `new`.
         if (witnessCounts === null || witnessCounts.fail > 0) return row('unproven', `the witnessed ${entry.test} run was not green and parseable, so the absence of ${entry.name} proves nothing: counts ${JSON.stringify(witnessCounts)}`)
       }
-      const control = nameVerdict(hardenRun(cmd)?.output, entry.name)
-      if (control === 'absent') return row('name-absent', `the repaired control reported no exact test named ${entry.name}`)
+      // A pinned-test-prescription finding was told to close with a NEW top-level test(...),
+      // so its control is adjudicated on top-level lines only and never falls back to the
+      // unfiltered run that admits nested names.
+      // MUTATION P1: adjudicate a prescription guard like any other and a nested guard
+      // closes the finding whose brief demanded a top-level one.
+      const topLevelOnly = prescribed?.has(entry.finding) === true                       // ANCHOR P1
+      const verdictOf = topLevelOnly ? topLevelNameVerdict : nameVerdict
+      let control = verdictOf(hardenRun(cmd)?.output, entry.name)
+      if (control === 'absent' && !topLevelOnly) { cmd = witnessCmd; control = nameVerdict(hardenRun(cmd)?.output, entry.name) }
+      if (control === 'absent') return row('name-absent', topLevelOnly ? `the repaired control reported no exact TOP-LEVEL test named ${entry.name}; a pinned-test-prescription finding must close with a new top-level test(...)` : `the repaired control reported no exact test named ${entry.name}`)
       if (control === 'ambiguous') return row('name-ambiguous', `the repaired control reported more than one exact test named ${entry.name}`)
       if (control === 'failed') return row('control-red', `the repaired control left ${entry.name} failing`)
       if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
@@ -5959,18 +5974,23 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
       // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
       // the behavioural proof again — the deadlock three finished lanes paid for.
       if (hardeningClassOf(entry) === 'coverage') {
-        // The claim is NOT taken on trust. A coverage repair asserts the implementation
-        // was ALREADY correct at review time, so the witnessed bytes and the built bytes
-        // must be the same bytes. This is the conjunct that closes the dishonest route:
-        // a builder that REGRESSED the implementation to manufacture a red pre-repair is
-        // refused here by name, and a builder that did not has nothing to gain from
-        // regressing it, because this arm certifies without a red pre-repair at all.
-        // Everything that makes the guard REAL still holds: the name was absent on the
-        // witnessed tree, it passes on the repaired tree, and the declared mutation must
-        // still kill it below.
-        // MUTATION D1: drop the byte-identity conjunct and the coverage arm certifies a
-        // declaration whose implementation changed — the regression route this closes.
-        if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)   // ANCHOR HC2
+        // Coverage is certified per finding: unchanged bytes take the fast path; changed
+        // bytes must retain the declared region and pass the named check on review-time code.
+        // MUTATION D1: restore whole-file refusal and changed-code coverage cannot certify.
+        if (repairedFile !== S.bytes) {                                                   // ANCHOR HC2
+          const reviewBound = applyMutationAnchor(S.bytes, entry.find, entry.replace)
+          if (reviewBound.text === null) return row('source-regressed', `source-regressed: declared find ${JSON.stringify(entry.find)} is ${reviewBound.mode} in review-time file ${entry.file}`)
+          let reviewResult
+          active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
+          try {
+            active.writeAttempted = true
+            io.writeFile(fileAbs, S.bytes)
+            reviewResult = hardenRun(cmd)
+          } finally { io.writeFile(fileAbs, repairedFile) }
+          active = null
+          const reviewVerdict = nameVerdict(reviewResult?.output, entry.name)
+          if (reviewVerdict !== 'passed') return row('source-regressed', `source-regressed: the review-time ${entry.file} check ${entry.name} was ${reviewVerdict}`)
+        }
       } else {
         let pre = null
         active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
@@ -6096,6 +6116,97 @@ function runTask(ctx, io, crash) {
   // dirtiness, stash behaviour, S.commit, or the suite-cycle number.
   let committedBaseline = false
   const art = (name) => `${ctx.taskDir}/${name}`
+  // Sub-class 1 pins (verifyPrescriptionPin): Map<repo-relative test path, {finding, source,
+  // bytes, names}>. Lane-long — a suite-cycle repair round may not undo what an earlier
+  // conversion pinned — and persisted to the lane state dir, so a resumed run keeps them.
+  // MUTATION P10: clear this map on every suite cycle and a post-suite repair round
+  // weakens a pinned test with no check left to see it.
+  const prescriptionPins = new Map()                                                    // ANCHOR P10
+  let prescriptionPinsDefect = null
+  // MUTATION P14: skip the reload and a crash-resumed run accepts with no pin to check.
+  if (ctx.resume_checkpoint) {                                                          // ANCHOR P14
+    // The durable marker that a conversion happened is its journal row. A marker with no
+    // readable pins file is refused, never read as "no pins".
+    let journalText = null
+    let markerUnknown = null
+    try { journalText = io.readFile(ctx.journal || art('journal.jsonl')) } catch (err) { markerUnknown = `the journal could not be read to look for a prescription pin marker: ${err?.message || String(err)}` }
+    const pinMarked = String(journalText ?? '').split('\n').some((line) => { try { return Boolean(JSON.parse(line)?.hardening_prescription_pinned) } catch { return false } })
+    let text = null
+    try { text = io.readFile(art(PRESCRIPTION_PINS_FILE)) } catch (err) { prescriptionPinsDefect = `the persisted prescription pins could not be read: ${err?.message || String(err)}` }
+    if (typeof text === 'string') {
+      try {
+        const parsed = JSON.parse(text)
+        if (!parsed || typeof parsed.pins !== 'object' || parsed.pins === null) throw new Error('no pins object')
+        for (const [file, pin] of Object.entries(parsed.pins)) prescriptionPins.set(file, pin)
+      } catch (err) { prescriptionPinsDefect = `the persisted prescription pins were unparseable: ${err?.message || String(err)}` }
+    }
+    // MUTATION P17: drop this and a resume whose pins file vanished accepts with no pin.
+    if (prescriptionPinsDefect === null && text === null && (pinMarked || markerUnknown)) {   // ANCHOR P17
+      prescriptionPinsDefect = markerUnknown ?? `the journal records a prescription pin, but ${PRESCRIPTION_PINS_FILE} is absent from the lane state dir`
+    }
+  }
+  const persistPrescriptionPins = () => io.writeFile(art(PRESCRIPTION_PINS_FILE), `${JSON.stringify({ version: 1, pins: Object.fromEntries(prescriptionPins) }, null, 2)}\n`)
+  // Snapshot what a conversion pins: the file's version on the lane BASE when the base
+  // carries it, else its review-time bytes. A builder may have edited the witnessed test
+  // before review, so the review-time bytes can carry its own damage; the base version is
+  // what the lane may not weaken. The checks are MEASURED by running that snapshot against
+  // the review-time tree, not guessed from its source.
+  // The git object id of the file's RAW checkout bytes: what `git rev-parse <base>:<file>`
+  // names for the base version, so two different undecodable bytes never compare equal the
+  // way two decoded strings can. --no-filters: a clean filter must not be able to hash an
+  // edited file to the base id (Sol, b1074). A filtered file therefore fails closed — a
+  // refusal of an identical restore, never an acceptance of an edit.
+  // MUTATION P21: drop --no-filters and a clean filter launders an edit into the base id.
+  const hashPinnedFile = (file) => { try { return gitObjectId(io.run(`git hash-object --no-filters -- ${shellArg(file)}`)) } catch { return null } }   // ANCHOR P21
+  const capturePrescriptionPin = (file, finding, cell) => {
+    const pin = { finding, source: null, bytes: null, names: null }
+    if (typeof ctx.head !== 'string' || ctx.head.trim() === '') return { ...pin, why: 'the lane base commit was blank' }
+    let tree
+    try { tree = io.run(`git ls-tree -z --full-tree ${shellArg(ctx.head)} -- ${shellArg(file)}`) } catch (err) { return { ...pin, why: `the base-tree query threw: ${err?.message || String(err)}` } }
+    const existence = tree?.ok === true ? parsePrescriptionBaseTree(tree.output, file) : { present: null, reason: 'the base-tree query returned non-ok output' }
+    if (existence.present === null) return { ...pin, why: existence.reason }
+    // MUTATION P15: snapshot the review-time bytes although the base carries the file and a
+    // builder that damaged the witnessed test before review freezes its own damage.
+    if (existence.present === true) {                                                   // ANCHOR P15
+      let shown
+      try { shown = io.run(`git show ${shellArg(`${ctx.head}:${file}`)}`) } catch { shown = null }
+      if (shown?.ok !== true || typeof shown.output !== 'string') return { ...pin, why: 'the base version could not be read' }
+      let baseId
+      try { baseId = io.run(`git rev-parse ${shellArg(`${ctx.head}:${file}`)}`) } catch { baseId = null }
+      pin.oid = gitObjectId(baseId)
+      if (pin.oid === null) return { ...pin, why: 'the base version has no readable git object id' }
+      pin.source = 'base'
+      // The live runner returns stdout+stderr; the snapshot is stdout alone.
+      pin.bytes = typeof shown.stderr === 'string' && shown.stderr !== '' && shown.output.endsWith(shown.stderr) ? shown.output.slice(0, -shown.stderr.length) : shown.output
+    } else {
+      if (cell?.state !== 'read' || typeof cell.bytes !== 'string') return { ...pin, why: 'the review-time bytes were unreadable' }
+      pin.oid = hashPinnedFile(file)
+      if (pin.oid === null) return { ...pin, why: 'the review-time file has no readable git object id' }
+      pin.source = 'review'
+      pin.bytes = cell.bytes
+    }
+    const measured = runBytesInPlace({ abs: `${ctx.checkout}/${file}`, bytes: pin.bytes, io, run: () => io.run(hardenWitnessCommand(file))?.output, digest: () => hashPinnedFile(file) })
+    if (measured.fatal) return { ...pin, fatal: measured.fatal }
+    if (measured.absent || measured.error) return { ...pin, why: measured.absent ? 'the file was absent at conversion' : measured.error }
+    // MUTATION P11: keep no measured names and every pinned check reads as preserved.
+    pin.names = topLevelCheckNames(measured.output)                                       // ANCHOR P11
+    return pin
+  }
+  // One verification of every pin; the first refusal is returned as its journal record.
+  const verifyPrescriptionPins = (when) => {
+    const checks = prescriptionPinsDefect
+      ? [{ file: PRESCRIPTION_PINS_FILE, record: { finding: null, file: PRESCRIPTION_PINS_FILE, when, source: null, reason: 'witnessed-test-unverifiable', why: prescriptionPinsDefect } }]
+      : [...prescriptionPins].map(([file, pin]) => {
+        const verdict = verifyPrescriptionPin({ file, pin, abs: `${ctx.checkout}/${file}`, io, run: () => io.run(hardenWitnessCommand(file))?.output, hash: () => hashPinnedFile(file) })
+        return { file, record: { finding: pin?.finding ?? null, file, when, source: pin?.source ?? null, reason: verdict.reason, why: verdict.why, ...(Number.isInteger(verdict.checks) ? { checks: verdict.checks } : {}) } }
+      })
+    for (const { record } of checks) {
+      try { io.log(recordRow({ at: io.now(), hardening_preservation: record })) } catch { /* evidence is never load-bearing */ }
+      if (record.reason !== null) return record
+    }
+    return null
+  }
+  const preservationWhy = (record) => `[${record.reason}] finding ${record.finding ?? '(unknown)'} (${record.when}): ${record.why}`
   // These gate cells are initialised before the resume branch so its canonical
   // gate and the ordinary escalation composer have the same state vocabulary.
   let activeGateCmd = null
@@ -7913,6 +8024,11 @@ function runTask(ctx, io, crash) {
       if (!publishFiles) return resumeEscalate('rebase', 'the authoritative publication diff could not be read from the verified base')
     }
 
+    // On the tree the resumed suite runs and publication ships (after any resumed commit
+    // and rebase), the persisted pins are verified like the accept and suite checks.
+    // MUTATION P16: skip this and a resumed run publishes a tree whose pinned checks nobody ran.
+    const pinnedOnResume = verifyPrescriptionPins('resume')                                // ANCHOR P16
+    if (pinnedOnResume) return resumeEscalate('harden', preservationWhy(pinnedOnResume), { hardening_preservation: pinnedOnResume })
     const warmFailure = runWarmSuite()
     if (warmFailure) return warmFailure
 
@@ -11278,7 +11394,15 @@ function runTask(ctx, io, crash) {
       stage(`lane:harden:r${round}`)
       const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
       for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
-      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure })
+      const prescribed = new Set(hardenOwed.owed.filter((finding) => finding.prescription).map(({ id }) => id))
+      // A prescribed guard goes in a DIFFERENT test file that the lane may write: in scope, or
+      // declared in the brief's creates. The pinned file itself must ship unchanged.
+      const placement = (entry) => {
+        if (prescriptionPins.has(entry.test)) return `the guard for ${entry.finding} is in ${entry.test}, the pinned file that must ship unchanged; put the new top-level test in a different test file that is in scope or declared in creates`
+        if (!inScope(entry.test) && !declaredCreates.includes(entry.test)) return `the guard for ${entry.finding} is in ${entry.test}, which is outside the lane scope and not declared in creates; put it in a test file that is in scope (${scopeFiles.filter((file) => hardeningTestPath(file) && !prescriptionPins.has(file)).join(', ') || 'none listed'}) or declared in creates`
+        return null
+      }
+      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure, prescribed, placement })
       for (const row of rows) logHardened(round, row)
       // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
       // (crew/drive.mjs:3490-3492) already refuses to continue when `gateProofFatal` is
@@ -11527,10 +11651,38 @@ function runTask(ctx, io, crash) {
           }
           hardenOwed = { owed: hardenOwed.owed, exempt: debt.exempt }
           const prescriptionAuthored = prescriptionAuthorshipEvidence(review.details, tree, ctx, io)
-          const prescriptionConflict = hardeningPrescriptionConflict(review.details, tree, prescriptionAuthored, tree)
-          if (prescriptionConflict) {
-            stageComplete()
-            return escalate('harden', `[pinned-test-prescription] finding ${prescriptionConflict.finding.id} prescribes a change to hardening-witnessed ${prescriptionConflict.file}; refusing the prescription`, [], { hardening_prescription_conflict: prescriptionConflict })
+          const rawById = acceptedRawById(review.details)
+          const conflicted = new Set()
+          for (const finding of debt.owed) {
+            const prescriptionConflict = hardeningPrescriptionConflict(
+              { ...review.details, findings: [rawById.get(finding.id)] }, tree, prescriptionAuthored, tree,
+            )
+            if (prescriptionConflict) {
+              conflicted.add(finding.id)
+              const carried = hardenOwed.owed.find((entry) => entry.id === finding.id)
+              if (carried) carried.prescription = prescriptionConflict
+              if (!prescriptionPins.has(prescriptionConflict.file)) {
+                const pin = capturePrescriptionPin(prescriptionConflict.file, finding.id, tree.get(prescriptionConflict.file))
+                if (pin.fatal) {
+                  stageComplete()
+                  return escalate('harden', `[witnessed-test-unverifiable] the snapshot run of ${prescriptionConflict.file} could not restore it: ${pin.fatal}`)
+                }
+                prescriptionPins.set(prescriptionConflict.file, pin)
+                try { persistPrescriptionPins() } catch (err) {
+                  stageComplete()
+                  return escalate('harden', `[witnessed-test-unverifiable] the prescription pin for ${prescriptionConflict.file} could not be persisted: ${err?.message || String(err)}`)
+                }
+                panelLog({ hardening_prescription_pinned: { finding: finding.id, file: prescriptionConflict.file, source: pin.source, pins: PRESCRIPTION_PINS_FILE } })
+              }
+              panelLog({ hardening_prescription_conflict: prescriptionConflict })
+            }
+          }
+          if (conflicted.size > 0) {
+            const blocked = disposed.autoFix.filter(({ id }) => conflicted.has(id))
+            disposed.autoFix = disposed.autoFix.filter(({ id }) => !conflicted.has(id))
+            for (const entry of blocked) {
+              if (!disposed.needsSeat.includes(entry.id)) disposed.needsSeat.push(entry.id)
+            }
           }
           for (const { id, why } of debt.exempt) {
             logHardened(roundNo, { finding: id, test: null, name: null, outcome: 'ungateable', why })
@@ -11686,6 +11838,13 @@ function runTask(ctx, io, crash) {
   if (!builderEnv || !accepted) {
     return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s)`)
   }
+
+  // Sub-class 1's conversion is verified where every accepted path converges before the
+  // commit, again on the tree the suite runs, and on a resumed run before its commit.
+  // MUTATION P4: skip this check and the builder's promise to leave the witnessed checks
+  // as they were is taken on trust — the false clean Sol reproduced on b1074.
+  const pinnedBeforeCommit = verifyPrescriptionPins('accept')                             // ANCHOR P4
+  if (pinnedBeforeCommit) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit })
 
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
@@ -12192,6 +12351,11 @@ function runTask(ctx, io, crash) {
     if (postCommit.escalation) return postCommit.escalation
   }
 
+  // A rebase (or a suite-cycle build round) rewrites the tree after the accept-time
+  // check; re-verify on the tree the suite runs and publication ships.
+  // MUTATION P8: drop this re-check and a rebase that weakens a pinned test ships green.
+  const pinnedAfterRebase = verifyPrescriptionPins(rebased ? 'rebased' : 'suite')        // ANCHOR P8
+  if (pinnedAfterRebase) return escalate('harden', preservationWhy(pinnedAfterRebase), [], { hardening_preservation: pinnedAfterRebase })
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   if (!suiteRes?.ok && (S.suiteAnchorRepairs ?? 0) < ANCHOR_SUITE_REPAIR_MAX) {
@@ -14210,7 +14374,7 @@ export function hardeningAppealRequest(entry) {
 }
 
 export const HARDENING_PRESCRIPTION_REASONS = Object.freeze(['pinned-test-prescription'])
-export const HARDENING_PRESCRIPTION_RESOLUTION = 'refuse-prescription'
+export const HARDENING_PRESCRIPTION_RESOLUTION = 'new-guard-requirement'
 
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
@@ -14223,14 +14387,14 @@ export const HARDENING_REFUSALS = Object.freeze([
 export const HARDENING_OUTCOMES = Object.freeze([
   'killed', 'survived', 'ungateable',
   'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
-  'pre-repair-green', 'source-regressed',
+  'pre-repair-green', 'source-regressed', 'guard-misplaced',
   'witness-missing', 'witness-absent', 'witness-unreadable',
   'unproven', 'unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe',
 ])
 
 export const HARDENING_PROVEN = Object.freeze(['killed', 'ungateable'])
 export const HARDENING_REFUTED = Object.freeze([
-  'survived', 'source-regressed', 'pre-repair-green',
+  'survived', 'source-regressed', 'pre-repair-green', 'guard-misplaced',
   'name-not-new', 'name-absent', 'name-ambiguous', 'control-red', 'control-skipped',
 ])
 export const HARDENING_UNMEASURED = Object.freeze([
@@ -14296,6 +14460,102 @@ export function nameVerdict(output, name) {
   if (hits.length === 0) return 'absent'                 // the name is on NO line of this run
   if (hits.length > 1) return 'ambiguous'                // two tests of one name adjudicate nothing
   return hits[0]
+}
+// The same adjudication over the run's TOP-LEVEL lines only. Node's TAP reporter indents
+// every subtest line (measured on node v26.10.0: `    ok 1 - inner guard` under
+// `ok 2 - outer`), so an unindented exact name is a top-level test(...) and nothing else.
+export function topLevelNameVerdict(output, name) {
+  return nameVerdict(String(output || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').filter((line) => !/^\s/.test(line)).join('\n'), name)
+}
+
+// A pinned-test-prescription conversion (sub-class 1) suppresses a review patch to a
+// hardening-witnessed test and tells the builder to leave that file's existing checks as
+// they were. The verification RUNS the checks rather than reading source text: a snapshot
+// of the pinned file, which the builder never supplies, is run in place of the built file
+// against the built implementation, so a text trick in the built copy cannot hide a broken
+// implementation and imported modules run for real. Every snapshotted top-level check must
+// report and pass, and must still run and pass as a top-level test of the built file.
+// Anything that cannot be read, run or measured is refused, never passed.
+export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
+// The lane-state file the pins persist to, so a crash-resumed run keeps them.
+export const PRESCRIPTION_PINS_FILE = 'prescription-pins.json'
+// The top-level checks one unfiltered run reported, by exact name, or null when the run is
+// not a parseable node:test summary — unmeasured, never an empty list.
+export function topLevelCheckNames(output) {
+  if (typeof output !== 'string' || parseSuiteCounts(output) === null) return null
+  const names = new Set()
+  for (const line of output.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
+    const m = /^(?:not ok|ok) \d+ - (.*)$/.exec(line)
+    if (m) names.add(m[1].replace(/\s*#\s*(SKIP|TODO)\b.*$/, '').trim())
+  }
+  return [...names]
+}
+// Run `bytes` in place of the file at `abs`, then put the file's own bytes back and prove
+// they read back. A file that is absent cannot host the run (nothing could restore an
+// absence). `fatal` means the restore failed and the tree may still carry the snapshot.
+// A git object id from one `git rev-parse` / `git hash-object` result, or null.
+export function gitObjectId(result) {
+  const text = result?.ok === true && typeof result.output === 'string' ? result.output.trim() : ''
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(text) ? text : null
+}
+export function runBytesInPlace({ abs, bytes, io, run, digest = null }) {
+  // With a digest, the restore is proven on the raw bytes: a text round-trip cannot put
+  // back an undecodable byte, and a read-back of decoded text would not notice.
+  const before = digest ? digest() : null
+  if (digest && before === null) return { error: 'its git object id could not be taken before the snapshot run' }
+  let current
+  try { current = io.readFile(abs) } catch (err) { return { error: `it could not be read: ${err?.message || String(err)}` } }
+  if (current === null) return { absent: true }
+  if (typeof current !== 'string') return { error: 'it did not read as text' }
+  let output = null
+  let runError = null
+  let restoreError = null
+  try {
+    if (current !== bytes) io.writeFile(abs, bytes)
+    output = run()
+  } catch (err) { runError = err } finally {
+    if (current !== bytes) { try { io.writeFile(abs, current) } catch (err) { restoreError = err } }
+  }
+  if (restoreError) return { fatal: `restoring it after the snapshot run failed: ${restoreError?.message || String(restoreError)}` }
+  let after
+  try { after = io.readFile(abs) } catch { after = null }
+  if (after !== current) return { fatal: 'it did not read back as its own bytes after the snapshot run' }
+  if (digest && current !== bytes && digest() !== before) return { fatal: 'its git object id changed across the snapshot run; its raw bytes were not restored' }
+  if (runError) return { error: `the snapshot run threw: ${runError?.message || String(runError)}` }
+  return { output, current }
+}
+export function verifyPrescriptionPin({ file, pin, abs, io, run, hash }) {
+  const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
+  if (!pin || typeof pin.bytes !== 'string') return refuse('witnessed-test-unverifiable', `no snapshot of ${file} was captured${pin?.why ? `: ${pin.why}` : ''}`)
+  if (!Array.isArray(pin.names)) return refuse('witnessed-test-unverifiable', `the ${pin.source ?? 'snapshot'} run of ${file} at conversion was not a parseable node:test summary, so its checks were never measured`)
+  let built
+  try { built = io.readFile(abs) } catch (err) { return refuse('witnessed-test-unverifiable', `${file}: it could not be read: ${err?.message || String(err)}`) }
+  if (built === null) return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its pinned checks are gone`)
+  // The pinned file ships BYTE-IDENTICAL to its snapshot: no normalisation, so no text
+  // trick survives — a weakened assertion, an appended monkeypatch and a nested check are
+  // all edits. Restoring a test the builder damaged before review to its base bytes IS
+  // the snapshot, and passes. The prescribed new guard belongs in a different test file.
+  // MUTATION P12: drop the identity and a shipped copy whose assertion was weakened keeps
+  // passing today and stops catching tomorrow's regression.
+  // Compared as git object ids, never as decoded strings: two different undecodable bytes
+  // decode to the same replacement character.
+  if (typeof pin.oid !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pin.oid)) return refuse('witnessed-test-unverifiable', `the snapshot of ${file} carries no git object id to compare against`)
+  const shipped = typeof hash === 'function' ? hash() : null
+  if (shipped === null) return refuse('witnessed-test-unverifiable', `the git object id of the built ${file} could not be taken`)
+  if (shipped !== pin.oid) return refuse('witnessed-test-altered', `${file} must ship byte-identical to its ${pin.source} version; it was edited — restore it and put the new guard in a different test file`)   // ANCHOR P12
+  if (pin.names.length === 0) return { reason: null, why: `${file} ships byte-identical to its ${pin.source} version, which reported no top-level check at conversion`, checks: 0 }
+  // The shipped file IS the snapshot, so this run proves the snapshot's checks against the
+  // built implementation, imported modules included.
+  let output
+  try { output = run() } catch (err) { return refuse('witnessed-test-unverifiable', `the run of ${file} threw: ${err?.message || String(err)}`) }
+  if (parseSuiteCounts(output) === null) return refuse('witnessed-test-unverifiable', `the run of ${file} was not a parseable node:test summary`)
+  // MUTATION P3: adjudicate with nameVerdict (indented lines too) and a pinned check that
+  // runs only nested reads as a passing top-level check.
+  for (const name of pin.names) {
+    const verdict = topLevelNameVerdict(output, name)                                      // ANCHOR P3
+    if (verdict !== 'passed') return refuse('witnessed-test-altered', `the ${pin.source} check ${JSON.stringify(name)} of ${file} is ${verdict} against the built implementation`, { name, verdict })
+  }
+  return { reason: null, why: `${file} ships byte-identical to its ${pin.source} version and all ${pin.names.length} of its top-level check(s) pass against the built implementation`, checks: pin.names.length }
 }
 
 // The findings that OWE a permanent guard, and the ones the reviewer exempted. Derived
@@ -14432,9 +14692,9 @@ export function hardenCommand(testFile, name) {
 //   --test-name-pattern='outer|F1 guard'    → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
 //   no filter at all                        → `    ok 1 - F1 guard # SKIP`, `# skipped 1`
 // The unfiltered run exists ONLY so node registers nested descendants; the exact declared
-// name is still the sole adjudicator, through `nameVerdict`. The repaired control, the
-// witnessed pre-repair and the mutant runs stay FILTERED — they ask whether one named
-// check passes, not what names exist.
+// name is still the sole adjudicator, through `nameVerdict`. Proof normally filters the
+// repaired control, pre-repair and mutant; an absent filtered control retries unfiltered
+// so Node registers nested descendants before exact-name adjudication.
 export function hardenWitnessCommand(testFile) {
   // MUTATION B5f: filter the witness run to the declared child name and node suppresses
   // the nested line, so an already-existing nested check reads `absent` and is credited
@@ -14635,9 +14895,12 @@ export function hardeningBriefLines(owed, exempt) {
   const findings = Array.isArray(owed) ? owed : []
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
-  lines.push(...findings.map(({ id, location, summary }) => `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}`))
+  lines.push(...findings.map(({ id, location, summary, prescription }) => {
+    const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, in a DIFFERENT test file that is in scope or declared in creates, leaving the existing checks of ${prescription.file} as they were: ${prescription.file} must ship byte-identical to its base version (its review-time version when the base lacks it), and its checks must pass against your implementation` : ''
+    return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
+  }))
   lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
-    'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, so editing the implementation to manufacture one is refused as source-regressed.',
+    'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, or its find must bind there and its named check must pass with those review-time implementation bytes restored; otherwise it is refused as source-regressed.',
     'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)
   if (Array.isArray(exempt) && exempt.length > 0) lines.push(...exempt.map(({ id }) => `Reviewer exemption recorded for ${id}.`))

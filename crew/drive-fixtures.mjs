@@ -1476,6 +1476,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at commit_subject"],
   ["recordRow", "", "at scope_gate"],
   ["recordRow", "", "at late_repair"],
+  ["recordRow", "", "at hardening_preservation"],
   ["recordRow", "", "at modifier"],
   ["recordRow", "", "at modifier"],
   ["recordRow", "", "at stage_done"],

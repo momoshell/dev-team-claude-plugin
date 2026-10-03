@@ -694,8 +694,9 @@ const main = async () => {
   globalThis.lab = Object.freeze(lab)
   try {
     const imported = await import(programUrl)
-    if (imported.default === undefined) emit({ done: true, refused: 'program-returned-nothing' })
-    else emit({ done: true, result: imported.default })
+    const result = await imported.default
+    if (result === undefined) emit({ done: true, refused: 'program-returned-nothing' })
+    else emit({ done: true, result: result })
   } catch (err) { report(err) }
 }
 main().catch(report)

@@ -1289,6 +1289,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       advisorCell: adapters?.[role]?.grants?.advisor === true && crew.advisor?.granted?.includes(role)
         ? advisorLaunchCell(crew.advisor)
         : null,
+      editAssist: crew.edit_assist ?? null,
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })
     const args = command.args || []

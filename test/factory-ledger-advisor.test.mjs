@@ -2081,6 +2081,73 @@ test('advisor-source S4 refuses guessed provenance and upgrades a pre-column tab
   upgraded.close()
 })
 
+// MUTATION EA9: stop emitting edit_assist from crew boot configuration or accept an invalid crew value.
+test('EA9 boot emission records valid edit assist and leaves absent or invalid values null', () => {
+  const axes = {
+    profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+    execution: { requested: 'full', effective: 'full', source: 'explicit' },
+    assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+  }
+  for (const [name, extra, expected] of [['on', { edit_assist: 'on' }, 'on'], ['absent', {}, null], ['invalid', { edit_assist: 'true' }, null]]) {
+    const stateDir = scratchDir(`ea9-${name}-`)
+    const dbPath = join(stateDir, 'ledger', 'ledger.db')
+    let emitter; let ledger
+    try {
+      writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({ schema_version: 3, task: 'ea9', tier: 'build', roles: ['planner'], run_configuration: axes, ...extra }))
+      writeFileSync(join(stateDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start' })}\n${JSON.stringify({ event: 'run-configuration', run_configuration: axes })}\n`)
+      emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'ea9', dbPath })
+      emitter.startRun()
+      ledger = openLedger({ dbPath })
+      const row = ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === emitter.adwId)
+      assert.equal(row.edit_assist, expected)
+    } finally {
+      ledger?.close(); emitter?.dispose(); rmSync(stateDir, { recursive: true, force: true })
+    }
+  }
+})
+
+// MUTATION EA10: remove edit-assist enum/nullability, additive migration, or JSONL replay forwarding.
+test('EA10 ledger validates, migrates, stores, and replays edit assist', () => {
+  const input = { adw_id: 'ea10-writer', schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit', requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit', requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit', legacy_variant: null, legacy_tier: 'build' }
+  const ledger = openTestLedger()
+  try {
+    assert.throws(() => ledger.recordRunConfiguration({ ...input, edit_assist: 'true' }), /edit_assist/)
+    ledger.recordRunConfiguration({ ...input, edit_assist: 'off' })
+    ledger.recordRunConfiguration({ ...input, adw_id: 'ea10-omitted' })
+    ledger.recordRunConfiguration({ ...input, adw_id: 'ea10-on', edit_assist: 'on' })
+    assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === input.adw_id).edit_assist, 'off')
+    assert.equal(ledger.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'ea10-omitted').edit_assist, null)
+    const replay = openTestLedger()
+    try {
+      replayJsonl(ledger._jsonlPath, replay)
+      const rows = replay.dumpTable('run_configurations')
+      assert.equal(rows.find(({ adw_id }) => adw_id === input.adw_id).edit_assist, 'off')
+      assert.equal(rows.find(({ adw_id }) => adw_id === 'ea10-on').edit_assist, 'on')
+    } finally { replay.close() }
+  } finally { ledger.close() }
+
+  const dir = scratchDir('ea10-migration-')
+  const dbPath = join(dir, 'legacy.db')
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`CREATE TABLE run_configurations (
+    adw_id TEXT PRIMARY KEY, schema_version INTEGER, task_profile TEXT, task_profile_source TEXT,
+    requested_execution TEXT, effective_execution TEXT, execution_source TEXT,
+    requested_assurance TEXT, effective_assurance TEXT, assurance_source TEXT,
+    legacy_variant TEXT, legacy_tier TEXT, created_at TEXT, advisor_model TEXT, advisor_granted_json TEXT,
+    advisor_source TEXT, advisor_source_evidence TEXT
+  )`)
+  db.prepare('INSERT INTO run_configurations (adw_id) VALUES (?)').run('ea10-legacy')
+  db.close()
+  const upgraded = openLedger({ dbPath })
+  try {
+    assert.ok(upgraded.columnNames('run_configurations').includes('edit_assist'))
+    assert.equal(upgraded.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'ea10-legacy').edit_assist, null)
+    upgraded.recordRunConfiguration({ ...input, adw_id: 'ea10-migrated', edit_assist: 'on' })
+    assert.equal(upgraded.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'ea10-migrated').edit_assist, 'on')
+  } finally { upgraded.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 // MUTATION S5: remove the rotation source filter; only rotation is eligible.
 test('advisor-source S5 excludes non-rotated and unrecorded runs from arms', { skip: SKIP }, () => {
   const ledger = openTestLedger()

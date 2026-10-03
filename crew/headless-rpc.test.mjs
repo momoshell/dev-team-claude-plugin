@@ -78,6 +78,26 @@ function fixture(options = {}) {
   }
 }
 
+// MUTATION EA7: stop forwarding edit_assist into the saved RPC command environment.
+test('EA7 edit assist reaches only the builder RPC command environment', () => {
+  for (const { role, edit_assist, expected } of [
+    { role: 'builder', edit_assist: 'on', expected: 'on' },
+    { role: 'planner', edit_assist: 'on', expected: undefined },
+    { role: 'builder', edit_assist: undefined, expected: undefined },
+  ]) {
+    const dir = scratchDir('ea7-rpc-')
+    const crew = { checkout: dir, ...(edit_assist === undefined ? {} : { edit_assist }), members: { [role]: { model: 'model', transport: 'headless-rpc' } } }
+    const f = fixture({ dir, role, crew })
+    try {
+      const briefFile = join(dir, `${role}.md`)
+      writeFileSync(briefFile, 'brief')
+      f.io.assign({ id: 'd1', role, briefFile })
+      const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', role, 'cmd.json'), 'utf8'))
+      assert.equal(command.env.CREW_EDIT_ASSIST, expected)
+    } finally { f.cleanup(); rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+
 function settle(f, run, frames = [{ type: 'agent_settled' }]) {
   writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), `${frames.map((x) => JSON.stringify(x)).join('\n')}\n`)
   writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))

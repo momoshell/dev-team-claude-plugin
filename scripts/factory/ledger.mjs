@@ -82,7 +82,8 @@ import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { modelString as claudeModelString } from '../../crew/adapters/adapter-claude.mjs'
-import { modelString as piModelString } from '../../crew/adapters/adapter-pi.mjs'
+import { modelString as piModelString, EDIT_ASSIST_VALUES } from '../../crew/adapters/adapter-pi.mjs'
+export { EDIT_ASSIST_VALUES }
 // NONCE_PREFIX was imported from the legacy runtime's contract
 // (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
 // sweep guard still honors nonce-prefixed sidecars, so the constant's
@@ -828,7 +829,8 @@ export const TABLES = Object.freeze({
       { name: 'advisor_model', decl: 'TEXT' },
       { name: 'advisor_granted_json', decl: 'TEXT' },
       { name: 'advisor_source', decl: 'TEXT' },
-      { name: 'advisor_source_evidence', decl: 'TEXT' }
+      { name: 'advisor_source_evidence', decl: 'TEXT' },
+      { name: 'edit_assist', decl: 'TEXT' }
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -3260,6 +3262,7 @@ export function openLedger({
       refuse('recordRunConfiguration: advisor_model must be a bounded nonblank string')
     }
     if (input.advisor_source != null) requireEnum(input.advisor_source, ADVISOR_SOURCES, 'recordRunConfiguration', 'advisor_source')
+    if (input.edit_assist != null) requireEnum(input.edit_assist, EDIT_ASSIST_VALUES, 'recordRunConfiguration', 'edit_assist')
     if (input.advisor_granted_json != null) {
       let grant
       try { grant = JSON.parse(input.advisor_granted_json) } catch { refuse('recordRunConfiguration: advisor_granted_json must be a JSON array of role names') }
@@ -3283,6 +3286,7 @@ export function openLedger({
       advisor_granted_json: input.advisor_granted_json ?? null,
       advisor_source: input.advisor_source ?? null,
       advisor_source_evidence: input.advisor_source_evidence ?? null,
+      edit_assist: input.edit_assist ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     appendJsonl('recordRunConfiguration', args)

@@ -443,6 +443,76 @@ function siblingIncidentRegister() {
   }
 }
 
+// The crew.json edit_assist each background spawn saw, so a recorder moved after the run spawn reddens.
+function crewBeforeRun() {
+  let crew = null
+  const seen = []
+  return {
+    seen,
+    writeFile: (path, content) => { if (String(path).endsWith('/crew.json')) crew = JSON.parse(content) },
+    spawnResult: (_args, call) => { if (call.background === true) seen.push(crew ? crew.edit_assist : 'no-crew-write'); return { status: 0, stdout: '', stderr: '' } },
+  }
+}
+
+// MUTATION EA1-order: call recordEditAssist after the run spawn; the run must already see edit_assist.
+test('EA1 requested edit assist is attributed before the run', async () => {
+  const probe = crewBeforeRun()
+  const result = await dispatchFixture({ label: 'ea1-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult, requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: 'on' } } })
+  assert.equal(probe.seen.at(-1), 'on')
+  const crewEntry = [...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))
+  assert.ok(crewEntry)
+  assert.equal(JSON.parse(crewEntry[1]).edit_assist, 'on')
+  assert.equal(dispatchRecordFor(result).edit_assist, 'on')
+  const rows = result.appended.filter(({ path }) => path.endsWith('/journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
+  assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source }) => ({ edit_assist, source })), [{ edit_assist: 'on', source: 'request' }])
+  assert.ok(result.spawned.some(({ background }) => background === true))
+})
+
+test('EA2 absent edit assist stays null and unset', async () => {
+  const probe = crewBeforeRun()
+  const result = await dispatchFixture({ label: 'ea2-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult })
+  assert.equal(probe.seen.at(-1), null)
+  assert.equal(dispatchRecordFor(result).edit_assist, null)
+  const crewEntry = [...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))
+  assert.equal(JSON.parse(crewEntry[1]).edit_assist, null)
+  const rows = result.appended.filter(({ path }) => path.endsWith('/journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
+  assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source }) => ({ edit_assist, source })), [{ edit_assist: null, source: 'unset' }])
+})
+
+test('EA3 invalid edit assist is refused as an enum before boot', async () => {
+  for (const value of [null, true, '']) {
+    await assert.rejects(dispatchFixture({ label: `ea3-edit-assist-${String(value)}`, names: ['lane-a'], requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: value } } }), (error) => /invalid edit_assist; expected on or off/.test(error.message) && /lane-a.request.json/.test(error.message))
+  }
+})
+
+test('EA4 panes refuse either edit assist value before boot', async () => {
+  for (const value of ['on', 'off']) {
+    await assert.rejects(dispatchFixture({ label: `ea4-edit-assist-${value}`, names: ['lane-a'], runFlags: { panes: true }, requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: value } } }), (error) => /edit_assist is unsupported with panes transport/.test(error.message))
+  }
+})
+
+test('EA5 inherited edit assist is refused even when empty', async () => {
+  for (const value of ['on', '']) {
+    const spawned = []
+    await assert.rejects(dispatchFixture({ label: `ea5-edit-assist-${value || 'empty'}`, names: ['lane-a'], env: { CREW_EDIT_ASSIST: value }, spawnedOut: spawned }), (error) => /request edit_assist/.test(error.message) && /CREW_EDIT_ASSIST/.test(error.message))
+    assert.equal(spawned.filter(({ args }) => (args || []).map(String).includes('boot')).length, 0)
+  }
+})
+
+// MUTATION EA11: read process.env instead of the injected d.env at the operator-env refusal.
+test('EA11 a seat env carrying CREW_EDIT_ASSIST does not refuse a fixture whose deps.env is clean', async () => {
+  const had = Object.hasOwn(process.env, 'CREW_EDIT_ASSIST')
+  const previous = process.env.CREW_EDIT_ASSIST
+  process.env.CREW_EDIT_ASSIST = 'on'
+  try {
+    const result = await dispatchFixture({ label: 'ea11-seat-env', names: ['lane-a'] })
+    assert.equal(dispatchRecordFor(result).edit_assist, null)
+  } finally {
+    if (had) process.env.CREW_EDIT_ASSIST = previous
+    else delete process.env.CREW_EDIT_ASSIST
+  }
+})
+
 test('RV1-3 keeps sourced admissions out of assurance floors', async () => {
   const adapter = 'crew/adapters/adapter-pi.mjs'
   const admitted = 'crew/roles/anchors.json'
@@ -4684,7 +4754,7 @@ test('HoldB2', async () => {
     const lane = call.args[call.args.indexOf('--task') + 1]
     assert.equal(call.args[call.args.indexOf('--brief-file') + 1], join(result.out, `${lane}.brief.md`))
   }
-  assert.equal(result.appended.length, 6)
+  assert.equal(result.appended.length, 9)
 })
 
 test('HoldB3', async () => {
@@ -4729,8 +4799,8 @@ test('HoldB4', async () => {
       return { status: 0, stdout: '', stderr: '' }
     },
   })
-  assert.deepEqual(trace, ['boot', 'arm', 'arm', 'run'])
-  assert.equal(result.appended.length, 2)
+  assert.deepEqual(trace, ['boot', 'arm', 'arm', 'arm', 'run'])
+  assert.equal(result.appended.length, 3)
 })
 
 test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', async () => {
@@ -5148,16 +5218,18 @@ test('advisor-source write denial leaves crew source absent but still journals a
     writeFile: (path, content) => {
       if (String(path).endsWith('/crew.json')) {
         denied++
-        if (denied === 1) throw new Error('crew write denied')
+        if (denied <= 2) throw new Error('crew write denied')
         persistedCrewSource = JSON.parse(content).advisor_source
       }
     },
   })
   const rows = result.appended.filter(({ path }) => path.endsWith('journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
-  assert.equal(denied, 1)
+  assert.equal(denied, 2)
   // MUTATION RV1-4a-state: record a crew source despite the denied write; no source was persisted.
   assert.equal(persistedCrewSource, null)
   assert.equal(rows.some((row) => row.event === 'advisor-source' && row.advisor_source === 'rotation'), true)
+  // MUTATION EA-denied: move the edit-assist journal append inside the crew try; a denied crew write must still journal.
+  assert.deepEqual(rows.filter((row) => row.event === 'edit-assist').map(({ edit_assist, source }) => [edit_assist, source]), [[null, 'unset']])
   assert.equal(result.spawned.some(({ args }) => args.map(String).includes('run')), true)
 })
 

@@ -307,8 +307,11 @@ export function piSeatAgentDir({ taskDir, role } = {}) {
 
 export function mcpConfigPath(spec) { return join(piSeatAgentDir(spec), 'mcp.json') }
 
+export const PI_EDIT_ASSIST_ENV = 'CREW_EDIT_ASSIST'
+export const EDIT_ASSIST_VALUES = Object.freeze(['on', 'off'])
+
 export function piRpcSeatParts(spec = {}) {
-  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, role, taskDir } = spec
+  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, editAssist = null, role, taskDir } = spec
   const agentDir = grants?.extensions?.includes('builtin:codemode') ? piSeatAgentDir({ taskDir, role }) : configDir
   const piDeny = translateDeny(deny)
   const advisor = grants?.advisor === true
@@ -324,9 +327,10 @@ export function piRpcSeatParts(spec = {}) {
       ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
     ],
     env: {
-      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR'))),
+      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV)),
       ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),
+      ...(role === 'builder' && EDIT_ASSIST_VALUES.includes(editAssist) ? { [PI_EDIT_ASSIST_ENV]: editAssist } : {}),
       ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
     },
   }

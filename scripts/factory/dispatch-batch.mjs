@@ -19,7 +19,7 @@ import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mj
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
-import { ADVISOR_ARMS, ADVISOR_SOURCES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -160,7 +160,7 @@ export const TOOL_CLASSES = ['edit', 'read', 'test', 'other']
 // the dispatcher logs and persists the decision. A dispatch-only key, so the compiler's
 // closed schema never sees it.
 export const TEST_REACH_OVERRIDE_KEY = 'allow_test_reach'
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', 'base_commit', TEST_REACH_OVERRIDE_KEY])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['assurance', 'tier', 'execution', 'variant', 'depends_on', 'seats', 'adopt', 'chunk', 'base_commit', 'edit_assist', TEST_REACH_OVERRIDE_KEY])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -1678,6 +1678,7 @@ function splitDispatchKeys(parsed, requestPath) {
     if (DISPATCH_ONLY_REQUEST_KEYS.includes(key)) dispatch[key] = value
     else request[key] = value
   }
+  if (Object.hasOwn(dispatch, 'edit_assist') && !EDIT_ASSIST_VALUES.includes(dispatch.edit_assist)) refuse(`request ${requestPath}: invalid edit_assist; expected on or off`, BATCH_UNREADABLE)
   const executionSupplied = dispatch.execution !== undefined && dispatch.execution !== null
   const variantSupplied = dispatch.variant !== undefined && dispatch.variant !== null
   const tierSupplied = dispatch.tier !== undefined && dispatch.tier !== null
@@ -1781,6 +1782,7 @@ export function readBatch({ batchDir, checkout, deps } = {}) {
       request: scoped.request,
       scope_observations: scoped.observations,
       authored_request: request,
+      edit_assist: dispatch.edit_assist ?? null,
       base_commit: typeof dispatch.base_commit === 'string' ? dispatch.base_commit : null,
       execution: execution ?? null,
       assurance: assurance ?? null,
@@ -4010,6 +4012,19 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
+// The requested builder edit assist reaches crew.json and the journal; both writes are best-effort instrumentation.
+function recordEditAssist({ editAssist, crewPath, crewDir, lane, deps } = {}) {
+  const d = normalDeps(deps)
+  const value = editAssist ?? null
+  try {
+    const crew = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8')))
+    if (crew && typeof crew === 'object' && !Array.isArray(crew)) d.writeFileSync(crewPath, JSON.stringify({ ...crew, edit_assist: value }, null, 2) + '\n')
+  } catch { /* missing or malformed crew is never recreated; instrumentation is best effort */ }
+  const row = { at: new Date().toISOString(), event: 'edit-assist', task: lane, lane, edit_assist: value, source: value === null ? 'unset' : 'request' }
+  try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* instrumentation is never load-bearing */ }
+  return { edit_assist: value }
+}
+
 // The dispatch-time advisor source reaches crew.json and the journal; both writes are best-effort instrumentation.
 function recordAdvisorSource({ advisorSource, crewPath, crewDir, lane, deps } = {}) {
   const d = normalDeps(deps)
@@ -4266,6 +4281,8 @@ function prepareDispatchContext(options) {
     refuse('cannot combine --planner-symbols-holdout-fraction with --brief-tripwires-holdout-fraction because pack omission is scalar', BATCH_UNREADABLE)
   }
   const d = normalDeps(deps)
+  // The operator env is read through the d.env seam: an edit-assist builder seat's own env must not refuse its tests.
+  if (Object.hasOwn(d.env, 'CREW_EDIT_ASSIST')) refuse('CREW_EDIT_ASSIST is dispatcher-controlled; request edit_assist in the lane request', BATCH_UNREADABLE)
   const transport = resolveTransport({ runFlags })
   const batchExecutionSpelling = runFlagSpelling(runFlags, 'execution', 'variant', '--execution', '--variant')
   const batchAssuranceSpelling = runFlagSpelling(runFlags, 'assurance', 'tier', '--assurance', '--tier')
@@ -4273,6 +4290,7 @@ function prepareDispatchContext(options) {
   if (tier === undefined || tier === null) tier = resolveRequestedTier({ tier: runFlags.tier, assurance: runFlags.assurance })
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const lanes = readBatch({ batchDir, checkout: root, deps: d })
+  if (transport === PANE_TRANSPORT && lanes.some((lane) => lane.edit_assist !== null)) refuse('edit_assist is unsupported with panes transport', BATCH_UNREADABLE)
   const { waves, graph } = planWaves({ lanes })
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
@@ -4655,6 +4673,7 @@ async function compileDispatchWave(prepared) {
       seats: (() => { const chain = seatChain(batchSeats, laneEntry?.seats); if (arm) (chain.advisor ??= {}).model = { batch: null, lane: null, settled: arm, from: 'rotation' }; return chain })(),
       advisor_rotation: arm ? { arm, source: 'rotation', reason: null } : { arm: null, source: null, reason: rotation.reason },
       advisor_source: advisorSource,
+      edit_assist: laneEntry?.edit_assist ?? null,
       operator_spelling: {
         execution: { spelling: laneExecutionSpelling, unmeasured_reason: null },
         assurance: { spelling: laneAssuranceSpelling, unmeasured_reason: null },
@@ -4680,7 +4699,7 @@ async function compileDispatchWave(prepared) {
       outDir: outputDir,
       d,
     })
-    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, advisorSource, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
+    settled.push({ ...item, plan, floor, prompt, tier: result.tier, execution: laneExecution, variant: laneVariant, seats, advisorSource, editAssist: laneEntry?.edit_assist ?? null, staffing, charterArm, enrollments, record: recordPath, runtimeRegisterPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -4810,6 +4829,7 @@ function launchDispatchWave(compiled, launchedLanes) {
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+    recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
     if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
     let run

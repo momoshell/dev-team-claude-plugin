@@ -7,11 +7,12 @@ import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync,
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir, ROOT } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
+import { EDIT_ASSIST_ENV } from './pi/extensions/builderloop.ts'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -90,6 +91,28 @@ test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
   assert.match(pane, /CREW_ADVISOR=1/)
   assert.doesNotMatch(pane, /CREW_ADVISOR_(?:MODEL|ENDPOINT|PROVENANCE)=/)
   assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
+})
+
+test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP', () => {
+  // MUTATION EA6: allow inherited or invalid edit-assist values, or insert it for a non-builder.
+  assert.equal(PI_EDIT_ASSIST_ENV, EDIT_ASSIST_ENV)
+  // MUTATION EA-enum: drop the freeze, or add a value; the closed enum is consulted by dispatch, emit and the ledger.
+  assert.deepEqual(EDIT_ASSIST_VALUES, ['on', 'off'])
+  assert.equal(Object.isFrozen(EDIT_ASSIST_VALUES), true)
+  const spec = { model: 'test', promptFile: '/tmp/role.md', env: { CREW_EDIT_ASSIST: 'on' } }
+  for (const editAssist of ['on', 'off']) {
+    assert.equal(piRpcSeatParts({ ...spec, role: 'builder', editAssist }).env[PI_EDIT_ASSIST_ENV], editAssist)
+    assert.equal(acpLaunch({ ...spec, role: 'builder', editAssist, bin: '/bin/pi', cwd: '/tmp' }).env[PI_EDIT_ASSIST_ENV], editAssist)
+  }
+  for (const role of ROLE_ORDER.filter((role) => role !== 'builder'))
+    assert.equal(piRpcSeatParts({ ...spec, role, editAssist: 'on' }).env[PI_EDIT_ASSIST_ENV], undefined)
+  for (const editAssist of [null, 'true', '', true, 'ON']) {
+    const rpc = piRpcSeatParts({ ...spec, role: 'builder', editAssist })
+    assert.equal(rpc.env[PI_EDIT_ASSIST_ENV], undefined)
+    assert.equal(Object.hasOwn(rpc.env, PI_EDIT_ASSIST_ENV), false)
+  }
+  assert.equal(piRpcSeatParts({ ...spec, role: 'builder', editAssist: null }).env[PI_EDIT_ASSIST_ENV], undefined)
+  assert.equal(acpLaunch({ ...spec, role: 'builder', editAssist: null, bin: '/bin/pi', cwd: '/tmp' }).env[PI_EDIT_ASSIST_ENV], undefined)
 })
 
 const SKELETONREAD_EXTENSION = join(ROOT, 'crew/pi/extensions/skeletonread.ts')

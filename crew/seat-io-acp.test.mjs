@@ -132,13 +132,13 @@ test('A1 skill-read ACP row is explicitly unmeasured', () => {
   } finally { cleanup(f) }
 })
 
-test('C1', () => {
+test('CC1', () => {
   const f = fixture(); try {
     const out = assign(f); f.io.teardown()
     const rows = f.logs.filter((entry) => entry.seat_turn_census)
     assert.equal(rows.length, 1)
     assert.ok(f.logs.indexOf(rows[0]) > f.logs.findIndex((entry) => entry.acp_turn))
-    assert.deepEqual(rows[0].seat_turn_census, { role: 'builder', dispatch_id: out.id, transport: 'acp', turns: null, tool_calls: null, skill_reads: null, absent_reason: ACP_CENSUS_TURNS_ABSENT })
+    assert.deepEqual(rows[0].seat_turn_census, { role: 'builder', dispatch_id: out.id, transport: 'acp', model: 'test', session_id: 'session-test', turns: null, tool_calls: null, skill_reads: null, context_first_tokens: null, context_peak_tokens: null, context_mean_tokens: null, context_calls: null, context_absent_reason: 'aggregate-usage-only', absent_reason: ACP_CENSUS_TURNS_ABSENT })
   } finally { cleanup(f) }
 })
 test('C2', () => {

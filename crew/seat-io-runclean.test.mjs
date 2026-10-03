@@ -10,12 +10,129 @@ import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
-  SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
+  SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
-import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT } from './headless.mjs'
+import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
 import { JOURNAL_CHANNEL_NAMES } from './drive.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
+
+const PANE_CAPTURE = String.raw`{"parentUuid":"c828178b-a377-46d3-b09e-bb9bcb7fd718","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSPg8agTgq9MxjMHBVf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01GSd211FY8ZKTrthuDHX1Er","name":"Bash","input":{"command":"sed -n '6060,6135p' crew/drive.mjs; echo \"=== GATE ===\"; cat /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope/task/gate.mjs | head -60","description":"Read post-green proof loop and gate checks"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":35997,"cache_read_input_tokens":0,"output_tokens":1008,"output_tokens_details":{"thinking_tokens":821},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":35997,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":1008,"cache_read_input_tokens":0,"cache_creation_input_tokens":35997,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":35997},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSPfVP8MYSnfLQABzQz","type":"assistant","uuid":"7d518552-0575-431b-aa4a-bc10eae84893","timestamp":"2026-09-08T18:23:16.916Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}
+{"parentUuid":"7eb9c965-2cbc-4368-b584-d55b189d37f6","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSQkzoL21CsnWAyS3pq","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01BC9djpCppspgFjAo738imQ","name":"Bash","input":{"command":"cd /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope; node -p \"const e=require('./returns/d3.planner.json'); JSON.stringify({mut:(e.details.mutations||[]).map(m=>({check:m.check,file:m.file,find:(m.find||'').slice(0,60)})), files:e.details.files_in_scope},null,1)\"","description":"Inspect planner envelope mutations and scope"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":3732,"cache_read_input_tokens":35997,"output_tokens":787,"output_tokens_details":{"thinking_tokens":572},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":3732,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":787,"cache_read_input_tokens":0,"cache_creation_input_tokens":3732,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":3732},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSQkBgmugDqLmrNtanB","type":"assistant","uuid":"82ac935a-e9de-4bb6-beb6-ef9ba41718c3","timestamp":"2026-09-08T18:23:29.284Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}`
+
+test('CC3', () => {
+  const root = scratchDir('pane-census-')
+  const transcript = join(root, 'session.jsonl')
+  const taskDir = join(root, 'task')
+  mkdirSync(taskDir)
+  const [firstFrame] = PANE_CAPTURE.split('\n')
+  writeFileSync(transcript, `${firstFrame}\n`)
+  const adapter = { paneUsageRecords: () => [{ session_id: 'session-1', transcript_path: transcript }] }
+  const census = paneTurnCensus({ taskDir, role: 'builder', id: 'dispatch-1', model: 'claude-opus-5', adapter })
+  const folded = claudeCensus(`${firstFrame}\n`)
+  assert.deepEqual([census.role, census.dispatch_id, census.transport, census.model, census.session_id], ['builder', 'dispatch-1', 'pane', 'claude-opus-5', 'session-1'])
+  assert.deepEqual([census.context_first_tokens, census.context_calls, census.turns, census.tool_calls], [35999, 1, 1, 1])
+  assert.deepEqual([census.context_first_tokens, census.context_calls, census.turns, census.tool_calls], [folded.context_first_tokens, folded.context_calls, folded.turns, folded.tool_calls])
+})
+
+test('CC4', () => {
+  const root = scratchDir('pane-census-cursor-')
+  const transcript = join(root, 'session.jsonl')
+  const taskDir = join(root, 'task')
+  mkdirSync(taskDir)
+  const [firstFrame, secondFrame] = PANE_CAPTURE.split('\n')
+  writeFileSync(transcript, `${firstFrame}\n`)
+  const adapter = { paneUsageRecords: () => [{ session_id: 'session-1', transcript_path: transcript }] }
+  paneTurnCensus({ taskDir, role: 'builder', adapter })
+  writeFileSync(transcript, `${firstFrame}\n${secondFrame}\n`)
+  const next = paneTurnCensus({ taskDir, role: 'builder', adapter })
+  const folded = claudeCensus(`${secondFrame}\n`)
+  // Mutation: resetting the per-session start offset to zero recounts the first captured frame.
+  assert.deepEqual([next.context_first_tokens, next.context_calls, next.turns, next.tool_calls], [39731, 1, 1, 1])
+  assert.deepEqual([next.context_first_tokens, next.context_calls, next.turns, next.tool_calls], [folded.context_first_tokens, folded.context_calls, folded.turns, folded.tool_calls])
+})
+
+test('pane partial lines, Unicode bytes, and growing sessions are counted once', () => {
+  const root = scratchDir('pane-census-growing-')
+  const taskDir = join(root, 'task')
+  const first = join(root, 'first.jsonl')
+  const second = join(root, 'second.jsonl')
+  mkdirSync(taskDir)
+  const row = (context, id) => Buffer.from(JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: context }, content: [{ type: 'tool_use', id: `tool-${id}`, name: 'Read' }], extra: '☃' } }) + '\n')
+  const partial = row(120, 'partial')
+  writeFileSync(first, partial.subarray(0, partial.length - 1))
+  writeFileSync(second, row(230, 'later'))
+  const adapter = { paneUsageRecords: () => [{ session_id: 's1', transcript_path: first }, { session_id: 's2', transcript_path: second }] }
+  const initial = paneTurnCensus({ taskDir, role: 'builder', adapter })
+  assert.equal(initial.context_first_tokens, 230)
+  assert.equal(initial.session_id, 's2')
+  writeFileSync(first, partial)
+  const next = paneTurnCensus({ taskDir, role: 'builder', adapter })
+  assert.equal(next.context_first_tokens, 120)
+  assert.equal(next.session_id, 's1')
+  assert.equal(paneTurnCensus({ taskDir, role: 'builder', adapter }).context_absent_reason, 'census-absent')
+})
+
+test('pane census combines complete lines from every growing session in discovery order', () => {
+  const root = scratchDir('pane-census-multiple-growing-')
+  const taskDir = join(root, 'task')
+  const first = join(root, 'first.jsonl')
+  const second = join(root, 'second.jsonl')
+  mkdirSync(taskDir)
+  const row = (context, id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: context }, content: [{ type: 'tool_use', id: `tool-${id}`, name: 'Read' }] } }) + '\n'
+  writeFileSync(first, row(120, 'first'))
+  writeFileSync(second, row(230, 'second'))
+  const adapter = { paneUsageRecords: () => [{ session_id: 's1', transcript_path: first }, { session_id: 's2', transcript_path: second }] }
+  const census = paneTurnCensus({ taskDir, role: 'builder', adapter })
+  assert.equal(census.context_calls, 2)
+  assert.equal(census.context_first_tokens, 120)
+  assert.equal(census.session_id, 's2')
+})
+
+test('CC5', () => {
+  const root = scratchDir('pane-census-absent-')
+  const taskDir = join(root, 'task')
+  const transcript = join(root, 'session.jsonl')
+  mkdirSync(taskDir)
+  const complete = `${JSON.stringify({ type: 'assistant', message: { id: 'valid', usage: { input_tokens: 88 } } })}\n`
+  writeFileSync(transcript, complete)
+  const records = [{ session_id: 's', transcript_path: transcript }]
+  const adapter = { paneUsageRecords: () => records }
+  const absent = paneTurnCensus({ taskDir, role: 'builder', agent: 'pi', adapter })
+  assert.deepEqual([absent.context_first_tokens, absent.context_peak_tokens, absent.context_mean_tokens, absent.context_calls, absent.context_absent_reason], [null, null, null, null, 'census-absent'])
+  assert.equal(paneTurnCensus({ taskDir, role: 'builder', adapter: { paneUsageRecords: () => [] } }).context_absent_reason, 'census-absent')
+  assert.equal(paneTurnCensus({ taskDir, role: 'builder', adapter }).context_absent_reason, null)
+  assert.equal(paneTurnCensus({ taskDir, role: 'builder', adapter }).context_absent_reason, 'census-absent')
+  const usageDir = join(taskDir, 'usage')
+  mkdirSync(usageDir, { recursive: true })
+  const writeDeniedDir = join(taskDir, 'write-denied')
+  mkdirSync(writeDeniedDir)
+  const writeDenied = paneTurnCensus({ taskDir: writeDeniedDir, role: 'builder', adapter, deps: { writeFileSync: () => { const error = new Error('denied'); error.code = 'EPERM'; throw error } } })
+  assert.equal(writeDenied.context_first_tokens, 88)
+})
+
+test('RV1-1 corrupt and EPERM cursor reads preserve durable state', () => {
+  const root = scratchDir('pane-census-cursor-integrity-')
+  const taskDir = join(root, 'task')
+  const transcript = join(root, 'session.jsonl')
+  mkdirSync(taskDir)
+  writeFileSync(transcript, `${JSON.stringify({ type: 'assistant', message: { id: 'valid', usage: { input_tokens: 88 } } })}\n`)
+  const adapter = { paneUsageRecords: () => [{ session_id: 's', transcript_path: transcript }] }
+  mkdirSync(join(taskDir, 'usage'))
+  const cursor = join(taskDir, 'usage', 'builder.census.json')
+  writeFileSync(cursor, '{')
+  // Mutation: accepting malformed durable state silently replays the transcript.
+  assert.equal(paneTurnCensus({ taskDir, role: 'builder', adapter }).context_absent_reason, 'census-absent')
+  assert.equal(readFileSync(cursor, 'utf8'), '{')
+  writeFileSync(cursor, JSON.stringify({ s: 0 }))
+  // Mutation: swallowing EPERM silently replays the transcript from byte zero.
+  const denied = paneTurnCensus({ taskDir, role: 'builder', adapter, deps: { readFileSync: (path, ...args) => {
+    if (path === cursor) { const error = new Error('denied'); error.code = 'EPERM'; throw error }
+    return readFileSync(path, ...args)
+  } } })
+  assert.equal(denied.context_absent_reason, 'census-absent')
+  assert.equal(readFileSync(cursor, 'utf8'), JSON.stringify({ s: 0 }))
+})
 
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
@@ -177,6 +294,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
   ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
+  ['recordRow', '', 'at seat_turn_census'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
@@ -194,11 +312,11 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 37)
+  assert.equal(sites.length, 38)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 27)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 10)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 11)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -313,7 +431,7 @@ test('paneUsageFrames folds claude spend once, then emits deltas and zeroes with
   })
 })
 
-test('a pane wait emits usage and persists sent totals across a second seatIo instance', () => {
+test('a pane wait emits usage and persists sent totals across a second seatIo instance, with exactly one census row', () => {
   withRepo({ dirty: false }, (fixture) => {
     const session = '33333333-3333-4333-8333-333333333333'
     const transcriptPath = join(fixture.paths.taskDir, `${session}.jsonl`)
@@ -333,7 +451,7 @@ test('a pane wait emits usage and persists sent totals across a second seatIo in
       io.emit = (event) => events.push(event)
       const assignment = io.assign({ role: 'planner', briefFile: join(fixture.paths.taskDir, 'brief.md') })
       assert.doesNotThrow(() => io.wait(assignment.returnPath, 0))
-      return { events, journal }
+      return { events, journal, assignment }
     }
     const first = make()
     const usage1 = first.events.filter((event) => event.kind === 'usage')
@@ -345,6 +463,10 @@ test('a pane wait emits usage and persists sent totals across a second seatIo in
     assert.equal(usage2.length, 1)
     assert.equal(usage2[0].usage.billed_output_tokens, 0)
     assert.equal(first.journal.filter((row) => row.event === 'pane-usage').length, 1)
+    const censusRows = first.journal.filter((row) => row.seat_turn_census)
+    assert.equal(censusRows.length, 1)
+    assert.equal(Object.hasOwn(censusRows[0], 'headless_outcome'), false)
+    assert.deepEqual([censusRows[0].seat_turn_census.dispatch_id, censusRows[0].seat_turn_census.transport], [first.assignment.id, 'pane'])
   })
 })
 

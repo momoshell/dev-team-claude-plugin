@@ -4858,7 +4858,8 @@ test('HoldB2', async () => {
     const lane = call.args[call.args.indexOf('--task') + 1]
     assert.equal(call.args[call.args.indexOf('--brief-file') + 1], join(result.out, `${lane}.brief.md`))
   }
-  assert.equal(result.appended.length, 9)
+  // pi-codemode adds one best-effort journal row per lane.
+  assert.equal(result.appended.length, 12)
 })
 
 test('HoldB3', async () => {
@@ -4903,8 +4904,10 @@ test('HoldB4', async () => {
       return { status: 0, stdout: '', stderr: '' }
     },
   })
-  assert.deepEqual(trace, ['boot', 'arm', 'arm', 'arm', 'run'])
-  assert.equal(result.appended.length, 3)
+  // pi-codemode adds its journal append between the other attribution rows and run.
+  assert.deepEqual(trace, ['boot', 'arm', 'arm', 'arm', 'arm', 'run'])
+  // pi-codemode adds one journal row.
+  assert.equal(result.appended.length, 4)
 })
 
 test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', async () => {
@@ -5470,13 +5473,14 @@ test('advisor-source write denial leaves crew source absent but still journals a
     writeFile: (path, content) => {
       if (String(path).endsWith('/crew.json')) {
         denied++
-        if (denied <= 2) throw new Error('crew write denied')
+        if (denied <= 3) throw new Error('crew write denied')
         persistedCrewSource = JSON.parse(content).advisor_source
       }
     },
   })
   const rows = result.appended.filter(({ path }) => path.endsWith('journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
-  assert.equal(denied, 2)
+  // pi-codemode contributes its independent crew write attempt.
+  assert.equal(denied, 3)
   // MUTATION RV1-4a-state: record a crew source despite the denied write; no source was persisted.
   assert.equal(persistedCrewSource, null)
   assert.equal(rows.some((row) => row.event === 'advisor-source' && row.advisor_source === 'rotation'), true)
@@ -7244,4 +7248,92 @@ test('BD3', async () => {
   assert.equal(crew.intent, 'Real intent')
   const rows = accepted.appended.filter(({ path }) => path.endsWith('journal.jsonl'))
   assert.ok(rows.some(({ content }) => content.includes('Real intent')))
+})
+
+// MUTATION PC1: discard the requested value at the recorder call.
+test('PC1', async () => {
+  let state, seen
+  const r = await dispatchFixture({ label: 'pc-1', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) }, writeFile: (p, c) => { if (String(p).endsWith('/crew.json')) state = JSON.parse(c) }, spawnResult: (_a, c) => { if (c.background) seen = state?.pi_codemode; return { status: 0, stdout: '' } } })
+  const crew = JSON.parse([...r.wrote].find(([p]) => p.endsWith('/crew.json'))[1])
+  const dispatch = JSON.parse(readFileSync(join(r.out, 'lane-a.dispatch.json'), 'utf8'))
+  const rows = r.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).filter(x => x.event === 'pi-codemode')
+  assert.equal(seen, 'on'); assert.equal(crew.pi_codemode, 'on'); assert.equal(dispatch.pi_codemode, 'on')
+  assert.deepEqual(rows.map(({ pi_codemode, source }) => ({ pi_codemode, source })), [{ pi_codemode: 'on', source: 'request' }])
+  const denied = await dispatchFixture({ label: 'pc-1-denied', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) }, writeFile: p => { if (String(p).endsWith('/crew.json')) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) } })
+  assert.equal(denied.appended.filter(x => x.content.includes('"event":"pi-codemode"')).length, 1)
+  assert.equal(denied.spawned.some(c => c.background), true)
+  const deniedAppend = await dispatchFixture({ label: 'pc-1-append-denied', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) }, appendFile: (p, c) => { if (String(p).endsWith('journal.jsonl') && String(c).includes('"event":"pi-codemode"')) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }) } })
+  assert.equal(deniedAppend.spawned.some(c => c.background), true)
+})
+
+// MUTATION PC2: turn an unset recorder value into off.
+test('PC2', async () => {
+  const r = await dispatchFixture({ label: 'pc-2', names: ['lane-a'] })
+  const dispatch = JSON.parse(readFileSync(join(r.out, 'lane-a.dispatch.json'), 'utf8'))
+  const crew = JSON.parse([...r.wrote].find(([p]) => p.endsWith('/crew.json'))[1])
+  const rows = r.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).filter(x => x.event === 'pi-codemode')
+  assert.equal(dispatch.pi_codemode, null); assert.equal(crew.pi_codemode, null)
+  assert.deepEqual(rows.map(({ pi_codemode, source }) => ({ pi_codemode, source })), [{ pi_codemode: null, source: 'unset' }])
+})
+
+// MUTATION PC3: disable the own-property enum guard.
+test('PC3', async () => {
+  for (const value of [null, true, '', 'maybe']) await assert.rejects(dispatchFixture({ label: `pc-3-${String(value)}`, names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: value }) } }), error => /lane-a\.request\.json: invalid pi_codemode; expected on or off/.test(error.message))
+})
+
+// MUTATION PC4: omit the boot-only environment overlay.
+test('PC4', async () => {
+  for (const value of ['on', 'off', undefined]) {
+    const r = await dispatchFixture({ label: `pc-4-${String(value)}`, names: ['lane-a'], ...(value === undefined ? {} : { requests: { 'lane-a': requestFor('lane-a', { pi_codemode: value }) } }) })
+    const boots = r.spawned.filter(x => x.args?.includes('boot'))
+    assert.equal(boots.length, 1); assert.equal(boots[0].env?.CREW_PI_CODEMODE, value)
+    if (value === undefined) assert.equal(Object.hasOwn(boots[0], 'env'), false)
+    assert.deepEqual(r.spawned.filter(c => !c.args?.includes('boot') && c.env && Object.hasOwn(c.env, 'CREW_PI_CODEMODE')), [])
+  }
+})
+
+// MUTATION PC5: bypass the dispatcher-controlled operator env refusal.
+test('PC5', async () => {
+  for (const value of ['on', 'off', '']) {
+    const spawned = []
+    await assert.rejects(dispatchFixture({ label: `pc-5-${value}`, names: ['lane-a'], env: { CREW_PI_CODEMODE: value }, spawnedOut: spawned }), error => /CREW_PI_CODEMODE.*pi_codemode/.test(error.message))
+    assert.equal(spawned.filter(x => x.args?.includes('boot')).length, 0)
+  }
+})
+
+// MUTATION PC6: consult process.env instead of d.env.
+test('PC6', async () => {
+  const had = Object.hasOwn(process.env, 'CREW_PI_CODEMODE'), old = process.env.CREW_PI_CODEMODE
+  process.env.CREW_PI_CODEMODE = 'on'
+  try {
+    const r = await dispatchFixture({ label: 'pc-6', names: ['lane-a'] })
+    assert.equal(JSON.parse(readFileSync(join(r.out, 'lane-a.dispatch.json'), 'utf8')).pi_codemode, null)
+  } finally { if (had) process.env.CREW_PI_CODEMODE = old; else delete process.env.CREW_PI_CODEMODE }
+})
+
+// MUTATION PC7: withhold the environment overlay for panes.
+test('PC7', async () => {
+  const r = await dispatchFixture({ label: 'pc-7', names: ['lane-a'], runFlags: { panes: true }, requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) } })
+  assert.equal(r.spawned.find(x => x.args?.includes('boot'))?.env?.CREW_PI_CODEMODE, 'on')
+})
+
+// MUTATION PC8: record an empty list instead of measuring seat grants.
+test('PC8', async () => {
+  const grants = { lane_name: 'lane-a', lane_fence: [], workspace_id: 'ws', members: { planner: { grant_snapshot: { grants: { extensions: ['builtin:codemode', 'builtin:mcp'] } } }, reviewer: { grant_snapshot: { grants: { extensions: [] } } }, builder: { grant_snapshot: { grants: { extensions: ['builtin:codemode'] } } } } }
+  const r = await dispatchFixture({ label: 'pc-8', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) }, crewJsonFor: () => JSON.stringify(grants) })
+  const row = r.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).find(x => x.event === 'pi-codemode')
+  assert.deepEqual(row.codemode_seats, ['builder', 'planner'])
+  let fired = false
+  const unreadable = await dispatchFixture({ label: 'pc-8-unreadable', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'on' }) }, readObserver: p => { if (p.endsWith('/crew.json') && new Error().stack.includes('recordPiCodemode')) { fired = true; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) } } })
+  assert.equal(fired, true)
+  const unreadableRow = unreadable.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).find(x => x.event === 'pi-codemode')
+  assert.equal(unreadableRow.codemode_seats, null)
+  for (const [label, value] of [['nonobject', '[]'], ['malformed', '{']]) {
+    const malformed = await dispatchFixture({ label: `pc-8-${label}`, names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { pi_codemode: 'off' }) }, crewRecorderRead: () => value })
+    const measured = malformed.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).find(x => x.event === 'pi-codemode')
+    assert.equal(measured.codemode_seats, null)
+  }
+  const empty = await dispatchFixture({ label: 'pc-8-empty', names: ['lane-a'] })
+  const emptyRow = empty.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).find(x => x.event === 'pi-codemode')
+  assert.deepEqual(emptyRow.codemode_seats, [])
 })

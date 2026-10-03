@@ -57,6 +57,10 @@ unchanged journal event reports `lanes: 0, files: 0`.
 
 A lane request may carry the dispatch-only `edit_assist` key with the closed value `on` or `off`; omission is recorded as `null` with journal source `unset`, never as `off`. The default remains off. Only pi builder RPC/ACP environments receive an explicit value; pane transport and a `CREW_EDIT_ASSIST` variable already in the dispatcher environment are refused. Attribution is recorded in the dispatch record, `crew.json`, the journal, and the run-configuration ledger.
 
+### Pi codemode
+
+A lane request may carry the dispatch-only `pi_codemode` key with the closed value `on` or `off`; omission remains `null` with journal source `unset`, never defaulted to `off`. Any dispatcher-owned `CREW_PI_CODEMODE` value, including empty or `off`, is refused before boot; request the lane value instead. The selected value is delivered only on the boot command environment to all pi seats (MCP remains grant-gated), including with panes transport. Attribution records the requested value and the roles whose boot grant snapshot includes `builtin:codemode`; unreadable grant evidence remains `null`.
+
 ### Proposal recommendation and minimum
 
 The compiler's `proposal` fence is v2 JSON with exactly
@@ -88,7 +92,7 @@ Retired by ADR-043: `external`, `externalFenceLiveness`, `crossBatchCollisions`,
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:40`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:41`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -220,9 +224,9 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:172`,
-`scripts/factory/dispatch-batch.mjs:173`,
-`scripts/factory/dispatch-batch.mjs:27`).
+(`scripts/factory/dispatch-batch.mjs:173`,
+`scripts/factory/dispatch-batch.mjs:174`,
+`scripts/factory/dispatch-batch.mjs:28`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
 pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
@@ -253,8 +257,8 @@ the own-surface meaning of either entry.
 A **wave** is a topological level of the declared graph. The operator authors
 an edge in the request; it is never inferred, because an inferred ordering is
 one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
-and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:44`
-and `scripts/factory/dispatch-batch.mjs:43`.
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:45`
+and `scripts/factory/dispatch-batch.mjs:44`.
 
 A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
 A dependent lane briefed against work that did not land is
@@ -269,7 +273,7 @@ and merge reconcile shared edits after the wave.
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is
 probed; a base that does not carry the predecessor's commit refuses
-**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:45`) rather than
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:46`) rather than
 compiling against a stale tree.
 
 Each wave is one invocation (`--wave`), because `run` is backgrounded and this

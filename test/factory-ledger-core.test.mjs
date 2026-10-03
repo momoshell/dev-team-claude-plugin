@@ -2753,6 +2753,25 @@ test('cellAttempts counts applied swaps as target-cell attempts', () => {
   } finally { ledger.close() }
 })
 
+// MUTATION PC9: drop pi_codemode from the recorded configuration arguments.
+test('PC9', () => {
+  const input = (id, value) => ({ adw_id: id, schema_version: 1, task_profile: null, task_profile_source: null, requested_execution: null, effective_execution: null, execution_source: null, requested_assurance: null, effective_assurance: null, assurance_source: null, legacy_variant: null, legacy_tier: null, pi_codemode: value })
+  const ledger = openTestLedger()
+  try {
+    for (const [i, value] of ['on', 'off', null].entries()) assert.equal(ledger.recordRunConfiguration(input(`pc9-${i}`, value)).pi_codemode, value)
+    assert.deepEqual(ledger.dumpTable('run_configurations').map(row => row.pi_codemode), ['on', 'off', null])
+    for (const value of [true, '', 'maybe', 0]) assert.throws(() => ledger.recordRunConfiguration(input('pc9-invalid', value)), /pi_codemode/)
+  } finally { ledger.close() }
+  const dir = scratchDir('pc9-legacy-'), dbPath = join(dir, 'ledger.db'), DatabaseSync = require('node:sqlite').DatabaseSync
+  let db = new DatabaseSync(dbPath)
+  db.exec('CREATE TABLE run_configurations (adw_id TEXT PRIMARY KEY)')
+  db.close()
+  const upgraded = openLedger({ dbPath, stderr: { write() {} } })
+  try { upgraded.dumpTable('run_configurations') } finally { upgraded.close() }
+  db = new DatabaseSync(dbPath)
+  try { assert.equal(db.prepare('PRAGMA table_info(run_configurations)').all().some(column => column.name === 'pi_codemode' && column.type === 'TEXT'), true) } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('cellAttempts keys operator overrides by model string', () => {
   const ledger = openTestLedger()
   try {

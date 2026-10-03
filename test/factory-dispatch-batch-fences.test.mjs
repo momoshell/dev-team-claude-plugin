@@ -853,6 +853,7 @@ async function dispatchFixture({
   briefs = {},
   workspaceFor = (lane) => `ws-${lane}`,
   crewJsonFor = null,
+  crewRecorderRead = null,
   outcomes = {},
   ancestor = () => 0,
   spawnResult = () => ({ status: 0, stdout: '', stderr: '' }),
@@ -912,6 +913,7 @@ async function dispatchFixture({
     readFileSync: (path, encoding) => {
       const text = String(path)
       readObserver(text)
+      if (text.endsWith('/crew.json') && crewRecorderRead && new Error().stack.includes('recordPiCodemode')) return crewRecorderRead(text)
       if (text.endsWith('advisor-reservations.json')) {
         if (rotationFiles.has(text)) return rotationFiles.get(text)
         return readFileSync(text, encoding || 'utf8')

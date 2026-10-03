@@ -82,8 +82,8 @@ import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { modelString as claudeModelString } from '../../crew/adapters/adapter-claude.mjs'
-import { modelString as piModelString, EDIT_ASSIST_VALUES } from '../../crew/adapters/adapter-pi.mjs'
-export { EDIT_ASSIST_VALUES }
+import { modelString as piModelString, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES } from '../../crew/adapters/adapter-pi.mjs'
+export { EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES }
 // NONCE_PREFIX was imported from the legacy runtime's contract
 // (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
 // sweep guard still honors nonce-prefixed sidecars, so the constant's
@@ -830,7 +830,8 @@ export const TABLES = Object.freeze({
       { name: 'advisor_granted_json', decl: 'TEXT' },
       { name: 'advisor_source', decl: 'TEXT' },
       { name: 'advisor_source_evidence', decl: 'TEXT' },
-      { name: 'edit_assist', decl: 'TEXT' }
+      { name: 'edit_assist', decl: 'TEXT' },
+      { name: 'pi_codemode', decl: 'TEXT' }
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -3263,6 +3264,7 @@ export function openLedger({
     }
     if (input.advisor_source != null) requireEnum(input.advisor_source, ADVISOR_SOURCES, 'recordRunConfiguration', 'advisor_source')
     if (input.edit_assist != null) requireEnum(input.edit_assist, EDIT_ASSIST_VALUES, 'recordRunConfiguration', 'edit_assist')
+    if (input.pi_codemode != null) requireEnum(input.pi_codemode, PI_CODEMODE_VALUES, 'recordRunConfiguration', 'pi_codemode')
     if (input.advisor_granted_json != null) {
       let grant
       try { grant = JSON.parse(input.advisor_granted_json) } catch { refuse('recordRunConfiguration: advisor_granted_json must be a JSON array of role names') }
@@ -3287,6 +3289,7 @@ export function openLedger({
       advisor_source: input.advisor_source ?? null,
       advisor_source_evidence: input.advisor_source_evidence ?? null,
       edit_assist: input.edit_assist ?? null,
+      pi_codemode: input.pi_codemode ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     appendJsonl('recordRunConfiguration', args)

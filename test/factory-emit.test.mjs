@@ -1980,6 +1980,18 @@ test('S1 S2 endRun ingests only lines after the latest run-start by position', {
   try { assert.deepEqual(ledger.dumpTable('advisor_usage').map((r) => r.consult_id), ['current']) }
   finally { ledger.close(); emitter.dispose() }
 })
+// MUTATION PC10: normalise every emitted codemode value to null.
+test('PC10', { skip: SKIP }, () => {
+  for (const [i, value] of ['on', 'off', null, true, '', 'maybe', undefined].entries()) {
+    const dir = freshDir(`pc10-${i}`), dbPath = join(dir, 'ledger.db')
+    writeFileSync(join(dir, 'crew.json'), JSON.stringify({ pi_codemode: value, run_configuration: { schema_version: 1, profile: { effective: 'default', source: 'default' }, assurance: { effective: 'quick', source: 'default' } } }))
+    const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: `pc10-${i}`, dbPath, stderr: { write() {} } })
+    emitter.startRun(); emitter.dispose()
+    const ledger = openLedger({ dbPath, stderr: { write() {} } })
+    try { assert.equal(ledger.dumpTable('run_configurations')[0]?.pi_codemode, ['on', 'off'].includes(value) ? value : null) } finally { ledger.close() }
+  }
+})
+
 test('E3 ingestion failure is counted and still closes ledger handle', () => {
   let ended = false, closed = false
   const f = journalIngestFixture({ _ingestJournal() { throw new Error('denied') }, _openLedger() {

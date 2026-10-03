@@ -9322,6 +9322,23 @@ test('SA9 green insufficient and blocked steps accept from the ownership gate', 
   }
 })
 
+// Kills Sol RV-pass1: drop S.returns.builder = acceptedEnv and a gate-accepted final step loses the suite checkpoint.
+test('SA10 gate-accepted steps keep the suite resume checkpoint', () => {
+  const checkpointAfterRedColdSuite = (env) => {
+    const { io } = steppedAcceptanceIo({ builders: [env, env], outputs: [steppedGreen(), steppedGreen(), steppedGreen(), steppedRed('A1'), steppedRed('A2')], lead: leadEnv('escalate') })
+    io.runCold = () => ({ ok: false, output: 'not ok 1 - a.test.mjs\n# fail 1\n', path: '/zz/cold', kept: null })
+    addStepCheckpointWitness(io)
+    const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 4 } }, io)
+    return { result, io }
+  }
+  const control = checkpointAfterRedColdSuite(buildEnv({ details: { ...buildEnv().details, files_changed: ['a.mjs'] } }))
+  assert.equal(control.result.details.resume_checkpoint?.kind, 'suite', JSON.stringify(control.result.details.escalation))
+  const accepted = checkpointAfterRedColdSuite(buildEnv({ status: 'insufficient', summary: 'work landed', details: { ...buildEnv().details, files_changed: ['a.mjs'] } }))
+  assert.ok(accepted.io.calls.logs.some(({ event }) => event === 'step:accepted-by-gate'))
+  assert.equal(accepted.result.details.escalation?.where, control.result.details.escalation?.where)
+  assert.equal(accepted.result.details.resume_checkpoint?.kind, 'suite')
+})
+
 test('SA10 later-owned red is deferred when accepting an insufficient step', () => {
   const { io } = steppedAcceptanceIo({ builder1: buildEnv({ status: 'insufficient', summary: 'later work pending' }), outputs: [steppedRed('A2'), steppedGreen()] })
   driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 4 } }, io)

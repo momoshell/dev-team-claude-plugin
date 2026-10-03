@@ -3,11 +3,13 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { forAll } from '../test/helpers.mjs'
+import { chmodSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_REFUSALS, eofAppendResolution, eofAppendStrictUtf8 } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8 } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -975,6 +977,46 @@ test('RV1-7 a Latin-1 EOF conflict is never auto-merged and keeps its bytes', ()
   assert.equal(builders.at(-1).note, 'rebase-conflict-fix')
   assert.equal(io.state.addCommands.length, 1)
   assert.match(io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`], /eof-append refused for src\/latin1\.txt: not-strict-utf8/)
+})
+
+// A real rebase where the lane made the file executable and appended a line while
+// upstream appended a different one. The text is a valid EOF append, but the stages
+// disagree on mode, so auto-merging would commit the file as 100644.
+// Mutation: make eofAppendModesAgree return true; the merge is written and staged.
+test('SOL1-1 an EOF append whose sides disagree on file mode is never auto-merged', () => {
+  const repo = scratchDir('crew-eof-mode-')
+  const must = (...args) => git(repo, ...args)
+  must('init', '-q', '-b', 'main')
+  const write = (text, mode) => { writeFileSync(join(repo, 'tool.sh'), text); chmodSync(join(repo, 'tool.sh'), mode) }
+  write('head\n', 0o644); must('add', 'tool.sh'); must('commit', '-qm', 'base')
+  must('checkout', '-qb', 'lane')
+  write('head\nlane\n', 0o755); must('commit', '-qam', 'lane')
+  must('checkout', '-q', 'main')
+  write('head\nupstream\n', 0o644); must('commit', '-qam', 'upstream')
+  must('checkout', '-q', 'lane')
+  assert.notEqual(gitResult(repo, 'rebase', 'main').status, 0)
+  const unmerged = must('ls-files', '-u', '--', 'tool.sh')
+  assert.match(unmerged, /^100644 \S+ 2\ttool\.sh$/m)
+  assert.match(unmerged, /^100755 \S+ 3\ttool\.sh$/m)
+  const hunk = must('diff', '--cc', '--', 'tool.sh')
+  assert.equal(EOF_APPEND_MODE_REFUSAL, 'mode-divergent')
+  assert.equal(eofAppendModesAgree(hunk), false)
+  assert.equal(eofAppendModesAgree(hunk.replace(/^mode .*\n/m, '')), true)
+  assert.equal(eofAppendModesAgree(null), false)
+
+  const path = 'src/tool.sh'
+  const spec = eofSpec([path], { hunk: hunk.replaceAll('tool.sh', path), builderEdits: { [path]: 'resolved by builder\n' } })
+  const { io, result } = runAnchorPublication({ specs: [spec], scope: [path], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+  } })
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.state.diff3CheckoutCommands, [])
+  assert.equal(io.calls.writes[`${CTX.checkout}/${path}`], undefined)
+  assert.deepEqual(io.calls.logs.filter((row) => row.rebase_eof_append).map((row) => row.rebase_eof_append), [
+    { paths: [path], outcome: 'refused', reason: 'mode-divergent' },
+  ])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').at(-1).note, 'rebase-conflict-fix')
+  assert.match(io.calls.writes[`${TD}/rebase-conflict-bounce-r1.md`], /eof-append refused: mode-divergent/)
 })
 
 test('A1 retained rebase state reaches conflict resolver before any abort', () => {

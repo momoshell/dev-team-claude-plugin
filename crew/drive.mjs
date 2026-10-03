@@ -4435,6 +4435,15 @@ export function eofAppendResolution(diff3Text, stage2Bytes, stage3Bytes) {
 // replacement character it leaves can. A file that legitimately contains U+FFFD is
 // refused too, which only costs it the ordinary builder route.
 export const EOF_APPEND_ENCODING_REFUSAL = 'not-strict-utf8'
+// `git checkout --conflict=diff3` rewrites the file with one mode and `git add` stages
+// whatever the worktree holds, so a conflict whose sides disagree on the file mode (a
+// lane that made a script executable) would lose that change silently. The combined
+// diff captured before recovery prints `mode <a>,<b>..<c>` exactly when the modes differ.
+export const EOF_APPEND_MODE_REFUSAL = 'mode-divergent'
+export function eofAppendModesAgree(hunks) {
+  // MUTATION: return true and a 100755 side is committed as 100644.
+  return typeof hunks === 'string' && !/^mode [0-7]+(?:,[0-7]+)+\.\.[0-7]+$/m.test(hunks)
+}
 export function eofAppendStrictUtf8(text) {
   // MUTATION: return true and a lossily decoded Latin-1 merge is written and staged.
   return typeof text === 'string' && !text.includes('\uFFFD') && text.isWellFormed()
@@ -11936,6 +11945,10 @@ function runTask(ctx, io, crash) {
         const eofAppendRecovery = () => {
           if (classifiedMechanical || !evidenceMeasured) return { ok: false, why: classifiedMechanical ? 'mechanical anchor recovery route was unavailable' : 'conflict is not mechanically anchor-resolvable' }
           const eofJournal = (fields) => { try { io.log(recordRow({ at: io.now(), rebase_eof_append: { paths: [...conflicted], ...fields } })) } catch {} }
+          if (!eofAppendModesAgree(conflictHunks)) {
+            eofJournal({ outcome: 'refused', reason: EOF_APPEND_MODE_REFUSAL })
+            return { ok: false, why: `eof-append refused: ${EOF_APPEND_MODE_REFUSAL}` }
+          }
           const merged = []
           for (const path of conflicted) {
             const quoted = shellArg(path)

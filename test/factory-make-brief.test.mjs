@@ -18,11 +18,11 @@ import {
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
-  canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere,
+  canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere, issueBindingFor,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS, parseProposalBrief } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo, profileProtectedPaths } from '../scripts/factory/probe-repo.mjs'
-import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, acceptanceIds, createsFromBrief, parseDirectedBrief } from '../crew/drive.mjs'
+import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, acceptanceIds, createsFromBrief, issueStatementDefect, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
@@ -315,13 +315,65 @@ test('the four authored lines are carried verbatim and compilation is idempotent
   assert.equal(first, second)
 })
 
+test('IB1 background hash does not bind packed issue context', () => {
+  const root = fixture('ib1-background-only')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { ask: 'Background #910 only; no issue is closed.' }, ['--pack', pack], 'ib1.md')
+  assert.match(section(brief, '## Context pack'), /^issue: \(none\) — basis: no-issue-cited$/m)
+})
+
+test('IB2 background-only packed brief passes issue publication defect check', () => {
+  const root = fixture('ib2-publication')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { ask: 'Background #910 only; no issue is closed.' }, ['--pack', pack], 'ib2.md')
+  assert.equal(issueStatementDefect({ brief, details: {} }), null)
+})
+
+test('IB3 first Closes citation binds after background hash, including mixed-case colon', () => {
+  const root = fixture('ib3-closes')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { ask: 'Background #910. cLoSeS: #1676 is the issue.' }, ['--pack', pack], 'ib3.md')
+  assert.match(section(brief, '## Context pack'), /^issue: #1676\b/m)
+})
+
+test('IB4 non-closing issue language stays unbound', () => {
+  for (const [index, ask] of ['Fixes #111 this issue', 'Resolves #112 this issue', 'Issue: #113 this issue', 'Encloses #114 this issue'].entries()) {
+    const root = fixture(`ib4-unbound-${index}`)
+    const pack = join(root, 'pack')
+    mkdirSync(pack)
+    const { brief } = compile(root, { ask }, ['--pack', pack], `ib4-${index}.md`)
+    assert.match(section(brief, '## Context pack'), /^issue: \(none\) — basis: no-issue-cited$/m)
+  }
+})
+
+test('RV1-1 Closes binding ignores an unrelated background issue citation', () => {
+  assert.deepEqual(issueBindingFor({ ask: 'Background #910. Closes #1676.' }), {
+    issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false,
+  })
+})
+
+test('IB7 declared close after placeholder binds compiled issue literally', () => {
+  const root = fixture('ib7-declared')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, {
+    ask: 'Background #910 only.',
+    done_means: 'details.closes=[A] is illustrative; details.closes=[73] is the declared close.',
+  }, ['--pack', pack], 'ib7.md')
+  assert.match(section(brief, '## Context pack'), /^issue: #73\b/m)
+  assert.equal(issueBindingFor({ ask: 'Background #910 only.', done_means: 'details.closes=[A]; details.closes=[73]' }).issue, 73)
+})
+
 test('pack mode moves boilerplate to sidecars and preserves the inline verdict', () => {
   // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
   const root = fixture('pack-basic', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
   const issueBody = 'Issue body line one.\nIssue body line two.'
   const issue = put(root, 'issue-body.md', `${issueBody}\n`)
   const journal = put(root, 'journal.jsonl', '{"event":"plan"}\n{"event":"build"}\n')
-  const ask = `#123 Move the widget cache contract into a smaller brief and point at sidecars. Journal: ${journal}`
+  const ask = `Closes #123 Move the widget cache contract into a smaller brief and point at sidecars. Journal: ${journal}`
   const bareBefore = compile(root, { ask: ASK }, [], 'bare-before.md').brief
   const pack = join(root, 'pack')
   mkdirSync(pack)
@@ -647,8 +699,8 @@ test('every packed absence uses one closed reason and never invents a value', ()
   const journalPath = join(root, 'missing-journal.jsonl')
   const cases = [
     { ask: ASK, reason: 'no-issue-cited' },
-    { ask: '#321 Move the widget cache contract into a smaller brief.', reason: 'no-issue-body-supplied' },
-    { ask: '#321 Move the widget cache contract into a smaller brief.', extra: ['--issue-body', issuePath], reason: 'issue-body-unreadable' },
+    { ask: 'Closes #321 Move the widget cache contract into a smaller brief.', reason: 'no-issue-body-supplied' },
+    { ask: 'Closes #321 Move the widget cache contract into a smaller brief.', extra: ['--issue-body', issuePath], reason: 'issue-body-unreadable' },
     { ask: ASK, reason: 'no-journal-named' },
     { ask: `${ASK} Journal: ${journalPath}`, reason: 'journal-unreadable' },
   ]
@@ -1074,7 +1126,7 @@ test('context pack records complete source data beyond argv limits', () => {
   git(root, 'add', '-A')
   const pack = join(root, 'pack')
   mkdirSync(pack)
-  const ask = `#456 Keep generated context data complete. Journal: ${journal}`
+  const ask = `Closes #456 Keep generated context data complete. Journal: ${journal}`
   const packed = compile(root, { ask, where: ['lib/generated.mjs'] }, [
     '--pack', pack, '--issue-body', issue,
   ], 'context-at-scale.brief.md').brief

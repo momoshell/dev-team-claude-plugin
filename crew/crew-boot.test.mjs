@@ -50,7 +50,7 @@ test('K11 K12 K13 K14 materialises a settings-only codemode profile and granted 
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8')), { theme: 'dark', codemode: { timeout: 7, mode: 'only' } })
   assert.equal(readlinkSync(join(dir, 'auth.json')), join(base, 'auth.json'))
   writeMcpConfigs({ taskDir, roles: ['builder'], adapters })
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [] } } })
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.json'), 'utf8')), { mcpServers: { fff: { command: '/opt/fff-mcp', args: [], exposure: 'direct' } } })
 })
 test('a pi MCP seat refuses while the checkout carries a project .pi/mcp.json; a codemode-only seat does not', () => {
   // MUTATION: `if (false)` for the project-MCP refusal — pi would load that file after the seat's and let it win by name.
@@ -2941,4 +2941,82 @@ test('SR15 boot persists empty planner grants and emits no-skills', async () => 
   try { assert.equal(f.error, null); const crew = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8')); const launcher = readFileSync(join(f.taskDir, 'launch-planner.sh'), 'utf8')
     assert.deepEqual(persistedAdapters(crew).planner.grants.skills, []); assert.match(launcher, /--no-skills/)
   } finally { rmSync(f.scratch, { recursive: true, force: true }); rmSync(f.checkoutRoot, { recursive: true, force: true }) }
+})
+
+// b1103 native pi delivery: NP3/NP5/NP6/NP9 pinned in the suite, not only in the lane's task gate.
+const NP_FFF_BIN = '/opt/homebrew/bin/fff-mcp'
+const NP_FFF_SERVER = { name: 'fff', command: { bin: NP_FFF_BIN, args: [] }, url: null }
+const npShipped = () => JSON.parse(readFileSync(join(ROOT, 'crew/capabilities.json'), 'utf8'))
+const npGranted = (extensions = ['builtin:mcp']) => ({ tools: [], extensions, agents: [], skills: [], advisor: false, mcp_servers: [NP_FFF_SERVER] })
+const npSpec = (entry) => ({ taskDir: '/np/task', checkout: '/np/checkout', roles: ['builder'], adapters: { builder: entry }, env: { PI_CODING_AGENT_DIR: '/np/base' } })
+function npFs(base = { theme: 'dark' }, project = false) {
+  const writes = new Map()
+  const noEntry = () => { throw Object.assign(new Error('fixture absent'), { code: 'ENOENT' }) }
+  return { writes, deps: {
+    lstatSync(path) { if (project && path === '/np/checkout/.pi/mcp.json') return { isDirectory: () => false }; return noEntry() },
+    readFileSync: (path) => path === '/np/base/settings.json' ? JSON.stringify(base) : noEntry(),
+    readdirSync: () => [], mkdirSync() {}, rmSync() {}, symlinkSync() {},
+    writeFileSync: (path, text) => writes.set(path, JSON.parse(text)),
+  } }
+}
+
+// Kills: writePiSeatAgentDirs materialising only codemode seats again.
+test('NP3 codemode off still writes native mcp.json and exactly the base settings', async () => {
+  const entry = (await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: npShipped(), env: { CREW_PI_CODEMODE: 'off' }, exists: (path) => path === NP_FFF_BIN || existsSync(path) })).builder
+  assert.equal(entry.grants.extensions.includes('builtin:mcp'), true)
+  assert.equal(entry.grants.extensions.includes('builtin:codemode'), false)
+  const fs = npFs(); const spec = npSpec(entry)
+  writePiSeatAgentDirs(spec, fs.deps); writeMcpConfigs(spec, fs.deps)
+  assert.deepEqual(fs.writes.get('/np/task/pi-agent/builder/settings.json'), { theme: 'dark' })
+  assert.deepEqual(fs.writes.get('/np/task/pi-agent/builder/mcp.json'), { mcpServers: { fff: { command: NP_FFF_BIN, args: [], exposure: 'direct' } } })
+  const preserved = npFs({ codemode: { mode: 'on', timeout: 7 } })
+  writePiSeatAgentDirs(spec, preserved.deps)
+  assert.deepEqual(preserved.writes.get('/np/task/pi-agent/builder/settings.json'), { codemode: { mode: 'on', timeout: 7 } })
+})
+
+// Kills: pi MCP exposure serialised as anything but direct.
+test('NP5 pi mcp.json carries exposure direct and claude MCP JSON carries none', async () => {
+  const pi = await import('./adapters/adapter-pi.mjs'); const claude = await import('./adapters/adapter-claude.mjs')
+  const fs = npFs()
+  writeMcpConfigs(npSpec({ name: 'pi', adapter: pi, transport: 'pane', grants: npGranted() }), fs.deps)
+  assert.deepEqual(fs.writes.get('/np/task/pi-agent/builder/mcp.json'), { mcpServers: { fff: { command: NP_FFF_BIN, args: [], exposure: 'direct' } } })
+  writeMcpConfigs(npSpec({ name: 'claude', adapter: claude, transport: 'pane', grants: npGranted([]) }), fs.deps)
+  assert.deepEqual(fs.writes.get(claude.mcpConfigPath({ taskDir: '/np/task', role: 'builder' })), { mcpServers: { fff: { command: NP_FFF_BIN, args: [] } } })
+})
+
+// Kills: the project .pi/mcp.json refusal disabled.
+test('NP6 an MCP-only pi seat refuses a project .pi/mcp.json before any write', () => {
+  const fs = npFs({}, true)
+  let refusal = null
+  try { writePiSeatAgentDirs(npSpec({ name: 'pi', grants: npGranted() }), fs.deps) } catch (error) { refusal = { reason: error.reason, message: error.message } }
+  assert.equal(refusal?.reason, 'grant-unsupported')
+  assert.equal(refusal?.message.includes('/np/checkout/.pi/mcp.json'), true)
+  assert.equal(fs.writes.size, 0)
+})
+
+// Kills: the boot row's pi_codemode expression replaced with null.
+test('NP9 the boot journal records pi_codemode on/default when unset, on/env when on and off/env when off', async () => {
+  const root = scratchDir('np9-native-'); const home = join(root, 'home'); const checkout = join(root, 'checkout')
+  mkdirSync(home); mkdirSync(checkout)
+  const prior = process.env.HOME; const priorDb = process.env.DEVTEAM_LEDGER_DB
+  process.env.HOME = home; process.env.DEVTEAM_LEDGER_DB = join(root, 'uncreated.db')
+  try {
+    const records = []
+    for (const [task, env] of [['default', {}], ['on', { CREW_PI_CODEMODE: 'on' }], ['off', { CREW_PI_CODEMODE: 'off' }]]) {
+      const register = npShipped()
+      for (const role of ['lead', 'builder']) { register.roles[role].advisor = false; register.roles[role].by_agent = {} }
+      await bootCmd({ task, checkout, roles: 'lead,builder', 'agent-lead': 'pi', 'agent-builder': 'pi', 'headless-all': true }, {
+        register, env: { ...env, PI_CODING_AGENT_DIR: join(root, 'base') }, checkoutBaseBranch: () => 'main',
+        awaitSeatsReady: async () => {}, openRun: () => ({ recordSeats() {} }),
+        cmux() { throw new Error('NP9 must not launch cmux') },
+      })
+      const rows = readFileSync(join(home, '.crew', 'checkout', task, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      records.push(rows.find((row) => row.event === 'boot')?.pi_codemode)
+    }
+    assert.deepEqual(records, [{ value: 'on', source: 'default' }, { value: 'on', source: 'env' }, { value: 'off', source: 'env' }])
+  } finally {
+    if (prior === undefined) delete process.env.HOME; else process.env.HOME = prior
+    if (priorDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = priorDb
+    rmSync(root, { recursive: true, force: true })
+  }
 })

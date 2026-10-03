@@ -89,9 +89,9 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Pi lab | `crew/pi/extensions/lab.ts` | - | - |
 | Builderloop | `crew/pi/extensions/builderloop.ts` | - | - |
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
-| FFF | `crew/pi/extensions/fff.ts` | - | - |
+| FFF | `crew/capabilities.json`, `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | - |
 | Rule reminders (pi builder) | `crew/pi/extensions/reminders.ts` | - | - |
-| Pi native codemode and MCP (per-lane `pi_codemode`, default off; standalone `CREW_PI_CODEMODE` remains supported) | `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
+| Pi native codemode and MCP (default on; per-lane `pi_codemode: off` or standalone `CREW_PI_CODEMODE=off` opts out; MCP independent) | `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
 | Advisor | `crew/pi/extensions/advisor.ts` | ADR-037 ([decision](../docs/adr/adr-037-local-models.md)) | [Local models](../docs/adr/adr-037-local-models.md) |
 | Scope and out-of-context journal | `crew/drive.mjs` | ADR-045 ([decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md)) | [Scope decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md) |
 | Validation | `crew/drive.mjs` | - | [Acceptance gate](#the-acceptance-gate-gate-first) |

@@ -923,6 +923,26 @@ test('D1 crew fallback keeps adapter-composed candidate model', async () => {
   await result.seat.cleanup()
 })
 
+// Kills RV1-2 (b1103): the seat re-resolution dropping the env makes an operator's CREW_PI_CODEMODE=off read as on.
+test('D2 seat re-resolution sees the same CREW_PI_CODEMODE the boot subprocess inherits', async () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'medium' }
+  const seen = []
+  const prior = process.env.CREW_PI_CODEMODE
+  process.env.CREW_PI_CODEMODE = 'off'
+  try {
+    const result = await runFixtureSeat(candidate, {
+      resolveAdapters: (roles, args, seats, deps) => {
+        seen.push({ seats: Boolean(seats), codemode: deps?.env?.CREW_PI_CODEMODE ?? null })
+        return fixtureAdapters(roles, args, seats)
+      },
+    })
+    await result.seat.cleanup()
+  } finally {
+    if (prior === undefined) delete process.env.CREW_PI_CODEMODE; else process.env.CREW_PI_CODEMODE = prior
+  }
+  assert.deepEqual(seen.filter(({ seats }) => !seats).map(({ codemode }) => codemode), ['off'])
+})
+
 test('E1 unsupported candidate provider refuses before boot', async () => {
   const unsupported = { provider: 'google', id: 'gemini-pro', agent: 'claude', effort: 'medium' }
   const resolveUnsupported = (roles, args, seats) => {

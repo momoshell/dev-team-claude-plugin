@@ -5304,12 +5304,12 @@ test('PV5 a compliant conversion is accepted with a measured preservation record
 // run reports its check only as a nested line, so it is not a top-level test any more.
 test('PV6 a witnessed check that runs only as a nested line is refused', () => {
   const built = { state: 'read', bytes: PIN_WITNESSED }
-  const nested = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
+  const nested = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
   assert.equal(nested.reason, 'witnessed-test-altered')
   assert.match(nested.why, /"existing check" in a\.test\.mjs is absent as a top-level test/)
-  const red = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built, run: () => 'not ok 1 - existing check\n# fail 1' })
+  const red = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'not ok 1 - existing check\n# fail 1' })
   assert.equal(red.reason, 'witnessed-test-altered')
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - existing check\n# pass 1' }).reason, null)
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built, run: () => 'ok 1 - existing check\n# pass 1' }).reason, null)
 })
 
 // Every unmeasurable input is a refusal with a closed reason; none is a pass.
@@ -5319,6 +5319,7 @@ test('PV7 preservation refuses every input it cannot read or measure', () => {
   const ok = () => 'ok 1 - existing check'
   const cases = [
     [{ witnessed: null, built: read, run: ok }, 'witnessed-test-unverifiable'],
+    [{ names: null, built: read, run: ok }, 'witnessed-test-unverifiable'],
     [{ witnessed: PIN_WITNESSED, built: { state: 'unreadable', why: 'EIO' }, run: ok }, 'witnessed-test-unverifiable'],
     [{ witnessed: PIN_WITNESSED, built: { state: 'read', bytes: null }, run: ok }, 'witnessed-test-unverifiable'],
     [{ witnessed: PIN_WITNESSED, built: undefined, run: ok }, 'witnessed-test-unverifiable'],
@@ -5328,7 +5329,7 @@ test('PV7 preservation refuses every input it cannot read or measure', () => {
     [{ witnessed: PIN_WITNESSED, built: { state: 'absent' }, run: ok }, 'witnessed-test-altered'],
   ]
   for (const [input, reason] of cases) {
-    const verdict = witnessedTestPreservation({ file: 'a.test.mjs', ...input })
+    const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], ...input })
     assert.equal(verdict.reason, reason, JSON.stringify(input.built))
     assert.ok(HARDENING_PRESERVATION_REFUSALS.includes(verdict.reason))
   }
@@ -5340,10 +5341,10 @@ test('PV7 preservation refuses every input it cannot read or measure', () => {
 test('PV8 top-level statements normalise only CRLF and blank lines in code', () => {
   assert.deepEqual(topLevelStatements(PIN_WITNESSED.replace(/\n/g, '\r\n')), topLevelStatements(PIN_WITNESSED))
   const appendedTight = `${PIN_IMPORTS}\n${PIN_EXISTING}${PIN_TOP_GUARD}`
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: appendedTight }, run: () => 'ok 1 - existing check' }).reason, null)
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: appendedTight }, run: () => 'ok 1 - existing check' }).reason, null)
   const reindented = `${PIN_IMPORTS}\n  ${PIN_EXISTING.replace(/\n(?!$)/g, '\n  ')}`
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: reindented }, run: () => 'ok 1 - existing check' }).reason, 'witnessed-test-altered')
-  const trailing = (text) => witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: `${PIN_WITNESSED}${text}` }, run: () => 'ok 1 - existing check' }).reason
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: reindented }, run: () => 'ok 1 - existing check' }).reason, 'witnessed-test-altered')
+  const trailing = (text) => witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: `${PIN_WITNESSED}${text}` }, run: () => 'ok 1 - existing check' }).reason
   assert.equal(trailing('\n\n\n'), null)
   assert.deepEqual(topLevelStatements('const x = `a\n\nb`\nconst y = 1\n'), ['const x = `a\n\nb`', 'const y = 1'])
   assert.equal(topLevelStatements('const x = `open\n'), null)
@@ -5354,20 +5355,20 @@ test('PV8 top-level statements normalise only CRLF and blank lines in code', () 
 test('PV9 trailing whitespace inside a witnessed template literal is content', () => {
   const witnessed = `${PIN_IMPORTS}\ntest('existing check', () => {\n  assert.equal(render(), \`row  \nnext\`)\n})\n`
   const edited = witnessed.replace('row  \n', 'row\n')
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes: edited }, run: () => 'ok 1 - existing check' })
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed, built: { state: 'read', bytes: edited }, run: () => 'ok 1 - existing check' })
   assert.equal(verdict.reason, 'witnessed-test-altered')
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes: witnessed }, run: () => 'ok 1 - existing check' }).reason, null)
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed, built: { state: 'read', bytes: witnessed }, run: () => 'ok 1 - existing check' }).reason, null)
 })
 
 // Kills P5 (Sol pass 1, must-fix 2): swapping the witnessed assertion import for a no-op
 // module leaves every test body identical and is still refused; extending it is not.
 test('PV10 a witnessed import binding must still come from the same module', () => {
   const swapped = PIN_WITNESSED.replace("import assert from 'node:assert/strict'", "import assert from './noop-assert.mjs'")
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: swapped }, run: () => 'ok 1 - existing check' })
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: swapped }, run: () => 'ok 1 - existing check' })
   assert.equal(verdict.reason, 'witnessed-test-altered')
   assert.deepEqual(verdict.lost_bindings, ['node:assert/strict::default=>assert'])
   const extended = PIN_WITNESSED.replace("import { test } from 'node:test'", "import { test, before } from 'node:test'")
-  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: extended }, run: () => 'ok 1 - existing check' }).reason, null)
+  assert.equal(witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: extended }, run: () => 'ok 1 - existing check' }).reason, null)
 })
 
 // Kills P6 (Sol pass 1, must-fix 3): a prescribed finding cannot close through an
@@ -5390,19 +5391,38 @@ test('PV12 a witnessed check enclosed in a block is not a top-level statement', 
   const enclosed = `${PIN_IMPORTS}\nif (false) {\n${PIN_EXISTING};}\n\n${PIN_TOP_GUARD}`
   assert.equal(topLevelStatements(enclosed).includes(PIN_EXISTING.trimEnd()), false)
   assert.equal(topLevelStatements(PIN_WITNESSED).includes(PIN_EXISTING.trimEnd()), true)
-  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: enclosed }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', names: ['existing check'], witnessed: PIN_WITNESSED, built: { state: 'read', bytes: enclosed }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
   assert.equal(verdict.reason, 'witnessed-test-altered')
 })
 
-// Kills P7 (unmeasured names read as preserved) — Sol pass 2: a witnessed check whose name
-// the run cannot be asked about is refused as unverifiable, never passed.
-test('PV13 a witnessed check without a literal test name is unverifiable', () => {
-  const witnessed = `${PIN_IMPORTS}\nconst title = 'existing check'\ntest(title, () => {\n  assert.equal(1, 1)\n})\n`
-  for (const bytes of [witnessed, `${witnessed}\n${PIN_TOP_GUARD}`]) {
-    const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
-    assert.equal(verdict.reason, 'witnessed-test-unverifiable')
-    assert.match(verdict.why, /no plain string-literal test\(\.\.\.\) name/)
+// Kills P11 (names guessed from syntax) — Sol pass 3: a witnessed check called through an
+// alias is measured by the name the review-time run reported, so neutering the alias with
+// every witnessed statement left verbatim is refused.
+test('PV13 a witnessed check called through an alias is measured by its review-time name', () => {
+  const witnessed = `${PIN_IMPORTS}\nlet check = test\ncheck('existing check', () => {\n  assert.equal(1, 1)\n})\n`
+  const neutered = `${PIN_IMPORTS}\nlet check = test\ncheck = () => {}\ncheck('existing check', () => {\n  assert.equal(1, 1)\n})\n\n${PIN_TOP_GUARD}`
+  const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  const files = { ...B376_FILES, [testAbs]: witnessed }
+  const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files })
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const env = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:2') files[testAbs] = neutered
+    return env
   }
+  const baseRun = io.run
+  io.run = function (cmd) {
+    const result = baseRun.call(this, cmd)
+    if (cmd !== hardenWitnessCommand(B376_TEST_FILE)) return result
+    // What node reports: the alias call runs at review time; once neutered it runs nothing.
+    if (files[testAbs] === witnessed) return { ok: true, output: 'ok 1 - existing check\n# pass 1\n# fail 0' }
+    if (files[testAbs] === neutered) return { ok: true, output: 'ok 1 - F1 guard\n# pass 1\n# fail 0' }
+    return { ok: true, output: '# pass 0\n# fail 0' }
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.notEqual(result.status, 'done')
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): the witnessed check "existing check" in a\.test\.mjs is absent as a top-level test/)
 })
 
 // Kills P8 (no re-check after rebase) — Sol pass 2: a rebase that weakens the pinned test
@@ -5415,6 +5435,36 @@ test('PV14 a rebase that weakens a pinned test is refused before the suite', () 
   assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(rebased\): /)
   assert.deepEqual(pinPreservation(io).map(({ when, reason }) => ({ when, reason })), [{ when: 'accept', reason: null }, { when: 'rebased', reason: 'witnessed-test-altered' }])
   assert.equal(result.details.stages.includes('suite'), false)
+})
+
+// Kills P10 (pins re-created per suite cycle) — Sol pass 3: after a red suite sends the lane
+// back to the builder, a repair round that weakens the pinned test is still refused.
+test('PV15 a suite-cycle repair round that weakens a pinned test is refused', () => {
+  const compliant = `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
+  const weakened = compliant.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const io = pinIo({ built: compliant })
+  const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
+  const baseWait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const env = baseWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:3') this.calls.writes[testAbs] = weakened
+    return env
+  }
+  const baseRead = io.readFile
+  io.readFile = function (path) {
+    if (path === testAbs && this.calls.writes[testAbs] === weakened) return weakened
+    return baseRead.call(this, path)
+  }
+  let suites = 0
+  const baseRun = io.run
+  io.run = function (cmd) {
+    if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
+    return baseRun.call(this, cmd)
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 3), true)
+  assert.notEqual(result.status, 'done')
+  assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
 })
 
 // Kills singleton detection or per-finding patch suppression by routing every conflict separately.

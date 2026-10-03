@@ -10275,6 +10275,13 @@ function runTask(ctx, io, crash) {
   // re-enters suiteCycle (suite red, census, rebase conflict) must not erase what an earlier
   // hardening round could not measure — only a later `killed` or `ungateable` settles one.
   let hardenBlindSpots = []   // ANCHOR B5g
+  // Map<repo-relative test path, {finding, bytes, names}> — the review-time bytes, and the
+  // top-level checks a run of them reported, of every witnessed test a pinned-test-
+  // prescription conversion told the builder to leave as it was. Lane-long like the blind
+  // spots above: a suite-cycle repair round may not undo what an earlier conversion pinned.
+  // MUTATION P10: re-create this map inside suiteCycle and a post-suite repair round
+  // weakens a pinned test with no check left to see it.
+  const prescriptionPins = new Map()                                                    // ANCHOR P10
   const fullOidFromResult = (result) => {
     if (result?.ok !== true || typeof result.output !== 'string') return null
     const oid = result.output.trim()
@@ -10632,10 +10639,6 @@ function runTask(ctx, io, crash) {
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
   let hardenWitness = new Map()         // Map<finding id, Map<repo-relative path, {state, bytes}>>
-  // Map<repo-relative test path, {finding, bytes}> — the review-time bytes of every witnessed
-  // test a pinned-test-prescription conversion told the builder to leave as it was. Lane-long:
-  // a later round may not undo what an earlier conversion pinned.
-  const prescriptionPins = new Map()
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the
   // reviewer; it is bounded because an unbounded one lets a reviewer that grants nothing
@@ -11560,7 +11563,14 @@ function runTask(ctx, io, crash) {
               if (carried) carried.prescription = prescriptionConflict
               if (!prescriptionPins.has(prescriptionConflict.file)) {
                 const cell = tree.get(prescriptionConflict.file)
-                prescriptionPins.set(prescriptionConflict.file, { finding: finding.id, bytes: cell?.state === 'read' ? cell.bytes : null })
+                // The checks to preserve are MEASURED on the review-time tree, not guessed from
+                // syntax: whatever form calls them, these are the top-level names the file ran.
+                // MUTATION P11: guess the names from source text instead and a check called
+                // through an alias is never run, yet reads as preserved.
+                let reviewRun
+                try { reviewRun = hardenRun(hardenWitnessCommand(prescriptionConflict.file))?.output } catch { reviewRun = null }
+                const names = topLevelCheckNames(reviewRun)                                  // ANCHOR P11
+                prescriptionPins.set(prescriptionConflict.file, { finding: finding.id, bytes: cell?.state === 'read' ? cell.bytes : null, names })
               }
               panelLog({ hardening_prescription_conflict: prescriptionConflict })
             }
@@ -11736,7 +11746,7 @@ function runTask(ctx, io, crash) {
       let built
       try { const bytes = io.readFile(`${ctx.checkout}/${file}`); built = bytes === null ? { state: 'absent' } : { state: 'read', bytes } }
       catch (err) { built = { state: 'unreadable', why: err?.message || String(err) } }
-      const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
+      const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, names: pin.names, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
       const record = { finding: pin.finding, file, when, reason: preserved.reason, why: preserved.why, ...(preserved.runtime ? { runtime: preserved.runtime } : {}) }
       panelLog({ hardening_preservation: record })
       if (preserved.reason !== null) return escalate('harden', `[${preserved.reason}] finding ${pin.finding} (${when}): ${preserved.why}`, [], { hardening_preservation: record })
@@ -14500,11 +14510,21 @@ export function importBindings(statement) {
   }
   return keys
 }
-const LITERAL_TEST_NAME = /^test\((['"])((?:(?!\1)[^\\])*)\1\s*[,)]/
-const TEST_CALL = /^(?:test|it|describe|suite)\s*(?:\.\s*[\w$]+\s*)?\(/
-export function witnessedTestPreservation({ file, witnessed, built, run }) {
+// The top-level checks one unfiltered run reported, by exact name, or null when the run is
+// not a parseable node:test summary — unmeasured, never an empty list.
+export function topLevelCheckNames(output) {
+  if (typeof output !== 'string' || parseSuiteCounts(output) === null) return null
+  const names = new Set()
+  for (const line of output.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
+    const m = /^(?:not ok|ok) \d+ - (.*)$/.exec(line)
+    if (m) names.add(m[1].replace(/\s*#\s*(SKIP|TODO)\b.*$/, '').trim())
+  }
+  return [...names]
+}
+export function witnessedTestPreservation({ file, witnessed, names, built, run }) {
   const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
   if (typeof witnessed !== 'string') return refuse('witnessed-test-unverifiable', `the review-time bytes of ${file} were not captured, so its existing checks cannot be compared`)
+  if (!Array.isArray(names)) return refuse('witnessed-test-unverifiable', `the review-time run of ${file} was not a parseable node:test summary, so its top-level checks were never measured`)
   if (!built || built.state === 'unreadable' || (built.state === 'read' && typeof built.bytes !== 'string')) return refuse('witnessed-test-unverifiable', `the built ${file} could not be read${built?.why ? `: ${built.why}` : ''}`)
   if (built.state !== 'read') return refuse('witnessed-test-altered', `the built tree no longer has ${file}, so its witnessed checks are gone`)
   const witnessedStatements = topLevelStatements(witnessed)
@@ -14536,15 +14556,7 @@ export function witnessedTestPreservation({ file, witnessed, built, run }) {
     else missing.push(statement.split('\n')[0])
   }
   if (missing.length > 0) return refuse('witnessed-test-altered', `${missing.length} of ${kept.length} witnessed top-level statement(s) of ${file} are no longer present verbatim at top level: ${missing.slice(0, 3).map((line) => JSON.stringify(line.slice(0, 120))).join(', ')}`, { missing })
-  // A witnessed check whose name the run cannot be asked about is unmeasured, and
-  // unmeasured is refused: a test(title, ...), a template-literal name, test.skip(...),
-  // it(...) and describe(...) all land here.
-  // MUTATION P7: drop this refusal and a check with a computed name is never run, yet
-  // reads as preserved.
-  const unmeasured = kept.filter((statement) => TEST_CALL.test(statement) && !LITERAL_TEST_NAME.test(statement))   // ANCHOR P7
-  if (unmeasured.length > 0) return refuse('witnessed-test-unverifiable', `${unmeasured.length} witnessed top-level check(s) of ${file} have no plain string-literal test(...) name, so the run cannot measure them: ${unmeasured.slice(0, 3).map((statement) => JSON.stringify(statement.split('\n')[0].slice(0, 120))).join(', ')}`)
-  const names = kept.flatMap((statement) => { const m = LITERAL_TEST_NAME.exec(statement); return m ? [m[2]] : [] })
-  if (names.length === 0) return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim; it has no literal top-level test name to run`, runtime: 'not-run: no literal top-level test name' }
+  if (names.length === 0) return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim; its review-time run reported no top-level check`, runtime: 'not-run: no review-time top-level check' }
   let output
   try { output = run() } catch (err) { return refuse('witnessed-test-unverifiable', `the run of ${file} threw: ${err?.message || String(err)}`) }
   if (typeof output !== 'string' || !/^(?:not ok|ok) \d+ - /m.test(output)) return refuse('witnessed-test-unverifiable', `the run of ${file} produced no top-level TAP result line, so the witnessed names were not measured`)
@@ -14554,7 +14566,7 @@ export function witnessedTestPreservation({ file, witnessed, built, run }) {
     const verdict = topLevelNameVerdict(output, name)                                   // ANCHOR P3
     if (verdict !== 'passed') return refuse('witnessed-test-altered', `the witnessed check ${JSON.stringify(name)} in ${file} is ${verdict} as a top-level test of the built tree`, { name, verdict })
   }
-  return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim and its ${names.length} literal top-level test name(s) pass at top level`, runtime: 'measured' }
+  return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim and all ${names.length} top-level check(s) its review-time run reported pass at top level`, runtime: 'measured' }
 }
 
 // The findings that OWE a permanent guard, and the ones the reviewer exempted. Derived

@@ -12488,7 +12488,7 @@ function runTask(ctx, io, crash) {
     const runnerUnparsed = suiteLocations.reason === SUITE_RUNNER_UNPARSED
     const testFiles = suiteLocations.files
     const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }
-    if (suiteRunner.runner !== 'node') io['log']({ ...recordRow({ at: io.now() }), suite_red_runner: { ...suiteRunner, files: suiteLocations.files, test_names: suiteLocations.test_names, reason: suiteLocations.reason } })
+    if (suiteRunner.runner !== 'node') io.log(recordRow({ at: io.now(), suite_red_runner: { ...suiteRunner, files: suiteLocations.files, test_names: suiteLocations.test_names, reason: suiteLocations.reason } }))
     const frozenFiles = testFiles.filter((file) => file === FROZEN_INVENTORY_FILE || file === FROZEN_FACTORY_ENV_FILE)
     if (frozenFiles.length > 0) {
       const frozenRepair = frozenRepairPreflight(frozenFiles)

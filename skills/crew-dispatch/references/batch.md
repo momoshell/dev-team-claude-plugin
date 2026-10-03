@@ -115,10 +115,10 @@ ambiguity stay fatal in the skill's own `exhibits.test.mjs`.
 
 ### Sourced fence admission
 
-The authored register is the scan floor. Every concrete unheld candidate from the
+The authored register is the scan floor. Every concrete unheld, unprotected candidate from the
 six sources is admitted to its owning lane's effective fence exactly once, in source
 order: `test-reach`, `anchor-pin`, `census-carrier`, `suite-cost`, `citation-carrier`,
-`data-file`. Data-file candidates are tracked non-code paths named by static literals
+`data-file`. Every automatic source checks the built-in protected floor plus `protectedPaths` additions; protected candidates are never admitted, are recorded once per file/source in `perLane[name].read_only_carriers`, and produce a logged `fence-admission-protected` warning. Data-file candidates are tracked non-code paths named by static literals
 in authored or requested surface tests; `.mjs`/`.js` code paths and runtime-built paths are excluded.
 BLIND SPOT: data-file admission sees only tracked non-code paths named by static literals in surface or authored-fence tests; paths built at runtime are invisible. The admission is written to
 `perLane[name].files`, the effective `dispatch.fences.json` when widening occurred,

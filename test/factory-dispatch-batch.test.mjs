@@ -285,6 +285,110 @@ test('DF2 data-file admits non-code literals read by surface tests', () => {
   }
 })
 
+// MUTATION PF1: replace the protected-candidate branch with `if (false) {`.
+test('PF1 protected floor excludes roster from automatic and effective fences', () => {
+  const checkout = scratchDir('pf1-')
+  const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+  write('test/owned.test.mjs', "const roster = 'crew/roster.json'; const data = 'fixtures/data.json'; const again = 'crew/roster.json'\n")
+  write('crew/roster.json', '{}\n')
+  write('fixtures/data.json', '{}\n')
+  const tracked = ['test/owned.test.mjs', 'crew/roster.json', 'fixtures/data.json']
+  const report = checkFences({
+    fences: [entry('lane-a', ['test/owned.test.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['test/owned.test.mjs'] }], checkout,
+    deps: { home: checkout, log: () => {}, spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: tracked.join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } },
+  })
+  assert.deepEqual(report.admissions.filter(({ source }) => source === 'data-file'), [{ lane: 'lane-a', file: 'fixtures/data.json', source: 'data-file' }])
+  assert.equal(report.admissions.some(({ file }) => file === 'crew/roster.json'), false)
+  assert.equal(report.perLane['lane-a'].files.includes('crew/roster.json'), false)
+  assert.equal(report.fences.find(({ lane }) => lane === 'lane-a').files.includes('crew/roster.json'), false)
+  assert.equal(tierFloor({ files: report.perLane['lane-a'].files }).forced, null)
+})
+
+// MUTATION PF2: replace `laneReadOnlyCarriers.push(row)` with `void row`.
+test('PF2 protected carrier is deduplicated and logged as a warning', () => {
+  const checkout = scratchDir('pf2-')
+  const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+  write('test/owned.test.mjs', "const a = 'crew/roster.json'; const b = 'crew/roster.json'\n")
+  write('crew/roster.json', '{}\n')
+  const logs = []
+  const report = checkFences({ fences: [entry('lane-a', ['test/owned.test.mjs'])], lanes: [{ lane: 'lane-a', where: ['test/owned.test.mjs'] }], checkout, deps: { home: checkout, log: (text) => logs.push(text), spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: ['test/owned.test.mjs', 'crew/roster.json'].join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } } })
+  const row = { lane: 'lane-a', file: 'crew/roster.json', source: 'data-file' }
+  assert.deepEqual(report.perLane['lane-a'].read_only_carriers, [row])
+  const warning = report.warnings.filter(({ kind }) => kind === 'fence-admission-protected')
+  assert.equal(warning.length, 1)
+  assert.deepEqual({ kind: warning[0].kind, lane: warning[0].lane, file: warning[0].file, source: warning[0].source }, { kind: 'fence-admission-protected', ...row })
+  assert.match(warning[0].text, /lane-a.*crew\/roster\.json.*data-file.*read-only carrier/)
+  assert.equal(logs.filter((text) => text === warning[0].text).length, 1)
+
+  const pinCheckout = gitFixture()
+  put(join(pinCheckout, 'src/a.mjs'), 'export const A = 1\n')
+  put(join(pinCheckout, 'src/b.mjs'), 'export const B = 1\n')
+  anchorFixtures(pinCheckout, { example: { 'src/a.mjs:1': 'export const A = 1', 'src/b.mjs:1': 'export const B = 1' } })
+  const pinLogs = []
+  const pinned = checkFences({
+    fences: [entry('lane-a', ['src/a.mjs', 'src/b.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['src/a.mjs', 'src/b.mjs'] }],
+    protectedPaths: ['skills/example/anchors.json'],
+    checkout: pinCheckout,
+    outDir: join(pinCheckout, 'out'),
+    deps: { home: join(root, 'pf2-anchor-home'), log: (text) => pinLogs.push(text) },
+  })
+  const anchorRow = { lane: 'lane-a', file: 'skills/example/anchors.json', source: 'anchor-pin' }
+  assert.deepEqual(pinned.perLane['lane-a'].read_only_carriers, [anchorRow])
+  const anchorWarnings = pinned.warnings.filter(({ kind }) => kind === 'fence-admission-protected')
+  assert.equal(anchorWarnings.length, 1)
+  assert.equal(pinLogs.filter((text) => text === anchorWarnings[0].text).length, 1)
+  assert.equal(pinned.admissions.some(({ file }) => file === 'skills/example/anchors.json'), false)
+})
+
+// MUTATION PF3: replace the protectedFloor assignment with `const protectedFloor = resolveProtectedPaths()`.
+test('PF3 protectedPaths additions exclude automatic admission in check and dispatch', async () => {
+  const checkout = scratchDir('pf3-')
+  const write = (file, body) => { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+  write('test/owned.test.mjs', "const data = 'fixtures/data.json'\n")
+  write('fixtures/data.json', '{}\n')
+  const tracked = ['test/owned.test.mjs', 'fixtures/data.json']
+  const report = checkFences({ fences: [entry('lane-a', ['test/owned.test.mjs'])], lanes: [{ lane: 'lane-a', where: ['test/owned.test.mjs'] }], checkout, protectedPaths: ['fixtures/'], deps: { home: checkout, log: () => {}, spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: tracked.join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } } })
+  assert.equal(report.admissions.some(({ file }) => file === 'fixtures/data.json'), false)
+  assert.deepEqual(report.perLane['lane-a'].read_only_carriers, [{ lane: 'lane-a', file: 'fixtures/data.json', source: 'data-file' }])
+  const dispatchPath = 'fixtures/pf3-dispatch-data.json'
+  put(join(root, dispatchPath), '{}\n')
+  put(join(root, 'test/pf3-dispatch-surface.test.mjs'), `test('surface', () => {}); const data = ${JSON.stringify(dispatchPath)}\n`)
+  const dispatched = await dispatchFixture({ label: 'pf3-forwarding', names: ['lane-a'], requests: { 'lane-a': request('protect profile data', ['test/pf3-dispatch-surface.test.mjs']) }, fences: [entry('lane-a', ['test/pf3-dispatch-surface.test.mjs'])], runFlags: { protectedPaths: ['fixtures/'] }, existsProbe: fsExistsSync, spawnResult: (args) => args.includes('ls-files') ? { status: 0, stdout: `test/pf3-dispatch-surface.test.mjs\0${dispatchPath}\0`, stderr: '' } : { status: 0, stdout: '', stderr: '' }, writeFile: (path, content) => put(path, content) })
+  assert.equal(dispatched.report.fences.admissions.some(({ file }) => file === dispatchPath), false)
+  assert.deepEqual(dispatched.report.fences.perLane['lane-a'].read_only_carriers, [{ lane: 'lane-a', file: dispatchPath, source: 'data-file' }])
+})
+
+// MUTATION PF4: replace the protected-candidate branch with `if (false) {`.
+test('PF4 protected carrier does not raise effective tier floor', () => {
+  const files = ['test/owned.test.mjs', 'fixtures/data.json']
+  const checkout = scratchDir('pf4-')
+  for (const [file, body] of [['test/owned.test.mjs', "const roster = 'crew/roster.json'; const data = 'fixtures/data.json'\n"], ['crew/roster.json', '{}\n'], ['fixtures/data.json', '{}\n']]) { const target = join(checkout, file); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, body) }
+  const tracked = ['test/owned.test.mjs', ...files.slice(1), 'crew/roster.json']
+  const report = checkFences({ fences: [entry('lane-a', files.slice(0, 1))], lanes: [{ lane: 'lane-a', where: files.slice(0, 1) }], checkout, outDir: join(checkout, 'out'), deps: { home: checkout, log: () => {}, spawn: (options) => options.args.includes('ls-files') ? { status: 0, stdout: tracked.join('\0') + '\0', stderr: '' } : { status: 0, stdout: '', stderr: '' } } })
+  assert.equal(tierFloor({ files: report.perLane['lane-a'].files }).forced, null)
+})
+
+// MUTATION WO1: replace the outside calculation with `const outside = ownSurface.filter((path) => !matchOwn(path))`.
+test('WO1 observes requested where outside authored fence without refusing', () => {
+  const checkout = scratchDir('wo1-')
+  const report = checkFences({ fences: [entry('lane-a', ['crew/drive.mjs'])], lanes: [{ lane: 'lane-a', where: ['crew/crew.mjs'] }], checkout, outDir: join(checkout, 'out'), deps: { readdirSync: () => [], log: () => {} } })
+  assert.deepEqual(report.observations.filter(({ kind }) => kind === 'scope-entry').map(({ authored }) => authored), [['crew/crew.mjs']])
+  assert.deepEqual(report.perLane['lane-a'].where, ['crew/crew.mjs'])
+  assert.ok(report.warnings.some(({ reason }) => reason === 'where-outside-fence'))
+  assert.equal(report.refusal, undefined)
+})
+
+// MUTATION WO2: replace the outside calculation with `const outside = ownSurface.filter((path) => !matchOwn(path))`.
+test('WO2 observes requested creates outside authored fence without refusing', () => {
+  const checkout = scratchDir('wo2-')
+  const report = checkFences({ fences: [entry('lane-a', ['crew/drive.mjs'])], lanes: [{ lane: 'lane-a', where: [], creates: ['fixtures/new.json'] }], checkout, outDir: join(checkout, 'out'), deps: { readdirSync: () => [], log: () => {} } })
+  assert.deepEqual(report.observations.filter(({ kind }) => kind === 'scope-entry').map(({ authored }) => authored), [['fixtures/new.json']])
+  assert.deepEqual(report.perLane['lane-a'].creates, ['fixtures/new.json'])
+  assert.equal(report.refusal, undefined)
+})
+
 // RV2-1 claimed a span `where` reaches matchOwn raw. It cannot: request scope drops
 // span entries before the fence comparison, so no span can be reported outside the fence.
 test('RV2-1 span where is dropped from request scope before the fence comparison', () => {

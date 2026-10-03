@@ -46,11 +46,11 @@
   "visualizer/web/src/lib/trace.js:459": "tone: gateTone(generation?.verdict),",
   "visualizer/web/src/App.svelte:29": "let runs = $state([])",
   "visualizer/web/src/App.svelte:117": "const result = await getSessions()",
-  "test/visualizer-panels.test.mjs:1487": "/duration<\\/th><th class=\"micro\">tokens<\\/th><th class=\"micro\">cost<\\/th><th class=\"micro\">heartbeat<\\/th>/",
-  "test/visualizer-panels.test.mjs:1492": "/\\.status\\.ok,\\s*\\.status\\.serious\\s*\\{\\s*color:var\\(--status-ok\\)/",
-  "test/visualizer-panels.test.mjs:1493": "/\\.status\\.serious\\s*\\{\\s*color:var\\(--status-escalated\\)/",
-  "test/visualizer-panels.test.mjs:1764": "source.includes('identityFor(lane)')",
-  "test/visualizer-panels.test.mjs:1771": "/#each markers as marker/",
-  "test/visualizer-panels.test.mjs:1837": "/class=\"bounce-layer\"/",
-  "visualizer/web/src/lib/RunCard.svelte:8": "let { run, taskEnvelope = null, onopen = () => {} } = $props()"
+  "visualizer/web/src/lib/RunCard.svelte:8": "let { run, taskEnvelope = null, onopen = () => {} } = $props()",
+  "test/visualizer-panels.test.mjs:1500": "/duration<\\/th><th class=\"micro\">tokens<\\/th><th class=\"micro\">cost<\\/th><th class=\"micro\">heartbeat<\\/th>/",
+  "test/visualizer-panels.test.mjs:1505": "/\\.status\\.ok,\\s*\\.status\\.serious\\s*\\{\\s*color:var\\(--status-ok\\)/",
+  "test/visualizer-panels.test.mjs:1506": "/\\.status\\.serious\\s*\\{\\s*color:var\\(--status-escalated\\)/",
+  "test/visualizer-panels.test.mjs:1777": "source.includes('identityFor(lane)')",
+  "test/visualizer-panels.test.mjs:1784": "/#each markers as marker/",
+  "test/visualizer-panels.test.mjs:1850": "/class=\"bounce-layer\"/"
 }

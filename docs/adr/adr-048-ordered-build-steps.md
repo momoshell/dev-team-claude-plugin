@@ -42,10 +42,10 @@ in the planner charter. `validateChunks` (`crew/drive.mjs:2484-2553`) enforces a
 (`chunkDeferredRows`, `:2589`).
 
 **Today a chunk program runs across lanes, never inside one.** `dispatch-batch --from-plan` compiles a parent
-planner envelope's `details.chunks` into one request per chunk (`scripts/factory/dispatch-batch.mjs:907-915`).
+planner envelope's `details.chunks` into one request per chunk (`readChunkProgram`, `scripts/factory/dispatch-batch.mjs:907-915`).
 When a plan has no chunks, it derives them from `carve_slices`. Each request carries `adopt` of the parent,
 `assurance: quick` and dependency lane names, and records the wave (`skills/crew-dispatch/references/batch.md:38-42`).
-Each chunk lane boots with `--chunked --chunk <id>` (`crew/crew.mjs:4882-4885`; `dispatch-batch.mjs:3947`) and runs
+Each chunk lane boots with `--chunked --chunk <id>` (`chunkCtxFromArgs`, `crew/crew.mjs:4882-4885`; `runCommand`, `scripts/factory/dispatch-batch.mjs:3947`) and runs
 a full lane of its own: build, review, suite and publish.
 
 **`carve_slices` is a third, human-routed split.** A plan revision may answer `carve`, and a carve always escalates

@@ -5032,7 +5032,7 @@ test('issueBindingFor accepts only explicit Closes citations and preserves decla
 test('IB5 background-only issue does not fetch and logs exact absence', async () => {
   const fixture = await runIssueBodyCompile({ label: 'ib5-background', ask: 'Background #910 only.' })
   assert.equal(fixture.calls.some(({ file }) => file === 'gh'), false)
-  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=none status=unavailable reason=no-issue-cited`])
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=none status=unavailable reason=no-issue-cited`, `dispatch-batch: acceptance-ids lane=${fixture.lane} parsed=none declared=none`])
 })
 
 test('IB6 Closes citation fetches exact issue and logs exact bytes', async () => {
@@ -5041,7 +5041,7 @@ test('IB6 Closes citation fetches exact issue and logs exact bytes', async () =>
   const gh = fixture.calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.deepEqual(gh.args, ['issue', 'view', '1676', '--json', 'body', '--jq', '.body'])
-  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=1676 source=closes status=available bytes=${Buffer.byteLength(body)}`])
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=1676 source=closes status=available bytes=${Buffer.byteLength(body)}`, `dispatch-batch: acceptance-ids lane=${fixture.lane} parsed=none declared=none`])
 })
 
 test('IB7 dispatch uses declared close after placeholder like compiled binding', async () => {
@@ -5180,6 +5180,112 @@ test('E1b unreadable history is null with one reason', () => {
   assert.deepEqual(empty, { ...nullCells, reason: 'archive-empty' })
 })
 
+async function compileAcceptanceBrief(label, brief) {
+  const lane = `lane-${label}`
+  const batch = makeBatch([lane])
+  const requestPath = put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(`${label} acceptance fixture`, ['crew/owned.mjs'])))
+  const out = join(root, `compile-${label}-out`)
+  const register = put(join(root, `compile-${label}-register.json`), JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
+  const logs = []
+  let result, refusal
+  try {
+    result = await compileLane({ lane, batchDir: batch, requestPath, laneDir: root, registerPath: register, outDir: out,
+      fences: [entry(lane, ['crew/owned.mjs'], [])],
+      deps: {
+        spawn: (call) => (call.args || []).includes('--discover-reads') ? { status: 0, stdout: '[]', stderr: '' } : { status: 0, stdout: '', stderr: '' },
+        readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, encoding || 'utf8'),
+        log: (line) => logs.push(String(line)),
+      },
+    })
+  } catch (error) { refusal = error }
+  return { result, refusal, logs, lane }
+}
+
+// MUTATION AI4: corrupt the parsed-set text in the compile diagnostic.
+test('AI4 compile logs parsed and declared acceptance ids', async () => {
+  const brief = '## Acceptance\nGATE LABELS ARE EXACTLY LR5\n(LR5) unit cases. (a) one fixture. (b) another.\n'
+  const found = await compileAcceptanceBrief('ai4', brief)
+  assert.equal(found.refusal, undefined)
+  assert.deepEqual(found.logs, ['dispatch-batch: issue-body lane=lane-ai4 issue=none status=unavailable reason=no-issue-cited', 'dispatch-batch: acceptance-ids lane=lane-ai4 parsed=LR5 declared=LR5'])
+})
+
+// MUTATION AI5: disable refusal when a declared acceptance id is absent from the parsed set.
+test('AI5 compile refuses declared and parsed acceptance-id disagreement', async () => {
+  const brief = '## Acceptance\nGATE LABELS ARE EXACTLY LR1, LR2\n(LR1) only real item\n'
+  const found = await compileAcceptanceBrief('ai5', brief)
+  assert.equal(found.refusal?.reason, 'compile-refused')
+  assert.match(found.refusal.message, /parsed=LR1/)
+  assert.match(found.refusal.message, /declared=LR1,LR2/)
+  assert.deepEqual(found.logs, ['dispatch-batch: issue-body lane=lane-ai5 issue=none status=unavailable reason=no-issue-cited', 'dispatch-batch: acceptance-ids lane=lane-ai5 parsed=LR1 declared=LR1,LR2'])
+})
+
+// MUTATION AI6: replace the absent-declaration fallback in the diagnostic.
+test('AI6 compile accepts an undeclared acceptance set and logs none', async () => {
+  const found = await compileAcceptanceBrief('ai6', '## Acceptance\n(LR5) real item\n')
+  assert.equal(found.refusal, undefined)
+  assert.deepEqual(found.logs, ['dispatch-batch: issue-body lane=lane-ai6 issue=none status=unavailable reason=no-issue-cited', 'dispatch-batch: acceptance-ids lane=lane-ai6 parsed=LR5 declared=none'])
+})
+
+test('declared acceptance ids handle duplicates, invalid occurrences, terminators and section fences', async () => {
+  for (const [label, brief] of [
+    ['decl-duplicate', '## Acceptance\nGATE LABELS ARE EXACTLY LR2, LR1, LR2 — labels.\n(LR1) one\n(LR2) two\n'],
+    ['decl-invalid-first', '## Acceptance\nGATE LABELS ARE EXACTLY LR1, (bad) then GATE LABELS ARE EXACTLY LR1\n(LR1) one\n'],
+    ['decl-paren', '## Acceptance\nGATE LABELS ARE EXACTLY LR1 (source)\n(LR1) one\n'],
+    ['decl-period', '## Acceptance\nGATE LABELS ARE EXACTLY LR1. Next sentence\n(LR1) one\n'],
+    ['decl-semicolon', '## Acceptance\nGATE LABELS ARE EXACTLY LR1; notes\n(LR1) one\n'],
+    ['decl-newline', '## Acceptance\nGATE LABELS ARE EXACTLY LR1\n(LR1) one\n'],
+    ['decl-no-parsed', '## Acceptance\nGATE LABELS ARE EXACTLY LR1\nordinary prose\n'],
+    ['decl-fenced-section', '```\n## Acceptance\nGATE LABELS ARE EXACTLY BAD9\n```\n## Acceptance\n(LR1) one\n'],
+    ['decl-heading-stop', '## Acceptance\n(LR1) one\n## Other\nGATE LABELS ARE EXACTLY BAD9\n'],
+  ]) {
+    const found = await compileAcceptanceBrief(label, brief)
+    if (label === 'decl-no-parsed') {
+      assert.equal(found.refusal?.reason, 'compile-refused')
+      assert.match(found.refusal.message, /parsed=none declared=LR1/)
+    } else {
+      assert.equal(found.refusal, undefined, label)
+      if (label === 'decl-fenced-section' || label === 'decl-heading-stop') assert.match(found.logs.at(-1), /parsed=LR1 declared=none$/, label)
+      else assert.match(found.logs.at(-1), label === 'decl-duplicate' ? /parsed=LR1,LR2 declared=LR2,LR1$/ : /parsed=LR1 declared=LR1$/, label)
+    }
+  }
+})
+
+// MUTATION: revert \.(?=\s|$) to \.\s and leave a final declaration period in the token.
+test('declared acceptance ids stop at a final period before a heading or EOF', async () => {
+  for (const [label, brief] of [
+    ['decl-period-heading', '## Acceptance\n(LR1) one\n(LR2) two\nGATE LABELS ARE EXACTLY LR1, LR2.\n## Notes'],
+    ['decl-period-eof', '## Acceptance\n(LR1) one\n(LR2) two\nGATE LABELS ARE EXACTLY LR1, LR2.'],
+  ]) {
+    const found = await compileAcceptanceBrief(label, brief)
+    assert.equal(found.refusal, undefined, label)
+    assert.equal(found.logs.at(-1), `dispatch-batch: acceptance-ids lane=${found.lane} parsed=LR1,LR2 declared=LR1,LR2`)
+  }
+})
+
+test('declared acceptance ids preserve Acceptance fence and heading boundaries', async () => {
+  // MUTATION: drop the same-character/same-or-longer fence close rule and admit BAD9 from the four-backtick fence.
+  // MUTATION: change #{1,2} to #{2} and admit BAD9 after the level-1 heading.
+  for (const [label, brief, diagnostic] of [
+    ['decl-four-backtick', '## Acceptance\n````\n```\nGATE LABELS ARE EXACTLY BAD9\n````\nGATE LABELS ARE EXACTLY LR1, LR2\n(LR1) one\n(LR2) two\n', 'parsed=LR1,LR2 declared=LR1,LR2'],
+    ['decl-tilde', '## Acceptance\n~~~\n```\nGATE LABELS ARE EXACTLY BAD9\n~~~\n(LR1) one\n', 'parsed=LR1 declared=none'],
+    ['decl-level-one-stop', '## Acceptance\n(LR1) one\n# Other\nGATE LABELS ARE EXACTLY BAD9\n', 'parsed=LR1 declared=none'],
+    ['decl-and', '## Acceptance\nGATE LABELS ARE EXACTLY LR1 and LR2\n(LR1) one\n(LR2) two\n', 'parsed=LR1,LR2 declared=LR1,LR2'],
+    ['decl-hyphen-and', '## Acceptance\nGATE LABELS ARE EXACTLY cli-and-api\n(cli-and-api) one\n', 'parsed=cli-and-api declared=cli-and-api'],
+  ]) {
+    const found = await compileAcceptanceBrief(label, brief)
+    assert.equal(found.refusal, undefined, label)
+    assert.equal(found.logs.at(-1), `dispatch-batch: acceptance-ids lane=${found.lane} ${diagnostic}`)
+  }
+})
+
+// MUTATION AI7: read a declaration from fenced example content.
+test('AI7 compile ignores declarations inside fences', async () => {
+  const brief = '## Acceptance\n```\nGATE LABELS ARE EXACTLY BAD9\n```\n(LR5) real item\n'
+  const found = await compileAcceptanceBrief('ai7', brief)
+  assert.equal(found.refusal, undefined)
+  assert.deepEqual(found.logs, ['dispatch-batch: issue-body lane=lane-ai7 issue=none status=unavailable reason=no-issue-cited', 'dispatch-batch: acceptance-ids lane=lane-ai7 parsed=LR5 declared=none'])
+})
+
 test('compileLane soft-fails an unavailable issue body without refusing or passing it', async () => {
   const lane = 'lane-gh'
   const batch = makeBatch([lane])
@@ -5212,7 +5318,7 @@ test('compileLane soft-fails an unavailable issue body without refusing or passi
   const gh = calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.deepEqual(gh.args, ['issue', 'view', '867', '--json', 'body', '--jq', '.body'])
-  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 source=closes status=unavailable reason=gh-failed'])
+  assert.deepEqual(logs, ['dispatch-batch: issue-body lane=lane-gh issue=867 source=closes status=unavailable reason=gh-failed', 'dispatch-batch: acceptance-ids lane=lane-gh parsed=none declared=none'])
   assert.equal(result.topSection, 'Proposed tier')
 })
 
@@ -5250,7 +5356,7 @@ test('compileLane passes a fetched issue body path only after gh returns content
   const issuePath = compile.args[issueFlag + 1]
   assert.equal(issuePath, join(out, `${lane}.issue.md`))
   assert.equal(writes.get(issuePath), 'Fetched body.\n')
-  assert.deepEqual(logs, [`dispatch-batch: issue-body lane=${lane} issue=42 source=closes status=available bytes=${Buffer.byteLength('Fetched body.\n')}`])
+  assert.deepEqual(logs, [`dispatch-batch: issue-body lane=${lane} issue=42 source=closes status=available bytes=${Buffer.byteLength('Fetched body.\n')}`, `dispatch-batch: acceptance-ids lane=${lane} parsed=none declared=none`])
   assert.equal(result.bytes, Buffer.byteLength(briefWithTierAndShape))
 })
 

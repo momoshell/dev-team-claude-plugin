@@ -2356,12 +2356,12 @@ function checkLabelMisdelimited(output, check) {
 // requirement into the task into the test (`_Requirements: 5.3_`); this is that thread for
 // the one carrier this repo already has.
 const ACCEPTANCE_HEADING = /^##\s+Acceptance\s*$/
-// An acceptance id is a CHECK LABEL in parentheses at the head of its item: the same
-// grammar `validateMutations` accepts (CHECK_LABEL), so `(RV1-2)` and `(A1)` are both ids
-// and neither can be spelled by a mention. "at the head of its item" is what keeps prose
-// out: a line or a CommonMark bullet (0-3 spaces of indent, then `-`, `+` or `*`), or the
-// first thing after the `;` or `.` that ended the last item. A mention mid-sentence
-// ("see (A1)") is not an item.
+// An acceptance id is a CHECK LABEL at an admitted head: a line or CommonMark bullet
+// (0-3 spaces, then `-`, `+` or `*`) always starts an item. Separators introduce two
+// shape classes: ENUMERATOR heads (single letter, lowercase i/v/x sequence, or digits)
+// and LABEL heads (the remaining CHECK_LABEL grammar). A separator continuation is
+// admitted only when its class has a head somewhere in this section, including later heads.
+// A separator followed by a newline starts a head; same-line mentions in other classes do not.
 const ACCEPTANCE_ITEM = /(?:^ {0,3}(?:[-+*]\s+)?|[;.]\s+)\((?<id>[A-Za-z0-9][A-Za-z0-9._-]*)\)/gm
 // A fence opens with 3+ backticks or tildes and closes only with the SAME character at the
 // same length or longer, so a four-backtick fence may carry triple backticks as text.
@@ -2388,8 +2388,8 @@ export function acceptanceIds(briefText) {
     if (inside) body.push(line)
   }
   if (!inside && body.length === 0) return null
-  const ids = [...body.join('\n').matchAll(ACCEPTANCE_ITEM)].map((match) => match.groups.id)
-  return ids.length > 0 ? [...new Set(ids)] : null
+  const matches = [...body.join('\n').matchAll(ACCEPTANCE_ITEM)], isHead = (match) => !/^[;.][^\n]*$/.test(match[0]), shape = (id) => /^(?:[A-Za-z]|[ivx]+|\d+)$/.test(id), heads = new Set(matches.filter(isHead).map((match) => shape(match.groups.id)))
+  const ids = matches.filter((match) => isHead(match) || heads.has(shape(match.groups.id))).map((match) => match.groups.id); return ids.length > 0 ? [...new Set(ids)] : null
 }
 
 // Why coverage could not be measured — closed, so a reason nobody named cannot appear.

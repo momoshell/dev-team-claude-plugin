@@ -4954,6 +4954,7 @@ function provenanceScenario(first, transport = 'headless-rpc') {
   const rows = io.calls.logs.filter((row) => row.seat_enforcement).map((row) => row.seat_enforcement)
   return {
     status: result.status,
+    escalation: result.details?.escalation ?? null,
     plannerDispatches: io.calls.assign.filter(({ role }) => role === 'planner').length,
     applied: (kind) => rows.filter((row) => row.kind === kind && row.applied),
     rows: (kind) => rows.filter((row) => row.kind === kind),
@@ -5017,6 +5018,10 @@ test('ZT2 an unproven dispatch transport or provenance fails closed, and the sig
   for (const [label, first, transport] of refused) {
     const observed = provenanceScenario(first, transport)
     assert.equal(observed.plannerDispatches, 1, label)
+    // Fail closed means the carrier is refused as an ordinary unaddressed return,
+    // never a driver crash: a throwing lookup must not escalate where 'driver'.
+    assert.equal(observed.escalation?.where, 'plan', label)
+    assert.match(observed.escalation?.why ?? '', /^envelope-refusal: run-mismatch/, label)
     assert.deepEqual(observed.rows('planner-no-envelope'), [], label)
     assert.deepEqual(observed.rows('zero-turn-non-start'), [], label)
   }

@@ -12,7 +12,7 @@ import {
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_SOURCE_BUDGET, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
 
 // The boot writes each role's mapped plugin skills after the charter; that section's
 // bytes are pinned by the skill-delivery tests in crew/crew-boot.test.mjs, so the
@@ -1420,6 +1420,15 @@ test('malformed question entries are dropped and reported, and the outcome never
   // A non-array questions field is the ABSENCE of the field, not a refusal.
   assert.equal(parseQuestions({ questions: 'nope' }), null)
   assert.equal(parseQuestions({}), null)
+})
+
+// Kills SB6: replacing the own-check clause breaks both the unique charter wording and its unchanged byte ceiling.
+test('SB6 builder charter states step-local ownership within its original budget', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew/roles/builder.md'), 'utf8')
+  const clause = "a step owes only its own checks, never a later step's."
+  assert.equal(charter.split(clause).length - 1, 1)
+  assert.ok(Buffer.byteLength(charter, 'utf8') <= CHARTER_SOURCE_BUDGET.builder)
+  assert.equal(CHARTER_SOURCE_BUDGET.builder, 3963)
 })
 
 // RV1-1 (b847): every enforced row of the charter-preservation table must quote

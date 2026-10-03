@@ -1549,6 +1549,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "event='mutation-check-coverage'", "at ...reconciliation"],
   ["recordRow", "event='builder-session'", "at attempt note outcome why"],
   ["recordRow", "event='step:start'", "at step round files owned builder_attempt"],
+  ["recordRow", "event='step:bounce'", "at step round status"],
   ["recordRow", "event='step:done'", "at step round passed"],
   ["recordRow", "event='step:red'", "at step round failed regressed"],
   ["recordRow", "", "at census_exhibits"],

@@ -10337,6 +10337,13 @@ function runTask(ctx, io, crash) {
       stage(`build:${step.id}:r${stepRound}`)
       builderAttempts = builderAttempts + 1
       const env = assignAndWait('builder', prepareBuilderAssignment(stepBrief, 'step-build'), 'step-build')
+      if (!handledEnvelopeRefusalWhy(env) && (env?.status === 'insufficient' || env?.status === 'blocked')) {
+        stageComplete()
+        priorStepFailure = [`${env.status}: ${env.summary || '(no summary)'}`, ...(parseQuestions(env.details)?.questions || []).map(({ id, question }) => `${id}: ${question}`)].join('\n')
+        io.log(recordRow({ at: io.now(), event: 'step:bounce', step: step.id, round: stepRound, status: env.status }))
+        if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted after ${env.status} for ${step.id}: ${env.summary || '(no summary)'}`, env.artifacts || [])
+        continue
+      }
       if (env?.status !== 'done' || handledEnvelopeRefusalWhy(env)) {
         stageComplete()
         return escalate('build', `stepped builder ${step.id} returned ${env?.status || 'no envelope'}: ${env?.summary || handledEnvelopeRefusalWhy(env) || 'invalid builder result'}`, env?.artifacts || [])
@@ -15409,7 +15416,7 @@ export function planStepSection(planText, id) {
 export function stepBriefText({ step, round, done, planPath, planText, priorFailure }) {
   const selected = planStepSection(planText, step.id)
   const body = selected.section ?? `PLAN SECTION UNAVAILABLE (${selected.reason})`
-  const tail = `Plan of record, for reference only: ${planPath}. Work only on this step's files and owned checks.`
+  const tail = `Plan of record, for reference only: ${planPath}. Work only on this step's files and owned checks. Done means this step's checks_owned pass and the plan's validation is green for its files_in_scope. Checks owned by later steps may stay red and are never a reason to return insufficient.`
   return `# Stepped build ${step.id} (round ${round})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\n## This step\n\n${body}\n\n${tail}${priorFailure ? `\n\nGate failure from prior attempt:\n${priorFailure}` : ''}\n`
 }
 

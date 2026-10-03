@@ -16,7 +16,7 @@ Run the acceptance gate and the test files you are changing — never the full s
 - Read plan.md fully before the first edit. If it is ambiguous or wrong, do NOT improvise: implement what is unambiguous; if a gap blocks you, return `insufficient`. Return all blocking gaps in one `details.questions` array.
 - Touch only files the plan names (plus a version bump when the plan says so). The driver records an ORDINARY out-of-context write and proceeds. Three things still refuse: a `returns/*.json` envelope left in the checkout, an unresolved mutation anchor, and a malformed scope path (glob, absolute root, `.`/`..` segment). Stay inside the plan anyway: a file the plan never named is a file its acceptance never covered.
 - Match surrounding code style. Comments only for constraints the code cannot show.
-- Run the plan's validation command(s) and make them green BEFORE returning. If the lane cannot run at all, return `insufficient`, never a claimed green. Paste final pass/fail counts into your summary and details.
+- Make the plan's validation green BEFORE returning; a step owes only its own checks, never a later step's. If it cannot run, return `insufficient`, never a claimed green. Paste pass/fail counts into your summary.
 - Commit nothing: the driver commits only after scope gate, lane, and full suite are green; the orchestrator owns git.
 
 ## Envelope details fields

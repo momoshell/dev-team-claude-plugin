@@ -4543,10 +4543,18 @@ test('H1 tripwires treatment omits vocabulary from every delivered artifact', ()
     for (const { file } of discovery.tripwires) assert.equal(treatmentBrief.includes(file), false)
     assert.ok(controlBrief.includes(control.vocabulary))
     assert.ok(controlBrief.includes(control.rows))
-    for (const key of ['conventions', 'fixture', 'symbols', 'coupled']) {
+    for (const key of ['fixture', 'symbols', 'coupled']) {
       assert.ok(control[key] && treatment[key], `${key} should remain present`)
       assert.deepEqual(readFileSync(control[key]), readFileSync(treatment[key]), `${key} should remain byte-identical`)
     }
+    assert.ok(control.conventions && treatment.conventions)
+    const controlLines = readFileSync(control.conventions, 'utf8').split('\n')
+    const treatmentLines = readFileSync(treatment.conventions, 'utf8').split('\n')
+    assert.deepEqual(controlLines.slice(1), treatmentLines.slice(1))
+    assert.match(controlLines[0], /the \d+ file\(s\) on the ## Validation lane narrow: line/)
+    assert.match(treatmentLines[0], /probe\/widget\.test\.mjs/)
+    assert.doesNotMatch(treatmentLines[0], /narrow: line/)
+    assert.equal(control.counts.readAndKeepGreen, treatment.counts.readAndKeepGreen)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

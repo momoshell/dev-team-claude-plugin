@@ -47,15 +47,15 @@ one.
 
 ## Runtime state and historical vocabulary
 
-### Builder edit assist
-
-A lane request may carry the dispatch-only `edit_assist` key with the closed value `on` or `off`; omission is recorded as `null` and has no source, never as `off`. The default remains off. Only pi builder RPC/ACP environments receive an explicit value; pane transport and an inherited `CREW_EDIT_ASSIST` process variable are refused. Attribution is recorded in the dispatch record, `crew.json`, the journal, and the run-configuration ledger.
-
 A lane's worktree is its concurrent-write isolation boundary. Compiles use the
 complete authored register and preserve each lane's own effective surface; boot
 writes a lane-specific register so runtime state cannot advertise another lane's
 scope. `crew.json` therefore records the lane name and `lane_fence: []`, and the
 unchanged journal event reports `lanes: 0, files: 0`.
+
+### Builder edit assist
+
+A lane request may carry the dispatch-only `edit_assist` key with the closed value `on` or `off`; omission is recorded as `null` with journal source `unset`, never as `off`. The default remains off. Only pi builder RPC/ACP environments receive an explicit value; pane transport and a `CREW_EDIT_ASSIST` variable already in the dispatcher environment are refused. Attribution is recorded in the dispatch record, `crew.json`, the journal, and the run-configuration ledger.
 
 ### Proposal recommendation and minimum
 

@@ -19,7 +19,7 @@ import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mj
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
-import { ADVISOR_ARMS, ADVISOR_SOURCES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
@@ -1678,7 +1678,7 @@ function splitDispatchKeys(parsed, requestPath) {
     if (DISPATCH_ONLY_REQUEST_KEYS.includes(key)) dispatch[key] = value
     else request[key] = value
   }
-  if (Object.hasOwn(dispatch, 'edit_assist') && !['on', 'off'].includes(dispatch.edit_assist)) refuse(`request ${requestPath}: invalid edit_assist; expected on or off`, BATCH_UNREADABLE)
+  if (Object.hasOwn(dispatch, 'edit_assist') && !EDIT_ASSIST_VALUES.includes(dispatch.edit_assist)) refuse(`request ${requestPath}: invalid edit_assist; expected on or off`, BATCH_UNREADABLE)
   const executionSupplied = dispatch.execution !== undefined && dispatch.execution !== null
   const variantSupplied = dispatch.variant !== undefined && dispatch.variant !== null
   const tierSupplied = dispatch.tier !== undefined && dispatch.tier !== null
@@ -4012,7 +4012,7 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
-// The dispatch-time advisor source reaches crew.json and the journal; both writes are best-effort instrumentation.
+// The requested builder edit assist reaches crew.json and the journal; both writes are best-effort instrumentation.
 function recordEditAssist({ editAssist, crewPath, crewDir, lane, deps } = {}) {
   const d = normalDeps(deps)
   const value = editAssist ?? null
@@ -4025,6 +4025,7 @@ function recordEditAssist({ editAssist, crewPath, crewDir, lane, deps } = {}) {
   return { edit_assist: value }
 }
 
+// The dispatch-time advisor source reaches crew.json and the journal; both writes are best-effort instrumentation.
 function recordAdvisorSource({ advisorSource, crewPath, crewDir, lane, deps } = {}) {
   const d = normalDeps(deps)
   if (!ADVISOR_SOURCES.includes(advisorSource)) return null
@@ -4280,7 +4281,8 @@ function prepareDispatchContext(options) {
     refuse('cannot combine --planner-symbols-holdout-fraction with --brief-tripwires-holdout-fraction because pack omission is scalar', BATCH_UNREADABLE)
   }
   const d = normalDeps(deps)
-  if (Object.hasOwn(process.env, 'CREW_EDIT_ASSIST')) refuse('CREW_EDIT_ASSIST is dispatcher-controlled; request edit_assist in the lane request', BATCH_UNREADABLE)
+  // The operator env is read through the d.env seam: an edit-assist builder seat's own env must not refuse its tests.
+  if (Object.hasOwn(d.env, 'CREW_EDIT_ASSIST')) refuse('CREW_EDIT_ASSIST is dispatcher-controlled; request edit_assist in the lane request', BATCH_UNREADABLE)
   const transport = resolveTransport({ runFlags })
   const batchExecutionSpelling = runFlagSpelling(runFlags, 'execution', 'variant', '--execution', '--variant')
   const batchAssuranceSpelling = runFlagSpelling(runFlags, 'assurance', 'tier', '--assurance', '--tier')
@@ -4688,11 +4690,7 @@ async function compileDispatchWave(prepared) {
       }),
       ...(enrollments.length > 0 ? { experiments: enrollments } : {}),
     }
-    try {
-      const recordJson = JSON.stringify(record, null, 2) + '\n'
-      d.writeFileSync(recordPath, recordJson)
-      writeFileSync(recordPath, recordJson)
-    } catch (err) {
+    try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
     const runtimeRegisterPath = writeRuntimeRegister({

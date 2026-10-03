@@ -7,7 +7,7 @@ import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync,
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir, ROOT } from '../test/helpers.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
@@ -96,6 +96,9 @@ test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
 test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP', () => {
   // MUTATION EA6: allow inherited or invalid edit-assist values, or insert it for a non-builder.
   assert.equal(PI_EDIT_ASSIST_ENV, EDIT_ASSIST_ENV)
+  // MUTATION EA-enum: drop the freeze, or add a value; the closed enum is consulted by dispatch, emit and the ledger.
+  assert.deepEqual(EDIT_ASSIST_VALUES, ['on', 'off'])
+  assert.equal(Object.isFrozen(EDIT_ASSIST_VALUES), true)
   const spec = { model: 'test', promptFile: '/tmp/role.md', env: { CREW_EDIT_ASSIST: 'on' } }
   for (const editAssist of ['on', 'off']) {
     assert.equal(piRpcSeatParts({ ...spec, role: 'builder', editAssist }).env[PI_EDIT_ASSIST_ENV], editAssist)

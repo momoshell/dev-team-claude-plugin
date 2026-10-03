@@ -870,6 +870,7 @@ async function dispatchFixture({
   rotationDeps = {},
   baseBranch = undefined,
   factoryRoot = scratchDir('dispatch-factory-root-'),
+  env = {},
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -897,7 +898,7 @@ async function dispatchFixture({
     home,
     factoryRoot,
     ...(baseBranch ? { baseBranch } : {}),
-    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
+    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state'), ...env },
     existsSync: (path) => existsProbe ? existsProbe(path) : defaultOutcomeExists(path),
     readdirSync: (path, options) => {
       if (String(path) === batch) return names.map((lane) => `${lane}${REQUEST_SUFFIX}`)

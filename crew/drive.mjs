@@ -338,9 +338,9 @@ function transportNoEnvelopeCarrier(env) {
   return zeroTurn || measuredNonzero || unavailable
 }
 
-// Set only here, on the received carrier that lacked a run_id: a seat-authored
-// envelope that copies the tuple AND carries a run_id never gains it.
+// The RPC producer's in-memory provenance stamp: a symbol key, so seat-written JSON never carries it.
 export const TRANSPORT_SETTLEMENT = Symbol.for('dev-team.crew.transport-settlement')
+// Set only here, on a received carrier that lacked a run_id; a seat envelope carrying a run_id never gains it.
 const RUNTIME_NO_ENVELOPE_CARRIER = Symbol('runtime-no-envelope-carrier')
 
 function normalizeRuntimeEnvelope(env, role, id, runId, budget, dispatchTransport = null) {

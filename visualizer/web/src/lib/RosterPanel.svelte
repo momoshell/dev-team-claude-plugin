@@ -1,5 +1,5 @@
 <script>
-  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getRosterLadder, getRosterPick, proposeRosterEdit, setModelCatalogKey, stageRosterLadder } from './api.js'
+  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getPluginWriteMode, getRosterLadder, getRosterPick, proposeRosterEdit, setModelCatalogKey, stageRosterLadder } from './api.js'
   import { directoryModelMatchesChip, directoryVariantLabel, fallbackModelName, groupDirectoryModels, providerDisplayName, selectedDirectoryVariant } from './model-directory.js'
   import { assuranceMeta } from './workflow-semantics.js'
   import { rosterPickPanel, rosterProposal } from './panels.js'
@@ -57,6 +57,8 @@
   let catalogKeyError = $state('')
   let catalogKeyOpen = $state(false)
   let rememberCatalogKey = $state(true)
+  let pluginWriteMode = $state(null)
+  let pluginReadOnly = $derived(pluginWriteMode?.writable === false)
   let validationRevision = 0
   const DIRECTORY_PAGE_SIZE = 12
 
@@ -118,6 +120,16 @@
   let pickRows = $derived((payload?.rail || []).flatMap((column) => seatRows(column).map((seat) => ({ tier:column.tier, role:seat.role }))))
   function pickFor(tier, role) { return policyPicks[pickKey(tier, role)] || null }
   function proposalFor(tier, role) { return pickProposals[pickKey(tier, role)] || null }
+
+  $effect(() => {
+    let active = true
+    getPluginWriteMode().then((result) => {
+      if (!active) return
+      pluginWriteMode = result
+      if (result.writable === false) rememberCatalogKey = false
+    }).catch(() => {})
+    return () => { active = false }
+  })
 
   $effect(() => {
     let active = true
@@ -413,6 +425,7 @@
 
 <svelte:window onkeydown={(event) => assignmentDraft && event.key === 'Escape' && closeAssignment()} />
 
+{#if pluginReadOnly && pluginWriteMode.notice}<section class="notice" role="status"><p>{pluginWriteMode.notice}</p></section>{/if}
 {#if loading}
   <section class="loading"><span></span><p>Loading the ratified roster…</p></section>
 {:else if payload?.degraded}
@@ -553,7 +566,7 @@
                 {#if catalogKeyOpen}
                   <form onsubmit={connectCatalog}>
                     <label><span>Artificial Analysis API key</span><div><input type="password" bind:value={catalogKey} autocomplete="off" placeholder="Paste key…" aria-describedby="catalog-key-note" /><button type="submit" disabled={connectingCatalog || catalogKey.trim().length < 8}>{connectingCatalog ? 'Connecting…' : rememberCatalogKey ? 'Save & connect' : 'Connect for this run'}</button></div></label>
-                    <label class="remember-key"><input type="checkbox" bind:checked={rememberCatalogKey} /><span><b>Remember on this machine</b><small>Save to the git-ignored <code>.env.local</code> file and reconnect automatically after restarts.</small></span></label>
+                    <label class="remember-key"><input type="checkbox" bind:checked={rememberCatalogKey} disabled={pluginReadOnly} /><span><b>Remember on this machine</b><small>Save to the git-ignored <code>.env.local</code> file and reconnect automatically after restarts.</small></span></label>
                   </form>
                   <small id="catalog-key-note">{rememberCatalogKey ? 'Only the named environment variable is updated; the key is never returned to the browser.' : 'Temporary mode holds the key only in local server memory until it restarts.'}</small>
                 {/if}
@@ -659,7 +672,7 @@
           <div class="draft-actions">
             <button type="button" class="secondary" disabled={!draftCount} onclick={exportDraft}>Copy experiment draft</button>
             <button type="button" class="secondary" disabled={!staged.length || containsCustomMoves || staging} onclick={validateDraft}>{staging ? 'Checking…' : 'Check readiness'}</button>
-            <button class="apply-local" type="button" disabled={!localReady || staging || applying || composing} onclick={applyLocal}>{applying ? 'Applying…' : publishReady ? 'Apply for next task' : localReady ? 'Apply anyway for next task' : !staged.length ? 'Assign a seat to apply locally' : containsCustomMoves ? 'Complete model setup to apply' : 'Resolve structural issues to apply'}</button>
+            <button class="apply-local" type="button" disabled={pluginReadOnly || !localReady || staging || applying || composing} onclick={applyLocal}>{applying ? 'Applying…' : publishReady ? 'Apply for next task' : localReady ? 'Apply anyway for next task' : !staged.length ? 'Assign a seat to apply locally' : containsCustomMoves ? 'Complete model setup to apply' : 'Resolve structural issues to apply'}</button>
             <button class="secondary prepare-patch" type="button" disabled={!publishReady || staging || applying || composing} onclick={compose}>{composing ? 'Preparing…' : publishReady ? 'Prepare repository patch' : 'Repository patch unavailable'}</button>
           </div>
           <p class="publish-note"><strong>Apply changes only this machine.</strong> It updates <code>crew/roster.json</code> for the next newly booted task. Running tasks continue unchanged; no branch, commit, PR, or remote push is created.</p>

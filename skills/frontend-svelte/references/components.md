@@ -26,7 +26,7 @@ Use native `onclick=` attributes: the census found 70 across 19 files and zero `
 
 ## Runes census and effects
 
-The measured source (visualizer/web/src/**/*.svelte, 34 files) contains `$state(` 142 times in 22 files, `$derived` 171 times in 29 files, `$props()` 25 times in 25 files, `$effect` 31 times in 19 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:973-975` checks those strings across every `.svelte` file.
+The measured source (visualizer/web/src/**/*.svelte, 34 files) contains `$state(` 143 times in 22 files, `$derived` 172 times in 29 files, `$props()` 25 times in 25 files, `$effect` 32 times in 19 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:973-975` checks those strings across every `.svelte` file.
 
 A correct effect has a dependency and a cleanup boundary. `visualizer/web/src/lib/RunCard.svelte:20-22` carries the `state_referenced_locally` comment: `previousRunning` is left undefined until the effect's first pass so a true running-to-finished transition can trigger the final drain. Treat that comment's shape—local previous value, guarded work, returned cleanup—as the repo's measured effect idiom, not as a generic API tutorial.
 

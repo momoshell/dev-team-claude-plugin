@@ -22,7 +22,20 @@ import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
-import { getAssurances, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
+import { getAssurances, getPluginWriteMode, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
+
+test('RO6', async () => {
+  // MUTATION: change the getter URL; the behavioral fetch assertion must fail.
+  const original = globalThis.fetch
+  let requested
+  globalThis.fetch = async (url) => { requested = url; return { ok:true, json:async () => ({ writable:false }) } }
+  try {
+    assert.deepEqual(await getPluginWriteMode(), { writable:false })
+    assert.equal(requested, '/api/plugin-write-mode')
+    globalThis.fetch = async () => ({ ok:false, json:async () => ({ error:'readonly' }) })
+    await assert.rejects(getPluginWriteMode(), /readonly/)
+  } finally { globalThis.fetch = original }
+})
 
 async function withAttentionFixture(extraKey, callback) {
   const dir = scratchDir('visualizer-attention-')

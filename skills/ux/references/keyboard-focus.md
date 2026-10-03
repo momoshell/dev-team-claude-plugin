@@ -15,8 +15,8 @@ Literal census over the 33 `.svelte` files directly under the visualizer lib dir
 | plain `:focus` selectors | 3 | 1 |
 | `tabindex` attributes | 1 | 1 |
 | `aria-` attributes | 124 | 28 |
-| `role=` attributes | 20 | 9 |
+| `role=` attributes | 21 | 9 |
 
-The remaining modern handlers live at `visualizer/web/src/lib/RosterPanel.svelte:414` and `visualizer/web/src/lib/RosterPanel.svelte:675`; the plain-`:focus` treatment and the single `tabindex` live at `visualizer/web/src/lib/RosterPanel.svelte:708` (the other two plain-`:focus` selectors sit on line 711) and `visualizer/web/src/lib/RosterPanel.svelte:675`. The other `:focus-visible` treatments are at `visualizer/web/src/lib/MetricsStrip.svelte:51` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
+The remaining modern handlers live at `visualizer/web/src/lib/RosterPanel.svelte:426` and `visualizer/web/src/lib/RosterPanel.svelte:688`; the plain-`:focus` treatment and the single `tabindex` live at `visualizer/web/src/lib/RosterPanel.svelte:721` (the other two plain-`:focus` selectors sit on line 711) and `visualizer/web/src/lib/RosterPanel.svelte:688`. The other `:focus-visible` treatments are at `visualizer/web/src/lib/MetricsStrip.svelte:51` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
 
 **Stated gap:** modern handlers cover 2/33 components and visible focus covers 3/33 components; that narrow coverage is recorded as-is, not as proof that all 33 components need handlers.

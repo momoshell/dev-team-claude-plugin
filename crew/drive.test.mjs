@@ -125,6 +125,19 @@ test('NR6', () => {
   assert.deepEqual(exhausted.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair.outcome), ['granted', 'refused'])
 })
 
+test('a cargo suite red whose panic sits above the last 4000 characters still admits its source file', () => {
+  // Derived capture: the t596 capture followed by its markerless copy (NR6's substitution), so the
+  // panic line is more than 4000 characters from the end of the output.
+  const markerless = cargoT596.split(/\r?\n/).map((line) => /panicked at|---- |error:|-->/.test(line) ? 'cargo diagnostic unavailable' : line).join('\n').repeat(3)
+  const output = `${cargoT596}\n${markerless}`
+  assert.ok(output.length - output.indexOf('panicked at') > 4000)
+  const { result, io } = suiteRedRunnerScenario('cargo', output)
+  assert.equal(result.status, 'done')
+  const admissions = io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red')
+  assert.deepEqual(admissions.map((row) => row.scope_admission.files), [[NR_PANIC_FILE]])
+  assert.equal(io.calls.logs.find((row) => row.suite_red_runner).suite_red_runner.reason, null)
+})
+
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
   const res = driveTask({ ...CTX, waits: { planner: 42 } }, io)

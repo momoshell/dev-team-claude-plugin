@@ -1168,7 +1168,16 @@ export function classifyTestRunner(command) {
   return 'unparsed'
 }
 
-export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot } = {}) {
+// `suite` is the run's explicit --suite command. When it differs from the ratified
+// test_command it is the command that actually runs, so it is the one classified.
+export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot, suite = null } = {}) {
+  const profiled = profiledTestRunner({ checkout, profilePath, factoryRoot })
+  const explicit = typeof suite === 'string' ? suite.trim() : ''
+  if (!explicit || explicit === profiled.command) return profiled.answer
+  return { runner: classifyTestRunner(explicit), basis: `run --suite ${JSON.stringify(explicit)} · overrides ${profiled.answer.basis}` }
+}
+
+function profiledTestRunner({ checkout, profilePath, factoryRoot }) {
   const path = profilePath != null
     ? resolve(profilePath)
     : defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
@@ -1177,15 +1186,15 @@ export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot }
     profile = readProfile(path)
   } catch (err) {
     if (!(err instanceof ProbeUsageError)) throw err
-    return { runner: 'node', basis: `legacy node runner · no readable profile at ${path}` }
+    return { command: null, answer: { runner: 'node', basis: `legacy node runner · no readable profile at ${path}` } }
   }
   const field = profile?.fields && typeof profile.fields === 'object' ? profile.fields.test_command : undefined
   if (!field || field.status !== 'ratified') {
     const status = field && nonEmptyString(field.status) ? field.status : 'unknown'
-    return { runner: 'node', basis: `legacy node runner · profile field test_command is ${status} · ${path}` }
+    return { command: null, answer: { runner: 'node', basis: `legacy node runner · profile field test_command is ${status} · ${path}` } }
   }
   const value = requireField(profile, 'test_command')
-  return { runner: classifyTestRunner(value), basis: `ratified profile field test_command · ${path}` }
+  return { command: typeof value === 'string' ? value.trim() : null, answer: { runner: classifyTestRunner(value), basis: `ratified profile field test_command · ${path}` } }
 }
 
 export const INTAKE_BOARD_REFUSALS = Object.freeze([

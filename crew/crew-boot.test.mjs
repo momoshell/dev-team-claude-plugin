@@ -1619,7 +1619,7 @@ test('run resolves the repo protected paths and journals the basis', async () =>
   }
 })
 
-test('NR7', async () => {
+async function runnerRunCtx(runArgs = {}) {
   const { root: checkoutRoot, checkout } = testCheckout('crew-runner-checkout-')
   const home = scratchDir('crew-runner-home-')
   const factoryRoot = join(home, 'factory')
@@ -1642,18 +1642,29 @@ test('NR7', async () => {
     await withHome(home, async () => {
       await bootCmd({ task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
         { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() })
-      runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+      runCmd({ task, checkout, 'brief-file': brief, keep: true, ...runArgs }, {
         drive: (ctx) => { seen.push(ctx); return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } } },
       })
     })
     assert.equal(seen.length, 1)
-    assert.equal(seen[0].testRunner.runner, 'cargo')
-    assert.match(seen[0].testRunner.basis, /ratified profile field test_command/)
+    return seen[0]
   } finally {
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+}
+
+test('NR7', async () => {
+  const ctx = await runnerRunCtx()
+  assert.equal(ctx.testRunner.runner, 'cargo')
+  assert.match(ctx.testRunner.basis, /ratified profile field test_command/)
+})
+
+test('run classifies an explicit --suite that differs from the ratified test_command', async () => {
+  const ctx = await runnerRunCtx({ suite: 'npm test' })
+  assert.equal(ctx.testRunner.runner, 'node')
+  assert.match(ctx.testRunner.basis, /^run --suite "npm test" · overrides ratified profile field test_command/)
 })
 
 test('boot persists the fence and run rides it into ctx beside the protected paths', async () => {

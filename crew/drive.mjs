@@ -12484,7 +12484,8 @@ function runTask(ctx, io, crash) {
       : ['node', 'cargo', 'unparsed'].includes(rawRunner)
         ? { runner: rawRunner, basis: typeof ctx.testRunner?.basis === 'string' ? ctx.testRunner.basis : 'runner context' }
         : { runner: 'unparsed', basis: 'unexpected runner value' }
-    const suiteLocations = suiteRedLocations(failureTail, ctx.checkout, suiteRunner.runner)
+    // A cargo location can sit far above the summary, so a non-node runner parses the whole output.
+    const suiteLocations = suiteRedLocations(suiteRunner.runner === 'node' ? failureTail : suiteOutput, ctx.checkout, suiteRunner.runner)
     const runnerUnparsed = suiteLocations.reason === SUITE_RUNNER_UNPARSED
     const testFiles = suiteLocations.files
     const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }

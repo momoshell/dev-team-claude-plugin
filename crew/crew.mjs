@@ -3968,7 +3968,7 @@ export function runCmd(args, deps = {}) {
   const head = readHead(checkout)
   logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug, run_id: runId, task_return: relative(paths.dir, taskReturn) })
   const protectedFloor = checkoutProtectedPaths({ checkout })
-  const testRunner = checkoutTestRunner({ checkout })
+  const testRunner = checkoutTestRunner({ checkout, suite: args.suite })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
   logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })

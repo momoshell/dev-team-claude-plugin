@@ -168,6 +168,20 @@ test('NR4', () => {
   assert.throws(() => checkoutTestRunner(options), (error) => error instanceof ProfileRefusal && error.reason === 'profile-ratification-invalid')
 })
 
+test('checkoutTestRunner classifies an explicit --suite that differs from the ratified test_command', () => {
+  const root = scratchDir('probe-test-runner-suite-')
+  const profilePath = join(root, 'profile.json')
+  writeFileSync(profilePath, JSON.stringify({ repo_key: 'fixture', fields: { test_command: { status: 'ratified', value: 'npm test', source: 'fixture', ratified_by: 'operator', ratified_at: 'now' } } }))
+  const options = { checkout: root, profilePath }
+  const overridden = checkoutTestRunner({ ...options, suite: ' cargo test --workspace ' })
+  assert.equal(overridden.runner, 'cargo')
+  assert.match(overridden.basis, /^run --suite "cargo test --workspace" · overrides ratified profile field test_command/)
+  for (const suite of [undefined, null, '', '  ', ' npm test ']) {
+    assert.deepEqual(checkoutTestRunner({ ...options, suite }), checkoutTestRunner(options), String(suite))
+  }
+  assert.equal(checkoutTestRunner({ checkout: root, profilePath: join(root, 'missing.json'), suite: 'cargo test' }).runner, 'cargo')
+})
+
 function captureMain(args) {
   let stdout = ''
   let stderr = ''

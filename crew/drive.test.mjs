@@ -123,6 +123,14 @@ test('NR6', () => {
   assert.match(exhausted.result.details.escalation.why, /budget is exhausted/)
   assert.equal(exhausted.io.calls.logs.filter((row) => row.scope_admission).length, 0)
   assert.deepEqual(exhausted.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair.outcome), ['granted', 'refused'])
+  // Budget to spare: the second runner-unparsed red spends the in-scope bounce limit and escalates.
+  const bounded = suiteRedRunnerScenario('unparsed', markerless, { repeat: true, limits: { build_rounds: 3 } })
+  assert.equal(bounded.result.status, 'escalation')
+  assert.equal(bounded.result.details.escalation.where, 'suite')
+  assert.match(bounded.result.details.escalation.why, /runner-unparsed/)
+  assert.match(bounded.result.details.escalation.why, /in-scope bounce limit/)
+  assert.equal(bounded.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(bounded.io.calls.logs.filter((row) => row.scope_admission).length, 0)
 })
 
 test('a cargo suite red whose panic sits above the last 4000 characters still admits its source file', () => {

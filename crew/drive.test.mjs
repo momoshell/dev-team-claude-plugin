@@ -48,7 +48,7 @@ test('NR1', () => {
 
 test('NR2', () => {
   // Mutation: disable rustc arrow extraction; compilation directory lines are not source paths.
-  assert.deepEqual(suiteRedLocations(cargoT514b, '/Users/momoshell/Dev/dt-b1099-registry-wiring', 'cargo'), {
+  assert.deepEqual(suiteRedLocations(cargoT514b, '/Users/momoshell/Dev/dt-t514b-registry-wiring', 'cargo'), {
     files: ['crates/power-api/src/app/flows.rs'], test_names: [], reason: null,
   })
 })
@@ -69,13 +69,60 @@ test('NR3', () => {
   assert.deepEqual(suiteRedLocations(cargoT596, CTX.checkout, 'other'), { files: [], test_names: [], reason: SUITE_RUNNER_UNPARSED })
 })
 
-// NR5/NR6 integration coverage is pinned by the suite-red scenarios below.
+const NR_PANIC_FILE = 'crates/power-api/src/request_writer_acceptance.rs'
+function suiteRedRunnerScenario(runner, output, { repeat = false, limits = repeat ? { build_rounds: 1 } : null } = {}) {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd:1': { ok: false, output }, 'suite-cmd:2': { ok: !repeat, output: repeat ? output : 'green' } },
+    changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, testRunner: { runner, basis: 'ratified profile field test_command' }, ...(limits ? { limits } : {}) }, io)
+  const bounce = Object.entries(io.calls.writes).find(([path]) => path.includes('/suite-red-bounce-'))?.[1] ?? ''
+  return { result, io, bounce }
+}
+
 test('NR5', () => {
-  assert.equal(suiteRedLocations(cargoT596, CTX.checkout, 'cargo').files.length, 1)
+  // Mutation: the suite-red site parses with the node runner; the cargo red escalates at scope admission.
+  const { result, io, bounce } = suiteRedRunnerScenario('cargo', cargoT596)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const admissions = io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red')
+  assert.equal(admissions.length, 1)
+  assert.deepEqual(admissions[0].scope_admission.files, [NR_PANIC_FILE])
+  const runners = io.calls.logs.filter((row) => row.suite_red_runner)
+  assert.equal(runners.length, 1)
+  assert.equal(runners[0].suite_red_runner.runner, 'cargo')
+  assert.deepEqual(runners[0].suite_red_runner.files, [NR_PANIC_FILE])
+  // The capture has no line that BEGINS with "panicked at": rustc prefixes it with the thread header.
+  const panicLine = cargoT596.split('\n').find((line) => line.includes('panicked at'))
+  assert.ok(panicLine, 'the t596 capture carries a "panicked at" line')
+  assert.ok(bounce.includes(panicLine), `bounce was ${bounce}`)
 })
+
 test('NR6', () => {
-  const markerless = cargoT596.split(/\r?\n/).map((line) => /panicked at|---- |error:/.test(line) ? 'cargo diagnostic unavailable' : line).join('\n').repeat(3)
-  assert.equal(suiteRedLocations(markerless, CTX.checkout, 'unparsed').reason, SUITE_RUNNER_UNPARSED)
+  // Mutation: runnerUnparsed is never true; the empty file list escalates at scope admission.
+  // Derived capture: the t596 capture with every marker-bearing line replaced, repeated past 2000 characters.
+  const markerless = cargoT596.split(/\r?\n/).map((line) => /panicked at|---- |error:|-->/.test(line) ? 'cargo diagnostic unavailable' : line).join('\n').repeat(3)
+  assert.ok(markerless.length > 2000)
+  const { result, io, bounce } = suiteRedRunnerScenario('unparsed', markerless)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission).length, 0)
+  const runners = io.calls.logs.filter((row) => row.suite_red_runner)
+  assert.equal(runners.length, 1)
+  assert.equal(runners[0].suite_red_runner.reason, SUITE_RUNNER_UNPARSED)
+  assert.ok(bounce.includes('runner-unparsed'), `bounce was ${bounce}`)
+  assert.ok(bounce.includes(markerless.slice(-2000)), `bounce was ${bounce}`)
+  const exhausted = suiteRedRunnerScenario('unparsed', markerless, { repeat: true })
+  assert.equal(exhausted.result.status, 'escalation')
+  assert.equal(exhausted.result.details.escalation.where, 'suite')
+  assert.match(exhausted.result.details.escalation.why, /runner-unparsed/)
+  assert.match(exhausted.result.details.escalation.why, /budget is exhausted/)
+  assert.equal(exhausted.io.calls.logs.filter((row) => row.scope_admission).length, 0)
+  assert.deepEqual(exhausted.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair.outcome), ['granted', 'refused'])
 })
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {

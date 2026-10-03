@@ -9281,7 +9281,7 @@ test('SA4 completed prefix degrades without a step checkpoint', () => {
   const chunks = ['c1', 'c2', 'c3'].map((id, i) => ({ id, files_in_scope: [i === 0 ? 'a.mjs' : 'b.mjs'], checks_owned: [`A${i + 1}`] }))
   const mutations = chunks.map((chunk, i) => ({ check: `A${i + 1}`, file: i === 0 ? 'a.mjs' : 'b.mjs', find: `alpha${i}`, replace: `ALPHA${i}` }))
   const insufficient = buildEnv({ status: 'insufficient', summary: 'owned check red' })
-  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs', 'b.mjs'], builders: [buildEnv(), insufficient, insufficient, insufficient, insufficient, insufficient, insufficient], outputs: [steppedGreen(3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3)] })
+  const { io } = steppedAcceptanceIo({ chunks, mutations, planFilesInScope: ['a.mjs', 'b.mjs'], builders: [buildEnv(), insufficient, insufficient, insufficient, insufficient, insufficient, insufficient], outputs: [steppedGreen(3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3), steppedRed('A2', 3)], lead: leadEnv('escalate') })
   addStepCheckpointWitness(io)
   const result = driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 5, gate_fails_to_triage: 99 } }, io)
   const rows = io.calls.logs.filter(({ event }) => event === 'step:degrade')
@@ -9289,6 +9289,7 @@ test('SA4 completed prefix degrades without a step checkpoint', () => {
   assert.equal(io.calls.files[`${CTX.checkout}/a.mjs`], 'alpha\n')
   const builders = io.calls.assign.filter(({ role }) => role === 'builder')
   assert.doesNotMatch(builders[5].briefFile, /step-/)
+  assert.equal(result.details.escalation.where, 'build')
   assert.notEqual(result.details.resume_checkpoint?.kind, 'step')
 })
 

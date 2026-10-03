@@ -5032,7 +5032,7 @@ test('issueBindingFor accepts only explicit Closes citations and preserves decla
 test('IB5 background-only issue does not fetch and logs exact absence', async () => {
   const fixture = await runIssueBodyCompile({ label: 'ib5-background', ask: 'Background #910 only.' })
   assert.equal(fixture.calls.some(({ file }) => file === 'gh'), false)
-  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=none status=unavailable reason=no-issue-cited`])
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=none status=unavailable reason=no-issue-cited`, `dispatch-batch: acceptance-ids lane=${fixture.lane} parsed=none declared=none`])
 })
 
 test('IB6 Closes citation fetches exact issue and logs exact bytes', async () => {
@@ -5041,7 +5041,7 @@ test('IB6 Closes citation fetches exact issue and logs exact bytes', async () =>
   const gh = fixture.calls.find(({ file }) => file === 'gh')
   assert.ok(gh)
   assert.deepEqual(gh.args, ['issue', 'view', '1676', '--json', 'body', '--jq', '.body'])
-  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=1676 source=closes status=available bytes=${Buffer.byteLength(body)}`])
+  assert.deepEqual(fixture.logs, [`dispatch-batch: issue-body lane=${fixture.lane} issue=1676 source=closes status=available bytes=${Buffer.byteLength(body)}`, `dispatch-batch: acceptance-ids lane=${fixture.lane} parsed=none declared=none`])
 })
 
 test('IB7 dispatch uses declared close after placeholder like compiled binding', async () => {

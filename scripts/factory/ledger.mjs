@@ -466,7 +466,7 @@ export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
 // docs/advisor-ab-protocol.md), never silently enforced here.
 export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const EVAL_ENVELOPE_STATUSES = Object.freeze(['received', 'absent'])
-export const CONTEXT_ABSENT_REASONS = Object.freeze(['no-usage-frame', 'census-absent', 'not-captured'])
+export const CONTEXT_ABSENT_REASONS = Object.freeze(['no-usage-frame', 'census-absent', 'not-captured', 'aggregate-usage-only'])
 export const BOUNCE_SOURCES = Object.freeze(['lead-consult', 'driver'])
 export const NEXT_GATE_OUTCOMES = Object.freeze(['gate-pass', 'gate-red', 'gate-not-reached', 'gate-result-absent'])
 
@@ -9649,7 +9649,7 @@ export function main(argv) {
           bucket.n += 1; bucket.next_gate[outcome] += 1
         }
       }
-      const blind_spots = ['pane seats write no census', 'ACP and pre-lane rows read not-captured', 'only bounces cover history']
+      const blind_spots = ['rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
       if (flags.json) stdout.write(`${JSON.stringify({ since, by_role_model, bounces, blind_spots })}\n`)
       else {
         for (const row of by_role_model) stdout.write(`${row.role}/${row.model ?? 'null'} assignments=${row.assignments} measured=${row.measured} first=${row.first.mean} n=${row.first.n} mean_per_call=${row.mean_per_call.mean} n=${row.mean_per_call.n} peak=${row.peak.mean} max=${row.peak.max} n=${row.peak.n} calls=${row.calls.mean} n=${row.calls.n} carry_over=${row.carry_over.mean} n=${row.carry_over.n} excluded_no_session=${row.carry_over.excluded_no_session} unmeasured=${JSON.stringify(row.unmeasured)}\n`)

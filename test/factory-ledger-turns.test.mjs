@@ -73,7 +73,7 @@ test('K7 legacy census ingest normalizes missing context to not-captured', { ski
 })
 
 test('context vocabularies are closed and reason consistency is enforced', { skip: SKIP }, () => {
-  assert.deepEqual(CONTEXT_ABSENT_REASONS, ['no-usage-frame', 'census-absent', 'not-captured'])
+  assert.deepEqual(CONTEXT_ABSENT_REASONS, ['no-usage-frame', 'census-absent', 'not-captured', 'aggregate-usage-only'])
   assert.equal(Object.isFrozen(CONTEXT_ABSENT_REASONS), true)
   assert.deepEqual(BOUNCE_SOURCES, ['lead-consult', 'driver'])
   assert.equal(Object.isFrozen(BOUNCE_SOURCES), true)
@@ -84,6 +84,16 @@ test('context vocabularies are closed and reason consistency is enforced', { ski
     assert.throws(() => ledger.recordSeatTurnCensus({ role: 'builder', context_absent_reason: 'bad-reason' }), LedgerUsageError)
     assert.throws(() => ledger.recordSeatTurnCensus({ role: 'builder', context_first_tokens: 0, context_absent_reason: 'not-captured' }), LedgerUsageError)
   } finally { ledger.close() }
+})
+
+test('CC2', { skip: SKIP }, () => {
+  assert.deepEqual(CONTEXT_ABSENT_REASONS, ['no-usage-frame', 'census-absent', 'not-captured', 'aggregate-usage-only'])
+  assert.equal(Object.isFrozen(CONTEXT_ABSENT_REASONS), true)
+  const result = contextReadout((l) => contextCensus(l, { dispatch: 'acp-1', at: 1, session: 'acp-session', first: null, reason: 'aggregate-usage-only' }))
+  assert.equal(result.status, 0, result.stderr)
+  const unmeasured = JSON.parse(result.stdout).by_role_model[0].unmeasured
+  assert.equal(unmeasured['aggregate-usage-only'], 1)
+  assert.equal(unmeasured['not-captured'], 0)
 })
 
 test('K8 carry-over excludes the baseline assignment', { skip: SKIP }, () => {
@@ -166,7 +176,18 @@ test('context CLI refuses unknown, valueless, and positional arguments', { skip:
 test('context text carries metric denominators, unmeasured counts, and blind spots', { skip: SKIP }, () => {
   const result = contextReadout((l) => contextCensus(l, { dispatch: 'd1', at: 1, session: null, first: null }), ['context'])
   assert.equal(result.status, 0, result.stderr)
-  for (const text of ['n=', 'unmeasured=', 'pane seats write no census', 'ACP and pre-lane rows read not-captured', 'only bounces cover history']) assert.ok(result.stdout.includes(text), text)
+  for (const text of ['n=', 'unmeasured=', 'rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']) assert.ok(result.stdout.includes(text), text)
+})
+
+test('CC6', { skip: SKIP }, () => {
+  const expected = ['rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
+  const json = contextReadout(() => {}, ['context', '--json'])
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).blind_spots, expected)
+  const text = contextReadout(() => {}, ['context'])
+  assert.equal(text.status, 0, text.stderr)
+  for (const item of expected) assert.ok(text.stdout.includes(item), item)
+  assert.match(text.stdout, /n=/)
 })
 
 test('context bounces report absent and last-attempt gate results', { skip: SKIP }, () => {

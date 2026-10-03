@@ -17,7 +17,7 @@ import {
 import {
   headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
   UNCLASSIFIED_REFUSAL, recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
-  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell, sleptMilliseconds,
+  SEAT_SUITE_POLICY_EVENT, PANE_NO_INTERCEPT, suitePolicyRow, suiteSeatCell, sleptMilliseconds, claudeCensus,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { acpIo as defaultAcpIo } from './acp-io.mjs'
@@ -1174,6 +1174,47 @@ function subtractTotals(total, sent) {
     billed_cache_write_tokens: Math.max(0, (total?.billed_cache_write_tokens ?? 0) - (sent?.billed_cache_write_tokens ?? 0)),
     billed_cache_read_tokens: Math.max(0, (total?.billed_cache_read_tokens ?? 0) - (sent?.billed_cache_read_tokens ?? 0)),
   }
+}
+
+export function paneTurnCensus({ taskDir, role, id = null, model = null, agent = 'claude', adapter = null, deps = {} } = {}) {
+  const absent = { role, dispatch_id: id, transport: 'pane', model, session_id: null, turns: null, tool_calls: null, skill_reads: null, context_first_tokens: null, context_peak_tokens: null, context_mean_tokens: null, context_calls: null, context_absent_reason: 'census-absent' }
+  if (agent !== 'claude') return absent
+  const readRecords = adapter?.paneUsageRecords ?? SHIPPED_PANE_USAGE[agent] ?? null
+  let records
+  try { records = readRecords?.({ taskDir, role, deps }) } catch { return absent }
+  if (!Array.isArray(records) || !records.length) return absent
+  const cursorPath = join(taskDir, 'usage', `${role}.census.json`)
+  const readFile = deps.readFileSync ?? fsReadFileSync
+  const writeFile = deps.writeFileSync ?? fsWriteFileSync
+  const mkdir = deps.mkdirSync ?? fsMkdirSync
+  let offsets = {}
+  try {
+    const raw = readFile(cursorPath)
+    offsets = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw))
+    if (!offsets || typeof offsets !== 'object' || Array.isArray(offsets) || Object.values(offsets).some((n) => !Number.isSafeInteger(n) || n < 0)) return absent
+  } catch (error) { if (error?.code !== 'ENOENT') return absent }
+  const slices = []
+  let lastSession = null
+  const updated = { ...offsets }
+  for (const record of records) {
+    if (!record || typeof record.session_id !== 'string' || !record.session_id || typeof record.transcript_path !== 'string') continue
+    try {
+      const data = readFile(record.transcript_path)
+      if (!Buffer.isBuffer(data)) return absent
+      const start = offsets[record.session_id] ?? 0
+      if (data.length < start || data.length === start) continue
+      const end = data.lastIndexOf(10, data.length - 1)
+      if (end < start) continue
+      const text = data.subarray(start, end + 1).toString('utf8')
+      if (text) slices.push(text)
+      updated[record.session_id] = end + 1
+      lastSession = record.session_id
+    } catch { return absent }
+  }
+  if (!slices.length) return absent
+  const census = claudeCensus(slices.join('\n'))
+  try { mkdir(join(taskDir, 'usage'), { recursive: true }); writeFile(cursorPath, JSON.stringify(updated)) } catch { /* best-effort cursor */ }
+  return { ...absent, ...census, role, dispatch_id: id, transport: 'pane', model, session_id: lastSession }
 }
 
 export function paneUsageFrames({ taskDir, role, id = null, model = null, agent = 'claude', sent = {}, adapter = null, deps = {} } = {}) {
@@ -2965,6 +3006,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // plausible guess.
   const paneUsageSentPath = (role) => join(paths.taskDir, 'usage', `${role}.sent.json`)
   const emitPaneUsage = (info) => {
+    const censusMember = crew.members?.[info?.role] || null
+    try {
+      const census = paneTurnCensus({ taskDir: paths.taskDir, role: info.role, id: info.id, model: censusMember?.model ?? null, agent: censusMember?.agent ?? 'claude', adapter: adapters?.[info.role]?.adapter ?? null, deps })
+      io.log(recordRow({ at: now(), seat_turn_census: census }))
+    } catch { /* census is best-effort */ }
     try {
       const member = crew.members?.[info?.role] || null
       const sentPath = paneUsageSentPath(info.role)

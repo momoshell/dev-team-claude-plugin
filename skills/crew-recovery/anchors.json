@@ -7,5 +7,5 @@
   "crew/crew.mjs:4783": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:4670": "const seats = rows.length",
   "crew/drive.mjs:59": "builder: 2400, reviewer: 1800",
-  "crew/drive.mjs:9085": "const completeCheckProof = (label, options = {}) => {"
+  "crew/drive.mjs:9088": "const completeCheckProof = (label, options = {}) => {"
 }

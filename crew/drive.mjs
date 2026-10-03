@@ -6151,10 +6151,13 @@ function runTask(ctx, io, crash) {
   // before review, so the review-time bytes can carry its own damage; the base version is
   // what the lane may not weaken. The checks are MEASURED by running that snapshot against
   // the review-time tree, not guessed from its source.
-  // The git object id of the file as it stands in the checkout: what `git rev-parse
-  // <base>:<file>` names for the base version, computed from the raw bytes, so two
-  // different undecodable bytes never compare equal the way two decoded strings can.
-  const hashPinnedFile = (file) => { try { return gitObjectId(io.run(`git hash-object -- ${shellArg(file)}`)) } catch { return null } }
+  // The git object id of the file's RAW checkout bytes: what `git rev-parse <base>:<file>`
+  // names for the base version, so two different undecodable bytes never compare equal the
+  // way two decoded strings can. --no-filters: a clean filter must not be able to hash an
+  // edited file to the base id (Sol, b1074). A filtered file therefore fails closed — a
+  // refusal of an identical restore, never an acceptance of an edit.
+  // MUTATION P21: drop --no-filters and a clean filter launders an edit into the base id.
+  const hashPinnedFile = (file) => { try { return gitObjectId(io.run(`git hash-object --no-filters -- ${shellArg(file)}`)) } catch { return null } }   // ANCHOR P21
   const capturePrescriptionPin = (file, finding, cell) => {
     const pin = { finding, source: null, bytes: null, names: null }
     if (typeof ctx.head !== 'string' || ctx.head.trim() === '') return { ...pin, why: 'the lane base commit was blank' }

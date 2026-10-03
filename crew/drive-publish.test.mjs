@@ -116,7 +116,7 @@ function resumeWithPins(pinsText, built, journalText = undefined) {
   const baseRun = io.run
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
-    if (cmd === `git hash-object -- ${shellArg('a.test.mjs')}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
+    if (cmd === `git hash-object --no-filters -- ${shellArg('a.test.mjs')}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd !== hardenWitnessCommand('a.test.mjs')) return result
     const names = [...String(files[testAbs]).matchAll(/^test\('([^']+)'/gm)].map((m) => m[1])
     return { ok: true, output: `${names.map((name, i) => `ok ${i + 1} - ${name}`).join('\n')}\n# pass ${names.length}\n# fail 0` }

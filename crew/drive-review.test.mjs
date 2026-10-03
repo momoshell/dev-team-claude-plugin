@@ -2874,7 +2874,7 @@ const withBaseTree = (io, bytes = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`
     if (cmd === `git show ${shellArg(`base-head:${B376_TEST_FILE}`)}`) return { ok: true, output: bytes }
     if (cmd === `git diff --unified=0 ${shellArg('base-head')} -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: '' }
     if (cmd === `git rev-parse ${shellArg(`base-head:${B376_TEST_FILE}`)}`) return { ok: true, output: `${blobOid(bytes)}\n` }
-    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(io.readFile(`${CTX.checkout}/${B376_TEST_FILE}`) ?? '')}\n` }
+    if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(io.readFile(`${CTX.checkout}/${B376_TEST_FILE}`) ?? '')}\n` }
     return result
   }
   return io
@@ -5269,7 +5269,7 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
     if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return pinTap(files[testAbs])
-    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
+    if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd === hardenCommand(guardFile, 'F1 guard')) {
       const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
       return proofOutputs[count - 1] ?? proofOutputs.at(-1)
@@ -5293,7 +5293,7 @@ const REAL_HEAD = "import { test } from 'node:test'\nimport assert from 'node:as
 const REAL_EXISTING = "test('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n"
 const REAL_BASE_TEST = `${REAL_HEAD}\n${REAL_EXISTING}`
 const REAL_GUARD_TEST = `${REAL_HEAD}\ntest('F1 guard', () => {\n  assert.equal(guard, true)\n})\n`
-function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b' } = {}) {
+function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b', setup = null } = {}) {
   const checkout = scratchDir('b1074-pin-')
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
@@ -5301,6 +5301,7 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
   const sh = (cmd) => spawnSync('sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', env })
   writeFileSync(join(checkout, 'a.mjs'), REAL_IMPL('(a, b) => a + b', 'false'))
   writeFileSync(join(checkout, 'a.test.mjs'), baseTest)
+  if (setup) setup({ checkout, sh })
   for (const cmd of ['git init -q', 'git add -A', 'git -c user.name=t -c user.email=t@t commit -q -m base']) assert.equal(sh(cmd).status, 0, cmd)
   const head = sh('git rev-parse HEAD').stdout.trim()
   writeFileSync(join(checkout, 'a.test.mjs'), reviewTest)
@@ -5459,7 +5460,7 @@ test('PV15 a suite-cycle repair round that edits the pinned file is refused', ()
   const baseRun = io.run
   io.run = function (cmd) {
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
-    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}` && builder3) return { ok: true, output: `${blobOid(edited)}\n` }
+    if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}` && builder3) return { ok: true, output: `${blobOid(edited)}\n` }
     return baseRun.call(this, cmd)
   }
   const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
@@ -5520,6 +5521,22 @@ test('PV25 a pinned file differing only in an undecodable byte is refused; ident
   const same = realPinRun({ baseTest: withByte(0xff), builtTest: withByte(0xff) })
   assert.equal(same.result.status, 'done')
   assert.deepEqual(same.preservation.map(({ when, reason }) => [when, reason]), [['accept', null], ['suite', null]])
+})
+
+// Kills P21 (filters applied when hashing) — Sol's final pass: a clean filter that strips
+// an inserted `assert.equal = () => {}` would hash the edited file to the base id; hashed
+// raw, the edit is refused.
+test('PV26 a git clean filter cannot launder an edit to the pinned file', () => {
+  const run = realPinRun({
+    setup: ({ checkout, sh }) => {
+      writeFileSync(join(checkout, '.gitattributes'), 'a.test.mjs filter=strip\n')
+      assert.equal(sh('git init -q && git config filter.strip.clean "grep -v \'^assert.equal = \'"').status, 0)
+    },
+    builtTest: `${REAL_HEAD}assert.equal = () => {}\n\n${REAL_EXISTING}`,
+    builtAdd: '(a, b) => a * b',
+  })
+  assert.notEqual(run.result.status, 'done')
+  assert.match(run.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its base version/)
 })
 
 // Kills P18 (placement rule skipped): the prescribed guard may not live in the pinned file,

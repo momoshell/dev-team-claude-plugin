@@ -5384,3 +5384,17 @@ test('RV1-2 a stale builder claim in a resumed commit message never satisfies th
       { status: 'escalation', refused: PUBLISH_REFUSALS.promptMeasurement, creates: 0 }, JSON.stringify(promptDiff))
   }
 })
+
+// Sol pass 3 (b1096). Mutation: drop the `(?<![A-Za-z0-9_./@:-])` lookbehind from the citation
+// matcher, so a URL host:port (`https://api.example.com:8000`) reads as a file citation and an
+// endpoint change is published under the driver's citation-only claim — watched red.
+test('RV1-2 a URL port change is never classified as a citation-only edit', () => {
+  for (const [before, after] of [
+    ['Call https://api.example.com:8000 first.', 'Call https://api.example.com:9000 first.'],
+    ['Call http://user@api.example.com:8000/v1 first.', 'Call http://user@api.example.com:9000/v1 first.'],
+  ]) assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, before, after)), false, before)
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'See (crew/drive.mjs:12) and `./crew/x.md:3-4`.', 'See (crew/drive.mjs:19) and `./crew/x.md:5-6`.')), true)
+  const io = pcIo({ claim: PC_PLAN, promptDiff: pcPatch(PC_PROMPT, 'Call https://api.example.com:8000 first.', 'Call https://api.example.com:9000 first.') })
+  assert.equal(driveTask(PC_CTX, io).status, 'done')
+  assert.deepEqual({ claim: pcSection(io), rows: pcRows(io) }, { claim: PC_PLAN, rows: [{ source: 'plan', citation_only: false, reason: null, files: [PC_PROMPT] }] })
+})

@@ -11,7 +11,9 @@ export function promptClaimLines(intent) { return String(intent ?? '').split('\n
 export function validPlanPromptClaim(claim) { return typeof claim === 'string' && !claim.includes('\n') && promptClaimLines(claim).length === 1 }
 export function stripPromptClaims(body) { return String(body ?? '').split('\n').filter((line) => !matches(line)).join('\n') }
 
-const citation = /([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.[A-Za-z][A-Za-z0-9]*):(\d+)(?:-(\d+))?(?![A-Za-z0-9_-])/g
+// The lookbehind refuses a match that starts mid-token, so a URL host:port is never a citation.
+// lean: a bare host:port with no scheme (example.com:8000) still reads as a citation; refuse known TLD extensions if one is seen.
+const citation = /(?<![A-Za-z0-9_./@:-])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.[A-Za-z][A-Za-z0-9]*):(\d+)(?:-(\d+))?(?![A-Za-z0-9_-])/g
 function citationShape(line) { return line.replace(citation, (_m, path, start, end) => `${path}:#${end === undefined ? '' : '-#'}`) }
 export function citationOnlyDiff(output) {
   if (typeof output !== 'string' || !output || output.includes('\0')) return false

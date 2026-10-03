@@ -3,10 +3,11 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { forAll } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND } from './drive.mjs'
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_REFUSALS, eofAppendResolution } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -491,6 +492,7 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
   io.state.resolverCalls = []
   io.state.addCommands = []
   io.state.continueCount = 0
+  io.state.diff3CheckoutCommands = []
   io.state.checkoutBytes = null
   const absoluteBytes = (bytes) => Object.fromEntries(Object.entries(bytes).map(([path, value]) => [`${CTX.checkout}/${path}`, value]))
   io.state.worktreeBytes = absoluteBytes(initialBytes)
@@ -499,6 +501,14 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
   io.state.phase = 'initial'
   io.state.currentSpec = null
   io.state.currentConflictPaths = []
+  const baseWrite = io.writeFile
+  io.writeFile = function (path, content) {
+    const rel = path.startsWith(`${CTX.checkout}/`) ? path.slice(`${CTX.checkout}/`.length) : null
+    if (rel && this.state.currentSpec?.diff3WriteFailure === rel) return { ok: false, output: 'permission denied' }
+    const result = baseWrite.call(this, path, content)
+    if (rel) this.state.worktreeBytes[path] = content
+    return result
+  }
   io.state.assignmentConflictSnapshots = []
   io.state.gateRunCount = 0
   io.state.runCleanCalls = []
@@ -571,6 +581,16 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
     if (text.startsWith('git ls-files -z --cached --')) return record({ ok: true, output: [...new Set(baseTracked)].join('\0') + (baseTracked.length ? '\0' : '') })
     if (text.startsWith('git ls-files -z --others --ignored --')) return record({ ok: true, output: ignored.join('\0') + (ignored.length ? '\0' : '') })
     if (text.startsWith('git ls-files -z --others --exclude-standard --')) return record({ ok: true, output: ordinary.join('\0') + (ordinary.length ? '\0' : '') })
+    if (text.startsWith('git checkout --conflict=diff3 -- ')) {
+      const spec = this.state.currentSpec || first
+      this.state.diff3CheckoutCommands.push(text)
+      const result = record(response(spec.diff3CheckoutResult))
+      if (result?.ok === true) for (const path of spec.paths || []) {
+        const value = spec.worktree?.[path]
+        if (typeof value === 'string') this.state.worktreeBytes[`${CTX.checkout}/${path}`] = value
+      }
+      return result
+    }
     if (text.startsWith('git checkout --ours -- ')) {
       const spec = this.state.currentSpec || first
       this.state.checkoutBytes = {}
@@ -621,6 +641,8 @@ function anchorPublicationIo({ specs = [], scope, limits = {}, gate = null, enve
   }
   const baseRead = io.readFile
   io.readFile = function (path) {
+    const rel = path.startsWith(`${CTX.checkout}/`) ? path.slice(`${CTX.checkout}/`.length) : null
+    if (rel && this.state.currentSpec?.diff3ReadFailure === rel) throw new Error('permission denied')
     if (Object.prototype.hasOwnProperty.call(this.state.worktreeBytes, path)) return this.state.worktreeBytes[path]
     return baseRead.call(this, path)
   }
@@ -700,6 +722,145 @@ test('RV1-0 anchor conflict predicates preserve duplicate keys and only line cit
   assert.equal(rebaseConflictRoute({ mechanical: true, bounces: 99, buildRounds: 1 }), 'mechanical')
   assert.equal(rebaseConflictRoute({ mechanical: false, bounces: 0, buildRounds: 2 }), 'bounce')
   assert.equal(rebaseConflictRoute({ mechanical: false, bounces: 1, buildRounds: 2 }), 'escalate')
+})
+
+// Mutation: remove `theirs` from the success expression; the independent expected bytes catch loss.
+test('LR5 EOF append resolver preserves bytes and refuses each closed unsafe shape', () => {
+  assert.equal(Object.isFrozen(EOF_APPEND_REFUSALS), true)
+  assert.deepEqual(EOF_APPEND_REFUSALS, ['invalid-input', 'markers', 'nonempty-base', 'not-eof', 'empty-side', 'identical-sides', 'stage-suffix'])
+  const diff = 'before\r\n<<<<<<< ours\r\nOURS\r\n||||||| base\r\n=======\r\nTHEIRS\r\n>>>>>>> theirs\r\n'
+  assert.deepEqual(eofAppendResolution(diff, 'head\r\nOURS\r\n', 'head\r\nTHEIRS\r\n'), { ok: true, merged: 'before\r\nOURS\r\nTHEIRS\r\n' })
+  const refusal = (text, ours = 'A\n', theirs = 'B\n') => eofAppendResolution(text, ours, theirs).reason
+  assert.equal(eofAppendResolution(null, 'A', 'B').reason, 'invalid-input')
+  assert.equal(refusal('<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n'), 'markers')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\nnonempty\n=======\nB\n>>>>>>> theirs\n'), 'nonempty-base')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\nextra'), 'not-eof')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\n\n'), 'not-eof')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs'), 'not-eof')
+  assert.equal(refusal('<<<<<<< ours\n||||||| base\n=======\nB\n>>>>>>> theirs\n'), 'empty-side')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nA\n>>>>>>> theirs\n', 'A\n', 'A\n'), 'identical-sides')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\n', 'X\n', 'B\n'), 'stage-suffix')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\n', 'A\n', 'X\n'), 'stage-suffix')
+  assert.equal(refusal('head\n<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\nmore\n<<<<<<< ours\nC\n||||||| base\n=======\nD\n>>>>>>> theirs\n'), 'markers')
+  assert.equal(refusal('<<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\n>>>>>>> duplicate\n'), 'markers')
+  assert.equal(refusal('||||||| base\nA\n<<<<<<< ours\nB\n=======\nC\n>>>>>>> theirs\n'), 'markers')
+  assert.equal(refusal('prefix <<<<<<< ours\nA\n||||||| base\n=======\nB\n>>>>>>> theirs\n'), 'markers')
+  const sharedOurs = 'ours\nshared closer text\n'
+  const sharedTheirs = 'theirs\nshared closer text\n'
+  const shared = `before\n<<<<<<< ours\n${sharedOurs}||||||| base\n=======\n${sharedTheirs}>>>>>>> theirs\n`
+  assert.deepEqual(eofAppendResolution(shared, `head\n${sharedOurs}`, `head\n${sharedTheirs}`), { ok: true, merged: `before\n${sharedOurs}${sharedTheirs}` })
+  forAll((random) => {
+    const chunk = () => Array.from({ length: 1 + Math.floor(random() * 3) }, () => `line-${Math.floor(random() * 100)}\n`).join('')
+    const before = chunk(), ours = chunk(), theirs = chunk()
+    return { before, ours, theirs, expected: before + ours + theirs }
+  }, ({ before, ours, theirs, expected }) => {
+    const input = `${before}<<<<<<< ours\n${ours}||||||| base\n=======\n${theirs}>>>>>>> theirs\n`
+    assert.deepEqual(eofAppendResolution(input, `head${ours}`, `head${theirs}`), { ok: true, merged: expected })
+    assert.equal(eofAppendResolution(input + '\n', `head${ours}`, `head${theirs}`).reason, 'not-eof')
+    assert.equal(eofAppendResolution(input.slice(0, input.indexOf('|||||||')), `head${ours}`, `head${theirs}`).reason, 'markers')
+    assert.equal(eofAppendResolution(input.replace('=======', 'not-separator'), `head${ours}`, `head${theirs}`).reason, 'markers')
+  })
+})
+
+// Mutation: replace EOF recovery with a refusal; this live-index fixture must stop continuing the rebase.
+test('LR6 resolves multiple EOF append conflicts and rejoins publication proofs', () => {
+  const paths = ['src/first.mjs', 'src/second.mjs']
+  const stage2 = {}, stage3 = {}, worktree = {}
+  for (const [index, path] of paths.entries()) {
+    const ours = `ours-${index}\n`
+    const theirs = `theirs-${index}\n`
+    stage2[path] = `head\n${ours}`
+    stage3[path] = `head\n${theirs}`
+    worktree[path] = `before\n<<<<<<< ours\n${ours}||||||| base\n=======\n${theirs}>>>>>>> theirs\n`
+  }
+  const specs = [{ paths, stage2, stage3, worktree, hunk: anchorHunk(paths) }]
+  const fixture = runAnchorPublication({ specs, scope: paths, limits: { build_rounds: 1 } })
+  assert.equal(fixture.error, undefined)
+  assert.equal(fixture.result.status, 'done', JSON.stringify({ escalation: fixture.result.details.escalation, checkout: fixture.io.state.diff3CheckoutCommands, logs: fixture.io.calls.logs.filter((row) => row.rebase_eof_append) }))
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.deepEqual(paths.map((path) => fixture.io.state.worktreeBytes[`${CTX.checkout}/${path}`]), ['before\nours-0\ntheirs-0\n', 'before\nours-1\ntheirs-1\n'])
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.rebase_eof_append).map((row) => row.rebase_eof_append), [
+    { paths, outcome: 'resolved' },
+  ])
+  assert.equal(fixture.io.state.continueCount, 1)
+  assert.deepEqual(fixture.io.state.diff3CheckoutCommands, [`git checkout --conflict=diff3 -- 'src/first.mjs'`, `git checkout --conflict=diff3 -- 'src/second.mjs'`])
+  const continueIndex = fixture.io.calls.order.findIndex((entry) => entry.includes('rebase --continue'))
+  const postContinueHeadIndex = fixture.io.calls.order.findIndex((entry, index) => index > continueIndex && entry.includes('git rev-parse HEAD'))
+  assert.ok(continueIndex >= 0)
+  assert.ok(postContinueHeadIndex > continueIndex)
+})
+
+// Mutation: restore the exhausted ordinary-budget guard; the retained third builder must not be dispatched.
+test('LR4 accepted non-EOF conflict consumes the post-review reserve', () => {
+  const path = 'src/non-eof.mjs'
+  const spec = {
+    paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' },
+    worktree: { [path]: '<<<<<<< ours\nbase\n||||||| base\n=======\nlane\n>>>>>>> theirs\nextra\n' },
+    hunk: anchorHunk([path]),
+  }
+  const fixture = runAnchorPublication({ specs: [spec], scope: [path], limits: { build_rounds: 2 }, envelopes: {
+    'builder:2': buildEnv(), 'builder:3': buildEnv(),
+    'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'), 'reviewer:3': reviewEnv('pass'),
+  } })
+  assert.equal(fixture.error, undefined)
+  assert.equal(fixture.result.status, 'done')
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 3)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').at(-1)?.note, 'rebase-conflict-fix')
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'rebase-conflict', outcome: 'granted', reason: null, builder_attempts: 2 },
+  ])
+})
+
+test('LR6 refusals and failed EOF steps preserve retained-conflict diagnostics', () => {
+  const makeSpec = (paths, overrides = {}) => {
+    const stage2 = {}, stage3 = {}, worktree = {}
+    for (const [index, path] of paths.entries()) {
+      const ours = `ours-${index}\n`, theirs = `theirs-${index}\n`
+      stage2[path] = `head\n${ours}`
+      stage3[path] = `head\n${theirs}`
+      worktree[path] = `<<<<<<< ours\n${ours}||||||| base\n=======\n${theirs}>>>>>>> theirs\n`
+    }
+    return { paths, stage2, stage3, worktree, hunk: anchorHunk(paths), ...overrides }
+  }
+  const paths = ['src/first.mjs', 'src/second.mjs']
+  const mixed = makeSpec(paths)
+  mixed.worktree[paths[1]] = '<<<<<<< ours\nours-1\n||||||| base\nbase text\n=======\ntheirs-1\n>>>>>>> theirs\n'
+  const refused = runAnchorPublication({ specs: [mixed], scope: paths, limits: { build_rounds: 1 } })
+  assert.match(refused.result.details.escalation.why, /eof-append refused.*nonempty-base/)
+  assert.deepEqual(paths.map((path) => refused.io.state.worktreeBytes[`${CTX.checkout}/${path}`]), paths.map((path) => mixed.worktree[path]))
+  assert.equal(refused.io.state.addCommands.length, 0)
+
+  for (const [step, override, expected] of [
+    ['checkout', { diff3CheckoutResult: { ok: false, output: 'unknown checkout' } }, /eof-append checkout failed/],
+    ['read', { diff3ReadFailure: paths[1] }, /eof-append read failed for src/],
+    ['write', { diff3WriteFailure: paths[1], diff3CheckoutResult: (state) => state.diff3CheckoutCommands.length < 3 ? { ok: true } : { ok: false, output: 'restore denied' } }, /eof-append write failed for src/],
+    ['add', { addResult: { ok: false, output: 'index denied' } }, /eof-append add failed/],
+    ['continue', { continueResult: { ok: false, output: 'editor interrupted' } }, /eof-append continue failed/],
+  ]) {
+    const fixture = runAnchorPublication({ specs: [makeSpec(paths, override)], scope: paths, limits: { build_rounds: 1 } })
+    assert.equal(fixture.result.status, 'escalation', step)
+    assert.match(fixture.result.details.escalation.why, expected, step)
+    if (step === 'write') {
+      assert.equal(fixture.io.state.diff3CheckoutCommands.length, 3)
+      assert.match(fixture.result.details.escalation.why, /restoration checkout failed: restore denied/)
+    }
+    if (['add', 'continue'].includes(step)) assert.deepEqual(fixture.io.calls.logs.filter((row) => row.rebase_eof_append).map((row) => row.rebase_eof_append.outcome), ['failed'])
+  }
+})
+
+test('LR4 non-EOF conflict respects the exhausted conflict-recovery cap', () => {
+  const path = 'src/not-eof.mjs'
+  const spec = {
+    paths: [path], stage2: { [path]: 'base\n' }, stage3: { [path]: 'lane\n' },
+    worktree: { [path]: '<<<<<<< ours\nbase\n||||||| base\n=======\nlane\n>>>>>>> theirs\nextra\n' },
+    hunk: anchorHunk([path]),
+  }
+  const fixture = runAnchorPublication({ specs: [spec], scope: [path], limits: { build_rounds: 1 } })
+  assert.equal(fixture.error, undefined)
+  assert.equal(fixture.result.status, 'escalation')
+  assert.match(fixture.result.details.escalation.why, /conflict-recovery budget is exhausted/)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.late_repair).length, 0)
 })
 
 test('A1 retained rebase state reaches conflict resolver before any abort', () => {

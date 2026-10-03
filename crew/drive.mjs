@@ -4396,6 +4396,38 @@ export function rebaseConflictRoute({ mechanical, bounces, buildRounds }) {
   return bounces < Math.max(0, buildRounds - 1) ? 'bounce' : 'escalate'
 }
 
+export const LATE_REPAIR_CAUSES = Object.freeze(['suite-red', 'frozen-inventory', 'rebase-conflict'])
+
+export function lateRepairDecision({ accepted, spent, remaining }) {
+  if (remaining > 0) return { grant: false, reason: null }
+  if (accepted !== true) return { grant: false, reason: 'not-accepted' }
+  if (spent !== false) return { grant: false, reason: 'spent' }
+  return { grant: true, reason: null }
+}
+
+export const EOF_APPEND_REFUSALS = Object.freeze(['invalid-input', 'markers', 'nonempty-base', 'not-eof', 'empty-side', 'identical-sides', 'stage-suffix'])
+
+export function eofAppendResolution(diff3Text, stage2Bytes, stage3Bytes) {
+  if (typeof diff3Text !== 'string' || typeof stage2Bytes !== 'string' || typeof stage3Bytes !== 'string') return { ok: false, reason: 'invalid-input' }
+  const lines = []
+  const re = /.*?(?:\r?\n|$)/gs
+  let match
+  while ((match = re.exec(diff3Text)) && match[0] !== '') lines.push({ text: match[0], start: match.index, end: re.lastIndex })
+  const markers = lines.filter(({ text }) => /^(?:<<<<<<< |\|{7} |=======|>>>>>>> )/.test(text.replace(/\r?\n$/, '')))
+  if (markers.length !== 4 || !markers[0].text.startsWith('<<<<<<< ') || !markers[1].text.startsWith('||||||| ') || markers[2].text.replace(/\r?\n$/, '') !== '=======' || !markers[3].text.startsWith('>>>>>>> ') || !(markers[0].start < markers[1].start && markers[1].start < markers[2].start && markers[2].start < markers[3].start)) return { ok: false, reason: 'markers' }
+  const [open, base, separator, close] = markers
+  if (base.end !== separator.start) return { ok: false, reason: 'nonempty-base' }
+  const tail = diff3Text.slice(close.end)
+  if (tail !== '' || !close.text.endsWith('\n')) return { ok: false, reason: 'not-eof' }
+  const before = diff3Text.slice(0, open.start)
+  const ours = diff3Text.slice(open.end, base.start)
+  const theirs = diff3Text.slice(separator.end, close.start)
+  if (!ours || !theirs) return { ok: false, reason: 'empty-side' }
+  if (ours === theirs) return { ok: false, reason: 'identical-sides' }
+  if (!stage2Bytes.endsWith(ours) || !stage3Bytes.endsWith(theirs)) return { ok: false, reason: 'stage-suffix' }
+  return { ok: true, merged: before + ours + theirs }
+}
+
 export function journalRowsSinceRunStart(text) {
   const rows = []
   for (const line of String(text || '').split('\n')) {
@@ -6009,9 +6041,21 @@ function runTask(ctx, io, crash) {
   const doneEnvelopes = []
   let lastStepEnv = null
   let grantedBuildAllowance = 0
+  let lateRepairSpent = false
   const builderRemaining = () => limits.build_rounds + grantedBuildAllowance - builderAttempts
   const grantBuilderAllowance = () => {
     grantedBuildAllowance += 1
+  }
+  // lead-accepted lanes (accept-with-residuals at review exhaustion) carry no 'review:pass' stage and are refused 'not-accepted' by the reserve;
+  const requestLateRepair = (cause) => {
+    if (builderRemaining() > 0) return true
+    const decision = lateRepairDecision({ accepted: S.stages.includes('review:pass'), spent: lateRepairSpent, remaining: builderRemaining() })
+    if (decision.grant) {
+      lateRepairSpent = true
+      grantBuilderAllowance()
+    }
+    try { io.log(recordRow({ at: io.now(), late_repair: { cause, outcome: decision.grant ? 'granted' : 'refused', reason: decision.reason, builder_attempts: builderAttempts } })) } catch {}
+    return decision.grant
   }
   const flooredProtectedPaths = new Set()
   const floorDiscoveredPaths = (paths, kind) => {
@@ -11877,6 +11921,41 @@ function runTask(ctx, io, crash) {
           if (continued?.ok !== true) return { ok: false, why: `continuing the resolved rebase failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}` }
           return { ok: true }
         }
+        const eofAppendRecovery = () => {
+          if (classifiedMechanical || !evidenceMeasured) return { ok: false, why: classifiedMechanical ? 'mechanical anchor recovery route was unavailable' : 'conflict is not mechanically anchor-resolvable' }
+          const merged = []
+          for (const path of conflicted) {
+            const quoted = shellArg(path)
+            let checkedOut
+            try { checkedOut = io.run(`git checkout --conflict=diff3 -- ${quoted}`) } catch (err) { checkedOut = { ok: false, output: err?.message ?? String(err) } }
+            if (checkedOut?.ok !== true) return { ok: false, why: `eof-append checkout failed for ${path}${checkedOut?.output ? `: ${String(checkedOut.output).slice(-1000)}` : ''}` }
+            let text
+            try { text = io.readFile(`${ctx.checkout}/${path}`) } catch (err) { return { ok: false, why: `eof-append read failed for ${path}: ${err?.message ?? String(err)}` } }
+            const resolved = eofAppendResolution(text, stageBytes.get(`2:${path}`), stageBytes.get(`3:${path}`))
+            if (!resolved.ok) return { ok: false, why: `eof-append refused for ${path}: ${resolved.reason}` }
+            merged.push([path, resolved.merged])
+          }
+          for (const [path, bytes] of merged) {
+            let written
+            try { written = io.writeFile(`${ctx.checkout}/${path}`, bytes) } catch (err) { written = { ok: false, output: err?.message ?? String(err) } }
+            if (written === false || written?.ok === false) {
+              const failedPath = path
+              let restored = { ok: true }
+              try { restored = io.run(`git checkout --conflict=diff3 -- ${conflicted.map((item) => shellArg(item)).join(' ')}`) } catch (err) { restored = { ok: false, output: err?.message ?? String(err) } }
+              return { ok: false, why: `eof-append write failed for ${failedPath}${restored?.ok === true ? '' : `; restoration checkout failed${restored?.output ? `: ${String(restored.output).slice(-1000)}` : ''}`}` }
+            }
+          }
+          let added
+          try { added = io.run(`git add -- ${conflicted.map((path) => shellArg(path)).join(' ')}`) } catch (err) { added = { ok: false, output: err?.message ?? String(err) } }
+          let continued = { ok: false }
+          if (added?.ok === true) {
+            try { continued = io.run('git -c core.editor=true rebase --continue') } catch (err) { continued = { ok: false, output: err?.message ?? String(err) } }
+          }
+          const ok = added?.ok === true && continued?.ok === true
+          try { io.log(recordRow({ at: io.now(), rebase_eof_append: { paths: [...conflicted], outcome: ok ? 'resolved' : 'failed' } })) } catch {}
+          if (!ok) return { ok: false, why: added?.ok !== true ? `eof-append add failed${added?.output ? `: ${String(added.output).slice(-1000)}` : ''}` : `eof-append continue failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}` }
+          return { ok: true }
+        }
 
         // A failed rebase must retain its live index. The accepted commit is pinned first,
         // then the captured stages are re-proved immediately before any retained dispatch.
@@ -11892,12 +11971,13 @@ function runTask(ctx, io, crash) {
           }
           const eligible = currentRebaseConflictProof(pending)
           if (!eligible.ok) return { escalation: conflictEscalate(`the current conflict stages were not eligible for retained recovery: ${eligible.why}`, recovery.recovery_ref) }
-          if (builderRemaining() <= 0) {
-            return { escalation: conflictEscalate(`the limits.build_rounds budget is exhausted after ${builderAttempts} attempt(s)`, recovery.recovery_ref) }
-          }
           const route = routeOverride || rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
           if (route === 'escalate') {
-            return { escalation: conflictEscalate('the limits.build_rounds conflict-recovery budget is exhausted', recovery.recovery_ref) }
+            const reason = 'the limits.build_rounds conflict-recovery budget is exhausted'
+            return { escalation: conflictEscalate(why?.startsWith('eof-append ') ? `${reason}; ${why}` : reason, recovery.recovery_ref) }
+          }
+          if (!requestLateRepair('rebase-conflict')) {
+            return { escalation: conflictEscalate(`the limits.build_rounds budget is exhausted after ${builderAttempts} attempt(s)`, recovery.recovery_ref) }
           }
           const retained = retainRebaseConflict(pending, mechanical
             ? 'mechanical anchor repair was refused'
@@ -11918,7 +11998,7 @@ function runTask(ctx, io, crash) {
         const classifiedRoute = rebaseConflictRoute({ mechanical: classifiedMechanical, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
         const mechanical = classifiedRoute === 'mechanical'
           ? anchorResolution()
-          : { ok: false, why: classifiedMechanical ? 'mechanical anchor recovery route was unavailable' : 'conflict is not mechanically anchor-resolvable' }
+          : eofAppendRecovery()
         if (mechanical.ok) {
           // A successful continue rejoins the existing postRebaseHead/direct-parent/
           // refreshProofTree path below. No second proof is introduced here.
@@ -12230,7 +12310,7 @@ function runTask(ctx, io, crash) {
         suiteBuildNote = 'frozen-inventory-fix'
         stageComplete()
         committedBaseline = true
-        if (builderRemaining() <= 0) return escalate('suite', `frozen inventory repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
+        if (!requestLateRepair('frozen-inventory')) return escalate('suite', `frozen inventory repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })
         continue suiteCycle
       }
       stageComplete()
@@ -12245,7 +12325,7 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('sensitivity-floor', floorDiscoveryWhy('full suite', floor), [], { commit: S.commit, suite_red: suiteEvidence }, { files: floor.paths })
       }
-      if (builderRemaining() <= 0) {
+      if (!requestLateRepair('suite-red')) {
         stageComplete()
         return escalate('suite', `full suite red after acceptance was recorded, but the global builder budget is exhausted after ${builderAttempts} attempt(s)\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
       }
@@ -12260,7 +12340,7 @@ function runTask(ctx, io, crash) {
       const retainedIndexes = [...retained].sort((a, b) => a - b)
       const failureExcerpt = { text: retainedIndexes.map((index) => suiteLines[index]).join('\n'), totalLines: suiteLines.length, elidedLines: suiteLines.length - retainedIndexes.length }
       const scopeWording = `The accepted commit ${S.commit} made the full suite red. The failing output named these test files, which are now recorded in the mutable context:`
-      const allowanceWording = 'Repair the implementation and rerun the builder/review/gate/commit cycle using one already-remaining builder attempt. This is context, not a scope widening cap.'
+      const allowanceWording = 'Repair the implementation and rerun the builder/review/gate/commit cycle using an ordinary remaining builder attempt or the single post-review late-repair reserve. This is context, not a scope widening cap.'
       io.writeFile(b, [
         '# Suite-red scope admission bounce', '',
         scopeWording,

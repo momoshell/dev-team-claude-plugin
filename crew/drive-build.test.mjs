@@ -6464,6 +6464,36 @@ test('B2 frozen inventory repair permits only one re-entry', () => {
   assert.equal(POST_COMMIT_FROZEN_REPAIR_MAX, 1)
 })
 
+test('LR3 frozen-inventory repair spends one reserve across causes and tolerates journal failure', () => {
+  const fixture = frozenCycleIo({ builder2: (files, path, current) => { files[path] = current } })
+  fixture.ctx.limits = { build_rounds: 1 }
+  const baseLog = fixture.io.log
+  fixture.io.log = function (row) {
+    if (row?.late_repair) throw new Error('journal unavailable')
+    return baseLog.call(this, row)
+  }
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(fixture.io.calls.assign.filter(({ role }) => role === 'builder').map(({ n }) => n), [1, 2])
+  assert.equal(fixture.io.calls.assign.find(({ role, n }) => role === 'builder' && n === 2)?.note, 'frozen-inventory-fix')
+  assert.equal(fixture.io.calls.logs.some((row) => row.late_repair), false)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.frozen_inventory_repair).length, 1)
+})
+
+test('LR3 frozen-inventory reserve refuses after suite-red already spent it', () => {
+  const fixture = frozenCycleIo({
+    suite: [frozenRed(), frozenRed()],
+    builder2: (files, path, current) => { files[path] = current },
+  })
+  fixture.ctx.limits = { build_rounds: 1 }
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair), [
+    { cause: 'frozen-inventory', outcome: 'granted', reason: null, builder_attempts: 1 },
+  ])
+})
+
 test('C1 frozen inventory repair refuses detector regex and warranty logic edits', () => {
   const source = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const digest = '7d7c508c980cd5b7be2b9952bdc37b7e76a759b77f8e6c93db117c600a3ddb8f'

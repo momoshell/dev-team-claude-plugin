@@ -1158,6 +1158,36 @@ export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRo
   return profileProtectedPaths(profile, { path })
 }
 
+export function classifyTestRunner(command) {
+  if (typeof command !== 'string') return 'unparsed'
+  const trimmed = command.trim()
+  if (!trimmed) return 'unparsed'
+  const executable = basename(trimmed.split(/\s+/u, 1)[0])
+  if (executable === 'cargo') return 'cargo'
+  if (['node', 'npm', 'npx', 'yarn', 'pnpm'].includes(executable)) return 'node'
+  return 'unparsed'
+}
+
+export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath != null
+    ? resolve(profilePath)
+    : defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  let profile
+  try {
+    profile = readProfile(path)
+  } catch (err) {
+    if (!(err instanceof ProbeUsageError)) throw err
+    return { runner: 'node', basis: `legacy node runner · no readable profile at ${path}` }
+  }
+  const field = profile?.fields && typeof profile.fields === 'object' ? profile.fields.test_command : undefined
+  if (!field || field.status !== 'ratified') {
+    const status = field && nonEmptyString(field.status) ? field.status : 'unknown'
+    return { runner: 'node', basis: `legacy node runner · profile field test_command is ${status} · ${path}` }
+  }
+  const value = requireField(profile, 'test_command')
+  return { runner: classifyTestRunner(value), basis: `ratified profile field test_command · ${path}` }
+}
+
 export const INTAKE_BOARD_REFUSALS = Object.freeze([
   'profile-unreadable',
   'profile-field-unknown',

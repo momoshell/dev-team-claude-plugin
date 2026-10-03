@@ -10,13 +10,13 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { ROOT } from './helpers.mjs'
+import { ROOT, scratchDir } from './helpers.mjs'
 import { slug } from '../crew/slug.mjs'
 import {
   FIELD_KIND_NAMES, FIELD_KINDS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
-  checkoutIntakeBoard, checkoutProtectedPaths, defaultProfilePath, fieldKind, isRatifiable, main,
+  checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, readProfile,
   requireField, writeProfile, checkoutBaseBranch, isPlainBranchName, BASE_BRANCH_REFUSALS,
 } from '../scripts/factory/probe-repo.mjs'
@@ -122,6 +122,51 @@ function snapshot(root) {
   visit(root)
   return out
 }
+
+test('NR4', () => {
+  const root = scratchDir('probe-test-runner-')
+  const checkout = join(root, 'checkout')
+  mkdirSync(checkout)
+  const profilePath = join(root, 'profile.json')
+  const ratified = (value) => ({ status: 'ratified', value, source: 'fixture', ratified_by: 'operator', ratified_at: 'now' })
+  const write = (field) => writeFileSync(profilePath, JSON.stringify({ repo_key: 'fixture', fields: { test_command: field } }))
+  const options = { checkout, profilePath }
+  const classifications = [
+    ['  cargo test --workspace  ', 'cargo'], ['npm test', 'node'],
+    ['make test', 'unparsed'], ['', 'unparsed'], ['   ', 'unparsed'], [null, 'unparsed'],
+    ['mystery -- cargo test', 'unparsed'], ['env cargo test', 'unparsed'],
+    ['/usr/bin/node --test', 'node'],
+  ]
+  for (const executable of ['node', 'npm', 'npx', 'yarn', 'pnpm']) classifications.push([`${executable} test`, 'node'])
+  for (const [command, expected] of classifications) assert.equal(classifyTestRunner(command), expected, String(command))
+
+  for (const [command, runner] of [['cargo test', 'cargo'], ['npm test', 'node'], ['make test', 'unparsed']]) {
+    write(ratified(command))
+    const result = checkoutTestRunner(options)
+    assert.equal(result.runner, runner)
+    assert.match(result.basis, /ratified profile field test_command/)
+    assert.ok(result.basis.includes(profilePath))
+  }
+  const missingPath = join(root, 'missing.json')
+  const missing = checkoutTestRunner({ checkout, profilePath: missingPath })
+  assert.equal(missing.runner, 'node')
+  assert.ok(missing.basis.includes(missingPath))
+  for (const body of ['{', '']) {
+    writeFileSync(profilePath, body)
+    const result = checkoutTestRunner(options)
+    assert.equal(result.runner, 'node')
+    assert.ok(result.basis.includes(profilePath))
+  }
+  for (const field of [ratified('cargo test') && { ...ratified('cargo test'), status: 'proposed' }, { status: 'unknown' }, undefined]) {
+    write(field)
+    const result = checkoutTestRunner(options)
+    assert.equal(result.runner, 'node')
+    assert.match(result.basis, /test_command.*(?:proposed|unknown)/)
+    assert.ok(result.basis.includes(profilePath))
+  }
+  write({ status: 'ratified', value: 'cargo test', source: 'fixture' })
+  assert.throws(() => checkoutTestRunner(options), (error) => error instanceof ProfileRefusal && error.reason === 'profile-ratification-invalid')
+})
 
 function captureMain(args) {
   let stdout = ''

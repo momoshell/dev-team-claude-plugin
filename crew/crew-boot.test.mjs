@@ -1619,6 +1619,43 @@ test('run resolves the repo protected paths and journals the basis', async () =>
   }
 })
 
+test('NR7', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-runner-checkout-')
+  const home = scratchDir('crew-runner-home-')
+  const factoryRoot = join(home, 'factory')
+  const ledgerDir = join(home, 'ledger')
+  const ledgerDb = join(ledgerDir, 'ledger.db')
+  const task = 'runner-run'
+  execSync('git init -q', { cwd: checkout })
+  const profilePath = protectedProfile(factoryRoot, checkout, {
+    status: 'ratified', value: [], source: 'human', ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+  })
+  const profile = JSON.parse(readFileSync(profilePath, 'utf8'))
+  profile.fields.test_command = { status: 'ratified', value: 'cargo test --workspace', source: 'human', ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z' }
+  writeFileSync(profilePath, JSON.stringify(profile))
+  const saved = Object.fromEntries(['DEVTEAM_FACTORY_DIR', 'DEVTEAM_LEDGER_DIR', 'DEVTEAM_LEDGER_DB'].map((key) => [key, process.env[key]]))
+  Object.assign(process.env, { DEVTEAM_FACTORY_DIR: factoryRoot, DEVTEAM_LEDGER_DIR: ledgerDir, DEVTEAM_LEDGER_DB: ledgerDb })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# brief\n')
+  const seen = []
+  try {
+    await withHome(home, async () => {
+      await bootCmd({ task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() })
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+        drive: (ctx) => { seen.push(ctx); return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } } },
+      })
+    })
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].testRunner.runner, 'cargo')
+    assert.match(seen[0].testRunner.basis, /ratified profile field test_command/)
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('boot persists the fence and run rides it into ctx beside the protected paths', async () => {
   const { root: checkoutRoot, checkout } = testCheckout('crew-fence-checkout-')
   const home = mkdtempSync(join(tmpdir(), 'crew-fence-home-'))

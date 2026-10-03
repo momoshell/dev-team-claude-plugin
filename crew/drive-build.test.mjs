@@ -6682,7 +6682,7 @@ test('B1 all four post-commit suite re-entry sites retain explicit committed pro
   const branches = [
     ['census repair', branch('    if (postCommit.repair) {', '    if (postCommitInside.length > 0) {')],
     ['inside census', branch('    if (postCommitInside.length > 0) {', '    if (postCommit.escalation) return postCommit.escalation')],
-    ['frozen inventory', branch('      if (frozenRepair.action === \'repair\') {', '    const suiteAdmission = admitScope({')],
+    ['frozen inventory', branch('      if (frozenRepair.action === \'repair\') {', '    const suiteAdmission = runnerUnparsed')],
     ['suite red', branch('    if (suiteAdmission.action === \'admit\' || suiteAdmission.action === \'bounce\') {', '  if (publishing && warmCounts === null) {')],
   ]
   for (const [label, text] of branches) assert.equal((text.match(/committedBaseline = true/g) || []).length, 1, label)

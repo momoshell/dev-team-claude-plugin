@@ -1,0 +1,22 @@
+   Compiling power-router v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-router)
+   Compiling power-captures v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-captures)
+   Compiling power-agents v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-agents)
+   Compiling power-store v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-store)
+   Compiling power-scheduler v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-scheduler)
+   Compiling power-judge v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-judge)
+   Compiling power-runtime v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-runtime)
+   Compiling power-schemas v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-schemas)
+   Compiling power-api v0.1.0 (/Users/momoshell/Dev/dt-t514b-registry-wiring/crates/power-api)
+error[E0609]: no field `node_plugins` on type `RunState`
+  --> crates/power-api/src/app/flows.rs:73:59
+   |
+73 |     let errors = validate_flow_document(&document, &state.node_plugins);
+   |                                                           ^^^^^^^^^^^^ unknown field
+   |
+   = note: available field is: `registry`
+
+For more information about this error, try `rustc --explain E0609`.
+error: could not compile `power-api` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+cargo-suite: UNMEASURED - cargo produced no "test result:" summary line
+cargo-suite: this is not a green suite; re-run when the build lock is free

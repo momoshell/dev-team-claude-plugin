@@ -64,7 +64,7 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './seat-io.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
-import { checkoutBaseBranch, checkoutProtectedPaths, ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
+import { checkoutBaseBranch, checkoutProtectedPaths, checkoutTestRunner, ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
@@ -3869,6 +3869,7 @@ export function resumeCmd(args, deps = {}) {
       // lean: resumed step waits use defaults; persist effective waits in a future checkpoint revision if needed
       return { briefFile: checkpoint.step.brief_file, limits: checkpoint.step.limits,
         protectedPaths: protectedFloor.paths, protectedPathsBasis: protectedFloor.basis,
+        testRunner: checkoutTestRunner({ checkout }),
         laneFence: crew.lane_fence, laneName: crew.lane_name, turnCeilings: crew.turn_ceilings }
     })() : {}),
   }
@@ -3967,6 +3968,7 @@ export function runCmd(args, deps = {}) {
   const head = readHead(checkout)
   logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug, run_id: runId, task_return: relative(paths.dir, taskReturn) })
   const protectedFloor = checkoutProtectedPaths({ checkout })
+  const testRunner = checkoutTestRunner({ checkout })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
   logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
@@ -4020,6 +4022,7 @@ export function runCmd(args, deps = {}) {
     task: taskSlug, briefFile, taskDir: runPaths.taskDir, checkout, journal, head,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
+    testRunner,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant, execution_source: runConfiguration.execution.source,
     publish: { branch: readBranch(checkout), base: crew.base_branch.branch },

@@ -3793,3 +3793,96 @@ test('P2 compiled Validation lane labels the full suite driver-owned', () => {
     assert.match(full, /· driver-owned: no seat runs it$/)
   }
 })
+
+const KEEP_GREEN_PREFIX = 'read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): '
+const NARROW_REFERENCE = (count) => `the ${count} file(s) on the ## Validation lane narrow: line that are not in files_in_scope`
+
+function keepGreenFixture(label, packed) {
+  const root = fixture(label, { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  for (const name of ['alpha', 'beta', 'gamma', 'delta']) {
+    put(root, `test/widget-${name}.test.mjs`, [
+      "import { test } from 'node:test'",
+      "import { computeWidget } from '../lib/widget.mjs'",
+      `test('widget ${name}', () => { computeWidget(1) })`,
+      '',
+    ].join('\n'))
+  }
+  git(root, 'add', '-A')
+  const pack = join(root, 'pack')
+  if (packed) mkdirSync(pack)
+  const { brief } = compile(root, {}, packed ? ['--pack', pack] : [], `${label}.brief.md`)
+  const keep = packed
+    ? readFileSync(join(pack, `${label}.conventions.md`), 'utf8').split('\n')[0]
+    : brief.split('\n').find((line) => line.startsWith(KEEP_GREEN_PREFIX))
+  const narrow = (brief.split('\n').find((line) => line.startsWith('narrow: ')) || '').split(' ').slice(3)
+  return { brief, keep, narrow }
+}
+
+function sharedNarrowBytes({ keep, narrow }) {
+  return narrow.filter((path) => keep.includes(path)).reduce((sum, path) => sum + Buffer.byteLength(path), 0)
+}
+
+test('OB1 a packed conventions sidecar repeats no path the narrow line already lists', () => {
+  // MUTATION: emit the complete named tripwireFiles payload on the keep-green line instead of keepGreenParts.
+  const packed = keepGreenFixture('ob1-packed', true)
+  assert.equal(packed.narrow.length, 6, packed.narrow.join(' '))
+  assert.ok(packed.narrow.includes('test/widget.test.mjs'))
+  assert.ok(packed.keep.startsWith(KEEP_GREEN_PREFIX), packed.keep)
+  assert.equal(sharedNarrowBytes(packed), 0, packed.keep)
+})
+
+test('OB2 a packed conventions sidecar counts the narrow files it references', () => {
+  // MUTATION: print `referenced + 1` instead of `referenced` in the reference phrase.
+  const packed = keepGreenFixture('ob2-packed', true)
+  assert.equal(packed.keep, KEEP_GREEN_PREFIX + NARROW_REFERENCE(6))
+})
+
+test('OB3 the unpacked conventions line repeats no narrow path and narrow still enumerates them', () => {
+  // MUTATION: force the unpacked renderWriteSurface call into tripwires-omitted mode.
+  const unpacked = keepGreenFixture('ob3-unpacked', false)
+  assert.ok(unpacked.narrow.includes('test/widget.test.mjs'), unpacked.narrow.join(' '))
+  assert.ok(unpacked.keep, 'unpacked brief has a keep-green line')
+  assert.equal(sharedNarrowBytes(unpacked), 0, unpacked.keep)
+  assert.equal(unpacked.keep, KEEP_GREEN_PREFIX + NARROW_REFERENCE(6))
+})
+
+test('OB4 keep-green references narrow files once and still names every other candidate', () => {
+  // MUTATION: set namedFiles to tripwireFiles, so narrow files are named as well as referenced.
+  // MUTATION: render an empty keep-green set as '' instead of '(none)'.
+  const rows = [
+    {
+      name: 'a non-tripwire candidate stays named',
+      files: [], candidates: ['probe/kept.test.mjs', 'docs/kept-note.md'], tripwires: ['probe/kept.test.mjs'],
+      expected: `${NARROW_REFERENCE(1)}, docs/kept-note.md`,
+    },
+    {
+      name: './ and backslash spellings are one normalised member',
+      files: [], candidates: ['./probe/a.test.mjs', 'probe\\a.test.mjs', 'probe/b.test.mjs'], tripwires: ['probe\\b.test.mjs', './probe/a.test.mjs'],
+      expected: NARROW_REFERENCE(2),
+    },
+    {
+      name: 'a writable tripwire is left out of the count',
+      files: ['probe/own.test.mjs'], candidates: ['probe/own.test.mjs', 'probe/other.test.mjs'], tripwires: ['probe/own.test.mjs', 'probe/other.test.mjs'],
+      expected: NARROW_REFERENCE(1),
+    },
+    {
+      name: 'a tripwire absent from the candidates is not counted',
+      files: [], candidates: ['docs/only-note.md'], tripwires: ['probe/elsewhere.test.mjs'],
+      expected: 'docs/only-note.md',
+    },
+    {
+      name: 'an empty discovery renders (none)',
+      files: [], candidates: [], tripwires: [],
+      expected: '(none)',
+    },
+  ]
+  for (const row of rows) {
+    const brief = renderBrief({
+      request: { ask: 'Keep a non-tripwire candidate readable.', done_means: 'Only narrow paths become a reference.', out_of_scope: 'Other output.' },
+      where: [], writeSurface: { files: row.files, basis: 'where' },
+      discovery: { candidates: row.candidates, tripwires: row.tripwires.map((file) => ({ file, keys: [] })), broadKeys: [], keys: [] },
+    })
+    const keep = section(brief, '## Conventions').split('\n').find((line) => line.startsWith(KEEP_GREEN_PREFIX))
+    assert.equal(keep, KEEP_GREEN_PREFIX + row.expected, row.name)
+  }
+})

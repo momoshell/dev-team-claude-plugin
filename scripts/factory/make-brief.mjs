@@ -3027,7 +3027,7 @@ function renderWriteSurface(writeSurface, discovery, tripwiresOmitted = false) {
   const keepGreenParts = [...(referenced ? [reference] : []), ...namedFiles]
   return [
     `files_in_scope (expected write surface; basis: ${basis}): ${listedFiles}`,
-    `read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): ${keepGreenParts.length ? keepGreenParts.join(', ') : '(none)'}`, 
+    `read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): ${keepGreenParts.length ? keepGreenParts.join(', ') : '(none)'}`,
   ].join('\n')
 }
 

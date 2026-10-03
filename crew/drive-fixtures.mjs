@@ -1491,6 +1491,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at review_outcome"],
   ["recordRow", "", "at review_findings_note"],
   ["recordRow", "", "at envelope role status"],
+  ["recordRow", "", "at envelope_id_reask"],
   ["recordRow", "", "at no_lead_escalation"],
   ["recordRow", "", "at perspective_from recommendation consult"],
   ["recordRow", "", "at dissent"],

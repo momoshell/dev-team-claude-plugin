@@ -37,6 +37,10 @@ describe the retired scripts/cmux/* runtime, which is not on main.
 - `crew/host-load.mjs`
 - `scripts/factory/seams.mjs`
 
+## Bounded envelope recovery
+
+A mismatched assignment id is never accepted: an otherwise-valid envelope may receive one correction on the same assignment, sharing seat-io's single re-ask grace. A planner RPC no-envelope carrier may receive one direct retry within the same plan round; this is planner-only. Headless-json and ACP no-envelope failures throw inside seat-io before the driver sees an envelope; seat-io intentionally excludes `no-envelope` from retry kinds, so those transports are not covered.
+
 ## Format
 
 - **YYYY-MM-DD** — decision/convention. *Why:* reason. [deprecated — supersedes: <prior entry>]

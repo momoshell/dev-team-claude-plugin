@@ -2792,7 +2792,10 @@ test('RV1-2 unmeasured turn census is rejected at every driver seam', () => {
   ]) {
     const io = fakeIo({
       files: { [journal]: journalText([json('planner1', 'planner', 137)]) },
-      envelopes: { 'planner:1': envelope }, runs: greenRuns, changed: ['a.mjs', 'a.test.mjs'],
+      envelopes: {
+        'planner:1': envelope,
+        ...(label === 'stale assignment' ? { 'planner1.id-reask.planner.json': envelope } : {}),
+      }, runs: greenRuns, changed: ['a.mjs', 'a.test.mjs'],
     })
     let journalReads = 0
     const readFile = io.readFile
@@ -3168,19 +3171,19 @@ test('A1 zero-turn non-start predicate validates the complete measured envelope'
   }
 
   const stale = zeroTurnEnvelope('stale-planner')
-  const io = fakeIo({ envelopes: { 'planner:1': stale, 'lead:1': leadEnv('escalate') } })
+  const io = fakeIo({ envelopes: { 'planner:1': stale, 'planner1.id-reask.planner.json': stale, 'lead:1': leadEnv('escalate') } })
   const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan')
   assert.match(result.details.escalation.why, /envelope-refusal: assignment-id-mismatch/)
   const refusalRows = io.calls.logs.filter((row) => Object.hasOwn(row, 'envelope_refused'))
-  assert.equal(refusalRows.length, 1)
+  assert.equal(refusalRows.length, 2)
   assert.deepEqual(refusalRows[0].envelope_refused, {
     role: 'planner', dispatch: 'planner1', reason: 'assignment-id-mismatch',
     field: 'assignment_id', expected: 'planner1', found: 'stale-planner',
-    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1',
+    found_assignment_id: 'stale-planner', expected_assignment_id: 'planner1', path: 'planner:1', otherwise_valid: true,
   })
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
   assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
 })
 
@@ -3320,6 +3323,138 @@ test('G1 zero-turn re-ask brief names the non-start', () => {
   const brief = io.calls.writes[second.briefFile]
   assert.match(brief, /^Your previous dispatch produced no envelope and took no turns \(zero-turn-non-start\)\.$/m)
   assert.match(brief, /The same assignment is asked directly again/)
+})
+
+const NO_ENV_RUN = 'run-planner-no-envelope'
+const noEnvelopeCarrier = (detail) => ({ role, id }) => ({
+  assignment_id: id, role, status: 'insufficient', summary: 'rpc fallback', artifacts: [],
+  details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', ...detail },
+})
+const plannerNoEnvelopeScenario = ({ planners = [], builders = [], leads = [leadEnv('escalate')], planRounds = 1 } = {}) => {
+  const queues = {
+    planner: [...planners, planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: leads,
+  }
+  const io = fakeIo({
+    emit: true, changed: ['a.mjs', 'a.test.mjs'],
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  const assign = io.assign.bind(io)
+  const identities = new Map()
+  io.assign = (spec) => {
+    const assigned = assign(spec)
+    const id = assigned.id
+    const returnPath = spec.reask?.returnPath ?? `/returns/${NO_ENV_RUN}/${id}.${spec.role}.json`
+    identities.set(returnPath, { role: spec.role, id })
+    return { id, returnPath }
+  }
+  io.wait = (returnPath) => {
+    const identity = identities.get(returnPath)
+    const raw = queues[identity.role]?.shift()
+    if (!raw) return null
+    // A carrier is returned as the RPC transport produces it, with no run_id, so the
+    // driver's own normalization is what admits it; ordinary envelopes carry the run.
+    if (typeof raw === 'function') return raw(identity)
+    return { ...raw, assignment_id: raw.assignment_id ?? identity.id, run_id: raw.run_id ?? NO_ENV_RUN }
+  }
+  return { io, result: driveTask({ ...CTX, run_id: NO_ENV_RUN, limits: { plan_rounds: planRounds } }, io) }
+}
+
+const noEnvelopeDispatches = (scenario, role) => scenario.io.calls.assign.filter((entry) => entry.role === role)
+const noEnvelopeRows = (scenario) => scenario.io.calls.logs.filter((row) => row.seat_enforcement).map((row) => row.seat_enforcement)
+const NO_ENVELOPE_DETAILS = Object.freeze([
+  { turns: 8, tool_calls: 40, absent_reason: null },
+  { turns: null, tool_calls: null, absent_reason: 'census-unavailable' },
+])
+
+// MUTATION NOENVREASK: remove plannerNoEnvelope from the direct retry condition.
+test('NOENVREASK', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail)] })
+    assert.equal(scenario.result.status, 'done')
+    assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
+    assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
+  }
+  // The same tuple on a builder is not a planner recovery: HEAD's ordinary handling bounces it
+  // with build-fix, and a zero-turn non-start keeps its one direct re-ask before that bounce.
+  const zeroTurn = { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }
+  for (const [builders, notes] of [
+    ...NO_ENVELOPE_DETAILS.map((detail) => [[noEnvelopeCarrier(detail)], ['build', 'build-fix']]),
+    [[noEnvelopeCarrier(zeroTurn), noEnvelopeCarrier(zeroTurn)], ['build', 'build', 'build-fix']],
+  ]) {
+    const builder = plannerNoEnvelopeScenario({ builders })
+    assert.deepEqual(noEnvelopeDispatches(builder, 'builder').map(({ note }) => note), notes)
+    assert.equal(builder.result.status, 'done')
+    assert.equal(noEnvelopeRows(builder).some((row) => row.kind === 'planner-no-envelope'), false)
+  }
+})
+
+// MUTATION NOENVPREAMBLE: count the direct retry as one plan round.
+test('NOENVPREAMBLE', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail)] })
+    const dispatches = noEnvelopeDispatches(scenario, 'planner')
+    assert.match(scenario.io.calls.writes[dispatches[1].briefFile], /planner-no-envelope/)
+    const applied = noEnvelopeRows(scenario).find((row) => row.kind === 'planner-no-envelope' && row.applied)
+    assert.deepEqual(applied.recovery, { reason: 'no-envelope', ...detail, seats: 1, rounds: 0 })
+  }
+})
+
+// MUTATION NOENVSECOND: allow a second direct no-envelope retry.
+test('NOENVSECOND', () => {
+  for (const detail of NO_ENVELOPE_DETAILS) {
+    const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail), noEnvelopeCarrier(detail)] })
+    assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
+    assert.equal(noEnvelopeDispatches(scenario, 'lead').length, 1)
+    assert.equal(scenario.result.status, 'escalation')
+    assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
+  }
+})
+
+// MUTATION: decide carrier-ness on the normalized envelope; a seat-authored lookalike then buys a direct retry.
+test('NOENVLOOKALIKE a planner-authored envelope copying the carrier tuple gets no direct retry', () => {
+  const lookalike = ({ role, id }) => ({ ...noEnvelopeCarrier(NO_ENVELOPE_DETAILS[0])({ role, id }), run_id: NO_ENV_RUN })
+  const scenario = plannerNoEnvelopeScenario({ planners: [lookalike] })
+  assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 1)
+  assert.equal(noEnvelopeDispatches(scenario, 'lead').length, 1)
+  assert.equal(noEnvelopeRows(scenario).some((row) => row.kind === 'planner-no-envelope'), false)
+})
+
+// MUTATION: clear only a pending zero-turn preamble at exhaustion; the planner-no-envelope preamble then leaks into plan:r2.
+test('NOENVRETIRE exhausted planner-no-envelope preamble never reaches the next plan round', () => {
+  const detail = NO_ENVELOPE_DETAILS[0]
+  const scenario = plannerNoEnvelopeScenario({
+    planners: [noEnvelopeCarrier(detail), noEnvelopeCarrier(detail)], leads: [leadEnv('bounce')], planRounds: 2,
+  })
+  const dispatches = noEnvelopeDispatches(scenario, 'planner')
+  assert.equal(dispatches.length, 3)
+  assert.match(scenario.io.calls.writes[dispatches[1].briefFile], /planner-no-envelope/)
+  assert.doesNotMatch(scenario.io.calls.writes[dispatches[2].briefFile], /planner-no-envelope/)
+  assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1', 'plan:r2'])
+  assert.equal(noEnvelopeRows(scenario).filter((row) => row.kind === 'planner-no-envelope' && row.applied).length, 1)
+})
+
+// MUTATION: drop the retirement after an assignment-id correction; the carrier's preamble then leaks into plan:r2.
+test('NOENVIDRETIRE a no-envelope carrier returned by an id correction leaves no preamble for the next plan round', () => {
+  const wrongId = () => ({ ...planEnv(), assignment_id: NO_ENV_RUN, run_id: NO_ENV_RUN })
+  const scenario = plannerNoEnvelopeScenario({
+    planners: [wrongId, noEnvelopeCarrier(NO_ENVELOPE_DETAILS[0])], leads: [leadEnv('bounce')], planRounds: 2,
+  })
+  const dispatches = noEnvelopeDispatches(scenario, 'planner')
+  assert.equal(dispatches.length, 3)
+  assert.doesNotMatch(scenario.io.calls.writes[dispatches[2].briefFile], /planner-no-envelope/)
+  assert.equal(noEnvelopeRows(scenario).some((row) => row.kind === 'planner-no-envelope' && row.applied), false)
+  assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1', 'plan:r2'])
+})
+
+// Both mixed orders share the one direct retry: a zero-turn and a no-envelope carrier spend it together.
+test('NOENVMIXED zero-turn and planner no-envelope share one direct retry in either order', () => {
+  const zeroTurn = { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }
+  for (const order of [[zeroTurn, NO_ENVELOPE_DETAILS[0]], [NO_ENVELOPE_DETAILS[0], zeroTurn]]) {
+    const scenario = plannerNoEnvelopeScenario({ planners: order.map(noEnvelopeCarrier) })
+    assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2, JSON.stringify(order))
+    assert.equal(noEnvelopeDispatches(scenario, 'lead').length, 1)
+    assert.equal(scenario.result.status, 'escalation')
+  }
 })
 
 test('A1 sourced dispatch admissions survive planner narrowing in full and triage runs', () => {

@@ -338,18 +338,22 @@ function transportNoEnvelopeCarrier(env) {
   return zeroTurn || measuredNonzero || unavailable
 }
 
+// Set only here, on the received carrier that lacked a run_id: a seat-authored
+// envelope that copies the tuple AND carries a run_id never gains it.
+const RUNTIME_NO_ENVELOPE_CARRIER = Symbol('runtime-no-envelope-carrier')
+
 function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
   if (runId === undefined || !env || typeof env !== 'object' || env.run_id !== undefined) return env
   if (env.assignment_id !== id || env.role !== role) return env
   const ceilingBudget = Number.isFinite(budget) ? budget : env.details?.turn_ceiling?.budget
   if (suiteRefusalOf(env) || turnCeilingOf(env, ceilingBudget)) return { ...env, run_id: runId }
   if (!transportNoEnvelopeCarrier(env)) return env
-  return { ...env, run_id: runId }
+  return { ...env, run_id: runId, [RUNTIME_NO_ENVELOPE_CARRIER]: true }
 }
 
 const HANDLED_ENVELOPE_REFUSAL = Symbol('handled-envelope-refusal')
 
-function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison }) {
+function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison, otherwiseValid }) {
   const envelope = {
     ...(runId === undefined ? {} : { run_id: runId }),
     assignment_id: id,
@@ -363,6 +367,7 @@ function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison }) {
         field: comparison.field,
         expected: comparison.expected,
         found: comparison.found,
+        ...(otherwiseValid === undefined ? {} : { otherwise_valid: otherwiseValid }),
       },
     },
   }
@@ -372,6 +377,10 @@ function handledEnvelopeRefusal({ role, id, runId, returnPath, comparison }) {
 
 function handledEnvelopeRefusalOf(env) {
   return env?.[HANDLED_ENVELOPE_REFUSAL] === true ? env.details?.envelope_refusal : null
+}
+
+function runtimeTransportNoEnvelopeCarrier(env) {
+  return env?.[RUNTIME_NO_ENVELOPE_CARRIER] === true
 }
 
 function handledEnvelopeRefusalWhy(env) {
@@ -390,6 +399,11 @@ function suiteRefusalPreamble(env) {
   }
 }
 
+function plannerNoEnvelopeOf(env) {
+  if (env?.role !== 'planner' || env?.details?.reason !== RPC_NO_ENVELOPE_OUTCOME) return null
+  return runtimeTransportNoEnvelopeCarrier(env) ? env.details : null
+}
+
 export function enforcementPreamble(env) {
   const zeroTurn = zeroTurnNonStartOf(env)
   if (zeroTurn) {
@@ -400,6 +414,17 @@ export function enforcementPreamble(env) {
         'The same assignment is asked directly again — this recovery does not consume a lead round.',
       ],
       recovery: { reason: zeroTurn.reason, turns: zeroTurn.turns, tool_calls: zeroTurn.tool_calls, seats: 1, rounds: 0 },
+    }
+  }
+  const plannerNoEnvelope = plannerNoEnvelopeOf(env)
+  if (plannerNoEnvelope) {
+    return {
+      kind: 'planner-no-envelope',
+      lines: [
+        `Your previous planner dispatch returned no RPC envelope (${plannerNoEnvelope.turns === null ? 'census-unavailable' : `${plannerNoEnvelope.turns} turns, ${plannerNoEnvelope.tool_calls} tool calls`}).`,
+        'The direct retry consumes no plan round.',
+      ],
+      recovery: { reason: plannerNoEnvelope.reason, turns: plannerNoEnvelope.turns, tool_calls: plannerNoEnvelope.tool_calls, seats: 1, rounds: 0 },
     }
   }
   const ceiling = env?.details?.turn_ceiling
@@ -6549,6 +6574,9 @@ function runTask(ctx, io, crash) {
         kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: 'envelope-refusal',
         detail: `envelope at ${returnPath} was refused: ${comparison.reason}; expected ${comparison.field}=${JSON.stringify(comparison.expected)}, found ${comparison.field}=${JSON.stringify(comparison.found)}`,
       })
+      const otherwiseValid = comparison.reason === 'assignment-id-mismatch'
+        ? validEnvelope({ ...normalized, assignment_id: id }, role, id, dispatchRunId, { strictIdentity })
+        : undefined
       io.log(recordRow({ at: io.now(), envelope_refused: {
         role, dispatch: id, reason: comparison.reason,
         field: comparison.field, expected: comparison.expected, found: comparison.found,
@@ -6557,12 +6585,14 @@ function runTask(ctx, io, crash) {
         ...(dispatchRunId === undefined && normalized?.run_id === undefined ? {} : {
           found_run_id: normalized?.run_id ?? null, expected_run_id: dispatchRunId ?? null,
         }),
+        ...(otherwiseValid === undefined ? {} : { otherwise_valid: otherwiseValid, }),
       } }))
       emit({ kind: 'envelope', id, role, status: 'insufficient' })
-      return handledEnvelopeRefusal({ role, id, runId: dispatchRunId, returnPath, comparison })
+      return handledEnvelopeRefusal({ role, id, runId: dispatchRunId, returnPath, comparison, otherwiseValid })
     }
     const env = enforceTurnCeiling(role, id, normalized, dispatchRunId)
     const enforcement = validEnvelope(env, role, id, dispatchRunId, { strictIdentity }) ? enforcementPreamble(env) : { kind: null, lines: [] }
+    if (enforcement.kind === 'planner-no-envelope') enforcement.recovery.absent_reason = env.details.absent_reason
     if (enforcement.lines.length > 0) {
       pendingEnforcement.set(role, enforcement)
       S.enforcements.push({ role, id, kind: enforcement.kind, lines: enforcement.lines })
@@ -6607,19 +6637,48 @@ function runTask(ctx, io, crash) {
   function assignAndWait(role, briefFile, note, opts = {}) {
     let suiteReasks = 0
     let nonStartReasks = 0
+    let identity = null
+    const callerOnDispatch = opts.onDispatch
     for (;;) {
-      const env = dispatchOnce(role, briefFile, note, opts)
+      const dispatchOpts = { ...opts, onDispatch: (current) => { identity = current; callerOnDispatch?.(current) } }
+      const env = dispatchOnce(role, briefFile, note, dispatchOpts)
       const refusal = suiteRefusalOf(env)
+      const refusalDetail = handledEnvelopeRefusalOf(env)
+      if (refusalDetail?.reason === 'assignment-id-mismatch' && refusalDetail.otherwise_valid === true) {
+        const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(identity.returnPath) : null
+        try { io.log(recordRow({ at: io.now(), envelope_id_reask: { role, dispatch: identity.id, path: identity.returnPath, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* the id re-ask journal is never load-bearing */ }
+        if (graceSpentBy) return env
+        const retryPath = join(dirname(identity.returnPath), `${identity.id}.id-reask.${role}.json`)
+        const preamble = `Your envelope was refused. Return assignment_id=${JSON.stringify(identity.id)}. run_id is never the assignment_id.`
+        const originalBrief = typeof opts.briefBuilder === 'function'
+          ? opts.briefBuilder({ id: identity.id, role, runId: typeof ctx.run_id === 'string' ? ctx.run_id : undefined })
+          : `Original brief: ${briefFile}`
+        const retryBrief = art(`${identity.id}.id-reask.${role}.md`)
+        io.writeFile(retryBrief, `${preamble}\n\n${originalBrief}\n`)
+        const correctionOpts = {
+          ...opts,
+          onDispatch: (current) => { identity = current; callerOnDispatch?.(current) },
+          briefBuilder: ({ id, runId }) => `${preamble}\n\n${typeof opts.briefBuilder === 'function' ? opts.briefBuilder({ id, role, runId }) : `Original brief: ${briefFile}`}\n`,
+          reask: { id: identity.id, returnPath: retryPath },
+        }
+        try {
+          return dispatchOnce(role, retryBrief, note, correctionOpts)
+        } finally {
+          // The correction buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.
+          if ([ZERO_TURN_NON_START, 'planner-no-envelope'].includes(pendingEnforcement.get(role)?.kind)) pendingEnforcement.delete(role)
+        }
+      }
       const nonStart = zeroTurnNonStartOf(env)
-      if (!refusal && !nonStart) return env
+      const plannerNoEnvelope = role === 'planner' ? plannerNoEnvelopeOf(env) : null
+      if (!refusal && !nonStart && !plannerNoEnvelope) return env
       if (refusal) {
         if (suiteReasks >= SUITE_REASK_MAX) return env
         suiteReasks += 1
         continue
       }
       if (nonStartReasks >= ZERO_TURN_REASK_MAX) {
-        if (pendingEnforcement.get(role)?.kind === ZERO_TURN_NON_START) pendingEnforcement.delete(role)
-        if (nonStartReasks >= ZERO_TURN_REASK_MAX) return env
+        if ([ZERO_TURN_NON_START, 'planner-no-envelope'].includes(pendingEnforcement.get(role)?.kind)) pendingEnforcement.delete(role)
+        return env
       }
       nonStartReasks += 1
     }

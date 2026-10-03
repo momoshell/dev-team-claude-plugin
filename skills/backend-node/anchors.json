@@ -10,9 +10,6 @@
   "crew/reclaim.mjs:12": "export const PARK_STATES = Object.freeze",
   "crew/pi/extensions/subagent.ts:473": "totals.cost += usage.cost.total",
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
-  "docs/conventions.md:126": "A frozen exported enum's drift guard needs",
-  "docs/conventions.md:49": "first TypeScript file on main, and every file under",
-  "crew/drive.mjs:524": "export const DECISIONS = Object.freeze",
   "crew/shape-validator.mjs:255": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/shape-validator.mjs:244": "if (!shape || typeof shape !== 'object')",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
@@ -41,5 +38,8 @@
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
   "scripts/factory/emit.mjs:1610": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:4297": "requireEnum(input.decision, CI_DECISIONS",
-  "scripts/factory/ledger.mjs:9930": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:9930": "unknown verb: ${verb}",
+  "docs/conventions.md:130": "A frozen exported enum's drift guard needs",
+  "docs/conventions.md:53": "first TypeScript file on main, and every file under",
+  "crew/drive.mjs:549": "export const DECISIONS = Object.freeze"
 }

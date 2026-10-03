@@ -1572,6 +1572,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at rebase_eof_append"],
   ["recordRow", "", "at rebase_restore_diagnosis"],
   ["recordRow", "", "at gate_proof_parent gate_generation"],
+  ["recordRow", "", "at suite_red_runner"],
   ["recordRow", "", "at cold_suite"],
   ["recordRow", "event='prompt-claim'", "at source citation_only reason files"],
   ["recordRow", "", "at narration"],

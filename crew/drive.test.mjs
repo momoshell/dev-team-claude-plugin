@@ -7,7 +7,7 @@ import {
   B318_GATED_RUNS, B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, ACCEPT_FINDINGS_SOFT, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
-import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LATE_REPAIR_CAUSES, lateRepairDecision, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, withPhaseSlot } from './drive.mjs'
+import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, suiteRedCargoLocations, suiteRedLocations, SUITE_RUNNER_UNPARSED, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LATE_REPAIR_CAUSES, lateRepairDecision, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, withPhaseSlot } from './drive.mjs'
 import { CENSUS_CARRIER_FILES as DISPATCH_CENSUS_CARRIER_FILES } from '../scripts/factory/dispatch-batch.mjs'
 import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefect } from './drive.mjs'
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
@@ -32,6 +32,119 @@ const assertExactTraceRows = (rows) => {
 const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
   .map((label) => String(label).split(':')[0])
   .filter((head) => !['done', 'escalate'].includes(head))
+
+const cargoT596 = readFileSync(new URL('../test/fixtures/suite-red/cargo-t596-panic.txt', import.meta.url), 'utf8')
+const cargoT514b = readFileSync(new URL('../test/fixtures/suite-red/cargo-t514b-compile.txt', import.meta.url), 'utf8')
+
+test('NR1', () => {
+  // Mutation: disable panic extraction; the recorded Rust source disappears.
+  assert.deepEqual(suiteRedLocations(cargoT596, '/workspace', 'cargo'), {
+    files: ['crates/power-api/src/request_writer_acceptance.rs'],
+    test_names: ['request_writer_acceptance::R5_11_a_limited_answer_records_its_provider_before_the_agent_reads_it'],
+    reason: null,
+  })
+  assert.deepEqual(suiteRedLocations(cargoT596, '/workspace'), { files: [], test_names: [], reason: null })
+})
+
+test('NR2', () => {
+  // Mutation: disable rustc arrow extraction; compilation directory lines are not source paths.
+  assert.deepEqual(suiteRedLocations(cargoT514b, '/Users/momoshell/Dev/dt-t514b-registry-wiring', 'cargo'), {
+    files: ['crates/power-api/src/app/flows.rs'], test_names: [], reason: null,
+  })
+})
+
+test('NR3', () => {
+  // Mutation: remove checkout containment; the outside source must never become a path.
+  const rel = 'crates/power-api/src/request_writer_acceptance.rs'
+  const source = cargoT596.replace(rel, `/rustc/${rel}`)
+  assert.deepEqual(suiteRedLocations(source, CTX.checkout, 'cargo'), { files: [], test_names: [ 'request_writer_acceptance::R5_11_a_limited_answer_records_its_provider_before_the_agent_reads_it' ], reason: SUITE_RUNNER_UNPARSED })
+  const absolute = cargoT596.replace(rel, `${CTX.checkout}/${rel}`)
+  assert.deepEqual(suiteRedCargoLocations(absolute, CTX.checkout).files, [rel])
+  for (const bad of [`${CTX.checkout}-sibling/${rel}`, `${CTX.checkout}/../outside/${rel}`, `${CTX.checkout}/src/*/bad.rs`]) {
+    const output = cargoT596.replace(rel, bad)
+    assert.deepEqual(suiteRedCargoLocations(output, CTX.checkout).files, [])
+  }
+  assert.deepEqual(suiteRedLocations('', CTX.checkout, 'cargo'), { files: [], test_names: [], reason: SUITE_RUNNER_UNPARSED })
+  assert.deepEqual(suiteRedLocations(`${CTX.checkout}/x.test.mjs:1\n${absolute}`, CTX.checkout, 'cargo').files, ['x.test.mjs', rel])
+  assert.deepEqual(suiteRedLocations(cargoT596, CTX.checkout, 'other'), { files: [], test_names: [], reason: SUITE_RUNNER_UNPARSED })
+})
+
+const NR_PANIC_FILE = 'crates/power-api/src/request_writer_acceptance.rs'
+function suiteRedRunnerScenario(runner, output, { repeat = false, limits = repeat ? { build_rounds: 1 } : null } = {}) {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd:1': { ok: false, output }, 'suite-cmd:2': { ok: !repeat, output: repeat ? output : 'green' } },
+    changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'a.test.mjs']],
+  })
+  const result = driveTask({ ...CTX, testRunner: { runner, basis: 'ratified profile field test_command' }, ...(limits ? { limits } : {}) }, io)
+  const bounce = Object.entries(io.calls.writes).find(([path]) => path.includes('/suite-red-bounce-'))?.[1] ?? ''
+  return { result, io, bounce }
+}
+
+test('NR5', () => {
+  // Mutation: the suite-red site parses with the node runner; the cargo red escalates at scope admission.
+  const { result, io, bounce } = suiteRedRunnerScenario('cargo', cargoT596)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  const admissions = io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red')
+  assert.equal(admissions.length, 1)
+  assert.deepEqual(admissions[0].scope_admission.files, [NR_PANIC_FILE])
+  const runners = io.calls.logs.filter((row) => row.suite_red_runner)
+  assert.equal(runners.length, 1)
+  assert.equal(runners[0].suite_red_runner.runner, 'cargo')
+  assert.deepEqual(runners[0].suite_red_runner.files, [NR_PANIC_FILE])
+  // The capture has no line that BEGINS with "panicked at": rustc prefixes it with the thread header.
+  const panicLine = cargoT596.split('\n').find((line) => line.includes('panicked at'))
+  assert.ok(panicLine, 'the t596 capture carries a "panicked at" line')
+  assert.ok(bounce.includes(panicLine), `bounce was ${bounce}`)
+})
+
+test('NR6', () => {
+  // Mutation: runnerUnparsed is never true; the empty file list escalates at scope admission.
+  // Derived capture: the t596 capture with every marker-bearing line replaced, repeated past 2000 characters.
+  const markerless = cargoT596.split(/\r?\n/).map((line) => /panicked at|---- |error:|-->/.test(line) ? 'cargo diagnostic unavailable' : line).join('\n').repeat(3)
+  assert.ok(markerless.length > 2000)
+  const { result, io, bounce } = suiteRedRunnerScenario('unparsed', markerless)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(io.calls.logs.filter((row) => row.scope_admission).length, 0)
+  const runners = io.calls.logs.filter((row) => row.suite_red_runner)
+  assert.equal(runners.length, 1)
+  assert.equal(runners[0].suite_red_runner.reason, SUITE_RUNNER_UNPARSED)
+  assert.ok(bounce.includes('runner-unparsed'), `bounce was ${bounce}`)
+  assert.ok(bounce.includes(markerless.slice(-2000)), `bounce was ${bounce}`)
+  const exhausted = suiteRedRunnerScenario('unparsed', markerless, { repeat: true })
+  assert.equal(exhausted.result.status, 'escalation')
+  assert.equal(exhausted.result.details.escalation.where, 'suite')
+  assert.match(exhausted.result.details.escalation.why, /runner-unparsed/)
+  assert.match(exhausted.result.details.escalation.why, /budget is exhausted/)
+  assert.equal(exhausted.io.calls.logs.filter((row) => row.scope_admission).length, 0)
+  assert.deepEqual(exhausted.io.calls.logs.filter((row) => row.late_repair).map((row) => row.late_repair.outcome), ['granted', 'refused'])
+  // Budget to spare: the second runner-unparsed red spends the in-scope bounce limit and escalates.
+  const bounded = suiteRedRunnerScenario('unparsed', markerless, { repeat: true, limits: { build_rounds: 3 } })
+  assert.equal(bounded.result.status, 'escalation')
+  assert.equal(bounded.result.details.escalation.where, 'suite')
+  assert.match(bounded.result.details.escalation.why, /runner-unparsed/)
+  assert.match(bounded.result.details.escalation.why, /in-scope bounce limit/)
+  assert.equal(bounded.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(bounded.io.calls.logs.filter((row) => row.scope_admission).length, 0)
+})
+
+test('a cargo suite red whose panic sits above the last 4000 characters still admits its source file', () => {
+  // Derived capture: the t596 capture followed by its markerless copy (NR6's substitution), so the
+  // panic line is more than 4000 characters from the end of the output.
+  const markerless = cargoT596.split(/\r?\n/).map((line) => /panicked at|---- |error:|-->/.test(line) ? 'cargo diagnostic unavailable' : line).join('\n').repeat(3)
+  const output = `${cargoT596}\n${markerless}`
+  assert.ok(output.length - output.indexOf('panicked at') > 4000)
+  const { result, io } = suiteRedRunnerScenario('cargo', output)
+  assert.equal(result.status, 'done')
+  const admissions = io.calls.logs.filter((row) => row.scope_admission?.source === 'suite-red')
+  assert.deepEqual(admissions.map((row) => row.scope_admission.files), [[NR_PANIC_FILE]])
+  assert.equal(io.calls.logs.find((row) => row.suite_red_runner).suite_red_runner.reason, null)
+})
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })

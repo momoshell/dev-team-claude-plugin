@@ -1,0 +1,38 @@
+rn_recovery_R16 ... ok
+test turn_recovery::tests::turn_recovery_R17 ... ok
+test turn_recovery::tests::turn_recovery_R2 ... ok
+test turn_recovery::tests::turn_recovery_R3 ... ok
+test turn_recovery::tests::turn_recovery_R9 ... ok
+test s15_detached_shutdown::turn_recovery_R21 ... ok
+test s15_detached_shutdown::turn_recovery_R19 ... ok
+test tests::ui_uf6_a_symlink_out_of_dist_is_never_followed ... ok
+test tests::ui_uf3_an_asset_is_served_with_its_type ... ok
+test tests::ui_uf4_a_missing_asset_is_404_not_index_html ... ok
+test tests::ui_uf1_a_deep_client_path_serves_index_html ... ok
+test tests::ui_uf9_a_source_or_config_file_in_dist_is_never_served ... ok
+test tests::ui_uf2_an_unknown_api_path_is_404_never_the_app ... ok
+test tests::ui_uf8_a_deep_path_whose_ids_contain_dots_serves_index_html ... ok
+test tests::ui_uf10_responses_forbid_sniffing_and_revalidate_the_index ... ok
+test tests::ui_uf12_an_encoded_slash_in_an_id_is_part_of_the_id_not_a_separator ... ok
+test router_route::adversarial_tests::R2_15_only_protocol_flags_ride_in_a_routed_query_string ... ok
+test tests::ui_uf5_a_dot_segment_is_refused_even_when_it_stays_inside ... ok
+test router_route::adversarial_tests::R2_19_a_credential_in_the_routed_body_is_refused ... ok
+test router_route::adversarial_tests::R2_13_a_subscription_token_in_x_api_key_is_not_a_provider_key ... ok
+
+failures:
+
+---- request_writer_acceptance::R5_11_a_limited_answer_records_its_provider_before_the_agent_reads_it stdout ----
+
+thread 'request_writer_acceptance::R5_11_a_limited_answer_records_its_provider_before_the_agent_reads_it' (481930729) panicked at crates/power-api/src/request_writer_acceptance.rs:2084:10:
+the limited answer is recorded
+
+
+failures:
+    request_writer_acceptance::R5_11_a_limited_answer_records_its_provider_before_the_agent_reads_it
+
+test result: FAILED. 523 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.29s
+
+error: test failed, to rerun pass `-p power-api --lib`
+ℹ pass 866
+ℹ fail 1
+ℹ skipped 1

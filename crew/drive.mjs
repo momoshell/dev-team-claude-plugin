@@ -12478,8 +12478,17 @@ function runTask(ctx, io, crash) {
   if (!suiteRes?.ok) {
     const suiteOutput = String(suiteRes?.output || '')
     const failureTail = suiteOutput.slice(-4000)
-    const testFiles = suiteRedTestFiles(failureTail, ctx.checkout)
+    const rawRunner = ctx.testRunner?.runner
+    const suiteRunner = rawRunner === undefined
+      ? { runner: 'node', basis: 'legacy node runner · no runner context' }
+      : ['node', 'cargo', 'unparsed'].includes(rawRunner)
+        ? { runner: rawRunner, basis: typeof ctx.testRunner?.basis === 'string' ? ctx.testRunner.basis : 'runner context' }
+        : { runner: 'unparsed', basis: 'unexpected runner value' }
+    const suiteLocations = suiteRedLocations(suiteRunner.runner === 'node' ? failureTail : suiteOutput, ctx.checkout, suiteRunner.runner)
+    const runnerUnparsed = suiteLocations.reason === SUITE_RUNNER_UNPARSED
+    const testFiles = suiteLocations.files
     const suiteEvidence = { output: suiteOutput, commit: S.commit, test_files: testFiles }
+    if (suiteRunner.runner !== 'node') io.log(recordRow({ at: io.now(), suite_red_runner: { ...suiteRunner, files: suiteLocations.files, test_names: suiteLocations.test_names, reason: suiteLocations.reason } }))
     const frozenFiles = testFiles.filter((file) => file === FROZEN_INVENTORY_FILE || file === FROZEN_FACTORY_ENV_FILE)
     if (frozenFiles.length > 0) {
       const frozenRepair = frozenRepairPreflight(frozenFiles)
@@ -12513,7 +12522,7 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('suite', `${frozenRepair.why}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
     }
-    const suiteAdmission = admitScope({
+    const suiteAdmission = runnerUnparsed ? { action: 'bounce', files: [] } : admitScope({
       source: 'suite-red', files: testFiles, evidence: suiteEvidence,
     })
     if (suiteAdmission.action === 'admit' || suiteAdmission.action === 'bounce') {
@@ -12524,19 +12533,32 @@ function runTask(ctx, io, crash) {
       }
       if (!requestLateRepair('suite-red')) {
         stageComplete()
-        return escalate('suite', `full suite red after acceptance was recorded, but the global builder budget is exhausted after ${builderAttempts} attempt(s)\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+        return escalate('suite', `full suite red after acceptance${runnerUnparsed ? ' with runner-unparsed' : ' was recorded'}, but the global builder budget is exhausted after ${builderAttempts} attempt(s)\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+      }
+      if (runnerUnparsed) {
+        if (suiteInScopeBounces >= SUITE_IN_SCOPE_BOUNCE_MAX) {
+          stageComplete()
+          return escalate('suite', `full suite red after acceptance with runner-unparsed: the suite-red in-scope bounce limit of ${SUITE_IN_SCOPE_BOUNCE_MAX} has been spent\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+        }
+        suiteInScopeBounces += 1
       }
       const b = art(`suite-red-bounce-r${reviews + 1}.md`)
       failureUpgrade('suite', 'builder')
       const suiteLines = suiteOutput.split(/\r?\n/)
       const retained = new Set()
       for (const [index, line] of suiteLines.entries()) {
-        if (!line.includes('✖') && !/^\s*(?:FAIL\b|not ok\b)/.test(line)) continue
+        const nodeMarker = line.includes('✖') || /^\s*(?:FAIL\b|not ok\b)/.test(line)
+        const cargoMarker = suiteRunner.runner !== 'node' && (line.includes('panicked at') || /^\s*error(?:\[|:)/.test(line) || line.includes('-->') || /^\s*---- .* stdout ----\s*$/.test(line))
+        if (!nodeMarker && !cargoMarker) continue
         for (let candidate = Math.max(0, index - 2); candidate <= Math.min(suiteLines.length - 1, index + 2); candidate += 1) retained.add(candidate)
       }
       const retainedIndexes = [...retained].sort((a, b) => a - b)
-      const failureExcerpt = { text: retainedIndexes.map((index) => suiteLines[index]).join('\n'), totalLines: suiteLines.length, elidedLines: suiteLines.length - retainedIndexes.length }
-      const scopeWording = `The accepted commit ${S.commit} made the full suite red. The failing output named these test files, which are now recorded in the mutable context:`
+      const excerptText = retainedIndexes.map((index) => suiteLines[index]).join('\n')
+      const fallbackExcerpt = suiteRunner.runner !== 'node' && retainedIndexes.length === 0
+      const failureExcerpt = { text: fallbackExcerpt ? suiteOutput.slice(-2000) : excerptText, totalLines: suiteLines.length, elidedLines: fallbackExcerpt ? Math.max(0, suiteLines.length - suiteOutput.slice(-2000).split(/\r?\n/).length) : suiteLines.length - retainedIndexes.length }
+      const scopeWording = runnerUnparsed
+        ? `The accepted commit ${S.commit} made the full suite red, but the test runner could not be parsed (${SUITE_RUNNER_UNPARSED}). No source files were admitted; this bounce preserves the observed failure context:`
+        : `The accepted commit ${S.commit} made the full suite red. The failing output named these test files, which are now recorded in the mutable context:`
       const allowanceWording = 'Repair the implementation and rerun the builder/review/gate/commit cycle using an ordinary remaining builder attempt or the single post-review late-repair reserve. This is context, not a scope widening cap.'
       io.writeFile(b, [
         '# Suite-red scope admission bounce', '',
@@ -12555,7 +12577,7 @@ function runTask(ctx, io, crash) {
       continue suiteCycle
     }
     stageComplete()
-    return escalate('suite', `full suite red after acceptance — no safe test-file context record could be made: ${suiteAdmission.why || 'the failure output was unparseable'}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
+    return escalate('suite', `full suite red after acceptance${runnerUnparsed ? ' with runner-unparsed' : ''} — no safe test-file context record could be made: ${suiteAdmission.why || 'the failure output was unparseable'}\n${suiteOutput.slice(-2000)}`, [], { commit: S.commit, suite_red: suiteEvidence })
   }
   if (publishing && warmCounts === null) {
     stageComplete()
@@ -15829,4 +15851,55 @@ function leadDecisionDelivery({ S, io, ctx, round, label, contextPaths, prefixLi
     mode: 'delta',
     sources: contextPaths.map((path) => ({ path, mode: 'path', state: 'not-read', bytes: null, reason: 'delta' })),
   }
+}
+
+export const SUITE_RUNNER_UNPARSED = 'runner-unparsed'
+
+export function suiteRedCargoLocations(output, checkout) {
+  const files = []
+  const test_names = []
+  if (typeof output !== 'string' || output.length === 0 || typeof checkout !== 'string' || checkout.trim() === '') return { files, test_names }
+  const root = checkout.replace(/\/+$/, '') || '/'
+  const seen = new Set()
+  const add = (token) => {
+    let cargoPath = String(token || '').replace(/[),;\]}]+$/g, '').replace(/^[([{]+/, '').replace(/:(?:\d+)(?::\d+)?$/, '')
+    if (!cargoPath) return
+    if (/^file:\/\//i.test(cargoPath)) {
+      try {
+        const parsed = new URL(cargoPath)
+        if (parsed.protocol !== 'file:' || (parsed.hostname && parsed.hostname !== 'localhost')) return
+        cargoPath = decodeURIComponent(parsed.pathname)
+      } catch { return }
+    }
+    if (cargoPath.startsWith('/')) {
+      const prefix = root === '/' ? '/' : `${root}/`
+      if (cargoPath === root || !cargoPath.startsWith(prefix)) return
+      cargoPath = cargoPath.slice(prefix.length)
+    } else {
+      cargoPath = cargoPath.replace(/^\.\//, '')
+    }
+    if (!cargoPath || cargoPath.startsWith('/') || cargoPath.split('/').some((segment) => segment === '.' || segment === '..')) return
+    if (/[\*?\[\]{}]/.test(cargoPath) || seen.has(cargoPath)) return
+    seen.add(cargoPath)
+    files.push(cargoPath)
+  }
+  // Captured Rust panic locations are inline with the thread header.
+  const panicPattern = /panicked at (.+?):\d+(?::\d+)?:/g
+  for (const match of output.matchAll(panicPattern)) add(match[1])
+  // Rustc source locations are arrow lines, not compilation directory summaries.
+  const compilePattern = /^\s*-->\s+(.+?):\d+(?::\d+)?\s*$/gm
+  for (const match of output.matchAll(compilePattern)) add(match[1])
+  for (const match of output.matchAll(/^---- (.+?) stdout ----$/gm)) {
+    if (!test_names.includes(match[1])) test_names.push(match[1])
+  }
+  return { files, test_names }
+}
+
+export function suiteRedLocations(output, checkout, runner = 'node') {
+  if (runner === 'node') return { files: suiteRedTestFiles(output, checkout), test_names: [], reason: null }
+  if (runner !== 'cargo') return { files: [], test_names: [], reason: SUITE_RUNNER_UNPARSED }
+  const nodeFiles = suiteRedTestFiles(output, checkout)
+  const cargo = suiteRedCargoLocations(output, checkout)
+  const files = [...new Set([...nodeFiles, ...cargo.files])]
+  return { files, test_names: cargo.test_names, reason: files.length > 0 ? null : SUITE_RUNNER_UNPARSED }
 }

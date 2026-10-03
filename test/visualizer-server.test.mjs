@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync, utimesSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, connect } from 'node:net'
@@ -3799,5 +3799,99 @@ test('workflow source reads plugin resources but proposals retain target resourc
     rmSync(target, { recursive: true, force: true })
     rmSync(plugin, { recursive: true, force: true })
     rmSync(external, { recursive: true, force: true })
+  }
+})
+
+// MUTATION: compare the installed root against only the lexical ~/.claude/plugins path;
+// a symlinked plugins dir then resolves outside it and this git-bearing install reads writable.
+test('RO1 symlinked plugins dir', () => {
+  const dir = realpathSync(scratchDir('visualizer-plugin-symlink-'))
+  try {
+    const home = join(dir, 'home'), store = join(dir, 'store'), installed = join(store, 'cache', 'dev-team', '1.0.0')
+    mkdirSync(join(installed, '.git'), { recursive:true })
+    mkdirSync(join(home, '.claude'), { recursive:true })
+    symlinkSync(store, join(home, '.claude', 'plugins'), 'dir')
+    assert.deepEqual(pluginWriteMode({ pluginRoot:join(home, '.claude', 'plugins', 'cache', 'dev-team', '1.0.0'), home }), {
+      writable:false, reason:'installed-plugin-read-only', basis:'under-claude-plugins-dir', plugin_root:installed,
+    })
+  } finally { rmSync(dir, { recursive:true, force:true }) }
+})
+
+function pluginWriteServerFixture(prefix) {
+  const dir = realpathSync(scratchDir(prefix))
+  const pluginRoot = join(dir, 'plugin'), home = join(dir, 'home'), rosterPath = join(dir, 'roster.json'), envFile = join(dir, '.env.local')
+  mkdirSync(pluginRoot, { recursive:true })
+  mkdirSync(home, { recursive:true })
+  writeFileSync(rosterPath, JSON.stringify(serverRosterFixture(), null, 2))
+  const reviewer = serverRosterFixture().tiers.build.reviewer
+  const move = { tier:'build', role:'reviewer', cell:{ ...reviewer, effort:reviewer.effort === 'high' ? 'xhigh' : 'high' } }
+  const options = {
+    pluginRoot, home, rosterPath, envFile, ledgerDb:join(dir, 'ledger.db'), triageDb:join(dir, 'triage.db'), crewRoot:dir,
+    fetchImpl:async () => new Response(JSON.stringify({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }), { status:200, headers:{ 'content-type':'application/json' } }),
+    openRouterCatalog:{ get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[], absent:null }) },
+  }
+  const refusal = { schema:2, error:'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.', reason:'installed-plugin-read-only', basis:'no-git-work-tree', plugin_root:pluginRoot }
+  return { dir, rosterPath, envFile, move, options, refusal }
+}
+const postJson = (input) => ({ method:'POST', headers:{ 'content-type':'application/json' }, body:typeof input === 'string' ? input : JSON.stringify(input) })
+
+// MUTATION: delete the ladder/apply `if (!writeMode.writable) return json(res, 409, pluginWriteRefusal)` guard;
+// the apply then reaches the roster writer (or the body parser) and this test reddens.
+test('RO3 installed plugin refuses ladder apply before parsing and leaves the roster bytes', async () => {
+  const { dir, rosterPath, move, options, refusal } = pluginWriteServerFixture('visualizer-plugin-apply-')
+  const before = readFileSync(rosterPath, 'utf8')
+  let handles
+  try {
+    handles = await startInProcess({}, options)
+    for (const body of [{ moves:[move] }, '{bad']) {
+      const applied = await json(handles.base, '/api/roster/ladder/apply', postJson(body))
+      assert.deepEqual({ status:applied.status, ...applied.json }, { status:409, ...refusal })
+      assert.equal(readFileSync(rosterPath, 'utf8'), before)
+    }
+    assert.equal((await json(handles.base, '/api/roster/ladder/apply')).status, 405)
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive:true, force:true })
+  }
+})
+
+// MUTATION: delete the model-catalog/key `if (input.persist === true && !writeMode.writable)` guard;
+// the key is then written to the env file and this test reddens.
+test('RO4 installed plugin refuses a persistent catalog key and keeps session and null-clear keys', async () => {
+  const { dir, envFile, options, refusal } = pluginWriteServerFixture('visualizer-plugin-key-')
+  let handles
+  try {
+    handles = await startInProcess({}, options)
+    const persisted = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:'installed-catalog-secret', persist:true }))
+    assert.deepEqual({ status:persisted.status, ...persisted.json }, { status:409, ...refusal })
+    assert.equal(existsSync(envFile), false)
+    const session = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:'installed-catalog-secret', persist:false }))
+    assert.equal(session.status, 200)
+    assert.equal(session.json.persisted, false)
+    const cleared = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:null, persist:true }))
+    assert.equal(cleared.status, 200)
+    assert.equal(existsSync(envFile), false)
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive:true, force:true })
+  }
+})
+
+// MUTATION: add a `pluginWriteRefusal` 409 to the propose, stage or compose route; proposals write
+// nothing, so an installed plugin must still answer 200 there and this test reddens.
+test('RO5 installed plugin keeps roster propose, stage and compose open', async () => {
+  const { dir, rosterPath, move, options } = pluginWriteServerFixture('visualizer-plugin-propose-')
+  const before = readFileSync(rosterPath, 'utf8')
+  let handles
+  try {
+    handles = await startInProcess({}, options)
+    for (const [path, body] of [['/api/roster/propose', move], ['/api/roster/ladder/stage', { moves:[move] }], ['/api/roster/ladder/compose', { moves:[move] }]]) {
+      const answered = await json(handles.base, path, postJson(body))
+      assert.equal(answered.status, 200, path)
+    }
+    assert.equal(readFileSync(rosterPath, 'utf8'), before)
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive:true, force:true })
   }
 })

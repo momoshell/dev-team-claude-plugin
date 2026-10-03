@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { resolve, join, dirname, basename } from 'node:path'
+import { resolve, join, dirname, basename, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -442,7 +442,10 @@ export function pluginWriteMode({ pluginRoot = PROJECT_ROOT, home = homedir(), e
   let realHome
   try { realHome = realpath(resolve(home)) } catch { realHome = resolve(home) }
   const plugins = join(realHome, '.claude', 'plugins')
-  if (plugin_root === plugins || plugin_root.startsWith(`${plugins}${process.platform === 'win32' ? '\\\\' : '/'}`)) return readonly('under-claude-plugins-dir')
+  let realPlugins = plugins
+  try { realPlugins = realpath(plugins) } catch {}
+  // A symlinked plugins dir puts the resolved root outside the lexical path, so either spelling refuses.
+  if ([plugins, realPlugins].some((dir) => plugin_root === dir || plugin_root.startsWith(dir + sep))) return readonly('under-claude-plugins-dir')
   if (!exists(join(plugin_root, '.git'))) return readonly('no-git-work-tree')
   return { writable:true, reason:null, basis:null, plugin_root }
 }

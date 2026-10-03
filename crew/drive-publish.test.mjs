@@ -9,11 +9,7 @@ import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-<<<<<<< HEAD
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8 } from './drive.mjs'
-=======
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
->>>>>>> a5555114 (fix(crew): verify prescription pins by running a snapshot, not by reading text)
+import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])

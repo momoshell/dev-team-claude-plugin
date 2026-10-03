@@ -5211,7 +5211,7 @@ const pinTap = (bytes) => {
   }
   return { ok: true, output: `${lines.join('\n')}\n# pass ${n}\n# fail 0` }
 }
-function pinIo({ built, proofOutputs, throwAfterReview = false }) {
+function pinIo({ built, proofOutputs, throwAfterReview = false, onRebase = null }) {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const files = { ...B376_FILES, [testAbs]: PIN_WITNESSED }
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
@@ -5233,8 +5233,15 @@ function pinIo({ built, proofOutputs, throwAfterReview = false }) {
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
     if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return pinTap(files[testAbs])
+    // A publication run: a real rebase moves HEAD and the merge base, and here it also
+    // rewrites the pinned test the way a clean rebase onto a moved main can.
+    if (cmd === `git rev-parse ${shellArg('origin/main')}`) return { ok: true, output: 'base1111\n' }
+    if (cmd === `git merge-base HEAD ${shellArg('origin/main')}`) return { ok: true, output: `${head.rebased ? 'base1111' : 'older000'}\n` }
+    if (cmd === `git rebase ${shellArg('origin/main')}`) { head.rebased = true; if (onRebase) files[testAbs] = onRebase(files[testAbs]); return { ok: true, output: '' } }
+    if (cmd === 'git rev-parse HEAD') return { ok: true, output: head.rebased ? 'post2222\n' : 'pre1111\n' }
     return result
   }
+  const head = { rebased: false }
   return io
 }
 const pinRows = (io) => io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : [])
@@ -5259,7 +5266,7 @@ test('PV2 a proven top-level guard does not accept a lane whose witnessed check 
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), true)
   assert.notEqual(result.status, 'done')
   assert.equal(result.details.escalation.where, 'harden')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1: /)
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): /)
   assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
 })
 
@@ -5270,7 +5277,7 @@ test('PV3 a witnessed check whose assertion text changed refuses acceptance', ()
   const io = pinIo({ built: weakened })
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.notEqual(result.status, 'done')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1: 1 of 1 witnessed top-level statement/)
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): 1 of 1 witnessed top-level statement/)
 })
 
 // Kills P4 on the unreadable route: a witnessed test that cannot be read at acceptance is
@@ -5279,7 +5286,7 @@ test('PV4 an unreadable witnessed test refuses acceptance as unverifiable', () =
   const io = pinIo({ built: `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`, throwAfterReview: true })
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.notEqual(result.status, 'done')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding F1: the built a\.test\.mjs could not be read: EACCES/)
+  assert.match(result.details.escalation.why, /^\[witnessed-test-unverifiable\] finding F1 \(accept\): the built a\.test\.mjs could not be read: EACCES/)
   assert.deepEqual(pinPreservation(io).map(({ reason }) => reason), ['witnessed-test-unverifiable'])
 })
 
@@ -5290,7 +5297,7 @@ test('PV5 a compliant conversion is accepted with a measured preservation record
   const io = pinIo({ built: compliant })
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(pinPreservation(io).map(({ reason, runtime }) => ({ reason, runtime })), [{ reason: null, runtime: 'measured' }])
+  assert.deepEqual(pinPreservation(io).map(({ when, reason, runtime }) => ({ when, reason, runtime })), [{ when: 'accept', reason: null, runtime: 'measured' }, { when: 'suite', reason: null, runtime: 'measured' }])
 })
 
 // Kills P3 (indented lines accepted): the witnessed statement is byte-identical, but the
@@ -5375,6 +5382,39 @@ test('PV11 a prescribed finding declared through an invocation is refused', () =
   const row = pinRows(io).find((entry) => entry.finding === 'F1')
   assert.equal(row?.outcome, 'name-absent')
   assert.match(row?.why ?? '', /must close with a new top-level node test\(\.\.\.\) named F1 guard, not an invocation/)
+})
+
+// Kills P9 (bracket depth ignored) — Sol pass 2: a byte-identical witnessed test(...)
+// enclosed in `if (false) {` is not a top-level statement any more.
+test('PV12 a witnessed check enclosed in a block is not a top-level statement', () => {
+  const enclosed = `${PIN_IMPORTS}\nif (false) {\n${PIN_EXISTING};}\n\n${PIN_TOP_GUARD}`
+  assert.equal(topLevelStatements(enclosed).includes(PIN_EXISTING.trimEnd()), false)
+  assert.equal(topLevelStatements(PIN_WITNESSED).includes(PIN_EXISTING.trimEnd()), true)
+  const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed: PIN_WITNESSED, built: { state: 'read', bytes: enclosed }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
+  assert.equal(verdict.reason, 'witnessed-test-altered')
+})
+
+// Kills P7 (unmeasured names read as preserved) — Sol pass 2: a witnessed check whose name
+// the run cannot be asked about is refused as unverifiable, never passed.
+test('PV13 a witnessed check without a literal test name is unverifiable', () => {
+  const witnessed = `${PIN_IMPORTS}\nconst title = 'existing check'\ntest(title, () => {\n  assert.equal(1, 1)\n})\n`
+  for (const bytes of [witnessed, `${witnessed}\n${PIN_TOP_GUARD}`]) {
+    const verdict = witnessedTestPreservation({ file: 'a.test.mjs', witnessed, built: { state: 'read', bytes }, run: () => 'ok 1 - existing check\nok 2 - F1 guard' })
+    assert.equal(verdict.reason, 'witnessed-test-unverifiable')
+    assert.match(verdict.why, /no plain string-literal test\(\.\.\.\) name/)
+  }
+})
+
+// Kills P8 (no re-check after rebase) — Sol pass 2: a rebase that weakens the pinned test
+// after the accept-time check is refused on the tree the suite would run.
+test('PV14 a rebase that weakens a pinned test is refused before the suite', () => {
+  const compliant = `${PIN_IMPORTS}\n${PIN_EXISTING}\n${PIN_TOP_GUARD}`
+  const io = pinIo({ built: compliant, onRebase: (bytes) => bytes.replace('assert.equal(1, 1)', 'assert.ok(true)') })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 }, publish: { base: 'main' } }, io)
+  assert.notEqual(result.status, 'done')
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(rebased\): /)
+  assert.deepEqual(pinPreservation(io).map(({ when, reason }) => ({ when, reason })), [{ when: 'accept', reason: null }, { when: 'rebased', reason: 'witnessed-test-altered' }])
+  assert.equal(result.details.stages.includes('suite'), false)
 })
 
 // Kills singleton detection or per-finding patch suppression by routing every conflict separately.

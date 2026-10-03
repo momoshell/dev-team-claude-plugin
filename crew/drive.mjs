@@ -11727,20 +11727,26 @@ function runTask(ctx, io, crash) {
     return escalate('build', `no accepted build within ${builderAttempts} builder attempt(s)`)
   }
 
-  // Sub-class 1's conversion is verified HERE, where every accepted path converges before
-  // the commit: no lane is accepted while a witnessed test a conversion pinned has lost a
-  // top-level statement or a top-level check. Unreadable is refused, never passed.
-  // MUTATION P4: skip this loop and the builder's promise to leave the witnessed checks
-  // as they were is taken on trust — the false clean Sol reproduced on b1074.
-  for (const [file, pin] of prescriptionPins) {                                          // ANCHOR P4
-    let built
-    try { const bytes = io.readFile(`${ctx.checkout}/${file}`); built = bytes === null ? { state: 'absent' } : { state: 'read', bytes } }
-    catch (err) { built = { state: 'unreadable', why: err?.message || String(err) } }
-    const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
-    const record = { finding: pin.finding, file, reason: preserved.reason, why: preserved.why, ...(preserved.runtime ? { runtime: preserved.runtime } : {}) }
-    panelLog({ hardening_preservation: record })
-    if (preserved.reason !== null) return escalate('harden', `[${preserved.reason}] finding ${pin.finding}: ${preserved.why}`, [], { hardening_preservation: record })
+  // Sub-class 1's conversion is verified where every accepted path converges before the
+  // commit, and again on the tree the suite runs: no lane is accepted while a witnessed
+  // test a conversion pinned has lost a top-level statement, an import binding or a
+  // top-level check. Unreadable is refused, never passed.
+  const pinnedTestEscalation = (when) => {
+    for (const [file, pin] of prescriptionPins) {
+      let built
+      try { const bytes = io.readFile(`${ctx.checkout}/${file}`); built = bytes === null ? { state: 'absent' } : { state: 'read', bytes } }
+      catch (err) { built = { state: 'unreadable', why: err?.message || String(err) } }
+      const preserved = witnessedTestPreservation({ file, witnessed: pin.bytes, built, run: () => hardenRun(hardenWitnessCommand(file))?.output })
+      const record = { finding: pin.finding, file, when, reason: preserved.reason, why: preserved.why, ...(preserved.runtime ? { runtime: preserved.runtime } : {}) }
+      panelLog({ hardening_preservation: record })
+      if (preserved.reason !== null) return escalate('harden', `[${preserved.reason}] finding ${pin.finding} (${when}): ${preserved.why}`, [], { hardening_preservation: record })
+    }
+    return null
   }
+  // MUTATION P4: skip this check and the builder's promise to leave the witnessed checks
+  // as they were is taken on trust — the false clean Sol reproduced on b1074.
+  const pinnedBeforeCommit = pinnedTestEscalation('accept')                              // ANCHOR P4
+  if (pinnedBeforeCommit) return pinnedBeforeCommit
 
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
@@ -12247,6 +12253,11 @@ function runTask(ctx, io, crash) {
     if (postCommit.escalation) return postCommit.escalation
   }
 
+  // A rebase (or a suite-cycle build round) rewrites the tree after the accept-time
+  // check; re-verify on the tree the suite runs and publication ships.
+  // MUTATION P8: drop this re-check and a rebase that weakens a pinned test ships green.
+  const pinnedAfterRebase = pinnedTestEscalation(rebased ? 'rebased' : 'suite')           // ANCHOR P8
+  if (pinnedAfterRebase) return pinnedAfterRebase
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
   if (!suiteRes?.ok && (S.suiteAnchorRepairs ?? 0) < ANCHOR_SUITE_REPAIR_MAX) {
@@ -14367,10 +14378,12 @@ export function topLevelNameVerdict(output, name) {
 // statement, and every literal top-level test name still runs as a top-level test and
 // passes. Anything that cannot be read or measured is refused, never passed.
 export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
-// Lexical state at the START of every line: 'code', 'comment' (inside /* */) or
-// 'template' (inside a template literal). It is what lets a column-0 line inside a
-// template or a block comment stay part of the statement around it, so splitting never
-// cuts a literal. Strings, comments, templates with ${} nesting and regex literals are
+// Lexical state at the START of every line: 'code' (at bracket depth 0), 'nested' (in code
+// inside an open `(`, `[` or `{`), 'comment' (inside /* */), 'template' (inside a template
+// literal) or 'string' (after a line continuation). Only a 'code' line can start a
+// top-level statement, so a column-0 line inside a block, a template or a comment stays
+// part of the statement around it: `if (false) {` above an unindented test(...) makes
+// that test nested, not top-level. Strings, comments, templates with ${} nesting and regex literals are
 // tracked; a `/` that does not close on its own line is division. Anything left open at
 // end of file returns null — unmeasured, never guessed.
 const REGEX_PRECEDERS = new Set(['', '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '<', '>', '~', '^'])
@@ -14378,7 +14391,8 @@ const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 
 export function lineStartStates(text) {
   const src = String(text)
   const states = ['code']
-  const holes = []                         // brace depth inside each open ${ }
+  const holes = []                         // the bracket depth at which each open ${ } began
+  let depth = 0
   let mode = 'code'
   let prev = ''
   let word = ''
@@ -14388,19 +14402,19 @@ export function lineStartStates(text) {
     if (c === '\n') {
       if (mode === 'line-comment') mode = 'code'
       if (mode === 'sq' || mode === 'dq') return null           // a raw newline cannot sit in a string
-      states.push(mode === 'block-comment' ? 'comment' : mode === 'template' ? 'template' : 'code')
+      states.push(mode === 'block-comment' ? 'comment' : mode === 'template' ? 'template' : depth > 0 ? 'nested' : 'code')
       continue
     }
     if (mode === 'line-comment') continue
     if (mode === 'block-comment') { if (c === '*' && n === '/') { mode = 'code'; i++ } continue }
     if (mode === 'sq' || mode === 'dq') {
-      if (c === '\\') { i++; if (src[i] === '\n') states.push('code'); continue }
+      if (c === '\\') { i++; if (src[i] === '\n') states.push('string'); continue }
       if ((mode === 'sq' && c === "'") || (mode === 'dq' && c === '"')) { mode = 'code'; prev = c; word = '' }
       continue
     }
     if (mode === 'template') {
       if (c === '\\') { i++; if (src[i] === '\n') states.push('template'); continue }
-      if (c === '`') { mode = 'code'; prev = '`'; word = '' } else if (c === '$' && n === '{') { holes.push(0); mode = 'code'; prev = '{'; word = ''; i++ }
+      if (c === '`') { mode = 'code'; prev = '`'; word = '' } else if (c === '$' && n === '{') { holes.push(depth); mode = 'code'; prev = '{'; word = ''; i++ }
       continue
     }
     if (/\s/.test(c)) continue
@@ -14420,16 +14434,14 @@ export function lineStartStates(text) {
       }
       if (j < src.length && src[j] === '/') { i = j; prev = '/'; word = ''; continue }
     }
-    if (c === '{' && holes.length > 0) holes[holes.length - 1] += 1
-    if (c === '}' && holes.length > 0) {
-      if (holes[holes.length - 1] === 0) { holes.pop(); mode = 'template'; continue }
-      holes[holes.length - 1] -= 1
-    }
+    if (c === '}' && holes.length > 0 && holes[holes.length - 1] === depth) { holes.pop(); mode = 'template'; continue }
+    if (c === '(' || c === '[' || c === '{') depth += 1
+    if (c === ')' || c === ']' || c === '}') { depth -= 1; if (depth < 0) return null }
     if (/[\w$]/.test(c)) word = /[\w$]/.test(prev) ? word + c : c
     else word = ''
     prev = c
   }
-  return mode === 'code' || mode === 'line-comment' ? states : null
+  return (mode === 'code' || mode === 'line-comment') && depth === 0 && holes.length === 0 ? states : null
 }
 // A top-level statement starts on a column-0 line, in code (not inside a template literal
 // or block comment), that does not begin with whitespace or a closing `}`, `)` or `]`; it
@@ -14489,6 +14501,7 @@ export function importBindings(statement) {
   return keys
 }
 const LITERAL_TEST_NAME = /^test\((['"])((?:(?!\1)[^\\])*)\1\s*[,)]/
+const TEST_CALL = /^(?:test|it|describe|suite)\s*(?:\.\s*[\w$]+\s*)?\(/
 export function witnessedTestPreservation({ file, witnessed, built, run }) {
   const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
   if (typeof witnessed !== 'string') return refuse('witnessed-test-unverifiable', `the review-time bytes of ${file} were not captured, so its existing checks cannot be compared`)
@@ -14523,6 +14536,13 @@ export function witnessedTestPreservation({ file, witnessed, built, run }) {
     else missing.push(statement.split('\n')[0])
   }
   if (missing.length > 0) return refuse('witnessed-test-altered', `${missing.length} of ${kept.length} witnessed top-level statement(s) of ${file} are no longer present verbatim at top level: ${missing.slice(0, 3).map((line) => JSON.stringify(line.slice(0, 120))).join(', ')}`, { missing })
+  // A witnessed check whose name the run cannot be asked about is unmeasured, and
+  // unmeasured is refused: a test(title, ...), a template-literal name, test.skip(...),
+  // it(...) and describe(...) all land here.
+  // MUTATION P7: drop this refusal and a check with a computed name is never run, yet
+  // reads as preserved.
+  const unmeasured = kept.filter((statement) => TEST_CALL.test(statement) && !LITERAL_TEST_NAME.test(statement))   // ANCHOR P7
+  if (unmeasured.length > 0) return refuse('witnessed-test-unverifiable', `${unmeasured.length} witnessed top-level check(s) of ${file} have no plain string-literal test(...) name, so the run cannot measure them: ${unmeasured.slice(0, 3).map((statement) => JSON.stringify(statement.split('\n')[0].slice(0, 120))).join(', ')}`)
   const names = kept.flatMap((statement) => { const m = LITERAL_TEST_NAME.exec(statement); return m ? [m[2]] : [] })
   if (names.length === 0) return { reason: null, why: `all ${kept.length} witnessed top-level statement(s) of ${file} are present verbatim; it has no literal top-level test name to run`, runtime: 'not-run: no literal top-level test name' }
   let output

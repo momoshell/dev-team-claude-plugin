@@ -3938,3 +3938,26 @@ test('OB4 keep-green references narrow files once and still names every other ca
     assert.equal(keep, KEEP_GREEN_PREFIX + row.expected, row.name)
   }
 })
+
+test('OB5 keep-green names every candidate exactly once across names and narrow paths', () => {
+  // MUTATION: truncating namedFiles with .slice(0, 1) drops the second named candidate.
+  const tripwires = ['probe/alpha.test.mjs', 'probe/beta.test.mjs']
+  const named = ['docs/alpha-note.md', 'docs/beta-note.md']
+  const candidates = [...tripwires, ...named]
+  const brief = renderBrief({
+    request: { ask: 'Keep every candidate readable.', done_means: 'Narrow references and names are complete.', out_of_scope: 'Other output.' },
+    where: [], writeSurface: { files: [], basis: 'where' },
+    discovery: { candidates, tripwires: tripwires.map((file) => ({ file, keys: [] })), broadKeys: [], keys: [] },
+  })
+  const keep = section(brief, '## Conventions').split('\n').find((line) => line.startsWith(KEEP_GREEN_PREFIX))
+  const narrowLine = section(brief, '## Validation lane').split('\n').find((line) => line.startsWith('narrow: node --test '))
+  assert.equal(keep, KEEP_GREEN_PREFIX + NARROW_REFERENCE(2) + ', docs/alpha-note.md, docs/beta-note.md', `keep-green output: ${keep}`)
+  const namedParts = keep.slice(KEEP_GREEN_PREFIX.length).split(', ')
+  const narrowPaths = narrowLine.slice('narrow: node --test '.length).split(/\s+/)
+  for (const file of candidates) {
+    const count = [...namedParts, ...narrowPaths].filter((part) => part === file).length
+    assert.equal(count, 1, `${file} occurs ${count} times; named=${namedParts}; narrow=${narrowPaths}`)
+  }
+  for (const file of tripwires) assert.ok(narrowPaths.includes(file), `${file} missing from narrow paths: ${narrowLine}`)
+  assert.equal(namedParts.filter((part) => part === NARROW_REFERENCE(2)).length, 1, `reference count in ${keep}`)
+})

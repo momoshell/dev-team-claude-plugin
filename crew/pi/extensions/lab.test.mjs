@@ -2126,3 +2126,34 @@ test('NV4', async () => {
     else assert.deepEqual(details.result, item.expected, message)
   }
 })
+
+
+// MUTATION: remove the child deadline statement so the promise never settles.
+test('NV5 a never-settling exported value is refused at the child deadline', async () => {
+  const { repo } = gapsRepo()
+  const controller = new AbortController()
+  const tool = mod.createLabTool({ env: gapsEnv(), childTimeoutMs: 1500, killGraceMs: 50 })
+  const BOUND_MS = 10000
+  let timer
+  let pending
+  try {
+    pending = tool.execute('nv5', { program: 'export default new Promise(() => {})', cwd: repo }, controller.signal, undefined, { cwd: repo })
+    const winner = await Promise.race([
+      pending.then((run) => ({ kind: 'returned', run })),
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          resolve({ kind: 'bound-exceeded' })
+        }, BOUND_MS)
+      }),
+    ])
+    assert.equal(winner.kind, 'returned')
+    assert.equal(winner.run.details.outcome, 'refused')
+    assert.equal(winner.run.details.refused, 'child-timeout')
+    assert.equal(Object.hasOwn(winner.run.details, 'result'), false)
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
+    if (pending) await pending
+  }
+})

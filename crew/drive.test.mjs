@@ -851,6 +851,7 @@ function identityFixture(envelope, { variant = 'scout', role = 'planner', runId 
 
 function rpcNoEnvelope(detail, over = {}) {
   return {
+    [Symbol.for('dev-team.crew.transport-settlement')]: 'headless-rpc',
     assignment_id: 'd1', role: 'planner', status: 'insufficient', summary: 'rpc fallback', artifacts: [],
     details: { degraded: 'rpc-no-envelope', ...detail }, ...over,
   }
@@ -4914,4 +4915,117 @@ test('RV1-1 every LR test registers exactly once as a top-level test', () => {
   assert.equal(run.status, 0, String(run.stdout).slice(-2000))
   assert.deepEqual(oks.filter(({ indent }) => indent === '').map(({ name }) => name).sort(), names)
   for (const name of names) assert.equal(oks.filter((ok) => ok.name === name).length, 1, name)
+})
+
+// b1093 hand-finish: AUTHENTIC no-envelope carriers driven through dispatch. Every
+// first planner return below is either the RPC producer's own shape stamped with
+// the agreed provenance symbol, or a deliberate counterfeit of it, and the fake io
+// reports the dispatch transport the scenario names. No test manufactures the
+// driver's private runtime mark: it is earned (or refused) by dispatch itself.
+const PROVENANCE_RUN = 'provenance-hand-run'
+const PROVENANCE_SETTLEMENT = Symbol.for('dev-team.crew.transport-settlement')
+const provenanceCarrier = (detail, { signed = true, settlement = 'headless-rpc' } = {}) => ({
+  assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'rpc fallback', artifacts: [],
+  details: { degraded: 'rpc-no-envelope', ...detail }, ...(signed ? { [PROVENANCE_SETTLEMENT]: settlement } : {}),
+})
+function provenanceScenario(first, transport = 'headless-rpc') {
+  const io = fakeIo()
+  const assign = io.assign.bind(io)
+  const ids = new Map()
+  let plannerWaits = 0
+  io.assign = (spec) => {
+    const result = assign(spec)
+    const returnPath = `/returns/${PROVENANCE_RUN}/${result.id}.${spec.role}.json`
+    ids.set(returnPath, { id: result.id, role: spec.role })
+    return { id: result.id, returnPath }
+  }
+  if (transport === 'missing') delete io.dispatchTransport
+  else io.dispatchTransport = () => {
+    if (transport === 'throwing') throw new Error('transport record unavailable')
+    return transport
+  }
+  io.wait = (returnPath) => {
+    const { id, role } = ids.get(returnPath)
+    if (role === 'planner' && ++plannerWaits === 1) return first
+    if (role === 'lead') return { ...leadEnv('escalate'), assignment_id: id, run_id: PROVENANCE_RUN }
+    return { assignment_id: id, role, run_id: PROVENANCE_RUN, status: 'insufficient', summary: 'stop the bounded fixture', artifacts: [], details: {} }
+  }
+  const result = driveTask({ ...CTX, run_id: PROVENANCE_RUN, limits: { plan_rounds: 1 } }, io)
+  const rows = io.calls.logs.filter((row) => row.seat_enforcement).map((row) => row.seat_enforcement)
+  return {
+    status: result.status,
+    escalation: result.details?.escalation ?? null,
+    plannerDispatches: io.calls.assign.filter(({ role }) => role === 'planner').length,
+    applied: (kind) => rows.filter((row) => row.kind === kind && row.applied),
+    rows: (kind) => rows.filter((row) => row.kind === kind),
+  }
+}
+
+// MUTATION ZT1: delete zeroTurnNonStartOf's reason/turns/tool_calls/absent_reason
+// guards (all four, or reason+turns, or reason+tool_calls). An AUTHENTIC measured
+// nonzero carrier then classifies as a zero-turn non-start: a zero-turn row is
+// applied where the planner-no-envelope row belongs. A single one of those four
+// guards deleted alone is an equivalent mutant under authentic inputs, because the
+// runtime mark is granted only to the producer's closed tuple, so the remaining
+// three still separate the shapes; this test states it rather than hiding it.
+test('ZT1 the zero-turn field guards separate authentic RPC carriers driven through dispatch', () => {
+  const valid = provenanceScenario(provenanceCarrier({ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }))
+  assert.equal(valid.plannerDispatches, 2)
+  assert.deepEqual(valid.applied('zero-turn-non-start').map((row) => row.recovery), [{ reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, seats: 1, rounds: 0 }])
+  assert.deepEqual(valid.rows('planner-no-envelope'), [])
+
+  for (const [label, detail] of [
+    ['turns without tool calls', { reason: 'no-envelope', turns: 5, tool_calls: 0, absent_reason: null }],
+    ['tool calls without turns', { reason: 'no-envelope', turns: 0, tool_calls: 3, absent_reason: null }],
+    ['census unavailable', { reason: 'no-envelope', turns: null, tool_calls: null, absent_reason: 'census-unavailable' }],
+  ]) {
+    const observed = provenanceScenario(provenanceCarrier(detail))
+    assert.deepEqual(observed.rows('zero-turn-non-start'), [], label)
+    assert.deepEqual(observed.applied('planner-no-envelope').map((row) => row.recovery), [{ ...detail, seats: 1, rounds: 0 }], label)
+    assert.equal(observed.plannerDispatches, 2, label)
+  }
+
+  // A signed tuple outside the producer's closed vocabulary is never a carrier.
+  for (const [label, detail] of [
+    ['nonzero turns', { reason: 'zero-turn-non-start', turns: 1, tool_calls: 0, absent_reason: null }],
+    ['nonzero tool calls', { reason: 'zero-turn-non-start', turns: 0, tool_calls: 1, absent_reason: null }],
+    ['absent reason', { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: 'census-unavailable' }],
+    ['reason', { reason: 'other', turns: 0, tool_calls: 0, absent_reason: null }],
+  ]) {
+    const observed = provenanceScenario(provenanceCarrier(detail))
+    assert.equal(observed.plannerDispatches, 1, label)
+    assert.deepEqual(observed.rows('zero-turn-non-start'), [], label)
+    assert.deepEqual(observed.rows('planner-no-envelope'), [], label)
+  }
+})
+
+// MUTATION ZT2: drop the try/catch around io.dispatchTransport in dispatchOnce; a
+// throwing lookup then aborts driveTask instead of failing closed.
+// MUTATION ZT2-VALUE: drop the symbol-value guard (env[TRANSPORT_SETTLEMENT] !==
+// 'headless-rpc'); the wrong-value and unsigned rows then buy a retry.
+// MUTATION ZT2-TRANSPORT: drop the recorded-dispatch guard (dispatchTransport !==
+// 'headless-rpc'); the pane, acp, missing, throwing and null rows then buy a retry.
+test('ZT2 an unproven dispatch transport or provenance fails closed, and the signed RPC control recovers', () => {
+  const nonzero = { reason: 'no-envelope', turns: 8, tool_calls: 40, absent_reason: null }
+  const zero = { reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null }
+  const refused = [
+    ...['pane', 'acp', 'missing', 'throwing', null].map((transport) => [`transport ${transport}`, provenanceCarrier(nonzero), transport]),
+    ['unsigned on rpc', provenanceCarrier(nonzero, { signed: false }), 'headless-rpc'],
+    ['wrong settlement value', provenanceCarrier(nonzero, { settlement: 'pane' }), 'headless-rpc'],
+    ...['pane', 'throwing', null].map((transport) => [`zero-turn on ${transport}`, provenanceCarrier(zero), transport]),
+    ['unsigned zero-turn on rpc', provenanceCarrier(zero, { signed: false }), 'headless-rpc'],
+  ]
+  for (const [label, first, transport] of refused) {
+    const observed = provenanceScenario(first, transport)
+    assert.equal(observed.plannerDispatches, 1, label)
+    // Fail closed means the carrier is refused as an ordinary unaddressed return,
+    // never a driver crash: a throwing lookup must not escalate where 'driver'.
+    assert.equal(observed.escalation?.where, 'plan', label)
+    assert.match(observed.escalation?.why ?? '', /^envelope-refusal: run-mismatch/, label)
+    assert.deepEqual(observed.rows('planner-no-envelope'), [], label)
+    assert.deepEqual(observed.rows('zero-turn-non-start'), [], label)
+  }
+  const genuine = provenanceScenario(provenanceCarrier(nonzero))
+  assert.equal(genuine.plannerDispatches, 2)
+  assert.deepEqual(genuine.applied('planner-no-envelope').map((row) => row.recovery), [{ ...nonzero, seats: 1, rounds: 0 }])
 })

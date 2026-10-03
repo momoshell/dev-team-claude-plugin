@@ -1,15 +1,15 @@
 {
-  "crew/drive.mjs:1933": "export function applyPrescriptionLines(source) {",
-  "crew/drive.mjs:2129": "export function planAcceptContractLines() {",
-  "crew/drive.mjs:1285": "function verdictOf(env) {",
-  "crew/drive.mjs:5455": "const checkPath = check.details?.check_path",
-  "crew/drive.mjs:5458": "Revise plan.md per the check at ${checkPath}",
-  "crew/drive.mjs:5459": "...applyPrescriptionLines('the plan check'),",
-  "crew/drive.mjs:8793": "const plannedScopeFiles = planEnv.details?.files_in_scope",
-  "crew/drive.mjs:8858": "const declared = planEnv.details?.mutations",
-  "crew/drive.mjs:8615": "if (planAdversary.trigger === 'none') {",
-  "crew/drive.mjs:8653": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
-  "crew/drive.mjs:8654": "const v = verdictOf(check)",
-  "crew/drive.mjs:7295": "function settleAccept(c, where, contextPaths = []) {",
-  "crew/drive.mjs:6923": "lead requested a second second-opinion"
+  "crew/drive.mjs:1936": "export function applyPrescriptionLines(source) {",
+  "crew/drive.mjs:2132": "export function planAcceptContractLines() {",
+  "crew/drive.mjs:1288": "function verdictOf(env) {",
+  "crew/drive.mjs:5461": "Revise plan.md per the check at ${checkPath}",
+  "crew/drive.mjs:5462": "...applyPrescriptionLines('the plan check'),",
+  "crew/drive.mjs:8798": "const plannedScopeFiles = planEnv.details?.files_in_scope",
+  "crew/drive.mjs:8863": "const declared = planEnv.details?.mutations",
+  "crew/drive.mjs:8620": "if (planAdversary.trigger === 'none') {",
+  "crew/drive.mjs:8658": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
+  "crew/drive.mjs:8659": "const v = verdictOf(check)",
+  "crew/drive.mjs:7300": "function settleAccept(c, where, contextPaths = []) {",
+  "crew/drive.mjs:6928": "lead requested a second second-opinion",
+  "crew/drive.mjs:5458": "const checkPath = check.details?.check_path"
 }

@@ -145,7 +145,7 @@ const invocationGitCanned = (original) => {
   if (original.includes('diff --name-only')) return { ok: true, status: 0, output: '', stderr: '' }
   return { ok: true, status: 0, output: '', stderr: '' }
 }
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null, lstats = null, fingerprints = null } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null, lstats = null, fingerprints = null, dispatchTransport = () => 'headless-rpc' } = {}) {
   const calls = { order: [], sequence: [], dispatch: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
@@ -174,6 +174,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, ...(spec.reask ? { reask: spec.reask, id, returnPath } : {}), n: counts[role] })
       return { id, returnPath }
     },
+    dispatchTransport(returnPath) { return dispatchTransport(returnPath) },
     wait(returnPath, timeoutS) {
       calls.waits.push({ returnPath, timeoutS })
       const env = envelopes[returnPath]

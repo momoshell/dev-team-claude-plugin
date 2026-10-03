@@ -76,7 +76,8 @@ function reviewIdentityEnvelope(baseSha, headSha) {
 
 function zeroTurnReviewEnvelope(assignment_id = 'd1') {
   return {
-    assignment_id, run_id: REVIEW_RUN_ID, role: 'reviewer', status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
+    [Symbol.for('dev-team.crew.transport-settlement')]: 'headless-rpc',
+    assignment_id, role: 'reviewer', status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
     details: { degraded: 'rpc-no-envelope', reason: 'zero-turn-non-start', turns: 0, tool_calls: 0, absent_reason: null },
   }
 }

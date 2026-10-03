@@ -3151,6 +3151,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         throw err
       }
     },
+    dispatchTransport(returnPath) { return seatFor.get(returnPath)?.transport ?? null },
     wait(returnPath, timeoutS) {
       const transport = transportForPath.get(returnPath)
       const info = seatFor.get(returnPath)

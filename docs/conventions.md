@@ -39,7 +39,7 @@ describe the retired scripts/cmux/* runtime, which is not on main.
 
 ## Bounded envelope recovery
 
-A mismatched assignment id is never accepted: an otherwise-valid envelope may receive one correction on the same assignment, sharing seat-io's single re-ask grace. An otherwise-valid envelope with a present, non-empty wrong run id shares that correction grace, but the wrong identity is never accepted; missing run IDs are ineligible. A planner RPC no-envelope carrier may receive one direct retry within the same plan round; this is planner-only. Headless-json and ACP no-envelope failures throw inside seat-io before the driver sees an envelope; seat-io intentionally excludes `no-envelope` from retry kinds, so those transports are not covered.
+A mismatched assignment id is never accepted: an otherwise-valid envelope may receive one correction on the same assignment, sharing seat-io's single re-ask grace. An otherwise-valid envelope with a present, non-empty wrong run id shares that correction grace, but the wrong identity is never accepted; missing run IDs are ineligible. A planner RPC no-envelope carrier authenticated by in-memory provenance and the driver's recorded RPC dispatch may receive one direct retry within the same plan round; this is planner-only. Headless-json and ACP no-envelope failures throw inside seat-io before the driver sees an envelope; seat-io intentionally excludes `no-envelope` from retry kinds, so those transports are not covered.
 
 ## Format
 

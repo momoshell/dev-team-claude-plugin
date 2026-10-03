@@ -201,7 +201,7 @@ const VACUITY_EXEMPT = new Map([
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
-  'crew/io-contract.test.mjs': '743c026942435b9fb1e8e27f2edeeb1bd07c886c3181e3c72ab4f26aabca9f89',
+  'crew/io-contract.test.mjs': '80fee631533502bc1e45d8f5a82eee54a0c2612ea2cba49cdf8ed32b489fd670',
   'crew/memory.test.mjs': '45453b430c297cfd38c2361137cb1de5fec7f1ce44905ebc968b3d56cd13cc0b',
   'crew/pi/extensions/advisor.test.mjs': 'ead2c23e878f9d14d477029bf9b66a075b4e1ff331d6e510ef41f56175010043',
   'crew/pi/extensions/lab.test.mjs': '4d1a2e042341ec8a3eb581299d58eda1dcf4a2110f7672139974d89280e849fb',

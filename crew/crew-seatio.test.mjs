@@ -722,3 +722,29 @@ test('chunk gate events reach recordGateResult with ledger checks', () => {
   assert.deepEqual(gates[0].violations, [])
   assert.deepEqual(gates[1].checks, [{ total: 1, failed: 0, errored: 0 }])
 })
+
+// b1093 hand-finish. MUTATION DT1: make seat-io's dispatchTransport read the LIVE
+// roster (crew.members[role].transport) instead of the dispatch-time seatFor record;
+// the RPC assignment then reports 'acp' after the roster is rewritten below.
+test('DT1 dispatchTransport reports the dispatch-time transport after the roster changes', () => {
+  const root = scratchDir('dispatch-transport-')
+  try {
+    const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+    mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+    const delegated = { assign: () => ({ id: 'rpc1', returnPath: join(paths.returnsDir, 'rpc1.builder.json') }), wait: () => null }
+    const crew = { members: { builder: { transport: 'headless-rpc' }, planner: { transport: 'pane', surface_id: 'surface-planner' } } }
+    const io = seatIo(crew, paths, root, null, null, {}, {
+      headlessRpcIo: () => delegated, resolveWorkerBin: () => { throw new Error('RPC must not resolve the claude binary') },
+      sendLine: () => {}, logLine: () => {}, now: () => 0,
+    })
+    const rpcAssignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const paneAssignment = io.assign({ role: 'planner', briefFile: '/brief.md' })
+    assert.deepEqual(rpcAssignment, { id: 'rpc1', returnPath: join(paths.returnsDir, 'rpc1.builder.json') })
+    assert.deepEqual(Object.keys(paneAssignment).sort(), ['id', 'returnPath'])
+    const lookup = () => [io.dispatchTransport(rpcAssignment.returnPath), io.dispatchTransport(paneAssignment.returnPath), io.dispatchTransport(join(root, 'unknown.json'))]
+    assert.deepEqual(lookup(), ['headless-rpc', 'pane', null])
+    crew.members.builder.transport = 'acp'
+    crew.members.planner.transport = 'headless-rpc'
+    assert.deepEqual(lookup(), ['headless-rpc', 'pane', null])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

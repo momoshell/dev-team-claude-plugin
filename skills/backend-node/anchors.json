@@ -13,9 +13,6 @@
   "crew/shape-validator.mjs:255": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/shape-validator.mjs:244": "if (!shape || typeof shape !== 'object')",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
-  "crew/drive-review.test.mjs:1629": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
-  "crew/drive-review.test.mjs:1628": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive-review.test.mjs:1627": "DECISIONS and LIMITS are the frozen public contract",
   "crew/daemon.test.mjs:265": "assert.doesNotMatch(variantsCode",
   "crew/daemon.test.mjs:254": "imports.every((specifier)",
   "crew/daemon.test.mjs:229": "IMPORT FIREWALL: daemon.mjs carries no top-level import",
@@ -34,12 +31,15 @@
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
   "docs/conventions.md:130": "A frozen exported enum's drift guard needs",
   "docs/conventions.md:53": "first TypeScript file on main, and every file under",
-  "crew/drive.mjs:549": "export const DECISIONS = Object.freeze",
   "scripts/factory/emit.mjs:1611": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8114": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8075": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:8122": "unknown flag --${name}",
   "scripts/factory/ledger.mjs:9934": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:529": "export const CI_DECISIONS = Object.freeze",
-  "scripts/factory/ledger.mjs:4301": "requireEnum(input.decision, CI_DECISIONS"
+  "scripts/factory/ledger.mjs:4301": "requireEnum(input.decision, CI_DECISIONS",
+  "crew/drive.mjs:552": "export const DECISIONS = Object.freeze",
+  "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
+  "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract"
 }

@@ -742,12 +742,15 @@ export function isBusyRefusal(frame) {
   return /already processing|streamingBehavior/i.test(String(frame.error ?? ''))
 }
 
+export const TRANSPORT_SETTLEMENT = Symbol.for('dev-team.crew.transport-settlement')
+
 export function emptyTurnEnvelope({ id, role, returnPath, census = null }) {
   return {
     assignment_id: id, role, status: 'insufficient',
     summary: `seat ${role} settled without writing an envelope to ${returnPath}; the turn produced no usable return`,
     artifacts: [],
     details: { degraded: 'rpc-no-envelope', ...noEnvelopeDetail(census) },
+    [TRANSPORT_SETTLEMENT]: 'headless-rpc',
   }
 }
 

@@ -15,6 +15,9 @@ export const CONFLICT_REASONS = Object.freeze(['answer-conflict', 'successor-con
 export const LIVENESS = { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }
 export const LOCK_ATTEMPTS = 20
 export const LOCK_INTERVAL_MS = 50
+export const LOCK_BACKOFF_CAP_MS = 1000
+// 60000ms is a chosen cleanup bound, not a measured lock duration; bounds release lock acquisition only.
+export const SLOT_RELEASE_LOCK_DEADLINE_MS = 60000
 
 const digest = (value) => createHash('sha256').update(String(value)).digest('hex')
 const defaultSleep = (ms) => {
@@ -258,9 +261,29 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       return false
     }
   }
-  function acquire(name) {
+  function acquire(name, { deadlineMs = LOCK_ATTEMPTS * LOCK_INTERVAL_MS } = {}) {
+    if (typeof deadlineMs !== 'number' || !Number.isFinite(deadlineMs) || deadlineMs < 0) throw new TypeError('deadlineMs must be a finite non-negative number')
+    const startedAt = finiteNow(d.now)
+    const maxAttempts = Math.ceil(deadlineMs / LOCK_INTERVAL_MS) + 1
     let attempts = 0
-    while (attempts < LOCK_ATTEMPTS) {
+    let backoffMs = LOCK_INTERVAL_MS
+    const waited = () => Math.max(0, finiteNow(d.now) - startedAt)
+    const holderOf = (observed) => observed?.record ? {
+      pid: observed.record.owner?.pid ?? null,
+      started_at: observed.record.owner?.startedAt ?? null,
+      actor: observed.record.actor ?? null,
+      fence: observed.record.fence ?? observed.fence,
+    } : null
+    const failure = (reason, observed) => ({ ok: false, reason, attempts, holder: holderOf(observed), waited_ms: waited() })
+    const contention = (observed) => {
+      attempts += 1
+      const elapsed = waited()
+      if (elapsed >= deadlineMs || attempts >= maxAttempts) return failure('contended', observed)
+      d.sleep(Math.min(backoffMs, Math.max(0, deadlineMs - elapsed)))
+      backoffMs = Math.min(LOCK_BACKOFF_CAP_MS, backoffMs * 2)
+      return null
+    }
+    while (true) {
       const cur = current(name)
       const overridden = matchingLockOverride(name, cur)
       if (cur && !overridden) {
@@ -283,11 +306,10 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
         // one lock stands in front of K slots (docs/conventions.md:64).
         const staleCorrupt = _staleCorruptLock && cur.raw !== null && !validLockRecord(cur)
         if (!staleCorrupt) {
-          if (!cur.record) return { ok: false, reason: 'unresolvable', attempts }
+          if (!cur.record) return failure('unresolvable', cur)
           if (cur.record.released !== true && ownerForLock(cur) !== LIVENESS.DEAD) {
-            attempts += 1
-            if (attempts >= LOCK_ATTEMPTS) return { ok: false, reason: 'contended', attempts }
-            d.sleep(LOCK_INTERVAL_MS)
+            const stopped = contention(cur)
+            if (stopped) return stopped
             continue
           }
         }
@@ -302,27 +324,25 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       } catch (err) {
         try { if (d.existsSync(tmp)) d.unlinkSync(tmp) } catch {}
         if (err?.code === 'EEXIST') {
-          attempts += 1
-          if (attempts >= LOCK_ATTEMPTS) return { ok: false, reason: 'contended', attempts }
-          d.sleep(LOCK_INTERVAL_MS)
+          const stopped = contention(current(name))
+          if (stopped) return stopped
           continue
         }
-        if (['EXDEV', 'EPERM', 'ENOTSUP'].includes(err?.code)) return { ok: false, reason: 'unresolvable', attempts }
+        if (['EXDEV', 'EPERM', 'ENOTSUP'].includes(err?.code)) return failure('unresolvable', current(name))
         throw err
       } finally { try { if (d.existsSync(tmp)) d.unlinkSync(tmp) } catch {} }
       const after = current(name)
       if (after?.fence > fence) {
         releaseHistorical({ name, fence, token })
-        return { ok: false, reason: 'lost', attempts }
+        return failure('lost', after)
       }
       if (after?.fence === fence && after.record?.token === token) {
         retireSuperseded({ name, fence })
         return { ok: true, handle: { name, fence, token }, attempts }
       }
-      if (after?.fence === fence) return { ok: false, reason: 'unresolvable', attempts }
-      return { ok: false, reason: 'lost', attempts }
+      if (after?.fence === fence) return failure('unresolvable', after)
+      return failure('lost', after)
     }
-    return { ok: false, reason: 'contended', attempts }
   }
   function checkFence(handle) {
     if (!handle?.name) return false
@@ -330,12 +350,15 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     return !!(cur && cur.fence === handle.fence && cur.record?.token === handle.token && cur.record.released !== true && !matchingLockOverride(handle.name, cur))
   }
   function release(handle) { return releaseEpoch(handle) }
-  function withLock(name, fn) {
-    const result = acquire(name)
+  function withLock(name, fn, options = {}) {
+    const result = acquire(name, options)
     if (!result.ok) {
-      const err = new Error(`reclaim lock unavailable: ${name}`)
+      const holder = result.holder
+      const err = new Error(`reclaim lock unavailable: ${name} reason=${result.reason} pid=${holder?.pid ?? 'unknown'} actor=${holder?.actor ?? 'unknown'} fence=${holder?.fence ?? 'unknown'} waited_ms=${result.waited_ms}`)
       err.stage = 'reclaim-lock-unavailable'
       err.reason = result.reason
+      err.holder = result.holder
+      err.waited_ms = result.waited_ms
       throw err
     }
     try { return fn(result.handle) } finally { release(result.handle) }
@@ -1283,7 +1306,8 @@ export function slotStore({ dir, kind, capacity, deps = {} }) {
   const acquire = (input = {}) => {
     const owner = nonblank(input?.owner) ? input.owner : null
     if (!owner) throw new Error('slotStore.acquire requires a non-blank owner')
-    return store.withLock(lockName, (lockHandle) => {
+    try {
+      return store.withLock(lockName, (lockHandle) => {
       let busy = 0
       for (const slot of slots) {
         const read = readJsonAt(slotPath(slot), d)
@@ -1300,7 +1324,11 @@ export function slotStore({ dir, kind, capacity, deps = {} }) {
         busy += 1
       }
       return { waiting: true, depth: busy }
-    })
+      })
+    } catch (err) {
+      if (err?.stage !== 'reclaim-lock-unavailable' || err.reason !== 'contended') throw err
+      return { waiting: true, depth: null, contended: { holder: err.holder, waited_ms: err.waited_ms } }
+    }
   }
   const release = (handle) => {
     if (handle?.disabled === true) return true
@@ -1312,7 +1340,7 @@ export function slotStore({ dir, kind, capacity, deps = {} }) {
       // comparison lives in dropRow and ONLY there — a second copy here would
       // leave neither copy provable by mutation, because either one alone
       // already refuses.
-      return store.withLock(lockName, (lockHandle) => dropRow(handle.slot, lockHandle, { kind: 'token', value: handle.token }) === 'ok')
+      return store.withLock(lockName, (lockHandle) => dropRow(handle.slot, lockHandle, { kind: 'token', value: handle.token }) === 'ok', { deadlineMs: SLOT_RELEASE_LOCK_DEADLINE_MS })
     } catch { return false }
   }
   return { kind, capacity: size, acquire, release }

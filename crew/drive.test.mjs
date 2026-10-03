@@ -851,6 +851,7 @@ function identityFixture(envelope, { variant = 'scout', role = 'planner', runId 
 
 function rpcNoEnvelope(detail, over = {}) {
   return {
+    [Symbol.for('dev-team.crew.transport-settlement')]: 'headless-rpc',
     assignment_id: 'd1', role: 'planner', status: 'insufficient', summary: 'rpc fallback', artifacts: [],
     details: { degraded: 'rpc-no-envelope', ...detail }, ...over,
   }

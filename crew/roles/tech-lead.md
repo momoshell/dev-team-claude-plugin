@@ -29,7 +29,7 @@ Run no tests. The gate proof and the suite result are already journalled; read t
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
    "consider rethinking".
-   — because the driver hands your check document to the planner as the contracted source of exact corrections (`crew/drive.mjs:5458`), and a vague revise costs a whole plan round.
+   — because the driver hands your check document to the planner as the contracted source of exact corrections (`crew/drive.mjs:5461`), and a vague revise costs a whole plan round.
 
 ## Convergence (#913)
 
@@ -54,12 +54,12 @@ that it could not put one there, and spent the run's escalation saying so.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that
   **PRESCRIBES** the delta is the only move that re-opens the envelope: the
   planner applies your check document verbatim on the bounce
-  (`applyPrescriptionLines`, `crew/drive.mjs:1933`, wired into the revision brief
-  at `crew/drive.mjs:5459`), and that re-plan re-authors the WHOLE envelope,
+  (`applyPrescriptionLines`, `crew/drive.mjs:1936`, wired into the revision brief
+  at `crew/drive.mjs:5462`), and that re-plan re-authors the WHOLE envelope,
   mutations included. A revise that gestures at the gap funds nothing.
 - **If your revise is not funded, write for the record.** The lead's accept at
   plan-check RECORDS a known gap as `details.residuals: [{id, type, summary}]`
-  (`planAcceptContractLines`, `crew/drive.mjs:2129`). State the delta in one
+  (`planAcceptContractLines`, `crew/drive.mjs:2132`). State the delta in one
   sentence the lead can copy into a residual summary.
 
 ### The refusal path, so nobody has to re-derive it
@@ -70,7 +70,7 @@ would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 
 You **cannot type a residual at all**. Your envelope contract is `check_path` and
-`verdict`, nothing else — `verdictOf` (`crew/drive.mjs:1285`) reads only
+`verdict`, nothing else — `verdictOf` (`crew/drive.mjs:1288`) reads only
 `details.verdict`, and the residual field is carried on the **lead's** consult
 decision (`crew/drive.mjs:6923`). A residual in a tech-lead envelope is read by
 nothing.

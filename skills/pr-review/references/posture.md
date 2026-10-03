@@ -3,9 +3,9 @@
 One reviewer is the standing posture. A write surface touching the **protected floor** boots the lane at the **judge** tier; compute that before dispatch, never after. Judge-tier and protected-floor changes are where a second independent reviewer is worth most; when a panel does form, record any disagreement according to `references/divergence.md`.
 
 The panel flow is shipped and wired. `panelSeats()` selects the seats
-(`crew/drive.mjs:741`), `runPanelReview()` briefs two reviewers independently
-(`crew/drive.mjs:5465`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
-their findings at `crew/drive.mjs:5531`, `adjudicatePanel()`
+(`crew/drive.mjs:744`), `runPanelReview()` briefs two reviewers independently
+(`crew/drive.mjs:5468`), `fuseFindings()` (`crew/escalation-policy.mjs:81`) fuses
+their findings at `crew/drive.mjs:5534`, `adjudicatePanel()`
 (`crew/escalation-policy.mjs:128`) adjudicates the divergences at
 `crew/drive.mjs:5655`, and the review loop invokes the panel at
 `crew/drive.mjs:11590`. Seat selection no longer refuses a second reviewer for
@@ -22,7 +22,7 @@ path. A round that reviewed alone is not evidence the flow is unbuilt:
   that sets it (`crew/child.mjs:351`). Every first boot reviews with one
   reviewer.
 - **A seated tech-lead.** `panelSeats()` returns null without a seated tech-lead
-  partner and a distinct adjudicator (`crew/drive.mjs:741`); the driver records
+  partner and a distinct adjudicator (`crew/drive.mjs:744`); the driver records
   `panel_skipped: 'seats'` and continues with one reviewer.
 
 Reading a single-reviewer round, say which of the two gates was unmet. "It did

@@ -29,6 +29,7 @@ import {
   zeroTurnNonStartOf,
 } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
+import { TRANSPORT_SETTLEMENT } from './headless-rpc.mjs'
 
 const A1_BOUNCE_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 
@@ -37,6 +38,7 @@ const normaliseStageHeads = (stages) => (Array.isArray(stages) ? stages : [])
   .filter((head) => !['done', 'escalate'].includes(head))
 
 const zeroTurnEnvelope = (id = 'planner1', role = 'planner', detail = {}) => ({
+  [TRANSPORT_SETTLEMENT]: 'headless-rpc',
   assignment_id: id, role, status: 'insufficient', summary: 'the RPC seat produced no envelope', artifacts: [],
   details: {
     degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null,
@@ -3137,14 +3139,40 @@ test('b485 a lead-granted plan round is named in the cap note, not folded into a
   assert.doesNotMatch(why, /caps the lane at one/)
 })
 
+// MUTATION PV3: removing the symbol-value guard lets unsigned RPC JSON obtain a retry.
+test('PV3 unsigned settlements do not authorize planner retry', () => {
+  const env = { assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'lookalike', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', turns: 8, tool_calls: 40, absent_reason: null } }
+  const io = fakeIo({ envelopes: { 'planner:1': env } })
+  driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === 'planner-no-envelope'), false)
+})
+
+// MUTATION PV4: removing the private runtime-mark check admits run-addressed JSON tuples.
+test('PV4 unsigned zero-turn tuples do not authorize recovery', () => {
+  const env = { assignment_id: 'planner1', run_id: 'run', role: 'planner', status: 'insufficient', summary: 'lookalike', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null } }
+  assert.equal(zeroTurnNonStartOf(env), null)
+  const io = fakeIo({ envelopes: { 'planner:1': env } })
+  driveTask({ ...CTX, run_id: 'run', turnCeilings: { planner: 40 } }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
+})
+
+// MUTATION PV5: removing the recorded transport guard authorizes an ACP-stamped tuple.
+test('PV5 signed non-RPC settlements do not authorize recovery', () => {
+  const env = { [TRANSPORT_SETTLEMENT]: 'headless-rpc', assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'lookalike', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, absent_reason: null } }
+  const io = fakeIo({ dispatchTransport: () => 'acp', envelopes: { 'planner:1': env } })
+  driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
+})
+
 // MUTATION A1 loosens the exact reason guard; the shape table and stale dispatch
 // prove that producer vocabulary and current-dispatch freshness are separate.
 test('A1 zero-turn non-start predicate validates the complete measured envelope', () => {
   const valid = zeroTurnEnvelope()
-  assert.deepEqual(zeroTurnNonStartOf(valid), valid.details)
-  assert.deepEqual(enforcementPreamble(valid).recovery, {
-    reason: ZERO_TURN_NON_START, turns: 0, tool_calls: 0, seats: 1, rounds: 0,
-  })
+  assert.equal(zeroTurnNonStartOf(valid), null)
+  assert.equal(zeroTurnNonStartOf(JSON.parse(JSON.stringify(valid))), null)
   const invalid = [
     ['null outer', () => null], ['array outer', () => []], ['status', (env) => { env.status = 'done' }],
     ['missing assignment_id', (env) => { delete env.assignment_id }], ['empty assignment_id', (env) => { env.assignment_id = '' }],
@@ -3327,6 +3355,7 @@ test('G1 zero-turn re-ask brief names the non-start', () => {
 
 const NO_ENV_RUN = 'run-planner-no-envelope'
 const noEnvelopeCarrier = (detail) => ({ role, id }) => ({
+  [TRANSPORT_SETTLEMENT]: 'headless-rpc',
   assignment_id: id, role, status: 'insufficient', summary: 'rpc fallback', artifacts: [],
   details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', ...detail },
 })

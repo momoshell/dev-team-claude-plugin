@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
+  briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, TRANSPORT_SETTLEMENT, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
@@ -18,6 +18,18 @@ import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+import { TRANSPORT_SETTLEMENT as DRIVE_TRANSPORT_SETTLEMENT } from './drive.mjs'
+
+// MUTATION PV1: changing the registry key breaks the producer identity/payload contract.
+test('PV1 RPC empty settlements carry non-JSON provenance', () => {
+  const value = emptyTurnEnvelope({ id: 'd1', role: 'planner', returnPath: '/returns/x.json' })
+  const key = Symbol.for('dev-team.crew.transport-settlement')
+  assert.equal(TRANSPORT_SETTLEMENT, key)
+  assert.equal(DRIVE_TRANSPORT_SETTLEMENT, key)
+  assert.equal(value[key], 'headless-rpc')
+  assert.equal(Object.getOwnPropertyDescriptor(value, key)?.enumerable, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), { assignment_id: 'd1', role: 'planner', status: 'insufficient', summary: 'seat planner settled without writing an envelope to /returns/x.json; the turn produced no usable return', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', turns: null, tool_calls: null, absent_reason: 'census-unavailable' } })
+})
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL

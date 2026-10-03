@@ -283,11 +283,11 @@ export function suiteRefusalOf(env) {
   return refusal
 }
 
-// Producer shape only: freshness belongs to validEnvelope(), at each dispatch
-// boundary below. Returning the details object mirrors suiteRefusalOf() and lets
-// the preamble carry the measured recovery cost without reading another source.
+// An authenticated in-memory producer stamp and the dispatch-time RPC record
+// are both required; JSON-written lookalikes cannot cross this boundary.
 export function zeroTurnNonStartOf(env) {
   if (!env || typeof env !== 'object' || Array.isArray(env) || env.status !== 'insufficient') return null
+  if (!runtimeTransportNoEnvelopeCarrier(env)) return null
   if (typeof env.assignment_id !== 'string' || env.assignment_id === '') return null
   if (typeof env.role !== 'string' || env.role === '') return null
   const detail = env.details
@@ -340,15 +340,18 @@ function transportNoEnvelopeCarrier(env) {
 
 // Set only here, on the received carrier that lacked a run_id: a seat-authored
 // envelope that copies the tuple AND carries a run_id never gains it.
+export const TRANSPORT_SETTLEMENT = Symbol.for('dev-team.crew.transport-settlement')
 const RUNTIME_NO_ENVELOPE_CARRIER = Symbol('runtime-no-envelope-carrier')
 
-function normalizeRuntimeEnvelope(env, role, id, runId, budget) {
-  if (runId === undefined || !env || typeof env !== 'object' || env.run_id !== undefined) return env
+function normalizeRuntimeEnvelope(env, role, id, runId, budget, dispatchTransport = null) {
+  if (!env || typeof env !== 'object' || env.run_id !== undefined) return env
   if (env.assignment_id !== id || env.role !== role) return env
   const ceilingBudget = Number.isFinite(budget) ? budget : env.details?.turn_ceiling?.budget
-  if (suiteRefusalOf(env) || turnCeilingOf(env, ceilingBudget)) return { ...env, run_id: runId }
+  if (suiteRefusalOf(env) || turnCeilingOf(env, ceilingBudget)) return runId === undefined ? env : { ...env, run_id: runId }
   if (!transportNoEnvelopeCarrier(env)) return env
-  return { ...env, run_id: runId, [RUNTIME_NO_ENVELOPE_CARRIER]: true }
+  if (env[TRANSPORT_SETTLEMENT] !== 'headless-rpc') return env
+  if (dispatchTransport !== 'headless-rpc') return env
+  return { ...env, ...(runId === undefined ? {} : { run_id: runId }), [RUNTIME_NO_ENVELOPE_CARRIER]: true }
 }
 
 const HANDLED_ENVELOPE_REFUSAL = Symbol('handled-envelope-refusal')
@@ -6730,6 +6733,8 @@ function runTask(ctx, io, crash) {
     }
     restoreAcceptedPlan(S.stages.at(-1)?.split(':')[0] ?? note)
     const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}) })
+    let dispatchTransport = null
+    try { dispatchTransport = io.dispatchTransport?.(returnPath) ?? null } catch { dispatchTransport = null }
     onDispatch?.({ id, returnPath })
     const dispatchRunId = typeof ctx.run_id === 'string' && /\/returns\/[^/]+\/[^/]+\.json$/.test(String(returnPath))
       ? ctx.run_id
@@ -6744,7 +6749,7 @@ function runTask(ctx, io, crash) {
     io.log(recordRow({ at: io.now(), assign: id, role, brief }))
     emit({ kind: 'assign', id, role, brief })
     const received = io.wait(returnPath, waits[role] || 1200)
-    const normalized = normalizeRuntimeEnvelope(received, role, id, dispatchRunId, ctx.turnCeilings?.[role])
+    const normalized = normalizeRuntimeEnvelope(received, role, id, dispatchRunId, ctx.turnCeilings?.[role], dispatchTransport)
     const comparison = antiReplayComparison(normalized, role, id, dispatchRunId, { strictIdentity })
     if (comparison) {
       emit({

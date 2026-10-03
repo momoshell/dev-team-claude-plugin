@@ -1223,3 +1223,12 @@ test('freshSession handles a missing retire seam, thrown retirement and non-rpc 
     assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, before)
   }
 })
+
+// MUTATION PV2: replacing the dispatch record lookup with null loses assigned transport identity.
+test('PV2 assigned return paths retain their dispatch transport', () => {
+  const { io } = makeSeatIo()
+  const assignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+  assert.deepEqual(assignment, { id: 'd1', returnPath: assignment.returnPath })
+  assert.equal(io.dispatchTransport(assignment.returnPath), 'pane')
+  assert.equal(io.dispatchTransport('/unknown.json'), null)
+})

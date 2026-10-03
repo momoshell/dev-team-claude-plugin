@@ -73,6 +73,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       advisorCell: adapter.grants?.advisor === true && crew.advisor?.granted?.includes(role)
         ? piAdapter.advisorLaunchCell(crew.advisor)
         : null,
+      editAssist: crew.edit_assist ?? null,
       env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: seatTaskDir,
         ...(deps.permissionLead ? { CREW_ACP_PERMISSION_TIMEOUT_MS: String(deps.permissionTimeoutMs) } : {}) } })
     // #797: the launch policy settles what it can; an unsettled request goes to the injected lead, and with

@@ -33,6 +33,15 @@ function fixture(options = {}) {
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
 
+// MUTATION EA8: omit the off switch from the concrete ACP builder launch.
+test('EA8 ACP builder launch receives edit assist off', () => {
+  const f = fixture({ crew: { edit_assist: 'off', members: { builder: { agent: 'pi', model: 'test' } } } })
+  try {
+    assign(f)
+    assert.equal(f.launch.env.CREW_EDIT_ASSIST, 'off')
+  } finally { cleanup(f) }
+})
+
 test('A1 sleepdeadline', () => {
   let wall = 0, mono = 0, polls = 0, assignment
   const f = fixture({ now: () => wall, monotonic: () => mono, sleep: (ms) => {

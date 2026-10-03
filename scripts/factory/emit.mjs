@@ -877,6 +877,7 @@ function openRunInner({
         advisor_model: advisorModel,
         advisor_granted_json: crew.advisor?.granted == null ? null : JSON.stringify(crew.advisor.granted),
         advisor_source: ADVISOR_SOURCES.includes(crew.advisor_source) ? crew.advisor_source : null,
+        edit_assist: ['on', 'off'].includes(crew.edit_assist) ? crew.edit_assist : null,
       }
     } catch {
       return null

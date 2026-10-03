@@ -2862,6 +2862,9 @@ test('#800 §7b 43 — panel class findings remint around a reviewer-origin coll
   assert.equal(dGitApplies(io).length, 1)
 })
 
+// The git blob object id of some text, as `git hash-object` / `git rev-parse <rev>:<path>` print it.
+const { createHash: pinHash } = await import('node:crypto')
+const blobOid = (content) => { const body = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8'); return pinHash('sha1').update(Buffer.concat([Buffer.from(`blob ${body.length}\0`), body])).digest('hex') }
 // A lane base that carries a.test.mjs unchanged: the pinned snapshot is its base version.
 const withBaseTree = (io, bytes = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`]) => {
   const baseRun = io.run
@@ -2870,6 +2873,8 @@ const withBaseTree = (io, bytes = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`
     if (cmd === `git ls-tree -z --full-tree ${shellArg('base-head')} -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `100644 blob ${'a'.repeat(40)}\t${B376_TEST_FILE}\0` }
     if (cmd === `git show ${shellArg(`base-head:${B376_TEST_FILE}`)}`) return { ok: true, output: bytes }
     if (cmd === `git diff --unified=0 ${shellArg('base-head')} -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: '' }
+    if (cmd === `git rev-parse ${shellArg(`base-head:${B376_TEST_FILE}`)}`) return { ok: true, output: `${blobOid(bytes)}\n` }
+    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(io.readFile(`${CTX.checkout}/${B376_TEST_FILE}`) ?? '')}\n` }
     return result
   }
   return io
@@ -5264,6 +5269,7 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
     if (cmd === hardenWitnessCommand(B376_TEST_FILE)) return pinTap(files[testAbs])
+    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd === hardenCommand(guardFile, 'F1 guard')) {
       const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
       return proofOutputs[count - 1] ?? proofOutputs.at(-1)
@@ -5287,7 +5293,7 @@ const REAL_HEAD = "import { test } from 'node:test'\nimport assert from 'node:as
 const REAL_EXISTING = "test('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n"
 const REAL_BASE_TEST = `${REAL_HEAD}\n${REAL_EXISTING}`
 const REAL_GUARD_TEST = `${REAL_HEAD}\ntest('F1 guard', () => {\n  assert.equal(guard, true)\n})\n`
-function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b' }) {
+function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b' } = {}) {
   const checkout = scratchDir('b1074-pin-')
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
@@ -5319,7 +5325,7 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
   const baseRun = io.run
   io.run = function (cmd) {
     const fake = baseRun.call(this, cmd)
-    if (!/^(node --test|git (ls-tree|show|diff --unified=0) )/.test(cmd)) return fake
+    if (!/^(node --test|git (ls-tree|show|diff --unified=0|hash-object) )/.test(cmd) && !cmd.startsWith(`git rev-parse ${shellArg(`${head}:`).slice(0, -1)}`)) return fake
     const r = sh(cmd)
     return { ok: r.status === 0, output: `${r.stdout}${r.stderr}`, stderr: r.stderr, status: r.status }
   }
@@ -5376,8 +5382,8 @@ test('PV5 a byte-identical pinned file with the guard in another in-scope file i
 // a passing top-level check, even in a byte-identical file.
 test('PV6 a pinned check reported only as a nested line is refused', () => {
   const io = { readFile: () => 'snapshot' }
-  const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
-  const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io, run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
+  const pin = { source: 'base', bytes: 'snapshot', oid: 'a'.repeat(40), names: ['existing check'] }
+  const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin, abs: '/c/a.test.mjs', io, hash: () => 'a'.repeat(40), run: () => 'ok 1 - outer\n    ok 1 - existing check\n# pass 2\n# fail 0' })
   assert.equal(verdict.reason, 'witnessed-test-altered')
   assert.match(verdict.why, /"existing check" of a\.test\.mjs is absent against the built implementation/)
 })
@@ -5386,7 +5392,7 @@ test('PV6 a pinned check reported only as a nested line is refused', () => {
 test('PV7 pin verification refuses every input it cannot read, run or measure', () => {
   assert.deepEqual(HARDENING_PRESERVATION_REFUSALS, ['witnessed-test-altered', 'witnessed-test-unverifiable'])
   const green = 'ok 1 - existing check\n# pass 1\n# fail 0'
-  const pin = { source: 'base', bytes: 'snapshot', names: ['existing check'] }
+  const pin = { source: 'base', bytes: 'snapshot', oid: 'a'.repeat(40), names: ['existing check'] }
   const same = { readFile: () => 'snapshot' }
   const cases = [
     [{ pin: { ...pin, bytes: null } }, 'witnessed-test-unverifiable'],
@@ -5394,13 +5400,15 @@ test('PV7 pin verification refuses every input it cannot read, run or measure', 
     [{ pin: null }, 'witnessed-test-unverifiable'],
     [{ io: { readFile: () => { throw new Error('EIO') } } }, 'witnessed-test-unverifiable'],
     [{ io: { readFile: () => null } }, 'witnessed-test-altered'],
-    [{ io: { readFile: () => 'snapshot\n' } }, 'witnessed-test-altered'],
+    [{ hash: () => 'b'.repeat(40) }, 'witnessed-test-altered'],
+    [{ hash: () => null }, 'witnessed-test-unverifiable'],
+    [{ pin: { ...pin, oid: undefined } }, 'witnessed-test-unverifiable'],
     [{ run: () => { throw new Error('spawn failed') } }, 'witnessed-test-unverifiable'],
     [{ run: () => null }, 'witnessed-test-unverifiable'],
     [{ run: () => 'garbage' }, 'witnessed-test-unverifiable'],
   ]
   for (const [over, reason] of cases) {
-    const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin: 'pin' in over ? over.pin : pin, abs: '/c/a.test.mjs', io: over.io ?? same, run: over.run ?? (() => green) })
+    const verdict = verifyPrescriptionPin({ file: 'a.test.mjs', pin: 'pin' in over ? over.pin : pin, abs: '/c/a.test.mjs', io: over.io ?? same, run: over.run ?? (() => green), hash: over.hash ?? (() => 'a'.repeat(40)) })
     assert.equal(verdict.reason, reason, JSON.stringify(Object.keys(over)))
   }
   const files = {}
@@ -5451,6 +5459,7 @@ test('PV15 a suite-cycle repair round that edits the pinned file is refused', ()
   const baseRun = io.run
   io.run = function (cmd) {
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
+    if (cmd === `git hash-object -- ${shellArg(B376_TEST_FILE)}` && builder3) return { ok: true, output: `${blobOid(edited)}\n` }
     return baseRun.call(this, cmd)
   }
   const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
@@ -5497,6 +5506,20 @@ test('PV19 restoring a pre-review-damaged witnessed test to its base bytes is ac
     { when: 'accept', source: 'base', reason: null, checks: 1 }, { when: 'suite', source: 'base', reason: null, checks: 1 },
   ])
   assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), REAL_BASE_TEST)
+})
+
+// Kills P20 (decoded strings compared) — Sol redesign pass 2: two DIFFERENT undecodable
+// bytes in a comment decode to the same text; compared as git object ids they differ and
+// the edit is refused. The identical bytes are accepted.
+test('PV25 a pinned file differing only in an undecodable byte is refused; identical bytes are accepted', () => {
+  const withByte = (byte) => Buffer.concat([Buffer.from(`${REAL_HEAD}// marker `), Buffer.from([byte]), Buffer.from(`\n\n${REAL_EXISTING}`)])
+  assert.equal(withByte(0xff).toString('utf8'), withByte(0xfe).toString('utf8'))
+  const swapped = realPinRun({ baseTest: withByte(0xff), builtTest: withByte(0xfe) })
+  assert.notEqual(swapped.result.status, 'done')
+  assert.match(swapped.result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its base version/)
+  const same = realPinRun({ baseTest: withByte(0xff), builtTest: withByte(0xff) })
+  assert.equal(same.result.status, 'done')
+  assert.deepEqual(same.preservation.map(({ when, reason }) => [when, reason]), [['accept', null], ['suite', null]])
 })
 
 // Kills P18 (placement rule skipped): the prescribed guard may not live in the pinned file,

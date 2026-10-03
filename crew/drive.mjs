@@ -6151,6 +6151,10 @@ function runTask(ctx, io, crash) {
   // before review, so the review-time bytes can carry its own damage; the base version is
   // what the lane may not weaken. The checks are MEASURED by running that snapshot against
   // the review-time tree, not guessed from its source.
+  // The git object id of the file as it stands in the checkout: what `git rev-parse
+  // <base>:<file>` names for the base version, computed from the raw bytes, so two
+  // different undecodable bytes never compare equal the way two decoded strings can.
+  const hashPinnedFile = (file) => { try { return gitObjectId(io.run(`git hash-object -- ${shellArg(file)}`)) } catch { return null } }
   const capturePrescriptionPin = (file, finding, cell) => {
     const pin = { finding, source: null, bytes: null, names: null }
     if (typeof ctx.head !== 'string' || ctx.head.trim() === '') return { ...pin, why: 'the lane base commit was blank' }
@@ -6164,15 +6168,21 @@ function runTask(ctx, io, crash) {
       let shown
       try { shown = io.run(`git show ${shellArg(`${ctx.head}:${file}`)}`) } catch { shown = null }
       if (shown?.ok !== true || typeof shown.output !== 'string') return { ...pin, why: 'the base version could not be read' }
+      let baseId
+      try { baseId = io.run(`git rev-parse ${shellArg(`${ctx.head}:${file}`)}`) } catch { baseId = null }
+      pin.oid = gitObjectId(baseId)
+      if (pin.oid === null) return { ...pin, why: 'the base version has no readable git object id' }
       pin.source = 'base'
       // The live runner returns stdout+stderr; the snapshot is stdout alone.
       pin.bytes = typeof shown.stderr === 'string' && shown.stderr !== '' && shown.output.endsWith(shown.stderr) ? shown.output.slice(0, -shown.stderr.length) : shown.output
     } else {
       if (cell?.state !== 'read' || typeof cell.bytes !== 'string') return { ...pin, why: 'the review-time bytes were unreadable' }
+      pin.oid = hashPinnedFile(file)
+      if (pin.oid === null) return { ...pin, why: 'the review-time file has no readable git object id' }
       pin.source = 'review'
       pin.bytes = cell.bytes
     }
-    const measured = runBytesInPlace({ abs: `${ctx.checkout}/${file}`, bytes: pin.bytes, io, run: () => io.run(hardenWitnessCommand(file))?.output })
+    const measured = runBytesInPlace({ abs: `${ctx.checkout}/${file}`, bytes: pin.bytes, io, run: () => io.run(hardenWitnessCommand(file))?.output, digest: () => hashPinnedFile(file) })
     if (measured.fatal) return { ...pin, fatal: measured.fatal }
     if (measured.absent || measured.error) return { ...pin, why: measured.absent ? 'the file was absent at conversion' : measured.error }
     // MUTATION P11: keep no measured names and every pinned check reads as preserved.
@@ -6184,7 +6194,7 @@ function runTask(ctx, io, crash) {
     const checks = prescriptionPinsDefect
       ? [{ file: PRESCRIPTION_PINS_FILE, record: { finding: null, file: PRESCRIPTION_PINS_FILE, when, source: null, reason: 'witnessed-test-unverifiable', why: prescriptionPinsDefect } }]
       : [...prescriptionPins].map(([file, pin]) => {
-        const verdict = verifyPrescriptionPin({ file, pin, abs: `${ctx.checkout}/${file}`, io, run: () => io.run(hardenWitnessCommand(file))?.output })
+        const verdict = verifyPrescriptionPin({ file, pin, abs: `${ctx.checkout}/${file}`, io, run: () => io.run(hardenWitnessCommand(file))?.output, hash: () => hashPinnedFile(file) })
         return { file, record: { finding: pin?.finding ?? null, file, when, source: pin?.source ?? null, reason: verdict.reason, why: verdict.why, ...(Number.isInteger(verdict.checks) ? { checks: verdict.checks } : {}) } }
       })
     for (const { record } of checks) {
@@ -14480,7 +14490,16 @@ export function topLevelCheckNames(output) {
 // Run `bytes` in place of the file at `abs`, then put the file's own bytes back and prove
 // they read back. A file that is absent cannot host the run (nothing could restore an
 // absence). `fatal` means the restore failed and the tree may still carry the snapshot.
-export function runBytesInPlace({ abs, bytes, io, run }) {
+// A git object id from one `git rev-parse` / `git hash-object` result, or null.
+export function gitObjectId(result) {
+  const text = result?.ok === true && typeof result.output === 'string' ? result.output.trim() : ''
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(text) ? text : null
+}
+export function runBytesInPlace({ abs, bytes, io, run, digest = null }) {
+  // With a digest, the restore is proven on the raw bytes: a text round-trip cannot put
+  // back an undecodable byte, and a read-back of decoded text would not notice.
+  const before = digest ? digest() : null
+  if (digest && before === null) return { error: 'its git object id could not be taken before the snapshot run' }
   let current
   try { current = io.readFile(abs) } catch (err) { return { error: `it could not be read: ${err?.message || String(err)}` } }
   if (current === null) return { absent: true }
@@ -14498,10 +14517,11 @@ export function runBytesInPlace({ abs, bytes, io, run }) {
   let after
   try { after = io.readFile(abs) } catch { after = null }
   if (after !== current) return { fatal: 'it did not read back as its own bytes after the snapshot run' }
+  if (digest && current !== bytes && digest() !== before) return { fatal: 'its git object id changed across the snapshot run; its raw bytes were not restored' }
   if (runError) return { error: `the snapshot run threw: ${runError?.message || String(runError)}` }
   return { output, current }
 }
-export function verifyPrescriptionPin({ file, pin, abs, io, run }) {
+export function verifyPrescriptionPin({ file, pin, abs, io, run, hash }) {
   const refuse = (reason, why, extra = {}) => ({ reason, why, ...extra })
   if (!pin || typeof pin.bytes !== 'string') return refuse('witnessed-test-unverifiable', `no snapshot of ${file} was captured${pin?.why ? `: ${pin.why}` : ''}`)
   if (!Array.isArray(pin.names)) return refuse('witnessed-test-unverifiable', `the ${pin.source ?? 'snapshot'} run of ${file} at conversion was not a parseable node:test summary, so its checks were never measured`)
@@ -14514,7 +14534,12 @@ export function verifyPrescriptionPin({ file, pin, abs, io, run }) {
   // the snapshot, and passes. The prescribed new guard belongs in a different test file.
   // MUTATION P12: drop the identity and a shipped copy whose assertion was weakened keeps
   // passing today and stops catching tomorrow's regression.
-  if (built !== pin.bytes) return refuse('witnessed-test-altered', `${file} must ship byte-identical to its ${pin.source} version; it was edited — restore it and put the new guard in a different test file`)   // ANCHOR P12
+  // Compared as git object ids, never as decoded strings: two different undecodable bytes
+  // decode to the same replacement character.
+  if (typeof pin.oid !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(pin.oid)) return refuse('witnessed-test-unverifiable', `the snapshot of ${file} carries no git object id to compare against`)
+  const shipped = typeof hash === 'function' ? hash() : null
+  if (shipped === null) return refuse('witnessed-test-unverifiable', `the git object id of the built ${file} could not be taken`)
+  if (shipped !== pin.oid) return refuse('witnessed-test-altered', `${file} must ship byte-identical to its ${pin.source} version; it was edited — restore it and put the new guard in a different test file`)   // ANCHOR P12
   if (pin.names.length === 0) return { reason: null, why: `${file} ships byte-identical to its ${pin.source} version, which reported no top-level check at conversion`, checks: 0 }
   // The shipped file IS the snapshot, so this run proves the snapshot's checks against the
   // built implementation, imported modules included.

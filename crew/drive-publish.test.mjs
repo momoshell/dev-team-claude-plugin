@@ -102,8 +102,10 @@ test('A1 resume retries frozen rebase without restarting plan or build and reach
 })
 
 // A resumed run of a lane whose prescription pins were persisted to the lane state dir.
+const { createHash: pinHash } = await import('node:crypto')
+const blobOid = (text) => { const body = Buffer.from(String(text), 'utf8'); return pinHash('sha1').update(Buffer.concat([Buffer.from(`blob ${body.length}\0`), body])).digest('hex') }
 const PIN_SNAPSHOT = "import { test } from 'node:test'\n\ntest('existing check', () => {})\n"
-const PIN_STATE = JSON.stringify({ version: 1, pins: { 'a.test.mjs': { finding: 'F1', source: 'base', bytes: PIN_SNAPSHOT, names: ['existing check'] } } })
+const PIN_STATE = JSON.stringify({ version: 1, pins: { 'a.test.mjs': { finding: 'F1', source: 'base', bytes: PIN_SNAPSHOT, oid: blobOid(PIN_SNAPSHOT), names: ['existing check'] } } })
 function resumeWithPins(pinsText, built, journalText = undefined) {
   const checkpoint = resumeCheckpointFixture()
   const testAbs = `${CTX.checkout}/a.test.mjs`
@@ -118,6 +120,7 @@ function resumeWithPins(pinsText, built, journalText = undefined) {
   const baseRun = io.run
   io.run = function (cmd) {
     const result = baseRun.call(this, cmd)
+    if (cmd === `git hash-object -- ${shellArg('a.test.mjs')}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd !== hardenWitnessCommand('a.test.mjs')) return result
     const names = [...String(files[testAbs]).matchAll(/^test\('([^']+)'/gm)].map((m) => m[1])
     return { ok: true, output: `${names.map((name, i) => `ok ${i + 1} - ${name}`).join('\n')}\n# pass ${names.length}\n# fail 0` }

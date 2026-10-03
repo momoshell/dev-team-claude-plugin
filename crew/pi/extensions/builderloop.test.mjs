@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
@@ -515,6 +516,83 @@ test('D3', async () => {
   const before = structuredClone(evt.input)
   const result = await loop.onToolResult(evt, { cwd: f.root })
   assert.equal(appendedText(result), text.split('\n').map((line, k) => `${k + 1}: ${line}`).join('\n')); assert.deepEqual(evt.input, before)
+})
+
+test('EA1', async () => {
+  const evt = recordedEvent(6, 7)
+  const input = structuredClone(evt.input)
+  const old = input.edits[0].oldText
+  const f = fixture()
+  const loop = loopFor(f, { deps: { stat: () => ({ size: 1000 }), readFile: () => `head\n${old}\nbetween\n${old}\ntail` } })
+  await loop.onToolResult({ ...evt, input }, { cwd: f.root })
+  assert.deepEqual(failureRows(f)[0] && [failureRows(f)[0].cause, failureRows(f)[0].edit_index], ['not-unique', 0])
+})
+
+test('EA2', async () => {
+  const evt = recordedEvent(4, 5)
+  const input = structuredClone(evt.input)
+  const f = fixture()
+  let stats = 0, reads = 0, text = 'unrelated'
+  const loop = loopFor(f, { deps: { stat: () => { stats++; return { size: 100 } }, readFile: () => { reads++; return text } } })
+  await loop.onToolResult({ ...evt, input }, { cwd: f.root })
+  assert.deepEqual([failureRows(f)[0].cause, failureRows(f)[0].edit_index], ['never-seen', 0])
+  assert.deepEqual([stats, reads], [1, 1])
+  for (const frames of [[4, 5], [6, 7]]) for (const count of [0, 2]) {
+    const other = recordedEvent(...frames), changed = structuredClone(other.input)
+    changed.edits = count === 0 ? [] : [...changed.edits, structuredClone(changed.edits[0])]
+    const probe = fixture(); let calls = 0
+    const guarded = loopFor(probe, { deps: { stat: () => { calls++; return { size: 1 } }, readFile: () => { calls++; return 'x' } } })
+    assert.equal(await guarded.onToolResult({ ...other, input: changed }, { cwd: probe.root }), undefined)
+    assert.deepEqual([failureRows(probe)[0].cause, failureRows(probe)[0].edit_index], ['other', null]); assert.equal(calls, 0)
+  }
+  const old = input.edits[0].oldText
+  const check = async (overrideText, deps, expected) => {
+    const probe = fixture(), helper = loopFor(probe, { deps: { stat: () => ({ size: 100 }), readFile: () => overrideText, ...deps } })
+    await helper.onToolResult({ ...evt, input: structuredClone(evt.input) }, { cwd: probe.root })
+    const row = failureRows(probe)[0]; assert.deepEqual([row.cause, row.cause_absent_reason, row.edit_index], expected)
+  }
+  await check(old.split('\n').map(line => `  ${line}`).join('\n'), {}, ['indentation', null, 0])
+  const stale = fixture(), staleLoop = loopFor(stale, { deps: { stat: () => ({ size: 100 }), readFile: () => 'unrelated' } })
+  await staleLoop.onToolResult({ toolName: 'read', content: [{ type: 'text', text: old }], isError: false })
+  await staleLoop.onToolResult({ ...evt, input: structuredClone(evt.input) }, { cwd: stale.root })
+  assert.deepEqual([failureRows(stale)[0].cause, failureRows(stale)[0].edit_index], ['seen-stale', 0])
+  await check('x', { stat: () => { throw Error('denied') } }, [null, 'file-unreadable', 0])
+  await check('x', { stat: () => ({ size: mod.EDIT_FILE_CAP_BYTES + 1 }) }, [null, 'file-too-large', 0])
+  await check('x'.repeat(mod.EDIT_FILE_CAP_BYTES + 1), { stat: () => ({ size: 1 }) }, [null, 'file-too-large', 0])
+  await check('x', { readFile: () => { throw Error('denied') } }, [null, 'file-unreadable', 0])
+})
+
+test('EA3', async () => {
+  const duplicate = recordedEvent(6, 7), notFound = recordedEvent(4, 5)
+  const duplicateInput = structuredClone(duplicate.input), missingInput = structuredClone(notFound.input)
+  const old = duplicateInput.edits[0].oldText
+  const [first, second] = old.split('\n')
+  const f = fixture(), loop = loopFor(f, { assist: 'on', deps: { stat: () => ({ size: 10000 }), readFile: () => `head\n${old}\nbetween\n${old}\ntail` } })
+  const result = await loop.onToolResult({ ...duplicate, input: duplicateInput }, { cwd: f.root })
+  assert.equal(appendedText(result), ['1: head', `2: ${first}`, `3: ${second}`, '4: between', `5: ${first}`, '---', `3: ${second}`, '4: between', `5: ${first}`, `6: ${second}`, '7: tail'].join('\n'))
+  assert.equal(result.content[0].text, duplicate.content[0].text); assert.deepEqual(duplicateInput, duplicate.input)
+  const g = fixture(), missingLoop = loopFor(g, { assist: 'on', deps: { stat: () => ({ size: 100 }), readFile: () => 'unrelated' } })
+  const missingResult = await missingLoop.onToolResult({ ...notFound, input: missingInput }, { cwd: g.root })
+  assert.equal(appendedText(missingResult), 'none of the oldText lines occur in crew/drive-build.test.mjs')
+  assert.equal(missingResult.content[0].text, notFound.content[0].text); assert.deepEqual(missingInput, notFound.input)
+})
+
+test('EA4', async () => {
+  const evt = recordedEvent(4, 5), input = structuredClone(evt.input), f = fixture()
+  const loop = loopFor(f, { deps: { stat: () => ({ size: 100 }), readFile: () => 'unrelated' } })
+  assert.equal(await loop.onToolResult({ ...evt, input }, { cwd: f.root }), undefined)
+  assert.deepEqual([failureRows(f)[0].cause, failureRows(f)[0].assist, failureRows(f)[0].edit_index], ['never-seen', 'off', 0])
+})
+
+test('EA5', () => {
+  const firstFour = readFileSync(new URL('./builderloop-edit-frames.jsonl', import.meta.url), 'utf8').split('\n').slice(0, 4).join('\n')
+  assert.equal(createHash('sha256').update(firstFour).digest('hex'), '04bb6654791ca5913bf412820c8b7b36c6b5e081a58b25d0eaf52fcb252f348c')
+  assert.equal(recordedFrames.length, 8)
+  for (const [start, end, phrase] of [[4, 5, 'Could not find the exact text'], [6, 7, 'Found 2 occurrences of the text']]) {
+    assert.equal(recordedFrames[start].toolCallId, recordedFrames[end].toolCallId)
+    assert.equal(recordedFrames[start].args.edits.length, 1)
+    assert.match(recordedFrames[end].result.content[0].text, new RegExp(phrase))
+  }
 })
 test('B1', async () => {
   const old = recordedEvent(2, 3).input.edits[0].oldText

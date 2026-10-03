@@ -30,7 +30,7 @@ function parkPending(at, until, wake) { return at < until && wake === null }
 // The GUARD below (ADR-029 §5 c3) is correct and untouched: one live invocation
 // per session. What changes is the RESPONSE to it. A refused concurrent turn at
 // a round boundary is transient and has an obvious move — wait for the prior
-// invocation to settle. The bound mirrors crew/seat-io.mjs:176-178
+// invocation to settle. The bound mirrors crew/seat-io.mjs's re-ask constants
 // (REASK_SETTLE_MS × REASK_SETTLE_POLLS), which waits out the same
 // write-then-exit gap one layer up. ONE bound covers BOTH phases, the probe and
 // the reservation race, so a busy round boundary costs 60s and never 120s.
@@ -46,15 +46,15 @@ export const SESSION_BUSY_EVENT = 'seat-session-busy'
 export const SESSION_BUSY_VERDICTS = Object.freeze(['waiting', 'settled', 'expired', 'unresolvable'])
 export const SESSION_BUSY_PHASES = Object.freeze(['probe', 'reservation'])
 // The driver names its rounds `plan:rN` and passes this transport no stage label
-// (crew/drive.mjs:3129). It does RECORD every stage it opens in the lane journal
-// this module already writes to — {stage} on open (crew/drive.mjs:2775) and
-// {stage_done} on close (:2769) — so replaying that stack here yields the
-// driver's own openStages.at(-1). crew/crew.mjs:2438 stagesFromJournal is the
+// (crew/drive.mjs, dispatchOnce). It does RECORD every stage it opens in the lane journal
+// this module already writes to — {stage} on open (crew/drive.mjs, stage) and
+// {stage_done} on close (stageComplete) — so replaying that stack here yields the
+// driver's own openStages.at(-1). crew/crew.mjs (stagesFromJournal) reads stages with the
 // same idiom, including its reset at a run-start row.
 //
 // NOTHING DURABLE IS WRITTEN FOR ANY OF THIS. The fallback ordinal below is
 // DERIVED from the {assign, role} record rows the driver already logs
-// (crew/drive.mjs:3132) — one per OPENED assignment, none for a refused one — so
+// (crew/drive.mjs, dispatchOnce) — one per OPENED assignment, none for a refused one — so
 // a lane whose rounds never overlap adds no crew-member field, no journal row and
 // no park call. When neither label nor ordinal can be measured the round is
 // reported UNKNOWN; an unmeasured value is never a guess.
@@ -64,9 +64,9 @@ export const SESSION_ROUND_UNMEASURED = 'unmeasured'
 export const SESSION_ROUND_BASES = Object.freeze([SESSION_DRIVER_BASIS, SESSION_ROUND_BASIS, SESSION_ROUND_UNMEASURED])
 export const SESSION_STAGE_ABSENT = Object.freeze(['journal-absent', 'journal-unreadable', 'no-open-stage'])
 export const JOURNAL_RECORD_CHANNEL = 'record'
-// The literal of crew/drive.mjs:2076 RUN_START_EVENT, repeated rather than
+// The literal of crew/drive.mjs (RUN_START_EVENT), repeated rather than
 // imported: crew/drive.mjs already imports from this module, and an import back
-// would close a cycle. crew/crew.mjs:2223 writes the row and :2447 resets on it.
+// would close a cycle. crew/crew.mjs (runCmd) writes the row; stagesFromJournal resets on it.
 export const JOURNAL_RUN_START_EVENT = 'run-start'
 const KILL_GRACE_MS = 10_000
 
@@ -126,10 +126,10 @@ export const SEAT_REFUSAL_ACTIONS = Object.freeze({
   [UNCLASSIFIED_REFUSAL]: 'reprompt-on-silence',   // verbatim: mutation G1
 })
 
-// The SAME CSI pattern scripts/factory/make-brief.mjs:53 carries, re-inlined
-// rather than imported across the factory boundary — the precedent is
-// scripts/factory/probe-repo.mjs:498. A worker colourises inside the phrase
-// ("rate\x1b[0m limit"), which a raw-byte matcher cannot see at all.
+// Strip terminal controls with node:util (stripVTControlCharacters) before
+// matching provider prose; no factory-module import is needed. A worker
+// colourises inside a phrase, so matching raw bytes can miss the condition.
+// For example, "rate\x1b[0m limit" is not a contiguous raw-byte phrase.
 // eslint-disable-next-line no-control-regex
 
 export function recogniseProviderCondition(text) {
@@ -146,7 +146,7 @@ export function recogniseSeatRefusal(text) {
   return null
 }
 
-// ONLY the stderr the wrapper already redirected (:238). One read on the
+// ONLY the stderr the wrapper already redirected (assign). One read on the
 // failure path: no new capture, no poll, no timer. A missing, empty or
 // unreadable file is an ABSENCE — it never fabricates a condition, and it
 // never fabricates the absence of one either (the caller attaches nothing).
@@ -216,7 +216,7 @@ export function providerFailureKind(status) {
 // plan, a build, a scope gate, a 17/17 mutation proof and a completed review to
 // a 529 at review:r1, and its own stream shows the worker had ALREADY spent ten
 // retries over 223s inside the turn. The kind was measured the whole time
-// (providerFailureKind, crew/headless.mjs:157) and nothing routed on it. Route here.
+// (crew/headless.mjs, providerFailureKind) and nothing routed on it. Route here.
 //
 // A retry that never gives up is worse than the escalation it replaces, so BOTH
 // bounds are closed constants and BOTH are consumed: a park that fits the
@@ -268,7 +268,7 @@ export const PARK_BEAT_MS = 15_000
 // The journal vocabulary for ONE park observation. It is the DRIVER that is measured,
 // never the seat — during a park there is deliberately no seat — so the row names its
 // own source instead of borrowing the seat-liveness one. The `provider-park-` prefix
-// is load-bearing: test/factory-emit.test.mjs:1663 asserts an unclassified failure
+// is load-bearing: test/factory-emit.test.mjs ('b443 #887 an unclassified provider status keeps today's terminal path') asserts an unclassified failure
 // writes no row whose event starts with `provider-retry`.
 export const PARK_BEAT_EVENT = 'provider-park-beat'
 export const PARK_BEAT_SOURCE = 'driver-park'
@@ -294,7 +294,7 @@ export function providerResetInstant(seconds) {
 }
 
 // What the driver does about each kind, as DATA for the same reason
-// SEAT_REFUSAL_ACTIONS (crew/headless.mjs:71) is data: a policy change is a data edit, not a new
+// SEAT_REFUSAL_ACTIONS (crew/headless.mjs) is data: a policy change is a data edit, not a new
 // branch. `none` is TODAY'S behaviour, byte for byte — no row, no wait, no
 // respawn — and it is what an UNCLASSIFIED failure and an unmeasured status
 // both get, because a failure nobody diagnosed must not be retried as though it
@@ -910,7 +910,7 @@ export const PANE_NO_INTERCEPT = 'pane-no-intercept'
 export const SUITE_RUN_REFUSAL = 'suite-run-not-owned'
 export const SUITE_RUN_UNRECOGNISED = 'suite-run-unrecognised'
 // DATA, not branches: a policy change is a data edit, the posture
-// SEAT_REFUSAL_ACTIONS (:71) already takes.
+// SEAT_REFUSAL_ACTIONS (crew/headless.mjs) already takes.
 export const SUITE_RUN_OWNERSHIP = Object.freeze({
   planner: 'once', 'tech-lead': 'never', builder: 'fenced', reviewer: 'never', lead: 'never',
 })
@@ -1063,14 +1063,14 @@ function shellTokens(text) {
   return [...String(text ?? '').matchAll(SHELL_TOKEN_RE)].map((match) => match[0].replace(/["']/g, ''))
 }
 // SHELL-WORD decoding for the fence path (issue 1406). Mirrors drive.mjs#shellWords
-// (crew/drive.mjs:12754-12777) — headless.mjs must not import the driver, so the
+// (crew/drive.mjs, shellWords) — headless.mjs must not import the driver, so the
 // scanner is mirrored rather than imported, exactly as fenceCovers mirrors
 // scopeMatcher below. A trailing `\` is accumulated LITERALLY, matching
-// drive.mjs:12772: the decoded word then fails concreteTestFile (it does not end
+// crew/drive.mjs (shellWords): the decoded word then fails concreteTestFile (it does not end
 // in .test.mjs) so testTargets still returns null, while isNodeTestInvocation stays
 // TRUE and the segment classifies `suite` and refuses. The null-returning alternative
 // looks fail-closed but is fail-open because `unrecognised` is not enforced —
-// crew/headless.mjs:2479 and crew/headless-rpc.mjs:1515 end the dispatch only on `refuse`.
+// crew/headless.mjs (enforceBeforeEnvelope) and crew/headless-rpc.mjs (enforceRpcBeforeEnvelope) end the dispatch only on `refuse`.
 // Returns null on unterminated-quote input — an unterminated quote is not a command
 // this policy can vouch for.
 // `$` and backticks are NOT expanded: the decoded word keeps them literally,
@@ -1160,7 +1160,7 @@ function safeOption(token) {
 }
 const GLOB_CHARS = /[*?[\]{}]/
 // A target must be the same PLAIN REPO-RELATIVE path a scope entry must be
-// (crew/drive.mjs:1742-1760): no glob, not absolute, and no `.` or `..` segment.
+// (crew/drive.mjs, validateScopeEntries): no glob, not absolute, and no `.` or `..` segment.
 // A command operand is not a canonical git path — `crew/pi/../../test/x.test.mjs`
 // has the `crew/pi/` prefix and resolves outside it — so the prefix match below
 // is only sound over paths that were validated here first.
@@ -1237,7 +1237,7 @@ export function testTargets(command, taskDir = null) {
   return targets.length > 0 ? targets : null
 }
 
-// The SAME two branches crew/drive.mjs#scopeMatcher uses (:1915-1919): an entry
+// The SAME two branches crew/drive.mjs (scopeMatcher) uses: an entry
 // ending in `/` matches by prefix, anything else matches exactly. Mirrored
 // rather than imported — headless.mjs must not import the driver — and sound only
 // because concreteTestFile has already refused `..` segments.
@@ -1710,7 +1710,7 @@ function workerCommand(adapter, spec) {
 
 // ONE durability contract for crew.json (#539, phase 2 of #546). Three
 // modules write this file and every reader parses it with no retry
-// (crew/crew.mjs:315 loadCrew, crew/daemon.mjs:1083), so a plain writeFileSync
+// (crew/crew.mjs, loadCrew; crew/daemon.mjs, enqueue), so a plain writeFileSync
 // publishes an O_TRUNC window the whole runtime can fall into — measured at
 // 2084 torn reads in 68156 (docs/audits/2026-08-23/hunt/h1/repro/r6-*.mjs).
 // The owner lives HERE, not in seat-io.mjs, because the import direction is
@@ -1734,7 +1734,7 @@ function parseCrewJson(readFileSync, path) {
 
 // The ONLY code path that publishes crew.json bytes: a uniquely named sibling
 // temp (a fixed `.tmp` name is itself a collision two writers can tear, the
-// `<name>.json.tmp.<uuid>` convention is crew/reclaim.mjs:166) followed by
+// `<name>.json.tmp.<uuid>` convention is crew/reclaim.mjs (writeNew)) followed by
 // renameSync, an atomic replace on POSIX — no reader can observe the file
 // absent or half-written.
 export function writeCrewJson(paths, crew, deps = {}) {
@@ -1755,7 +1755,7 @@ export function writeCrewJson(paths, crew, deps = {}) {
   return p
 }
 
-// Locked read-modify-write, the posture scripts/factory/emit.mjs:875-902
+// Locked read-modify-write, the posture scripts/factory/emit.mjs (withLock)
 // already uses. Every writer used to republish a whole private in-memory copy,
 // so a seat minting a session id erased the driver's reseat with no race at
 // all. `mutate` receives the CURRENT on-disk crew and returns false to publish
@@ -1810,7 +1810,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   // [F1] The PARK is a deliberate wait between a refused turn and its
   // replacement spawn, and in exactly that window the previous worker root is
   // gone BY DESIGN. seat-io's deps.sleep is a death PROBE that throws
-  // `seat-died` on precisely that state (crew/seat-io.mjs:2301-2324), so the
+  // `seat-died` on precisely that state (crew/seat-io.mjs, seatIo's transportArgs.deps.sleep), so the
   // park gets its own seam. The deps.sleep fallback exists only for a
   // composition that supplies no park seam at all; seat-io always supplies one.
   const delay = deps.delay || deps.sleep || defaultSleep
@@ -1908,13 +1908,13 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     err.stage = 'headless-unresolvable-reservation'; err.role = role; return err
   }
   // #944 — the lane journal is this transport's only view of the driver's round.
-  // crew/seat-io.mjs:3626 and this module's own log() write the SAME file, so the
+  // crew/seat-io.mjs (seatIo.log) and this module's own log() write the SAME file, so the
   // {stage}/{stage_done}/{assign} record rows are already on disk when assign
   // runs. Replaying the stage rows as a STACK reproduces the driver's openStages;
   // its top is openStages.at(-1) — the round the refusal belongs to. Counting the
   // role's {assign} rows gives the fallback ordinal without storing anything.
   // Both are scoped to the CURRENT run by the run-start reset, the same idiom as
-  // crew/drive.mjs:2129 and crew/crew.mjs:2447. Read LAZILY: a lane whose rounds
+  // crew/drive.mjs (RUN_START_EVENT) and crew/crew.mjs (stagesFromJournal). Read LAZILY: a lane whose rounds
   // never overlap must touch nothing at all.
   function journalFacts(role) {
     const path = join(paths.dir, 'journal.jsonl')
@@ -1988,7 +1988,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     return { verdict: 'expired', dispatch: waitedOn, handle: null, waited_ms: waited }
   }
   // reclaim's reserve() refuses ANY marker whose verdict is not FREE
-  // (crew/reclaim.mjs:1062-1068), RECLAIMABLE included, so a race winner that has
+  // (crew/reclaim.mjs, reserve), RECLAIMABLE included, so a race winner that has
   // merely FINISHED never yields to a bare retry. Each pass RECONCILES afresh,
   // keeps waiting while the winner is BUSY, CLEARS its exact handle once it is
   // reclaimable, and only then reserves. UNRESOLVABLE is not transient: it stops
@@ -2025,7 +2025,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   // A RE-ASK is not a new assignment: it is the SAME one, asked again. The caller
   // (crew/seat-io.mjs reaskUnusableEnvelope) owns the bound and supplies BOTH the
   // original LOGICAL id — so the envelope that comes back still satisfies the
-  // driver's anti-replay check (crew/drive.mjs:631) — and a fresh path to collect
+  // driver's anti-replay check (crew/drive.mjs, validEnvelope) — and a fresh path to collect
   // it on, because the seat's own bytes are read, never rewritten. The PHYSICAL
   // run keeps its own `runId`: it is a second invocation and every reservation,
   // directory and journal row must still be able to say so.
@@ -2038,7 +2038,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     // ONE deadline, taken once, read by BOTH waits. Neither mints its own.
     const deadline = now() + SESSION_BUSY_SETTLE_MS
     const roundFor = roundResolver(role, !!reask)
-    // The RE-ASK path does not settle: crew/seat-io.mjs:2727 and :2870 already
+    // The RE-ASK path does not settle: crew/seat-io.mjs (reaskUnusableEnvelope and seatIo.assign) already
     // poll REASK_SETTLE_POLLS times on this very stage, and waiting in both
     // places multiplies one 60s bound into twelve minutes.
     const settled = reask ? sessionProbe(role, prior, persisted) : settleSession({ role, sessionId, prior, persisted, roundFor, deadline })
@@ -2142,8 +2142,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     // ran out of time; it must never say that about a seat that never had one.
     const next = chain[0]
     if (!next || typeof next.model !== 'string' || !next.model) return null
-    // The role wait is a DISPATCH deadline (crew/drive.mjs:2155,
-    // crew/crew.mjs:1864-1866). A second turn with zero budget is not a turn,
+    // The role wait is a DISPATCH deadline (crew/drive.mjs, WAITS_S/resolveWaits;
+    // crew/crew.mjs, runCmd). A second turn with zero budget is not a turn,
     // and the refusal is recorded rather than silently skipped.
     if (now() >= deadline) {
       log({ at: now(), event: 'seat-fallback-expired', role: run.role, assignment_id: run.id, cause: 'budget' })
@@ -2154,8 +2154,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const rest = chain.slice(1)
     const patch = { model: to.model, provider: to.provider, id: to.id, effort: to.effort ?? member.effort ?? null, fallback: rest }
     // BOTH authoritative views, in memory and on disk, in one locked
-    // read-modify-write — the posture crew/seat-io.mjs:3045-3064 already takes,
-    // because crew/seat-io.mjs:2896 reads `crew.seats?.[role] || m` as the LIVE
+    // read-modify-write — the posture crew/seat-io.mjs (seatIo.reseat) already takes,
+    // because crew/seat-io.mjs (seatIo.reseat) reads `crew.seats?.[role] || m` as the LIVE
     // cell and a member-only update leaves that reader on the refused one.
     for (const target of [member, crew.seats?.[run.role]]) { if (target) Object.assign(target, patch) }
     fallbacksUsed.set(key, (fallbacksUsed.get(key) ?? 0) + 1)
@@ -2221,8 +2221,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   // out of the wait never leaves crew.json claiming a park that ended; a SIGKILL runs
   // no finally, which is exactly the case crew-watch reports as abandoned. The clear is
   // WRAPPED for the same reason every other write here is: updateCrewJson calls
-  // existsSync outside its own catch (:1242-1247) and a failed persist reaches the
-  // injected logger (:1313-1318), so either could otherwise replace a healthy retry
+  // existsSync outside its own catch (updateCrewJson) and a failed persist reaches the
+  // injected logger (notePersist), so either could otherwise replace a healthy retry
   // result with a throw.
   function parkFor(waitMs, park = null) {
     const startedAt = now()
@@ -2294,7 +2294,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       providerRetries.set(key, { attempts: latest.attempts, waited_ms: latest.waited_ms, declined: why })
       return { act: 'refuse' }
     }
-    // [F5] The SECOND call site (crew/headless.mjs:1450) is reached only after the wait loop ran
+    // [F5] The SECOND call site (waitUntil, after endDispatch) is reached only after the wait loop ran
     // out on now() >= deadline and endDispatch already killed the worker. A park
     // there would spend real minutes and then hand the replacement a deadline
     // that the same park has already moved past — an attempt burnt on a worker
@@ -2357,7 +2357,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   }
   // The escalation NAMES the provider cause and what the bound bought. The
   // clause is APPENDED and never woven in: escalationCause
-  // (scripts/factory/ledger.mjs:166) matches PROSE for several rules that
+  // (scripts/factory/ledger.mjs, escalationCause) matches PROSE for several rules that
   // precede the budget rule, and the tokens that would re-route it are
   // deliberately absent from this sentence. A kind whose action is `none` is
   // annotated with nothing, so today's message stays byte-identical.
@@ -2372,7 +2372,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     return err
   }
   // A re-ask is not a new assignment: same id, same return path, same brief
-  // (the reask contract at :416), and the SAME absolute deadline. A re-assign
+  // (the reask contract in assign), and the SAME absolute deadline. A re-assign
   // that THROWS is journalled and yields null, so the caller escalates on the
   // original outcome rather than on a reservation error nobody asked about.
   function reaskOnFallback(run, returnPath, deadline, providerFailure = null) {

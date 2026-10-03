@@ -88,6 +88,7 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/roster': [],
+  '/api/plugin-write-mode': [],
   '/api/roster/pick': ['tier', 'role'],
   '/api/agents': [],
   '/api/agents/propose': [],
@@ -434,9 +435,24 @@ function readPickQuery(url) {
   return values
 }
 
+export function pluginWriteMode({ pluginRoot = PROJECT_ROOT, home = homedir(), existsSync: exists = existsSync, realpathSync: realpath = realpathSync } = {}) {
+  let plugin_root = resolve(pluginRoot)
+  const readonly = (basis) => ({ writable:false, reason:'installed-plugin-read-only', basis, plugin_root })
+  try { plugin_root = realpath(plugin_root) } catch { return readonly('plugin-root-unresolvable') }
+  let realHome
+  try { realHome = realpath(resolve(home)) } catch { realHome = resolve(home) }
+  const plugins = join(realHome, '.claude', 'plugins')
+  if (plugin_root === plugins || plugin_root.startsWith(`${plugins}${process.platform === 'win32' ? '\\\\' : '/'}`)) return readonly('under-claude-plugins-dir')
+  if (!exists(join(plugin_root, '.git'))) return readonly('no-git-work-tree')
+  return { writable:true, reason:null, basis:null, plugin_root }
+}
+
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
+  const writeMode = pluginWriteMode({ pluginRoot:config.pluginRoot ?? PROJECT_ROOT, home:config.home ?? homedir() })
+  const PLUGIN_WRITE_NOTICE = 'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.'
+  const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }
   config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb, crewRoot: config.crewRoot })
@@ -599,6 +615,10 @@ export function startServer(options = {}) {
         if (!journalRepo || !journalTask) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = journal.readJournal({ repo_slug: journalRepo, task_slug: journalTask, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/plugin-write-mode') {
+        if (method !== 'GET') return json(res, 405, { schema, error:'method not allowed' }, { allow:'GET' })
+        return json(res, 200, { schema, ...writeMode, notice: writeMode.writable ? null : PLUGIN_WRITE_NOTICE })
       }
       if (url.pathname === '/api/roster') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -866,6 +886,7 @@ export function startServer(options = {}) {
         try {
           if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await readModelCatalog(), persisted:false }) }
           if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
+          if (input.persist === true && !writeMode.writable) return json(res, 409, pluginWriteRefusal)
           if (input.persist === true) {
             saveArtificialAnalysisKey(config.envFile, input.api_key)
             modelCatalog.setPersistentApiKey(input.api_key)
@@ -911,6 +932,7 @@ export function startServer(options = {}) {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        if (!writeMode.writable) return json(res, 409, pluginWriteRefusal)
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves) || input.moves.length === 0) return json(res, 400, { schema, error: 'moves must be a non-empty array' })

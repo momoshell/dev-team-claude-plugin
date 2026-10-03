@@ -24,3 +24,5 @@ running tasks are unaffected. This route never invokes Git, creates a PR, or
 touches a remote repository. Policy failures can be explicitly accepted for a
 local experiment with `allow_warnings`; schema, model, adapter, and boot-shape
 refusals remain hard blockers. Repository patch composition stays strict.
+
+The server permits local apply and persistent model-catalog key writes only when its plugin root resolves to a git-bearing location outside the real home `~/.claude/plugins/` tree. Otherwise it reports `installed-plugin-read-only` and refuses POST ladder/apply and persistent POST model-catalog/key requests. Session-only keys and null key clears remain available, as do propose, stage, and compose routes because they do not write files. Edits to an installed, version-pinned plugin copy would be overwritten by the next plugin update.

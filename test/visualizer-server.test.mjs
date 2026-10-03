@@ -10,7 +10,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
-import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
+import { parseCliArgs, pluginWriteMode, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createWorkflowsSource, WORKFLOW_FEED_REASONS } from '../visualizer/server/workflows-source.mjs'
 import { VARIANTS } from '../crew/variants.mjs'
 import { SHAPE_DEFECT_CODES } from '../crew/shape-validator.mjs'
@@ -65,6 +65,17 @@ function announceDetails(child) {
   })
 }
 const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
+
+test('RO1', () => {
+  // MUTATION: invert the no-.git decision; this fake no-git checkout must refuse.
+  const root = '/tmp/work', home = '/tmp/home'
+  assert.deepEqual(pluginWriteMode({ pluginRoot:root, home, existsSync:() => false, realpathSync:(path) => path }), {
+    writable:false, reason:'installed-plugin-read-only', basis:'no-git-work-tree', plugin_root:root,
+  })
+  assert.deepEqual(pluginWriteMode({ pluginRoot:`${home}/.claude/plugins/cache/pkg`, home, existsSync:() => true, realpathSync:(path) => path }), {
+    writable:false, reason:'installed-plugin-read-only', basis:'under-claude-plugins-dir', plugin_root:`${home}/.claude/plugins/cache/pkg`,
+  })
+})
 function runServerCli(args, opts = {}) {
   return spawnSync(process.execPath, [SERVER_SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8', ...opts })
 }

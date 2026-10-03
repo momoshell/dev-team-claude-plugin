@@ -23,6 +23,6 @@ Case-insensitive literal census over the 33 `.svelte` files directly under the v
 
 `not measured` files: FleetTable.svelte, OperationsOverview.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
 
-One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/AgentsPage.svelte:85`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:172`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/PromptsPage.svelte:52`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:585`.
+One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/AgentsPage.svelte:85`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:172`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/PromptsPage.svelte:52`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:598`.
 
 **Stated gap:** 4 spellings across 27/33 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears in 3/33 components (AgentsPage.svelte, PromptsPage.svelte, SkillsPage.svelte).

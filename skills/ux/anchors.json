@@ -8,14 +8,14 @@
   "visualizer/web/src/lib/PhaseDots.svelte:8": "animation:pulse 1.2s infinite",
   "visualizer/web/src/lib/PhaseGantt.svelte:258": ".bounce-hotspot:focus-visible",
   "visualizer/web/src/lib/PromptsPage.svelte:52": "prompt.recipients_reason",
-  "visualizer/web/src/lib/RosterPanel.svelte:414": "<svelte:window onkeydown",
-  "visualizer/web/src/lib/RosterPanel.svelte:585": "Null means not measured—not zero",
-  "visualizer/web/src/lib/RosterPanel.svelte:675": "assignment-title\" tabindex=\"-1\"",
-  "visualizer/web/src/lib/RosterPanel.svelte:692": ".loading span { width:1.6rem",
-  "visualizer/web/src/lib/RosterPanel.svelte:708": ".directory-loading span",
   "visualizer/web/src/lib/RunCard.svelte:54": "run.engineer || 'engineer —'",
   "visualizer/web/src/lib/RunDetail.svelte:172": "Not measured for this run",
   "visualizer/web/src/lib/TaskList.svelte:120": "No tasks match this view.",
   "visualizer/web/src/lib/WorkflowsPage.svelte:171": "Loading workflows",
-  "visualizer/web/src/lib/WorkflowsPage.svelte:294": "class=\"editor-error\" role=\"alert\""
+  "visualizer/web/src/lib/WorkflowsPage.svelte:294": "class=\"editor-error\" role=\"alert\"",
+  "visualizer/web/src/lib/RosterPanel.svelte:598": "Null means not measured—not zero",
+  "visualizer/web/src/lib/RosterPanel.svelte:426": "<svelte:window onkeydown",
+  "visualizer/web/src/lib/RosterPanel.svelte:688": "assignment-title\" tabindex=\"-1\"",
+  "visualizer/web/src/lib/RosterPanel.svelte:721": ".directory-loading span",
+  "visualizer/web/src/lib/RosterPanel.svelte:705": ".loading span { width:1.6rem"
 }

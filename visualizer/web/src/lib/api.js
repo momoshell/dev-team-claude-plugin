@@ -37,3 +37,4 @@ export const setModelCatalogKey = (apiKey, options = {}) => request('/api/model-
 export const stageRosterLadder = (moves) => request('/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })
 export const composeRosterLadder = (moves) => request('/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })
 export const applyRosterLadder = (moves, options = {}) => request('/api/roster/ladder/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves, allow_warnings:options.allowWarnings === true }) })
+export const getPluginWriteMode = () => request('/api/plugin-write-mode')

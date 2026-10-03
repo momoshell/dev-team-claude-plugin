@@ -12,7 +12,7 @@ Make every painted foreground, background, border, marker, and fill resolve to a
 
 ## T3 - escalation goes through the alias
 
-Use `--status-escalated` in a component; treat `--serious` as raw. Both escalation exhibits are now alias-correct: `visualizer/web/src/App.svelte:246` paints the rail tones from `--status-escalated`, and `visualizer/web/src/lib/RosterPanel.svelte:693` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
+Use `--status-escalated` in a component; treat `--serious` as raw. Both escalation exhibits are now alias-correct: `visualizer/web/src/App.svelte:246` paints the rail tones from `--status-escalated`, and `visualizer/web/src/lib/RosterPanel.svelte:706` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
 
 ## T4 - one owner writes the theme switch
 

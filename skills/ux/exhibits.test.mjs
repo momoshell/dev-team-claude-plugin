@@ -144,7 +144,7 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(aria.occurrences, 124)
   assert.equal(aria.files, 28)
   const role = census('role=', 'g')
-  assert.equal(role.occurrences, 20)
+  assert.equal(role.occurrences, 21)
   assert.equal(role.files, 9)
   for (const row of [
     '| legacy `on:keydown` attributes | 0 | 0 |',
@@ -153,7 +153,7 @@ test('ux keyboard and focus register re-derives', () => {
     '| plain `:focus` selectors | 3 | 1 |',
     '| `tabindex` attributes | 1 | 1 |',
     '| `aria-` attributes | 124 | 28 |',
-    '| `role=` attributes | 20 | 9 |',
+    '| `role=` attributes | 21 | 9 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)
   }

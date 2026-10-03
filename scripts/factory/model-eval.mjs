@@ -94,7 +94,7 @@ async function seatModel(candidate, role, deps) {
       model: null,
     },
   }
-  const adapters = await deps.resolveAdapters([role], args, seats)
+  const adapters = await deps.resolveAdapters([role], args, seats, { env: process.env })
   if (NON_BLANK(candidate?.model)) return candidate.model
   if (!adapters || typeof adapters !== 'object' || Array.isArray(adapters)) {
     throw new Error(`model-eval: adapter resolver returned no adapter set for seat ${role}`)
@@ -1140,7 +1140,7 @@ export async function defaultRunSeat({ task, candidate, role, bench, dir, briefF
       [`effort-${role}`]: member.effort || candidate.effort,
       ...(member.transport === 'headless-rpc' ? { 'headless-rpc': role } : { headless: role }),
     }
-    const adapters = await deps.resolveAdapters([role], adapterArgs)
+    const adapters = await deps.resolveAdapters([role], adapterArgs, null, { env: process.env })
     io = await deps.seatIo(crew, paths, checkout, null, adapters, adapterArgs, deps.seatIoDeps || {})
     if (!io || typeof io !== 'object') throw new Error('model-eval: seat I/O factory returned no I/O object')
 

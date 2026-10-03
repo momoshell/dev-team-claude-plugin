@@ -43,13 +43,13 @@ export function citationOnlyDiff(output) {
   return finish() && hunks > 0
 }
 export function readPromptDiff({ files, baseSha, io, quote } = {}) {
-  if (typeof baseSha !== 'string' || !baseSha.trim() || typeof io?.run !== 'function' || typeof quote !== 'function' || !Array.isArray(files)) return { citation_only: null, reason: 'diff-unreadable' }
-  try {
-    const result = io.run(`git diff -U0 ${quote(baseSha)}...HEAD -- ${files.map(quote).join(' ')}`)
-    if (result?.ok !== true || typeof result.output !== 'string' || result.output.includes('\0')) return { citation_only: null, reason: 'diff-unreadable' }
-    const citationOnly = citationOnlyDiff(result.output)
-    return { citation_only: citationOnly, reason: null }
-  } catch { return { citation_only: null, reason: 'diff-unreadable' } }
+  let result = null
+  if (typeof baseSha === 'string' && baseSha.trim() && typeof io?.run === 'function' && typeof quote === 'function' && Array.isArray(files)) {
+    try { result = io.run(`git diff -U0 ${quote(baseSha)}...HEAD -- ${files.map(quote).join(' ')}`) } catch { result = null }
+  }
+  if (result?.ok !== true || typeof result.output !== 'string' || result.output.includes('\0')) return { citation_only: null, reason: 'diff-unreadable' }
+  const citationOnly = citationOnlyDiff(result.output)
+  return { citation_only: citationOnly, reason: null }
 }
 export function publishPromptClaim({ files, baseSha, io, quote, register, planClaim } = {}) {
   const hits = promptDocumentHits(files, promptSurfacePaths(register))

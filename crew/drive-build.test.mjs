@@ -7742,7 +7742,7 @@ test('A1 prompt-surface plan sends the plain brief to builder', () => {
 })
 
 test('A4 directory-scoped charter plan sends the plain brief to builder', () => {
-  // Mutation: restoring the planner's retired wrapper makes this assertion fail.
+  // Mutation: restoring the builder's retired wrapper makes this assertion fail.
   const scope = ['crew/roles/']
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({

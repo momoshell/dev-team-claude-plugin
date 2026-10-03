@@ -4,6 +4,8 @@ import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 import { shapeValidationDefect } from './shape-validator.mjs'
 import { loadCapabilities } from './capabilities.mjs'
 import { protectedHitsIn, resolveProtectedPaths, promptDocumentHits, promptScopeHits, promptSurfacePaths } from './protected-paths.mjs'
+import { PROMPT_MEASURED_CLAIM, PROMPT_UNMEASURED_CLAIM, PROMPT_NOT_APPLICABLE, validPlanPromptClaim, stripPromptClaims, promptClaimLines, publishPromptClaim, askClosingIssues } from './prompt-claim.mjs'
+export { PROMPT_MEASURED_CLAIM, PROMPT_UNMEASURED_CLAIM, promptClaimLines } from './prompt-claim.mjs'
 import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeContains } from './fence-scope.mjs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -3478,12 +3480,13 @@ function mergeFenceScopes(scopes) {
   return merged
 }
 
-export function composeCommitMessage({ task, planEnv, builderEnv }) {
+export function composeCommitMessage({ task, planEnv, builderEnv, brief = null }) {
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
   const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
   const planLine = firstNonEmptyLine(planEnv?.summary)
   const subject = subjectLine || `crew(${task}): ${planLine || 'task change'}`
-  const body = String(builderEnv?.details?.commit_message || builderEnv?.summary || '').trim()
+  const builderBody = stripPromptClaims(builderEnv?.details?.commit_message || builderEnv?.summary || '')
+  const body = [builderBody.trim(), validPlanPromptClaim(planEnv?.details?.prompt_claim) ? planEnv.details.prompt_claim : ''].filter(Boolean).join('\n\n').trim()
   const bodyPart = body && body.split('\n')[0] === subject ? '' : body
   const normalizeIssues = (values) => {
     const out = []
@@ -3497,7 +3500,8 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)])
+  const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => askClosingIssues(brief).includes(ref))
+  const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes), ...promoted])
   const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
   const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
@@ -3545,17 +3549,12 @@ export const NARRATION_REFUSALS = Object.freeze({
   trailer: 'narration-trailer',
 })
 export const NARRATION_REFUSAL_NAMES = Object.freeze(Object.values(NARRATION_REFUSALS))
-const PROMPT_CLAIM_LINE_START = String.raw`(?:^|\n)`
-const PROMPT_MEASURE_NAME = String.raw`(?:first-round pass rate|turns per seat|[a-z0-9][a-z0-9._-]* refusal frequency)`
-const PROMPT_MEASURE_SAMPLE = String.raw`[^;\n]+\s+\(n=[1-9]\d*\)`
-const PROMPT_MEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}Measure: ${PROMPT_MEASURE_NAME}; before: ${PROMPT_MEASURE_SAMPLE}; after: ${PROMPT_MEASURE_SAMPLE}\.?(?:\n|$)`, 'i')
-const PROMPT_UNMEASURED_CLAIM = new RegExp(String.raw`${PROMPT_CLAIM_LINE_START}unmeasured — n insufficient; reason: [^;\n]*[^\s;\n][^;\n]*; re-measure after [1-9]\d* seats\.?(?:\n|$)`, 'i')
-
-export function promptMeasurementDefect({ files, body, register = loadCapabilities() } = {}) {
+export function promptMeasurementDefect({ files, body, register = loadCapabilities(), citation_only = null } = {}) {
   const hits = promptDocumentHits(files, promptSurfacePaths(register))
   if (hits.length === 0) return null
   const text = String(body ?? '')
   if (PROMPT_MEASURED_CLAIM.test(text) || PROMPT_UNMEASURED_CLAIM.test(text)) return null
+  if (citation_only === true && text.split('\n').includes(PROMPT_NOT_APPLICABLE)) return null
   return `prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: ${hits.join(', ')}`
 }
 
@@ -4697,13 +4696,9 @@ export function carriedPrLines(carried) {
 
 const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Hardening blind spots', '## Changed', '## Run', '## Prompt measurement']
 
-export function promptClaimLines(intent) {
-  const lines = String(intent ?? '').split('\n')
-  return lines.filter((line) => PROMPT_MEASURED_CLAIM.test(line) || PROMPT_UNMEASURED_CLAIM.test(line))
-}
-
 export function composePrBody(record) {
-  const intent = String(record?.intent || '').trim()
+  const rawIntent = String(record?.intent || '').trim()
+  const intent = record?.prompt_claim === PROMPT_NOT_APPLICABLE ? stripPromptClaims(rawIntent).trim() : rawIntent
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
   const whyParts = []
@@ -4762,7 +4757,7 @@ export function composePrBody(record) {
     ...(repeated.length ? [`- Repeated: ${repeated.join(', ')}`] : []),
     ...anomalies.map((row) => `- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`),
   ]
-  const claims = promptClaimLines(intent)
+  const claims = record && Object.hasOwn(record, 'prompt_claim') ? (validPlanPromptClaim(record.prompt_claim) ? [record.prompt_claim] : []) : promptClaimLines(intent)
   const prSections = [
     ['## What', intent],
     ['## Why', why],
@@ -5381,7 +5376,8 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
 
   stageComplete()
   stage('converge:commit')
-  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+  const convergeBriefText = (() => { try { const value = io.readFile(ctx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: convergeBriefText })
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = [...new Set(io.changedFiles())]
@@ -8069,11 +8065,13 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return resumeEscalate('publish', `publish refused (${reason}): ${detail}`, { publish: { refused: reason } })
       }
+      const resumePromptClaim = publishPromptClaim({ files: publishFiles, baseSha: verifiedBaseSha, io: resumeIo, quote: shellArg, register: loadCapabilities(), planClaim: checkpoint.returns?.planner?.details?.prompt_claim })
+      if (resumePromptClaim) resumeIo.log(recordRow({ at: resumeIo.now(), event: 'prompt-claim', source: resumePromptClaim.source, citation_only: resumePromptClaim.citation_only, reason: resumePromptClaim.reason, files: resumePromptClaim.files }))
       if (publishBranch === baseName) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${baseName}`)
       const resumeBriefText = (() => { try { const value = resumeIo.readFile(resumeCtx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
       const resumeIssueDefect = issueStatementDefect({ brief: resumeBriefText, details: checkpoint.returns?.planner?.details })
       if (resumeIssueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, resumeIssueDefect)
-      const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
+      const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: resumePromptClaim?.citation_only ?? null, body: composePrBody({ intent: commitIntent(checkpoint.commit.message), ...(resumePromptClaim ? { prompt_claim: resumePromptClaim.claim } : {}) }) })
       if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
       try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
@@ -8102,6 +8100,7 @@ function runTask(ctx, io, crash) {
         if (!pushed?.ok) return refusePublish(PUBLISH_REFUSALS.pushRejected, `the branch push was rejected${pushed?.output ? `: ${String(pushed.output).slice(-2000)}` : ''}`)
         const bodyRecord = {
           intent: commitIntent(checkpoint.commit.message),
+          ...(resumePromptClaim ? { prompt_claim: resumePromptClaim.claim } : {}),
           closes: issueTrailers(checkpoint.commit.message).closes,
           issues: issueTrailers(checkpoint.commit.message).refs,
           stages: [...S.stages], cursor: roundCursor(S.stages), files: [...publishFiles],
@@ -8364,6 +8363,7 @@ function runTask(ctx, io, crash) {
         '`LANE_VALUE_OPTIONS` (for values such as `--test-timeout`) and `LANE_PATH_OPTIONS` (for paths such as `--import`) are supported.',
         'An environment value belongs in the test as a declared constant, with the variable as an optional override.',
         'details.needs_adversary must be a boolean: true requests the adversary plan-check round; false does not.',
+        'details.prompt_claim is mandatory for prompt scope. Use exactly one own-whole-line form: Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).; unmeasured — n insufficient; reason: <why>; re-measure after N seats.; or not applicable — citation-only; no seat-behaviour change intended. The measured name is first-round pass rate, turns per seat, or <slug> refusal frequency; counts are positive integers.',
         'files_in_scope is mutable plan context, not an allow-list; wider, narrower, and later-round contexts are recorded and proceed when their literal shape is valid and each newly named concrete path is tracked in the checkout.',
       ].join('\n'))
     } catch (err) {
@@ -8844,6 +8844,9 @@ function runTask(ctx, io, crash) {
     }
     logScopeAdmission(row)
     return { action: 'admit', source, files: additions, evidence }
+  }
+  if (planEnv.role === 'planner' && promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length > 0 && !validPlanPromptClaim(planEnv.details?.prompt_claim)) {
+    return escalate('plan', 'prompt-claim-missing: prompt-scoped planner plans require one valid prompt_claim', planEnv.artifacts || [])
   }
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
@@ -10247,28 +10250,8 @@ function runTask(ctx, io, crash) {
     }
   }
 
-  const builderAssignmentBrief = (briefPath) => {
-    if (promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length === 0) return briefPath
-    const wrapperPath = art('builder-assignment.md')
-    io.writeFile(wrapperPath, [
-      '# Builder assignment wrapper', '',
-      `Read the current builder brief at ${briefPath}.`,
-      `Builder source brief: ${briefPath}.`, '',
-      'The commit message must carry a prompt measurement claim.',
-      'Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).',
-      'unmeasured — n insufficient; reason: <why>; re-measure after N seats.',
-      'Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.',
-      '`<name>`, `<sample>`, `<why>`, and `N` are placeholders to substitute, never literals; every `n=` and the `re-measure after N seats` count must be a positive integer.',
-      'The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.',
-      '`<why>` must contain at least one non-whitespace character; empty or all-space reasons do not match.',
-      'Put the claim on its own whole line in the commit message body, not the subject line: nothing may precede it on that line or follow its final period; a trailing ` Closes #123.` breaks the match.',
-      '`<sample>` must be followed by whitespace and then the literal parenthesised `(n=N)` shape, exactly as the template line shows.',
-      'Put the claim in details.commit_message.',
-    ].join('\n'))
-    return wrapperPath
-  }
   function prepareBuilderAssignment(briefPath, note) {
-    const wrappedPath = builderAssignmentBrief(briefPath)
+    const wrappedPath = briefPath
     if (builderAttempts <= 1) return wrappedPath
     let renewal = { session: 'kept', why: 'io.freshSession is unavailable' }
     if (typeof io.freshSession === 'function') {
@@ -11885,7 +11868,7 @@ function runTask(ctx, io, crash) {
   verifiedPublishBaseSha = null
   const continuingRebase = pendingRebaseConflict !== null
   stage('commit')
-  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: briefText })
   const subject = String(message).split('\n')[0]
   S.commitMessage = message
   S.commitSubject = subject
@@ -12649,11 +12632,13 @@ function runTask(ctx, io, crash) {
         commit: S.commit, files_committed: publishFiles, publish: { refused: reason },
       })
     }
+    const promptClaim = publishPromptClaim({ files: publishFiles, baseSha, io, quote: shellArg, register: loadCapabilities(), planClaim: planEnv?.details?.prompt_claim })
+    if (promptClaim) io.log(recordRow({ at: io.now(), event: 'prompt-claim', source: promptClaim.source, citation_only: promptClaim.citation_only, reason: promptClaim.reason, files: promptClaim.files }))
     if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
     if (branch === publishBase) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${publishBase}`)
     const issueDefect = issueStatementDefect({ brief: briefText, details: planEnv?.details })
     if (issueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, issueDefect)
-    const promptDefect = promptMeasurementDefect({ files: publishFiles, body: composePrBody({ intent: commitIntent(message) }) })
+    const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: promptClaim?.citation_only ?? null, body: composePrBody({ intent: commitIntent(message), ...(promptClaim ? { prompt_claim: promptClaim.claim } : {}) }) })
     if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
 
     let ghMissing
@@ -12689,6 +12674,7 @@ function runTask(ctx, io, crash) {
     // `intent` is the builder's commit body verbatim, so an absolute path it carries reaches the body.
     const record = {
       intent: commitIntent(message),
+      ...(promptClaim ? { prompt_claim: promptClaim.claim } : {}),
       closes: trailers.closes,
       issues: trailers.refs,
       stages: [...S.stages],

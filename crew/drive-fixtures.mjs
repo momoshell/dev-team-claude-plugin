@@ -1516,6 +1516,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   // The resume path journals its own narration row (crew/drive.mjs:7651) before the
   // triage row, in source order: a resumed lane narrates too, and an inventory listing
   // one site while the driver has two is an inventory nobody can trust.
+  ["recordRow", "event='prompt-claim'", "at source citation_only reason files"],
   ["recordRow", "", "at narration"],
   ["recordRow", "", "at triage"],
   ["recordRow", "", "at directed"],
@@ -1572,6 +1573,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at rebase_restore_diagnosis"],
   ["recordRow", "", "at gate_proof_parent gate_generation"],
   ["recordRow", "", "at cold_suite"],
+  ["recordRow", "event='prompt-claim'", "at source citation_only reason files"],
   ["recordRow", "", "at narration"],
   ["recordRow", "", "at published"],
   ["operationalRow", "", "at event kind queue_depth waited_ms slotted lock_contended lock_holder"],

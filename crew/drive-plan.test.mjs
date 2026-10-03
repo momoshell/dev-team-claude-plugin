@@ -3330,7 +3330,7 @@ const noEnvelopeCarrier = (detail) => ({ role, id }) => ({
   assignment_id: id, role, status: 'insufficient', summary: 'rpc fallback', artifacts: [],
   details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', ...detail },
 })
-const plannerNoEnvelopeScenario = ({ planners = [], builders = [], leads = [leadEnv('escalate')], planRounds = 1 } = {}) => {
+const plannerNoEnvelopeScenario = ({ planners = [], builders = [], leads = [leadEnv('escalate')], planRounds = 1, turnCeilings, censusDenied = false } = {}) => {
   const queues = {
     planner: [...planners, planEnv()], builder: [...builders, buildEnv()], reviewer: [reviewEnv('pass')], lead: leads,
   }
@@ -3356,7 +3356,14 @@ const plannerNoEnvelopeScenario = ({ planners = [], builders = [], leads = [lead
     if (typeof raw === 'function') return raw(identity)
     return { ...raw, assignment_id: raw.assignment_id ?? identity.id, run_id: raw.run_id ?? NO_ENV_RUN }
   }
-  return { io, result: driveTask({ ...CTX, run_id: NO_ENV_RUN, limits: { plan_rounds: planRounds } }, io) }
+  if (censusDenied) {
+    const readFile = io.readFile
+    io.readFile = (path) => {
+      if (path === `${TD}/journal.jsonl`) throw new Error('EACCES: turn census denied')
+      return readFile(path)
+    }
+  }
+  return { io, result: driveTask({ ...CTX, run_id: NO_ENV_RUN, ...(turnCeilings ? { turnCeilings } : {}), limits: { plan_rounds: planRounds } }, io) }
 }
 
 const noEnvelopeDispatches = (scenario, role) => scenario.io.calls.assign.filter((entry) => entry.role === role)
@@ -3365,6 +3372,29 @@ const NO_ENVELOPE_DETAILS = Object.freeze([
   { turns: 8, tool_calls: 40, absent_reason: null },
   { turns: null, tool_calls: null, absent_reason: 'census-unavailable' },
 ])
+
+// MUTATION NC1: remove the post-log carrier escape and census unreadability masks the transport retry.
+test('NC1 unreadable planner census preserves authentic no-envelope direct retry', () => {
+  const detail = { turns: null, tool_calls: null, absent_reason: 'census-unavailable' }
+  const scenario = plannerNoEnvelopeScenario({ planners: [noEnvelopeCarrier(detail), noEnvelopeCarrier(detail)], turnCeilings: { planner: 40 }, censusDenied: true })
+  assert.equal(noEnvelopeDispatches(scenario, 'planner').length, 2)
+  assert.deepEqual(scenario.result.details.stages.filter((stage) => /^plan:r/.test(stage)), ['plan:r1'])
+  assert.equal(noEnvelopeRows(scenario).filter((row) => row.kind === 'planner-no-envelope' && row.applied).length, 1)
+  assert.doesNotMatch(scenario.io.calls.writes[noEnvelopeDispatches(scenario, 'planner')[1].briefFile], /turn-ceiling-unmeasured/)
+  const census = scenario.io.calls.logs.filter((row) => row.seat_turn_ceiling?.role === 'planner').map((row) => row.seat_turn_ceiling)
+  assert.equal(census.length, 2)
+  assert.deepEqual(census.map(({ measured, enforced, absent_reason }) => ({ measured, enforced, absent_reason })), [
+    { measured: false, enforced: false, absent_reason: CENSUS_UNREADABLE },
+    { measured: false, enforced: false, absent_reason: CENSUS_UNREADABLE },
+  ])
+  const ordinary = plannerNoEnvelopeScenario({ planners: [planEnv()], turnCeilings: { planner: 40 }, censusDenied: true })
+  assert.equal(noEnvelopeDispatches(ordinary, 'planner').length, 1)
+  assert.equal(ordinary.result.status, 'escalation')
+  assert.equal(ordinary.io.calls.logs.filter((row) => row.envelope && row.role === 'planner' && row.status === 'done').length, 0)
+  assert.deepEqual(ordinary.io.calls.logs.find((row) => row.seat_turn_ceiling?.role === 'planner')?.seat_turn_ceiling, {
+    role: 'planner', dispatch: 'planner1', turns: null, budget: 40, measured: false, enforced: false, absent_reason: CENSUS_UNREADABLE,
+  })
+})
 
 // MUTATION NOENVREASK: remove plannerNoEnvelope from the direct retry condition.
 test('NOENVREASK', () => {

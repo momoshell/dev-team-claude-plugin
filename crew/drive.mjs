@@ -6683,6 +6683,7 @@ function runTask(ctx, io, crash) {
     const breached = turnCeilingBreached(observed.turns, budget)
     const measured = observed.turns !== null
     io.log(recordRow({ at: io.now(), seat_turn_ceiling: { role, dispatch: id, turns: observed.turns, budget, measured, enforced: breached, absent_reason: observed.absent } }))
+    if (plannerNoEnvelopeOf(env)) return env
     if (!breached && measured) return env
     return {
       ...(runId === undefined ? {} : { run_id: runId }),
@@ -6752,7 +6753,9 @@ function runTask(ctx, io, crash) {
       })
       const otherwiseValid = comparison.reason === 'assignment-id-mismatch'
         ? validEnvelope({ ...normalized, assignment_id: id }, role, id, dispatchRunId, { strictIdentity })
-        : undefined
+        : comparison.reason === 'run-mismatch'
+          ? typeof normalized?.run_id === 'string' && normalized.run_id.trim().length > 0 && validEnvelope({ ...normalized, run_id: dispatchRunId }, role, id, dispatchRunId, { strictIdentity })
+          : undefined
       io.log(recordRow({ at: io.now(), envelope_refused: {
         role, dispatch: id, reason: comparison.reason,
         field: comparison.field, expected: comparison.expected, found: comparison.found,
@@ -6820,12 +6823,14 @@ function runTask(ctx, io, crash) {
       const env = dispatchOnce(role, briefFile, note, dispatchOpts)
       const refusal = suiteRefusalOf(env)
       const refusalDetail = handledEnvelopeRefusalOf(env)
-      if (refusalDetail?.reason === 'assignment-id-mismatch' && refusalDetail.otherwise_valid === true) {
+      if (['assignment-id-mismatch', 'run-mismatch'].includes(refusalDetail?.reason) && refusalDetail.otherwise_valid === true) {
         const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(identity.returnPath) : null
         try { io.log(recordRow({ at: io.now(), envelope_id_reask: { role, dispatch: identity.id, path: identity.returnPath, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* the id re-ask journal is never load-bearing */ }
         if (graceSpentBy) return env
         const retryPath = join(dirname(identity.returnPath), `${identity.id}.id-reask.${role}.json`)
-        const preamble = `Your envelope was refused. Return assignment_id=${JSON.stringify(identity.id)}. run_id is never the assignment_id.`
+        const preamble = refusalDetail.reason === 'run-mismatch'
+          ? `Your envelope was refused. Return run_id=${JSON.stringify(refusalDetail.expected)}.`
+          : `Your envelope was refused. Return assignment_id=${JSON.stringify(identity.id)}. run_id is never the assignment_id.`
         const originalBrief = typeof opts.briefBuilder === 'function'
           ? opts.briefBuilder({ id: identity.id, role, runId: typeof ctx.run_id === 'string' ? ctx.run_id : undefined })
           : `Original brief: ${briefFile}`

@@ -3486,8 +3486,11 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null }
   const planLine = firstNonEmptyLine(planEnv?.summary)
   const subject = subjectLine || `crew(${task}): ${planLine || 'task change'}`
   const builderBody = stripPromptClaims(builderEnv?.details?.commit_message || builderEnv?.summary || '')
-  const body = [builderBody.trim(), validPlanPromptClaim(planEnv?.details?.prompt_claim) ? planEnv.details.prompt_claim : ''].filter(Boolean).join('\n\n').trim()
-  const bodyPart = body && body.split('\n')[0] === subject ? '' : body
+  const builderText = builderBody.trim()
+  // A builder body that merely repeats the subject is suppressed; the plan claim is appended
+  // after that suppression so it never rides along into the drop.
+  const builderPart = builderText && builderText.split('\n')[0] === subject ? '' : builderText
+  const bodyPart = [builderPart, validPlanPromptClaim(planEnv?.details?.prompt_claim) ? planEnv.details.prompt_claim : ''].filter(Boolean).join('\n\n')
   const normalizeIssues = (values) => {
     const out = []
     for (const issue of Array.isArray(values) ? values : []) {

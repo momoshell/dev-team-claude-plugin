@@ -5357,3 +5357,16 @@ test('RV1-4 a generated checkpoint keeps the final committed files apart from th
   assert.deepEqual(checkpoint.commit.files, [PC_PROMPT])
   assert.equal(checkpoint.publish.base_sha, 'base1111')
 })
+
+// Sol pass 1 (b1096). Mutation: append the plan claim BEFORE the duplicate-subject suppression
+// (`const bodyPart = body && body.split('\n')[0] === subject ? '' : body` over builder text + claim)
+// and a builder body that repeats the subject drops the plan claim from the commit — watched red.
+test('RV1-2 the plan claim survives a builder body that repeats the commit subject', () => {
+  const planEnvelope = { details: { commit_subject: 'feat: move', prompt_claim: PC_PLAN } }
+  for (const commitMessage of ['feat: move', 'feat: move\n\nmore detail', `feat: move\n${PC_BUILDER}`]) {
+    const message = composeCommitMessage({ task: 't', planEnv: planEnvelope, builderEnv: { details: { commit_message: commitMessage } } })
+    assert.equal(message, `feat: move\n\n${PC_PLAN}`, JSON.stringify(commitMessage))
+  }
+  const kept = composeCommitMessage({ task: 't', planEnv: planEnvelope, builderEnv: { details: { commit_message: 'moved the thing' } } })
+  assert.equal(kept, `feat: move\n\nmoved the thing\n\n${PC_PLAN}`)
+})

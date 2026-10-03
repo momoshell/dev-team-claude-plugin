@@ -1429,17 +1429,33 @@ function blankComments(source) {
   return out
 }
 
-// A real emit wearing a form DRIVE_SINK cannot see: `io.log.call(io, recordRow(...))`
-// or `io['log'](recordRow(...))`. The BARE forwarder `io.log.call(io, row)` carries no
-// row wrapper and stays legal — crew/drive.mjs:3134 is one, by design.
-const NONCANONICAL_SINK = /(?:io\.log\.call\s*\(\s*io\s*,\s*|io\s*\[\s*['"`]log['"`]\s*\]\s*\(\s*)(?:recordRow|operationalRow)\s*\(/g
+// lean: textual journal grammar, quoted strings remain visible; use a parser if legitimate source exceeds this grammar.
+const IO_JOURNAL_REFERENCE = /(?<![\w$])io\s*(?:\??\.\s*log\b|(?:\?\.\s*)?\[)/g
 
+// References outside the canonical wrapped calls or bare forwarder in crew/drive.mjs (phaseSlot) refuse.
 export function noncanonicalJournalSinks(source) {
   const text = blankComments(source)
-  NONCANONICAL_SINK.lastIndex = 0
+  IO_JOURNAL_REFERENCE.lastIndex = 0
   const out = []
   let hit
-  while ((hit = NONCANONICAL_SINK.exec(text)) !== null) {
+  while ((hit = IO_JOURNAL_REFERENCE.exec(text)) !== null) {
+    const suffix = text.slice(hit.index)
+    const wrapperCall = /^(?:io\.log\(|io\?\.log\?\.\()(?:recordRow|operationalRow|row)\(/.exec(suffix)
+    let canonical = Boolean(wrapperCall)
+    if (canonical) {
+      let depth = 0, quote = null, escaped = false, outerComma = false
+      for (let i = suffix.indexOf('('); i < suffix.length; i += 1) {
+        const c = suffix[i]
+        if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
+        if (c === "'" || c === '"' || c === '\`') { quote = c; continue }
+        if (c === '(') depth += 1
+        else if (c === ')') { depth -= 1; if (depth === 0) break }
+        else if (c === ',' && depth === 1) outerComma = true
+      }
+      canonical = !outerComma && depth === 0
+    }
+    const forwarder = /^io\.log\.call\(\s*io\s*,\s*row\s*\)/.test(suffix)
+    if (canonical || forwarder) continue
     out.push({ line: text.slice(0, hit.index).split('\n').length, form: hit[0].trim() })
   }
   return out
@@ -1448,7 +1464,7 @@ export function noncanonicalJournalSinks(source) {
 function driveJournalSites(rawText) {
   const disguised = noncanonicalJournalSinks(rawText)
   if (disguised.length > 0) {
-    throw new Error(`journal sink inventory: ${disguised.length} emit(s) hidden from DRIVE_SINK at line(s) ${disguised.map((d) => d.line).join(', ')} — a wrapped row must be emitted as io.log(...), never through .call or a computed member`)
+    throw new Error(`journal sink inventory: ${disguised.length} emit(s) hidden from DRIVE_SINK at line(s) ${disguised.map((d) => d.line).join(', ')} — unclassified io references must use a canonical wrapped call or exact bare forwarder`)
   }
   const text = blankComments(rawText)
   DRIVE_SINK.lastIndex = 0
@@ -1574,6 +1590,9 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at rebase_eof_append"],
   ["recordRow", "", "at rebase_restore_diagnosis"],
   ["recordRow", "", "at gate_proof_parent gate_generation"],
+  ["recordRow", "", "at suite_anchor_repair"],
+  ["recordRow", "", "at suite_anchor_repair"],
+  ["recordRow", "", "at suite_anchor_repair"],
   ["recordRow", "", "at suite_red_runner"],
   ["recordRow", "", "at cold_suite"],
   ["recordRow", "event='prompt-claim'", "at source citation_only reason files"],

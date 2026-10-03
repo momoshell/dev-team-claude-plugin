@@ -12454,7 +12454,7 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('suite', `anchor repair could not be safely rolled back${unrecoverable ? `; unrecoverable path: ${unrecoverable}` : ''}`)
       }
-      io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }) })
+      io.log(recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }))
     } else {
       if (changedCarriers.length === 0) decline = 'still-moved'
       else {
@@ -12465,12 +12465,12 @@ function runTask(ctx, io, crash) {
           return escalate('suite', 'anchor repair was verified but its standalone commit failed')
         }
         S.commit = commit; committing = [...new Set([...committing, ...changedCarriers])]; if (Array.isArray(publishFiles)) { const measured = publishDiffFiles(io, baseSha); if (measured === null) { stageComplete(); return escalate('suite', 'the publication diff could not be re-read from the verified base after the anchor repair', [], { commit: S.commit }) } publishFiles = measured }
-        io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'repaired', moved: parsed.moved, directories: dirs, files: changedCarriers, commit } }) })
+        io.log(recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'repaired', moved: parsed.moved, directories: dirs, files: changedCarriers, commit } }))
         S.suiteAnchorRepairs = (S.suiteAnchorRepairs ?? 0) + 1
         const repairedSuiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
         suiteRes = repairedSuiteRes
       }
-      if (decline) io['log']({ ...recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }) })
+      if (decline) io.log(recordRow({ at: io.now(), suite_anchor_repair: { outcome: 'declined', reason: decline } }))
     }
   }
   const warmCounts = parseSuiteCounts(suiteRes?.output)

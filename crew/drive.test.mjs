@@ -5533,3 +5533,73 @@ test('RV1-2 rooted path citations renumber as citation-only while URL ports neve
   // host.tld:port with no scheme still reads as a citation. Pinned so a change to it is deliberate.
   assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'Use api.example.com:8000.', 'Use api.example.com:9000.')), true)
 })
+
+ // JS1 mutation: inverting the canonical-or-forwarder allowance refuses valid wrapped calls
+ // while allowing computed references to disappear from the inventory.
+test('JS1 journal scanner classifies canonical sinks and refuses unclassified references', () => {
+  const refuse = (source, line = 1) => assert.throws(() => driveJournalSites(source), (err) => {
+    assert.match(err.message, /journal sink inventory/)
+    assert.match(err.message, new RegExp(`line\\(s\\) ${line}\\b`))
+    return true
+  })
+  refuse("io['log']({ ...recordRow({ at: 't', x: 1 }) })\\n")
+  assert.deepEqual(driveJournalSites("io.log(recordRow({ at: 't', x: 1 }))"), [
+    { line: 1, wrapper: 'recordRow', events: '', keys: 'at x' },
+  ])
+  const cases = [
+    { source: "io['log'](recordRow({ at: 't' }))", refuses: true },
+    { source: "io?.['log'](recordRow({ at: 't' }))", refuses: true },
+    { source: "io.log.bind(io)(recordRow({ at: 't' }))", refuses: true },
+    { source: "io.log({ ...recordRow({ at: 't' }) })", refuses: true },
+    { source: "io.log.call(io, recordRow({ at: 't' }))", refuses: true },
+    { source: "io.log(recordRow({ at: 't' }), 1)", refuses: true },
+    { source: "io . log(recordRow({ at: 't' }))", refuses: true },
+    { source: "io.log(recordRow({ at: 't' }))", sites: [{ line: 1, wrapper: 'recordRow', events: '', keys: 'at' }] },
+    { source: "io?.log?.(operationalRow({ at: 't', event: 'x' }))", sites: [{ line: 1, wrapper: 'operationalRow', events: "event='x'", keys: 'at' }] },
+    { source: "io.log.call(io, row)", sites: [] },
+    { source: "// io['log'](recordRow({ at: 'fake' }))", sites: [] },
+  ]
+  for (const row of cases) {
+    if (row.refuses) refuse(row.source)
+    else assert.deepEqual(driveJournalSites(row.source), row.sites)
+  }
+  refuse("\n\nio['log'](recordRow({ at: 't' }))", 3)
+  assert.deepEqual(driveJournalSites("// io['log'](recordRow({ at: 'fake' }))\nio.log(recordRow({ at: 't' }))"), [
+    { line: 2, wrapper: 'recordRow', events: '', keys: 'at' },
+  ])
+  const productions = [
+    (key, prefix) => ({ source: `${prefix}io[${key}](recordRow({ at: 't' }))`, refuses: true }),
+    (_key, prefix) => ({ source: `${prefix}io.log.bind(io)(recordRow({ at: 't' }))`, refuses: true }),
+    (_key, prefix) => ({ source: `${prefix}io.log(recordRow({ at: 't' }))`, refuses: false, count: 1 }),
+    (_key, prefix) => ({ source: `${prefix}io.log.call(io, row)`, refuses: false, count: 0 }),
+    (_key, prefix) => ({ source: `${prefix}// io.log(recordRow({ at: 'fake' }))`, refuses: false, count: 0 }),
+  ]
+  for (const make of productions) {
+    const sample = make("'log'", '')
+    if (sample.refuses) refuse(sample.source)
+    else assert.equal(driveJournalSites(sample.source).length, sample.count)
+  }
+  forAll((random) => ({
+    make: productions[Math.floor(random() * productions.length)],
+    key: random() < 0.5 ? "'log'" : '"log"',
+    prefix: random() < 0.5 ? '' : random() < 0.5 ? '\n' : '/* prefix */\n',
+  }), ({ make, key, prefix }) => {
+    const sample = make(key, prefix)
+    if (sample.refuses) refuse(sample.source, prefix.split('\n').length)
+    else assert.equal(driveJournalSites(sample.source).length, sample.count)
+  }, { runs: 40, seed: 1712 })
+})
+
+// JS2 mutation: permitting the exact newline-separated alias makes the hidden write disappear.
+test('JS2 journal scanner refuses aliases and reports their source lines', () => {
+  assert.throws(() => driveJournalSites("const write = io.log\nwrite(recordRow({ at: 't' }))\n"), /journal sink inventory/)
+  assert.throws(() => driveJournalSites("\nio.log\n"), /line\(s\) 2/)
+  assert.throws(() => driveJournalSites("io?.log(recordRow({ at: 't' }))"), /journal sink inventory/)
+})
+
+// JS3 mutation: renaming the repaired site's key leaves only two repair records inventoried.
+test('JS3 suite-anchor repair emissions are inventoried as record rows', () => {
+  const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const rows = driveJournalSites(text).filter(({ keys }) => keys === 'at suite_anchor_repair')
+  assert.deepEqual(rows.map(({ wrapper }) => wrapper), ['recordRow', 'recordRow', 'recordRow'])
+})

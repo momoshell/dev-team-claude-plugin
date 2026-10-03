@@ -5398,3 +5398,14 @@ test('RV1-2 a URL port change is never classified as a citation-only edit', () =
   assert.equal(driveTask(PC_CTX, io).status, 'done')
   assert.deepEqual({ claim: pcSection(io), rows: pcRows(io) }, { claim: PC_PLAN, rows: [{ source: 'plan', citation_only: false, reason: null, files: [PC_PROMPT] }] })
 })
+
+// Sol delta pass 4 (b1096). Mutation: drop the optional leading `\/?` from the citation path group;
+// a rooted citation then starts mid-token, the lookbehind refuses it, and a pure renumber of
+// `/opt/work/crew/drive.mjs:12` is classified as a wording edit — watched red.
+test('RV1-2 rooted path citations renumber as citation-only while URL ports never do', () => {
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'See /opt/work/crew/drive.mjs:12.', 'See /opt/work/crew/drive.mjs:19.')), true)
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'Call http://h:8000 first.', 'Call http://h:9000 first.')), false)
+  // Documented blind spot (the `lean:` ceiling above `citation` in crew/prompt-claim.mjs): a bare
+  // host.tld:port with no scheme still reads as a citation. Pinned so a change to it is deliberate.
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'Use api.example.com:8000.', 'Use api.example.com:9000.')), true)
+})

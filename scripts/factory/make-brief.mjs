@@ -3013,20 +3013,21 @@ function renderFences(fences, writeSurface, pack) {
   return lines.length ? lines.join('\n') : '(fence register is empty)'
 }
 
-function renderWriteSurface(writeSurface, discovery) {
+function renderWriteSurface(writeSurface, discovery, tripwiresOmitted = false) {
   const files = Array.isArray(writeSurface?.files) ? writeSurface.files : []
   const listedFiles = files.length ? files.join(', ') : '(none)'
   const basis = writeSurface?.basis === 'fences'
     ? `fence register, lane "${writeSurface.lane}"`
     : 'authored where paths, no lane fence applied'
-  const writable = new Set(files)
-  const discovered = Array.isArray(discovery?.candidates)
-    ? [...new Set(discovery.candidates.map((file) => normaliseRepoPath(file)))].sort()
-    : []
-  const tripwireFiles = discovered.filter((file) => !writable.has(file))
+  const tripwireFiles = readAndKeepGreenFiles(writeSurface, discovery)
+  const narrowFiles = new Set(tripwiresOmitted ? [] : (discovery?.tripwires ?? []).map((tripwire) => normaliseRepoPath(tripwire.file)))
+  const referenced = tripwireFiles.filter((file) => narrowFiles.has(file)).length
+  const namedFiles = tripwireFiles.filter((file) => !narrowFiles.has(file))
+  const reference = `the ${referenced} file(s) on the ## Validation lane narrow: line that are not in files_in_scope`
+  const keepGreenParts = [...(referenced ? [reference] : []), ...namedFiles]
   return [
     `files_in_scope (expected write surface; basis: ${basis}): ${listedFiles}`,
-    `read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): ${tripwireFiles.length ? tripwireFiles.join(', ') : '(none)'}`,
+    `read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): ${keepGreenParts.length ? keepGreenParts.join(', ') : '(none)'}`, 
   ].join('\n')
 }
 
@@ -3065,8 +3066,8 @@ function readAndKeepGreenFiles(writeSurface, discovery) {
     .sort()
 }
 
-function conventionsFile(discovery, writeSurface, profile) {
-  const surface = renderWriteSurface(writeSurface, discovery).split('\n')[1]
+function conventionsFile(discovery, writeSurface, profile, tripwiresOmitted = false) {
+  const surface = renderWriteSurface(writeSurface, discovery, tripwiresOmitted).split('\n')[1]
     || 'read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): (none)'
   return [surface, renderConventions(profile?.conventions), CONVENTIONS_BLOCK].join('\n')
 }
@@ -3266,7 +3267,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     paths.vocabulary = null
     paths.rows = null
   }
-  writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile)}\n`)
+  writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile, packOmission === 'tripwires')}\n`)
   writeFileSync(paths.proposal, `${renderProposedTier(proposal ?? proposeTier({ where: where ?? request?.where ?? [], discovery }))}\n`)
   if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)

@@ -1721,7 +1721,7 @@ test('a named lane declares its fence as the write surface and keeps discovery d
   const readLine = conventions.split('\n').find((line) => line.startsWith('read-and-keep-green'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: fence register, lane "own"): lib/widget.mjs, test/widget-new.test.mjs')
   assert.ok(readLine)
-  assert.match(readLine, /test\/widget\.test\.mjs/)
+  assert.match(readLine, /on the ## Validation lane narrow: line/)
   assert.doesNotMatch(writeLine, /test\/(?:reads-config\.test|widget\.test)\.mjs/)
   const writeFiles = writeLine.slice(writeLine.indexOf('): ') + 3).split(', ')
   const readFiles = readLine.slice(readLine.indexOf(': ') + 2).split(', ')
@@ -1755,7 +1755,7 @@ test('without fences the write surface is the authored where paths and names its
   const readLine = conventions.split('\n').find((line) => line.startsWith('read-and-keep-green'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/widget.mjs')
   assert.doesNotMatch(writeLine, /test\/widget\.test\.mjs/)
-  assert.match(readLine, /test\/widget\.test\.mjs/)
+  assert.match(readLine, /on the ## Validation lane narrow: line/)
 })
 
 test('an unslashed directory fence entry refuses at compile time', () => {

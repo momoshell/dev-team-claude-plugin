@@ -2015,7 +2015,8 @@ export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
   return found
 }
 
-export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {}) {
+export function checkFences({ fences, lanes, graph, checkout, outDir, deps, protectedPaths } = {}) {
+  const protectedFloor = resolveProtectedPaths(protectedPaths)
   const d = normalDeps(deps)
   const inheritedObservations = Array.isArray(fences?.observations) ? [...fences.observations] : []
   const observations = [...inheritedObservations]
@@ -2145,6 +2146,8 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     const effectiveFiles = [...authorityFiles]
     const laneAdmissions = []
     const admissionKeys = new Set()
+    const laneReadOnlyCarriers = []
+    const readOnlyCarrierKeys = new Set()
     admissionByLane.set(name, laneAdmissions)
     admissionArbitrations.set(name, [])
     const recordAdmission = (row) => {
@@ -2157,6 +2160,17 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
     }
     const automaticAdmission = (source, file) => {
       const row = fenceAdmission({ lane: name, file, source })
+      if (protectedHitsIn([row.file], protectedFloor).length > 0) {
+        const key = row.file + '\u0000' + row.source
+        if (!readOnlyCarrierKeys.has(key)) {
+          readOnlyCarrierKeys.add(key)
+          laneReadOnlyCarriers.push(row)
+          const text = `dispatch-batch: WARNING fence-admission-protected: lane ${name} candidate ${row.file} from ${row.source} is a read-only carrier, not automatic write-scope admission`
+          warnings.push({ kind: 'fence-admission-protected', ...row, text })
+          d.log(text)
+        }
+        return row
+      }
       const admissionOwner = admissionOwners.get(row.file)
       if (admissionOwner && admissionOwner.lane !== name && !relatedLanes(graph, name, admissionOwner.lane)) {
         return arbitrationWarning({ lane: name, file: row.file, source, holder: admissionOwner })
@@ -2207,7 +2221,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       if (!holder) automaticAdmission('suite-cost', SUITE_COST_SUITE)
     }
     const ownSurface = [...requestedSurface]
-    const outside = ownSurface.filter((path) => !matchOwn(path))
+    const outside = ownSurface.filter((path) => !scopeMatcher(ownPaths)(path))
     if (outside.length > 0) {
       const observation = { kind: 'scope-entry', lane: name, field: 'request', authored: outside, reason: WHERE_OUTSIDE_FENCE, detail: 'request scope is retained as context and does not narrow dispatch authority' }
       observations.push(observation)
@@ -2351,6 +2365,7 @@ export function checkFences({ fences, lanes, graph, checkout, outDir, deps } = {
       siblings,
       ...(laneObservations.length > 0 ? { observations: laneObservations } : {}),
       ...(laneAdmissions.length > 0 ? { fence_admissions: laneAdmissions } : {}),
+      ...(laneReadOnlyCarriers.length > 0 ? { read_only_carriers: laneReadOnlyCarriers } : {}),
       ...(admissionArbitrations.get(name)?.length > 0 ? { fence_admission_arbitrated: admissionArbitrations.get(name) } : {}),
     }
   }
@@ -4300,7 +4315,7 @@ function prepareDispatchContext(options) {
   preflightRunOptions({ execution, runFlags, lanes })
   const dispatchBase = resolveDispatchBase(root, d)
   d.baseBranch = () => dispatchBase
-  const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d })
+  const fenceReport = checkFences({ fences, lanes, graph, checkout, outDir: outputDir, deps: d, protectedPaths: runFlags.protectedPaths })
   const hasAdmissions = fenceReport.admissions.length > 0
   const effectiveFences = fenceReport.fences
   const waitBuilder = runFlags['wait-builder']

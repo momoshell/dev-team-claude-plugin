@@ -13,6 +13,9 @@ import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefec
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
 import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
+import { publicationIo, composeCommitMessage, issueTrailers, PUBLISH_REFUSALS } from './drive-fixtures.mjs'
+import { citationOnlyDiff, readPromptDiff } from './prompt-claim.mjs'
+import { git as gitIn, forAll } from '../test/helpers.mjs'
 
 const A1_FULL_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 const A1_PUBLISH_DISABLED_TRACE = Object.freeze(['commit', 'document', 'suite', 'suite'])
@@ -5091,4 +5094,318 @@ test('ZT2 an unproven dispatch transport or provenance fails closed, and the sig
   const genuine = provenanceScenario(provenanceCarrier(nonzero))
   assert.equal(genuine.plannerDispatches, 2)
   assert.deepEqual(genuine.applied('planner-no-envelope').map((row) => row.recovery), [{ ...nonzero, seats: 1, rounds: 0 }])
+})
+
+// b1096 hardening (#1694): permanent guards for the prompt-claim review findings RV1-1..RV1-4.
+// Each test names the kill-mutation it was watched to fail under. Fixtures drive the real
+// driveTask/resumeTask through publicationIo; no external binary runs except RV1-1's git.
+const PC_NA = 'not applicable — citation-only; no seat-behaviour change intended.'
+const PC_PLAN = 'unmeasured — n insufficient; reason: planned wording experiment; re-measure after 3 seats.'
+const PC_BUILDER = 'unmeasured — n insufficient; reason: unrelated builder repair; re-measure after 9 seats.'
+const PC_PROMPT = 'crew/roles/planner.md'
+const PC_CTX = { ...CTX, journal: `${TD}/journal.jsonl`, publish: { branch: 'feature/ship', base: 'main' } }
+const pcPatch = (path, before = 'See crew/drive.mjs:12.', after = 'See crew/drive.mjs:19.') => `diff --git a/${path} b/${path}\nindex 1111111..2222222 100644\n--- a/${path}\n+++ b/${path}\n@@ -3 +3 @@ ## Section\n-${before}\n+${after}\n`
+const pcNul = (files) => (files.length ? `${files.join('\0')}\0` : '')
+// inventory(state) -> final file list; promptDiff -> the -U0 output, or { unreadable } / { throws }.
+function pcIo({ claim, scope = ['a.mjs'], builder = '', inventory = () => [PC_PROMPT], promptDiff = pcPatch(PC_PROMPT), brief = null, gate = null, fingerprint = null, issues } = {}) {
+  const details = { ...planEnv().details, files_in_scope: scope, ...(claim === undefined ? {} : { prompt_claim: claim }), ...(issues ? { issues } : {}), ...(gate ? { gate_cmd: 'gate-cmd' } : {}) }
+  const io = publicationIo({ changed: scope, envelopes: {
+    'planner:1': planEnv({ details }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: `feat: change\n\n${builder}` } }),
+    'reviewer:1': reviewEnv('pass'),
+  } })
+  io.calls.assign = []
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => { io.calls.assign.push(spec); return assign(spec) }
+  const run = io.run.bind(io)
+  io.run = (command) => {
+    const text = String(command)
+    if (gate && text.includes('\ngate-cmd\n')) { io.calls.run.push(text); return gate(io.state) }
+    if (text.startsWith('git diff --name-only -z ') && text.endsWith('...HEAD')) { io.calls.run.push(text); return { ok: true, output: pcNul(inventory(io.state, text)) } }
+    if (text.startsWith('git diff -U0 ') && text.includes('...HEAD')) {
+      io.calls.run.push(text)
+      if (promptDiff?.throws) throw new Error('interrupted')
+      return promptDiff?.unreadable ? { ok: false, output: 'permission denied' } : { ok: true, output: promptDiff }
+    }
+    return run(command)
+  }
+  if (typeof brief === 'string') { const read = io.readFile.bind(io); io.readFile = (path) => (path === PC_CTX.briefFile ? brief : read(path)) }
+  if (fingerprint) {
+    io.fingerprintTree = () => ({ measured: true, entries: Object.fromEntries(fingerprint.map((path) => [path, `file:-:${'a'.repeat(64)}`])) })
+    io.indexOid = () => 'tree1111'
+  }
+  return io
+}
+function pcCheckpoint({ kind = 'publish', files = [PC_PROMPT], scope = [PC_PROMPT], claim } = {}) {
+  const treeFiles = scope.map((path) => ({ path, state: 'present', bytes: `file:-:${'a'.repeat(64)}` }))
+  return {
+    version: 2, kind, frozen_where: kind, head_oid: 'pre1111', chunk: null,
+    tree: { index_oid: 'tree1111', files: treeFiles, worktree_sha256: resumeWorktreeSha256(treeFiles) },
+    accepted_scope: scope, returns: {
+      planner: { status: 'done', role: 'planner', artifacts: [], details: claim === undefined ? {} : { prompt_claim: claim } },
+      builder: { status: 'done', role: 'builder', artifacts: [], details: {} },
+      reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} },
+    },
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: 'pre1111', pending: false, files, message: 'feat: resume', subject: 'feat: resume' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: `${TD}/gate.mjs`, summary: { total: 3, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'suite-cmd', warm: null, cold: null }, publish: { branch: 'feature/ship', base: 'main', base_sha: 'base1111' }, prior_stages: ['review:r1', 'commit', 'rebase'],
+  }
+}
+const pcSection = (io) => (io.calls.writes[`${TD}/pr-body.md`] || '').match(/^## Prompt measurement\n([\s\S]*?)(?=\n## |$)/m)?.[1].trim() ?? null
+const pcRows = (io) => io.calls.logs.filter((row) => row.event === 'prompt-claim').map(({ source, citation_only, reason, files }) => ({ source, citation_only, reason, files }))
+const pcBuilders = (io) => io.calls.assign.filter(({ role }) => role === 'builder').length
+const pcResume = (io, checkpoint) => resumeTask({ ...PC_CTX, files_in_scope: checkpoint.accepted_scope }, io, checkpoint)
+
+// RV1-1. Mutations (crew/prompt-claim.mjs citationOnlyDiff), each watched red:
+//   drop `if (/^index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?$/.test(line)) continue`;
+//   restore the hunk-header regex ending `@@$` (no trailing function context).
+test('RV1-1 a real git -U0 citation-only prompt diff reads as citation-only through readPromptDiff', () => {
+  const repo = scratchDir('pc-real-diff-')
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+  const write = (name, text) => { mkdirSync(join(repo, name, '..'), { recursive: true }); writeFileSync(join(repo, name), text) }
+  write('roles/planner.md', 'Planner charter\n\nSee crew/drive.mjs:10 and crew/drive.mjs:20-24.\n')
+  write('roles/lead.md', 'Lead charter\n\nThe lead reads crew/drive.mjs:7.\n')
+  gitIn(repo, 'init', '-q'); gitIn(repo, 'add', '.'); gitIn(repo, 'commit', '-qm', 'base')
+  const base = gitIn(repo, 'rev-parse', 'HEAD').trim()
+  write('roles/planner.md', 'Planner charter\n\nSee crew/drive.mjs:11 and crew/drive.mjs:21-25.\n')
+  write('roles/lead.md', 'Lead charter\n\nThe lead reads crew/drive.mjs:9.\n')
+  gitIn(repo, 'commit', '-qam', 'renumber')
+  const io = { run: (command) => { const r = spawnSync('sh', ['-c', command], { cwd: repo, encoding: 'utf8', env }); return { ok: r.status === 0, output: r.stdout } } }
+  const files = ['roles/lead.md', 'roles/planner.md']
+  // The fixture must carry both shapes the parser once refused, or the check is vacuous.
+  const raw = io.run(`git diff -U0 ${shellArg(base)}...HEAD -- ${files.map(shellArg).join(' ')}`).output
+  assert.match(raw, /^index [0-9a-f]+\.\.[0-9a-f]+ 100644$/m)
+  assert.match(raw, /^@@ -3 \+3 @@ \S.*$/m)
+  assert.deepEqual(readPromptDiff({ files, baseSha: base, io, quote: shellArg }), { citation_only: true, reason: null })
+  // The other direction on the same real output shape: a wording edit is not citation-only.
+  write('roles/lead.md', 'Lead charter\n\nThe lead now reads crew/drive.mjs:9.\n')
+  gitIn(repo, 'commit', '-qam', 'wording')
+  assert.deepEqual(readPromptDiff({ files, baseSha: base, io, quote: shellArg }), { citation_only: false, reason: null })
+})
+
+// RV1-2 / PC1. Mutations, each watched red: `const citationOnly = false` in readPromptDiff;
+// `if (false) io.log(recordRow(...'prompt-claim'` on main; `if (false) resumeIo.log(` on resume.
+test('RV1-2 PC1 main and resume publish the driver NA claim and journal one classification row each', () => {
+  const main = pcIo({})
+  const mainResult = driveTask(PC_CTX, main)
+  const resumed = pcIo({})
+  const resumeResult = pcResume(resumed, pcCheckpoint({}))
+  const expected = { status: 'done', claim: PC_NA, rows: [{ source: 'driver-citation-only', citation_only: true, reason: null, files: [PC_PROMPT] }] }
+  assert.deepEqual({ status: mainResult.status, claim: pcSection(main), rows: pcRows(main) }, expected)
+  assert.deepEqual({ status: resumeResult.status, claim: pcSection(resumed), rows: pcRows(resumed) }, expected)
+  // A mixed final diff (one wording file) is not citation-only as a whole.
+  const mixed = pcIo({ claim: PC_PLAN, inventory: () => [PC_PROMPT, 'crew/roles/lead.md'], promptDiff: pcPatch(PC_PROMPT) + pcPatch('crew/roles/lead.md', 'old wording', 'new wording') })
+  assert.equal(driveTask(PC_CTX, mixed).status, 'done')
+  assert.deepEqual(pcRows(mixed), [{ source: 'plan', citation_only: false, reason: null, files: ['crew/roles/lead.md', PC_PROMPT] }])
+  assert.equal(pcSection(mixed), PC_PLAN)
+})
+
+// RV1-2 / PC2. Mutation: `validPlanPromptClaim` returns true unconditionally — watched red.
+test('RV1-2 PC2 a prompt-scoped plan without one valid claim escalates at plan before any builder', () => {
+  const malformed = [undefined, '', `${PC_PLAN}\n${PC_PLAN}`, `Measure: ${PC_PLAN}`, 'not applicable — citation-only.', 42]
+  for (const scope of [['crew/roles/builder.md'], ['crew/roles/'], ['skills/lean-build/SKILL.md']]) {
+    for (const claim of malformed) {
+      const io = pcIo({ scope, claim })
+      const result = driveTask(PC_CTX, io)
+      const seen = { where: result.details?.escalation?.where, missing: /prompt-claim-missing/.test(result.details?.escalation?.why ?? ''), builders: pcBuilders(io) }
+      assert.deepEqual(seen, { where: 'plan', missing: true, builders: 0 }, `${scope} ${JSON.stringify(claim)}`)
+    }
+  }
+  for (const claim of [PC_NA, PC_PLAN, 'Measure: turns per seat; before: 12 (n=4); after: 9 (n=4).']) {
+    const io = pcIo({ scope: ['crew/roles/builder.md'], claim })
+    driveTask(PC_CTX, io)
+    assert.equal(pcBuilders(io), 1, `admitted ${claim}`)
+  }
+  for (const scope of [['a.mjs'], ['crew/roles/anchors.json']]) {
+    const io = pcIo({ scope, inventory: () => scope })
+    assert.equal(driveTask(PC_CTX, io).status, 'done', `unaffected ${scope}`)
+  }
+})
+
+// RV1-2 / PC3. Mutation: `const builderBody = String(builderEnv?.details?.commit_message || ...)`
+// (stripPromptClaims removed from composeCommitMessage) — watched red.
+test('RV1-2 PC3 the plan claim wins the PR body and builder claim lines never reach it', () => {
+  for (const builder of [PC_BUILDER, PC_NA, 'Measure: turns per seat; before: 12 (n=4); after: 9 (n=4).']) {
+    const io = pcIo({ claim: PC_PLAN, builder, promptDiff: pcPatch(PC_PROMPT, 'old wording', 'new wording') })
+    const result = driveTask(PC_CTX, io)
+    const body = io.calls.writes[`${TD}/pr-body.md`] || ''
+    assert.deepEqual({ status: result.status, claim: pcSection(io), leaked: body.includes(builder), rows: pcRows(io) },
+      { status: 'done', claim: PC_PLAN, leaked: false, rows: [{ source: 'plan', citation_only: false, reason: null, files: [PC_PROMPT] }] }, builder)
+  }
+})
+
+// RV1-2 / PC4. Mutation: `if (text.split('\n').includes(PROMPT_NOT_APPLICABLE)) return null`
+// (NA admitted without citation_only === true) — watched red.
+test('RV1-2 PC4 a planner NA claim over a wording diff refuses publish with no PR created', () => {
+  const io = pcIo({ claim: PC_NA, promptDiff: pcPatch(PC_PROMPT, 'old wording', 'new wording') })
+  const result = driveTask(PC_CTX, io)
+  assert.deepEqual({ where: result.details?.escalation?.where, refused: result.details?.publish?.refused, creates: io.calls.run.filter((cmd) => cmd.startsWith('gh pr create')).length, pushes: io.calls.run.filter((cmd) => cmd.includes('git push')).length },
+    { where: 'publish', refused: PUBLISH_REFUSALS.promptMeasurement, creates: 0, pushes: 0 })
+})
+
+// RV1-2 / PC5. Mutation: the non-ok branch of readPromptDiff returns
+// `{ citation_only: false, reason: null }` — watched red.
+test('RV1-2 PC5 an unreadable prompt diff journals diff-unreadable and needs a measured or unmeasured plan claim', () => {
+  for (const promptDiff of [{ unreadable: true }, { throws: true }]) {
+    const io = pcIo({ promptDiff })
+    const result = driveTask(PC_CTX, io)
+    assert.deepEqual({ refused: result.details?.publish?.refused, rows: pcRows(io) },
+      { refused: PUBLISH_REFUSALS.promptMeasurement, rows: [{ source: 'plan', citation_only: null, reason: 'diff-unreadable', files: [PC_PROMPT] }] }, JSON.stringify(promptDiff))
+  }
+  const claimed = pcIo({ claim: PC_PLAN, promptDiff: { unreadable: true } })
+  assert.equal(driveTask(PC_CTX, claimed).status, 'done')
+  assert.equal(pcSection(claimed), PC_PLAN)
+})
+
+// RV1-2 / PC6 + PC7. Mutations, each watched red: `const promoted = []` in composeCommitMessage;
+// `const ask = text` in askClosingIssues (whole brief instead of the bounded ask).
+test('RV1-2 PC6 PC7 only plan issues the bounded ask closes publish as Closes, through both commit callers', () => {
+  const brief = ['# Task', 'Closes #9004', '', '## The ask', 'Fix it.', 'Closes #9001\r', 'Closes #9001', 'see inline Closes #9002', '## Context pack', 'Closes #9003', ''].join('\n')
+  const compose = (over) => issueTrailers(composeCommitMessage({ task: 't', planEnv: { details: { commit_subject: 'feat: claim', issues: [9001, 9002, 9003, 9004], ...over } }, builderEnv: { summary: 'built' }, brief }))
+  assert.deepEqual(compose({}), { closes: ['#9001'], refs: ['#9002', '#9003', '#9004'] })
+  assert.deepEqual(compose({ closes: [9003] }), { closes: ['#9003', '#9001'], refs: ['#9002', '#9004'] })
+  assert.deepEqual(issueTrailers(composeCommitMessage({ task: 't', planEnv: { details: { commit_subject: 'feat: claim', issues: [9003] } }, builderEnv: { summary: 'built' }, brief: '## The ask\nFix it.\n## Context pack\nCloses #9003\n' })), { closes: [], refs: ['#9003'] })
+  assert.deepEqual(issueTrailers(composeCommitMessage({ task: 't', planEnv: { details: { commit_subject: 'feat: claim', issues: [9001] } }, builderEnv: { summary: 'built' }, brief: 'Closes #9001\n' })), { closes: [], refs: ['#9001'] })
+  // The ordinary commit caller (driveTask main path) reads the cached brief.
+  const io = pcIo({ scope: ['a.mjs'], inventory: () => ['a.mjs'], brief, issues: [9001, 9002, 9003] })
+  assert.equal(driveTask(PC_CTX, io).status, 'done')
+  assert.deepEqual(issueTrailers(io.calls.commits[0].message), { closes: ['#9001'], refs: ['#9002', '#9003'] })
+  // The convergence caller reads the brief through its own io (convergeIo's shape, plan with issues).
+  const converge = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', commit_subject: 'feat: converge', issues: [9001, 9003] } }),
+      'builder:1': buildEnv(),
+      'lead:1': leadEnv('escalate', 'the gate names its red checks'),
+    },
+    runs: { 'gate-cmd': { ok: false, output: RED(3) }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'], gh: { issueThrows: false, prThrows: false },
+  })
+  const baseRead = converge.readFile.bind(converge)
+  converge.readFile = (path) => (path === CTX.briefFile ? brief : baseRead(path))
+  const converged = driveTask({ ...CTX, limits: { plan_rounds: 1, build_rounds: 1, review_rounds: 1 } }, converge)
+  assert.ok(converged.details?.converge, 'the run converged')
+  const committed = converge.calls.commits.at(-1)?.message ?? ''
+  assert.deepEqual(issueTrailers(committed), { closes: ['#9001'], refs: ['#9003'] })
+})
+
+// RV1-2 planner wrapper. Mutation: delete the `details.prompt_claim is mandatory for prompt
+// scope...` line from the planner assignment wrapper — watched red.
+test('RV1-2 the planner wrapper names the prompt_claim requirement and the builder gets the plain brief', () => {
+  const io = pcIo({ scope: ['crew/roles/builder.md'], claim: PC_PLAN })
+  driveTask(PC_CTX, io)
+  const wrapper = io.calls.writes[`${TD}/planner-assignment-r1.md`] || ''
+  assert.match(wrapper, /^details\.prompt_claim is mandatory for prompt scope\./m)
+  for (const form of ['Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).', 'unmeasured — n insufficient; reason: <why>; re-measure after N seats.', PC_NA]) assert.ok(wrapper.includes(form), form)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
+})
+
+// RV1-2 forAll. Mutation: citationShape erases the range marker (`'-#'` -> `''`), so a
+// single-to-range edit reads as citation-only — watched red.
+test('RV1-2 citationOnlyDiff agrees with an independent oracle over generated line and range citations', () => {
+  const paths = ['crew/drive.mjs', 'skills/pr-review/SKILL.md', 'a.b-c/d_e.test.mjs']
+  forAll((random) => {
+    const pick = (n) => 1 + Math.floor(random() * n)
+    const cite = () => (random() < 0.5 ? { start: pick(400) } : { start: pick(400), end: pick(400) })
+    const lines = Array.from({ length: pick(3) }, () => {
+      const path = paths[pick(paths.length) - 1]
+      const before = cite(); const after = random() < 0.2 ? before : cite()
+      return { path, before, after }
+    })
+    const render = (c) => `${c.start}${c.end === undefined ? '' : `-${c.end}`}`
+    const old = lines.map((l) => `See ${l.path}:${render(l.before)} here.`).join(' ')
+    const neu = lines.map((l) => `See ${l.path}:${render(l.after)} here.`).join(' ')
+    // Oracle: true iff the text changed and every citation kept its single-or-range shape.
+    const expected = old !== neu && lines.every((l) => (l.before.end === undefined) === (l.after.end === undefined))
+    return { diff: `diff --git a/x.md b/x.md\n--- a/x.md\n+++ b/x.md\n@@ -4 +4 @@\n-${old}\n+${neu}\n`, expected }
+  }, ({ diff, expected }) => assert.equal(citationOnlyDiff(diff), expected), { runs: 300, seed: 1694 })
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT)), true)
+  for (const bad of ['', pcPatch(PC_PROMPT, 'See crew/drive.mjs:12.', 'See crew/drive.mjs:12.'), pcPatch(PC_PROMPT, 'See crew/drive.mjs:12.', 'See crew/drive.js:19.'), pcPatch(PC_PROMPT, 'n=12', 'n=19'), 'diff --git a/x.md b/x.md\nBinary files a/x.md and b/x.md differ\n', 'diff --git a/x.md b/x.md\nold mode 100644\nnew mode 100755\n']) {
+    assert.equal(citationOnlyDiff(bad), false, JSON.stringify(bad))
+  }
+})
+
+// RV1-3. Mutations, each watched red: publishDiffFiles reads `git diff --name-only -z HEAD^...HEAD`
+// (a pre-rebase inventory); resume sets `publishFiles = checkpoint.commit.files`.
+test('RV1-3 both publish paths classify the post-rebase inventory in both divergence directions', () => {
+  const inventory = (before, after) => (state, command) => (command.includes('HEAD^...HEAD') || state.head !== state.post ? before : after)
+  for (const [label, before, after, expected] of [['dropped', [PC_PROMPT], ['a.mjs'], 'done'], ['added', ['a.mjs'], [PC_PROMPT], 'escalation']]) {
+    const main = pcIo({ claim: PC_NA, promptDiff: pcPatch(PC_PROMPT, 'old wording', 'new wording'), inventory: inventory(before, after) })
+    const mainResult = driveTask(PC_CTX, main)
+    const resumed = pcIo({ claim: PC_NA, promptDiff: pcPatch(PC_PROMPT, 'old wording', 'new wording'), inventory: inventory(before, after) })
+    const resumeResult = pcResume(resumed, pcCheckpoint({ kind: 'rebase', files: before, scope: ['a.mjs', PC_PROMPT], claim: PC_NA }))
+    for (const [path, io, result] of [['main', main, mainResult], ['resume', resumed, resumeResult]]) {
+      assert.equal(result.status, expected, `${path} ${label}`)
+      assert.deepEqual(pcRows(io), expected === 'done' ? [] : [{ source: 'plan', citation_only: false, reason: null, files: [PC_PROMPT] }], `${path} ${label}`)
+      if (expected === 'escalation') assert.equal(result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, `${path} ${label}`)
+    }
+  }
+})
+
+// RV1-4. Mutations, each watched red: the generated checkpoint writes `accepted_scope: commitFiles`;
+// it writes `commit: { ..., files: paths }`.
+test('RV1-4 a generated checkpoint keeps the final committed files apart from the accepted scope', () => {
+  const fence = ['a.mjs', PC_PROMPT, 'crew/roles/anchors.json']
+  let gateCalls = 0
+  const io = pcIo({ claim: PC_NA, scope: fence, promptDiff: pcPatch(PC_PROMPT, 'old wording', 'new wording'), fingerprint: fence,
+    gate: () => (++gateCalls === 1 ? { ok: false, output: 'red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' } : { ok: true, output: 'green\nGATE-SUMMARY {"total":3,"failed":0,"errored":0}' }) })
+  const result = driveTask(PC_CTX, io)
+  assert.equal(result.status, 'escalation')
+  const checkpoint = result.details.resume_checkpoint
+  assert.ok(checkpoint, 'a publish refusal after commit generates a resume checkpoint')
+  assert.deepEqual(checkpoint.accepted_scope, [...fence].sort())
+  assert.deepEqual(checkpoint.commit.files, [PC_PROMPT])
+  assert.equal(checkpoint.publish.base_sha, 'base1111')
+})
+
+// Sol pass 1 (b1096). Mutation: append the plan claim BEFORE the duplicate-subject suppression
+// (`const bodyPart = body && body.split('\n')[0] === subject ? '' : body` over builder text + claim)
+// and a builder body that repeats the subject drops the plan claim from the commit — watched red.
+test('RV1-2 the plan claim survives a builder body that repeats the commit subject', () => {
+  const planEnvelope = { details: { commit_subject: 'feat: move', prompt_claim: PC_PLAN } }
+  for (const commitMessage of ['feat: move', 'feat: move\n\nmore detail', `feat: move\n${PC_BUILDER}`]) {
+    const message = composeCommitMessage({ task: 't', planEnv: planEnvelope, builderEnv: { details: { commit_message: commitMessage } } })
+    assert.equal(message, `feat: move\n\n${PC_PLAN}`, JSON.stringify(commitMessage))
+  }
+  const kept = composeCommitMessage({ task: 't', planEnv: planEnvelope, builderEnv: { details: { commit_message: 'moved the thing' } } })
+  assert.equal(kept, `feat: move\n\nmoved the thing\n\n${PC_PLAN}`)
+})
+
+// Sol pass 2 (b1096). Mutation: at either publish site, pass the rendered PR body (which still
+// carries a stale builder claim under `## What`) to promptMeasurementDefect instead of the selected
+// claim — the resume path then publishes with no `## Prompt measurement` section. Watched red.
+test('RV1-2 a stale builder claim in a resumed commit message never satisfies the prompt measurement check', () => {
+  for (const promptDiff of [{ unreadable: true }, pcPatch(PC_PROMPT, 'old wording', 'new wording')]) {
+    const io = pcIo({ promptDiff })
+    const checkpoint = pcCheckpoint({})
+    checkpoint.commit.message = `feat: resume\n\n${PC_BUILDER}`
+    const result = pcResume(io, checkpoint)
+    assert.deepEqual({ status: result.status, refused: result.details?.publish?.refused, creates: io.calls.run.filter((cmd) => cmd.startsWith('gh pr create')).length },
+      { status: 'escalation', refused: PUBLISH_REFUSALS.promptMeasurement, creates: 0 }, JSON.stringify(promptDiff))
+  }
+})
+
+// Sol pass 3 (b1096). Mutation: drop the `(?<![A-Za-z0-9_./@:-])` lookbehind from the citation
+// matcher, so a URL host:port (`https://api.example.com:8000`) reads as a file citation and an
+// endpoint change is published under the driver's citation-only claim — watched red.
+test('RV1-2 a URL port change is never classified as a citation-only edit', () => {
+  for (const [before, after] of [
+    ['Call https://api.example.com:8000 first.', 'Call https://api.example.com:9000 first.'],
+    ['Call http://user@api.example.com:8000/v1 first.', 'Call http://user@api.example.com:9000/v1 first.'],
+  ]) assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, before, after)), false, before)
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'See (crew/drive.mjs:12) and `./crew/x.md:3-4`.', 'See (crew/drive.mjs:19) and `./crew/x.md:5-6`.')), true)
+  const io = pcIo({ claim: PC_PLAN, promptDiff: pcPatch(PC_PROMPT, 'Call https://api.example.com:8000 first.', 'Call https://api.example.com:9000 first.') })
+  assert.equal(driveTask(PC_CTX, io).status, 'done')
+  assert.deepEqual({ claim: pcSection(io), rows: pcRows(io) }, { claim: PC_PLAN, rows: [{ source: 'plan', citation_only: false, reason: null, files: [PC_PROMPT] }] })
+})
+
+// Sol delta pass 4 (b1096). Mutation: drop the optional leading `\/?` from the citation path group;
+// a rooted citation then starts mid-token, the lookbehind refuses it, and a pure renumber of
+// `/opt/work/crew/drive.mjs:12` is classified as a wording edit — watched red.
+test('RV1-2 rooted path citations renumber as citation-only while URL ports never do', () => {
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'See /opt/work/crew/drive.mjs:12.', 'See /opt/work/crew/drive.mjs:19.')), true)
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'Call http://h:8000 first.', 'Call http://h:9000 first.')), false)
+  // Documented blind spot (the `lean:` ceiling above `citation` in crew/prompt-claim.mjs): a bare
+  // host.tld:port with no scheme still reads as a citation. Pinned so a change to it is deliberate.
+  assert.equal(citationOnlyDiff(pcPatch(PC_PROMPT, 'Use api.example.com:8000.', 'Use api.example.com:9000.')), true)
 })

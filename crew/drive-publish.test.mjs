@@ -232,12 +232,19 @@ function withPublicationDiff(io, options = {}) {
   const provider = hasFinalDiff ? options.finalDiff : (options.changed || ['a.mjs', 'a.test.mjs'])
   const resultProvider = options.publishDiffResult
   const gateResultProvider = options.gateResult
+  const hasPromptDiff = Object.hasOwn(options, 'promptDiff')
+  const promptDiff = options.promptDiff
   const baseRun = io.run
   io.run = function (command) {
     const text = String(command)
     if (typeof gateResultProvider === 'function' && text.includes('\ngate-cmd\n')) {
       this.calls.run.push(text); this.calls.order.push(`run:${text}`)
       return gateResultProvider(this.state, text)
+    }
+    if (hasPromptDiff && text.startsWith('git diff -U0 ')) {
+      this.calls.run.push(text); this.calls.order.push(`run:${text}`)
+      const configured = typeof promptDiff === 'function' ? promptDiff(this.state, text) : promptDiff
+      return typeof configured === 'string' ? { ok: true, output: configured } : configured
     }
     if (text.startsWith('git diff --name-only -z ') && text.endsWith('...HEAD')) {
       this.calls.run.push(text); this.calls.order.push(`run:${text}`)
@@ -283,10 +290,11 @@ function runPublished(options = {}) {
 }
 
 const PROMPT_SCOPE = ['crew/roles/planner.md']
-const promptPublicationOptions = (body = '') => ({
+const PLAN_PROMPT_CLAIM = 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.'
+const promptPublicationOptions = (body = '', claim = PLAN_PROMPT_CLAIM) => ({
   changed: PROMPT_SCOPE,
   envelopes: {
-    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: PROMPT_SCOPE } }),
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: PROMPT_SCOPE, prompt_claim: claim } }),
     'builder:1': buildEnv({ details: { files_changed: PROMPT_SCOPE, commit_message: body } }),
     'reviewer:1': reviewEnv('pass'),
   },
@@ -304,6 +312,16 @@ const WIDE_PROMPT_FENCE = ['a.mjs', 'crew/roles/planner.md', 'crew/roles/anchors
 const FINAL_CODE_FILES = ['a.mjs']
 const FINAL_PROMPT_FILES = ['crew/roles/planner.md']
 const FINAL_ANCHOR_FILES = ['crew/roles/anchors.json']
+const CITATION_ONLY_PROMPT_DIFF = [
+  'diff --git a/crew/roles/planner.md b/crew/roles/planner.md',
+  'index 1111111..2222222 100644',
+  '--- a/crew/roles/planner.md',
+  '+++ b/crew/roles/planner.md',
+  '@@ -1 +1 @@',
+  '-crew/drive.mjs:10',
+  '+crew/drive.mjs:11',
+  '',
+].join('\n')
 const NUL_FILES = (files) => Array.isArray(files) && files.length > 0 ? `${files.join('\0')}\0` : ''
 
 function widePublicationOptions(finalDiff, extra = {}) {
@@ -312,7 +330,7 @@ function widePublicationOptions(finalDiff, extra = {}) {
     changed: WIDE_PROMPT_FENCE,
     finalDiff,
     envelopes: {
-      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE } }),
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, prompt_claim: PLAN_PROMPT_CLAIM } }),
       'builder:1': buildEnv({ details: { files_changed: WIDE_PROMPT_FENCE, commit_message: ' ' } }),
       'reviewer:1': reviewEnv('pass'),
       ...(extra.envelopes || {}),
@@ -320,15 +338,17 @@ function widePublicationOptions(finalDiff, extra = {}) {
   }
 }
 
-function wideResumeCheckpoint({ kind = 'publish', message = 'feat: resume\n\n ', files = FINAL_CODE_FILES } = {}) {
+function wideResumeCheckpoint({ kind = 'publish', message = 'feat: resume\n\n ', files = FINAL_CODE_FILES, claim = PLAN_PROMPT_CLAIM } = {}) {
   const bytes = 'file:-:' + 'a'.repeat(64)
   const treeFiles = WIDE_PROMPT_FENCE.map((path) => ({ path, state: 'present', bytes }))
-  return resumeCheckpointFixture({
+  const checkpoint = resumeCheckpointFixture({
     kind, frozen_where: kind, accepted_scope: WIDE_PROMPT_FENCE,
     tree: { files: treeFiles, worktree_sha256: resumeWorktreeSha256(treeFiles) },
     commit: { oid: 'pre1111', pending: false, files, message, subject: 'feat: resume' },
     publish: { branch: 'feature/ship', base: 'main', base_sha: 'base1111' },
   })
+  checkpoint.returns.planner.details.prompt_claim = claim
+  return checkpoint
 }
 
 function runWideResume(finalDiff, options = {}) {
@@ -1458,11 +1478,11 @@ test('A1 main publication uses final diff instead of wide fence', () => {
   assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
 })
 
-test('A2 normal anchor-only publication is admitted without a measurement claim', () => {
+test('A2 normal anchor-only publication retains the canonical plan claim', () => {
   const run = runPublished(widePublicationOptions(FINAL_ANCHOR_FILES))
   assert.equal(run.result.status, 'done')
   assert.deepEqual(run.result.details.files_committed, FINAL_ANCHOR_FILES)
-  assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /Measure:|unmeasured — n insufficient/i)
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(PLAN_PROMPT_CLAIM))
 })
 
 test('A3 resumed anchor-only publication is admitted without a measurement claim', () => {
@@ -1480,28 +1500,27 @@ test('B1 resumed publication uses final diff instead of accepted scope', () => {
   assert.doesNotMatch(run.io.calls.writes[`${TD}/pr-body.md`], /crew\/roles\/planner|crew\/roles\/anchors/)
 })
 
-test('C1 main publication refuses a prompt in the final diff', () => {
-  const run = runPublished(widePublicationOptions(FINAL_PROMPT_FILES))
+test('C1 main publication refuses a wording diff with a citation-only plan claim', () => {
+  const run = runPublished(widePublicationOptions(FINAL_PROMPT_FILES, { envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, prompt_claim: 'not applicable — citation-only; no seat-behaviour change intended.' } }) } }))
   assert.equal(run.result.status, 'escalation')
   assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
   assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
   assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
 })
 
-test('D1 resumed publication refuses a prompt in the final diff', () => {
+test('D1 resumed publication accepts a final prompt diff with the canonical planner claim', () => {
   const run = runWideResume(FINAL_PROMPT_FILES)
-  assert.equal(run.result.status, 'escalation')
-  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
-  assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
-  assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(PLAN_PROMPT_CLAIM))
 })
 
-test('E1 generated checkpoint separates committed files from accepted scope', () => {
+// Mutation: replace FINAL_PROMPT_FILES with FINAL_CODE_FILES; the resumed checkpoint would no longer pin the final prompt file.
+test('RV1-4 rebase checkpoint keeps final committed files distinct from accepted scope', () => {
   let gateCalls = 0
   const run = runPublished(widePublicationOptions(FINAL_PROMPT_FILES, {
     fingerprint: true, fingerprintFiles: WIDE_PROMPT_FENCE,
     gateResult: () => (++gateCalls === 1 ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }),
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, gate_cmd: 'gate-cmd' } }) },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, gate_cmd: 'gate-cmd', prompt_claim: 'not applicable — citation-only; no seat-behaviour change intended.' } }) },
   }))
   assert.equal(run.result.status, 'escalation')
   const checkpoint = run.result.details.resume_checkpoint
@@ -1509,6 +1528,29 @@ test('E1 generated checkpoint separates committed files from accepted scope', ()
   assert.deepEqual(checkpoint.accepted_scope, [...WIDE_PROMPT_FENCE].sort())
   assert.deepEqual(checkpoint.commit.files, FINAL_PROMPT_FILES)
   assert.equal(checkpoint.publish.base_sha, 'base1111')
+})
+
+// Mutation: replace `if (promptClaim) io.log(recordRow` in crew/drive.mjs with `if (false) io.log(recordRow`; the main row disappears.
+test('RV1-3 main and resume journal the final citation-only prompt classification', () => {
+  const claim = 'not applicable — citation-only; no seat-behaviour change intended.'
+  const main = runPublished(widePublicationOptions(FINAL_PROMPT_FILES, {
+    promptDiff: CITATION_ONLY_PROMPT_DIFF,
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, prompt_claim: claim } }) },
+  }))
+  const resumed = runWideResume(FINAL_PROMPT_FILES, {
+    promptDiff: CITATION_ONLY_PROMPT_DIFF,
+    checkpoint: wideResumeCheckpoint({ claim }),
+  })
+  for (const run of [main, resumed]) {
+    assert.equal(run.result.status, 'done')
+    const rows = run.io.calls.logs.filter((row) => row.event === 'prompt-claim')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].source, 'driver-citation-only')
+    assert.equal(rows[0].citation_only, true)
+    assert.equal(rows[0].reason, null)
+    assert.deepEqual(rows[0].files, FINAL_PROMPT_FILES)
+    assert.equal(run.io.calls.run.some((command) => command.startsWith('git diff -U0 ') && command.endsWith("-- 'crew/roles/planner.md'")), true)
+  }
 })
 
 test('F1 both publication paths use post-rebase diff in both divergence directions', () => {
@@ -1519,8 +1561,9 @@ test('F1 both publication paths use post-rebase diff in both divergence directio
         output: NUL_FILES(command.includes('HEAD^...HEAD') || state.head !== state.post ? before : after),
       }),
     }
-    if (!resume) return runPublished(widePublicationOptions(undefined, options))
-    return runWideResume(undefined, { ...options, checkpoint: wideResumeCheckpoint({ kind: 'rebase' }) })
+    const citationOnlyClaim = 'not applicable — citation-only; no seat-behaviour change intended.'
+    if (!resume) return runPublished(widePublicationOptions(undefined, { ...options, envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, prompt_claim: citationOnlyClaim } }) } }))
+    return runWideResume(undefined, { ...options, checkpoint: wideResumeCheckpoint({ kind: 'rebase', claim: citationOnlyClaim }) })
   }
   const dropped = {
     before: FINAL_PROMPT_FILES,
@@ -1634,12 +1677,12 @@ test('failed and blank rebase probes, post-head probes, empty conflicts, and rec
   assert.equal(failedRecovery.io.calls.run.some((command) => command === 'git rebase --abort'), false)
 })
 
-test('A1 normal prompt-surface silence is refused before any publish side effect', () => {
-  const run = runPromptPublished(' ')
+test('A1 normal prompt-surface silence is refused before builder assignment', () => {
+  const run = runPublished(promptPublicationOptions(' ', null))
   assert.equal(run.result.status, 'escalation')
-  assert.equal(run.result.details.escalation.where, 'publish')
-  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
-  assert.match(run.result.details.escalation.why, /crew\/roles\/planner\.md/)
+  assert.equal(run.result.details.escalation.where, 'plan')
+  assert.match(run.result.details.escalation.why, /prompt-claim-missing/)
+  assert.equal(run.io.calls.assign?.some(({ role }) => role === 'builder') ?? false, false)
   assert.equal(run.io.calls.run.some((command) => command.includes('command -v gh')), false)
   assert.equal(run.io.calls.run.some((command) => command.includes('gh')), false)
   assert.equal(run.io.calls.run.some((command) => command.includes('git push')), false)
@@ -1672,7 +1715,8 @@ test('B1 an unmeasured claim with reason and re-measure seat count publishes', (
   const claim = 'unmeasured — n insufficient; reason: first-round data is not available; re-measure after 2 seats.'
   const run = runPromptPublished(claim)
   assert.equal(run.result.status, 'done')
-  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(claim))
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(PLAN_PROMPT_CLAIM))
+  assert.equal(run.io.calls.writes[`${TD}/pr-body.md`].includes(claim), false)
 })
 
 test('B2 all three allowed measured metric-name shapes publish with before-after denominators', () => {
@@ -1680,17 +1724,20 @@ test('B2 all three allowed measured metric-name shapes publish with before-after
     const claim = `Measure: ${name}; before: 80% (n=2); after: 90% (n=3).`
     const run = runPromptPublished(claim)
     assert.equal(run.result.status, 'done', name)
-    assert.match(run.io.calls.writes[`${TD}/pr-body.md`], new RegExp(`Measure: ${name}`), name)
+    assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(PLAN_PROMPT_CLAIM), name)
+    assert.equal(run.io.calls.writes[`${TD}/pr-body.md`].includes(claim), false, name)
   }
 })
 
-test('B3 an unsupported measured metric name is refused despite valid denominators', () => {
-  const run = runPromptPublished('Measure: completion rate; before: 80% (n=2); after: 90% (n=3).')
-  assert.equal(run.result.status, 'escalation')
-  assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement)
+test('B3 an unsupported measured metric cannot override the plan claim', () => {
+  const claim = 'Measure: completion rate; before: 80% (n=2); after: 90% (n=3).'
+  const run = runPromptPublished(claim)
+  assert.notEqual(promptMeasurementDefect({ files: PROMPT_SCOPE, body: claim }), null)
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.io.calls.writes[`${TD}/pr-body.md`].includes(PLAN_PROMPT_CLAIM))
 })
 
-test('B4 malformed unmeasured reasons and re-measure counts are refused', () => {
+test('B4 malformed unmeasured reasons and re-measure counts are rejected without overriding the plan claim', () => {
   const claims = [
     'unmeasured — n insufficient; re-measure after 2 seats.',
     'unmeasured — n insufficient; reason: ; re-measure after 2 seats.',
@@ -1702,39 +1749,28 @@ test('B4 malformed unmeasured reasons and re-measure counts are refused', () => 
   ]
   for (const claim of claims) {
     const run = runPromptPublished(claim)
-    assert.equal(run.result.status, 'escalation', claim)
-    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+    assert.notEqual(promptMeasurementDefect({ files: PROMPT_SCOPE, body: claim }), null, claim)
+    assert.equal(run.result.status, 'done', claim)
   }
 })
 
-test('B5 prefixed and negated prompt measurement claims are refused', () => {
+test('B5 prefixed and negated prompt claims are rejected without overriding the plan claim', () => {
   const measured = 'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns (n=3).'
   const unmeasured = 'unmeasured — n insufficient; reason: data is incomplete; re-measure after 2 seats.'
-  const claims = [
-    `not ${measured}`,
-    `we did not ${measured}`,
-    `not ${unmeasured}`,
-    `we did not ${unmeasured}`,
-    `${measured} not a standalone claim`,
-    `${unmeasured} not a standalone claim`,
-  ]
+  const claims = [`not ${measured}`, `we did not ${measured}`, `not ${unmeasured}`, `we did not ${unmeasured}`, `${measured} not a standalone claim`, `${unmeasured} not a standalone claim`]
   for (const claim of claims) {
     const run = runPromptPublished(claim)
-    assert.equal(run.result.status, 'escalation', claim)
-    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+    assert.notEqual(promptMeasurementDefect({ files: PROMPT_SCOPE, body: claim }), null, claim)
+    assert.equal(run.result.status, 'done', claim)
   }
 })
 
-test('C1 a point estimate without n is refused', () => {
-  const claims = [
-    'Prompt changes improved the first-round pass rate to 90%.',
-    'Measure: turns per seat; before: 2 turns; after: 3 turns (n=2).',
-    'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns.',
-  ]
+test('C1 a point estimate without n is rejected without overriding the plan claim', () => {
+  const claims = ['Prompt changes improved the first-round pass rate to 90%.', 'Measure: turns per seat; before: 2 turns; after: 3 turns (n=2).', 'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns.']
   for (const claim of claims) {
     const run = runPromptPublished(claim)
-    assert.equal(run.result.status, 'escalation', claim)
-    assert.equal(run.result.details.publish.refused, PUBLISH_REFUSALS.promptMeasurement, claim)
+    assert.notEqual(promptMeasurementDefect({ files: PROMPT_SCOPE, body: claim }), null, claim)
+    assert.equal(run.result.status, 'done', claim)
   }
 })
 
@@ -1819,7 +1855,7 @@ test('P2 generated gated checkpoint freezes the run base at a forced fetch failu
     fingerprint: true, fingerprintFiles: WIDE_PROMPT_FENCE, base: 'dispute',
     gateResult: () => (++gates === 1 ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }),
     commands: { [`git fetch origin ${shellArg('dispute')}`]: { ok: false, output: 'forced fetch failure' } },
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', files_in_scope: WIDE_PROMPT_FENCE } }) },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', files_in_scope: WIDE_PROMPT_FENCE, prompt_claim: PLAN_PROMPT_CLAIM } }) },
   }))
   assert.equal(run.result.status, 'escalation')
   assert.equal(run.result.details.resume_checkpoint.publish.base, 'dispute')
@@ -1924,7 +1960,7 @@ test('each closed publish refusal is named and never creates a pull request', ()
     ['pr-exists', { commands: { 'gh pr view': { ok: true, output: 'not json' } } }],
     ['pr-check', { commands: { 'gh pr view': { ok: false, output: 'permission denied' } } }],
     ['push-rejected', { commands: { 'git push -u origin': { ok: false, output: 'rejected' } } }],
-    ['prompt-measurement-missing', promptPublicationOptions(' ')],
+    ['prompt-measurement-missing', { ...promptPublicationOptions(' ', null), publish: { branch: 'feature/ship', base: 'main' } }],
     ['issue-statement-missing', { briefText: ISSUE_BOUND_BRIEF }],
     ['pr-create', { commands: { 'gh pr create': { ok: true, output: 'created but URL omitted' } } }],
   ]
@@ -1932,9 +1968,9 @@ test('each closed publish refusal is named and never creates a pull request', ()
   for (const [reason, options] of cases) {
     const run = runPublished(options)
     assert.equal(run.result.status, 'escalation', reason)
-    assert.equal(run.result.details.escalation.where, 'publish', reason)
-    assert.match(run.result.details.escalation.why, new RegExp(reason), reason)
-    assert.equal(run.result.details.publish.refused, reason)
+    assert.equal(run.result.details.escalation.where, reason === 'prompt-measurement-missing' ? 'plan' : 'publish', reason)
+    assert.match(run.result.details.escalation.why, new RegExp(reason === 'prompt-measurement-missing' ? 'prompt-claim-missing' : reason), reason)
+    if (reason !== 'prompt-measurement-missing') assert.equal(run.result.details.publish.refused, reason)
     assert.equal(run.result.details.pr, undefined, reason)
     if (reason !== 'pr-create') assert.equal(run.io.calls.run.some((command) => command.startsWith('gh pr create')), false, reason)
   }

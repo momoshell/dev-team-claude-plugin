@@ -15,7 +15,9 @@ import { emitAdapter } from './seat-io.mjs'
 import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll } from '../test/helpers.mjs'
+import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
+import { writeFileSync as writeText } from 'node:fs'
+import { askClosingIssues, citationOnlyDiff } from './prompt-claim.mjs'
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
 const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
@@ -7724,9 +7726,9 @@ test('G1 baseline inventory fatal retains the typed tree contamination shape', (
   assert.ok(fatal.why.length > 0)
 })
 
-test('A1 prompt-surface plan briefs builder with measurement claim', () => {
+test('A1 prompt-surface plan sends the plain brief to builder', () => {
   const scope = ['crew/roles/builder.md']
-  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
     envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: scope } }), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -7735,23 +7737,14 @@ test('A1 prompt-surface plan briefs builder with measurement claim', () => {
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
-  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
-  const brief = io.calls.writes[assignment.briefFile]
-  assert.ok(brief)
-  assert.match(brief, /The commit message must carry a prompt measurement claim\./)
-  assert.match(brief, /Measure: <name>; before: <sample> \(n=N\); after: <sample> \(n=N\)\./)
-  assert.match(brief, /unmeasured — n insufficient; reason: <why>; re-measure after N seats\./)
-  assert.match(brief, /Put the claim in details\.commit_message\./)
-  assert.ok(brief.includes('Choose <name> from the closed set: `first-round pass rate`, `turns per seat`, or `<slug> refusal frequency` where `<slug>` matches `[a-z0-9][a-z0-9._-]*`.'))
-  assert.ok(brief.includes('The semicolon is the field separator: `<sample>` and `<why>` must not contain `;` or a line break.'))
-  assert.ok(brief.includes(plan.details.plan_path))
+  assert.equal(assignment?.briefFile, plan.details.plan_path)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
 })
 
-test('A4 directory-scoped charter plan briefs builder with measurement claim', () => {
-  // MUTATION A4: filter the wrapper predicate to .md files only (promptDocumentHits) and a plan scoped
-  // to crew/roles/ hands the builder plan.md with no claim instruction.
+test('A4 directory-scoped charter plan sends the plain brief to builder', () => {
+  // Mutation: restoring the builder's retired wrapper makes this assertion fail.
   const scope = ['crew/roles/']
-  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
     envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/roles/builder.md'] } }), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -7759,8 +7752,8 @@ test('A4 directory-scoped charter plan briefs builder with measurement claim', (
   })
   driveTask(CTX, io)
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
-  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
-  assert.match(io.calls.writes[assignment.briefFile], /The commit message must carry a prompt measurement claim\./)
+  assert.equal(assignment?.briefFile, plan.details.plan_path)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
 })
 
 test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no wrapper', () => {
@@ -7780,11 +7773,9 @@ test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no w
   assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
 })
 
-test('A6 granted-skill parent directory scope briefs builder with measurement claim', () => {
-  // MUTATION A6: drop the directory clause from promptScopeHits and a plan scoped to the granted skill's
-  // parent hands the builder plan.md with no claim instruction.
+test('A6 granted-skill parent directory scope sends the plain brief to builder', () => {
   const scope = ['skills/lean-build/']
-  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
     envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['skills/lean-build/SKILL.md'] } }), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -7792,13 +7783,13 @@ test('A6 granted-skill parent directory scope briefs builder with measurement cl
   })
   driveTask(CTX, io)
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
-  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
-  assert.match(io.calls.writes[assignment.briefFile], /The commit message must carry a prompt measurement claim\./)
+  assert.equal(assignment?.briefFile, plan.details.plan_path)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
 })
 
-test('A2 granted skill plan briefs builder with measurement claim', () => {
+test('A2 granted skill plan sends the plain brief to builder', () => {
   const scope = ['skills/lean-build/SKILL.md']
-  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope } })
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
     envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: scope } }), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -7807,8 +7798,8 @@ test('A2 granted skill plan briefs builder with measurement claim', () => {
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
-  assert.equal(assignment?.briefFile, `${TD}/builder-assignment.md`)
-  assert.match(io.calls.writes[assignment.briefFile], /The commit message must carry a prompt measurement claim\./)
+  assert.equal(assignment?.briefFile, plan.details.plan_path)
+  assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
 })
 
 test('B1 ordinary plan keeps builder assignment unchanged', () => {
@@ -10049,7 +10040,7 @@ test('SD12', () => {
   assert.equal(text.match(/step-c2-r1\.md/)?.[0] ?? null, 'step-c2-r1.md')
 })
 
-import { LEAD_CONSULT_TRIGGERS, failingCheckSet, driverBounceLines } from './drive.mjs'
+import { LEAD_CONSULT_TRIGGERS, failingCheckSet, driverBounceLines, composeCommitMessage } from './drive.mjs'
 
 const LB_GREEN = { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` }
 const lbFail = (label) => ({ ok: false, output: `FAIL ${label}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` })
@@ -10120,4 +10111,26 @@ test('LB extras pin trigger vocabulary, strict check labels, delta rows and jour
   assert.equal(lbRow(blockedFinal)?.trigger, 'shape-conflict')
   const s = lbScenario({ throwJournal: true })
   assert.equal(s.io.calls.assign.filter((x) => x.role === 'builder').length, 2)
+})
+
+test('RV1-1 real git citation-only prompt diff accepts metadata and hunk context', () => {
+  const repo = scratchDir('prompt-claim-real-diff-')
+  writeText(join(repo, '.gitattributes'), '*.md diff=markdown\n')
+  writeText(join(repo, 'planner.md'), '## The ask\ncrew/drive.mjs:10\n')
+  git(repo, 'init')
+  git(repo, 'config', 'diff.markdown.xfuncname', '^#+.*$')
+  git(repo, 'add', '.'); git(repo, 'commit', '-m', 'base')
+  writeText(join(repo, 'planner.md'), '## The ask\ncrew/drive.mjs:11\n')
+  const diff = git(repo, 'diff', '-U0', 'HEAD')
+  assert.match(diff, /^index [0-9a-f]+\.\.[0-9a-f]+/m)
+  assert.match(diff, /^@@ .* @@ .+$/m)
+  assert.equal(citationOnlyDiff(diff), true)
+})
+
+test('RV1-2 permanent prompt-claim boundaries preserve PC6 and PC7 issue routing', () => {
+  const brief = ['# Context', 'Closes #9003', '', '## The ask', 'Closes #9001', 'Closes #9001', 'inline Closes #9002', '## Context pack', 'Closes #9004'].join('\n')
+  assert.deepEqual(askClosingIssues(brief), ['#9001'])
+  const message = composeCommitMessage({ task: 'prompt', brief, planEnv: { details: { issues: [9001, 9002, 9003] } }, builderEnv: { details: {} } })
+  assert.match(message, /Closes: #9001/)
+  assert.match(message, /Refs: #9002, #9003/)
 })

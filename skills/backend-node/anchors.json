@@ -38,8 +38,8 @@
   "scripts/factory/ledger.mjs:9934": "unknown verb: ${verb}",
   "scripts/factory/ledger.mjs:529": "export const CI_DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:4301": "requireEnum(input.decision, CI_DECISIONS",
-  "crew/drive.mjs:552": "export const DECISIONS = Object.freeze",
   "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract"
+  "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
+  "crew/drive.mjs:554": "export const DECISIONS = Object.freeze"
 }

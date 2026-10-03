@@ -3167,9 +3167,11 @@ test('PV5 signed non-RPC settlements do not authorize recovery', () => {
   assert.equal(io.calls.logs.some((row) => row.seat_enforcement?.kind === ZERO_TURN_NON_START), false)
 })
 
-// MUTATION A1 loosens the exact reason guard; the shape table and stale dispatch
-// prove that producer vocabulary and current-dispatch freshness are separate.
-test('A1 zero-turn non-start predicate validates the complete measured envelope', () => {
+// MUTATION A1: deletion of the runtimeTransportNoEnvelopeCarrier guard in
+// zeroTurnNonStartOf admits the valid unmarked tuple and its JSON clone.
+// Field-guard coverage lives in ZT1 in crew/drive.test.mjs; single field-guard
+// deletions are equivalent mutants under authentic inputs.
+test('A1 zero-turn predicate refuses every unmarked envelope, valid or malformed', () => {
   const valid = zeroTurnEnvelope()
   assert.equal(zeroTurnNonStartOf(valid), null)
   assert.equal(zeroTurnNonStartOf(JSON.parse(JSON.stringify(valid))), null)
@@ -3198,6 +3200,8 @@ test('A1 zero-turn non-start predicate validates the complete measured envelope'
     assert.equal(zeroTurnNonStartOf(candidate), null, label)
   }
 
+  // A stamped zero-turn envelope from a stale dispatch is refused as
+  // assignment-id-mismatch, re-asked once, and never recovers as zero-turn.
   const stale = zeroTurnEnvelope('stale-planner')
   const io = fakeIo({ envelopes: { 'planner:1': stale, 'planner1.id-reask.planner.json': stale, 'lead:1': leadEnv('escalate') } })
   const result = driveTask({ ...CTX, turnCeilings: { planner: 40 } }, io)

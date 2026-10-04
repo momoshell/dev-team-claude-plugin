@@ -1,7 +1,7 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
-import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
+import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
@@ -233,7 +233,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
         const wallDelta = wall - priorWall, monoDelta = mono - priorMono
         const slept = sleptMilliseconds(wallDelta, monoDelta)
         deadline += slept
-        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: assignment.role, transport: 'acp', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        if (slept > 0) { try { log(operationalRow({ at: now(), event: 'host_suspended', role: assignment.role, transport: 'acp', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta })) } catch { /* diagnostics only */ } }
         priorWall = wall; priorMono = mono
       }
       if (wall >= deadline) throw noEnvelope(null, returnPath, assignment)

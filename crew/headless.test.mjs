@@ -950,6 +950,50 @@ test('H2 sleepdeadline', () => {
     assert.equal(polls, 5)
   } finally { f.cleanup() }
 })
+// MUTATION SC1: unwrap JSON emit and lose the operational channel.
+test('SC1', () => {
+  let wall = 0, mono = 0, polls = 0, ended = false
+  const logs = []
+  let run
+  const f = fixture({ now: () => wall, monotonic: () => mono, log: (row) => logs.push(row), kill: () => { ended = true }, existsSync: (path) => (run && path === run.returnPath && polls >= 5 && !ended) || existsSync(path), readFileSync: (path, ...args) => run && path === run.returnPath && polls >= 5 && !ended ? JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }) : readFileSync(path, ...args), sleep: (ms) => {
+    if (ms === WAIT_POLL_MS) {
+      polls++
+      if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    } else { wall += ms; mono += ms }
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(run.returnPath, 900).status, 'done')
+    const rows = logs.filter((row) => row.event === 'host_suspended')
+    assert.equal(rows.length, 1)
+    const { at, ...row } = rows[0]
+    assert.ok(Object.hasOwn(rows[0], 'at'))
+    assert.deepEqual(row, { event: 'host_suspended', role: 'builder', transport: 'headless-json', slept_ms: 1195000, wall_ms: 1200000, mono_ms: 5000, channel: 'operational' })
+    assert.equal(polls, 5)
+  } finally { f.cleanup() }
+})
+
+// MUTATION SC4: unwrap one host-suspended emit and remove its source wrapper.
+test('SC4', () => {
+  const files = ['crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/acp-io.mjs', 'crew/seat-io.mjs']
+  const sites = files.flatMap((path) => readFileSync(join(ROOT, path), 'utf8').split(/\r?\n/).flatMap((line, index) => {
+    const eventAt = line.indexOf("event: 'host_suspended'")
+    return eventAt < 0 ? [] : [{ path, line: index + 1, text: line, wrapped: line.slice(0, eventAt).includes('operationalRow(') }]
+  }))
+  assert.equal(sites.length, 4, JSON.stringify(sites))
+  assert.ok(sites.every((site) => site.wrapped), JSON.stringify(sites))
+})
+
+// MUTATION SC4LineInventory: treat each source file as one line.
+test('SC4LineInventory', () => {
+  const files = ['crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/acp-io.mjs', 'crew/seat-io.mjs']
+  const lines = files.flatMap((path) => readFileSync(join(ROOT, path), 'utf8').split(/\r?\n/).flatMap((line, index) =>
+    line.includes("event: 'host_suspended'") ? [{ path, line: index + 1 }] : []))
+  assert.equal(lines.length, 4, JSON.stringify(lines))
+  assert.ok(lines.every((site) => site.line > 1), JSON.stringify(lines))
+})
+
 test('N1 sleepdeadline', () => {
   let wall = 0, mono = 0, polls = 0
   const logs = []

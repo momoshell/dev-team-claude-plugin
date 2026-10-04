@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
-import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
+import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { sleptMilliseconds } from './headless.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
@@ -1717,7 +1717,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         const wallDelta = wall - priorWall, monoDelta = mono - priorMono
         const slept = sleptMilliseconds(wallDelta, monoDelta)
         deadline += slept
-        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: turn.role, transport: 'headless-rpc', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        if (slept > 0) { try { log(operationalRow({ at: now(), event: 'host_suspended', role: turn.role, transport: 'headless-rpc', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta })) } catch { /* diagnostics only */ } }
         priorWall = wall; priorMono = mono
       }
       if (wall >= deadline) break

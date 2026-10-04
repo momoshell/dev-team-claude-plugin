@@ -56,6 +56,25 @@ test('A1 sleepdeadline', () => {
   } finally { cleanup(f) }
 })
 
+// MUTATION SC3: unwrap ACP emit and lose the operational channel.
+test('SC3', () => {
+  let wall = 0, mono = 0, polls = 0, assignment
+  const f = fixture({ now: () => wall, monotonic: () => mono, sleep: (ms) => {
+    polls++
+    if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    if (polls === 5) writeFileSync(assignment.returnPath, JSON.stringify({ assignment_id: assignment.id, role: 'builder', status: 'done' }))
+  } })
+  try {
+    assignment = assign(f)
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(assignment.returnPath, 900).status, 'done')
+    const rows = f.logs.filter((row) => row.event === 'host_suspended')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].channel, 'operational')
+    assert.deepEqual({ role: rows[0].role, transport: rows[0].transport, slept_ms: rows[0].slept_ms }, { role: 'builder', transport: 'acp', slept_ms: 1195000 })
+  } finally { cleanup(f) }
+})
+
 test('A1', () => {
   const f = fixture({ guardPending: true }); try {
     assign(f); assign(f, { id: 'next' })

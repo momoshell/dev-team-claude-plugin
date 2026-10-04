@@ -3503,7 +3503,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, 
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const boundIssue = String(brief ?? '').split('\n').filter((line) => line.trim() === '## Context pack').length === 1 ? boundIssueOf(brief) : null // the compiler emits one pack; a second (quoted by the ask) makes the binding ambiguous, so nothing is promoted
+  const boundIssue = boundIssueOf(brief)
   const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => ref === `#${boundIssue}` || askClosingIssues(brief).includes(ref))
   const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes), ...promoted])
   const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref) && !askClosingIssues(brief).includes(ref))
@@ -3568,14 +3568,14 @@ export function boundIssueOf(brief) {
   const text = typeof brief === 'string' ? brief : String(brief ?? '')
   if (!text) return null
   const lines = text.split('\n')
-  let issue = null
-  for (let index = 0; index < lines.length; index += 1) {
-    if (lines[index].trim() !== '## Context pack') continue
-    const next = index + 1 < lines.length ? lines[index + 1] : ''
-    const match = /^issue: #([1-9]\d*)\b/.exec(next)
-    if (match) { issue = match[1]; break }
-  }
-  return issue
+  if (lines[0] !== '# Task') return null
+  // Compiler metadata is authoritative only in its fixed slot.
+  // Ask text and inlined issue bodies may quote headings or markers.
+  // A later marker must never become a dispatch binding.
+  // Legacy pack rows deliberately have no authority here.
+  const match = /^<!-- crew:bound-issue #([1-9]\d*) -->$/.exec(lines[1] ?? '')
+  // Missing or malformed metadata fails safe without publication refusal.
+  return match?.[1] ?? null
 }
 
 export function issueStatementDefect({ brief, details } = {}) {

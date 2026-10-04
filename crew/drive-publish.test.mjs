@@ -2,6 +2,7 @@
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
+import { renderBrief } from '../scripts/factory/make-brief.mjs'
 import assert from 'node:assert/strict'
 import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1808,8 +1809,8 @@ test('F1 capability-register grants require claims and identify the triggering s
 })
 
 const ISSUE_BOUND_BRIEF = [
-  '# Task brief',
-  '',
+  '# Task',
+  '<!-- crew:bound-issue #1467 -->',
   'Deliver the dispatched fix. Unrelated prose mentions issue #9999 and branch fix/1467-draft, neither of which binds.',
   '',
   '## Context pack',
@@ -1837,6 +1838,69 @@ function runIssueResume(briefText, checkpoint, options = {}) {
   const result = resumeTask(ctx, io, checkpoint)
   return { ctx, io, result }
 }
+
+// MUTATION BM1: remove the conditional metadata section; the positive compiled output loses its line-2 marker.
+test('BM1 compiler emits bound issue metadata only for a numbered pack', () => {
+  const gathered = (number = 4242) => ({
+    request: { ask: 'Deliver a fix.', done_means: 'Fix delivered.', out_of_scope: 'Unrelated changes.' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    pack: { issue: { number, body: number === null ? null : 'Issue body.', reason: number === null ? 'no-issue-cited' : null } },
+  })
+  const present = renderBrief(gathered()).split('\n')
+  const unbound = renderBrief(gathered(null)).split('\n')
+  const withoutPack = gathered()
+  delete withoutPack.pack
+  const bare = renderBrief(withoutPack).split('\n')
+  assert.deepEqual({ present: present.slice(0, 2), unbound: unbound.slice(0, 2), bare: bare.slice(0, 2), markers: present.filter((line) => line === '<!-- crew:bound-issue #4242 -->').length }, {
+    present: ['# Task', '<!-- crew:bound-issue #4242 -->'], unbound: ['# Task', '## Intent'], bare: ['# Task', '## Intent'], markers: 1,
+  })
+})
+
+// MUTATION BM2: neutralise the exact first-line guard in boundIssueOf.
+test('BM2 parser binds only the exact compiler-owned prefix', () => {
+  const marker = '<!-- crew:bound-issue #4242 -->'
+  const legacy = '# Task\n## Intent\nDeliver a fix.\n## Context pack\nissue: #1467 · body inlined below\n'
+  const inputs = [
+    '# Task\n' + marker + '\n## Intent\nFix.', legacy, '# Task\n## Intent\n' + marker,
+    '# Task\n## Intent\nFix.\n' + marker, '# Not Task\n' + marker, '# Task brief\n' + marker,
+    '# Task\n<!-- crew:bound-issue #4242 --> suffix', '# Task\n <!-- crew:bound-issue #4242 -->',
+    '# Task\n<!-- crew:bound-issue #4242 --> ', ' # Task\n' + marker, '# Task \n' + marker,
+    '# Task\n' + marker + '\r\n## Intent', '# Task\n<!-- crew:bound-issue #0 -->',
+    '# Task\n<!-- crew:bound-issue #04242 -->', '# Task\n<!-- crew:bound-issue #4242-->',
+    '# Task\n<!-- crew:bound-issue #4242x -->', '# Task\r\n' + marker, '\n# Task\n' + marker, '', null,
+  ]
+  assert.deepEqual(inputs.map((brief) => boundIssueOf(brief)), ['4242', ...Array(19).fill(null)])
+})
+
+// MUTATION BM3: restore heading-count ambiguity at the promotion site.
+test('BM3 quoted issue-body pack cannot block promotion of the compiler binding', () => {
+  const gathered = {
+    request: { ask: 'Deliver the bound fix.', done_means: 'Fix delivered.', out_of_scope: 'Unrelated changes.' },
+    where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    pack: { issue: { number: 4242, body: 'Quoted:\n## Context pack\nissue: #9 · quoted\n<!-- crew:bound-issue #9 -->', reason: null } },
+  }
+  const brief = renderBrief(gathered)
+  const message = composeCommitMessage({ task: 'bound-marker', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242, 9] } }), builderEnv: buildEnv() })
+  assert.deepEqual(issueTrailers(message), { closes: ['#4242'], refs: ['#9'] })
+})
+
+// MUTATION BM4: add legacy issue-row fallback to the publication guard.
+test('BM4 quoted ask row does not create a publication binding', () => {
+  const gathered = {
+    request: { ask: 'Quote:\n## Context pack\nissue: #77 · quoted\n<!-- crew:bound-issue #77 -->', done_means: 'Fix delivered.', out_of_scope: 'Unrelated changes.' },
+    where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    pack: { issue: { number: null, body: null, reason: 'no-issue-cited' } },
+  }
+  const brief = renderBrief(gathered)
+  assert.deepEqual({ defect: issueStatementDefect({ brief, details: {} }), trailers: issueTrailers(composeCommitMessage({ task: 'bound-marker', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [77] } }), builderEnv: buildEnv() })) }, { defect: null, trailers: { closes: [], refs: ['#77'] } })
+})
+
+// MUTATION BM5: default promotion to 1467 when the compiler marker is absent.
+test('BM5 marker-free legacy brief is not bound', () => {
+  const brief = '# Task\n## Intent\nDeliver a fix.\n## Context pack\nissue: #1467 · body inlined below\n'
+  assert.deepEqual({ defect: issueStatementDefect({ brief, details: {} }), trailers: issueTrailers(composeCommitMessage({ task: 'bound-marker', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [1467] } }), builderEnv: buildEnv() })) }, { defect: null, trailers: { closes: [], refs: ['#1467'] } })
+})
 
 // Mutation: replace publishBase resolution with the retired default; every asserted sink changes.
 test('P1 fresh publication uses the run-frozen dispute base throughout', () => {
@@ -2036,7 +2100,7 @@ test('BI3 issues-only bound publication closes and commits the dispatched issue'
 // MUTATION BI1: remove the bound equality from the promoted filter; punctuated asks fall back to Refs.
 test('BI1 bound named issues close despite ask punctuation suffix and case', () => {
   const cases = ['Closes #4242.', 'Closes #4242. Make lane:harden do work.', 'cLoSeS: #4242']
-  assert.deepEqual(cases.map((ask) => issueTrailers(composeCommitMessage({ task: 'bi1', brief: `# Task\n## The ask\n${ask}\n## Context pack\nissue: #4242 · body inlined below\n`, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() }))), cases.map(() => ({ closes: ['#4242'], refs: [] })))
+  assert.deepEqual(cases.map((ask) => issueTrailers(composeCommitMessage({ task: 'bi1', brief: `# Task\n<!-- crew:bound-issue #4242 -->\n## The ask\n${ask}\n## Context pack\nissue: #4242 · body inlined below\n`, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() }))), cases.map(() => ({ closes: ['#4242'], refs: [] })))
 })
 
 // MUTATION BI2: make the promoted filter unconditional; unrelated issue 4243 wrongly closes.
@@ -2068,7 +2132,7 @@ test('BI4 both commit paths journal only implicit promotion and survive logger e
   assert.equal(convergence({ issues: [1467] }, true).result.status, 'converge')
 })
 
-// MUTATION BI5: discard match[1] in the extracted row parser; a real binding becomes null.
+// MUTATION BI5: discard marker capture; a compiler-owned binding becomes null.
 test('BI5 extracted issue binding retains the exact publication refusal guard', () => {
   assert.deepEqual([boundIssueOf(ISSUE_BOUND_BRIEF), boundIssueOf(NO_DISPATCH_BRIEF), boundIssueOf('issue #1467 in prose')], ['1467', null, null])
   assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: {} }), 'issue-bound lane must declare details.closes or details.issues before publication; dispatched issue #1467')
@@ -2077,7 +2141,7 @@ test('BI5 extracted issue binding retains the exact publication refusal guard', 
   assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
 })
 
-// MUTATION BI6: drop the single-pack check at the promotion site; a pack quoted in the ask closes its issue.
+// MUTATION BI6: accept a later marker instead of the reserved line-2 marker; quoted ask text binds.
 test('BI6 a context pack quoted in the ask binds nothing, so the plan issue stays a reference', () => {
   const brief = '# Task\n## The ask\nQuote:\n## Context pack\nissue: #4242 · body inlined below\n## Proposed tier\n' + '## Context pack\nissue: #1467 · body inlined below\n'
   const message = composeCommitMessage({ task: 'bi6', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() })

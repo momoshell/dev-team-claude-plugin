@@ -3130,3 +3130,75 @@ test('RV1-4 workflow page states the proposal-only boundary', () => {
   assert.match(page, /DiffBlock/)
   assert.doesNotMatch(page, /data-action\s*=/i)
 })
+
+import { PLAN_STEP_STATUSES, PLAN_STEP_REASONS, PLAN_ABSENCE_REASONS, planSteps } from '../visualizer/web/src/lib/plan-steps.js'
+import { readFileSync as readSource } from 'node:fs'
+
+test('PV3', () => {
+  const payload = { plan:{ chunks:[{ id:'a', checks_owned:['C1'], files_in_scope:['a.js'], depends_on:['b'] }] }, rows:[
+    { channel:'record', event:'step:start', step:'a', round:1, at:99 }, { channel:null, event:'step:start', step:'a', round:3, at:1 },
+    { channel:'record', event:'step:done', step:'a' }, { channel:'record', event:'step:red', step:'a' },
+  ] }
+  assert.deepEqual(planSteps(payload).steps[0], { id:'a', checks_owned:['C1'], files_in_scope:['a.js'], depends_on:['b'], status:'red', via:'step:red', reason:null, rounds:3 })
+  payload.rows.push({ event:'step:bounce', step:'a' }, { event:'step:start', step:'a', round:4 })
+  assert.equal(planSteps(payload).steps[0].status, 'started')
+  assert.equal(planSteps(payload).steps[0].rounds, 4)
+})
+test('PV4', () => {
+  const base = { plan:{ chunks:[{ id:'a' }] } }
+  assert.equal(planSteps({...base, rows:[{ event:'step:accepted-by-gate', step:'a' }]}).steps[0].via, 'step:accepted-by-gate')
+  assert.equal(planSteps({...base, rows:[{ event:'step:reverified', step:'a' }]}).steps[0].status, 'done')
+  assert.equal(planSteps({...base, rows:[{ event:'step:reverified', step:'a' }, { event:'step:reverify-red', step:'a' }]}).steps[0].status, 'red')
+  const redThenDone = planSteps({...base, rows:[{ event:'step:red', step:'a' }, { event:'step:done', step:'a' }]}).steps[0]
+  assert.deepEqual([redThenDone.status, redThenDone.via], ['done', 'step:done'])
+})
+test('PV5', () => {
+  const plan = { chunks:[{ id:'a' }, { id:'b' }] }
+  assert.deepEqual([planSteps({ plan, rows:[] }).steps[0].status, planSteps({ plan, rows:[] }).steps[0].reason], [null, 'no-step-events'])
+  const result = planSteps({ plan, rows:[{ event:'step:start', step:'a', round:1 }] })
+  assert.equal(result.steps[1].status, 'not-started')
+})
+test('PV6', () => {
+  const plan = { chunks:[{ id:'a' }] }
+  const result = planSteps({ plan, rows:[{ event:'step:degrade', remaining:['a','outside','outside'] }] })
+  assert.deepEqual([result.steps[0].status, result.steps[0].reason], [null, 'degraded-to-whole-build'])
+  assert.deepEqual(result.unplanned, ['outside'])
+  assert.equal(planSteps({ plan, rows:[{ event:'step:degrade', remaining:['a'] }, { event:'step:done', step:'a' }, { event:'step:red', step:'a' }] }).steps[0].status, 'red')
+})
+test('PV7', () => {
+  assert.equal(planSteps({}).absent, 'plan-not-accepted')
+  const errored = planSteps({ plan:{ chunks:[{ id:'a' }, { id:'b' }] }, rows:[{ event:'step:done', step:'a' }, { event:'step:done', step:'b' }], error:'read failed' })
+  assert.deepEqual(errored.steps.map(({ status, reason }) => [status, reason]), [[null, 'journal-unavailable'], [null, 'journal-unavailable']])
+  assert.deepEqual(PLAN_STEP_STATUSES, ['not-started','started','done','red','bounced'])
+  assert.deepEqual(PLAN_STEP_REASONS, ['no-step-events','degraded-to-whole-build','journal-unavailable'])
+  assert.deepEqual(PLAN_ABSENCE_REASONS, ['plan-not-accepted','plan-unreadable','plan-has-no-chunks'])
+  assert.equal(Object.isFrozen(PLAN_STEP_STATUSES), true)
+  assert.equal(planSteps({ plan:{ chunks:[null, {}, { id:' ' }, { id:'ok', checks_owned:['x'] }] }, rows:[null, []] }).steps.length, 1)
+})
+test('PV8', () => {
+  const source = readSource(new URL('../visualizer/web/src/lib/plan-steps.js', import.meta.url), 'utf8')
+  const detector = (text) => /(?:from\s*|import\s*(?:\(\s*)?)['"](?!\.)/.test(text)
+  // Mutation killed: allowing a bare dynamic import in plan-steps.js must fail this shared detector.
+  assert.equal(detector(source), false)
+  assert.equal(detector("import x from 'bare-package'"), true)
+  assert.equal(detector("import 'node:fs'"), true)
+  assert.equal(detector("const fs = import('node:fs')"), true)
+  assert.equal(detector("import('./local.js')"), false)
+})
+test('PV9', () => {
+  const component = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8')
+  const detail = readSource(new URL('../visualizer/web/src/lib/RunDetail.svelte', import.meta.url), 'utf8')
+  assert.match(component, /import \{ planSteps \} from '\.\/plan-steps\.js'/)
+  assert.match(component, /let \{ journalState \} = \$props\(\)/)
+  assert.match(component, /checks_owned/)
+  assert.match(component, /step\.status \?\? `Unmeasured —/)
+  assert.match(component, /step\.rounds \?\? `Unmeasured —/)
+  assert.match(component, /if view\.steps\.length === 0/)
+  assert.match(component, /Loading accepted plan/)
+  assert.match(component, /Inspect the accepted planner return/)
+  assert.match(component, /role="status"/)
+  assert.match(component, /var\(--panel\).*var\(--line\)/)
+  const style = component.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
+  assert.doesNotMatch(style, /#[0-9a-f]{3,8}\b|\b(?:rgb|hsl)a?\(/i)
+  assert.match(detail, /<PlanSteps \{journalState\} \/>/)
+})

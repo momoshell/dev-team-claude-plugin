@@ -14,7 +14,7 @@ function readJson(path) {
 export function createJournalSource({ crewRoot = join(homedir(), '.crew') } = {}) {
   const root = resolve(crewRoot)
   function readJournal({ repo_slug, task_slug, adw_id } = {}) {
-    const empty = { dir: null, verified: false, rows: [], skipped_malformed: 0, skipped_line_numbers: [], channels: JOURNAL_CHANNELS, degraded: false }
+    const empty = { dir: null, verified: false, rows: [], skipped_malformed: 0, skipped_line_numbers: [], channels: JOURNAL_CHANNELS, degraded: false, plan: { chunks: null, absent: 'plan-not-accepted' } }
     if (!validSegment(repo_slug) || !validSegment(task_slug)) return { ...empty, error: 'invalid repo_slug or task_slug' }
     const parent = resolve(root, repo_slug)
     const candidateRoot = resolve(parent, task_slug)
@@ -44,6 +44,12 @@ export function createJournalSource({ crewRoot = join(homedir(), '.crew') } = {}
     if (!chosen) return { ...empty, error: 'no task directory for this run' }
 
     const result = { ...empty, dir: chosen, verified: chosenVerified }
+    try {
+      const acceptedPlan = JSON.parse(readFileSync(join(chosen, 'task', 'plan.accepted.envelope.json'), 'utf8'))
+      if (!acceptedPlan || typeof acceptedPlan !== 'object' || Array.isArray(acceptedPlan)) result.plan.absent = 'plan-unreadable'
+      else if (!Array.isArray(acceptedPlan.details?.chunks) || acceptedPlan.details.chunks.length === 0) result.plan.absent = 'plan-has-no-chunks'
+      else result.plan = { chunks: acceptedPlan.details.chunks, absent: null }
+    } catch (err) { result.plan.absent = err.code === 'ENOENT' ? 'plan-not-accepted' : 'plan-unreadable' }
     let text = ''
     try { text = readFileSync(join(chosen, 'journal.jsonl'), 'utf8') } catch (err) { result.degraded = true; result.error = err.message; return result }
     const rows = []

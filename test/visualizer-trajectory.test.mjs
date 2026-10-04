@@ -229,6 +229,45 @@ test('projectSpan uses a marker without a width for an open span', () => {
   assert.equal('width' in box, false)
 })
 
+test('PV1 reads accepted plan chunks from the selected lane without changing its tree', () => {
+  const root = scratchDir('visualizer-trajectory-plan-')
+  const { dir } = lane(root)
+  mkdirSync(join(dir, 'task'))
+  const chunks = [
+    { id: 'router', checks_owned: ['L1.8', 'L1.9'] },
+    { id: 'view', checks_owned: ['L2'] },
+  ]
+  writeFileSync(join(dir, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }))
+  const before = treeDigest(root)
+  const result = createJournalSource({ crewRoot: root }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+  assert.deepEqual(result.plan, { chunks, absent: null })
+  assert.equal(treeDigest(root), before)
+})
+
+test('PV2 distinguishes absent, unreadable and chunkless plans while retaining plans without journals', () => {
+  const read = (name, setup) => {
+    const root = scratchDir(`visualizer-trajectory-${name}-`)
+    const { dir } = lane(root)
+    mkdirSync(join(dir, 'task'))
+    if (setup) setup(join(dir, 'task', 'plan.accepted.envelope.json'))
+    return createJournalSource({ crewRoot: root }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+  }
+  assert.deepEqual(read('plan-missing').plan, { chunks: null, absent: 'plan-not-accepted' })
+  for (const [name, text] of [
+    ['plan-invalid', '{'], ['plan-null', 'null'], ['plan-array', '[]'], ['plan-primitive', '7'],
+    ['plan-no-chunks', JSON.stringify({ details: {} })], ['plan-empty-chunks', JSON.stringify({ details: { chunks: [] } })],
+  ]) {
+    const result = read(name, (path) => writeFileSync(path, text))
+    assert.equal(result.plan.absent, ['plan-no-chunks', 'plan-empty-chunks'].includes(name) ? 'plan-has-no-chunks' : 'plan-unreadable')
+  }
+  const denied = read('plan-directory', (path) => mkdirSync(path))
+  assert.deepEqual(denied.plan, { chunks: null, absent: 'plan-unreadable' })
+  const chunks = [{ id: 'kept', checks_owned: ['PV2'] }]
+  const retained = read('plan-no-journal', (path) => writeFileSync(path, JSON.stringify({ details: { chunks } })))
+  assert.deepEqual(retained.plan, { chunks, absent: null })
+  assert.equal(retained.degraded, true)
+})
+
 function growingPayload(count) {
   const rows = [{ at: 0, stage: 'live-stage' }]
   for (let index = 1; index < count; index += 1) rows.push({ at: index * 1000, event: `event-${index}` })

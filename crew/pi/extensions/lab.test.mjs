@@ -7,7 +7,85 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync,
 import { dirname, join } from 'node:path'
 import * as mod from './lab.ts'
 import * as capabilities from '../../capabilities.mjs'
+import { createLabServer } from '../../mcp/lab-server.mjs'
 import { ROOT, git, scratchDir } from '../../../test/helpers.mjs'
+
+// MUTATION: replace the advertised tool list with an empty list.
+test('LM1', async () => {
+  const writes = []
+  const tool = { description: 'fixture description', execute: async () => ({ content: [] }) }
+  const handle = createLabServer({ tool, cwd: '/foreign/repo', write: (reply) => writes.push(reply) })
+  await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } })
+  await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+  await handle({ jsonrpc: '2.0', id: 3, method: 'ping' })
+  assert.equal(writes[0].result.protocolVersion, '2025-03-26')
+  assert.deepEqual(writes[0].result.capabilities, { tools: {} })
+  assert.deepEqual(writes[1].result.tools, [{ name: 'lab', description: 'fixture description', inputSchema: mod.LAB_PARAMS }])
+  assert.deepEqual(writes[2].result, {})
+})
+
+// MUTATION: hard-code the delegated result's isError field to false.
+test('LM2', async () => {
+  const writes = []
+  const seen = []
+  const deferred = []
+  let active = false
+  const tool = {
+    description: 'fixture',
+    execute: async (...args) => {
+      seen.push(args)
+      if (args[1].program === 'first') {
+        active = true
+        try { await new Promise((resolve, reject) => deferred.push({ resolve, reject })) } finally { active = false }
+        throw new Error('first rejected')
+      }
+      assert.equal(active, false)
+      return { content: [{ type: 'text', text: args[1].program }], details: { refused: args[1].program === 'refuse' ? 'policy' : null } }
+    },
+  }
+  const handle = createLabServer({ tool, cwd: '/foreign/repo', write: (reply) => writes.push(reply) })
+  const first = handle({ jsonrpc: '2.0', id: 0, method: 'tools/call', params: { name: 'lab', arguments: { program: 'first', skill: { key: 'value' } } } })
+  const second = handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lab', arguments: { program: 'refuse', skill: ['literal'] } } })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(seen.length, 1)
+  deferred[0].reject(new Error('first rejected'))
+  await Promise.all([first, second])
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0][0], 0)
+  assert.deepEqual(seen[0][1], { program: 'first', skill: { key: 'value' } })
+  assert.equal(seen[0][4].cwd, '/foreign/repo')
+  assert.ok(seen[0][2] instanceof AbortSignal)
+  assert.deepEqual(seen[1][1], { program: 'refuse', skill: ['literal'] })
+  assert.deepEqual(writes[1].result, { content: [{ type: 'text', text: 'refuse' }], isError: true })
+  const success = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'lab', arguments: { program: 'success' } } })
+  assert.equal(success, undefined)
+  assert.deepEqual(writes[2].result, { content: [{ type: 'text', text: 'success' }], isError: false })
+})
+
+// MUTATION: neutralise notifications/cancelled abort dispatch.
+test('LM3', async () => {
+  const writes = []
+  let captured
+  let release
+  const tool = { description: 'fixture', execute: async (_id, _args, signal) => {
+    captured = signal
+    await new Promise((resolve) => { release = resolve })
+    return { content: [] }
+  } }
+  const handle = createLabServer({ tool, write: (reply) => writes.push(reply) })
+  const pending = handle({ jsonrpc: '2.0', id: 0, method: 'tools/call', params: { name: 'lab', arguments: {} } })
+  await new Promise((resolve) => setImmediate(resolve))
+  await handle({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 99 } })
+  await handle({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 0 } })
+  assert.equal(captured.aborted, true)
+  await handle({ jsonrpc: '2.0', method: 'notifications/initialized' })
+  assert.equal(writes.length, 0)
+  await handle({ jsonrpc: '2.0', id: 4, method: 'unknown' })
+  assert.equal(writes[0].error.code, -32601)
+  release()
+  await pending
+  assert.equal(writes.length, 2)
+})
 
 function temp(prefix = 'lab-test-') {
   return realpathSync(scratchDir(prefix))
@@ -621,14 +699,25 @@ test('a normal close cancels the escalation timer', async () => {
   assert.equal(deadline.cleared, true)
 })
 
-test('the register grants lab to planner pi only', () => {
+// MUTATION: re-add the retired lab extension to planner/pi's raw grant.
+test('LM4', () => {
+  const grantsDocument = JSON.parse(readFileSync(join(ROOT, 'skills/qa-test-writing/grants.json'), 'utf8'))
+  assert.deepEqual(grantsDocument.lab.ops, ['scratchCheckout', 'read', 'grep'])
+  assert.deepEqual(grantsDocument.lab.host_authority, [])
+  const evidence = readFileSync(join(ROOT, 'skills/qa-test-writing/anchor-evidence.mjs'), 'utf8')
+  assert.match(evidence, /lab\.scratchCheckout/)
   const register = capabilities.loadCapabilities()
   const planner = capabilities.grantsFor(register, 'planner', { agent: 'pi' })
-  assert.ok(planner.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')))
+  assert.deepEqual(planner.mcp_servers.find((server) => server.name === 'lab'), { name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null })
+  assert.equal(planner.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
   for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) {
     const grants = capabilities.grantsFor(register, role, { agent: 'pi' })
     assert.equal(grants.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
+    assert.equal(grants.mcp_servers.some((server) => server.name === 'lab'), false)
   }
+  const claude = capabilities.grantsFor(register, 'planner', { agent: 'claude' })
+  assert.equal(claude.mcp_servers.some((server) => server.name === 'lab'), false)
+  assert.equal(claude.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
 })
 
 test('the exported API has exactly six operation names', () => {

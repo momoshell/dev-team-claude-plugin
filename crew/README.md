@@ -86,7 +86,7 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Plan and plan checks | `crew/drive.mjs` | - | [Plan check](#plan-check-growth-evidence-and-the-carve-verdict) |
 | Acceptance gate and kill-mutations | `crew/drive.mjs` | ADR-030 ([decision](../docs/adr/adr-030-acceptance-authorship.md)) | [Acceptance gate](#the-acceptance-gate-gate-first) |
 | Build | `crew/drive.mjs` | - | [Model](#the-model) |
-| Pi lab | `crew/pi/extensions/lab.ts` | - | - |
+| Pi planner lab | `crew/mcp/lab-server.mjs` → `crew/pi/extensions/lab.ts` | - | - |
 | Builderloop | `crew/pi/extensions/builderloop.ts` | - | - |
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
 | FFF | `crew/capabilities.json`, `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | - |
@@ -120,6 +120,8 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Headless daemon | `crew/daemon.mjs` | ADR-029 ([decision](../docs/adr/adr-029-headless-observability-interjection.md)) | [The daemon](#the-daemon) |
 | ACP | `crew/acp-client.mjs` | ADR-036 ([decision](../docs/adr/adr-036-acp-seat-transport.md)) | [ACP decision](../docs/adr/adr-036-acp-seat-transport.md) |
 | Return paths | `crew/crew.mjs`, `crew/daemon.mjs` | - | [Contracts](#contracts) |
+
+The planner's pi seat receives native `mcp__lab__lab` (timeout 960 seconds); the retained `lab.ts` implements the tool. If the server file is absent or its probe fails, the grant is withheld with `server-absent`.
 
 The scope list gives context, not enforcement: out-of-context edits are
 journaled; protocol-debris and trust-boundary refusals remain separate. Tests

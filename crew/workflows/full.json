@@ -10,7 +10,6 @@
       "skills": [],
       "extensions": [
         "crew/pi/extensions/subagent.ts",
-        "crew/pi/extensions/lab.ts",
         "crew/pi/extensions/readgate.ts"
       ]
     },

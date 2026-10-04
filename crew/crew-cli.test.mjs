@@ -1030,7 +1030,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -1049,8 +1049,8 @@ test('the shipped planner pi RPC command pins the complete extension-derived too
   assert.deepEqual(planner.args, [
     '--mode', 'rpc', '--model', 'openai-codex/gpt-5.6', '--thinking', 'medium', '--session-dir', '/tmp/crew-task/sessions',
     '--session-id', 'planner', '--append-system-prompt', '/tmp/crew-task/role-planner.md',
-    '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,lab,submit_envelope', '--exclude-tools', 'edit',
-    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', '/repo/crew/pi/extensions/lab.ts',
+    '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts',
     '-e', '/repo/crew/pi/extensions/readgate.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
   ])
 })
@@ -4641,7 +4641,7 @@ test('E1 runtime RPC tools activate every granted extension tool', () => {
   const grants = pinnedGrants(loadCapabilities(), 'pi')
   const command = grantRuntimeRpcCommand({ model: 'openai-codex/gpt-5.6', effort: 'medium', deny: SEAT_DEFAULTS.planner.deny }, grants)
   const tools = command.args[command.args.indexOf('--tools') + 1].split(',')
-  assert.deepEqual(tools.filter((tool) => ['agent', 'lab', 'retrieve'].includes(tool)), ['agent', 'lab'])
+  assert.deepEqual(tools.filter((tool) => ['agent', 'lab', 'retrieve'].includes(tool)), ['agent'])
   assert.equal(tools.includes('retrieve'), false)
 })
 
@@ -4654,11 +4654,12 @@ test('F1 durable seat state records its resolved extensions', async () => {
   })
   assert.deepEqual(member.grant_snapshot.grants.extensions, [
     join(ROOT, 'crew/pi/extensions/subagent.ts'),
-    join(ROOT, 'crew/pi/extensions/lab.ts'),
     join(ROOT, 'crew/pi/extensions/readgate.ts'),
     join(ROOT, 'crew/pi/extensions/submit.ts'),
     'builtin:codemode',
+    'builtin:mcp',
   ])
+  assert.deepEqual(member.grant_snapshot.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }])
   assert.equal(Object.hasOwn(member, 'config_dir'), false)
 })
 

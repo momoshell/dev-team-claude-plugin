@@ -98,6 +98,7 @@ function assertAgentRefusals(register, agent, activeDimensions, { role = 'unknow
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+const LAB_SERVER_PATH = join(HERE, 'mcp', 'lab-server.mjs')
 const ROLES_DIR = join(HERE, 'roles')
 const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 const CHARTER_GUIDELINES_DIR = join(HERE, 'guidelines')
@@ -206,6 +207,30 @@ function searchRecord(tools, fff, reasonOrOptions = undefined) {
 
 function copyFffGrant(grants) {
   return Object.freeze({ ...grants, mcp_servers: Object.freeze(grants.mcp_servers.filter((server) => !(server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN))) })
+}
+
+function resolveLabServer(grants, exists) {
+  const index = (grants.mcp_servers || []).findIndex((server) => server?.name === 'lab')
+  if (index === -1) return { grants, lab: Object.freeze({ state: 'ungranted' }) }
+  let available = false
+  try { available = exists(LAB_SERVER_PATH) } catch { /* an indeterminate probe withholds the server */ }
+  if (!available) {
+    return {
+      grants: Object.freeze({ ...grants, mcp_servers: Object.freeze(grants.mcp_servers.filter((server) => server?.name !== 'lab')) }),
+      lab: Object.freeze({ state: 'withheld', reason: 'server-absent' }),
+    }
+  }
+  const servers = grants.mcp_servers.map((server, i) => {
+    if (i !== index) return server
+    return Object.freeze({
+      ...server,
+      command: Object.freeze({ bin: process.execPath, args: Object.freeze([LAB_SERVER_PATH]) }),
+    })
+  })
+  return {
+    grants: Object.freeze({ ...grants, mcp_servers: Object.freeze(servers) }),
+    lab: Object.freeze({ state: 'granted' }),
+  }
 }
 
 function resolveFffSearch(role, adapter, grants, exists) {
@@ -2480,6 +2505,8 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       assertGrantsBacked(role, grants, registry, { agent: name })
       const fff = resolveFffSearch(role, name, grants, exists)
       grants = fff.grants
+      const lab = resolveLabServer(grants, exists)
+      grants = lab.grants
       if (name === 'pi') {
         const extensions = [...(grants.extensions || [])]
         if (piCodemodeOn) extensions.push('builtin:codemode')
@@ -2626,7 +2653,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
         throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
       }
-      const adapterConfig = { name, adapter, transport, grants, configDir, search: fff.search }
+      const adapterConfig = { name, adapter, transport, grants, configDir, search: fff.search, lab: lab.lab }
       out[role] = adapterConfig
     } catch (err) {
       if (err.role === undefined) { err.role = role; err.cell = seats?.[role] ?? null }
@@ -2924,6 +2951,7 @@ export function mcpConfigDocument(grants = EMPTY_GRANTS, agent = 'claude') {
       mcpServers[server.name] = { type: 'http', url: server.url }
     }
     if (agent === 'pi') mcpServers[server.name].exposure = 'direct'
+    if (agent === 'pi' && server.name === 'lab') mcpServers[server.name].timeout = 960
   }
   return { mcpServers }
 }
@@ -3206,7 +3234,7 @@ export async function bootCmd(args, deps = {}) {
     adapters = await resolveAdapters(roles, args, tierSeats, {
       ...(registerDep ? { register: registerDep } : {}),
       ...(selectedRoster ? { roster: selectedRoster } : {}),
-      exists: existsSyncDep ? (path) => path === FFF_MCP_BIN ? existsSyncDep(path) : existsSync(path) : existsSync,
+      exists: existsSyncDep ? (path) => path === FFF_MCP_BIN || path === LAB_SERVER_PATH ? existsSyncDep(path) : existsSync(path) : existsSync,
       env: bootEnv,
     })
   } catch (err) {
@@ -3573,6 +3601,7 @@ export async function bootCmd(args, deps = {}) {
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
     mcp_servers: Object.fromEntries(roles.map((r) => [r, members[r].mcp_servers])),
     search: Object.fromEntries(roles.map((r) => [r, adapters[r].search])),
+        lab: Object.fromEntries(roles.map((r) => [r, adapters[r].lab])),
     // Persist optional vendor grant shortfalls in the append-only boot event.
     vendor_withheld: Object.fromEntries(roles.map((r) => [r, adapters[r].grants?.vendor_withheld ?? []])),
     charter_bytes: charter.bytes,

@@ -920,11 +920,12 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
   assert.equal(resolvedPlanner.planner.name, 'pi')
   assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
     join(ROOT, 'crew/pi/extensions/subagent.ts'),
-    join(ROOT, 'crew/pi/extensions/lab.ts'),
     join(ROOT, 'crew/pi/extensions/readgate.ts'),
     join(ROOT, 'crew/pi/extensions/submit.ts'),
     'builtin:codemode',
+    'builtin:mcp',
   ])
+  assert.deepEqual(resolvedPlanner.planner.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })
   assert.equal(headlessPlanner.planner.transport, 'headless-rpc')

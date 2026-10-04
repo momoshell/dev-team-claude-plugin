@@ -210,17 +210,26 @@ const SEAT_PASS_THROUGH = new Set([
   "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },",
 ])
 function blankComments(source) {
-  let out = ''
-  let mode = null
-  let previous = '('
-  for (let i = 0; i < source.length; i += 1) {
-    const c = source[i], d = source[i + 1]
-    if (mode === null) {
-      if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
-      if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
-      // Strings and regex literals are copied whole, so a // or /* inside one never opens a comment.
+  // Same-length output: comments become spaces (newlines kept), so lines and indexes still map to the source.
+  // Strings and regex literals pass through whole; a template's ${...} is code again, so its comments blank too.
+  const expressionKeywords = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await']
+  let i = 0
+  function code(insideInterpolation) {
+    let out = '', previous = '(', depth = 0
+    while (i < source.length) {
+      const c = source[i], d = source[i + 1]
+      if (insideInterpolation && c === '{') depth += 1
+      if (insideInterpolation && c === '}') { if (depth === 0) return out; depth -= 1 }
+      if (c === '/' && d === '/') { while (i < source.length && source[i] !== '\n') { out += ' '; i += 1 } continue }
+      if (c === '/' && d === '*') {
+        out += '  '; i += 2
+        while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) { out += source[i] === '\n' ? '\n' : ' '; i += 1 }
+        if (i < source.length) { out += '  '; i += 2 }
+        continue
+      }
+      if (c === '`') { out += c; i += 1; out += template(); previous = 'x'; continue }
       const regexStart = c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)
-      if (c === "'" || c === '"' || c === '`' || regexStart) {
+      if (c === "'" || c === '"' || regexStart) {
         let j = i + 1, slash = false, inClass = false
         while (j < source.length) {
           const r = source[j]
@@ -233,27 +242,45 @@ function blankComments(source) {
           j += 1
         }
         out += source.slice(i, j + 1)
-        i = j
+        i = j + 1
         previous = 'x'
         continue
       }
-      if (/[A-Za-z_$0-9)\]]/.test(c)) {
+      if (/[A-Za-z_$0-9]/.test(c)) {
         let j = i
         while (j < source.length && /[\w$]/.test(source[j])) j += 1
-        const word = source.slice(i, Math.max(j, i + 1))
-        previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(word) ? '(' : 'x'
+        const word = source.slice(i, j)
+        previous = expressionKeywords.includes(word) ? '(' : 'x'
         out += word
-        i = Math.max(j, i + 1) - 1
+        i = j
         continue
       }
-      if (!/\s/.test(c)) previous = c
-      out += c; continue
+      if (c === ')' || c === ']') previous = 'x'
+      else if (!/\s/.test(c)) previous = c
+      out += c
+      i += 1
     }
-    if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
-    if (c === '*' && d === '/') { mode = null; out += '  '; i += 1; continue }
-    out += c === '\n' ? '\n' : ' '
+    return out
   }
-  return out
+  function template() {
+    let out = '', slash = false
+    while (i < source.length) {
+      const c = source[i]
+      if (slash) { slash = false; out += c; i += 1; continue }
+      if (c === '\\') { slash = true; out += c; i += 1; continue }
+      if (c === '`') { out += c; i += 1; return out }
+      if (c === '$' && source[i + 1] === '{') {
+        out += '${'; i += 2
+        out += code(true)
+        if (i < source.length) { out += '}'; i += 1 }
+        continue
+      }
+      out += c
+      i += 1
+    }
+    return out
+  }
+  return code(false)
 }
 // BLIND SPOT: computed deps['logLine'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.
 // io.log(row(...)) is visible with wrapper null and is rejected by the inventory projection.
@@ -542,6 +569,14 @@ test('SL7', () => {
     assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
   }
   for (const accepted of ['const u = "a // log(row)"', '// log(row) in a comment', '/* log(row) */ const x = 1']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+})
+// Mutation SL8: copying a template's ${...} without blanking its comments counts a commented-out emit as a live site.
+test('SL8', () => {
+  const live = 'const s = `${ log?.(operationalRow({ event: \'sl8\' })) }`'
+  assert.equal(seatJournalSites(live).length, 1)
+  for (const commented of ['const s = `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 1 }`', 'const s = `${ 1 // log?.(operationalRow({ event: \'sl8\' }))\n}`', 'const s = `a ${ `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 2 }` } b`']) {
+    assert.deepEqual(seatJournalSites(commented), [], commented)
+  }
 })
 
 // Mutation SS1: disabling callHits accepts the seventh disguised form.

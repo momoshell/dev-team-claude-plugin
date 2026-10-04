@@ -429,6 +429,61 @@ test('Claude ACP empty allowlist retains MCP wildcard denial', () => {
   assert.deepEqual(options.disallowedTools, ['mcp__*'])
 })
 
+function withAcpSkillFixture(materialise, fn) {
+  const taskDir = scratchDir('acpskills-acp-')
+  const sourceDir = join(taskDir, 'source', 'alpha')
+  mkdirSync(sourceDir, { recursive: true })
+  const skill = join(sourceDir, 'SKILL.md')
+  writeFileSync(skill, '---\nname: alpha\ndescription: acceptance fixture\n---\nFixture skill.\n')
+  const role = 'builder'
+  const grants = { tools: ['Write', 'Bash'], skills: [skill], mcp_servers: [] }
+  const spec = { bin: '/bin/acp', claudeBin: '/frozen/claude', cwd: '/checkout', model: 'opus', tools: 'Read,Write', deny: 'Edit,Task', effort: 'high', promptFile: '/task/role.md', writableDirs: ['/task', '/returns'], env: {}, taskDir, role, grants }
+  try {
+    if (materialise) writeSeatSkills({ taskDir, role, grants })
+    fn(spec)
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
+}
+
+test('ACS1 Claude ACP launch includes the materialised local skills plugin', () => {
+  // MUTATION: remove the conditional plugins spread from acpLaunch.
+  withAcpSkillFixture(true, (spec) => {
+    const options = claudeAcpLaunch(spec).sessionParams._meta.claudeCode.options
+    assert.deepEqual(options.plugins, [{ type: 'local', path: skillsPluginDir({ taskDir: spec.taskDir, role: spec.role }) }])
+  })
+})
+
+test('ACS2 Claude ACP launch refuses unmaterialised skill grants', () => {
+  // MUTATION: remove acpLaunch's materialisation assertion.
+  withAcpSkillFixture(false, (spec) => {
+    assert.throws(() => claudeAcpLaunch(spec), (error) => error.reason === 'grant-unsupported')
+  })
+})
+
+test('ACS3 Claude ACP keeps no-skill options unchanged', () => {
+  // MUTATION: emit plugins whenever taskDir and role are present, even without grants.
+  withAcpSkillFixture(true, (spec) => {
+    const bare = claudeAcpLaunch({ ...spec, grants: { ...spec.grants, skills: [] } }).sessionParams._meta.claudeCode.options
+    assert.equal(Object.hasOwn(bare, 'plugins'), false)
+    assert.equal(bare.allowedTools.includes('Skill'), false)
+    const granted = claudeAcpLaunch(spec).sessionParams._meta.claudeCode.options
+    const { plugins, ...withoutPlugins } = granted
+    withoutPlugins.allowedTools = withoutPlugins.allowedTools.filter((tool) => tool !== 'Skill')
+    assert.deepEqual(withoutPlugins, bare)
+  })
+})
+
+test('ACS4 Claude ACP appends exactly one Skill to granted allowedTools', () => {
+  // MUTATION: drop the conditional Skill append from acpLaunch's allowedTools.
+  withAcpSkillFixture(true, (spec) => {
+    for (const tools of ['Read,Write', 'Skill,Read,Skill,Write']) {
+      const actual = claudeAcpLaunch({ ...spec, tools }).sessionParams._meta.claudeCode.options.allowedTools
+      assert.deepEqual({ last: actual.at(-1), count: actual.filter((tool) => tool === 'Skill').length }, { last: 'Skill', count: 1 })
+    }
+  })
+})
+
 test('Claude ACP launch refuses relative binaries and extension grants', () => {
   assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: 'claude' }), /adapter-claude\.acpLaunch.*claudeBin.*ABSOLUTE/)
   assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', grants: { extensions: ['x'] } }), (error) => error.reason === 'grant-unsupported')

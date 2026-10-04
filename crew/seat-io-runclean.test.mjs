@@ -212,11 +212,41 @@ const SEAT_PASS_THROUGH = new Set([
 function blankComments(source) {
   let out = ''
   let mode = null
+  let previous = '('
   for (let i = 0; i < source.length; i += 1) {
     const c = source[i], d = source[i + 1]
     if (mode === null) {
       if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
       if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
+      // Strings and regex literals are copied whole, so a // or /* inside one never opens a comment.
+      const regexStart = c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)
+      if (c === "'" || c === '"' || c === '`' || regexStart) {
+        let j = i + 1, slash = false, inClass = false
+        while (j < source.length) {
+          const r = source[j]
+          if (slash) slash = false
+          else if (r === '\\') slash = true
+          else if (regexStart && r === '\n') break
+          else if (regexStart && r === '[') inClass = true
+          else if (regexStart && r === ']') inClass = false
+          else if (r === (regexStart ? '/' : c) && !inClass) break
+          j += 1
+        }
+        out += source.slice(i, j + 1)
+        i = j
+        previous = 'x'
+        continue
+      }
+      if (/[A-Za-z_$0-9)\]]/.test(c)) {
+        let j = i
+        while (j < source.length && /[\w$]/.test(source[j])) j += 1
+        const word = source.slice(i, Math.max(j, i + 1))
+        previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(word) ? '(' : 'x'
+        out += word
+        i = Math.max(j, i + 1) - 1
+        continue
+      }
+      if (!/\s/.test(c)) previous = c
       out += c; continue
     }
     if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
@@ -505,6 +535,13 @@ test('SL5', () => {
 test('SL6', () => {
   for (const accepted of ['const r = /log/', 'const r = (/logLine\\(/).test(s)', 'if (/[/]log/.test(s)) x()', 'return /log/.test(s)']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
   for (const emit of ['const half = a / log(row)', 'const r = x /log/ y']) assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+})
+// Mutation SL7: letting blankComments open a comment at a // inside a regex or string hides the sink after it.
+test('SL7', () => {
+  for (const emit of ['const s = `${ /[//]/.test(s) && log(row) }`', "const u = 'http://x'; log(row)", 'if (/a\\/\\//.test(s)) log(row)']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+  }
+  for (const accepted of ['const u = "a // log(row)"', '// log(row) in a comment', '/* log(row) */ const x = 1']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
 })
 
 // Mutation SS1: disabling callHits accepts the seventh disguised form.

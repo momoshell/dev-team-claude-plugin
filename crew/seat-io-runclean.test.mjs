@@ -215,7 +215,9 @@ function blankComments(source) {
   const expressionKeywords = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await']
   let i = 0
   function code(insideInterpolation) {
-    let out = '', previous = '(', depth = 0
+    let out = '', previous = '(', depth = 0, lastWord = ''
+    // A ) closing an if/while/for/with head is followed by a statement, where / opens a regex.
+    const parens = []
     while (i < source.length) {
       const c = source[i], d = source[i + 1]
       if (insideInterpolation && c === '{') depth += 1
@@ -251,12 +253,16 @@ function blankComments(source) {
         while (j < source.length && /[\w$]/.test(source[j])) j += 1
         const word = source.slice(i, j)
         previous = expressionKeywords.includes(word) ? '(' : 'x'
+        lastWord = word
         out += word
         i = j
         continue
       }
-      if (c === ')' || c === ']') previous = 'x'
+      if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastWord))
+      if (c === ')') previous = parens.pop() ? '(' : 'x'
+      else if (c === ']') previous = 'x'
       else if (!/\s/.test(c)) previous = c
+      if (!/\s/.test(c)) lastWord = ''
       out += c
       i += 1
     }
@@ -304,7 +310,8 @@ function seatRefuseJournalSinks(text) {
   const tokens = []
   // A template's ${...} is code: each open interpolation keeps its own brace depth.
   const interpolations = []
-  let quote = null, escaped = false, previous = '('
+  let quote = null, escaped = false, previous = '(', lastName = ''
+  const parens = []
   for (let i = 0; i < text.length;) {
     const c = text[i]
     if (quote !== null) {
@@ -346,9 +353,13 @@ function seatRefuseJournalSinks(text) {
         && !/[.\w$]/.test(text[start - 1] ?? '')
         && !/[\w$]/.test(text[i] ?? '')) tokens.push({ name, index: start })
       previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(name) ? '(' : 'x'
+      lastName = name
       continue
     }
-    if (!/\s/.test(c)) previous = c
+    if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastName))
+    if (c === ')') previous = parens.pop() ? '(' : 'x'
+    else if (!/\s/.test(c)) previous = c
+    if (!/\s/.test(c)) lastName = ''
     i += 1
   }
   for (const { name, index } of tokens) {
@@ -574,6 +585,8 @@ test('SL7', () => {
 test('SL8', () => {
   const live = 'const s = `${ log?.(operationalRow({ event: \'sl8\' })) }`'
   assert.equal(seatJournalSites(live).length, 1)
+  assert.equal(seatJournalSites('const s = `${ (() => { if (true) /[//]/.test(\'/\') && log?.(operationalRow({ event: \'alive\' })) })() }`').length, 1)
+  assert.deepEqual(seatJournalSites('if (ok) /log/.test(s)'), [])
   for (const commented of ['const s = `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 1 }`', 'const s = `${ 1 // log?.(operationalRow({ event: \'sl8\' }))\n}`', 'const s = `a ${ `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 2 }` } b`']) {
     assert.deepEqual(seatJournalSites(commented), [], commented)
   }

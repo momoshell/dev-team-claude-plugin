@@ -4015,6 +4015,21 @@ test('repair triage context is recorded rather than refused', () => {
   assert.ok(io.calls.assign.find(({ role, policy }) => role === 'builder' && policy.fence.includes('b.mjs')))
 })
 
+// MUTATION CC3: drop closes from the triage plan conversion; a repair lane's declared close ships no trailer.
+test('CC3 a repair triage plan keeps details.closes, so its commit carries the Closes trailer', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv({ details: { plan_path: `${TD}/triage.md`, files_in_scope: ['b.mjs'], closes: [42] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: S843_RUNS, changed: ['a.mjs'],
+    files: { [`${TD}/triage.md`]: '# Triage\n\nfix the off-by-one in a.mjs\n' },
+  })
+  const result = driveTask({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] }, io)
+  assert.equal(result.status, 'done')
+  assert.match(io.calls.commits[0]?.message ?? '', /^Closes: #42$/m)
+})
+
 // MUTATION A13 — shell-word tokenization keeps quoted paths as one input.
 test("shellWords honours quotes, escapes and adjacent quote runs, and refuses an unterminated one", () => {
   assert.deepEqual(shellWords("node --test 'a b.mjs'"), {

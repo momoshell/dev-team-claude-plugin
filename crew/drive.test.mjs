@@ -13,7 +13,7 @@ import { ANTI_REPLAY_REFUSAL_REASONS, SECOND_OPINION, envelopeFieldMetadataDefec
 import { CENSUS_COMMAND, CENSUS_INSTRUMENT, CENSUS_INSTRUMENT_ABSENT, censusInstrumentPresent } from './drive.mjs'
 import { seatIo } from './seat-io.mjs'
 import { acpIo } from './acp-io.mjs'
-import { publicationIo, composeCommitMessage, issueTrailers, PUBLISH_REFUSALS } from './drive-fixtures.mjs'
+import { publicationIo, composeCommitMessage, issueTrailers, PUBLISH_REFUSALS, noncanonicalJournalSinks } from './drive-fixtures.mjs'
 import { citationOnlyDiff, readPromptDiff } from './prompt-claim.mjs'
 import { git as gitIn, forAll } from '../test/helpers.mjs'
 
@@ -5595,6 +5595,45 @@ test('JS2 journal scanner refuses aliases and reports their source lines', () =>
   assert.throws(() => driveJournalSites("const write = io.log\nwrite(recordRow({ at: 't' }))\n"), /journal sink inventory/)
   assert.throws(() => driveJournalSites("\nio.log\n"), /line\(s\) 2/)
   assert.throws(() => driveJournalSites("io?.log(recordRow({ at: 't' }))"), /journal sink inventory/)
+})
+
+// MUTATION SH1: disabling regex opening refuses /x)/; opening every slash hides the division comma.
+// MUTATION SH1: dropping regex classes or escapes exposes / and ) inside a regex literal.
+test('SH1 regex literals are opaque and division remains visible', () => {
+  for (const [source, count] of [
+    ["io.log(recordRow({ at: /[)]/ }), operationalRow({ at: 't' }))", 1],
+    ["io.log(recordRow({ at: /[/)]/ }))", 0],
+    ["io.log(recordRow({ at: /\\/)/ }))", 0],
+    ["io.log(recordRow({ at: /x)/.test(s) ? 1 : 2 }))", 0],
+    ["io.log(recordRow({ at: a / b }))", 0],
+    ["io.log(recordRow({ at: a / 2 }), operationalRow({ x: 1 / 2 }))", 1],
+    ["io.log(recordRow({ at: 1 }), operationalRow({ at: 't' }))", 1],
+  ]) assert.deepEqual(noncanonicalJournalSinks(source), count ? [{ line: 1, form: 'io.log' }] : [])
+})
+
+// MUTATION SH2: unconditional success at wrapper close accepts post-wrapper operators.
+test('SH2 only whitespace may follow the wrapper', () => {
+  for (const [source, count] of [
+    ["io.log(recordRow({ at: 1 }) && operationalRow({ at: 't' }))", 1],
+    ["io.log(recordRow({ at: 1 }) || operationalRow({ at: 't' }))", 1],
+    ["io.log(recordRow({ at: 1 }) ?? operationalRow({ at: 't' }))", 1],
+    ["io.log(recordRow({ at: 1 })\n  )", 0],
+    ["io?.log?.(operationalRow({ at: 't' }))", 0],
+  ]) assert.deepEqual(noncanonicalJournalSinks(source), count ? [{ line: 1, form: 'io.log' }] : [])
+})
+
+// MUTATION SH3: optimistic initialization accepts walks that never reach a successful close.
+test('SH3 incomplete walks and non-call suffixes refuse', () => {
+  for (const [source, count] of [
+    ["io.log(recordRow({ at: 1 }).x)", 1],
+    ["io.log(recordRow({ at: 1 }) + 1)", 1],
+    ["io.log(recordRow({ at: 1 })[0])", 1],
+    ["io.log(recordRow({ at: '", 1],
+    ["io.log(recordRow({ at: /abc", 1],
+    ["io.log(recordRow({ at: 1 }", 1],
+    ["io.log.call(io, row)", 0],
+  ]) assert.deepEqual(noncanonicalJournalSinks(source), count ? [{ line: 1, form: 'io.log' }] : [])
+  assert.deepEqual(noncanonicalJournalSinks(readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')), [])
 })
 
 // JS3 mutation: renaming the repaired site's key leaves only two repair records inventoried.

@@ -1441,18 +1441,33 @@ export function noncanonicalJournalSinks(source) {
   while ((hit = IO_JOURNAL_REFERENCE.exec(text)) !== null) {
     const suffix = text.slice(hit.index)
     const wrapperCall = /^(?:io\.log\(|io\?\.log\?\.\()(?:recordRow|operationalRow|row)\(/.exec(suffix)
-    let canonical = Boolean(wrapperCall)
-    if (canonical) {
-      let depth = 0, quote = null, escaped = false, outerComma = false
-      for (let i = suffix.indexOf('('); i < suffix.length; i += 1) {
+    let canonical = false
+    if (wrapperCall) {
+      let depth = 0, quote = null, escaped = false, regex = false, regexClass = false, previous = '('
+      for (let i = wrapperCall[0].length - 1; i < suffix.length; i += 1) {
         const c = suffix[i]
         if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
-        if (c === "'" || c === '"' || c === '\`') { quote = c; continue }
+        if (regex) {
+          if (escaped) escaped = false
+          else if (c === '\\') escaped = true
+          else if (c === '[' && !regexClass) regexClass = true
+          else if (c === ']' && regexClass) regexClass = false
+          else if (c === '/' && !regexClass) regex = false
+          continue
+        }
+        if (c === "'" || c === '"' || c === '\`') { quote = c; previous = ')'; continue }
+        if (c === '/' && '(,=:[!&|?{};'.includes(previous)) { regex = true; regexClass = false; escaped = false; previous = ')'; continue }
+        if (/\s/.test(c)) continue
         if (c === '(') depth += 1
-        else if (c === ')') { depth -= 1; if (depth === 0) break }
-        else if (c === ',' && depth === 1) outerComma = true
+        else if (c === ')') {
+          depth -= 1
+          if (depth === 0) {
+            canonical = /^\s*\)/.test(suffix.slice(i + 1))
+            break
+          }
+        }
+        previous = c
       }
-      canonical = !outerComma && depth === 0
     }
     const forwarder = /^io\.log\.call\(\s*io\s*,\s*row\s*\)/.test(suffix)
     if (canonical || forwarder) continue

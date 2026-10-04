@@ -893,7 +893,9 @@ function acquireAdvisorLease(d, pool, owner) {
   const started = now()
   while (now() - started <= ADVISOR_LEASE_WAIT_MS) {
     let acquired
-    try { acquired = pool.acquire({ owner }) } catch { return { handle: null, reason: 'ledger-unreadable', waited_ms: now() - started } }
+    try { acquired = pool.acquire({ owner }) } catch (error) {
+      if (error?.stage !== 'reclaim-lock-unavailable') return { handle: null, reason: 'ledger-unreadable', waited_ms: now() - started }
+    }
     if (acquired?.handle) return { handle: acquired.handle, reason: null, waited_ms: now() - started }
     if (now() - started + ADVISOR_LEASE_POLL_MS > ADVISOR_LEASE_WAIT_MS) break
     sleep(ADVISOR_LEASE_POLL_MS)

@@ -564,6 +564,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
       requestLine: 'POST /api/intake/brake HTTP/1.1',
       headers: [`Host: ${host}`, 'content-type: application/json', `Origin: http://${host}`, `content-length: ${Buffer.byteLength(body)}`, 'connection: close'],
       body,
+      timeoutMs: 30000,
     })
     assert.equal(rawStatus(own), 200)
     assert.equal(rawJson(own).ok, true)
@@ -574,6 +575,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
       requestLine: 'POST /api/intake/brake HTTP/1.1',
       headers: [`Host: ${host}`, 'content-type: application/json', `content-length: ${Buffer.byteLength(body)}`, 'connection: close'],
       body,
+      timeoutMs: 30000,
     })
     assert.equal(rawStatus(originless), 200)
     assert.equal(rawJson(originless).ok, true)
@@ -585,6 +587,24 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
   } finally {
     if (server) await stopServer(server.child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// VZ1 source-isolation marker: pin only brake requests in the named test body.
+test('VZ1', () => {
+  const source = readFileSync(new URL(import.meta.url), 'utf8')
+  const opening = "test('same-origin and originless JSON clients still engage the stop switch'"
+  const start = source.indexOf(opening)
+  assert.notEqual(start, -1, 'named stop-switch test exists')
+  const end = source.indexOf('\ntest(', start + opening.length)
+  const body = source.slice(start, end === -1 ? source.length : end)
+  assert.equal((body.match(/rawRequest\(/g) || []).length, 2)
+  const requests = [...body.matchAll(/rawRequest\(\{([\s\S]*?)\}\)/g)]
+  assert.equal(requests.length, 2)
+  for (const [, request] of requests) {
+    const timeout = request.match(/timeoutMs:\s*(\d+)/)
+    assert.ok(timeout, 'each stop-switch request has an explicit timeout')
+    assert.ok(Number(timeout[1]) >= 30000)
   }
 })
 

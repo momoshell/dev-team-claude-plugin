@@ -8054,16 +8054,19 @@ function runTask(ctx, io, crash) {
     } else {
       try {
         const names = [...new Set([resumeCtx.laneName, resumeCtx.task].filter((name) => typeof name === 'string' && name.trim()))]
-        const cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
+        let cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
+        const retriedResumeCold = cold?.ok ? null : { path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
+        if (!cold?.ok) cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
         coldSuite = cold?.ok
           ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
           : { verdict: 'red', path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
+        if (retriedResumeCold) coldSuite.retried = retriedResumeCold
       } catch (error) { coldSuite = { verdict: 'unproven', why: error?.message ?? String(error) } }
     }
     stageComplete()
     if (coldSuite.verdict !== 'green') {
       const why = coldSuite.verdict === 'red'
-        ? `the resumed full suite is green in this checkout and red from ${coldSuite.path || '(unknown checkout)'}: ${coldSuite.output || ''}`
+        ? `the resumed full suite was red on two consecutive fresh checkouts: warm checkout ${resumeCtx.checkout || '(unknown checkout)'} at commit ${commitOid || '(unknown commit)'}; first cold checkout ${coldSuite.retried?.path || '(unknown checkout)'} kept at ${coldSuite.retried?.kept || '(unknown)'}; second cold checkout ${coldSuite.path || '(unknown checkout)'} kept at ${coldSuite.kept || '(unknown)'}. Investigate checkout/load dependencies; this does not establish cwd as the cause. Cleanup: ${coldSuite.retried?.kept ? `git worktree remove --force ${coldSuite.retried.kept}` : '(first kept-worktree path unknown)'}; ${coldSuite.kept ? `git worktree remove --force ${coldSuite.kept}` : '(second kept-worktree path unknown)'}. ${coldSuite.output || ''}`
         : `the resumed cold verification produced no verdict (${coldSuite.verdict}): ${coldSuite.why || 'reason unavailable'}`
       return resumeEscalate('cold-suite', why, { cold_suite: coldSuite })
     }
@@ -12651,10 +12654,13 @@ function runTask(ctx, io, crash) {
   } else {
     try {
       const coldGuards = [...new Set([ctx.laneName, ctx.task].filter((name) => typeof name === 'string' && name.trim()))]
-      const cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
+      let cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
+      const retriedCold = cold.ok ? null : { path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
+      if (!cold.ok) cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
       coldSuite = cold.ok
         ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
+      if (retriedCold) coldSuite.retried = retriedCold
       resumeColdSuite = coldSuite
     } catch (err) {
       coldSuite = { verdict: 'unproven', why: err.message }
@@ -12665,7 +12671,7 @@ function runTask(ctx, io, crash) {
   stageComplete()
   if (coldSuite.verdict !== 'green') {
     const why = coldSuite.verdict === 'red'
-      ? `the full suite is GREEN in this lane's checkout (${ctx.checkout}) and RED from ${coldSuite.path} — byte-identical files at the identical commit ${S.commit}, the only variable being which directory the suite ran in. This is NOT an ordinary suite failure: something under test is reading its own absolute path, its cwd, or the NAME of the directory it is running in. The cold checkout was kept at ${coldSuite.kept} so the failure can be reproduced there directly; remove it with \`git worktree remove --force ${coldSuite.kept}\` once you are done.\n${coldSuite.output}`
+      ? `the full suite was red on two consecutive fresh checkouts: warm checkout ${ctx.checkout} at commit ${S.commit}; first cold checkout ${coldSuite.retried?.path || '(unknown checkout)'} kept at ${coldSuite.retried?.kept || '(unknown)'}; second cold checkout ${coldSuite.path || '(unknown checkout)'} kept at ${coldSuite.kept || '(unknown)'}. This warrants investigating checkout/load dependencies, not concluding which directory the suite ran in caused the failure. Cleanup: ${coldSuite.retried?.kept ? `git worktree remove --force ${coldSuite.retried.kept}` : '(first kept-worktree path unknown)'}; ${coldSuite.kept ? `git worktree remove --force ${coldSuite.kept}` : '(second kept-worktree path unknown)'}.\n${coldSuite.output}`
       : `the cold verification produced no verdict (${coldSuite.verdict}): ${coldSuite.why}. The suite is green only in the checkout this lane built in (${ctx.checkout}), which is the one piece of evidence a lane may not report done on. The commit ${S.commit} is local and unpushed.`
     return escalate('cold-suite', why, [], { commit: S.commit, cold_suite: coldSuite })
   }

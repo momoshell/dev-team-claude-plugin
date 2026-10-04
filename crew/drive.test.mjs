@@ -390,12 +390,15 @@ test('a red cold run escalates with its commit, paths, and cleanup diagnosis', (
     cold: { ok: false, output: 'cold failure\n', path: '/zz/coldpath', kept: '/zz/coldpath' },
   })
   const result = driveTask(CTX, io)
+  assert.equal(io.calls.runCold.length, 2)
+  assert.deepEqual(result.details.cold_suite.retried, { path: '/zz/coldpath', kept: '/zz/coldpath', output: 'cold failure\n' })
+  assert.match(result.details.escalation.why, /two consecutive fresh checkouts/)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'cold-suite')
   assert.equal(result.details.commit, 'abc1234')
   assert.match(result.details.escalation.why, /\/tmp\/repo/)
   assert.match(result.details.escalation.why, /\/zz\/coldpath/)
-  assert.match(result.details.escalation.why, /git worktree remove --force/)
+  assert.match(result.details.escalation.why, /git worktree remove --force \/zz\/coldpath/)
   assert.match(result.details.escalation.why, /which directory the suite ran in/)
 })
 
@@ -4375,6 +4378,24 @@ test('a cold-suite escalation persists the measured checkpoint and its custom su
   assert.equal(resumeCheckpointDefect(checkpoint), null)
 })
 
+test('CS3', () => {
+  const checkpoint = resumeCheckpointForTest({ frozen_where: 'cold-suite' })
+  const io = fakeIo({ runs: { 'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` }, 'custom-suite': { ok: true, output: '# pass 1\n# fail 0\n' } } })
+  let attempt = 0
+  io.runCold = (cmd, names) => {
+    io.calls.runCold.push({ cmd, names })
+    attempt++
+    return attempt === 1 ? { ok: false, path: '/resume/first', kept: '/resume/first', output: 'red' } : { ok: true, path: '/resume/second', kept: null, output: '' }
+  }
+  const result = resumeTask({ ...CTX, task: 'resume-cs3', suite: 'ignored-suite', files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.equal(attempt, 2)
+  assert.deepEqual(io.calls.runCold.map(({ cmd, names }) => ({ cmd, names })), [
+    { cmd: 'custom-suite', names: ['resume-cs3'] }, { cmd: 'custom-suite', names: ['resume-cs3'] },
+  ])
+  assert.equal(io.calls.assign.length, 0)
+})
+
 test('resume reruns canonical gate, warm and cold slots without assigning seats', () => {
   const checkpoint = resumeCheckpointForTest({ frozen_where: 'cold-suite' })
   const io = fakeIo({
@@ -5658,4 +5679,110 @@ test('JS3 suite-anchor repair emissions are inventoried as record rows', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const rows = driveJournalSites(text).filter(({ keys }) => keys === 'at suite_anchor_repair')
   assert.deepEqual(rows.map(({ wrapper }) => wrapper), ['recordRow', 'recordRow', 'recordRow'])
+})
+
+// MUTATION CS1: suppress the first cold result snapshot.
+// MUTATION CS2: erase the two-checkout diagnosis.
+test('CS1', () => {
+  const io = closeoutIo({ slots: slotFactory() })
+  const original = io.runCold
+  let attempt = 0
+  io.runCold = (cmd, names) => {
+    original(cmd, names)
+    attempt++
+    return attempt === 1
+      ? { ok: false, output: 'x'.repeat(2050), path: '/cold/first', kept: '/cold/first' }
+      : { ok: true, output: '', path: '/cold/second', kept: null }
+  }
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.runCold.length, 2)
+  assert.deepEqual(io.calls.runCold, [{ cmd: CTX.suite, names: [CTX.task] }, { cmd: CTX.suite, names: [CTX.task] }])
+  assertColdSlotPairs(io.calls, 'runCold:suite-cmd', 2)
+  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/cold/second', counts: null, retried: { path: '/cold/first', kept: '/cold/first', output: 'x'.repeat(2000) } })
+  assert.ok(io.calls.logs.some((row) => row.cold_suite?.verdict === 'green' && row.cold_suite.retried?.path === '/cold/first'))
+  assert.match(result.summary, /cold-verified from \/cold\/second/)
+})
+
+test('CS2', () => {
+  const io = closeoutIo()
+  let attempt = 0
+  io.runCold = () => { attempt++; return { ok: false, output: 'red-' + attempt, path: '/cold/' + attempt, kept: '/cold/' + attempt } }
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(attempt, 2)
+  assert.equal(result.details.cold_suite.path, '/cold/2')
+  assert.deepEqual(result.details.cold_suite.retried, { path: '/cold/1', kept: '/cold/1', output: 'red-1' })
+  assert.match(result.details.escalation.why, /two consecutive fresh checkouts/)
+  assert.ok(result.details.escalation.why.includes('git worktree remove --force /cold/1'))
+  assert.ok(result.details.escalation.why.includes('git worktree remove --force /cold/2'))
+  assert.ok(result.details.escalation.why.includes('/cold/1'))
+  assert.ok(result.details.escalation.why.includes('/cold/2'))
+})
+
+
+function assertColdSlotPairs(calls, runner, count) {
+  const labels = traceLabels(calls)
+  let after = -1
+  for (let n = 0; n < count; n++) {
+    const acquireIndex = calls.trace.findIndex((entry, index) => index > after && entry?.label === 'acquire:suite-cold' && entry.handle)
+    assert.notEqual(acquireIndex, -1, `cold invocation ${n + 1} has an acquired slot`)
+    const acquire = calls.trace[acquireIndex]
+    const runIndex = labels.findIndex((label, index) => index > acquireIndex && label === runner)
+    assert.notEqual(runIndex, -1, `cold invocation ${n + 1} ran inside its acquired slot`)
+    const releaseIndex = labels.findIndex((label, index) => index > runIndex && label === `release:${acquire.handle.slot}`)
+    assert.notEqual(releaseIndex, -1, `cold invocation ${n + 1} released its own slot`)
+    after = releaseIndex
+  }
+}
+
+test('cold retry edges retain bounded attempts and release every slot', () => {
+  const runMain = (outcomes) => {
+    const io = closeoutIo({ slots: slotFactory() }), original = io.runCold
+    let attempt = 0
+    io.runCold = (cmd, names) => { original(cmd, names); const outcome = outcomes[attempt++]; if (outcome instanceof Error) throw outcome; return outcome }
+    return { io, result: driveTask(slotCtx(), io), attempts: () => attempt }
+  }
+  const green = runMain([{ ok: true, path: '/green', output: '' }])
+  assert.equal(green.attempts(), 1)
+  assert.deepEqual(green.result.details.cold_suite, { verdict: 'green', path: '/green', counts: null })
+  const firstThrow = runMain([new Error('first throw')])
+  assert.equal(firstThrow.attempts(), 1)
+  assert.equal(firstThrow.result.details.cold_suite.verdict, 'unproven')
+  const retryThrow = runMain([{ ok: false, path: '/throw/1', kept: '/throw/1', output: 'red' }, new Error('retry throw')])
+  assert.equal(retryThrow.attempts(), 2)
+  assert.equal(retryThrow.result.details.cold_suite.verdict, 'unproven')
+  assert.equal(retryThrow.io.calls.trace.filter((entry) => (typeof entry === 'string' ? entry : entry?.label) === 'runCold:suite-cmd').length, 2)
+  assertColdSlotPairs(retryThrow.io.calls, 'runCold:suite-cmd', 2)
+})
+
+test('resume retry red-red and throws preserve evidence and release slots', () => {
+  const checkpoint = resumeCheckpointForTest({ frozen_where: 'cold-suite' })
+  const make = (outcomes) => {
+    const io = fakeIo({ runs: { 'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` }, 'custom-suite': { ok: true, output: '# pass 1\\n# fail 0\\n' } }, slots: slotFactory() })
+    let attempt = 0
+    io.runCold = (cmd, names) => { io.calls.runCold.push({ cmd, names }); io.calls.trace.push('runCold:custom-suite'); const outcome = outcomes[attempt++]; if (outcome instanceof Error) throw outcome; return outcome }
+    return { io, run: () => resumeTask({ ...slotCtx(), task: 'resume-retry', suite: 'ignored', files_in_scope: ['a.mjs'] }, io, checkpoint), attempts: () => attempt }
+  }
+  const redRed = make([{ ok: false, path: '/resume/1', kept: '/resume/1', output: 'x'.repeat(2100) }, { ok: false, path: '/resume/2', kept: '/resume/2', output: 'red2' }])
+  const result = redRed.run()
+  assert.equal(redRed.attempts(), 2)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  assert.equal(result.details.cold_suite.retried.output, 'x'.repeat(2000))
+  assert.equal(result.details.cold_suite.retried.path, '/resume/1')
+  assert.match(result.details.escalation.why, /the resumed full suite was red on two consecutive fresh checkouts/)
+  assert.ok(result.details.escalation.why.includes('git worktree remove --force /resume/1'))
+  assert.ok(result.details.escalation.why.includes('git worktree remove --force /resume/2'))
+  assert.ok(result.details.escalation.why.includes('abc1234'))
+  assert.equal(result.details.cold_suite.path, '/resume/2')
+  assert.equal(redRed.io.calls.assign.length, 0)
+  assert.equal(redRed.io.calls.trace.filter((entry) => (typeof entry === 'string' ? entry : entry?.label) === 'runCold:custom-suite').length, 2)
+  assertColdSlotPairs(redRed.io.calls, 'runCold:custom-suite', 2)
+  const firstThrow = make([new Error('resume first throw')])
+  assert.equal(firstThrow.run().details.cold_suite.verdict, 'unproven')
+  assert.equal(firstThrow.attempts(), 1)
+  const retryThrow = make([{ ok: false, path: '/resume/t1', kept: '/resume/t1', output: 'red' }, new Error('resume retry throw')])
+  assert.equal(retryThrow.run().details.cold_suite.verdict, 'unproven')
+  assert.equal(retryThrow.attempts(), 2)
 })

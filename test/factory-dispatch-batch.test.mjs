@@ -3449,6 +3449,73 @@ const testRotationRead = ({ inFlight }) => {
   const arm = ADVISOR_ARMS[inFlight.length % ADVISOR_ARMS.length]
   return { readout: { arms: ADVISOR_ARMS.map((value) => ({ arm: value })), next_arm: arm }, reason: null }
 }
+// MUTATION AL1: suppress transient recovery; lost lease epochs must poll and acquire on the next bounded attempt.
+test('AL1', async () => {
+  const home = leasedDispatchHome('al1'), events = [], owners = [], clock = { value: 0 }
+  let attempts = 0
+  const rotationDeps = {
+    now: () => clock.value,
+    sleep: (ms) => { events.push(['sleep', ms]); clock.value += ms },
+    slots: () => ({
+      acquire: ({ owner }) => {
+        owners.push(owner)
+        attempts++
+        if (attempts === 1) { const error = new Error('epoch changed'); error.stage = 'reclaim-lock-unavailable'; throw error }
+        return { handle: { token: 'recovered' } }
+      },
+      release: () => { events.push(['release']); return true },
+    }),
+  }
+  const recovered = await dispatchFixture({ label: 'advisor-al1-recovery', names: ['lane-a'], home, batchTier: 'build', rotationDeps, readAdvisorArms: testRotationRead })
+  assert.equal(attempts, 2)
+  assert.equal(owners[0], owners[1])
+  assert.deepEqual(events, [['sleep', 50], ['release']])
+  const record = dispatchRecordFor(recovered, 'lane-a')
+  assert.equal(record.advisor_rotation.source, 'rotation')
+  assert.ok(recovered.spawned.find(({ args }) => args.includes('boot'))?.args.includes('--model-advisor'))
+  assert.ok([...recovered.wrote.keys()].some((path) => path.endsWith('advisor-reservations.json')))
+
+  let unrelatedAttempts = 0, sleeps = 0, writes = 0
+  const unrelated = await dispatchFixture({ label: 'advisor-al1-unrelated', names: ['lane-b'], home, batchTier: 'build', rotationDeps: {
+    now: () => 0, sleep: () => { sleeps++ },
+    slots: () => ({ acquire: () => { unrelatedAttempts++; throw new Error('EPERM') }, release() {} }),
+  }, readAdvisorArms: testRotationRead, writeFile: (path) => { if (String(path).endsWith('advisor-reservations.json')) writes++ } })
+  assert.equal(dispatchRecordFor(unrelated, 'lane-b').advisor_rotation.reason, 'ledger-unreadable')
+  assert.deepEqual([unrelatedAttempts, sleeps, writes], [1, 0, 0])
+
+  let differentStageAttempts = 0, differentStageSleeps = 0, differentStageWrites = 0
+  const differentStage = await dispatchFixture({ label: 'advisor-al1-other-stage', names: ['lane-c'], home, batchTier: 'build', rotationDeps: {
+    now: () => 0, sleep: () => { differentStageSleeps++ },
+    slots: () => ({ acquire: () => { differentStageAttempts++; const error = new Error('write failed'); error.stage = 'slot-store-write'; throw error }, release() {} }),
+  }, readAdvisorArms: testRotationRead, writeFile: (path) => { if (String(path).endsWith('advisor-reservations.json')) differentStageWrites++ } })
+  assert.equal(dispatchRecordFor(differentStage, 'lane-c').advisor_rotation.reason, 'ledger-unreadable')
+  assert.deepEqual([differentStageAttempts, differentStageSleeps, differentStageWrites], [1, 0, 0])
+
+  let timeoutAttempts = 0, elapsed = 0, timeoutReads = 0, timeoutWrites = 0, releases = 0
+  const timeout = await dispatchFixture({ label: 'advisor-al1-timeout', names: ['lane-d'], home, batchTier: 'build', rotationDeps: {
+    now: () => elapsed, sleep: (ms) => { elapsed += ms },
+    slots: () => ({ acquire: () => { timeoutAttempts++; const error = new Error('race'); error.stage = 'reclaim-lock-unavailable'; throw error }, release: () => { releases++ } }),
+  }, readAdvisorArms: (args) => { timeoutReads++; return testRotationRead(args) }, writeFile: (path) => { if (String(path).endsWith('advisor-reservations.json')) timeoutWrites++ } })
+  assert.equal(dispatchRecordFor(timeout, 'lane-d').advisor_rotation.reason, 'lease-timeout')
+  // 5000ms / 50ms polling yields one initial acquisition plus 100 bounded retries.
+  assert.equal(timeoutAttempts, Math.floor(5000 / 50) + 1)
+  assert.ok(elapsed >= 5000)
+  assert.deepEqual([timeoutReads, timeoutWrites, releases], [0, 0, 0])
+
+  for (const reason of ['lost', 'unresolvable', 'contended']) {
+    const reasons = [], waits = []
+    let calls = 0
+    const recoveredReason = await dispatchFixture({ label: `advisor-al1-${reason}`, names: ['lane-e'], home, batchTier: 'build', rotationDeps: {
+      now: () => 0, sleep: (ms) => waits.push(['sleep', ms]),
+      slots: () => ({ acquire: ({ owner }) => { reasons.push(owner); calls++; if (calls === 1) { const error = new Error(reason); error.stage = 'reclaim-lock-unavailable'; error.reason = reason; throw error } return { handle: { token: reason } } }, release: () => { waits.push(['release']); return true } }),
+    }, readAdvisorArms: testRotationRead })
+    assert.equal(calls, 2)
+    assert.equal(reasons[0], reasons[1])
+    assert.deepEqual(waits, [['sleep', 50], ['release']])
+    assert.ok([...recoveredReason.wrote.keys()].some((path) => path.endsWith('advisor-reservations.json')))
+  }
+})
+
 // MUTATION L1: skip the durable reservation write; separate calls must rotate from shared state.
 test('advisor-lease L1 durable reservations rotate separate eligible dispatch calls', async () => {
   const home = leasedDispatchHome('l1'), shared = new Map(), lease = leasedRotationDeps(home, [], undefined, shared)

@@ -225,9 +225,9 @@ function blankComments(source) {
   }
   return out
 }
-// The bare log?.( base and the logLine journal.jsonl base have no refusal in this lane.
+// BLIND SPOT: computed deps['logLine'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.
 // io.log(row(...)) is visible with wrapper null and is rejected by the inventory projection.
-// lean: textual journal grammar with quoted strings visible; use a parser when source exceeds this grammar.
+// lean: identifier-level journal grammar; use a parser when syntax exceeds this grammar.
 function seatRefuseJournalSinks(text) {
   const lines = text.split('\n')
   const byLine = new Map()
@@ -235,8 +235,83 @@ function seatRefuseJournalSinks(text) {
   const hidden = []
   for (const [line, hitCount] of byLine) {
     const sourceLine = lines[line - 1]
-    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log\s*,/g)].length
+    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log(?=\s*(?:,|$))/g)].length
     if (hitCount > exemptCount) hidden.push(...Array(hitCount - exemptCount).fill(line))
+  }
+  const spans = [
+    '{ taskDir, log, deps = {} }',
+    '{ taskDir, log, emit, deps = {} }',
+    'descendantCapture({ taskDir, log, deps })',
+  ].flatMap((fragment) => [...text.matchAll(new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
+    .map((match) => [match.index, match.index + match[0].length]))
+  const tokens = []
+  let quote = null, escaped = false
+  for (let i = 0; i < text.length;) {
+    const c = text[i]
+    if (quote !== null) {
+      if (escaped) escaped = false
+      else if (c === '\\') escaped = true
+      else if (c === quote) quote = null
+      i += 1
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; i += 1; continue }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i
+      i += 1
+      while (i < text.length && /[\w$]/.test(text[i])) i += 1
+      const name = text.slice(start, i)
+      if (['log', 'logLine', 'defaultLogLine'].includes(name)
+        && !/[.\w$]/.test(text[start - 1] ?? '')
+        && !/[\w$]/.test(text[i] ?? '')) tokens.push({ name, index: start })
+      continue
+    }
+    i += 1
+  }
+  for (const { name, index } of tokens) {
+    const after = text.slice(index + name.length)
+    const line = text.slice(0, index).split('\n').length
+    const sourceLine = lines[line - 1].trim()
+    const measured = spans.some(([start, end]) => index >= start && index < end)
+      || sourceLine === 'closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,'
+      || sourceLine === 'const logLine = deps.logLine || defaultLogLine'
+    const fullForwarder = SEAT_PASS_THROUGH.has(sourceLine)
+    const keyOrMethod = name === 'log' && (/^\s*:/.test(after) || after.startsWith('(obj) {'))
+    let sink = false
+    if (name !== 'defaultLogLine') {
+      const heads = name === 'log'
+        ? ['log?.(operationalRow(', 'log?.(recordRow(']
+        : ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow(", "logLine(join(paths.dir, 'journal.jsonl'), recordRow("]
+      const head = heads.find((candidate) => text.startsWith(candidate, index))
+      if (head) {
+        const wrapper = head.includes('operationalRow(') ? 'operationalRow(' : 'recordRow('
+        const open = index + head.lastIndexOf(wrapper) + wrapper.length - 1
+        let depth = 0, quote = null, escaped = false, regex = false, regexClass = false, previous = '('
+        for (let i = open; i < text.length; i += 1) {
+          const c = text[i]
+          if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
+          if (regex) {
+            if (escaped) escaped = false
+            else if (c === '\\') escaped = true
+            else if (c === '[' && !regexClass) regexClass = true
+            else if (c === ']' && regexClass) regexClass = false
+            else if (c === '/' && !regexClass) regex = false
+            continue
+          }
+          if (c === "'" || c === '"' || c === '`') { quote = c; previous = ')'; continue }
+          if (c === '/' && '(,=:[!&|?{};'.includes(previous)) { regex = true; regexClass = false; escaped = false; previous = ')'; continue }
+          if (/\s/.test(c)) continue
+          if (c === '(') depth += 1
+          else if (c === ')') {
+            depth -= 1
+            if (depth === 0) { sink = /^\s*\)/.test(text.slice(i + 1)); break }
+          }
+          previous = c
+        }
+      }
+    }
+    const allowed = fullForwarder || measured || keyOrMethod || sink
+    if (!allowed) hidden.push(line)
   }
   const callHits = [...text.matchAll(/(?<![\w$])io\s*\.\s*log\s*\.\s*call\b/g)]
   for (const hit of callHits) {
@@ -347,6 +422,52 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at reseat'],
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
 ])
+
+// Mutation SL1: replacing the unique refusal push with a log-only guard admits bare log disguises.
+test('SL1', () => {
+  for (const emit of ['log(operationalRow({ at: 1 }))', 'log && log(operationalRow({ at: 1 }))', 'log?.call(null, operationalRow({ at: 1 }))', 'log ?.(operationalRow({ at: 1 }))', '{ sink: log }', 'const emit = log']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'))
+  }
+  assert.throws(() => seatJournalSites('// fixture\nrecord("it\\"s", log)'), (error) => error.message.includes('line(s) 2'))
+  for (const accepted of ['{ taskDir, log, deps = {} }', '{ taskDir, log, emit, deps = {} }', 'descendantCapture({ taskDir, log, deps })', 'log: io.log', "record('log', { level: 'info' })"]) assert.deepEqual(seatJournalSites(accepted), [])
+  for (const accepted of ['log?.(operationalRow({ at: 1 }))', 'log?.(recordRow({ at: 1 }))']) assert.doesNotThrow(() => seatJournalSites(accepted))
+  assert.throws(() => seatJournalSites('log?.(operationalRow({ at: 1 }), extra)'), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites('log?.(operationalRow({ at: 1 })'), /journal sink inventory/)
+})
+// Mutation SL2: replacing the unique refusal push with a bare-log-only guard admits logLine disguises.
+test('SL2', () => {
+  for (const emit of ['logLine(join(paths.dir, "journal.jsonl"), operationalRow({ at: 1 }))', "logLine(join(paths.dir,'journal.jsonl'),operationalRow({ at: 1 }))", "logLine(join(paths.dir, 'journal.jsonl'),operationalRow(", 'logLine(journalPath, operationalRow({ at: 1 }))', 'const w = logLine', 'logLine.call(null, p, row)', "defaultLogLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }))"]) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'))
+  }
+  for (const accepted of ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }))", "logLine(join(paths.dir, 'journal.jsonl'), recordRow({ at: 1 }))", `logLine(join(paths.dir, 'journal.jsonl'), operationalRow({\n at: 1\n}))`]) assert.doesNotThrow(() => seatJournalSites(accepted))
+  assert.throws(() => seatJournalSites("logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }), extra)"), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites("logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 })"), /journal sink inventory/)
+  for (const accepted of ['log: (obj) => io.log(obj),', "log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),", "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },", 'closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,', 'const logLine = deps.logLine || defaultLogLine']) assert.doesNotThrow(() => seatJournalSites(accepted), accepted)
+})
+// Mutation SL3: replacing the unique refusal push with a false guard leaves all eleven rewrites invisible.
+test('SL3', () => {
+  const source = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  assert.doesNotThrow(() => seatJournalSites(source))
+  const lines = source.split('\n')
+  const bare = lines.flatMap((line, i) => /(?<![.\w])log\?\.\(/.test(line) ? [i] : [])
+  const journal = lines.flatMap((line, i) => line.includes("logLine(join(paths.dir, 'journal.jsonl'), operationalRow(") ? [i] : [])
+  assert.equal(bare.length, 9)
+  assert.equal(journal.length, 2)
+  for (const index of [...bare, ...journal]) {
+    const copy = [...lines]
+    copy[index] = bare.includes(index) ? copy[index].replace('log?.(', 'log(') : copy[index].replace("join(paths.dir, 'journal.jsonl')", 'journalPath')
+    assert.throws(() => seatJournalSites(copy.join('\n')), (error) => error.message.includes(`line(s) ${index + 1}`))
+  }
+})
+// Mutation SL4: retiring the nearby contract comment removes the stated grammar boundary.
+test('SL4', () => {
+  const source = readFileSync(new URL('./seat-io-runclean.test.mjs', import.meta.url), 'utf8')
+  const needle = 'have no refusal' + ' in this lane'
+  assert.equal(source.includes(needle), false)
+  const lines = source.split('\n')
+  const at = lines.findIndex((line) => line.startsWith('function seatRefuseJournalSinks'))
+  assert.equal(lines.slice(Math.max(0, at - 10), at).some((line) => line === '// BLIND SPOT: computed deps[\'logLine\'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.'), true)
+})
 
 // Mutation SS1: disabling callHits accepts the seventh disguised form.
 test('SS1', () => {

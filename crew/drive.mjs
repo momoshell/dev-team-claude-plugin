@@ -8268,7 +8268,7 @@ function runTask(ctx, io, crash) {
         files_in_scope: scope,
         validation_lane: laneCmd,
         commit_subject: env.details.commit_subject,
-        issues: env.details.issues,
+        issues: env.details.issues, ...(Array.isArray(env.details.closes) ? { closes: env.details.closes } : {}),
       },
     } }
   }

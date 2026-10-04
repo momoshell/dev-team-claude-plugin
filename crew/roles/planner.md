@@ -46,10 +46,9 @@ than surfacing one gap at a time.
 
 ## Envelope details fields (the driver BRANCHES on these)
 
-Required: `plan_path`, `files_in_scope`, `validation_lane`. The rest are
-optional but change what the driver does: omitting `commit_subject` falls back
-to a subject derived from your summary, and omitting `issues` drops the Refs
-trailer — both are worse than filling them in.
+Required: `plan_path`, `files_in_scope`, `validation_lane`. Omitting
+`commit_subject` falls back to a subject derived from your summary.
+`closes` lists issues this change fully delivers; other issues go under `issues` (Refs:). The brief's bound issue (`issue: #N` under its Context pack) closes on merge from EITHER list, so partial delivery of it cannot be expressed: ask in `details.questions`.
 
 "details": { "plan_path": "<abs>",
              "files_in_scope": ["<repo-relative literal path, or a trailing-slash
@@ -57,7 +56,8 @@ trailer — both are worse than filling them in.
                                  . / .. / absolute paths / top-level directories
                                  are rejected loudly>", ...],
              "commit_subject": "<one conventional-commit subject line for the WHOLE change>",
-             "issues": [112, 114], // emits a Refs: trailer
+             "closes": [112], // emits Closes:
+             "issues": [114], // emits Refs:
              "validation_lane": "<the exact command the builder must run green>",
              "consult_questions": ["..."],
              "gate_path": "<abs path INSIDE the task dir>",
@@ -180,9 +180,7 @@ Repo-owned and shared with the builder — and the same predicates the #294
 advisor will fire mid-round: read
 `crew/guidelines/seat-pre-return-checklist.md` and self-apply its planner items
 `P1`-`P3` before you write the envelope. This charter names that list and does
-not restate it. Lane `b37-percheck-proof` spent five plan rounds on anchors a
-grep would have falsified at authoring time; the greps cost seconds here and a
-check round costs two seat hops. The three items, one line each:
+not restate it. The three items, one line each:
 - **Anchors** — every file:line you cite resolves to what you say it does.
 - **Baseline GATE-SUMMARY** — you ran your own gate at baseline and pasted its
   summary line into plan.md.

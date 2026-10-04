@@ -10772,7 +10772,7 @@ function runTask(ctx, io, crash) {
       `# Review bounce (round ${round})`, '',
       `Close every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`,
       ...applyPrescriptionLines('the review'),
-      ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
+      ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
     ].join('\n')
   }
   // #800 — a finding the reviewer marked `auto-fix` and shipped a patch for is applied
@@ -10821,7 +10821,7 @@ function runTask(ctx, io, crash) {
         `# Auto-fix revalidation bounce (round ${roundNo})`, '',
         `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
         '', detail,
-        ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
+        ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
         '', `Plan: ${planPath}`,
       ].join('\n') }
     }
@@ -11394,7 +11394,7 @@ function runTask(ctx, io, crash) {
     // ADR-038: proof on the changed surface beats argument about it.
     if (hardenOwed.owed.length > 0) {
       stage(`lane:harden:r${round}`)
-      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope)
+      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope, ctx.testRunner)
       for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
       const prescribed = new Set(hardenOwed.owed.filter((finding) => finding.prescription).map(({ id }) => id))
       // A prescribed guard goes in a DIFFERENT test file that the lane may write: in scope, or
@@ -11471,11 +11471,11 @@ function runTask(ctx, io, crash) {
         stageComplete()
       } else if (!plans || finalRound()) {
         stageComplete()
-        return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows).join(' '))
+        return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '))
       } else {
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('harden', 'builder')
-        io.writeFile(b, hardeningBounceLines(round, liveRefusals, liveRows).join('\n'))
+        io.writeFile(b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
         buildBrief = b; buildNote = 'harden-fix'
         stageComplete()
         continue
@@ -11721,7 +11721,7 @@ function runTask(ctx, io, crash) {
         failureUpgrade('review', 'builder')
         io.writeFile(b, [`# Ask-user bounce (round ${round})`, '', c.guidance, '',
           ...askUserLines(disposed.askUser),
-          ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt),
+          ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
           '', `Review: ${lastReviewPath}`, `Plan: ${planPath}`].join('\n'))
         buildBrief = b; buildNote = 'review-fix'
         stageComplete()
@@ -14402,14 +14402,28 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
+export function normalizeTestRunner(testRunner) {
+  const rawRunner = testRunner?.runner
+  if (rawRunner === undefined) return { runner: 'node', basis: 'legacy node runner · no runner context' }
+  if (['node', 'cargo', 'unparsed'].includes(rawRunner)) return { runner: rawRunner, basis: typeof testRunner?.basis === 'string' ? testRunner.basis : 'runner context' }
+  return { runner: 'unparsed', basis: 'unexpected runner value' }
+}
+export function hardeningRunnerSentence(testRunner) {
+  const runner = normalizeTestRunner(testRunner)
+  if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] in the module's test file declared through invocation with the exact command that runs it; a .test.mjs path is refused.`
+  if (runner.runner === 'unparsed') return `blind spot: the runner could not be classified (${runner.basis}), so a .test.mjs guard's presence in the repo suite is unverified; invocation is the form whose run is proven.`
+  return 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
+}
+
 export const HARDENING_PRESCRIPTION_REASONS = Object.freeze(['pinned-test-prescription'])
 export const HARDENING_PRESCRIPTION_RESOLUTION = 'new-guard-requirement'
 
 export const HARDENING_REFUSALS = Object.freeze([
   'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
   'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
-  'replace-identical', 'builder-exemption', 'class-unknown',
+  'replace-identical', 'builder-exemption', 'class-unknown', 'test-runner-mismatch',
 ])
+export const HARDENING_BLIND_SPOTS = Object.freeze(['runner-unclassified'])
 // Proof OUTCOMES. `name-not-new` is the check's own word for an already-existing test
 // name; it lives here rather than in HARDENING_REFUSALS because the witness it is
 // measured against exists at PROOF time, not at declaration-validation time.
@@ -14770,7 +14784,8 @@ export function hardeningTestPath(file) {
   return typeof file === 'string' && file.trim() !== '' && file.endsWith('.test.mjs')
 }
 
-export function validateHardened(details, owed, inScope) {
+export function validateHardened(details, owed, inScope, testRunner) {
+  const runner = normalizeTestRunner(testRunner)
   const wanted = Array.isArray(owed) ? owed : []
   const wantedIds = wanted.map(({ id }) => id)
   const wantedSet = new Set(wantedIds)
@@ -14855,6 +14870,10 @@ export function validateHardened(details, owed, inScope) {
         refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
         continue
       }
+      if (runner.runner === 'cargo') {
+        refuse(id, 'test-runner-mismatch', `the declared cargo runner (${runner.basis}) cannot run a .test.mjs guard; declare invocation with the exact command that runs it`)
+        continue
+      }
     }
     if (!scopedPath(entry.file, scope)) {
       refuse(id, 'file-not-in-scope', `the hardened implementation ${entry.file ?? '(missing)'} must be a concrete repo-relative literal path`)
@@ -14894,12 +14913,15 @@ export function validateHardened(details, owed, inScope) {
       refuse(id, 'replace-identical', 'find and replace differ only in whitespace — that mutates no token')
       continue
     }
+    if (namesTest && runner.runner === 'unparsed') {
+      observations.push({ finding: id, reason: HARDENING_BLIND_SPOTS[0], why: `the runner could not be classified (${runner.basis}), so this guard's presence in the repo suite is unverified` })
+    }
     entries.push(entry)
   }
   return { entries, refusals, observations }
 }
 
-export function hardeningBounceLines(round, refusals, rows) {
+export function hardeningBounceLines(round, refusals, rows, testRunner) {
   const lines = [`# Hardening bounce (round ${round})`, '', 'Every owed must-fix needs a permanent named guard proven by its declared mutation.']
   for (const refusal of Array.isArray(refusals) ? refusals : []) {
     lines.push(`- ${refusal.finding ?? '(unknown finding)'}: ${refusal.reason} — ${refusal.why}`)
@@ -14916,12 +14938,12 @@ export function hardeningBounceLines(round, refusals, rows) {
   if (undeclared.length > 0) lines.push('No guard was declared for:', ...undeclared.map((refusal) => `- ${refusal.finding}`))
   const unmeasured = Array.isArray(rows) ? rows.filter((row) => hardeningRowBucket(row) === 'unmeasured') : []
   if (unmeasured.length > 0) lines.push('Measured nothing — not blocking:', ...unmeasured.map((row) => `- ${row.finding}: ${row.outcome} — ${row.why}`))
-  lines.push('', 'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.', `Hardening proof for round ${round} did not close every finding.`)
+  lines.push('', `Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, ${hardeningRunnerSentence(testRunner)}`, `Hardening proof for round ${round} did not close every finding.`)
   lines.push(`A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly ${HARDENING_APPEAL_SHAPE}, which is still refused builder-exemption until the reviewer approves it.`)
   return lines
 }
 
-export function hardeningBriefLines(owed, exempt) {
+export function hardeningBriefLines(owed, exempt, testRunner) {
   const findings = Array.isArray(owed) ? owed : []
   if (findings.length === 0) return []
   const lines = ['', '## Permanent guards required (#839)', 'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.']
@@ -14929,7 +14951,7 @@ export function hardeningBriefLines(owed, exempt) {
     const requirement = prescription ? `; close with a NEW top-level test(...) whose name is absent from the review-time tree, in a DIFFERENT test file that is in scope or declared in creates, leaving the existing checks of ${prescription.file} as they were: ${prescription.file} must ship byte-identical to its base version (its review-time version when the base lacks it), and its checks must pass against your implementation` : ''
     return `- ${id} (${location || 'location unspecified'}) — ${summary || 'close this finding with a named guard'}${requirement}`
   }))
-  lines.push('Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+  lines.push(`Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, ${hardeningRunnerSentence(testRunner)}`,
     'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, or its find must bind there and its named check must pass with those review-time implementation bytes restored; otherwise it is refused as source-regressed.',
     'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
     `If a finding's defect class cannot become a mechanical guard, ASK: return that finding's entry as exactly ${HARDENING_APPEAL_SHAPE} and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.`)

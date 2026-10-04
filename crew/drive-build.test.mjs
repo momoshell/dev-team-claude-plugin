@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -4504,7 +4504,7 @@ test('#839 reviewer hardening marks preserve the five-key finding shape unless v
   assert.deepEqual(HARDENING_REFUSALS, [
     'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
     'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
-    'replace-identical', 'builder-exemption', 'class-unknown',
+    'replace-identical', 'builder-exemption', 'class-unknown', 'test-runner-mismatch',
   ])
   assert.deepEqual(HARDENING_OUTCOMES, [
     'killed', 'survived', 'ungateable',
@@ -8796,7 +8796,7 @@ test('b869 hardening acceptance', async (t) => {
     assert.deepEqual(HARDENING_REFUSALS, [
       'no-declaration', 'not-an-array', 'unknown-finding', 'duplicate-finding',
       'test-path-invalid', 'test-invocation-conflict', 'invocation-invalid', 'test-not-in-scope', 'file-not-in-scope', 'name-missing', 'name-file-wrapper', 'find-missing',
-      'replace-identical', 'builder-exemption', 'class-unknown',
+      'replace-identical', 'builder-exemption', 'class-unknown', 'test-runner-mismatch',
     ])
   })
 })
@@ -10264,4 +10264,132 @@ test('RV1-2 permanent prompt-claim boundaries preserve PC6 and PC7 issue routing
   const message = composeCommitMessage({ task: 'prompt', brief, planEnv: { details: { issues: [9001, 9002, 9003] } }, builderEnv: { details: {} } })
   assert.match(message, /Closes: #9001/)
   assert.match(message, /Refs: #9002, #9003/)
+})
+
+// MUTATION HN1: erase the trailing runner input of hardeningBriefLines; cargo gets legacy node prose.
+const cargo = { runner: 'cargo', basis: 'ratified profile field test_command' }
+const owed = [{ id: 'F1', location: 'a.mjs:1', summary: 'the implementation defect' }]
+const entry = { finding: 'F1', test: 'a.test.mjs', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
+const scope = () => true
+const nodeSentence = 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
+const inspect = (value) => JSON.stringify(value) ?? String(value)
+const assertText = (text, expected, path) => assert.equal(expected.every((part) => text.includes(part)), true, `${path}; text=${inspect(text)}; required=${inspect(expected)}`)
+const validate = (testRunner, guard = entry) => validateHardened({ hardened: [guard] }, owed, scope, testRunner)
+
+test('HN1 cargo runner permanent-guard brief', () => {
+  const text = hardeningBriefLines(owed, [], cargo).join('\n')
+  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused'], 'hardeningBriefLines output')
+  assert.equal(text.includes(nodeSentence), false, `hardeningBriefLines output=${inspect(text)}`)
+  assert.deepEqual(hardeningBriefLines([], [], cargo), [], 'empty owed findings stay empty')
+})
+// MUTATION HN2: erase the trailing runner input of hardeningBounceLines; the bounce gets legacy node prose.
+test('HN2 cargo runner hardening bounce', () => {
+  const text = hardeningBounceLines(2, [], [], cargo).join('\n')
+  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused'], 'hardeningBounceLines output')
+  assert.equal(text.includes(nodeSentence), false, `hardeningBounceLines output=${inspect(text)}`)
+})
+// MUTATION HN3: neutralise the classified cargo refusal branch; the node declaration is accepted.
+test('HN3 cargo node guard refusal', () => {
+  const actual = validate(cargo)
+  assert.deepEqual({ entries: actual.entries.length, reasons: actual.refusals.map((row) => row.reason) }, { entries: 0, reasons: ['test-runner-mismatch'] }, 'validateHardened cargo result')
+  assertText(actual.refusals[0].why, ['cargo', cargo.basis], 'validateHardened cargo refusal why')
+})
+// MUTATION HN4: make hardeningInvocation validation reject every invocation; cargo loses its working form.
+test('HN4 cargo invocation guard accepted', () => {
+  const { test, ...base } = entry
+  const guard = { ...base, invocation: 'cargo test guard_f1' }
+  const actual = validate(cargo, guard)
+  assert.deepEqual(actual.entries, [guard], 'validateHardened cargo invocation entries')
+  assert.deepEqual(actual.refusals, [], 'validateHardened cargo invocation refusals')
+  assert.deepEqual(actual.observations, [], 'validateHardened cargo invocation observations')
+})
+// MUTATION HN5: disable the unparsed observation branch; the accepted guard's blind spot disappears.
+test('HN5 unclassified runner uncertainty', () => {
+  const unparsed = { runner: 'unparsed', basis: 'profile-basis-unclassified-7' }
+  for (const text of [hardeningBriefLines(owed, [], unparsed).join('\n'), hardeningBounceLines(2, [], [], unparsed).join('\n')]) {
+    assert.match(text, /blind spot/i, `unparsed generated prose=${inspect(text)}`)
+    assertText(text, ['profile-basis-unclassified-7', 'unverified', 'invocation'], 'unparsed generated prose')
+  }
+  const actual = validate(unparsed)
+  assert.deepEqual(actual.entries, [entry], 'validateHardened unparsed entries')
+  assert.deepEqual(actual.refusals, [], 'validateHardened unparsed refusals')
+  assert.deepEqual(actual.observations.map(({ finding, reason }) => ({ finding, reason })), [{ finding: 'F1', reason: 'runner-unclassified' }], 'validateHardened unparsed observations')
+  assertText(actual.observations[0].why, ['profile-basis-unclassified-7', 'unverified'], 'unparsed observation why')
+  assert.deepEqual(HARDENING_BLIND_SPOTS, ['runner-unclassified'], 'HARDENING_BLIND_SPOTS data')
+  assert.equal(Object.isFrozen(HARDENING_BLIND_SPOTS), true, 'HARDENING_BLIND_SPOTS frozen data')
+  const invocation = { ...entry, test: undefined, invocation: 'node --test crew/guards.test.mjs' }
+  assert.deepEqual(validate(unparsed, invocation).observations, [], 'unparsed invocation has no suite-presence observation')
+  const invalid = validate({ runner: 'other', basis: 'should not be trusted' })
+  assert.deepEqual(invalid.entries, [entry], 'unexpected runner entries')
+  assertText(invalid.observations[0]?.why ?? '', ['unexpected runner value', 'unverified'], 'unexpected runner observation')
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, limits: { build_rounds: 3 } })
+  driveTask({ ...CTX, testRunner: unparsed, limits: { build_rounds: 3 } }, io)
+  assert.equal(io.calls.logs.some((row) => row.hardening_observation?.reason === 'runner-unclassified' && row.hardening_observation?.finding === 'F1' && row.hardening_observation?.why.includes('profile-basis-unclassified-7')), true, 'driveTask journals unclassified runner observation')
+})
+// MUTATION HN6: remove test-runner-mismatch from the end of HARDENING_REFUSALS; the closed refusal contract drifts.
+test('HN6 legacy node runner and closed refusals', () => {
+  assert.equal(HARDENING_REFUSALS.at(-1), 'test-runner-mismatch', 'HARDENING_REFUSALS final value')
+  for (const runner of [undefined, { runner: 'node' }]) {
+    const actual = validate(runner)
+    assert.deepEqual(actual.entries, [entry], 'legacy/node hardened entries')
+    assert.deepEqual(actual.refusals, [], 'legacy/node hardened refusals')
+    assert.deepEqual(actual.observations, [], 'legacy/node hardened observations')
+    const brief = hardeningBriefLines(owed, [], runner)
+    const bounce = hardeningBounceLines(2, [], [], runner)
+    assert.deepEqual(brief, [
+      '', '## Permanent guards required (#839)',
+      'Every must-fix below needs a permanent named test guard, and its declared kill-mutation must be proven by the driver.',
+      '- F1 (a.mjs:1) — the implementation defect',
+      `Declare each guard in details.hardened with the exact shape { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, plus "class": "coverage" when the implementation the finding names was ALREADY correct at review time and the finding was that nothing durable guarded it. For each guard, ${nodeSentence}`,
+      'A coverage declaration is certified WITHOUT a red pre-repair: its file must be byte-identical to the review-time witness, or its find must bind there and its named check must pass with those review-time implementation bytes restored; otherwise it is refused as source-regressed.',
+      'The declared name must be one that does not exist on the tree the review read; only the reviewer may mark a finding ungateable with a non-empty hardening_why.',
+      'If a finding\'s defect class cannot become a mechanical guard, ASK: return that finding\'s entry as exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" } and nothing else. That request is still refused builder-exemption and grants nothing until the reviewer approves it in a hardening appeal; an entry that mixes the request with a declaration is not a request.',
+    ], `legacy/node brief=${inspect(brief)}`)
+    assert.deepEqual(bounce, [
+      '# Hardening bounce (round 2)', '',
+      'Every owed must-fix needs a permanent named guard proven by its declared mutation.', '',
+      `Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, ${nodeSentence}`,
+      'Hardening proof for round 2 did not close every finding.',
+      'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
+    ], `legacy/node bounce=${inspect(bounce)}`)
+  }
+  const normalize = normalizeTestRunner
+  for (const [input, expected] of [
+    [undefined, { runner: 'node', basis: 'legacy node runner · no runner context' }],
+    [{}, { runner: 'node', basis: 'legacy node runner · no runner context' }],
+    [{ runner: 'node' }, { runner: 'node', basis: 'runner context' }],
+    [{ runner: 'node', basis: 7 }, { runner: 'node', basis: 'runner context' }],
+    [cargo, cargo],
+    [{ runner: 'unparsed', basis: 'profile-basis-unclassified-7' }, { runner: 'unparsed', basis: 'profile-basis-unclassified-7' }],
+    [{ runner: null }, { runner: 'unparsed', basis: 'unexpected runner value' }],
+    [{ runner: 'other' }, { runner: 'unparsed', basis: 'unexpected runner value' }],
+  ]) assert.deepEqual(normalize(input), expected, `normalizeTestRunner input=${inspect(input)}`)
+})
+// MUTATION HN7: omit ctx.testRunner from lane:harden's validator call; the cargo lane accepts the node guard and never refuses it.
+test('HN7 cargo lane bounces and escalates', () => {
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, limits: { build_rounds: 3 } })
+  const result = driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 3 } }, io)
+  const bounce = io.calls.writes[join(TD, 'build-bounce-r2.md')] ?? null
+  const reviewBounce = io.calls.writeLog.filter(({ content }) => typeof content === 'string' && content.includes('# Review bounce')).map(({ content }) => content)
+  assertText(bounce ?? '', ['cargo', cargo.basis, '#[test]', 'test-runner-mismatch'], 'driveTask build-bounce-r2.md')
+  assert.equal(result.status, 'escalation', 'driveTask result status')
+  assert.equal(result.details.escalation?.where, 'harden', 'driveTask escalation where')
+  assertText(result.details.escalation?.why ?? '', ['cargo', '#[test]', 'test-runner-mismatch'], 'driveTask terminal hardening bounce')
+  assert.equal(reviewBounce.some((text) => text.includes('cargo') && text.includes('#[test]')), true, `driveTask review bounce output=${inspect(reviewBounce)}`)
+  const askIo = dispositionIo({ ...D_ASK, hardening: undefined, hardening_why: undefined }, { leadDecision: 'bounce' })
+  driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 2 } }, askIo)
+  const askBriefs = Object.values(askIo.calls.writes).filter((text) => typeof text === 'string').join('\n')
+  assertText(askBriefs, ['cargo', '#[test]'], 'ask-user hardening brief')
+  assert.equal(askBriefs.includes(nodeSentence), false, 'ask-user retained legacy node guidance')
+  const autoIo = dispositionIo({ ...D_AUTO, hardening: undefined, hardening_why: undefined })
+  const baseRun = autoIo.run
+  let laneRuns = 0
+  autoIo.run = function (cmd) {
+    if (cmd === 'lane-cmd' && ++laneRuns === 2) return { ok: false, output: 'auto-fix lane failure' }
+    return baseRun.call(this, cmd)
+  }
+  driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 2 } }, autoIo)
+  const autoBriefs = Object.values(autoIo.calls.writes).filter((text) => typeof text === 'string').join('\n')
+  assertText(autoBriefs, ['cargo', '#[test]'], 'auto-fix hardening brief')
+  assert.equal(autoBriefs.includes(nodeSentence), false, 'auto-fix retained legacy node guidance')
 })

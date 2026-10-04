@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED, SKILL_BLOCK_CEILINGS, ROLE_PROMPT_CEILINGS, ROLE_PROMPT_UNMEASURED_CAUSES, rolePromptBytes, rolePromptRefusals, ROLE_PROMPT_REFUSAL, omitInlinedPiSkills } from './crew.mjs'
+import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED, SKILL_BLOCK_CEILINGS, ROLE_PROMPT_CEILINGS, ROLE_PROMPT_UNMEASURED_CAUSES, rolePromptBytes, rolePromptRefusals, ROLE_PROMPT_REFUSAL, omitInlinedPiSkills } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -28,7 +28,76 @@ import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, readlinkSync, execSync, spawn, tmpdir, join, dirname, writePiSeatAgentDirs, writeMcpConfigs, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, readlinkSync, execSync, spawn, tmpdir, join, dirname, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+
+// MUTATION: skip the runtime rewrite from the register-relative server path.
+test('LM5', async () => {
+  const home = scratchDir('lab-native-granted-home-')
+  const { checkout } = testCheckout('lab-native-granted-checkout-', home)
+  const serverPath = join(ROOT, 'crew/mcp/lab-server.mjs')
+  const quiet = process.stdout.write; process.stdout.write = () => true
+  try {
+    await withHome(home, () => bootCmd({ task: 'lab-native-granted', checkout, roles: 'planner', 'agent-planner': 'pi', 'headless-all': true, 'claude-bin': process.execPath }, {
+      env: { CREW_PI_CODEMODE: 'off' }, homedir: () => home,
+      existsSync: (path) => path === serverPath ? true : existsSync(path),
+      awaitSeatsReady: async () => {}, cmux() { throw new Error('unexpected cmux') }, openRun: () => ({ recordSeats() {} }),
+    }))
+  } finally { process.stdout.write = quiet }
+  const dir = testCrewDir(home, checkout, 'lab-native-granted')
+  const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+  const grant = crew.members.planner.grant_snapshot.grants
+  assert.ok(grant.extensions.includes('builtin:mcp'))
+  assert.ok(!grant.extensions.some((path) => path.endsWith('/lab.ts')))
+  assert.deepEqual(grant.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [serverPath] }, url: null }])
+  const row = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((event) => event.event === 'boot')
+  assert.deepEqual(row.lab.planner, { state: 'granted' })
+  const written = JSON.parse(readFileSync(join(dir, 'task/pi-agent/planner/mcp.json'), 'utf8'))
+  assert.deepEqual(written.mcpServers.lab, { command: process.execPath, args: [serverPath], exposure: 'direct', timeout: 960 })
+})
+
+// MUTATION: remove the truthful withheld state while dropping the lab server.
+test('LM6', async () => {
+  const serverPath = join(ROOT, 'crew/mcp/lab-server.mjs')
+  for (const probe of [() => false, () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }]) {
+    const resolved = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, {
+      env: { CREW_PI_CODEMODE: 'off' }, exists: (path) => path === serverPath ? probe() : existsSync(path),
+    })
+    assert.deepEqual(resolved.planner.lab, { state: 'withheld', reason: 'server-absent' })
+    assert.equal(resolved.planner.grants.mcp_servers.some((server) => server.name === 'lab'), false)
+    assert.ok(resolved.planner.grants.extensions.some((path) => path.endsWith('/subagent.ts')))
+    const home = scratchDir('lab-native-withheld-home-')
+    const { checkout } = testCheckout('lab-native-withheld-checkout-', home)
+    const quiet = process.stdout.write; process.stdout.write = () => true
+    try {
+      await withHome(home, () => bootCmd({ task: 'lab-native-withheld', checkout, roles: 'planner', 'agent-planner': 'pi', 'headless-all': true, 'claude-bin': process.execPath }, {
+        env: { CREW_PI_CODEMODE: 'off' }, homedir: () => home,
+        existsSync: (path) => path === serverPath ? probe() : existsSync(path),
+        awaitSeatsReady: async () => {}, cmux() { throw new Error('unexpected cmux') }, openRun: () => ({ recordSeats() {} }),
+      }))
+    } finally { process.stdout.write = quiet }
+    const dir = testCrewDir(home, checkout, 'lab-native-withheld')
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.equal(crew.members.planner.grant_snapshot.grants.mcp_servers.some((server) => server.name === 'lab'), false)
+    const row = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((event) => event.event === 'boot')
+    assert.deepEqual(row.lab.planner, { state: 'withheld', reason: 'server-absent' })
+  }
+  const noLab = await resolveAdapters(['lead'], {}, null, { env: { CREW_PI_CODEMODE: 'off' } })
+  assert.deepEqual(noLab.lead.lab, { state: 'ungranted' })
+})
+
+// MUTATION: assign timeout 960 to every server in a pi MCP document.
+test('LM7', () => {
+  const grants = { mcp_servers: [
+    { name: 'lab', command: { bin: process.execPath, args: ['/plugin/lab-server.mjs'] }, url: null },
+    { name: 'fff', command: { bin: '/opt/fff', args: [] }, url: null },
+  ] }
+  const pi = mcpConfigDocument(grants, 'pi').mcpServers
+  assert.deepEqual(pi.lab, { command: process.execPath, args: ['/plugin/lab-server.mjs'], exposure: 'direct', timeout: 960 })
+  assert.deepEqual(pi.fff, { command: '/opt/fff', args: [], exposure: 'direct' })
+  const claude = mcpConfigDocument(grants, 'claude').mcpServers
+  assert.deepEqual(claude.lab, { command: process.execPath, args: ['/plugin/lab-server.mjs'] })
+  assert.deepEqual(claude.fff, { command: '/opt/fff', args: [] })
+})
 
 test('K2 invalid CREW_PI_CODEMODE refuses before boot work', async () => {
   // MUTATION: remove the closed switch guard.

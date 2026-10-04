@@ -26,10 +26,12 @@ test('K5 builtin codemode is activated by rpc --tools', () => {
 test('K7 and K8 MCP tools are pinned and unknown servers refuse', () => {
   // MUTATION: skip MCP table activation or its own-property guard.
   const expected = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
-  const tools = piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] })
-  assert.deepEqual(tools.filter((tool) => tool.startsWith('mcp__')), expected)
+  const tools = piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }, { name: 'lab' }] })
+  assert.deepEqual(tools.filter((tool) => tool.startsWith('mcp__')), [...expected, 'mcp__lab__lab'])
+  assert.deepEqual(piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] }).filter((tool) => tool.startsWith('mcp__')), expected)
   assert.throws(() => piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'toString' }] }), (error) => error.reason === 'grant-unsupported' && error.message.includes('toString'))
   assert.deepEqual(PI_MCP_SERVER_TOOLS.fff, expected)
+  assert.deepEqual(PI_MCP_SERVER_TOOLS.lab, ['mcp__lab__lab'])
   assert.ok(Object.isFrozen(PI_MCP_SERVER_TOOLS) && Object.isFrozen(PI_MCP_SERVER_TOOLS.fff) && Object.isFrozen(PI_BUILTIN_EXTENSION_TOOLS['builtin:codemode']))
 })
 test('K15 and K16 codemode selects deterministic rpc and pane agent directories', () => {

@@ -666,12 +666,12 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
   const loaded = loadCapabilities()
   const expected = [
     join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts'),
-    join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
   ]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
+  assert.deepEqual(grants.mcp_servers, [{ name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null }])
   for (const path of expected) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('planner', grants, loaded, { agent: 'pi' }))
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
@@ -1410,7 +1410,7 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('edit'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('write'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('bash'), false)
-  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts', 'readgate.ts', 'submit.ts'])
+  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'readgate.ts', 'submit.ts'])
   assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
   assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
 })

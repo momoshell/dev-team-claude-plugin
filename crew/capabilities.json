@@ -81,10 +81,10 @@
         "pi": {
           "extensions": [
             "crew/pi/extensions/subagent.ts",
-            "crew/pi/extensions/lab.ts",
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/submit.ts"
           ],
+          "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }],
           "skills": [
             "skills/lean-build/SKILL.md"
           ],

@@ -203,6 +203,7 @@ export const PI_BUILTIN_EXTENSION_TOOLS = Object.freeze({
 })
 export const PI_MCP_SERVER_TOOLS = Object.freeze({
   fff: Object.freeze(['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']),
+  lab: Object.freeze(['mcp__lab__lab']),
 })
 
 function piMcpTools(mcpServers) {

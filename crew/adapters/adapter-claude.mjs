@@ -401,8 +401,9 @@ const ACP_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', sessi
 export const ACP_BINARY = 'claude-agent-acp'
 
 export function acpLaunch(spec = {}) {
-  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, grants = NO_GRANTS, configDir, env = {} } = spec
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {} } = spec
   assertSupportedGrants(grants)
+  assertSkillsMaterialised({ role, taskDir, grants })
   assertNoLocalProvider(configDir)
   if (typeof bin !== 'string' || !bin || !isAbsolute(bin)) {
     throw new Error(`adapter-claude.acpLaunch: bin must be a nonempty ABSOLUTE ACP path, got ${JSON.stringify(bin)}`)
@@ -410,6 +411,8 @@ export function acpLaunch(spec = {}) {
   if (!claudeBin || !isAbsolute(claudeBin)) {
     throw new Error(`adapter-claude.acpLaunch: claudeBin must be an ABSOLUTE frozen worker path, got ${JSON.stringify(claudeBin)}`)
   }
+  const hasSkills = (grants?.skills?.length ?? 0) > 0
+  const acpAllowedTools = allowedTools(tools, grants).split(',').filter(Boolean)
   return {
     bin,
     args: [],
@@ -420,7 +423,8 @@ export function acpLaunch(spec = {}) {
       mcpServers: [],
       _meta: { claudeCode: { options: {
         model,
-        allowedTools: allowedTools(tools, grants).split(',').filter(Boolean),
+        allowedTools: hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools,
+        ...(hasSkills ? { plugins: [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] } : {}),
         disallowedTools: deniedTools(deny, grants).split(',').filter(Boolean),
         additionalDirectories: spec.writableDirs,
         extraArgs: { ...(effort ? { effort } : {}), 'append-system-prompt-file': promptFile },

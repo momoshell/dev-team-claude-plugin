@@ -26,7 +26,7 @@ The lane fallback is the `?? 6` overflow index at `visualizer/web/src/lib/PhaseG
 
 ## L1 - measured state-colour leak inventory
 
-The measured leak is **22 hex literals in 4 of 33 components**. They are all state colours, so they remain theme-invariant. The complete inventory is:
+The measured leak is **22 hex literals in 4 of 34 components**. They are all state colours, so they remain theme-invariant. The complete inventory is:
 
 | File and exhibit | Literals | Count |
 |---|---|---:|
@@ -48,7 +48,7 @@ Six rows from the earlier inventory are gone upstream and are recorded here with
 
 ## Divergences: encode the boundary, not the majority
 
-- **D4:** the old 3-vs-2 majority is gone: no hard-coded `#b42318` `.error` remains. The token-correct `var(--status-fail)` form appears in `visualizer/web/src/lib/RunDetail.svelte:294` (`.error-banner`), `visualizer/web/src/lib/EnvelopeInspector.svelte:85` (`.error`), and `visualizer/web/src/App.svelte:246` (`.rail-status.fail`), alongside the roster notice rule. Following a hard-coded majority would now be wrong twice over: the majority no longer exists, and the surviving rule is the alias.
+- **D4:** the old 3-vs-2 majority is gone: no hard-coded `#b42318` `.error` remains. The token-correct `var(--status-fail)` form appears in `visualizer/web/src/lib/RunDetail.svelte:297` (`.error-banner`), `visualizer/web/src/lib/EnvelopeInspector.svelte:85` (`.error`), and `visualizer/web/src/App.svelte:246` (`.rail-status.fail`), alongside the roster notice rule. Following a hard-coded majority would now be wrong twice over: the majority no longer exists, and the surviving rule is the alias.
 - **D5:** `unproven` has four policies: an amber chip (`#92400e` on `#fef3c7`) at `visualizer/web/src/lib/PhasePanel.svelte:100`; muted text with a `color-mix` fill at `visualizer/web/src/lib/GateChips.svelte:13`; pale text `#ffe7a9` at `visualizer/web/src/lib/PhaseGantt.svelte:257`; and `var(--status-running)` at `visualizer/web/src/lib/TeardownPanel.svelte:63`. `proven` and `failed` likewise mix chip pairs, gantt colours, and status aliases. Choose one token policy for new state, do not infer it from the most common old rule.
 - **D6:** `deriveStatus` emits `quiet` for queued and unknown at `visualizer/web/src/lib/fleet.js:533-535`, but only the attention rail defines those tones; the RunCard class map at `visualizer/web/src/lib/RunCard.svelte:66` through `visualizer/web/src/lib/RunCard.svelte:69` and the FleetTable class map at `visualizer/web/src/lib/FleetTable.svelte:37` through `visualizer/web/src/lib/FleetTable.svelte:41` omit `quiet`. Require every emitted tone to have a class rule in every consumer, or state the absence explicitly.
 - **D10:** the old global `border-radius:0` reset is gone from `theme.css`; the surviving global reset is the box-sizing rule at `visualizer/web/src/lib/theme.css:141`, and `visualizer/web/src/App.svelte:233` restates it. Components reintroduce corners through the panel and status idioms. A new component follows the actual boundary rather than reading `theme.css` alone and concluding that every surface is square.

@@ -8,7 +8,7 @@ A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`
 
 ## T2 - painted colour comes from a token
 
-Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 33 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:100`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
+Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 34 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:100`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
 
 ## T3 - escalation goes through the alias
 

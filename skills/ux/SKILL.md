@@ -9,7 +9,7 @@ description: >-
   component. It records this checkout's evidence rather than generic UX advice.
 ---
 
-This is the measured UX boundary an agent works inside. The counts below describe the current checkout's 33 visualizer components, not a generic design system: extend the discipline to a new component without inventing rules the exhibits do not support.
+This is the measured UX boundary an agent works inside. The counts below describe the current checkout's 34 visualizer components, not a generic design system: extend the discipline to a new component without inventing rules the exhibits do not support.
 
 ## Routing
 

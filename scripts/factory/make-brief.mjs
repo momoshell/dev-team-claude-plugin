@@ -3484,6 +3484,7 @@ function renderBriefSections(gathered) {
   const tierLines = pack == null ? [renderProposedTier(proposal)] : [`proposal rationale: ${pack.proposal} — read it once with: cat ${pack.proposal}`, ...renderProposedTier(proposal).split('\n').filter((line) => line.startsWith(MISCLASSIFIED_PREFIX))]
   const sections = [
     briefSection('task', null, ['# Task']),
+    ...(pack?.issue?.number == null ? [] : [briefSection('bound issue', null, [`<!-- crew:bound-issue #${pack.issue.number} -->`])]),
     briefSection('intent', null, ['## Intent', resolveIntent(request)]),
     briefSection('the ask', 'ask', ['## The ask', request.ask], request.ask),
     briefSection('proposed tier', null, ['## Proposed tier', ...tierLines, renderProposalBlock(proposal)]),

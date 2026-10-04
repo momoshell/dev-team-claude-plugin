@@ -3580,6 +3580,8 @@ test('every journal emit site in the driver is inventoried, wrapped and on the r
     ['recordRow', "event='step:reverified'", 'at step passed'],
     ['recordRow', "event='step:reverify-red'", 'at step failed'],
   ])
+  assert.ok(DRIVE_JOURNAL_EXPECTED.some((entry) => JSON.stringify(entry) === JSON.stringify(['recordRow', '', 'at suite_red_noop'])))
+  assert.ok(sites.some(({ wrapper, events, keys }) => wrapper === 'recordRow' && events === '' && keys === 'at suite_red_noop'))
   const legacySites = sites.filter(({ keys }) => !keys.split(' ').includes('scope_admission') && !keys.split(' ').includes('envelope_refused') && !keys.split(' ').includes('review_identity_refused') && !keys.split(' ').includes('plan_prescription_applied') && keys !== 'at step passed' && keys !== 'at step failed')
   const expectedLegacySites = DRIVE_JOURNAL_EXPECTED.filter(([, , keys]) => keys !== 'at rebase_restore_diagnosis')
   assert.equal(legacySites.length, expectedLegacySites.length)

@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture,
+  staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
@@ -149,7 +149,7 @@ function frozenCycleIo({ suite = [frozenRed(), frozenGreen()], builder2 = null, 
 
 const suiteRed = (file, line = 1, detail = 'suite failure') => `FAIL file://${CTX.checkout}/${file}:${line}:1 ${detail}`
 
-function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed = null, envelopes = {}, ctx = {}, laneFence = [], protectedPaths = [], onSuite = null, onAssign = null } = {}) {
+function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed = null, envelopes = {}, ctx = {}, laneFence = [], protectedPaths = [], onSuite = null, onAssign = null, onCommit = null } = {}) {
   const suiteRuns = Object.fromEntries(suite.map((result, index) => [`suite-cmd:${index + 1}`, result]))
   const io = fakeIo({
     envelopes: {
@@ -160,6 +160,7 @@ function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, ...suiteRuns },
     changed: changed ?? Array.from({ length: 12 }, () => [...planFiles]),
+    ...(onCommit ? { onCommit } : {}),
   })
   let activeProtected = [...protectedPaths]
   const dynamic = { ...CTX, ...ctx, files_in_scope: [...planFiles], laneFence }
@@ -184,6 +185,97 @@ function suiteCycleIo({ planFiles = ['a.mjs', 'a.test.mjs'], suite = [], changed
   }
   return { ctx: dynamic, io }
 }
+
+const noopSuiteCycle = ({ suite } = {}) => {
+  const keptCommit = 'abc1234'
+  const fixture = suiteCycleIo({
+    suite,
+    changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs', 'a.test.mjs'] : [],
+    onCommit(files) { if (files.length === 0) throw new Error('commit: nothing in scope actually changed — refusing an empty commit') },
+  })
+  return { ...fixture, keptCommit }
+}
+
+test('EC1 unchanged suite-red-fix retains its commit and green recheck completes', () => {
+  const fixture = noopSuiteCycle({ suite: [{ ok: false, output: suiteRed('a.test.mjs') }, { ok: true, output: 'green' }] })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length, 2)
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(fixture.io.calls.commits.length, 1)
+  assert.equal(result.details.commit, fixture.keptCommit)
+  assert.deepEqual(result.details.files_committed, ['a.mjs', 'a.test.mjs'])
+  assert.match(result.summary, /\(2 files\)/)
+  assert.equal(result.details.stages.filter((stage) => String(stage).startsWith('document')).length, 1)
+  assert.equal(fixture.io.calls.logs.filter((row) => row.suite_red_noop).length, 1)
+})
+
+test('EC1 publication: unchanged suite-red-fix recheck rebases twice, runs cold suite and publishes retained commit', () => {
+  const io = publicationIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'), 'reviewer:2': reviewEnv('pass'),
+    },
+    commands: {
+      ['git merge-base HEAD ' + shellArg('origin/main')]: { ok: true, output: 'base1111\n' },
+      'git diff --name-only -z': { ok: true, output: 'a.mjs\0a.test.mjs\0' },
+    },
+  })
+  let builderAssignments = 0
+  const assign = io.assign.bind(io)
+  io.assign = (spec) => {
+    if (spec.role === 'builder') builderAssignments += 1
+    return assign(spec)
+  }
+  io.changedFiles = () => builderAssignments < 2 ? ['a.mjs', 'a.test.mjs'] : []
+  const commit = io.commit.bind(io)
+  io.commit = (files, message) => {
+    if (files.length === 0) throw new Error('commit: nothing in scope actually changed — refusing an empty commit')
+    return commit(files, message)
+  }
+  const originalRun = io.run.bind(io)
+  let warmRuns = 0
+  io.run = (command) => {
+    if (String(command) !== 'suite-cmd') return originalRun(command)
+    originalRun(command)
+    warmRuns += 1
+    return warmRuns === 1 ? { ok: false, output: suiteRed('a.test.mjs') } : { ok: true, output: PUBLISH_WARM_OUTPUT }
+  }
+  const ctx = { ...CTX, limits: { build_rounds: 5 }, journal: TD + '/journal.jsonl', publish: { branch: 'feature/ship', base: 'main' } }
+  const result = driveTask(ctx, io)
+  const retained = io.calls.commits[0].sha
+  assert.equal(result.status, 'done')
+  assert.equal(warmRuns, 2)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(result.details.commit, retained)
+  assert.equal(io.calls.runCold.length, 1)
+  assert.equal(io.calls.coldHead, retained)
+  assert.equal(result.details.stages.filter((stage) => stage === 'rebase').length, 2)
+  assert.equal(result.details.stages.filter((stage) => stage === 'document').length, 1)
+  assert.equal(builderAssignments, 2)
+  assert.ok(io.calls.run.some((command) => command.startsWith('git push -u origin')))
+})
+
+test('EC2 unchanged suite-red-fix recheck red terminates before another repair', () => {
+  const output = `${'x'.repeat(2100)}unique-trailing-marker`
+  const fixture = noopSuiteCycle({ suite: [{ ok: false, output: suiteRed('a.test.mjs') }, { ok: false, output }] })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'suite')
+  assert.match(result.details.escalation.why, /^suite-red-no-fix: /)
+  assert.ok(result.details.escalation.why.endsWith(output.slice(-2000)))
+  assert.deepEqual(result.details.suite_red, { output, commit: fixture.keptCommit, outcome: 'suite-red-no-fix' })
+  assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length, 2)
+  assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd.includes('--check .')).length, 1)
+})
+
+test('EC3 no-op recheck writes the retained commit to the journal', () => {
+  const fixture = noopSuiteCycle({ suite: [{ ok: false, output: suiteRed('a.test.mjs') }, { ok: true, output: 'green' }] })
+  assert.equal(driveTask(fixture.ctx, fixture.io).status, 'done')
+  assert.deepEqual(fixture.io.calls.logs.filter((row) => row.suite_red_noop).map(({ suite_red_noop }) => suite_red_noop), [{ commit: fixture.keptCommit, outcome: 'recheck' }])
+})
 
 const anchorCheck = ({ rot = 0, ambiguous = 0, moved = 1, unverified = 0, lines = moved } = {}) => [
   ...Array.from({ length: lines }, (_, index) => `moved crew/drive.mjs:${index + 1} -> crew/drive.mjs:${index + 2}`),

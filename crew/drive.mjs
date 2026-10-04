@@ -10472,6 +10472,8 @@ function runTask(ctx, io, crash) {
   }
   let suiteBuildBrief = planPath
   let suiteBuildNote = 'build'
+  let suiteNoopRechecked = false
+  let suiteRedFixFiles = []
   const retainRebaseConflict = (pending, why) => {
     const bounceNumber = rebaseConflictBounces + 1
     const bounce = art(`rebase-conflict-bounce-r${bounceNumber}.md`)
@@ -10732,6 +10734,7 @@ function runTask(ctx, io, crash) {
   builderEnv = null
   let buildBrief = suiteBuildBrief
   let buildNote = suiteBuildNote
+  let suiteRedNoop = false
   let reviews = 0
   // The finish block runs ONLY when `accepted` is set — at review:pass or at
   // an explicit lead accept. No bounce, however granted, can fall out of the
@@ -11958,22 +11961,30 @@ function runTask(ctx, io, crash) {
       report = finalFrozen.report
     }
     committing = [...new Set(commitChanged || io.changedFiles())]
-    const preRebaseCommit = io.commit(committing, message)
-    if (pendingFrozenInventory && !preRebaseCommit) {
+    suiteRedNoop = committing.length === 0 && suiteBuildNote === 'suite-red-fix' && !pendingFrozenInventory
+    if (suiteRedNoop) {
+      committing = [...suiteRedFixFiles]
+      suiteNoopRechecked = true
+      io.log(recordRow({ at: io.now(), suite_red_noop: { commit: S.commit, outcome: 'recheck' } }))
       stageComplete()
-      return escalate('suite', 'the frozen inventory repair commit returned no commit id; the repair was not recorded', [], { commit: S.commit })
+    } else {
+      const preRebaseCommit = io.commit(committing, message)
+      if (pendingFrozenInventory && !preRebaseCommit) {
+        stageComplete()
+        return escalate('suite', 'the frozen inventory repair commit returned no commit id; the repair was not recorded', [], { commit: S.commit })
+      }
+      S.commit = preRebaseCommit
+      if (pendingFrozenInventory) {
+        recordFrozenInventoryRepair(report)
+        pendingFrozenInventory = null
+      }
+      stageComplete()
+      stage('document')
+      const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
+      S.commit = documented.commit
+      S.documentation = documented.documentation
+      stageComplete()
     }
-    S.commit = preRebaseCommit
-    if (pendingFrozenInventory) {
-      recordFrozenInventoryRepair(report)
-      pendingFrozenInventory = null
-    }
-    stageComplete()
-    stage('document')
-    const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
-    S.commit = documented.commit
-    S.documentation = documented.documentation
-    stageComplete()
   }
 
   if (publishing) {
@@ -12370,6 +12381,11 @@ function runTask(ctx, io, crash) {
   if (pinnedAfterRebase) return escalate('harden', preservationWhy(pinnedAfterRebase), [], { hardening_preservation: pinnedAfterRebase })
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+  if (!suiteRes?.ok && suiteRedNoop) {
+    const output = String(suiteRes?.output || '')
+    stageComplete()
+    return escalate('suite', `suite-red-no-fix: builder left no changes; suite recheck remained red\n${output.slice(-2000)}`, [], { commit: S.commit, suite_red: { output, commit: S.commit, outcome: 'suite-red-no-fix' } })
+  }
   if (!suiteRes?.ok && (S.suiteAnchorRepairs ?? 0) < ANCHOR_SUITE_REPAIR_MAX) {
     let decline = null
     let before = new Map()
@@ -12580,6 +12596,7 @@ function runTask(ctx, io, crash) {
       ].join('\n'))
       suiteBuildBrief = b
       suiteBuildNote = 'suite-red-fix'
+      suiteRedFixFiles = [...committing]
       stageComplete()
       committedBaseline = true
       if (builderRemaining() <= 0) return escalate('suite', `suite-red repair was recorded but the global builder budget is exhausted after ${builderAttempts} attempt(s)`, [], { commit: S.commit, suite_red: suiteEvidence })

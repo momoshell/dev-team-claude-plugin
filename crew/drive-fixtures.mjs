@@ -1604,6 +1604,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at auto_fix"],
   ["recordRow", "", "at closes_promoted source"],
   ["recordRow", "", "at commit_subject"],
+  ["recordRow", "", "at suite_red_noop"],
   ["recordRow", "", "at rebase_eof_append"],
   ["recordRow", "", "at rebase_restore_diagnosis"],
   ["recordRow", "", "at gate_proof_parent gate_generation"],

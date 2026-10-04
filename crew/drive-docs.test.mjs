@@ -1601,3 +1601,15 @@ test('SA8 ADR-048 Amendment 2 pins the scaled budget and attributed denominators
   assert.match(index, /^\| 048 \|[^\n]*amended 2026-10-03/m)
   assert.match(index, /^- \*\*ADR-048[^\n]*amended 2026-10-03/m)
 })
+
+// MUTATION CC1: reverse the bound-issue promotion instruction; the authoritative planner prompt must catch it.
+test('CC1 planner charter teaches closing and reference issues', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const prose = charter.replace(/\s+/g, ' ')
+  assert.equal(charter.includes('emits a Refs: trailer'), false)
+  assert.ok(charter.includes('             "closes": [112], // emits Closes:\n             "issues": [114], // emits Refs:'))
+  assert.ok(prose.includes('`closes` lists issues this change fully delivers; other issues go under `issues` (Refs:).'))
+  assert.ok(prose.includes("The brief's bound issue (`issue: #N` under its Context pack) closes on merge from EITHER list"))
+  assert.ok(prose.includes('partial delivery of it cannot be expressed: ask in `details.questions`'))
+  assert.ok(prose.includes('`commit_subject` falls back to a subject derived from your summary.'))
+})

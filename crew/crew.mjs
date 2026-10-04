@@ -2757,11 +2757,11 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
   _shared: 4942,
   builder: 3963,
   lead: 9099,
-  planner: 16928,
+  planner: 16905,
   reviewer: 7675,
   'tech-lead': 6295,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 48902
+export const CHARTER_SOURCE_TOTAL_BUDGET = 48879
 
 // Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
 // plus the installation-path delta for the three seats whose cards name a guideline.
@@ -2769,7 +2769,7 @@ const CHARTER_GUIDELINE_DELTA = Buffer.byteLength(CHARTER_GUIDELINES_DIR, 'utf8'
 export const CHARTER_CEILINGS = Object.freeze({
   builder: 8907 + CHARTER_GUIDELINE_DELTA,
   lead: 14043,
-  planner: 21872 + CHARTER_GUIDELINE_DELTA,
+  planner: 21849 + CHARTER_GUIDELINE_DELTA,
   reviewer: 12619 + CHARTER_GUIDELINE_DELTA,
   'tech-lead': 11239,
 })

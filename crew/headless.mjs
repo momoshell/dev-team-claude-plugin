@@ -14,7 +14,7 @@ import { stripVTControlCharacters } from 'node:util'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
-import { assignmentDelivery, assignmentPrompt } from './driver.mjs'
+import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { headlessCommand as defaultHeadlessCommand } from './adapters/adapter-claude.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
@@ -2556,7 +2556,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
         const monoDelta = mono - priorMono
         const slept = sleptMilliseconds(wallDelta, monoDelta)
         deadline += slept
-        if (slept > 0) { try { log({ at: now(), event: 'host_suspended', role: run.role, transport: 'headless-json', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta }) } catch { /* diagnostics only */ } }
+        if (slept > 0) { try { log(operationalRow({ at: now(), event: 'host_suspended', role: run.role, transport: 'headless-json', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta })) } catch { /* diagnostics only */ } }
         priorWall = wall; priorMono = mono
       }
       if (wall >= deadline) break

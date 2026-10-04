@@ -1341,6 +1341,26 @@ test('R1 sleepdeadline', () => {
   } finally { f.cleanup() }
 })
 
+// MUTATION SC2: unwrap RPC emit and lose the operational channel.
+test('SC2', () => {
+  let wall = 0, mono = 0, polls = 0, run
+  const logs = []
+  const f = fixture({ now: () => wall, monotonic: () => mono, promptDeliveryWindowMs: 10000000, log: (row) => logs.push(row), onSleep: ({ ms }) => {
+    polls++
+    if (polls === 3) { wall += 1200000; mono += 5000 } else { wall += ms; mono += ms }
+    if (polls === 5) writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    wall = 0; mono = 0; polls = 0
+    assert.equal(f.io.wait(run.returnPath, 900).status, 'done')
+    const rows = logs.filter((row) => row.event === 'host_suspended')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].channel, 'operational')
+    assert.deepEqual({ role: rows[0].role, transport: rows[0].transport, slept_ms: rows[0].slept_ms }, { role: 'builder', transport: 'headless-rpc', slept_ms: 1195000 })
+  } finally { f.cleanup() }
+})
+
 test('a supervisor session probe that throws starts a fresh session', () => {
   const f = fixture({ existsSync(path) {
     if (String(path).endsWith('/session.json')) throw Error('probe failed')

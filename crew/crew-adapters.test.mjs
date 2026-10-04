@@ -429,6 +429,53 @@ test('Claude ACP empty allowlist retains MCP wildcard denial', () => {
   assert.deepEqual(options.disallowedTools, ['mcp__*'])
 })
 
+const ACP_MCP_FFF = { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }
+const ACP_MCP_NAMES = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
+const ACP_MCP_GRANTS = { tools: ['Write', 'Bash'], skills: [], mcp_servers: [ACP_MCP_FFF] }
+const acpMcpOptions = (grants = ACP_MCP_GRANTS, tools = 'Read,Write') => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', cwd: '/checkout', model: 'opus', tools, deny: 'Edit,Task', effort: 'high', promptFile: '/task/role.md', writableDirs: ['/task', '/returns'], env: {}, grants }).sessionParams
+
+test('AM1 Claude ACP delivers mapped granted MCP servers through metadata', () => {
+  // MUTATION: delete the conditional SDK mcpServers spread.
+  const value = acpMcpOptions()
+  assert.deepEqual(value._meta.claudeCode.options.mcpServers, { fff: { command: '/opt/homebrew/bin/fff-mcp', args: [] } })
+  assert.deepEqual(value._meta.claudeCode.options.mcpServers, mcpConfigDocument(ACP_MCP_GRANTS, 'claude').mcpServers)
+  assert.deepEqual(value.mcpServers, [])
+  const mixed = { ...ACP_MCP_GRANTS, mcp_servers: [ACP_MCP_FFF, { name: 'search', command: { bin: '/opt/search', args: ['--stdio'] }, url: null }, { name: 'remote', command: null, url: 'https://example.invalid/mcp' }] }
+  const expected = { fff: { command: '/opt/homebrew/bin/fff-mcp', args: [] }, search: { command: '/opt/search', args: ['--stdio'] }, remote: { type: 'http', url: 'https://example.invalid/mcp' } }
+  assert.deepEqual(acpMcpOptions(mixed)._meta.claudeCode.options.mcpServers, expected)
+  assert.deepEqual(acpMcpOptions(mixed)._meta.claudeCode.options.mcpServers, mcpConfigDocument(mixed, 'claude').mcpServers)
+})
+test('AM2 Claude ACP enables strict MCP config for grants', () => {
+  // MUTATION: delete the conditional strictMcpConfig spread.
+  assert.equal(acpMcpOptions()._meta.claudeCode.options.strictMcpConfig, true)
+})
+test('AM3 Claude ACP allowlists each fff tool exactly once', () => {
+  // MUTATION: remove the conditional fff tool-name append.
+  for (const tools of ['Read,Write', 'Read,Write,mcp__fff__grep']) {
+    const options = acpMcpOptions(ACP_MCP_GRANTS, tools)._meta.claudeCode.options
+    for (const name of ACP_MCP_NAMES) assert.equal(options.allowedTools.filter(tool => tool === name).length, 1)
+    assert.equal(options.disallowedTools.includes('mcp__*'), false)
+  }
+})
+test('AM4 Claude ACP omits MCP config without grants', () => {
+  // MUTATION: force hasMcpServers true, injecting forbidden config into no-grant output.
+  const granted = acpMcpOptions()._meta.claudeCode.options
+  assert.equal(Object.hasOwn(granted, 'mcpServers'), true)
+  for (const servers of [[], undefined]) {
+    const grants = { ...ACP_MCP_GRANTS }
+    if (servers === undefined) delete grants.mcp_servers
+    else grants.mcp_servers = servers
+    const bare = acpMcpOptions(grants)._meta.claudeCode.options
+    assert.equal(Object.hasOwn(bare, 'mcpServers'), false)
+    assert.equal(Object.hasOwn(bare, 'strictMcpConfig'), false)
+    assert.equal(bare.disallowedTools.includes('mcp__*'), true)
+    const { mcpServers, strictMcpConfig, ...normalizedGranted } = granted
+    normalizedGranted.allowedTools = normalizedGranted.allowedTools.filter(tool => !ACP_MCP_NAMES.includes(tool))
+    const normalizedBare = { ...bare, disallowedTools: bare.disallowedTools.filter(tool => tool !== 'mcp__*') }
+    assert.deepEqual(normalizedBare, normalizedGranted)
+  }
+})
+
 function withAcpSkillFixture(materialise, fn) {
   const taskDir = scratchDir('acpskills-acp-')
   const sourceDir = join(taskDir, 'source', 'alpha')

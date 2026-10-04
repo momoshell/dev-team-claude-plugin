@@ -3223,7 +3223,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             classifyExpiry: info ? (at) => diagnoseExpiry(info, returnPath, at, timeoutS) : null,
             onExtend: (record) => noteWaitExtended(info, returnPath, record),
             monotonic: deps.monotonic,
-            onSuspend: (record) => { try { io.log?.({ at: now(), event: 'host_suspended', ...record }) } catch { /* diagnostics only */ } },
+            onSuspend: (record) => { try { io?.log?.(operationalRow({ at: now(), event: 'host_suspended', ...record })) } catch { /* diagnostics only */ } },
             now, sleep,
           })
         if (env == null) {

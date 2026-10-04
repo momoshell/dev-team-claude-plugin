@@ -532,6 +532,60 @@ function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {})
   return { api, root, received, journal, prompt(text) { return api.prompt([{ type: 'text', text }]) }, cleanup() { api.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
+test('AR1 resumes with the explicit session cwd', () => {
+  // MUTATION: removing cwd from the resume request must fail this assertion.
+  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
+  try {
+    const params = { cwd: join(f.root, 'different-cwd') }
+    const id = f.api.newSession(params)
+    f.api.resumeSession(id)
+    const created = f.received.filter((frame) => frame.method === 'session/new').at(-1).params
+    const resumed = f.received.filter((frame) => frame.method === 'session/resume').at(-1).params
+    assert.equal(created.cwd, params.cwd)
+    assert.notEqual(created.cwd, f.root)
+    assert.equal(resumed.cwd, params.cwd)
+  } finally { f.cleanup() }
+})
+
+test('AR2 resumes with configured MCP servers', () => {
+  // MUTATION: removing mcpServers from the resume request must fail this assertion.
+  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
+  try {
+    const servers = [{ name: 'tools', command: '/bin/false', args: [], env: [] }]
+    const id = f.api.newSession({ mcpServers: servers })
+    f.api.resumeSession(id)
+    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params.mcpServers, servers)
+    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/resume').at(-1).params.mcpServers, servers)
+  } finally { f.cleanup() }
+})
+
+test('AR3 resumes with claudeCode metadata', () => {
+  // MUTATION: removing metadata from the resume request must fail this assertion.
+  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
+  try {
+    const meta = { claudeCode: { options: { model: 'test-model', allowedTools: ['Read'], plugins: [{ type: 'local', path: '/acp-resume/plugin' }] } } }
+    const id = f.api.newSession({ _meta: meta })
+    f.api.resumeSession(id)
+    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params._meta, meta)
+    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/resume').at(-1).params._meta, meta)
+  } finally { f.cleanup() }
+})
+
+test('AR4 resumes with defaults and no metadata', () => {
+  // MUTATION: adding default _meta to resume params must fail this exact-frame assertion.
+  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
+  try {
+    const id = f.api.newSession()
+    f.api.resumeSession(id)
+    const expected = { cwd: f.root, mcpServers: [] }
+    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params, expected)
+    const resumed = f.received.filter((frame) => frame.method === 'session/resume').at(-1).params
+    assert.equal(resumed.sessionId, id)
+    const { sessionId, ...resumedParams } = resumed
+    assert.deepEqual(resumedParams, expected)
+  } finally { f.cleanup() }
+})
+
 test('W1 short writes reassemble one complete 70KB prompt frame', () => {
   let chunks = 0
   const f = writeHarness(([fd, buffer, offset, length], receive) => {

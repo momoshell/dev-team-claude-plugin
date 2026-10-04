@@ -69,7 +69,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
   })
 
-  const session = { id: null, cancelled: false }
+  const session = { id: null, cancelled: false, params: null }
   const responses = new Map()
   let torn = 0
   let seq = 0
@@ -231,14 +231,16 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
 
   function newSession(params = {}) {
     const meta = params._meta ?? null
-    const frame = request('session/new', { cwd: params.cwd ?? cwd, mcpServers: params.mcpServers ?? [], ...(meta ? { _meta: meta } : {}) })
+    const sessionParams = { cwd: params.cwd ?? cwd, mcpServers: params.mcpServers ?? [], ...(meta ? { _meta: meta } : {}) }
+    const frame = request('session/new', sessionParams)
     if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/new: ${frame.error.message}`)
+    session.params = sessionParams
     session.id = frame.result?.sessionId ?? null
     return session.id
   }
 
   function resumeSession(sessionId) {
-    const frame = request('session/resume', { sessionId })
+    const frame = request('session/resume', { sessionId, ...session.params })
     if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/resume: ${frame.error.message}`)
     session.id = sessionId
     session.cancelled = false

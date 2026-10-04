@@ -245,17 +245,41 @@ function seatRefuseJournalSinks(text) {
   ].flatMap((fragment) => [...text.matchAll(new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
     .map((match) => [match.index, match.index + match[0].length]))
   const tokens = []
-  let quote = null, escaped = false
+  // A template's ${...} is code: each open interpolation keeps its own brace depth.
+  const interpolations = []
+  let quote = null, escaped = false, previous = '('
   for (let i = 0; i < text.length;) {
     const c = text[i]
     if (quote !== null) {
       if (escaped) escaped = false
       else if (c === '\\') escaped = true
-      else if (c === quote) quote = null
+      else if (quote === '`' && c === '$' && text[i + 1] === '{') { interpolations.push(0); quote = null; previous = '('; i += 2; continue }
+      else if (c === quote) { quote = null; previous = 'x' }
       i += 1
       continue
     }
+    if (interpolations.length > 0 && c === '{') interpolations[interpolations.length - 1] += 1
+    if (interpolations.length > 0 && c === '}') {
+      if (interpolations[interpolations.length - 1] === 0) { interpolations.pop(); quote = '`'; i += 1; continue }
+      interpolations[interpolations.length - 1] -= 1
+    }
     if (c === "'" || c === '"' || c === '`') { quote = c; i += 1; continue }
+    // A / in expression position opens a regex literal, skipped as one opaque unit; elsewhere it is division.
+    if (c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) {
+      let j = i + 1, inClass = false, slash = false
+      while (j < text.length && text[j] !== '\n') {
+        const r = text[j]
+        if (slash) slash = false
+        else if (r === '\\') slash = true
+        else if (r === '[') inClass = true
+        else if (r === ']') inClass = false
+        else if (r === '/' && !inClass) break
+        j += 1
+      }
+      i = j + 1
+      previous = 'x'
+      continue
+    }
     if (/[A-Za-z_$]/.test(c)) {
       const start = i
       i += 1
@@ -264,8 +288,10 @@ function seatRefuseJournalSinks(text) {
       if (['log', 'logLine', 'defaultLogLine'].includes(name)
         && !/[.\w$]/.test(text[start - 1] ?? '')
         && !/[\w$]/.test(text[i] ?? '')) tokens.push({ name, index: start })
+      previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(name) ? '(' : 'x'
       continue
     }
+    if (!/\s/.test(c)) previous = c
     i += 1
   }
   for (const { name, index } of tokens) {
@@ -467,6 +493,18 @@ test('SL4', () => {
   const lines = source.split('\n')
   const at = lines.findIndex((line) => line.startsWith('function seatRefuseJournalSinks'))
   assert.equal(lines.slice(Math.max(0, at - 10), at).some((line) => line === '// BLIND SPOT: computed deps[\'logLine\'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.'), true)
+})
+// Mutation SL5: dropping the ${ interpolation push leaves a sink inside a template expression unscanned.
+test('SL5', () => {
+  for (const emit of ['const s = `${log(operationalRow({ at: 1 }))}`', 'const s = `a ${ { k: logLine(p, row) }.k } b`', 'const s = `${`${log(row)}`}`']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+  }
+  for (const accepted of ['const s = `log(row) ${1 + 2} logLine`', 'const s = `${ { a: 1 }.a } log`']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+})
+// Mutation SL6: treating every / as division makes an ordinary regex literal naming log a hidden sink.
+test('SL6', () => {
+  for (const accepted of ['const r = /log/', 'const r = (/logLine\\(/).test(s)', 'if (/[/]log/.test(s)) x()', 'return /log/.test(s)']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+  for (const emit of ['const half = a / log(row)', 'const r = x /log/ y']) assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
 })
 
 // Mutation SS1: disabling callHits accepts the seventh disguised form.

@@ -412,7 +412,19 @@ export function acpLaunch(spec = {}) {
     throw new Error(`adapter-claude.acpLaunch: claudeBin must be an ABSOLUTE frozen worker path, got ${JSON.stringify(claudeBin)}`)
   }
   const hasSkills = (grants?.skills?.length ?? 0) > 0
-  const acpAllowedTools = allowedTools(tools, grants).split(',').filter(Boolean)
+  const hasMcpServers = (grants?.mcp_servers?.length ?? 0) > 0
+  const mcpServers = {}
+  for (const server of grants?.mcp_servers || []) {
+    if (server.command !== null) {
+      mcpServers[server.name] = { command: server.command.bin, args: [...server.command.args] }
+    } else {
+      mcpServers[server.name] = { type: 'http', url: server.url }
+    }
+  }
+  const acpAllowedTools = [...new Set([
+    ...allowedTools(tools, grants).split(',').filter(Boolean),
+    ...(hasFffGrant(grants) ? ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep'] : []),
+  ])]
   return {
     bin,
     args: [],
@@ -423,6 +435,8 @@ export function acpLaunch(spec = {}) {
       mcpServers: [],
       _meta: { claudeCode: { options: {
         model,
+        ...(hasMcpServers ? { mcpServers } : {}),
+        ...(hasMcpServers ? { strictMcpConfig: true } : {}),
         allowedTools: hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools,
         ...(hasSkills ? { plugins: [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] } : {}),
         disallowedTools: deniedTools(deny, grants).split(',').filter(Boolean),

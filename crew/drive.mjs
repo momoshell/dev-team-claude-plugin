@@ -6148,11 +6148,9 @@ function runTask(ctx, io, crash) {
     }
   }
   const persistPrescriptionPins = () => io.writeFile(art(PRESCRIPTION_PINS_FILE), `${JSON.stringify({ version: 1, pins: Object.fromEntries(prescriptionPins) }, null, 2)}\n`)
-  // Snapshot what a conversion pins: the file's version on the lane BASE when the base
-  // carries it, else its review-time bytes. A builder may have edited the witnessed test
-  // before review, so the review-time bytes can carry its own damage; the base version is
-  // what the lane may not weaken. The checks are MEASURED by running that snapshot against
-  // the review-time tree, not guessed from its source.
+  // Snapshot the base version for plan-unscoped files the base carries; snapshot review-time
+  // bytes for plan-scoped files and files absent from the base. The checks are MEASURED by
+  // running that snapshot against the review-time tree, not guessed from its source.
   // The git object id of the file's RAW checkout bytes: what `git rev-parse <base>:<file>`
   // names for the base version, so two different undecodable bytes never compare equal the
   // way two decoded strings can. --no-filters: a clean filter must not be able to hash an
@@ -6160,16 +6158,15 @@ function runTask(ctx, io, crash) {
   // refusal of an identical restore, never an acceptance of an edit.
   // MUTATION P21: drop --no-filters and a clean filter launders an edit into the base id.
   const hashPinnedFile = (file) => { try { return gitObjectId(io.run(`git hash-object --no-filters -- ${shellArg(file)}`)) } catch { return null } }   // ANCHOR P21
-  const capturePrescriptionPin = (file, finding, cell) => {
-    const pin = { finding, source: null, bytes: null, names: null }
+  const capturePrescriptionPin = (file, finding, cell, planScoped) => {
+    const pin = { finding, source: null, bytes: null, names: null, baseline: null, baseline_reason: null }
     if (typeof ctx.head !== 'string' || ctx.head.trim() === '') return { ...pin, why: 'the lane base commit was blank' }
     let tree
     try { tree = io.run(`git ls-tree -z --full-tree ${shellArg(ctx.head)} -- ${shellArg(file)}`) } catch (err) { return { ...pin, why: `the base-tree query threw: ${err?.message || String(err)}` } }
     const existence = tree?.ok === true ? parsePrescriptionBaseTree(tree.output, file) : { present: null, reason: 'the base-tree query returned non-ok output' }
     if (existence.present === null) return { ...pin, why: existence.reason }
-    // MUTATION P15: snapshot the review-time bytes although the base carries the file and a
-    // builder that damaged the witnessed test before review freezes its own damage.
-    if (existence.present === true) {                                                   // ANCHOR P15
+    // MUTATION P15: use review bytes for a plan-unscoped base-present file and freeze pre-review damage.
+    if (!planScoped && existence.present === true) {                                    // ANCHOR P15
       let shown
       try { shown = io.run(`git show ${shellArg(`${ctx.head}:${file}`)}`) } catch { shown = null }
       if (shown?.ok !== true || typeof shown.output !== 'string') return { ...pin, why: 'the base version could not be read' }
@@ -6187,6 +6184,8 @@ function runTask(ctx, io, crash) {
       pin.source = 'review'
       pin.bytes = cell.bytes
     }
+    pin.baseline = pin.source
+    pin.baseline_reason = planScoped ? 'plan-scoped' : existence.present === true ? 'plan-unscoped' : 'absent-from-base'
     const measured = runBytesInPlace({ abs: `${ctx.checkout}/${file}`, bytes: pin.bytes, io, run: () => io.run(hardenWitnessCommand(file))?.output, digest: () => hashPinnedFile(file) })
     if (measured.fatal) return { ...pin, fatal: measured.fatal }
     if (measured.absent || measured.error) return { ...pin, why: measured.absent ? 'the file was absent at conversion' : measured.error }
@@ -11665,7 +11664,9 @@ function runTask(ctx, io, crash) {
               const carried = hardenOwed.owed.find((entry) => entry.id === finding.id)
               if (carried) carried.prescription = prescriptionConflict
               if (!prescriptionPins.has(prescriptionConflict.file)) {
-                const pin = capturePrescriptionPin(prescriptionConflict.file, finding.id, tree.get(prescriptionConflict.file))
+                // MUTATION P22: ignore accepted-plan coverage and a sanctioned test edit is held to its obsolete base bytes.
+                const planScoped = scopeMatcher(plannedScopeFiles)(prescriptionConflict.file) // ANCHOR P22
+                const pin = capturePrescriptionPin(prescriptionConflict.file, finding.id, tree.get(prescriptionConflict.file), planScoped)
                 if (pin.fatal) {
                   stageComplete()
                   return escalate('harden', `[witnessed-test-unverifiable] the snapshot run of ${prescriptionConflict.file} could not restore it: ${pin.fatal}`)
@@ -11675,7 +11676,7 @@ function runTask(ctx, io, crash) {
                   stageComplete()
                   return escalate('harden', `[witnessed-test-unverifiable] the prescription pin for ${prescriptionConflict.file} could not be persisted: ${err?.message || String(err)}`)
                 }
-                panelLog({ hardening_prescription_pinned: { finding: finding.id, file: prescriptionConflict.file, source: pin.source, pins: PRESCRIPTION_PINS_FILE } })
+                panelLog({ hardening_prescription_pinned: { finding: finding.id, file: prescriptionConflict.file, source: pin.source, pins: PRESCRIPTION_PINS_FILE, baseline: pin.baseline, baseline_reason: pin.baseline_reason } })
               }
               panelLog({ hardening_prescription_conflict: prescriptionConflict })
             }
@@ -14507,6 +14508,7 @@ export function topLevelNameVerdict(output, name) {
 export const HARDENING_PRESERVATION_REFUSALS = Object.freeze(['witnessed-test-altered', 'witnessed-test-unverifiable'])
 // The lane-state file the pins persist to, so a crash-resumed run keeps them.
 export const PRESCRIPTION_PINS_FILE = 'prescription-pins.json'
+export const PRESCRIPTION_PIN_BASELINE_REASONS = Object.freeze(['plan-scoped', 'plan-unscoped', 'absent-from-base'])
 // The top-level checks one unfiltered run reported, by exact name, or null when the run is
 // not a parseable node:test summary — unmeasured, never an empty list.
 export function topLevelCheckNames(output) {

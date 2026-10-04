@@ -8,7 +8,7 @@ import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, verifyPrescriptionPin, runBytesInPlace } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -5294,24 +5294,28 @@ const REAL_HEAD = "import { test } from 'node:test'\nimport assert from 'node:as
 const REAL_EXISTING = "test('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n"
 const REAL_BASE_TEST = `${REAL_HEAD}\n${REAL_EXISTING}`
 const REAL_GUARD_TEST = `${REAL_HEAD}\ntest('F1 guard', () => {\n  assert.equal(guard, true)\n})\n`
-function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b', setup = null } = {}) {
+function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTest = baseTest, builtAdd = '(a, b) => a + b', setup = null, planScope = ['a.mjs', PIN_GUARD_FILE], patch = '' } = {}) {
   const checkout = scratchDir('b1074-pin-')
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
   delete env.FORCE_COLOR
   const sh = (cmd) => spawnSync('sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', env })
   writeFileSync(join(checkout, 'a.mjs'), REAL_IMPL('(a, b) => a + b', 'false'))
-  writeFileSync(join(checkout, 'a.test.mjs'), baseTest)
+  if (baseTest !== null) writeFileSync(join(checkout, 'a.test.mjs'), baseTest)
   if (setup) setup({ checkout, sh })
   for (const cmd of ['git init -q', 'git add -A', 'git -c user.name=t -c user.email=t@t commit -q -m base']) assert.equal(sh(cmd).status, 0, cmd)
   const head = sh('git rev-parse HEAD').stdout.trim()
   writeFileSync(join(checkout, 'a.test.mjs'), reviewTest)
-  const finding = { ...B376_FINDING, location: 'a.test.mjs:1', disposition: 'auto-fix', patch: '' }
+  const absentFilePatch = ['diff --git a/a.test.mjs b/a.test.mjs', '--- a/a.test.mjs', '+++ b/a.test.mjs', '@@ -1 +1 @@', '-const old = 1', '+const next = 1', ''].join('\n')
+  const finding = { ...B376_FINDING, location: 'a.test.mjs:1', disposition: 'auto-fix', patch: patch || (baseTest === null ? absentFilePatch : '') }
   const hardened = { finding: 'F1', test: PIN_GUARD_FILE, name: 'F1 guard', file: 'a.mjs', find: 'export const guard = true', replace: 'export const guard = false' }
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), hardened: [hardened], files: {}, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE })
+  const laneName = 'pin-baseline-fixture'
+  const journal = `${TD}/pin-baseline-journal.jsonl`
+  const fenceJournal = `${JSON.stringify({ event: 'fence-admitted', lane: laneName, file: 'a.test.mjs', source: 'operator' })}\n`
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), hardened: [hardened], files: {}, plan: { files_in_scope: planScope }, changed: PIN_SCOPE })
   const inCheckout = (path) => path.startsWith(`${checkout}/`)
   const baseRead = io.readFile
-  io.readFile = function (path) { return inCheckout(path) ? (existsSync(path) ? readFileSync(path, 'utf8') : null) : baseRead.call(this, path) }
+  io.readFile = function (path) { if (path === journal) return fenceJournal; return inCheckout(path) ? (existsSync(path) ? readFileSync(path, 'utf8') : null) : baseRead.call(this, path) }
   const baseWrite = io.writeFile
   io.writeFile = function (path, content) { if (inCheckout(path)) { writeFileSync(path, content); return } return baseWrite.call(this, path, content) }
   const baseWait = io.wait
@@ -5331,7 +5335,7 @@ function realPinRun({ baseTest = REAL_BASE_TEST, reviewTest = baseTest, builtTes
     const r = sh(cmd)
     return { ok: r.status === 0, output: `${r.stdout}${r.stderr}`, stderr: r.stderr, status: r.status }
   }
-  const result = driveTask({ ...CTX, checkout, head, limits: { build_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX, checkout, head, files_in_scope: PIN_SCOPE, laneName, journal, limits: { build_rounds: 2 } }, io)
   return { result, io, checkout, rows: pinRows(io), preservation: pinPreservation(io) }
 }
 
@@ -5343,6 +5347,49 @@ test('PV1 a nested guard never closes a pinned-test prescription', () => {
   assert.notEqual(result.status, 'done')
   assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), false)
   assert.match(pinRows(io).find((row) => row.finding === 'F1' && row.outcome === 'name-absent')?.why ?? '', /TOP-LEVEL test named F1 guard/)
+})
+
+// MUTATION: force P22's planScoped false and this sanctioned review assertion change no longer ships.
+test('PB1 an accepted-plan scoped witnessed assertion pins review bytes', () => {
+  const reviewed = REAL_BASE_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(2, 4), 6)')
+  const run = realPinRun({ reviewTest: reviewed, builtTest: reviewed, planScope: PIN_SCOPE })
+  assert.equal(run.result.status, 'done')
+  assert.ok(run.preservation.length > 0)
+  assert.deepEqual(run.preservation.map(({ source, reason }) => [source, reason]), run.preservation.map(() => ['review', null]))
+  const chosen = run.io.calls.logs.flatMap((row) => row.hardening_prescription_pinned ? [row.hardening_prescription_pinned] : [])[0]
+  assert.deepEqual([chosen?.source, chosen?.baseline, chosen?.baseline_reason], ['review', 'review', 'plan-scoped'])
+  assert.ok(PRESCRIPTION_PIN_BASELINE_REASONS.includes(chosen.baseline_reason))
+  const persisted = JSON.parse(run.io.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`])
+  assert.deepEqual([persisted.pins['a.test.mjs'].source, persisted.pins['a.test.mjs'].baseline, persisted.pins['a.test.mjs'].baseline_reason], ['review', 'review', 'plan-scoped'])
+  assert.equal(persisted.pins['a.test.mjs'].bytes, reviewed)
+  assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), reviewed)
+})
+
+// MUTATION: disable the plan-unscoped base-present P15 branch and the damaged admission is no longer refused against base bytes.
+test('PB2 dispatch-only witnessed test keeps the base version pin', () => {
+  const damaged = REAL_BASE_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.ok(add(1, 2))')
+  const run = realPinRun({ reviewTest: damaged, builtTest: damaged, builtAdd: '(a, b) => a * b', planScope: ['a.mjs', PIN_GUARD_FILE] })
+  assert.notEqual(run.result.status, 'done')
+  assert.equal(run.result.details.escalation.why, '[witnessed-test-altered] finding F1 (accept): a.test.mjs must ship byte-identical to its base version; it was edited — restore it and put the new guard in a different test file')
+  const chosen = run.io.calls.logs.flatMap((row) => row.hardening_prescription_pinned ? [row.hardening_prescription_pinned] : [])[0]
+  assert.deepEqual([chosen?.source, chosen?.baseline, chosen?.baseline_reason], ['base', 'base', 'plan-unscoped'])
+  assert.ok(PRESCRIPTION_PIN_BASELINE_REASONS.includes(chosen.baseline_reason))
+  const persisted = JSON.parse(run.io.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`])
+  assert.deepEqual([persisted.pins['a.test.mjs'].source, persisted.pins['a.test.mjs'].baseline, persisted.pins['a.test.mjs'].baseline_reason], ['base', 'base', 'plan-unscoped'])
+  assert.equal(persisted.pins['a.test.mjs'].bytes, REAL_BASE_TEST)
+})
+
+// MUTATION: removing Object.freeze from the reason enum makes the frozen-state assertion fail.
+test('PB3 baseline reasons are closed and absent-from-base files use review bytes', () => {
+  assert.deepEqual(PRESCRIPTION_PIN_BASELINE_REASONS, ['plan-scoped', 'plan-unscoped', 'absent-from-base'])
+  assert.equal(Object.isFrozen(PRESCRIPTION_PIN_BASELINE_REASONS), true)
+  const explicit = `${REAL_HEAD}\ntest('existing check', () => {\n  assert.equal(add(1, 2), 3)\n})\n`
+  const run = realPinRun({ baseTest: null, reviewTest: explicit, builtTest: explicit, planScope: ['a.mjs', PIN_GUARD_FILE] })
+  assert.equal(run.result.status, 'done')
+  const chosen = run.io.calls.logs.flatMap((row) => row.hardening_prescription_pinned ? [row.hardening_prescription_pinned] : [])[0]
+  assert.deepEqual([chosen?.source, chosen?.baseline, chosen?.baseline_reason], ['review', 'review', 'absent-from-base'])
+  assert.ok(PRESCRIPTION_PIN_BASELINE_REASONS.includes(chosen.baseline_reason))
+  assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), explicit)
 })
 
 // Kills P12 (byte identity) and, through the suite backstop, nothing else: an edited
@@ -5487,7 +5534,7 @@ test('PV17 a weakened imported helper fails the byte-identical pinned file', () 
   assert.match(run.result.details.escalation.why, /the base check "existing check" of a\.test\.mjs is failed against the built implementation/)
 })
 
-// Kills P15 (review-time bytes snapshotted although the base carries the file): the
+// Kills P15 (review-time bytes snapshotted for a plan-unscoped base-present file): the
 // builder weakened the witnessed check BEFORE review and ships that copy with a broken
 // implementation; the base version is what the file must ship as.
 test('PV18 a witnessed check the builder weakened before review is held to its base version', () => {

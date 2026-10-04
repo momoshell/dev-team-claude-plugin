@@ -13,6 +13,7 @@
   import EventStream from './EventStream.svelte'
   import Trajectory from './Trajectory.svelte'
   import PhasePanel from './PhasePanel.svelte'
+  import PlanSteps from './PlanSteps.svelte'
 
   let { run, phase = null, onback = () => {}, onphase = () => {} } = $props()
   let returns = $state({ envelopes: [], task: null })
@@ -247,6 +248,8 @@
       <div class="task-times"><div><span>Started</span><time datetime={started.iso || undefined}><strong>{started.date}</strong><small>{started.time}</small></time></div><div><span>Finished</span>{#if run.running}<strong>{openRecordNote(status.key) ?? 'Still running'}</strong>{:else}<time datetime={finished.iso || undefined}><strong>{finished.date}</strong><small>{finished.time}</small></time>{/if}</div></div>
     </aside>
   </div>
+
+  <PlanSteps {journalState} />
 
   <section class="phase-section">
     <header><div><p class="micro">Selected phase</p><h2>{selectedPhaseLabel ? title(selectedPhaseLabel) : 'Choose a phase'}</h2></div>{#if selectedPhase}<span>Click another bar in the waterfall to inspect it.</span>{/if}</header>

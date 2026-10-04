@@ -110,7 +110,7 @@ Each of the 25 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.56; ink 6.01 → 6.01 |
 
-25 rules in 12/33 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+25 rules in 12/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 

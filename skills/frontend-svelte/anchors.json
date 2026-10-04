@@ -27,7 +27,6 @@
   "visualizer/web/src/App.svelte:72": "document.documentElement.dataset.theme = theme",
   "visualizer/web/src/App.svelte:186": "<OperationsOverview {runs} degraded={feedDegraded} {now} onopen={openRun} />",
   "visualizer/web/src/App.svelte:228": "<TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />",
-  "visualizer/web/src/lib/RunDetail.svelte:286": "4rem; display:grid; gap:1rem; }",
   "visualizer/web/src/lib/api.js:1": "async function request(path, options) {",
   "visualizer/web/src/lib/api.js:26": "export const getSeatTeardowns = (params = {}) => request(",
   "visualizer/web/src/lib/envelope-diff.js:1": "const FIELDS = ['status', 'summary', 'artifacts', 'details']",
@@ -52,5 +51,6 @@
   "test/visualizer-panels.test.mjs:1506": "/\\.status\\.serious\\s*\\{\\s*color:var\\(--status-escalated\\)/",
   "test/visualizer-panels.test.mjs:1777": "source.includes('identityFor(lane)')",
   "test/visualizer-panels.test.mjs:1784": "/#each markers as marker/",
-  "test/visualizer-panels.test.mjs:1850": "/class=\"bounce-layer\"/"
+  "test/visualizer-panels.test.mjs:1850": "/class=\"bounce-layer\"/",
+  "visualizer/web/src/lib/RunDetail.svelte:289": "4rem; display:grid; gap:1rem; }"
 }

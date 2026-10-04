@@ -27,15 +27,15 @@ Every colour a component paints resolves to a Tier-2 alias token; a component ne
 
 Both ramps are positionally parallel five-step scales: ground -> panel -> hairline -> text -> muted.
 
-T1 (name only Tier-2 aliases) is obeyed except where the register says otherwise; T2 (every painted colour comes from a token) is violated in 4 of 33 components, 22 times.
+T1 (name only Tier-2 aliases) is obeyed except where the register says otherwise; T2 (every painted colour comes from a token) is violated in 4 of 34 components, 22 times.
 
-The leak boundary is exactly state-vs-chrome: 19 background:var(--panel) sites and 45 var(--line) sites, zero hard-coded surfaces or separators.
+The leak boundary is exactly state-vs-chrome: 20 background:var(--panel) sites and 47 var(--line) sites, zero hard-coded surfaces or separators.
 
 A component never decides colour: a shaper returns a tone and CSS maps class -> token; no component reads run.status to pick a colour.
 
 Role and lane isolation is a hand-maintained six-filename allowlist and does not generalise to a component written tomorrow.
 
-- Build content regions on the measured panel chassis: `background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem;`. The chassis appears in 12 components and its surface pairing appears at 19 panel-background sites and 45 separator sites (`visualizer/web/src/lib/theme.css` and the C1 inventory in the register).
+- Build content regions on the measured panel chassis: `background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem;`. The chassis appears in 13 components and its surface pairing appears at 20 panel-background sites and 47 separator sites (`visualizer/web/src/lib/theme.css` and the C1 inventory in the register).
 - Use `var(--bg)` for a surface recessed inside a panel and `var(--panel)` for a raised surface. The four recessed exhibits are two in the IntakePanel style block at `visualizer/web/src/lib/IntakePanel.svelte:90` (`.loop-state`) and `visualizer/web/src/lib/IntakePanel.svelte:91` (`.actor input`) and two in RosterPanel at `visualizer/web/src/lib/RosterPanel.svelte:721` (`.source-setup input`) and `visualizer/web/src/lib/RosterPanel.svelte:734` (`.pick-evidence pre`); do not reverse the C2 roles.
 - Divide sibling rows with `border-top:1px solid var(--line)`, not an empty gap. The register counts 52 one-pixel hairlines across the named panel rows; exhibit `visualizer/web/src/lib/RunCard.svelte:71` and `visualizer/web/src/lib/FleetTable.svelte:32`.
 - Use `rem` for gaps, padding, and margins. Permit `1px` only for hairlines, `999px` for the measured pill idiom, `720px`/`640px`/`1200px` for measured layout bounds, and the `18px`/`5px` SVG user-unit exception at `visualizer/web/src/lib/PhaseGantt.svelte:254`; do not turn the exception into CSS spacing.

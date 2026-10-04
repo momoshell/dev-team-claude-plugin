@@ -7,9 +7,9 @@ import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
-  COMMIT_TRAILER, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
+  COMMIT_TRAILER, CONVERGE_CTX, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
 } from './drive-fixtures.mjs'
-import { anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
+import { boundIssueOf, anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -2014,19 +2014,83 @@ test('B1 issue-bound publication accepts closes and renders one closing keyword'
   assert.equal((body.match(/^Closes\b/gm) || []).length, 1)
 })
 
-test('C1 issue-bound publication accepts issues-only partial delivery', () => {
+test('BI3 issues-only bound publication closes and commits the dispatched issue', () => {
+  // MUTATION: omit ...promoted from the closes union; the published body loses its closing keyword.
   const run = runPublished({
     briefText: ISSUE_BOUND_BRIEF, task: 'issue-bound-issues',
     envelopes: {
-      'planner:1': planEnv({ details: { ...planEnv().details, issues: ['#1467'] } }),
+      'planner:1': planEnv({ details: { ...planEnv().details, issues: ['#1467', 1467] } }),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
   })
   assert.equal(run.result.status, 'done')
   const body = run.io.calls.writes[`${TD}/pr-body.md`]
-  assert.match(body, /Refs #1467/)
-  assert.doesNotMatch(body, /Closes #1467/)
-  assert.equal((body.match(/^(Closes|Fixes|Resolves)\b/gmi) || []).length, 0)
+  assert.equal((body.match(/^Closes #1467$/gm) || []).length, 1)
+  assert.doesNotMatch(body, /^Refs:.*#1467$/m)
+  assert.deepEqual(issueTrailers(run.io.calls.commits[0].message), { closes: ['#1467'], refs: [] })
+  const partial = runPublished({ briefText: NO_DISPATCH_BRIEF, envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, issues: [1467] } }) } })
+  assert.match(partial.io.calls.writes[`${TD}/pr-body.md`], /Refs #1467/)
+  assert.doesNotMatch(partial.io.calls.writes[`${TD}/pr-body.md`], /Closes #1467/)
+})
+
+// MUTATION BI1: remove the bound equality from the promoted filter; punctuated asks fall back to Refs.
+test('BI1 bound named issues close despite ask punctuation suffix and case', () => {
+  const cases = ['Closes #4242.', 'Closes #4242. Make lane:harden do work.', 'cLoSeS: #4242']
+  assert.deepEqual(cases.map((ask) => issueTrailers(composeCommitMessage({ task: 'bi1', brief: `# Task\n## The ask\n${ask}\n## Context pack\nissue: #4242 · body inlined below\n`, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() }))), cases.map(() => ({ closes: ['#4242'], refs: [] })))
+})
+
+// MUTATION BI2: make the promoted filter unconditional; unrelated issue 4243 wrongly closes.
+test('BI2 only the binding or exact ask-line closes; other issues remain references', () => {
+  const build = (brief, issues) => issueTrailers(composeCommitMessage({ task: 'bi2', brief, planEnv: planEnv({ details: { ...planEnv().details, issues } }), builderEnv: buildEnv() }))
+  assert.deepEqual([build('# Task\n## The ask\nCloses #4242. see it\n' + NO_DISPATCH_BRIEF, [4242]), build(ISSUE_BOUND_BRIEF.replace('1467', '4242'), [4243]), build('# Task\n## The ask\nCloses #4242\n' + NO_DISPATCH_BRIEF, [4242]), build(ISSUE_BOUND_BRIEF, [])], [{ closes: [], refs: ['#4242'] }, { closes: [], refs: ['#4243'] }, { closes: ['#4242'], refs: [] }, { closes: [], refs: [] }])
+})
+
+// MUTATION BI4: disable the shared onBoundIssuePromotion invocation; both commit paths lose their record.
+test('BI4 both commit paths journal only implicit promotion and survive logger errors', () => {
+  const ordinary = (details, throwLog = false) => {
+    const io = publicationIo({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, ...details } }), ...(details.builder ? { 'builder:1': buildEnv({ details: { ...buildEnv().details, closes: [1467] } }) } : {}) } })
+    const baseRead = io.readFile.bind(io); io.readFile = (path) => path === CTX.briefFile ? ISSUE_BOUND_BRIEF : baseRead(path)
+    if (throwLog) { const log = io.log.bind(io); io.log = (row) => { if (row.closes_promoted) throw new Error('denied'); return log(row) } }
+    return { io, result: driveTask({ ...CTX, task: 'bi4', publish: { branch: 'feature/ship', base: 'main' } }, io) }
+  }
+  const convergence = (details, throwLog = false) => {
+    const io = convergeIo(); const wait = io.wait.bind(io)
+    io.wait = (path, ...args) => { const env = wait(path, ...args); return path === 'planner:1' ? { ...env, details: { ...env.details, ...details } } : env }
+    const baseRead = io.readFile.bind(io); io.readFile = (path) => path === CONVERGE_CTX.briefFile ? ISSUE_BOUND_BRIEF : baseRead(path)
+    if (throwLog) { const log = io.log.bind(io); io.log = (row) => { if (row.closes_promoted) throw new Error('denied'); return log(row) } }
+    return { io, result: driveTask(CONVERGE_CTX, io) }
+  }
+  const rows = ({ io }) => io.calls.logs.filter((row) => row.closes_promoted).map(({ closes_promoted, source, channel }) => ({ closes_promoted, source, channel }))
+  for (const run of [ordinary({ issues: [1467] }), convergence({ issues: [1467] })]) assert.deepEqual(rows(run), [{ closes_promoted: ['#1467'], source: 'bound-issue', channel: 'record' }])
+  for (const run of [ordinary({ issues: [1467], closes: [1467] }), convergence({ issues: [1467], closes: [1467] }), ordinary({ issues: [1467], builder: true })]) assert.deepEqual(rows(run), [])
+  assert.equal(ordinary({ issues: [1467], closes: [1467] }, true).result.status, 'done')
+  assert.equal(ordinary({ issues: [1467] }, true).result.status, 'done')
+  assert.equal(convergence({ issues: [1467] }, true).result.status, 'converge')
+})
+
+// MUTATION BI5: discard match[1] in the extracted row parser; a real binding becomes null.
+test('BI5 extracted issue binding retains the exact publication refusal guard', () => {
+  assert.deepEqual([boundIssueOf(ISSUE_BOUND_BRIEF), boundIssueOf(NO_DISPATCH_BRIEF), boundIssueOf('issue #1467 in prose')], ['1467', null, null])
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: {} }), 'issue-bound lane must declare details.closes or details.issues before publication; dispatched issue #1467')
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { issues: [1467] } }), null)
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { closes: [1467] } }), null)
+  assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
+})
+
+// MUTATION BI6: drop the single-pack check at the promotion site; a pack quoted in the ask closes its issue.
+test('BI6 a context pack quoted in the ask binds nothing, so the plan issue stays a reference', () => {
+  const brief = '# Task\n## The ask\nQuote:\n## Context pack\nissue: #4242 · body inlined below\n## Proposed tier\n' + '## Context pack\nissue: #1467 · body inlined below\n'
+  const message = composeCommitMessage({ task: 'bi6', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() })
+  assert.deepEqual(issueTrailers(message), issueTrailers('Refs: #4242'))
+})
+
+// MUTATION BI7: drop the ask-line exclusion; an exact `Closes #N` ask line is journaled as a bound-issue promotion.
+test('BI7 an issue the exact ask line already closes is not journaled as a bound-issue promotion', () => {
+  const recorded = []
+  const brief = '# Task\n## The ask\nCloses #4242\n## Context pack\nissue: #4242 · body inlined below\n'
+  const message = composeCommitMessage({ task: 'bi7', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv(), onBoundIssuePromotion: (refs) => recorded.push(...refs) })
+  assert.deepEqual(issueTrailers(message), issueTrailers('Closes: #4242'))
+  assert.deepEqual(recorded, [])
 })
 
 test('D1 publication without a dispatch issue needs no issue statement', () => {

@@ -3480,7 +3480,7 @@ function mergeFenceScopes(scopes) {
   return merged
 }
 
-export function composeCommitMessage({ task, planEnv, builderEnv, brief = null }) {
+export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, onBoundIssuePromotion = null }) {
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
   const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
   const planLine = firstNonEmptyLine(planEnv?.summary)
@@ -3503,8 +3503,11 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null }
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => askClosingIssues(brief).includes(ref))
+  const boundIssue = String(brief ?? '').split('\n').filter((line) => line.trim() === '## Context pack').length === 1 ? boundIssueOf(brief) : null // the compiler emits one pack; a second (quoted by the ask) makes the binding ambiguous, so nothing is promoted
+  const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => ref === `#${boundIssue}` || askClosingIssues(brief).includes(ref))
   const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes), ...promoted])
+  const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref) && !askClosingIssues(brief).includes(ref))
+  try { if (boundPromoted.length) onBoundIssuePromotion?.(boundPromoted) } catch {}
   const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
   const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
@@ -3561,7 +3564,7 @@ export function promptMeasurementDefect({ files, body, register = loadCapabiliti
   return `prompt-change PR body must name a ledger cell measure with before/after and n, or say unmeasured — n insufficient with a reason and re-measure seat count; prompt surface: ${hits.join(', ')}`
 }
 
-export function issueStatementDefect({ brief, details } = {}) {
+export function boundIssueOf(brief) {
   const text = typeof brief === 'string' ? brief : String(brief ?? '')
   if (!text) return null
   const lines = text.split('\n')
@@ -3572,6 +3575,11 @@ export function issueStatementDefect({ brief, details } = {}) {
     const match = /^issue: #([1-9]\d*)\b/.exec(next)
     if (match) { issue = match[1]; break }
   }
+  return issue
+}
+
+export function issueStatementDefect({ brief, details } = {}) {
+  const issue = boundIssueOf(brief)
   if (issue === null) return null
   if (Array.isArray(details?.closes) && details.closes.length > 0) return null
   if (Array.isArray(details?.issues) && details.issues.length > 0) return null
@@ -5380,7 +5388,7 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
   stageComplete()
   stage('converge:commit')
   const convergeBriefText = (() => { try { const value = io.readFile(ctx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
-  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: convergeBriefText })
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: convergeBriefText, onBoundIssuePromotion: (closes_promoted) => io.log(recordRow({ at: io.now(), closes_promoted, source: 'bound-issue' })) })
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = [...new Set(io.changedFiles())]
@@ -11872,7 +11880,7 @@ function runTask(ctx, io, crash) {
   verifiedPublishBaseSha = null
   const continuingRebase = pendingRebaseConflict !== null
   stage('commit')
-  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: briefText })
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: briefText, onBoundIssuePromotion: (closes_promoted) => io.log(recordRow({ at: io.now(), closes_promoted, source: 'bound-issue' })) })
   const subject = String(message).split('\n')[0]
   S.commitMessage = message
   S.commitSubject = subject

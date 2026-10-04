@@ -16,6 +16,7 @@ import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSAL
 import { JOURNAL_CHANNEL_NAMES } from './drive.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
+import { noncanonicalJournalSinks } from './drive-fixtures.mjs'
 
 const PANE_CAPTURE = String.raw`{"parentUuid":"c828178b-a377-46d3-b09e-bb9bcb7fd718","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSPg8agTgq9MxjMHBVf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01GSd211FY8ZKTrthuDHX1Er","name":"Bash","input":{"command":"sed -n '6060,6135p' crew/drive.mjs; echo \"=== GATE ===\"; cat /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope/task/gate.mjs | head -60","description":"Read post-green proof loop and gate checks"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":35997,"cache_read_input_tokens":0,"output_tokens":1008,"output_tokens_details":{"thinking_tokens":821},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":35997,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":1008,"cache_read_input_tokens":0,"cache_creation_input_tokens":35997,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":35997},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSPfVP8MYSnfLQABzQz","type":"assistant","uuid":"7d518552-0575-431b-aa4a-bc10eae84893","timestamp":"2026-09-08T18:23:16.916Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}
 {"parentUuid":"7eb9c965-2cbc-4368-b584-d55b189d37f6","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSQkzoL21CsnWAyS3pq","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01BC9djpCppspgFjAo738imQ","name":"Bash","input":{"command":"cd /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope; node -p \"const e=require('./returns/d3.planner.json'); JSON.stringify({mut:(e.details.mutations||[]).map(m=>({check:m.check,file:m.file,find:(m.find||'').slice(0,60)})), files:e.details.files_in_scope},null,1)\"","description":"Inspect planner envelope mutations and scope"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":3732,"cache_read_input_tokens":35997,"output_tokens":787,"output_tokens_details":{"thinking_tokens":572},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":3732,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":787,"cache_read_input_tokens":0,"cache_creation_input_tokens":3732,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":3732},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSQkBgmugDqLmrNtanB","type":"assistant","uuid":"82ac935a-e9de-4bb6-beb6-ef9ba41718c3","timestamp":"2026-09-08T18:23:29.284Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}`
@@ -208,6 +209,42 @@ const SEAT_PASS_THROUGH = new Set([
   "log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),",
   "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },",
 ])
+function blankComments(source) {
+  let out = ''
+  let mode = null
+  for (let i = 0; i < source.length; i += 1) {
+    const c = source[i], d = source[i + 1]
+    if (mode === null) {
+      if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
+      if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
+      out += c; continue
+    }
+    if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
+    if (c === '*' && d === '/') { mode = null; out += '  '; i += 1; continue }
+    out += c === '\n' ? '\n' : ' '
+  }
+  return out
+}
+// The bare log?.( base and the logLine journal.jsonl base have no refusal in this lane.
+// io.log(row(...)) is visible with wrapper null and is rejected by the inventory projection.
+// lean: textual journal grammar with quoted strings visible; use a parser when source exceeds this grammar.
+function seatRefuseJournalSinks(text) {
+  const lines = text.split('\n')
+  const byLine = new Map()
+  for (const { line } of noncanonicalJournalSinks(text)) byLine.set(line, (byLine.get(line) ?? 0) + 1)
+  const hidden = []
+  for (const [line, hitCount] of byLine) {
+    const sourceLine = lines[line - 1]
+    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log\s*,/g)].length
+    if (hitCount > exemptCount) hidden.push(...Array(hitCount - exemptCount).fill(line))
+  }
+  const callHits = [...text.matchAll(/(?<![\w$])io\s*\.\s*log\s*\.\s*call\b/g)]
+  for (const hit of callHits) {
+    const line = text.slice(0, hit.index).split('\n').length
+    if (!hidden.includes(line)) hidden.push(line)
+  }
+  if (hidden.length > 0) throw new Error(`journal sink inventory: ${hidden.length} emit(s) hidden from SEAT_SINK at line(s) ${[...new Set(hidden)].join(', ')}`)
+}
 function seatPayloadElements(text, from) {
   let i = from
   while (i < text.length && text[i] !== '{') i += 1
@@ -246,7 +283,9 @@ function seatPayloadElements(text, from) {
   }
   return { events: events.join(' '), keys: keys.join(' ') }
 }
-function seatJournalSites(text) {
+function seatJournalSites(rawText) {
+  const text = blankComments(rawText)
+  seatRefuseJournalSinks(text);
   SEAT_SINK.lastIndex = 0
   const lines = text.split('\n')
   const out = []
@@ -299,6 +338,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
+  ['operationalRow', "event='host_suspended'", 'at ...record'],
   ['recordRow', '', ''],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
@@ -308,14 +348,57 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
 ])
 
-test('every journal emit site in seat-io is inventoried, wrapped and on the right channel', () => {
+// Mutation SS1: disabling callHits accepts the seventh disguised form.
+test('SS1', () => {
+  for (const emit of [
+    "io['log'](operationalRow({ at: 1 }))", 'io.log.call(io, operationalRow({ at: 1 }))',
+    'io[k](operationalRow({ at: 1 }))', "io?.['log'](operationalRow({ at: 1 }))",
+    'io.log?.({ at: 1 })', 'io.log(recordRow({ at: 1 }), extra)', 'io.log.call(io, row)',
+  ]) {
+    assert.throws(() => seatJournalSites(`\n${emit}\n`), (error) => error.message.includes('journal sink inventory') && error.message.includes('hidden from SEAT_SINK') && error.message.includes('line(s) 2'))
+  }
+})
+// Mutation SS2: widening per-occurrence comparison to exempt the whole line admits the mixed fixture.
+test('SS2', () => {
+  const source = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  assert.equal(source.split('log: (obj) => io.log(obj),').length - 1, 1)
+  assert.equal(source.split('log: io.log,').length - 1, 2)
+  for (const text of ['const f = io.log', '{ sink: io.log }', '{ log: io.log, sink: io.log }', '{ log: io.log }', 'catalog: io.log,']) {
+    assert.throws(() => seatJournalSites(text), /journal sink inventory/)
+  }
+  for (const text of ['log: (obj) => io.log(obj),', '{ log: io.log, emit: io.emit, }', 'try { settleSeatRoots({ taskDir: paths.taskDir, log: io.log, deps: {} }) } catch {}']) {
+    assert.deepEqual(seatJournalSites(text), [])
+  }
+})
+// Mutation SS3: bypassing blankComments counts the canonical call inside the comment.
+test('SS3', () => {
+  const one = seatJournalSites('io.log(operationalRow({ at: 1 }))\n// io.log(operationalRow({ at: 2 }))')
+  assert.equal(one.length, 1)
+  assert.deepEqual(one.map(({ line, wrapper, keys }) => [line, wrapper, keys]), [[1, 'operationalRow', 'at']])
+  assert.throws(() => seatJournalSites("/* io.log(operationalRow({ at: 2 })) */\nio['log'](operationalRow({ at: 1 }))"), (error) => error.message.includes('line(s) 2'))
+  const commented = seatJournalSites('/* io[bad](row) */\nio.log(operationalRow({ at: 1 }))')
+  assert.equal(commented.length, 1)
+  assert.equal(commented[0].line, 2)
+})
+// Mutation SS5: removing the scanner refusal accepts the reverted operational emitter.
+test('SS5', () => {
+  const source = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  const wrapped = "io?.log?.(operationalRow({ at: now(), event: 'host_suspended', ...record }))"
+  const old = "io.log?.({ at: now(), event: 'host_suspended', ...record })"
+  const reverted = source.replace(wrapped, old)
+  const line = reverted.split('\n').findIndex((text) => text.includes('onSuspend:') && text.includes(old)) + 1
+  assert.ok(line > 0)
+  assert.throws(() => seatJournalSites(reverted), (error) => error.message.includes(`line(s) ${line}`))
+})
+
+test('SS4', () => {
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 38)
+  assert.equal(sites.length, 39)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 27)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 28)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 11)
 })
 

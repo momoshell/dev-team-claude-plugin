@@ -210,24 +210,87 @@ const SEAT_PASS_THROUGH = new Set([
   "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },",
 ])
 function blankComments(source) {
-  let out = ''
-  let mode = null
-  for (let i = 0; i < source.length; i += 1) {
-    const c = source[i], d = source[i + 1]
-    if (mode === null) {
-      if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
-      if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
-      out += c; continue
+  // Same-length output: comments become spaces (newlines kept), so lines and indexes still map to the source.
+  // Strings and regex literals pass through whole; a template's ${...} is code again, so its comments blank too.
+  const expressionKeywords = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await']
+  let i = 0
+  function code(insideInterpolation) {
+    let out = '', previous = '(', depth = 0, lastWord = ''
+    // A ) closing an if/while/for/with head is followed by a statement, where / opens a regex.
+    const parens = []
+    while (i < source.length) {
+      const c = source[i], d = source[i + 1]
+      if (insideInterpolation && c === '{') depth += 1
+      if (insideInterpolation && c === '}') { if (depth === 0) return out; depth -= 1 }
+      if (c === '/' && d === '/') { while (i < source.length && source[i] !== '\n') { out += ' '; i += 1 } continue }
+      if (c === '/' && d === '*') {
+        out += '  '; i += 2
+        while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) { out += source[i] === '\n' ? '\n' : ' '; i += 1 }
+        if (i < source.length) { out += '  '; i += 2 }
+        continue
+      }
+      if (c === '`') { out += c; i += 1; out += template(); previous = 'x'; continue }
+      const regexStart = c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)
+      if (c === "'" || c === '"' || regexStart) {
+        let j = i + 1, slash = false, inClass = false
+        while (j < source.length) {
+          const r = source[j]
+          if (slash) slash = false
+          else if (r === '\\') slash = true
+          else if (regexStart && r === '\n') break
+          else if (regexStart && r === '[') inClass = true
+          else if (regexStart && r === ']') inClass = false
+          else if (r === (regexStart ? '/' : c) && !inClass) break
+          j += 1
+        }
+        out += source.slice(i, j + 1)
+        i = j + 1
+        previous = 'x'
+        continue
+      }
+      if (/[A-Za-z_$0-9]/.test(c)) {
+        let j = i
+        while (j < source.length && /[\w$]/.test(source[j])) j += 1
+        const word = source.slice(i, j)
+        previous = expressionKeywords.includes(word) ? '(' : 'x'
+        lastWord = word
+        out += word
+        i = j
+        continue
+      }
+      if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastWord))
+      if (c === ')') previous = parens.pop() ? '(' : 'x'
+      else if (c === ']') previous = 'x'
+      else if (!/\s/.test(c)) previous = c
+      if (!/\s/.test(c)) lastWord = ''
+      out += c
+      i += 1
     }
-    if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
-    if (c === '*' && d === '/') { mode = null; out += '  '; i += 1; continue }
-    out += c === '\n' ? '\n' : ' '
+    return out
   }
-  return out
+  function template() {
+    let out = '', slash = false
+    while (i < source.length) {
+      const c = source[i]
+      if (slash) { slash = false; out += c; i += 1; continue }
+      if (c === '\\') { slash = true; out += c; i += 1; continue }
+      if (c === '`') { out += c; i += 1; return out }
+      if (c === '$' && source[i + 1] === '{') {
+        out += '${'; i += 2
+        out += code(true)
+        if (i < source.length) { out += '}'; i += 1 }
+        continue
+      }
+      out += c
+      i += 1
+    }
+    return out
+  }
+  return code(false)
 }
-// The bare log?.( base and the logLine journal.jsonl base have no refusal in this lane.
+// BLIND SPOT: computed deps['logLine'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.
 // io.log(row(...)) is visible with wrapper null and is rejected by the inventory projection.
-// lean: textual journal grammar with quoted strings visible; use a parser when source exceeds this grammar.
+// lean: identifier-level journal grammar; use a parser when syntax exceeds this grammar.
 function seatRefuseJournalSinks(text) {
   const lines = text.split('\n')
   const byLine = new Map()
@@ -235,8 +298,114 @@ function seatRefuseJournalSinks(text) {
   const hidden = []
   for (const [line, hitCount] of byLine) {
     const sourceLine = lines[line - 1]
-    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log\s*,/g)].length
+    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log(?=\s*(?:,|$))/g)].length
     if (hitCount > exemptCount) hidden.push(...Array(hitCount - exemptCount).fill(line))
+  }
+  const spans = [
+    '{ taskDir, log, deps = {} }',
+    '{ taskDir, log, emit, deps = {} }',
+    'descendantCapture({ taskDir, log, deps })',
+  ].flatMap((fragment) => [...text.matchAll(new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
+    .map((match) => [match.index, match.index + match[0].length]))
+  const tokens = []
+  // A template's ${...} is code: each open interpolation keeps its own brace depth.
+  const interpolations = []
+  let quote = null, escaped = false, previous = '(', lastName = ''
+  const parens = []
+  for (let i = 0; i < text.length;) {
+    const c = text[i]
+    if (quote !== null) {
+      if (escaped) escaped = false
+      else if (c === '\\') escaped = true
+      else if (quote === '`' && c === '$' && text[i + 1] === '{') { interpolations.push(0); quote = null; previous = '('; i += 2; continue }
+      else if (c === quote) { quote = null; previous = 'x' }
+      i += 1
+      continue
+    }
+    if (interpolations.length > 0 && c === '{') interpolations[interpolations.length - 1] += 1
+    if (interpolations.length > 0 && c === '}') {
+      if (interpolations[interpolations.length - 1] === 0) { interpolations.pop(); quote = '`'; i += 1; continue }
+      interpolations[interpolations.length - 1] -= 1
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; i += 1; continue }
+    // A / in expression position opens a regex literal, skipped as one opaque unit; elsewhere it is division.
+    if (c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) {
+      let j = i + 1, inClass = false, slash = false
+      while (j < text.length && text[j] !== '\n') {
+        const r = text[j]
+        if (slash) slash = false
+        else if (r === '\\') slash = true
+        else if (r === '[') inClass = true
+        else if (r === ']') inClass = false
+        else if (r === '/' && !inClass) break
+        j += 1
+      }
+      i = j + 1
+      previous = 'x'
+      continue
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i
+      i += 1
+      while (i < text.length && /[\w$]/.test(text[i])) i += 1
+      const name = text.slice(start, i)
+      if (['log', 'logLine', 'defaultLogLine'].includes(name)
+        && !/[.\w$]/.test(text[start - 1] ?? '')
+        && !/[\w$]/.test(text[i] ?? '')) tokens.push({ name, index: start })
+      previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(name) ? '(' : 'x'
+      lastName = name
+      continue
+    }
+    if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastName))
+    if (c === ')') previous = parens.pop() ? '(' : 'x'
+    else if (!/\s/.test(c)) previous = c
+    if (!/\s/.test(c)) lastName = ''
+    i += 1
+  }
+  for (const { name, index } of tokens) {
+    const after = text.slice(index + name.length)
+    const line = text.slice(0, index).split('\n').length
+    const sourceLine = lines[line - 1].trim()
+    const measured = spans.some(([start, end]) => index >= start && index < end)
+      || sourceLine === 'closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,'
+      || sourceLine === 'const logLine = deps.logLine || defaultLogLine'
+    const fullForwarder = SEAT_PASS_THROUGH.has(sourceLine)
+    const keyOrMethod = name === 'log' && (/^\s*:/.test(after) || after.startsWith('(obj) {'))
+    let sink = false
+    if (name !== 'defaultLogLine') {
+      const heads = name === 'log'
+        ? ['log?.(operationalRow(', 'log?.(recordRow(']
+        : ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow(", "logLine(join(paths.dir, 'journal.jsonl'), recordRow("]
+      const head = heads.find((candidate) => text.startsWith(candidate, index))
+      if (head) {
+        const wrapper = head.includes('operationalRow(') ? 'operationalRow(' : 'recordRow('
+        const open = index + head.lastIndexOf(wrapper) + wrapper.length - 1
+        let depth = 0, quote = null, escaped = false, regex = false, regexClass = false, previous = '('
+        for (let i = open; i < text.length; i += 1) {
+          const c = text[i]
+          if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
+          if (regex) {
+            if (escaped) escaped = false
+            else if (c === '\\') escaped = true
+            else if (c === '[' && !regexClass) regexClass = true
+            else if (c === ']' && regexClass) regexClass = false
+            else if (c === '/' && !regexClass) regex = false
+            continue
+          }
+          if (c === "'" || c === '"' || c === '`') { quote = c; previous = ')'; continue }
+          if (c === '/' && '(,=:[!&|?{};'.includes(previous)) { regex = true; regexClass = false; escaped = false; previous = ')'; continue }
+          if (/\s/.test(c)) continue
+          if (c === '(') depth += 1
+          else if (c === ')') {
+            depth -= 1
+            if (depth === 0) { sink = /^\s*\)/.test(text.slice(i + 1)); break }
+          }
+          previous = c
+        }
+      }
+    }
+    const allowed = fullForwarder || measured || keyOrMethod || sink
+    if (!allowed) hidden.push(line)
   }
   const callHits = [...text.matchAll(/(?<![\w$])io\s*\.\s*log\s*\.\s*call\b/g)]
   for (const hit of callHits) {
@@ -347,6 +516,81 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at reseat'],
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
 ])
+
+// Mutation SL1: replacing the unique refusal push with a log-only guard admits bare log disguises.
+test('SL1', () => {
+  for (const emit of ['log(operationalRow({ at: 1 }))', 'log && log(operationalRow({ at: 1 }))', 'log?.call(null, operationalRow({ at: 1 }))', 'log ?.(operationalRow({ at: 1 }))', '{ sink: log }', 'const emit = log']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'))
+  }
+  assert.throws(() => seatJournalSites('// fixture\nrecord("it\\"s", log)'), (error) => error.message.includes('line(s) 2'))
+  for (const accepted of ['{ taskDir, log, deps = {} }', '{ taskDir, log, emit, deps = {} }', 'descendantCapture({ taskDir, log, deps })', 'log: io.log', "record('log', { level: 'info' })"]) assert.deepEqual(seatJournalSites(accepted), [])
+  for (const accepted of ['log?.(operationalRow({ at: 1 }))', 'log?.(recordRow({ at: 1 }))']) assert.doesNotThrow(() => seatJournalSites(accepted))
+  assert.throws(() => seatJournalSites('log?.(operationalRow({ at: 1 }), extra)'), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites('log?.(operationalRow({ at: 1 })'), /journal sink inventory/)
+})
+// Mutation SL2: replacing the unique refusal push with a bare-log-only guard admits logLine disguises.
+test('SL2', () => {
+  for (const emit of ['logLine(join(paths.dir, "journal.jsonl"), operationalRow({ at: 1 }))', "logLine(join(paths.dir,'journal.jsonl'),operationalRow({ at: 1 }))", "logLine(join(paths.dir, 'journal.jsonl'),operationalRow(", 'logLine(journalPath, operationalRow({ at: 1 }))', 'const w = logLine', 'logLine.call(null, p, row)', "defaultLogLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }))"]) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'))
+  }
+  for (const accepted of ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }))", "logLine(join(paths.dir, 'journal.jsonl'), recordRow({ at: 1 }))", `logLine(join(paths.dir, 'journal.jsonl'), operationalRow({\n at: 1\n}))`]) assert.doesNotThrow(() => seatJournalSites(accepted))
+  assert.throws(() => seatJournalSites("logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 }), extra)"), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites("logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: 1 })"), /journal sink inventory/)
+  for (const accepted of ['log: (obj) => io.log(obj),', "log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),", "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },", 'closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,', 'const logLine = deps.logLine || defaultLogLine']) assert.doesNotThrow(() => seatJournalSites(accepted), accepted)
+})
+// Mutation SL3: replacing the unique refusal push with a false guard leaves all eleven rewrites invisible.
+test('SL3', () => {
+  const source = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  assert.doesNotThrow(() => seatJournalSites(source))
+  const lines = source.split('\n')
+  const bare = lines.flatMap((line, i) => /(?<![.\w])log\?\.\(/.test(line) ? [i] : [])
+  const journal = lines.flatMap((line, i) => line.includes("logLine(join(paths.dir, 'journal.jsonl'), operationalRow(") ? [i] : [])
+  assert.equal(bare.length, 9)
+  assert.equal(journal.length, 2)
+  for (const index of [...bare, ...journal]) {
+    const copy = [...lines]
+    copy[index] = bare.includes(index) ? copy[index].replace('log?.(', 'log(') : copy[index].replace("join(paths.dir, 'journal.jsonl')", 'journalPath')
+    assert.throws(() => seatJournalSites(copy.join('\n')), (error) => error.message.includes(`line(s) ${index + 1}`))
+  }
+})
+// Mutation SL4: retiring the nearby contract comment removes the stated grammar boundary.
+test('SL4', () => {
+  const source = readFileSync(new URL('./seat-io-runclean.test.mjs', import.meta.url), 'utf8')
+  const needle = 'have no refusal' + ' in this lane'
+  assert.equal(source.includes(needle), false)
+  const lines = source.split('\n')
+  const at = lines.findIndex((line) => line.startsWith('function seatRefuseJournalSinks'))
+  assert.equal(lines.slice(Math.max(0, at - 10), at).some((line) => line === '// BLIND SPOT: computed deps[\'logLine\'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.'), true)
+})
+// Mutation SL5: dropping the ${ interpolation push leaves a sink inside a template expression unscanned.
+test('SL5', () => {
+  for (const emit of ['const s = `${log(operationalRow({ at: 1 }))}`', 'const s = `a ${ { k: logLine(p, row) }.k } b`', 'const s = `${`${log(row)}`}`']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+  }
+  for (const accepted of ['const s = `log(row) ${1 + 2} logLine`', 'const s = `${ { a: 1 }.a } log`']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+})
+// Mutation SL6: treating every / as division makes an ordinary regex literal naming log a hidden sink.
+test('SL6', () => {
+  for (const accepted of ['const r = /log/', 'const r = (/logLine\\(/).test(s)', 'if (/[/]log/.test(s)) x()', 'return /log/.test(s)']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+  for (const emit of ['const half = a / log(row)', 'const r = x /log/ y']) assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+})
+// Mutation SL7: letting blankComments open a comment at a // inside a regex or string hides the sink after it.
+test('SL7', () => {
+  for (const emit of ['const s = `${ /[//]/.test(s) && log(row) }`', "const u = 'http://x'; log(row)", 'if (/a\\/\\//.test(s)) log(row)']) {
+    assert.throws(() => seatJournalSites('// fixture\n' + emit), (error) => error.message.includes('line(s) 2'), emit)
+  }
+  for (const accepted of ['const u = "a // log(row)"', '// log(row) in a comment', '/* log(row) */ const x = 1']) assert.deepEqual(seatJournalSites(accepted), [], accepted)
+})
+// Mutation SL8: copying a template's ${...} without blanking its comments counts a commented-out emit as a live site.
+test('SL8', () => {
+  const live = 'const s = `${ log?.(operationalRow({ event: \'sl8\' })) }`'
+  assert.equal(seatJournalSites(live).length, 1)
+  assert.equal(seatJournalSites('const s = `${ (() => { if (true) /[//]/.test(\'/\') && log?.(operationalRow({ event: \'alive\' })) })() }`').length, 1)
+  assert.deepEqual(seatJournalSites('if (ok) /log/.test(s)'), [])
+  for (const commented of ['const s = `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 1 }`', 'const s = `${ 1 // log?.(operationalRow({ event: \'sl8\' }))\n}`', 'const s = `a ${ `${ /* log?.(operationalRow({ event: \'sl8\' })) */ 2 }` } b`']) {
+    assert.deepEqual(seatJournalSites(commented), [], commented)
+  }
+})
 
 // Mutation SS1: disabling callHits accepts the seventh disguised form.
 test('SS1', () => {

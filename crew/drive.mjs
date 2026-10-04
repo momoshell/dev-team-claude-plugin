@@ -8858,7 +8858,7 @@ function runTask(ctx, io, crash) {
     logScopeAdmission(row)
     return { action: 'admit', source, files: additions, evidence }
   }
-  if (planEnv.role === 'planner' && promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).length > 0 && !validPlanPromptClaim(planEnv.details?.prompt_claim)) {
+  if (planEnv.role === 'planner' && promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).filter((hit) => !acceptedInheritedScope.preserved.some(({ file }) => file === hit)).length > 0 && !validPlanPromptClaim(planEnv.details?.prompt_claim)) {
     return escalate('plan', 'prompt-claim-missing: prompt-scoped planner plans require one valid prompt_claim', planEnv.artifacts || [])
   }
   const lane = planEnv.details?.validation_lane || ctx.lane

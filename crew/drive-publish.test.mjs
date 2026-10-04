@@ -2077,6 +2077,22 @@ test('BI5 extracted issue binding retains the exact publication refusal guard', 
   assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
 })
 
+// MUTATION BI6: drop the single-pack check at the promotion site; a pack quoted in the ask closes its issue.
+test('BI6 a context pack quoted in the ask binds nothing, so the plan issue stays a reference', () => {
+  const brief = '# Task\n## The ask\nQuote:\n## Context pack\nissue: #4242 · body inlined below\n## Proposed tier\n' + '## Context pack\nissue: #1467 · body inlined below\n'
+  const message = composeCommitMessage({ task: 'bi6', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv() })
+  assert.deepEqual(issueTrailers(message), issueTrailers('Refs: #4242'))
+})
+
+// MUTATION BI7: drop the ask-line exclusion; an exact `Closes #N` ask line is journaled as a bound-issue promotion.
+test('BI7 an issue the exact ask line already closes is not journaled as a bound-issue promotion', () => {
+  const recorded = []
+  const brief = '# Task\n## The ask\nCloses #4242\n## Context pack\nissue: #4242 · body inlined below\n'
+  const message = composeCommitMessage({ task: 'bi7', brief, planEnv: planEnv({ details: { ...planEnv().details, issues: [4242] } }), builderEnv: buildEnv(), onBoundIssuePromotion: (refs) => recorded.push(...refs) })
+  assert.deepEqual(issueTrailers(message), issueTrailers('Closes: #4242'))
+  assert.deepEqual(recorded, [])
+})
+
 test('D1 publication without a dispatch issue needs no issue statement', () => {
   assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
   assert.equal(issueStatementDefect({ brief: 'See issue #1467 in prose.\n', details: {} }), null)

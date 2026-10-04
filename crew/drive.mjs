@@ -3503,10 +3503,10 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, 
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const boundIssue = boundIssueOf(brief)
+  const boundIssue = String(brief ?? '').split('\n').filter((line) => line.trim() === '## Context pack').length === 1 ? boundIssueOf(brief) : null // the compiler emits one pack; a second (quoted by the ask) makes the binding ambiguous, so nothing is promoted
   const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => ref === `#${boundIssue}` || askClosingIssues(brief).includes(ref))
   const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes), ...promoted])
-  const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref))
+  const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref) && !askClosingIssues(brief).includes(ref))
   try { if (boundPromoted.length) onBoundIssuePromotion?.(boundPromoted) } catch {}
   const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
   const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''

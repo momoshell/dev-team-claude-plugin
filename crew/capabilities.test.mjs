@@ -36,7 +36,6 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/lab.ts': ['lab'],
     'crew/pi/extensions/skeletonread.ts': ['retrieve'],
     'crew/pi/extensions/subagent.ts': ['agent'],
-    'crew/pi/extensions/fff.ts': ['fff_grep', 'fff_find', 'fff_multi_grep'],
     'crew/pi/extensions/submit.ts': ['submit_envelope'],
     'crew/pi/extensions/reminders.ts': [],
   }
@@ -721,18 +720,19 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
-    join(REGISTER_ROOT, 'crew/pi/extensions/fff.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
   const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
+  assert.deepEqual(pi.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.deepEqual(pi.skills, expectedSkills)
   for (const path of [...expected, ...expectedSkills]) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('builder', pi, loaded, { agent: 'pi' }))
   const claude = grantsFor(loaded, 'builder', { agent: 'claude' })
   assert.deepEqual(claude.extensions, [])
+  assert.deepEqual(claude.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.deepEqual(claude.skills, expectedSkills)
   assert.doesNotThrow(() => assertGrantsBacked('builder', claude, loaded, { agent: 'claude' }))
   const forged = { ...pi, extensions: [...pi.extensions, join(REGISTER_ROOT, 'crew/pi/extensions/forged.ts')] }
@@ -1648,4 +1648,39 @@ test('G2 local provider schema still requires settings pi_provider and base_url'
   const absent = registerFor({ ...baseEntry })
   delete absent.narrator.model
   assert.deepEqual(validateCapabilities(schema, absent), [])
+})
+
+// b1103 native pi delivery: NP1/NP8/NP10 pinned in the suite, not only in the lane's task gate.
+const NP_FFF_SERVER = { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }
+const npShipped = () => JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
+
+// Kills: the pi overlay fff binary changed to /missing/fff-mcp, or fff.ts granted again.
+test('NP1 shipped pi builder MCP is the literal fff server and grants no fff.ts', () => {
+  const register = npShipped(); const overlay = register.roles.builder.by_agent.pi
+  assert.deepEqual(overlay.mcp_servers, [NP_FFF_SERVER])
+  assert.deepEqual(overlay.mcp_servers, register.roles.builder.by_agent.claude.mcp_servers)
+  assert.deepEqual(overlay.extensions.filter((path) => path.endsWith('crew/pi/extensions/fff.ts')), [])
+})
+
+// Kills: builtin: entries counted as extension delivery again.
+test('NP8 builtins never satisfy extension delivery, so an on-mode planner without extensions refuses', async () => {
+  const { resolveAdapters } = await import('./crew.mjs')
+  const register = npShipped(); register.roles.planner.by_agent.pi.extensions = []
+  let error = null
+  try { await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register, env: { CREW_PI_CODEMODE: 'on' } }) }
+  catch (caught) { error = { reason: caught.reason, message: caught.message } }
+  assert.equal(error?.reason, 'capability-shortfall'); assert.match(error?.message || '', /subagents/)
+  for (const extensions of [['builtin:codemode'], ['builtin:mcp'], ['builtin:codemode', 'builtin:mcp']]) {
+    assert.equal(effectiveCapabilities({ declared: { subagents: true }, bare: { subagents: false }, grants: { extensions, agents: [{}] } }).subagents, false)
+  }
+})
+
+// Kills: the dated native-delivery convention removed, or fff.ts / its first-party table entry restored.
+test('NP10 fff.ts is retired and the dated convention states native MCP, direct exposure and codemode default on', () => {
+  const retired = 'crew/pi/extensions/fff.ts'
+  assert.equal(existsSync(join(REGISTER_ROOT, retired)), false)
+  assert.deepEqual(Object.keys(PI_FIRST_PARTY_EXTENSION_TOOLS).filter((key) => key.endsWith(retired)), [])
+  const doc = readFileSync(join(REGISTER_ROOT, 'docs/conventions.md'), 'utf8')
+  const entry = doc.split('\n').find((line) => /2026-10-03/.test(line) && /builtin:mcp/.test(line)) || ''
+  assert.match(entry, /exposure.{0,8}direct/); assert.match(entry, /codemode.{0,8}default.{0,8}on/)
 })

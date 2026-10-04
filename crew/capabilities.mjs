@@ -674,7 +674,7 @@ export const CAPABILITY_DELIVERY = Object.freeze({
 })
 
 export function effectiveCapabilities({ declared, bare, grants = EMPTY_GRANTS } = {}) {
-  const nonEmpty = (key) => ((grants?.[key]) || []).length > 0
+  const nonEmpty = (key) => ((grants?.[key]) || []).some((value) => key !== 'extensions' || !String(value).startsWith('builtin:'))
   const out = { ...declared }
   for (const [cap, delivery] of Object.entries(CAPABILITY_DELIVERY)) {
     if (out[cap] !== true) continue

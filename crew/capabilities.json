@@ -112,11 +112,20 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ],
           "extensions": [
             "crew/pi/extensions/builderloop.ts",
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/skeletonread.ts",
-            "crew/pi/extensions/fff.ts",
             "crew/pi/extensions/submit.ts",
             "crew/pi/extensions/reminders.ts"
           ],

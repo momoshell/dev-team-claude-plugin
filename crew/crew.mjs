@@ -173,10 +173,8 @@ const CHARTER_TERSE_TAIL = '\n\nBe terse: state the result in the fewest words t
 // five complexity tags live in the charters every arm receives (_shared.md, reviewer.md).
 const CHARTER_TAILS = Object.freeze({ control: '', 'terse-tail': CHARTER_TERSE_TAIL, })
 
-const FFF_EXTENSION_SUFFIX = '/crew/pi/extensions/fff.ts'
 const FFF_MCP_NAME = 'fff'
 const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
-const PI_FFF_TOOLS = Object.freeze(['fff_grep', 'fff_find', 'fff_multi_grep'])
 const CLAUDE_FFF_TOOLS = Object.freeze(['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'])
 const PI_SEARCH_TOOLS = Object.freeze(['grep', 'find'])
 const CLAUDE_SEARCH_TOOLS = Object.freeze(['Glob', 'Grep'])
@@ -206,41 +204,31 @@ function searchRecord(tools, fff, reasonOrOptions = undefined) {
   })
 }
 
-function copyFffGrant(grants, adapter, available) {
-  const matches = adapter === 'pi'
-    ? (extension) => String(extension).replaceAll('\\', '/').endsWith(FFF_EXTENSION_SUFFIX)
-    : (server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN
-  if (adapter === 'pi') {
-    return Object.freeze({ ...grants, extensions: Object.freeze(grants.extensions.filter((extension) => !matches(extension))) })
-  }
-  return Object.freeze({ ...grants, mcp_servers: Object.freeze(grants.mcp_servers.filter((server) => !matches(server))) })
+function copyFffGrant(grants) {
+  return Object.freeze({ ...grants, mcp_servers: Object.freeze(grants.mcp_servers.filter((server) => !(server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN))) })
 }
 
 function resolveFffSearch(role, adapter, grants, exists) {
-  const declared = role === 'builder' && (
-    adapter === 'pi'
-      ? grants.extensions.some((extension) => String(extension).replaceAll('\\', '/').endsWith(FFF_EXTENSION_SUFFIX))
-      : adapter === 'claude' && grants.mcp_servers.some((server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN)
-  )
+  const declared = role === 'builder' && ['pi', 'claude'].includes(adapter) && grants.mcp_servers.some((server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN)
   const builtins = adapter === 'pi' ? PI_SEARCH_TOOLS : CLAUDE_SEARCH_TOOLS
   if (!declared) return { grants, search: searchRecord(builtins, 'ungranted') }
   try {
     const available = exists(FFF_MCP_BIN)
-    if (declared && !available) {
+    if (!available) {
       return {
-        grants: copyFffGrant(grants, adapter, available),
+        grants: copyFffGrant(grants),
         search: searchRecord(builtins, 'withheld', 'binary-absent'),
       }
     }
   } catch {
     return {
-      grants: copyFffGrant(grants, adapter, false),
+      grants: copyFffGrant(grants),
       search: searchRecord(builtins, 'withheld', 'binary-absent'),
     }
   }
   return {
     grants,
-    search: searchRecord(adapter === 'pi' ? PI_FFF_TOOLS : CLAUDE_FFF_TOOLS, 'granted', { withholding: FFF_SEARCH_WITHHOLDINGS[0], limit: FFF_SEARCH_WITHHOLDING_LIMITS[0] }),
+    search: searchRecord(CLAUDE_FFF_TOOLS, 'granted', { withholding: FFF_SEARCH_WITHHOLDINGS[0], limit: FFF_SEARCH_WITHHOLDING_LIMITS[0] }),
   }
 }
 
@@ -2460,7 +2448,7 @@ export async function shadowPickBoot({ roster, tier, seats, sources,
 export async function resolveAdapters(roles, args, seats = null, deps = {}) {
   const piCodemode = deps.env?.CREW_PI_CODEMODE
   if (piCodemode !== undefined && !['off', 'on'].includes(piCodemode)) throw new Error(`invalid CREW_PI_CODEMODE ${JSON.stringify(piCodemode)}; allowed values: off, on`)
-  const piCodemodeOn = piCodemode === 'on'
+  const piCodemodeOn = piCodemode !== 'off'
   const out = {}
   const sourceArgs = args || {}
   for (const key of Object.keys(sourceArgs)) {
@@ -2492,9 +2480,9 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       assertGrantsBacked(role, grants, registry, { agent: name })
       const fff = resolveFffSearch(role, name, grants, exists)
       grants = fff.grants
-      if (name === 'pi' && piCodemodeOn) {
+      if (name === 'pi') {
         const extensions = [...(grants.extensions || [])]
-        extensions.push('builtin:codemode')
+        if (piCodemodeOn) extensions.push('builtin:codemode')
         if ((grants.mcp_servers?.length ?? 0) > 0) extensions.push('builtin:mcp')
         grants = Object.freeze({ ...grants, extensions: Object.freeze([...new Set(extensions)]) })
       }
@@ -2927,7 +2915,7 @@ function writeRolePrompt(role, taskDir, section = '', charterArm = 'control', sk
   return merged
 }
 
-export function mcpConfigDocument(grants = EMPTY_GRANTS) {
+export function mcpConfigDocument(grants = EMPTY_GRANTS, agent = 'claude') {
   const mcpServers = {}
   for (const server of grants?.mcp_servers || []) {
     if (server.command !== null) {
@@ -2935,6 +2923,7 @@ export function mcpConfigDocument(grants = EMPTY_GRANTS) {
     } else {
       mcpServers[server.name] = { type: 'http', url: server.url }
     }
+    if (agent === 'pi') mcpServers[server.name].exposure = 'direct'
   }
   return { mcpServers }
 }
@@ -2948,7 +2937,7 @@ export function writePiSeatAgentDirs({ taskDir, checkout, roles, adapters, env =
   }
   for (const role of roles || []) {
     const entry = adapters?.[role]
-    if (entry?.name !== 'pi' || !entry.grants?.extensions?.includes('builtin:codemode')) continue
+    if (entry?.name !== 'pi' || !entry.grants?.extensions?.some((extension) => ['builtin:codemode', 'builtin:mcp'].includes(extension))) continue
     try {
       const agentDir = piAdapter.piSeatAgentDir({ taskDir, role })
       if (entry.grants.extensions.includes('builtin:mcp')) {
@@ -2978,7 +2967,9 @@ export function writePiSeatAgentDirs({ taskDir, checkout, roles, adapters, env =
       try { names = fs.readdirSync(baseDir) } catch (error) { if (error.code !== 'ENOENT') throw error }
       fs.rmSync(agentDir, { recursive: true, force: true })
       fs.mkdirSync(agentDir, { recursive: true })
-      const seatSettings = { ...baseSettings, codemode: { ...baseSettings.codemode, mode: 'only' } }
+      const seatSettings = entry.grants.extensions.includes('builtin:codemode')
+        ? { ...baseSettings, codemode: { ...baseSettings.codemode, mode: 'only' } }
+        : baseSettings
       fs.writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(seatSettings, null, 2))
       for (const name of names) {
         if (name === 'settings.json' || name === 'mcp.json') continue
@@ -3002,7 +2993,7 @@ export function writeMcpConfigs({ taskDir, roles, adapters }, deps = {}) {
     }
     const path = entry.adapter.mcpConfigPath({ taskDir, role })
     mkdir(dirname(path), { recursive: true })
-    write(path, JSON.stringify(mcpConfigDocument(entry.grants), null, 2))
+    write(path, JSON.stringify(mcpConfigDocument(entry.grants, entry.name), null, 2))
   }
 }
 
@@ -3575,6 +3566,7 @@ export async function bootCmd(args, deps = {}) {
     : null
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm, base_branch: baseBranch,
+    pi_codemode: { value: bootEnv.CREW_PI_CODEMODE === 'off' ? 'off' : 'on', source: bootEnv.CREW_PI_CODEMODE === undefined ? 'default' : 'env' },
     run_configuration: { ...bootConfigRecord, advisor },
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),

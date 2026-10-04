@@ -172,7 +172,7 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
       bin: process.execPath,
       args: [bridge, '--model', spec.model, '--append-system-prompt', spec.promptFile, '--tools', toolSet,
         ...(autoDeny.length ? ['--exclude-tools', autoDeny.join(',')] : []), '--no-context-files', '--no-extensions', '--no-skills'],
-      env: { SENTINEL: 'yes', CREW_PI_BIN: spec.bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
+      env: { SENTINEL: 'yes', CREW_FFF: '0', CREW_PI_BIN: spec.bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
       sessionParams: { cwd: '/tmp', mcpServers: [] },
       policy: { autoDeny, autoApprove: role === 'builder' ? escalate : [], escalate: role === 'builder' ? [] : escalate },
     }, role)
@@ -186,7 +186,7 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
   const advisorExtension = join(ROOT, 'crew/pi/extensions/advisor.ts')
   assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
-  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
+  assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_FFF: '0', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
   const unseatedAdvisor = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } })
   assert.deepEqual(Object.keys(unseatedAdvisor.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
   assert.equal(unseatedAdvisor.args.includes(advisorExtension), true)
@@ -725,7 +725,7 @@ test('A1', () => {
     role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
   }
-  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
   assert.equal(seatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
   assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
@@ -942,4 +942,27 @@ test('a pane seat ignores legacy advisor endpoint fields in favor of manifest co
   const env = paneAdvisorEnv({ endpoint: 'http://127.0.0.1:8080/v1', model: 'qwen3' }, 'http://evil.example')
   assert.equal(env.CREW_ADVISOR_ENDPOINT, undefined)
   assert.equal(env.CREW_ADVISOR, '1')
+})
+
+// Kills: piFffEnv's granted CREW_FFF changed from 1 to 0 (RV1-1: readgate stops refusing bash grep/find).
+test('NP7 the grant decides CREW_FFF for rpc, pane and acp, and readgate points at native fff tools', async () => {
+  const { createReadGate } = await import('./pi/extensions/readgate.ts')
+  const grants = { tools: [], extensions: ['builtin:mcp'], agents: [], skills: [], advisor: false, mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] }
+  const base = { role: 'builder', taskDir: '/np/task', model: 'openai-codex/model', promptFile: '/np/role.md', bootBrief: 'boot', env: {}, grants }
+  const parts = piRpcSeatParts(base); const pane = seatCommand(base)
+  assert.equal(parts.env.CREW_FFF, '1'); assert.match(pane, /\bCREW_FFF=1\b/)
+  assert.equal(parts.env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
+  assert.match(pane, /PI_CODING_AGENT_DIR="\/np\/task\/pi-agent\/builder"/)
+  assert.equal(acpLaunch({ ...base, bin: '/np/pi', cwd: '/np/checkout' }).env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
+  const ungranted = { ...base, grants: { ...grants, extensions: [], mcp_servers: [] } }
+  assert.equal(piRpcSeatParts(ungranted).env.CREW_FFF, '0')
+  assert.match(seatCommand(ungranted), /\bCREW_FFF=0\b/)
+  const hostile = { ...ungranted, env: { CREW_FFF: '1' } }
+  assert.equal(piRpcSeatParts(hostile).env.CREW_FFF, '0')
+  assert.match(seatCommand(hostile), /\bCREW_FFF=0\b/)
+  const gate = createReadGate({ env: parts.env, hasUnquotedPipe: () => false })
+  for (const [program, replacement] of [['grep', 'mcp__fff__grep'], ['find', 'mcp__fff__find_files']]) {
+    const result = gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/np/checkout' })
+    assert.equal(result?.block, true, program); assert.match(result.reason, new RegExp(replacement))
+  }
 })

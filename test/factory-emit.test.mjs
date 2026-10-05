@@ -49,6 +49,14 @@ function freshDir(label) {
   return mkdtempSync(join(fixtureRoot, `${label}-`))
 }
 
+function recordingSleep(requests) {
+  const cell = new Int32Array(new SharedArrayBuffer(4))
+  return (ms) => {
+    requests.push(ms)
+    Atomics.wait(cell, 0, 0, ms)
+  }
+}
+
 const trackChild = childTracker(after, assert)
 
 test('proposal-v2 J1', () => {
@@ -448,9 +456,10 @@ test('PERSIST-BEFORE-EMIT: reserved_through advances on disk before the emission
 // fake, almost-certainly-dead one like 999999 — otherwise the new liveness
 // check correctly identifies it as dead and steals it, which is exactly the
 // M5 fix working as intended, not a bug.
-test('BOUNDED LOCK WAIT + COUNTED GIVE-UP: a live, non-stale lock forces a bounded give-up within the budget', () => {
+test('LR1', () => {
   const dir = freshDir('lock-giveup')
-  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  const requests = []
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, _sleepSync: recordingSleep(requests) })
   const lockPath = join(dir, 'ledger', 'run.lock')
   mkdirSync(join(dir, 'ledger'), { recursive: true })
   writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
@@ -464,7 +473,9 @@ test('BOUNDED LOCK WAIT + COUNTED GIVE-UP: a live, non-stale lock forces a bound
   // LOCK_RETRY_INTERVAL_MS=50 ~= 1000ms), not just "eventually gives up" —
   // a future edit that silently guts the budget should fail this floor.
   assert.ok(elapsed >= 900, `expected the bounded wait to take at least ~1s (budget=20x50ms), took ${elapsed}ms`)
-  assert.ok(elapsed < 3000, `expected the bounded wait to finish under 3s, took ${elapsed}ms`)
+  // MUTATION: increasing the retry budget or interval, or bypassing the injected sleeper, must fail these requested-delay observations.
+  assert.equal(requests.length, 20)
+  assert.ok(requests.every((ms) => Number.isInteger(ms) && ms >= 50 && ms < 65), JSON.stringify(requests))
   assert.equal(emitter.stats().lock_giveups, 1)
 })
 
@@ -541,21 +552,40 @@ test('BOUNDED LOCK WAIT + COUNTED GIVE-UP: an over-age lock, held by a live pid,
 // is guaranteed dead by the time spawnSync returns (it has already exited)
 // and won't race a real "alive but slow" holder the way a hardcoded guess
 // like 999999 could on a busy CI box.
-test('LOCK STALE STEAL: a lock held by a definitely-dead pid is stolen regardless of age, and the emission succeeds', () => {
+test('LR2', () => {
+  const controlDir = freshDir('lock-live-control')
+  const controlRequests = []
+  const controlEmitter = openRun({ stateDir: controlDir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, _sleepSync: recordingSleep(controlRequests) })
+  mkdirSync(join(controlDir, 'ledger'), { recursive: true })
+  writeFileSync(join(controlDir, 'ledger', 'run.lock'), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
+  controlEmitter.reserveSeq('event', 1)
+  assert.ok(controlRequests.length > 0, `control sleep requests: ${JSON.stringify(controlRequests)}`)
+
   const dir = freshDir('lock-dead-pid')
-  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  const deadRequests = []
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, _sleepSync: recordingSleep(deadRequests) })
   const lockPath = join(dir, 'ledger', 'run.lock')
   mkdirSync(join(dir, 'ledger'), { recursive: true })
   const deadProc = spawnSync(process.execPath, ['-e', 'process.exit(0)'])
+  assert.equal(deadProc.status, 0)
+  assert.ok(Number.isInteger(deadProc.pid) && deadProc.pid > 0)
   writeFileSync(lockPath, JSON.stringify({ pid: deadProc.pid, started_at: new Date().toISOString() }))
 
-  const start = Date.now()
   const seqs = emitter.reserveSeq('event', 1)
-  const elapsed = Date.now() - start
 
   assert.deepEqual(seqs, [1])
   assert.equal(emitter.stats().lock_giveups, 0)
-  assert.ok(elapsed < 500, `a dead-pid steal should be near-instant (no wait budget consumed), took ${elapsed}ms`)
+  // MUTATION: sleeping once in the stale-lock steal branch kills this zero-request assertion.
+  assert.deepEqual(deadRequests, [])
+})
+
+// MUTATION LR3: adding a numeric elapsed ceiling to the LR3 declaration must fail the source scan.
+test('LR3', () => {
+  const detector = /elapsed\s*<\s*\d/
+  const ceilings = SELF_SOURCE.split(/\r?\n/).filter((line) => detector.test(line))
+  assert.deepEqual(ceilings, [], `unexpected elapsed ceilings: ${JSON.stringify(ceilings)}`)
+  assert.equal(detector.test(['elapsed', '<', '3000'].join(' ')), true)
+  assert.equal(detector.test(['elapsed', '>=', '900'].join(' ')), false)
 })
 
 // M5 (round 3): the lock file is now created via the SAME exclusive-create

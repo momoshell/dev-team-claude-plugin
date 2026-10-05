@@ -352,7 +352,7 @@ function stealStaleLock(lockPath, judgedStaleValue, judgedCorrupt) {
 // lock. linkSync is a single atomic syscall: the fully-written tmp file's
 // content becomes visible at `lockPath` in one step, so `lockPath` is NEVER
 // observable half-written by any concurrent reader.
-function acquireLock(lockPath, nowFn) {
+function acquireLock(lockPath, nowFn, sleepFn) {
   secureMkdirSync(dirname(lockPath))
   let stoleOnce = false
   let waitAttempts = 0
@@ -367,7 +367,7 @@ function acquireLock(lockPath, nowFn) {
       // released) — genuine contention, never automatically stale.
       if (waitAttempts >= LOCK_RETRY_BUDGET) return null
       waitAttempts += 1
-      sleepSync(retryDelayMs())
+      sleepFn(retryDelayMs())
       continue
     }
     const existingValue = read.status === 'parsed' ? read.value : null
@@ -391,7 +391,7 @@ function acquireLock(lockPath, nowFn) {
     }
     if (waitAttempts >= LOCK_RETRY_BUDGET) return null
     waitAttempts += 1
-    sleepSync(retryDelayMs())
+    sleepFn(retryDelayMs())
   }
 }
 
@@ -709,6 +709,8 @@ function openRunInner({
   // obtains its ledger handle, so a test can inject a handle whose writers
   // throw or are otherwise degraded without touching the real ledger.
   _openLedger,
+  // TEST SEAM ONLY: overrides lock retry sleeping for deterministic observation.
+  _sleepSync = sleepSync,
   _ingestJournal = ingestJournal,
 } = {}) {
   const ingestJournalFn = _ingestJournal
@@ -944,7 +946,7 @@ function openRunInner({
   // both see "no run yet" and mint two different adw_ids sharing one seq
   // counter.
   function createOrAdoptSidecar() {
-    const holder = acquireLock(lockPath, now)
+    const holder = acquireLock(lockPath, now, _sleepSync)
     if (!holder) return null
     try {
       const existing = readJsonOrNull(sidecarPath)
@@ -1102,7 +1104,7 @@ function openRunInner({
   // exists to prevent). initialSidecar() is reachable ONLY from the
   // genuine create path inside createOrAdoptSidecar above.
   function withLock(mutateFn) {
-    const holder = acquireLock(lockPath, now)
+    const holder = acquireLock(lockPath, now, _sleepSync)
     if (!holder) {
       localStats.lock_giveups += 1
       noteStderrOnce(`emit: lock give-up acquiring ${lockPath}`)

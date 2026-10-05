@@ -193,7 +193,7 @@ const VACUITY_EXEMPT = new Map([
       && /assert\.match\(other, \/SECOND_BODY\/\)/.test(source)
       && /assert\.doesNotMatch\(other, \/FIRST_BODY\/\)/.test(source),
   }],
-  ['test/factory-emit.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-emit.test.mjs'], 'by-design', 'audited 2026-09-09: /no_run/ is serialized in the stderr distinction at test/factory-emit.test.mjs:1737, so the assertion discriminates an unknown_flag refusal from a no_run one.')],
+  ['test/factory-emit.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-emit.test.mjs'], 'by-design', 'audited 2026-09-09: /no_run/ is serialized in the stderr distinction at test/factory-emit.test.mjs:1767, so the assertion discriminates an unknown_flag refusal from a no_run one.')],
   ['test/factory-make-brief.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-make-brief.test.mjs'], 'by-design', 'audited 2026-09-10: the /BROAD_PIN/ section distinction is asserted at test/factory-make-brief.test.mjs:3133 and paired with a positive match for the same token in the Tripwires section.')],
   ['test/fixtures.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/fixtures.test.mjs'], 'by-design', 'audited 2026-09-09: the /toLowerCase/ source-text guard is at test/fixtures.test.mjs:20 and is paired with a positive production-rule import match.')],
   ['test/visualizer-server.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-server.test.mjs'], 'flagged', 'audited 2026-09-18: the recordIntakeBrake presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
@@ -208,7 +208,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'crew/pi/extensions/subagent.test.mjs': 'd17c9cc3cae62362a8f3ed93713b53a1cd6b201f77b9c1271816adf9c5c3c6c6',
   'crew/reclaim-descendants.test.mjs': '5b5c49106a9d282011747f0c0fb312fe79b053f7be68c6fa55f5b83d85a386d9',
   'crew/roster-refresh.test.mjs': '2aa9146c3330b5c5773d4684efd4c90ce38221dcadc17e59bf439413866f6138',
-  'test/factory-emit.test.mjs': '15db2474a3d38b523fcc79204100ba908eb9b9e732ef5928bd3195d4773f7b1a',
+  'test/factory-emit.test.mjs': '52fcb8473a99c920b9b4ccf513750e8059e5d243530722860498aa94abe74ee3',
   'test/factory-make-brief.test.mjs': '31152ea83fab9fa4cbbd62c566bd82f560d9f1a76f9c4e2030584a04eb507813',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
   'test/visualizer-server.test.mjs': '853c37d37ea7e77175611a981ecc27ba40038e9692f9f89020d45db08c90b9f3',

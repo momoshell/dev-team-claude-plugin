@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../../../test/helpers.mjs'
 import * as mod from './readgate.ts'
@@ -705,7 +705,7 @@ function resultFor(d, { range = true, offset = 1, limit = 300, id = `bytes-${++n
 
 const readGateMarker = '\n\n[read gate: '
 
-test('RB1', () => {
+test('byte cap truncates oversized whole-read result to DEFAULT_MAX_BYTES', () => {
   // MUTATION: remove the oversized-result cap decision.
   const d = byteFixture()
   const { output } = resultFor(d)
@@ -714,7 +714,7 @@ test('RB1', () => {
   assert.ok(Buffer.byteLength(prefix, 'utf8') <= 24576)
 })
 
-test('RB2', () => {
+test('byte cap keeps complete lines, not a raw byte prefix', () => {
   // MUTATION: replace complete-line selection with a raw byte prefix.
   const d = byteFixture()
   const { output } = resultFor(d)
@@ -725,7 +725,7 @@ test('RB2', () => {
   assert.ok(prefix.endsWith('\n'))
 })
 
-test('RB3', () => {
+test('byte cap continuation hint names the offset after delivered whole lines', () => {
   // MUTATION: report the requested end rather than delivered whole lines.
   const d = byteFixture()
   const { output } = resultFor(d)
@@ -734,7 +734,7 @@ test('RB3', () => {
   assert.match(output.slice(output.indexOf(readGateMarker)), new RegExp(`offset: ${wholeLines + 1}`))
 })
 
-test('RB4', () => {
+test('byte cap records only delivered lines as read, allowing the next range', () => {
   // MUTATION: remember every requested line as delivered.
   const d = byteFixture()
   resultFor(d)
@@ -742,13 +742,92 @@ test('RB4', () => {
   assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'rb4-next', input: next }, { cwd: d.root }), undefined)
 })
 
-test('RB5', () => {
+test('byte cap honours CREW_READGATE_MAX_BYTES override', () => {
   // MUTATION: ignore the byte environment override.
   const d = byteFixture({ lines: 20, env: { CREW_READGATE_MAX_BYTES: '1000' } })
   const { output } = resultFor(d, { limit: 20 })
   const prefix = output.slice(0, output.indexOf(readGateMarker))
   assert.ok(Buffer.byteLength(prefix, 'utf8') <= 1000)
   assert.equal(prefix, d.text.slice(0, 1000))
+})
+
+function handedFixture() {
+  const f = fixture()
+  const out = join(f.root, 'out')
+  mkdirSync(out)
+  const brief = join(out, 'brief.md')
+  writeFileSync(brief, ('x'.repeat(79) + '\n').repeat(400))
+  const wrapper = join(f.taskDir, 'planner-assignment-r1.md')
+  writeFileSync(wrapper, 'Planner source brief: ' + brief + '.\n')
+  return { ...f, brief, wrapper, long: readFileSync(brief, 'utf8'), short: 'x\n'.repeat(400) }
+}
+
+test('RB1', () => {
+  // MUTATION: disable the whole handed-read result bypass; the actual full text is capped.
+  const f = handedFixture(), gate = gateFor(f)
+  const input = { path: f.brief }
+  assert.equal(call(gate, 'read', input, f.root), undefined)
+  const event = { toolName: 'read', toolCallId: 'whole-handed', input, isError: false, content: [{ type: 'text', text: f.long }] }
+  const before = JSON.stringify(event)
+  assert.equal(gate.onToolResult(event, { cwd: f.root }), undefined)
+  assert.equal(JSON.stringify(event), before)
+  for (const prefix of ['Read the current planner brief at ', 'Original task brief: ']) {
+    const path = join(f.root, prefix.startsWith('Read') ? 'current.md' : 'original.md')
+    writeFileSync(path, f.long)
+    writeFileSync(join(f.taskDir, 'planner-assignment-r3.md'), prefix + path + '.\r\n')
+    assert.equal(call(gate, 'read', { path }, f.root), undefined)
+  }
+  const alias = join(f.root, 'alias.md')
+  symlinkSync(f.brief, alias)
+  assert.equal(call(gate, 'read', { path: alias }, f.root), undefined)
+})
+
+test('RB2', () => {
+  // MUTATION: remove the per-operand handed-file skip before cat bytes / head-tail lines.
+  const f = handedFixture(), gate = gateFor(f)
+  for (const command of ['cat', 'head', 'tail']) {
+    const input = { command: command + " '" + f.brief + "'" }, before = JSON.stringify(input)
+    assert.equal(call(gate, 'bash', input, f.root), undefined)
+    unchanged(input, before)
+  }
+})
+
+test('RB3', () => {
+  // MUTATION: disable the direct real-parent exemption; decision-1.md is refused.
+  const f = handedFixture(), gate = gateFor(f)
+  const decision = join(f.taskDir, 'decision-1.md'), other = join(f.root, 'other.md')
+  writeFileSync(decision, f.short); writeFileSync(other, f.short)
+  assert.equal(call(gate, 'read', { path: decision }, f.root), undefined)
+  assert.equal(call(gate, 'read', { path: f.brief }, f.root), undefined)
+  refusal(call(gate, 'read', { path: other }, f.root), other, 400)
+  refusal(call(gate, 'bash', { command: "cat '" + other + "'" }, f.root), other, 400)
+  assert.equal(call(gate, 'bash', { command: "cat '" + f.brief + "' '" + other + "'" }, f.root)?.block, true)
+  for (const taskDir of ['', join(f.root, 'missing')]) refusal(call(gateFor(f, { taskDir }), 'read', { path: other }, f.root), other, 400)
+})
+
+test('RB4', () => {
+  // MUTATION: widen direct-parent equality to startsWith; subdir and sibling become exempt.
+  const f = handedFixture(), gate = gateFor(f)
+  const paths = [join(f.root,'elsewhere','task','big.md'), join(f.taskDir+'-x','big.md'), join(f.taskDir,'nested','big.md'), join(f.root,'other.md'), join(f.root,'ignored.md')]
+  for (const path of paths) { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, f.short) }
+  const link = join(f.taskDir, 'link.md'); symlinkSync(paths[3], link); paths.push(link)
+  writeFileSync(join(f.taskDir,'planner-assignment-r9.md'), 'Not a source brief: ' + paths[4] + '.\n')
+  for (const path of paths) refusal(call(gate, 'read', { path }, f.root), path, 400)
+  assert.equal(call(gate, 'read', { path: f.brief }, f.root), undefined)
+  writeFileSync(join(f.taskDir, 'nested', 'planner-assignment-r4.md'), 'Planner source brief: ' + paths[4] + '.\n')
+  refusal(call(gate, 'read', { path: paths[4] }, f.root), paths[4], 400)
+})
+
+test('RB5', () => {
+  // MUTATION: recognise only r1 wrappers; the post-construction r2 brief is refused.
+  const f = handedFixture(), gate = gateFor(f), second = join(f.root, 'second.md')
+  writeFileSync(second, f.long)
+  const wrapper = join(f.taskDir, 'planner-assignment-r2.md')
+  writeFileSync(wrapper, 'Read the current planner brief at ' + second + '.\n')
+  assert.equal(call(gate, 'read', { path: second }, f.root), undefined)
+  rmSync(wrapper)
+  refusal(call(gate, 'read', { path: second }, f.root), second, 400)
+  assert.equal(call(gate, 'read', { path: f.brief }, f.root), undefined)
 })
 
 test('RB6', () => {

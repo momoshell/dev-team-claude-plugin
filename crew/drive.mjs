@@ -5262,6 +5262,17 @@ function attachResumeCheckpoint(result, ctx, io) {
 //        journal: <real journal.jsonl path (lives in the CREW dir)>,
 //        env?: <environment for the suite-slot admission; defaults to process.env>,
 //        limits?, waits?: {<role>: <seconds>} — the per-role seat wait budget overlay (resolveWaits/waitsCtx above) }
+export function settleRetriedCold(io, retried) {
+  if (!retried?.kept) return retried
+  if (typeof io.removeCold !== 'function') return { ...retried, removed: false, remove_why: 'this io provides no removeCold' }
+  try {
+    io.removeCold(retried.kept)
+    return { ...retried, kept: null, removed: true }
+  } catch (error) {
+    return { ...retried, removed: false, remove_why: error?.message ?? String(error) }
+  }
+}
+
 // io:  { assign({role, briefFile, note}) -> {id, returnPath},
 //        wait(returnPath, timeoutS) -> envelope|null,
 //        writeFile(path, content) -> void, readFile(path) -> string|null,
@@ -5273,6 +5284,8 @@ function attachResumeCheckpoint(result, ctx, io) {
 //                                            // OPTIONAL: run cmd in a FRESH checkout
 //                                            // cut at a NEUTRAL path; THROWS rather
 //                                            // than report a verdict it could not take
+//        removeCold(path) -> void,             // OPTIONAL; THROWS if removal fails;
+//                                            // driver settlement is best-effort and never load-bearing
 //        reseat(role, {reason}) -> closed result // OPTIONAL, never load-bearing
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        fingerprintTree(path) -> typed measured/unmeasurable tree witness, // OPTIONAL
@@ -8060,7 +8073,7 @@ function runTask(ctx, io, crash) {
         coldSuite = cold?.ok
           ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
           : { verdict: 'red', path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
-        if (retriedResumeCold) coldSuite.retried = retriedResumeCold
+        if (retriedResumeCold) coldSuite.retried = cold?.ok ? settleRetriedCold(resumeIo, retriedResumeCold) : retriedResumeCold
       } catch (error) { coldSuite = { verdict: 'unproven', why: error?.message ?? String(error) } }
     }
     stageComplete()
@@ -12660,7 +12673,7 @@ function runTask(ctx, io, crash) {
       coldSuite = cold.ok
         ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
-      if (retriedCold) coldSuite.retried = retriedCold
+      if (retriedCold) coldSuite.retried = cold.ok ? settleRetriedCold(io, retriedCold) : retriedCold
       resumeColdSuite = coldSuite
     } catch (err) {
       coldSuite = { verdict: 'unproven', why: err.message }

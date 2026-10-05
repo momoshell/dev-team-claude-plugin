@@ -146,7 +146,7 @@ const invocationGitCanned = (original) => {
   return { ok: true, status: 0, output: '', stderr: '' }
 }
 function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, documentDiff = '', emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false, now = () => 0, slots = null, diffListing = '', diffHunks = {}, diffReports = [], fenceBases = {}, fenceDiffs = {}, baseBlobs = {}, spanDiffs = {}, onRun = null, onCommit = null, commitResults = null, screener = null, stats = null, lstats = null, fingerprints = null, dispatchTransport = () => 'headless-rpc' } = {}) {
-  const calls = { order: [], sequence: [], dispatch: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
+  const calls = { order: [], sequence: [], dispatch: [], trace: [], assign: [], run: [], diffRuns: [], fenceShows: [], fenceDiffs: [], diffInventory: [], diffConfigs: [], runClean: [], runCold: [], removeCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], checkoutLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], sleeps: [], slotFactories: [], files, screener: { models: [], diffs: [], children: [] } }
   const counts = {}; let seq = 0
 
   const scriptedFence = (table, cmd, index, fallback) => {
@@ -312,6 +312,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     }
   }
   if (cold !== null) {
+    io.removeCold = (path) => { calls.removeCold.push(path) }
     io.runCold = (cmd, names) => {
       calls.order.push('runCold')
       calls.runCold.push({ cmd, names })

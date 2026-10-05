@@ -13,7 +13,8 @@ import {
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
-import { JOURNAL_CHANNEL_NAMES } from './drive.mjs'
+import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, driveTask, resumeTask, resumeWorktreeSha256, settleRetriedCold } from './drive.mjs'
+import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, fakeIo } from './drive-fixtures.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 import { noncanonicalJournalSinks } from './drive-fixtures.mjs'
@@ -1069,6 +1070,174 @@ test('runCold removes a green checkout and keeps a red checkout for inspection',
       if (red.kept) git(fixture.checkout, 'worktree', 'remove', '--force', red.kept)
     }
   })
+})
+
+test('removeCold removes a failed checkout and its Git registration', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const io = makeIo(fixture)
+    const red = io.runCold("printf 'diagnostic'; exit 3")
+    try {
+      assert.equal(red.ok, false)
+      assert.equal(existsSync(red.kept), true)
+      io.removeCold(red.kept)
+      assert.equal(existsSync(red.kept), false)
+      assert.equal(git(fixture.checkout, 'worktree', 'list', '--porcelain').includes(red.kept), false)
+    } finally {
+      if (red.kept && existsSync(red.kept)) git(fixture.checkout, 'worktree', 'remove', '--force', red.kept)
+    }
+  })
+})
+
+test('removeCold failures retain the registered path and available diagnostics', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    for (const result of [
+      { status: 1, stderr: 'denied' },
+      { status: null, error: Object.assign(new Error('permission denied'), { code: 'EPERM' }) },
+      { status: null, signal: 'SIGTERM' },
+      { status: 1, stdout: '', stderr: '' },
+    ]) {
+      const seen = []
+      const io = makeIo(fixture, { spawnSync: (_bin, argv) => { seen.push(argv); return result } })
+      const path = '/tmp/space ; $path'
+      assert.throws(() => io.removeCold(path), (error) => (
+        error.message.includes(path)
+        && (!result.stderr || error.message.includes(result.stderr))
+        && (!result.error || error.message.includes(result.error.message))
+        && (!result.signal || error.message.includes(result.signal))
+      ))
+      assert.deepEqual(seen[0].slice(-2), ['--force', path])
+    }
+  })
+})
+
+// MUTATION RV1-1: reverse settleRetriedCold's no-kept guard and this test calls removeCold with no path.
+test('retried cold cleanup stays best-effort across main and resumed verification', () => {
+  const retried = { path: '/direct/first', kept: '/direct/kept', output: 'evidence' }
+  const unchanged = { path: '/direct/none', kept: null, output: 'evidence' }
+  assert.strictEqual(settleRetriedCold({ removeCold() { throw new Error('must not run') } }, unchanged), unchanged)
+  assert.deepEqual(settleRetriedCold({}, retried), { ...retried, removed: false, remove_why: 'this io provides no removeCold' })
+  const directCalls = []
+  assert.deepEqual(
+    settleRetriedCold({ removeCold(path) { directCalls.push(path) } }, retried),
+    { path: '/direct/first', kept: null, removed: true, output: 'evidence' },
+  )
+  assert.deepEqual(directCalls, ['/direct/kept'])
+  assert.deepEqual(
+    settleRetriedCold({ removeCold() { throw new Error('cleanup unavailable') } }, retried),
+    { ...retried, removed: false, remove_why: 'cleanup unavailable' },
+  )
+  assert.deepEqual(
+    settleRetriedCold({ removeCold() { throw 'interrupted cleanup' } }, retried),
+    { ...retried, removed: false, remove_why: 'interrupted cleanup' },
+  )
+
+  const runMain = (outcomes, remover = undefined) => {
+    const io = closeoutIo()
+    const removed = []
+    const original = io.runCold
+    let attempt = 0
+    io.runCold = (cmd, names) => {
+      original(cmd, names)
+      const outcome = outcomes[attempt++]
+      if (outcome instanceof Error) throw outcome
+      return outcome
+    }
+    if (remover === null) delete io.removeCold
+    else io.removeCold = (path) => {
+      removed.push(path)
+      if (typeof remover === 'function') return remover(path)
+    }
+    return { result: driveTask(CTX, io), removed }
+  }
+
+  const checkpointFile = { path: 'a.mjs', state: 'present', bytes: `file:-:${'a'.repeat(64)}` }
+  const checkpoint = {
+    version: RESUME_CHECKPOINT_VERSION, kind: 'suite', frozen_where: 'cold-suite', head_oid: 'abc1234',
+    tree: { index_oid: 'tree1234', files: [checkpointFile], worktree_sha256: resumeWorktreeSha256([checkpointFile]) },
+    accepted_scope: ['a.mjs'],
+    returns: {
+      planner: { status: 'done', role: 'planner', artifacts: [], details: {} },
+      builder: { status: 'done', role: 'builder', artifacts: [], details: {} },
+      reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} },
+    },
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: 'abc1234', pending: false, files: ['a.mjs'], message: 'feat: resume', subject: 'feat: resume' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: '/tmp/fake-task/gate.mjs', summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'custom-suite', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'commit'], chunk: null,
+  }
+  const runResume = (outcomes, remover = undefined) => {
+    const io = fakeIo({
+      runs: {
+        'gate-cmd': { ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":1,"failed":0,"errored":0}` },
+        'custom-suite': { ok: true, output: '# pass 1\\n# fail 0\\n' },
+      },
+    })
+    const removed = []
+    let attempt = 0
+    io.runCold = (cmd, names) => {
+      io.calls.runCold.push({ cmd, names })
+      const outcome = outcomes[attempt++]
+      if (outcome instanceof Error) throw outcome
+      return outcome
+    }
+    if (remover === null) delete io.removeCold
+    else io.removeCold = (path) => {
+      removed.push(path)
+      if (typeof remover === 'function') return remover(path)
+    }
+    return {
+      result: resumeTask({ ...CTX, task: 'resume-cold-retry', suite: 'ignored', files_in_scope: ['a.mjs'] }, io, checkpoint),
+      removed,
+    }
+  }
+
+  for (const [label, run, prefix] of [['main', runMain, '/main'], ['resume', runResume, '/resume']]) {
+    const success = run([
+      { ok: false, path: `${prefix}/first`, kept: `${prefix}/kept`, output: 'x'.repeat(2005) },
+      { ok: true, path: `${prefix}/second`, kept: null, output: '' },
+    ])
+    assert.equal(success.result.status, 'done', label)
+    assert.deepEqual(success.removed, [`${prefix}/kept`], label)
+    assert.deepEqual(success.result.details.cold_suite.retried, { path: `${prefix}/first`, kept: null, removed: true, output: 'x'.repeat(2000) }, label)
+
+    const missing = run([
+      { ok: false, path: `${prefix}/missing`, kept: `${prefix}/missing-kept`, output: 'red' },
+      { ok: true, path: `${prefix}/second`, kept: null, output: '' },
+    ], null)
+    assert.equal(missing.result.status, 'done', label)
+    assert.deepEqual(missing.removed, [], label)
+    assert.deepEqual(missing.result.details.cold_suite.retried, {
+      path: `${prefix}/missing`, kept: `${prefix}/missing-kept`, output: 'red',
+      removed: false, remove_why: 'this io provides no removeCold',
+    }, label)
+
+    const throwing = run([
+      { ok: false, path: `${prefix}/throw`, kept: `${prefix}/throw-kept`, output: 'red' },
+      { ok: true, path: `${prefix}/second`, kept: null, output: '' },
+    ], () => { throw new Error('cleanup unavailable') })
+    assert.equal(throwing.result.status, 'done', label)
+    assert.deepEqual(throwing.removed, [`${prefix}/throw-kept`], label)
+    assert.equal(throwing.result.details.cold_suite.retried.remove_why, 'cleanup unavailable', label)
+    assert.equal(throwing.result.details.cold_suite.retried.kept, `${prefix}/throw-kept`, label)
+
+    const redRed = run([
+      { ok: false, path: `${prefix}/red-1`, kept: `${prefix}/red-kept-1`, output: 'red' },
+      { ok: false, path: `${prefix}/red-2`, kept: `${prefix}/red-kept-2`, output: 'red' },
+    ])
+    assert.equal(redRed.result.status, 'escalation', label)
+    assert.deepEqual(redRed.removed, [], label)
+
+    const retryThrow = run([
+      { ok: false, path: `${prefix}/retry-throw`, kept: `${prefix}/retry-throw-kept`, output: 'red' },
+      new Error('retry interrupted'),
+    ])
+    assert.equal(retryThrow.result.details.cold_suite.verdict, 'unproven', label)
+    assert.deepEqual(retryThrow.removed, [], label)
+
+    const firstGreen = run([{ ok: true, path: `${prefix}/green`, kept: null, output: '' }])
+    assert.equal(firstGreen.result.status, 'done', label)
+    assert.deepEqual(firstGreen.removed, [], label)
+  }
 })
 
 test('runCold throws when git worktree add fails', () => {

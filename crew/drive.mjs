@@ -10,7 +10,7 @@ import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeCo
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
+import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
@@ -13731,14 +13731,21 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   const maxScans = Math.max(1, Math.ceil(ceiling / interval) + 1)
   let depth = null, lockContended = 0, lockHolder = null
   let handle = null
+  let unresolvableWaits = 0
   for (let scan = 0; scan < maxScans; scan += 1) {
-    // NO catch here, deliberately. A store that cannot answer is not admission:
-    // swallowing an unresolvable claim would let every affected lane exceed K at once,
-    // exactly when the pool cannot protect the host. The store exposes that state as a
-    // throw on purpose (crew/reclaim.mjs:1260-1264) and #825's wrapper does not swallow
-    // it either (crew/host-load.mjs:115-133). Only a COMPLETED wait that reaches the
-    // ceiling runs unslotted.
-    const attempt = pool.acquire({ owner }); if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
+    // A lost lock race is a wait; unresolvable waits are capped at SLOT_UNRESOLVABLE_WAIT_MAX.
+    // Beyond the cap the original error escalates; any other throw, including slot-claim-unresolvable,
+    // is not admission and still escalates.
+    let attempt
+    try {
+      attempt = pool.acquire({ owner }); unresolvableWaits = 0
+    } catch (error) {
+      if (error?.stage !== 'reclaim-lock-unavailable') throw error
+      if (error.reason === 'lost') unresolvableWaits = 0
+      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) unresolvableWaits += 1
+      else throw error
+    }
+    if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
     if (attempt?.handle) { handle = attempt.handle; break }
     depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
     // The driver is ALIVE and this completed scan is the observation that proves it.

@@ -3630,6 +3630,83 @@ test('LW5', () => {
   assert.equal(rows[0].lock_holder, null)
 })
 
+const phaseLockError = (reason, message = reason) => Object.assign(new Error(message), { stage: 'reclaim-lock-unavailable', reason })
+const phaseSequence = ({ phase = 'gate', sequence, ceiling = 6000, interval = 2000 } = {}) => {
+  let clock = 0, attempts = 0, runs = 0, releases = 0
+  const sleeps = [], rows = [], beats = [], handle = sequence.find(item => !(item instanceof Error) && item?.handle)?.handle
+  const pool = { acquire() { attempts++; const item = sequence[Math.min(attempts - 1, sequence.length - 1)]; if (item instanceof Error) throw item; return item }, release(value) { assert.equal(value, handle); releases++ } }
+  const result = withPhaseSlot({ pool, phase, owner: 'phase-owner', now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling, interval, log(row) { rows.push(row) }, emit(event) { beats.push(event) } }, () => { runs++; return 'phase-ran' })
+  return { result, attempts, runs, releases, sleeps, rows, beats }
+}
+
+test('PR1', () => {
+  const out = phaseSequence({ sequence: [phaseLockError('lost'), { handle: { id: 'phase-handle' } }] })
+  assert.equal(out.result, 'phase-ran'); assert.equal(out.runs, 1); assert.equal(out.releases, 1)
+  assert.equal(out.attempts, 2); assert.deepEqual(out.sleeps, [2000]); assert.equal(out.rows.length, 1); assert.equal(out.rows[0].slotted, true)
+})
+test('PR2', () => {
+  const failure = Object.assign(phaseLockError('unresolvable', 'slot claim failed'), { stage: 'slot-claim-unresolvable' })
+  let calls = 0, runs = 0
+  const pool = { acquire() { calls++; if (calls === 1) throw phaseLockError('lost'); throw failure }, release() {} }
+  assert.throws(() => withPhaseSlot({ pool, phase: 'warm', owner: 'o', now: () => calls * 10, sleep() {}, ceiling: 1000, interval: 10 }, () => { runs++ }), /slot claim failed/)
+  assert.equal(runs, 0); assert.equal(calls, 2)
+})
+test('PR3', () => {
+  const out = phaseSequence({ sequence: [phaseLockError('lost')], ceiling: 6000 })
+  assert.equal(out.runs, 1); assert.equal(out.releases, 0); assert.equal(out.rows.length, 1)
+  assert.deepEqual(out.rows[0], { at: 6000, event: PHASE_SLOT_WAIT_EVENT, kind: 'gate', queue_depth: null, waited_ms: 6000, slotted: false, lock_contended: 0, lock_holder: null, channel: 'operational' })
+})
+test('PR4', () => {
+  const same = phaseLockError('unresolvable')
+  let clock = 0, attempts = 0
+  const sleeps = [], pool = { acquire() { attempts++; throw same }, release() { assert.fail('unexpected release') } }
+  assert.throws(() => withPhaseSlot({ pool, phase: 'cold', owner: 'o', now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling: 20000, interval: 2000 }, () => assert.fail('unexpected phase')), e => e === same)
+  assert.equal(attempts, 4); assert.deepEqual(sleeps, [2000, 2000, 2000])
+})
+test('PR5', () => {
+  const out = phaseSequence({ phase: 'warm', sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), { handle: { id: 'phase-handle' } }] })
+  assert.equal(out.attempts, 3); assert.equal(out.runs, 1); assert.equal(out.releases, 1); assert.equal(out.rows.length, 1); assert.equal(out.rows[0].slotted, true)
+})
+test('D3 returned phase acquisitions reset the unresolvable streak', () => {
+  for (const returned of [{ waiting: true, depth: 0 }, null, undefined]) {
+    const out = phaseSequence({ sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), returned, phaseLockError('unresolvable'), phaseLockError('unresolvable'), { handle: { id: 'phase-handle' } }], ceiling: 12000 })
+    assert.equal(out.attempts, 6)
+  }
+})
+test('D4 lost phase errors reset the unresolvable streak', () => {
+  const out = phaseSequence({ sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), phaseLockError('lost'), phaseLockError('unresolvable'), phaseLockError('unresolvable'), { handle: { id: 'phase-handle' } }], ceiling: 12000 })
+  assert.equal(out.attempts, 6)
+})
+test('D6 three unresolvable phase waits preserve unslotted admission row', () => {
+  const out = phaseSequence({ sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), phaseLockError('unresolvable'), { waiting: true, depth: 1 }], ceiling: 6000 })
+  assert.equal(out.runs, 1); assert.equal(out.attempts, 4); assert.equal(out.rows[0].slotted, false); assert.equal(out.rows[0].queue_depth, 1)
+})
+test('D8 counted throws heartbeat across all suite phases and frozen scan bounds', () => {
+  for (const phase of ['gate', 'suite-warm', 'suite-cold']) {
+    const out = phaseSequence({ phase, sequence: [phaseLockError('lost')], ceiling: 20, interval: 10 })
+    assert.equal(out.beats.length, 3); assert.ok(out.beats.every(event => event.kind === 'heartbeat'))
+  }
+})
+test('suite slot driver retries a lost lock race before admission', () => {
+  let calls = 0, released = 0
+  const handles = []
+  const pool = { acquire() { calls++; if (calls === 1) throw phaseLockError('lost'); const handle = { id: `integration-${calls}` }; handles.push(handle); return { handle } }, release(handle) { assert.ok(handles.includes(handle)); released++ } }
+  const io = closeoutIo({ slots: () => pool })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.run.some(({ cmd }) => cmd === 'suite-cmd'))
+  assert.ok(calls >= 2); assert.ok(released >= 1)
+})
+test('suite slot driver escalates the original unresolvable lock error', () => {
+  const failure = phaseLockError('unresolvable', 'original unresolvable claim')
+  const io = closeoutIo({ slots: () => ({ acquire() { throw failure }, release() { assert.fail('unexpected release') } }) })
+  const result = driveTask(slotCtx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'reclaim-lock-unavailable')
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'suite-cmd'), false)
+  assert.match(result.summary, /original unresolvable claim/)
+})
+
 test('LW6', () => {
   const dir = scratchDir('lw6-drive-')
   let now = 0

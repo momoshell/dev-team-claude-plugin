@@ -90,6 +90,7 @@ export function assertHostQuiet(record) {
 export const SUITE_SLOT_KIND = 'suite'
 export const SLOT_WAIT_INTERVAL_MS = 2000
 export const SLOT_WAIT_CEILING_MS = 30 * 60 * 1000
+export const SLOT_UNRESOLVABLE_WAIT_MAX = 3
 
 // crew/reclaim.mjs's idiom, not a new one: a synchronous sleep with no busy
 // wait. It is duplicated rather than imported because reclaim does not export it.
@@ -113,8 +114,17 @@ function acquireSlot({ pool, owner, now, sleep, ceiling }) {
   const started = now()
   let depth = null
   let waits = 0
+  let unresolvableWaits = 0
   for (;;) {
-    const attempt = pool.acquire({ owner })
+    let attempt
+    try {
+      attempt = pool.acquire({ owner }); unresolvableWaits = 0
+    } catch (error) {
+      if (error?.stage !== 'reclaim-lock-unavailable') throw error
+      if (error.reason === 'lost') unresolvableWaits = 0
+      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) unresolvableWaits += 1
+      else throw error
+    }
     if (attempt?.handle) return { handle: attempt.handle, slot: attempt.slot ?? null, waits, depth, waitedMs: now() - started }
     depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
     waits += 1

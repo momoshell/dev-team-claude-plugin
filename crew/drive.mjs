@@ -8594,6 +8594,23 @@ function runTask(ctx, io, crash) {
       }
       laneDeferred = laneResolved.deferred ?? []
     }
+    const roundCoverage = acceptanceCoverage(briefText, env.details?.mutations ?? [])
+    if (roundCoverage.status === 'measured' && roundCoverage.uncovered.length > 0) {
+      if (round >= planRounds()) {
+        stageComplete()
+        io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...roundCoverage }))
+        return escalate('plan', acceptanceCoverageWhy(roundCoverage), env.artifacts || [])
+      }
+      io.log(recordRow({ at: io.now(), event: 'acceptance-coverage-bounce', round, uncovered: roundCoverage.uncovered, extra: roundCoverage.extra }))
+      failureUpgrade('plan', 'planner')
+      const b = art(`plan-bounce-r${round}.md`)
+      io.writeFile(b, acceptanceCoverageBounceLines(round, roundCoverage, ctx.briefFile).join('\n'))
+      planBrief = b
+      planBounceWhy = acceptanceCoverageWhy(roundCoverage)
+      planEnv = null
+      stageComplete()
+      continue
+    }
     planBounceWhy = null
     planEnv = env
     try {
@@ -8916,10 +8933,7 @@ function runTask(ctx, io, crash) {
     const coverage = acceptanceCoverage(briefText, mutations)
     io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...coverage }))
     if (coverage.status === 'measured' && coverage.uncovered.length > 0) {
-      const waived = coverage.waived.length > 0 ? `; ${coverage.waived.join(', ')} declared only an exemption` : ''
-      return escalate('plan',
-        `the plan's gate checks answer ${coverage.covered.length} of ${coverage.ids.length} acceptance ids; ${coverage.uncovered.join(', ')} ${coverage.uncovered.length === 1 ? 'has' : 'have'} no check${waived} — fix the plan, not the build`,
-        planEnv.artifacts || [])
+      return escalate('plan', acceptanceCoverageWhy(coverage), planEnv.artifacts || [])
     }
   }
   // Chunked lanes validate the chunk program against the retained parent scope,
@@ -15995,4 +16009,21 @@ export function steppedBudget({ buildRounds, steps }) {
 
 export function stepAllowance({ total, spent, later }) {
   return total - spent - later * STEP_ALLOWANCE
+}
+
+export function acceptanceCoverageWhy(coverage) {
+  const waived = coverage.waived.length > 0 ? `; ${coverage.waived.join(', ')} declared only an exemption` : ''
+  return `the plan's gate checks answer ${coverage.covered.length} of ${coverage.ids.length} acceptance ids; ${coverage.uncovered.join(', ')} ${coverage.uncovered.length === 1 ? 'has' : 'have'} no check${waived} — fix the plan, not the build`
+}
+
+export function acceptanceCoverageBounceLines(round, coverage, briefFile) {
+  return [
+    `# Acceptance coverage miss — plan round ${round}`,
+    '',
+    `Reason: ${acceptanceCoverageWhy(coverage)}`,
+    `Acceptance ids: ${coverage.ids.join(', ')}`,
+    `Uncovered ids: ${coverage.uncovered.join(', ')}`,
+    `Extra checks: ${coverage.extra.length > 0 ? coverage.extra.join(', ') : 'none'}`,
+    `Original brief: ${briefFile}`,
+  ]
 }

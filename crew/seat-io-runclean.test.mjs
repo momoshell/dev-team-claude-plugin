@@ -13,12 +13,79 @@ import {
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
-import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, resumeTask, resumeWorktreeSha256, settleRetriedCold } from './drive.mjs'
-import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, driveTask, fakeIo } from './drive-fixtures.mjs'
+import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, resumeTask, resumeWorktreeSha256, settleRetriedCold, SENSITIVITY_FLOOR } from './drive.mjs'
+import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, driveTask, fakeIo, protectedPlanEnv, buildEnv, reviewEnv, RED } from './drive-fixtures.mjs'
 import { forAll, git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 import { driveJournalSites, noncanonicalJournalSinks } from './drive-fixtures.mjs'
 import { tokenizeJs, blankJsComments } from './js-tokens.mjs'
+
+function acpFloorFixture(tier) {
+  const roster = JSON.parse(readFileSync(join(ROOT, 'crew/roster.json'), 'utf8'))
+  const cell = roster.tiers[tier].reviewer
+  const root = scratchDir(`acp-floor-${tier}-`)
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir)
+  mkdirSync(paths.returnsDir)
+  const member = { ...cell, transport: 'acp', model: cell.id }
+  const crew = { tier, members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  const io = seatIo(crew, paths, root, null, { reviewer: { adapter: {} } }, {}, {
+    readRoster: () => roster,
+    logLine: () => {},
+  })
+  return { crew, io, member, seat: crew.seats.reviewer }
+}
+
+// Mutation: excluding ACP from the same-floor no-op makes this real reseat refuse.
+test('AR1', () => {
+  const { crew, io, member, seat } = acpFloorFixture('judge')
+  const memberBefore = structuredClone(member)
+  const seatBefore = structuredClone(seat)
+  const result = io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.equal(result.applied, true)
+  assert.equal(result.already, true)
+  assert.deepEqual(member, memberBefore)
+  assert.deepEqual(seat, seatBefore)
+  assert.equal(crew.members.reviewer, member)
+  assert.equal(crew.seats.reviewer, seat)
+})
+
+// Mutation: excluding ACP from the same-floor no-op leaves the protected drive lane unable to satisfy its floor.
+test('AR2', () => {
+  const { io: acpIo } = acpFloorFixture('judge')
+  const driveIo = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(undefined, 'proved'), 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['crew/drive.mjs'] } }), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    files: { [`${CTX.checkout}/crew/drive.mjs`]: 'true' },
+    changed: ['crew/drive.mjs'],
+    reseat: (...args) => acpIo.reseat(...args),
+  })
+  const result = driveTask(CTX, driveIo)
+  assert.equal(result.status, 'done')
+  assert.notEqual(result.status, 'escalation')
+  const rows = result.details.modifiers.filter(({ modifier }) => modifier === SENSITIVITY_FLOOR)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].outcome, 'applied')
+})
+
+test('ACP reseat still refuses different cells and requests without a tier', () => {
+  const exactWhy = 'ACP seat reviewer cannot be reseated because its live client cannot change models in-session'
+  const mechanical = acpFloorFixture('mechanical')
+  const mechanicalMember = structuredClone(mechanical.member)
+  const mechanicalSeat = structuredClone(mechanical.seat)
+  const different = mechanical.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.deepEqual([different.applied, different.reason, different.to, different.why], [false, 'transport', null, exactWhy])
+  assert.deepEqual(mechanical.member, mechanicalMember)
+  assert.deepEqual(mechanical.seat, mechanicalSeat)
+
+  const judge = acpFloorFixture('judge')
+  const judgeMember = structuredClone(judge.member)
+  const judgeSeat = structuredClone(judge.seat)
+  const untargeted = judge.io.reseat('reviewer', { reason: 'lane' })
+  assert.deepEqual([untargeted.applied, untargeted.reason, untargeted.to, untargeted.why], [false, 'transport', null, exactWhy])
+  assert.deepEqual(judge.member, judgeMember)
+  assert.deepEqual(judge.seat, judgeSeat)
+})
 
 const PANE_CAPTURE = String.raw`{"parentUuid":"c828178b-a377-46d3-b09e-bb9bcb7fd718","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSPg8agTgq9MxjMHBVf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01GSd211FY8ZKTrthuDHX1Er","name":"Bash","input":{"command":"sed -n '6060,6135p' crew/drive.mjs; echo \"=== GATE ===\"; cat /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope/task/gate.mjs | head -60","description":"Read post-green proof loop and gate checks"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":35997,"cache_read_input_tokens":0,"output_tokens":1008,"output_tokens_details":{"thinking_tokens":821},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":35997,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":1008,"cache_read_input_tokens":0,"cache_creation_input_tokens":35997,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":35997},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSPfVP8MYSnfLQABzQz","type":"assistant","uuid":"7d518552-0575-431b-aa4a-bc10eae84893","timestamp":"2026-09-08T18:23:16.916Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}
 {"parentUuid":"7eb9c965-2cbc-4368-b584-d55b189d37f6","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSQkzoL21CsnWAyS3pq","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01BC9djpCppspgFjAo738imQ","name":"Bash","input":{"command":"cd /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope; node -p \"const e=require('./returns/d3.planner.json'); JSON.stringify({mut:(e.details.mutations||[]).map(m=>({check:m.check,file:m.file,find:(m.find||'').slice(0,60)})), files:e.details.files_in_scope},null,1)\"","description":"Inspect planner envelope mutations and scope"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":3732,"cache_read_input_tokens":35997,"output_tokens":787,"output_tokens_details":{"thinking_tokens":572},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":3732,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":787,"cache_read_input_tokens":0,"cache_creation_input_tokens":3732,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":3732},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSQkBgmugDqLmrNtanB","type":"assistant","uuid":"82ac935a-e9de-4bb6-beb6-ef9ba41718c3","timestamp":"2026-09-08T18:23:29.284Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}`

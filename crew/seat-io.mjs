@@ -3580,7 +3580,6 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           model: cell?.model ?? null,
         })
         from = snapshot(live)
-        if (m.transport === ACP_TRANSPORT) return { applied: false, reason: 'transport', why: `ACP seat ${roleName} cannot be reseated because its live client cannot change models in-session`, from, to: null }
         const floorTier = typeof options.tier === 'string' && options.tier ? options.tier : null
         let floorTarget = null
         let roster
@@ -3609,6 +3608,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             }
           }
         }
+        if (m.transport === ACP_TRANSPORT) return { applied: false, reason: 'transport', why: `ACP seat ${roleName} cannot be reseated because its live client cannot change models in-session`, from, to: null }
         if (m.transport !== HEADLESS_TRANSPORT && m.transport !== HEADLESS_RPC_TRANSPORT) {
           const why = m.transport === DEFAULT_TRANSPORT
             ? 'a pane seat bakes model and effort into its launch command at boot (paneCommand in crew/crew.mjs); its reassign: true capability means give a settled seat NEW WORK, never change its cell'

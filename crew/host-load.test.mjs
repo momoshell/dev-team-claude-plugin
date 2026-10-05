@@ -231,6 +231,15 @@ test('SR5', () => {
   const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), { handle: { token: 'host-handle' }, slot: 's' }] })
   assert.equal(out.attempts, 3); assert.equal(out.runs, 1); assert.equal(out.releases, 1)
 })
+// Mutation SR6: running unslotted after an unresolvable ceiling scan exceeds K on an unknown pool.
+test('SR6 an unresolvable scan at the ceiling escalates instead of running unslotted', () => {
+  const final = lockError('unresolvable')
+  const sleeps = []; let clock = 0, attempts = 0, runs = 0
+  const sequence = [{ waiting: true, depth: 1 }, { waiting: true, depth: 1 }, final]
+  const pool = { acquire() { const item = sequence[attempts++]; if (item instanceof Error) throw item; return item }, release() { assert.fail('unexpected release') } }
+  assert.throws(() => withSuiteSlot({ owner: 'o', env: { CREW_SUITE_SLOTS: '1' }, slots: () => pool, now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling: 4000 }, () => { runs++ }), e => e === final)
+  assert.equal(attempts, 3); assert.equal(runs, 0); assert.deepEqual(sleeps, [2000, 2000])
+})
 test('H3 returned host acquisitions reset the error streak', () => {
   for (const returned of [{ waiting: true, depth: 0 }, null, undefined]) {
     const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), returned, lockError('unresolvable'), lockError('unresolvable'), { handle: { token: 'host-handle' } }], ceiling: 12000 })

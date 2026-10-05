@@ -3667,6 +3667,15 @@ test('PR5', () => {
   const out = phaseSequence({ phase: 'warm', sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), { handle: { id: 'phase-handle' } }] })
   assert.equal(out.attempts, 3); assert.equal(out.runs, 1); assert.equal(out.releases, 1); assert.equal(out.rows.length, 1); assert.equal(out.rows[0].slotted, true)
 })
+// Mutation PR6: admitting the phase unslotted after an unresolvable ceiling scan exceeds K on an unknown pool.
+test('PR6 an unresolvable scan at the ceiling escalates instead of running the phase unslotted', () => {
+  const final = phaseLockError('unresolvable')
+  let clock = 0, attempts = 0, runs = 0
+  const sleeps = [], rows = [], sequence = [{ waiting: true, depth: 1 }, { waiting: true, depth: 1 }, final]
+  const pool = { acquire() { const item = sequence[attempts++]; if (item instanceof Error) throw item; return item }, release() { assert.fail('unexpected release') } }
+  assert.throws(() => withPhaseSlot({ pool, phase: 'gate', owner: 'o', now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling: 4000, interval: 2000, log(row) { rows.push(row) } }, () => { runs++ }), e => e === final)
+  assert.equal(attempts, 3); assert.equal(runs, 0); assert.deepEqual(sleeps, [2000, 2000]); assert.deepEqual(rows, [])
+})
 test('D3 returned phase acquisitions reset the unresolvable streak', () => {
   for (const returned of [{ waiting: true, depth: 0 }, null, undefined]) {
     const out = phaseSequence({ sequence: [phaseLockError('unresolvable'), phaseLockError('unresolvable'), returned, phaseLockError('unresolvable'), phaseLockError('unresolvable'), { handle: { id: 'phase-handle' } }], ceiling: 12000 })

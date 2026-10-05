@@ -13732,17 +13732,20 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   let depth = null, lockContended = 0, lockHolder = null
   let handle = null
   let unresolvableWaits = 0
+  // An unresolvable final scan leaves the pool state unknown; it escalates rather than
+  // admitting the phase unslotted (see acquireSlot in crew/host-load.mjs).
+  let unresolved = null
   for (let scan = 0; scan < maxScans; scan += 1) {
     // A lost lock race is a wait; unresolvable waits are capped at SLOT_UNRESOLVABLE_WAIT_MAX.
     // Beyond the cap the original error escalates; any other throw, including slot-claim-unresolvable,
     // is not admission and still escalates.
     let attempt
     try {
-      attempt = pool.acquire({ owner }); unresolvableWaits = 0
+      attempt = pool.acquire({ owner }); unresolvableWaits = 0; unresolved = null
     } catch (error) {
       if (error?.stage !== 'reclaim-lock-unavailable') throw error
-      if (error.reason === 'lost') unresolvableWaits = 0
-      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) unresolvableWaits += 1
+      if (error.reason === 'lost') { unresolvableWaits = 0; unresolved = null }
+      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) { unresolvableWaits += 1; unresolved = error }
       else throw error
     }
     if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
@@ -13767,6 +13770,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   // — hands the caller its phase back unslotted rather than failing a run that would
   // have succeeded. Nothing is held on this path, so the row is written outside any
   // release region.
+  if (!handle && unresolved) throw unresolved
   if (!handle) { recordWait(); return run() }
   // FINALLY, not a trailing statement, and the row write is INSIDE it. io.runCold THROWS
   // rather than report a verdict it could not take (crew/drive.mjs:4745) — and so does

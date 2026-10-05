@@ -11768,7 +11768,28 @@ function runTask(ctx, io, crash) {
         stageComplete()
         continue build
       }
-      if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
+      if (v === 'pass') {
+        // Review-sourced snapshots advance only on a passing review; base pins never move.
+        for (const [file, prior] of prescriptionPins) {
+          if (prior.source !== 'review') continue
+          const repin = capturePrescriptionPin(file, prior.finding, witnessTree([file]).get(file), prior.baseline_reason === 'plan-scoped')
+          if (repin.fatal) {
+            stageComplete()
+            return escalate('harden', `[witnessed-test-unverifiable] the snapshot run of ${file} could not restore it: ${repin.fatal}`)
+          }
+          if (typeof repin.bytes !== 'string') {
+            panelLog({ hardening_prescription_repinned: { finding: prior.finding, file, round: roundNo, oid: prior.oid, moved: false, source: prior.source, pins: PRESCRIPTION_PINS_FILE, baseline: prior.baseline, baseline_reason: prior.baseline_reason, kept: 'prior', why: repin.why } })
+            continue
+          }
+          prescriptionPins.set(file, repin)
+          try { persistPrescriptionPins() } catch (err) {
+            stageComplete()
+            return escalate('harden', `[witnessed-test-unverifiable] the prescription pin for ${file} could not be persisted: ${err?.message || String(err)}`)
+          }
+          panelLog({ hardening_prescription_repinned: { finding: prior.finding, file, round: roundNo, oid: repin.oid, moved: repin.oid !== prior.oid, source: repin.source, pins: PRESCRIPTION_PINS_FILE, baseline: repin.baseline, baseline_reason: repin.baseline_reason } })
+        }
+        stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build
+      }
       if (v === 'revise') {
         const fixes = applyAutoFixes(disposed.autoFix, roundNo)
         // #839 — CODE closed every finding that demanded a change, but the guard that

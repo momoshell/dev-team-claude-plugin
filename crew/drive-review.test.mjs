@@ -5222,8 +5222,8 @@ test('PT3', () => {
 // ---------------------------------------------------------------------------
 // Sub-class 1 class invariant (b1074 hand-finish, operator decision 2026-10-03, option a):
 // a pinned-test-prescription conversion is accepted only when the pinned test file ships
-// BYTE-IDENTICAL to its snapshot (its BASE version when the lane base carries it, else its
-// review-time bytes) and its checks pass against the built implementation; the prescribed
+// BYTE-IDENTICAL to its passing-review snapshot, or its immutable BASE version when the
+// lane base carries it, and its checks pass against the built implementation; the prescribed
 // new guard is a top-level test in a DIFFERENT test file the lane may write. Unreadable,
 // unrunnable or unmeasured is refused, never passed.
 const PIN_IMPORTS = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\n"
@@ -5245,7 +5245,7 @@ const pinTap = (bytes) => {
   }
   return { ok: true, output: `${lines.join('\n')}\n# pass ${n}\n# fail 0` }
 }
-function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, onRebase = null, hardened = null }) {
+function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, missingAfterReview = false, onRebase = null, hardened = null }) {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const guardAbs = `${CTX.checkout}/${guardFile}`
   const files = { ...B376_FILES, [testAbs]: PIN_WITNESSED }
@@ -5264,6 +5264,7 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
   const baseRead = io.readFile
   io.readFile = function (path) {
     if (throwAfterReview && reviewed && path === testAbs) throw new Error('EACCES: permission denied')
+    if (missingAfterReview && reviewed && path === testAbs) return null
     return baseRead.call(this, path)
   }
   const baseRun = io.run
@@ -5285,6 +5286,7 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
 }
 const pinRows = (io) => io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : [])
 const pinPreservation = (io) => io.calls.logs.flatMap((row) => row.hardening_preservation ? [row.hardening_preservation] : [])
+const pinRepins = (io) => io.calls.logs.flatMap((row) => row.hardening_prescription_repinned ? [row.hardening_prescription_repinned] : [])
 const PIN_CTX = { ...CTX, head: 'base-head', limits: { build_rounds: 2 } }
 
 // A real checkout: a git repo whose commit is the lane base, real node:test runs, so the
@@ -5392,15 +5394,121 @@ test('PB3 baseline reasons are closed and absent-from-base files use review byte
   assert.equal(readFileSync(join(run.checkout, 'a.test.mjs'), 'utf8'), explicit)
 })
 
-// Kills P12 (byte identity) and, through the suite backstop, nothing else: an edited
-// pinned file is refused even when its checks still run and pass.
-test('PV2 an edited pinned file is refused even when its checks still pass', () => {
-  const io = pinIo({ built: PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)') })
+// MUTATION: preserve the prior map entry at review pass; the reviewed fix is then refused.
+test('HP1', () => {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const io = pinIo({ built: edited })
   const result = driveTask(PIN_CTX, io)
-  assert.equal(pinRows(io).some((row) => row.finding === 'F1' && row.outcome === 'killed'), true)
-  assert.notEqual(result.status, 'done')
+  const persisted = JSON.parse(io.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`]).pins[B376_TEST_FILE]
+  const row = pinRepins(io)[0]
+  assert.equal(result.status, 'done')
+  assert.equal(pinPreservation(io).some((entry) => entry.reason === 'witnessed-test-altered'), false)
+  assert.deepEqual([row?.finding, row?.file, row?.round, row?.oid, row?.moved, row?.source, row?.pins, row?.baseline, row?.baseline_reason], ['F1', B376_TEST_FILE, 2, blobOid(edited), true, 'review', PRESCRIPTION_PINS_FILE, 'review', 'plan-scoped'])
+  assert.deepEqual([persisted?.bytes, persisted?.oid], [edited, blobOid(edited)])
+})
+
+// MUTATION: bypass accept-time verification; a post-pass edit would otherwise ship.
+test('HP2', () => {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const io = pinIo({ built: edited })
+  const log = io.log
+  io.log = function (row) {
+    log.call(this, row)
+    if (row.hardening_prescription_repinned?.round === 2) io.calls.files[CTX.checkout + '/' + B376_TEST_FILE] = edited + '// unreviewed edit\n'
+  }
+  const result = driveTask(PIN_CTX, io)
+  const row = pinRepins(io).find((entry) => entry.round === 2)
+  assert.equal(row?.moved, true)
   assert.equal(result.details.escalation.where, 'harden')
-  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its review version; it was edited/)
+  assert.equal(result.details.escalation.why, '[witnessed-test-altered] finding F1 (accept): a.test.mjs must ship byte-identical to its review version; it was edited — restore it and put the new guard in a different test file')
+})
+
+// MUTATION: force moved true; identical review bytes must remain idempotent.
+test('HP3', () => {
+  const io = pinIo({})
+  const result = driveTask(PIN_CTX, io)
+  const row = pinRepins(io).find((entry) => entry.round === 2)
+  const saved = JSON.parse(io.calls.writes[TD + '/' + PRESCRIPTION_PINS_FILE]).pins[B376_TEST_FILE]
+  assert.equal(result.status, 'done')
+  assert.deepEqual([row?.moved, row?.oid], [false, blobOid(PIN_WITNESSED)])
+  assert.deepEqual([saved?.bytes, saved?.oid], [PIN_WITNESSED, blobOid(PIN_WITNESSED)])
+})
+
+const passPersistFailure = () => {
+  const io = pinIo({})
+  const write = io.writeFile
+  let pinWrites = 0
+  io.writeFile = function (path, content) {
+    if (path === `${TD}/${PRESCRIPTION_PINS_FILE}` && ++pinWrites > 1) throw new Error('EACCES: pins denied')
+    return write.call(this, path, content)
+  }
+  return { io, result: driveTask(PIN_CTX, io) }
+}
+
+// MUTATION: corrupt an enforced audit quote; its cited source line must fail to contain it.
+test('HP5', () => {
+  const io = pinIo({})
+  const result = driveTask(PIN_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(pinRepins(io).some((row) => row.round === 2), true)
+
+  const unreadable = pinIo({ throwAfterReview: true })
+  const unreadableResult = driveTask(PIN_CTX, unreadable)
+  const unreadableSaved = JSON.parse(unreadable.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`]).pins[B376_TEST_FILE]
+  const unreadableKept = pinRepins(unreadable).find((row) => row.round === 2)
+  assert.deepEqual([unreadableSaved?.bytes, unreadableKept?.kept, unreadableKept?.why], [PIN_WITNESSED, 'prior', 'the review-time bytes were unreadable'])
+  assert.equal(unreadableResult.details.escalation.why, '[witnessed-test-unverifiable] finding F1 (accept): a.test.mjs: it could not be read: EACCES: permission denied')
+
+  const missing = pinIo({ missingAfterReview: true })
+  const missingResult = driveTask(PIN_CTX, missing)
+  const missingSaved = JSON.parse(missing.calls.writes[`${TD}/${PRESCRIPTION_PINS_FILE}`]).pins[B376_TEST_FILE]
+  const missingKept = pinRepins(missing).find((row) => row.round === 2)
+  assert.deepEqual([missingSaved?.bytes, missingKept?.kept, missingKept?.why], [PIN_WITNESSED, 'prior', 'the review-time bytes were unreadable'])
+  assert.equal(missingResult.details.escalation.why, '[witnessed-test-altered] finding F1 (accept): the built tree no longer has a.test.mjs, so its pinned checks are gone')
+
+  const fatal = pinIo({})
+  let reviewed = false
+  const fatalWait = fatal.wait
+  fatal.wait = function (returnPath, timeoutS) {
+    const env = fatalWait.call(this, returnPath, timeoutS)
+    if (returnPath === 'reviewer:2') reviewed = true
+    return env
+  }
+  let corrupt = false
+  const fatalRun = fatal.run
+  fatal.run = function (cmd) {
+    const outcome = fatalRun.call(this, cmd)
+    if (reviewed && cmd === hardenWitnessCommand(B376_TEST_FILE)) corrupt = true
+    return outcome
+  }
+  const fatalRead = fatal.readFile
+  fatal.readFile = function (path) {
+    const bytes = fatalRead.call(this, path)
+    return corrupt && path === `${CTX.checkout}/${B376_TEST_FILE}` ? `${bytes}// corrupt\n` : bytes
+  }
+  const fatalResult = driveTask(PIN_CTX, fatal)
+  assert.equal(fatalResult.details.escalation.why, '[witnessed-test-unverifiable] the snapshot run of a.test.mjs could not restore it: it did not read back as its own bytes after the snapshot run')
+  assert.equal(fatalResult.details.stages.includes('review:pass'), false)
+
+  const persisted = passPersistFailure()
+  assert.equal(persisted.result.details.escalation.why, '[witnessed-test-unverifiable] the prescription pin for a.test.mjs could not be persisted: EACCES: pins denied')
+  assert.equal(persisted.result.details.stages.includes('review:pass'), false)
+
+  const audit = readFileSync(join(REPO_ROOT, 'docs/audits/2026-09-18/charter-preservation-reviewermdandsharedmd.md'), 'utf8')
+  for (const line of audit.split('\n')) {
+    const cells = line.split('|').slice(1, -1).map((cell) => cell.trim())
+    if (cells.length !== 5 || cells[2] !== 'enforced') continue
+    const match = /^(.+):(\d+)$/.exec(cells[3])
+    assert.ok(match)
+    const source = readFileSync(join(REPO_ROOT, match[1]), 'utf8').split('\n')[Number(match[2]) - 1]
+    assert.equal(source?.includes(cells[4]), true, cells[3])
+  }
+})
+
+test('HP5 pass-review persistence denial is escalated', () => {
+  const { result } = passPersistFailure()
+  assert.equal(result.details.escalation.why, '[witnessed-test-unverifiable] the prescription pin for a.test.mjs could not be persisted: EACCES: pins denied')
+  assert.equal(result.details.stages.includes('review:pass'), false)
 })
 
 // The unreadable route: a pinned file that cannot be read at acceptance is refused with its
@@ -5486,9 +5594,8 @@ test('PV14 a rebase that edits the pinned file is refused before the suite', () 
   assert.equal(result.details.stages.includes('suite'), false)
 })
 
-// Kills P10 (pins cleared per suite cycle): after a red suite sends the lane back to the
-// builder, a repair round that edits the pinned file is still refused.
-test('PV15 a suite-cycle repair round that edits the pinned file is refused', () => {
+// MUTATION: clear pins at suite cycle; reviewer 3 then cannot advance its surviving snapshot.
+test('HP4', () => {
   const io = pinIo({})
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
@@ -5496,25 +5603,26 @@ test('PV15 a suite-cycle repair round that edits the pinned file is refused', ()
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
-    if (returnPath === 'builder:3') builder3 = true
+    if (returnPath === 'builder:3') { builder3 = true; io.calls.files[testAbs] = edited }
     return env
-  }
-  const baseRead = io.readFile
-  io.readFile = function (path) {
-    const bytes = baseRead.call(this, path)
-    return path === testAbs && builder3 ? edited : bytes
   }
   let suites = 0
   const baseRun = io.run
   io.run = function (cmd) {
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
-    if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}` && builder3) return { ok: true, output: `${blobOid(edited)}\n` }
     return baseRun.call(this, cmd)
   }
+  const log = io.log
+  io.log = function (row) {
+    log.call(this, row)
+    if (builder3 && row.hardening_prescription_repinned) io.calls.files[testAbs] = edited + '// unreviewed edit\n'
+  }
   const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const row = pinRepins(io).find((entry) => entry.moved === true && entry.oid === blobOid(edited))
   assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 3), true)
-  assert.notEqual(result.status, 'done')
-  assert.equal(pinPreservation(io).at(-1)?.reason, 'witnessed-test-altered')
+  assert.deepEqual([row?.source, row?.oid, row?.moved], ['review', blobOid(edited), true])
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its review version/)
 })
 
 // Kills P12 for Sol's last open bypass: `assert.equal = () => {}` at the top of the

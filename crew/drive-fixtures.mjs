@@ -21,6 +21,7 @@ import { regrantVerdict } from './escalation-policy.mjs'
 import { checkAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
+import { tokenizeJs, blankJsComments } from './js-tokens.mjs'
 
 import { ADOPT_BLOCK } from '../scripts/factory/dispatch-batch.mjs'
 
@@ -1405,74 +1406,39 @@ function drivePayloadElements(text, from) {
   return { events: events.join(' '), keys: keys.join(' ') }
 }
 
-// Comments are BLANKED, length-preserving, before the scan. String literals are NOT:
-// a template literal carrying `${...}` cannot be skipped without a real parser, and
-// blanking them naively swallowed 17 genuine sinks. A sink quoted inside a string
-// would still be counted — a narrower hole than comments, and stated rather than hidden.
-// b583-driveact1 disguised six real emits as `io.log.call(io, recordRow(...))` and
-// left comments quoting the old calls at the vacated lines; because this scanner
-// reads RAW SOURCE, those comments MATCHED and the inventory counted six comments
-// as if they were code. A guard that can be satisfied by a comment is not a guard.
-function blankComments(source) {
-  let out = ''
-  let mode = null
-  for (let i = 0; i < source.length; i += 1) {
-    const c = source[i], d = source[i + 1]
-    if (mode === null) {
-      if (c === '/' && d === '/') { mode = 'line'; out += '  '; i += 1; continue }
-      if (c === '/' && d === '*') { mode = 'block'; out += '  '; i += 1; continue }
-      out += c; continue
-    }
-    if (mode === 'line') { if (c === '\n') { mode = null; out += '\n' } else out += ' '; continue }
-    if (c === '*' && d === '/') { mode = null; out += '  '; i += 1; continue }
-    out += c === '\n' ? '\n' : ' '
-  }
-  return out
-}
-
-// lean: textual journal grammar, quoted strings remain visible; use a parser if legitimate source exceeds this grammar.
-const IO_JOURNAL_REFERENCE = /(?<![\w$])io\s*(?:\??\.\s*log\b|(?:\?\.\s*)?\[)/g
-
-// References outside the canonical wrapped calls or bare forwarder in crew/drive.mjs (phaseSlot) refuse.
+// References outside canonical wrappers or the exact bare forwarder refuse.
 export function noncanonicalJournalSinks(source) {
-  const text = blankComments(source)
-  IO_JOURNAL_REFERENCE.lastIndex = 0
+  const tokens = tokenizeJs(source)
+  const text = blankJsComments(source)
+  const significant = tokens.filter((token) => token.kind !== 'whitespace' && token.kind !== 'comment')
   const out = []
-  let hit
-  while ((hit = IO_JOURNAL_REFERENCE.exec(text)) !== null) {
-    const suffix = text.slice(hit.index)
-    const wrapperCall = /^(?:io\.log\(|io\?\.log\?\.\()(?:recordRow|operationalRow|row)\(/.exec(suffix)
+  for (let i = 0; i < significant.length; i++) {
+    const t = significant[i]
+    if (t.kind !== 'name' || t.text !== 'io') continue
+    const a = significant[i + 1], b = significant[i + 2]
+    const optional = a?.text === '?.'
+    const log = (a?.text === '.' || optional) && significant[i + 2]?.text === 'log'
+    const computed = a?.text === '[' || (optional && b?.text === '[')
+    if (!log && !computed) continue
+    const formEnd = (log ? significant[i + 2] : optional ? b : a).end
+    const offset = t.start, suffix = text.slice(offset)
+    const wrappers = ['io.log(recordRow(', 'io.log(operationalRow(', 'io.log(row(', 'io?.log?.(recordRow(', 'io?.log?.(operationalRow(', 'io?.log?.(row(']
+    const wrapper = wrappers.find((head) => text.startsWith(head, offset))
     let canonical = false
-    if (wrapperCall) {
-      let depth = 0, quote = null, escaped = false, regex = false, regexClass = false, previous = '('
-      for (let i = wrapperCall[0].length - 1; i < suffix.length; i += 1) {
-        const c = suffix[i]
-        if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
-        if (regex) {
-          if (escaped) escaped = false
-          else if (c === '\\') escaped = true
-          else if (c === '[' && !regexClass) regexClass = true
-          else if (c === ']' && regexClass) regexClass = false
-          else if (c === '/' && !regexClass) regex = false
-          continue
-        }
-        if (c === "'" || c === '"' || c === '\`') { quote = c; previous = ')'; continue }
-        if (c === '/' && '(,=:[!&|?{};'.includes(previous)) { regex = true; regexClass = false; escaped = false; previous = ')'; continue }
-        if (/\s/.test(c)) continue
-        if (c === '(') depth += 1
-        else if (c === ')') {
-          depth -= 1
-          if (depth === 0) {
-            canonical = /^\s*\)/.test(suffix.slice(i + 1))
-            break
-          }
-        }
-        previous = c
+    if (wrapper) {
+      const open = offset + wrapper.lastIndexOf('(')
+      let depth = 0, close = -1
+      let at = i
+      while (at < significant.length && significant[at].start < open) at++
+      for (; at < significant.length; at++) {
+        const token = significant[at]
+        if (token.kind === 'punctuator' && token.text === '(') depth++
+        else if (token.kind === 'punctuator' && token.text === ')') { depth--; if (depth === 0) { close = at; break } }
       }
+      canonical = close >= 0 && significant[close + 1]?.kind === 'punctuator' && significant[close + 1]?.text === ')'
     }
-    const forwarder = /^io\.log\.call\(\s*io\s*,\s*row\s*\)/.test(suffix)
-    if (canonical || forwarder) continue
-    out.push({ line: text.slice(0, hit.index).split('\n').length, form: hit[0].trim() })
+    const forwarder = log && text.startsWith('io.log.call(', offset) && /^io\.log\.call\(\s*io\s*,\s*row\s*\)/.test(suffix)
+    if (!canonical && !forwarder) out.push({ line: text.slice(0, offset).split('\n').length, form: text.slice(offset, formEnd).trim() })
   }
   return out
 }
@@ -1482,11 +1448,13 @@ function driveJournalSites(rawText) {
   if (disguised.length > 0) {
     throw new Error(`journal sink inventory: ${disguised.length} emit(s) hidden from DRIVE_SINK at line(s) ${disguised.map((d) => d.line).join(', ')} — unclassified io references must use a canonical wrapped call or exact bare forwarder`)
   }
-  const text = blankComments(rawText)
+  const tokens = tokenizeJs(rawText)
+  const text = blankJsComments(rawText)
   DRIVE_SINK.lastIndex = 0
   const out = []
   let hit
   while ((hit = DRIVE_SINK.exec(text)) !== null) {
+    if (!tokens.some((token) => token.start === hit.index && token.kind === 'name')) continue
     const line = text.slice(0, hit.index).split('\n').length
     const after = text.slice(hit.index + hit[0].length)
     const payload = drivePayloadElements(text, hit.index + hit[0].length)

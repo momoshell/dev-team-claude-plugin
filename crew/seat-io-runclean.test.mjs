@@ -15,9 +15,10 @@ import {
 import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
 import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, resumeTask, resumeWorktreeSha256, settleRetriedCold } from './drive.mjs'
 import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, driveTask, fakeIo } from './drive-fixtures.mjs'
-import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { forAll, git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
-import { noncanonicalJournalSinks } from './drive-fixtures.mjs'
+import { driveJournalSites, noncanonicalJournalSinks } from './drive-fixtures.mjs'
+import { tokenizeJs, blankJsComments } from './js-tokens.mjs'
 
 const PANE_CAPTURE = String.raw`{"parentUuid":"c828178b-a377-46d3-b09e-bb9bcb7fd718","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSPg8agTgq9MxjMHBVf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01GSd211FY8ZKTrthuDHX1Er","name":"Bash","input":{"command":"sed -n '6060,6135p' crew/drive.mjs; echo \"=== GATE ===\"; cat /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope/task/gate.mjs | head -60","description":"Read post-green proof loop and gate checks"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":35997,"cache_read_input_tokens":0,"output_tokens":1008,"output_tokens_details":{"thinking_tokens":821},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":35997,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":1008,"cache_read_input_tokens":0,"cache_creation_input_tokens":35997,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":35997},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSPfVP8MYSnfLQABzQz","type":"assistant","uuid":"7d518552-0575-431b-aa4a-bc10eae84893","timestamp":"2026-09-08T18:23:16.916Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}
 {"parentUuid":"7eb9c965-2cbc-4368-b584-d55b189d37f6","isSidechain":false,"message":{"model":"claude-opus-5","id":"msg_011CerSQkzoL21CsnWAyS3pq","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_01BC9djpCppspgFjAo738imQ","name":"Bash","input":{"command":"cd /Users/momoshell/.crew/dt-b564-proofscope/b564-proofscope; node -p \"const e=require('./returns/d3.planner.json'); JSON.stringify({mut:(e.details.mutations||[]).map(m=>({check:m.check,file:m.file,find:(m.find||'').slice(0,60)})), files:e.details.files_in_scope},null,1)\"","description":"Inspect planner envelope mutations and scope"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":2,"cache_creation_input_tokens":3732,"cache_read_input_tokens":35997,"output_tokens":787,"output_tokens_details":{"thinking_tokens":572},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":3732,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":787,"cache_read_input_tokens":0,"cache_creation_input_tokens":3732,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":3732},"type":"message"}]},"diagnostics":null},"apiBlockIndex":1,"requestId":"req_011CerSQkBgmugDqLmrNtanB","type":"assistant","uuid":"82ac935a-e9de-4bb6-beb6-ef9ba41718c3","timestamp":"2026-09-08T18:23:29.284Z","effort":"high","userType":"external","entrypoint":"sdk-cli","cwd":"/Users/momoshell/Dev/dt-b564-proofscope","sessionId":"c8d9af08-1b11-408b-bf4f-58d63ca8a873","version":"2.1.263","gitBranch":"b564-proofscope"}`
@@ -210,210 +211,55 @@ const SEAT_PASS_THROUGH = new Set([
   "log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),",
   "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },",
 ])
-function blankComments(source) {
-  // Same-length output: comments become spaces (newlines kept), so lines and indexes still map to the source.
-  // Strings and regex literals pass through whole; a template's ${...} is code again, so its comments blank too.
-  const expressionKeywords = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await']
-  let i = 0
-  function code(insideInterpolation) {
-    let out = '', previous = '(', depth = 0, lastWord = ''
-    // A ) closing an if/while/for/with head is followed by a statement, where / opens a regex.
-    const parens = []
-    while (i < source.length) {
-      const c = source[i], d = source[i + 1]
-      if (insideInterpolation && c === '{') depth += 1
-      if (insideInterpolation && c === '}') { if (depth === 0) return out; depth -= 1 }
-      if (c === '/' && d === '/') { while (i < source.length && source[i] !== '\n') { out += ' '; i += 1 } continue }
-      if (c === '/' && d === '*') {
-        out += '  '; i += 2
-        while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) { out += source[i] === '\n' ? '\n' : ' '; i += 1 }
-        if (i < source.length) { out += '  '; i += 2 }
-        continue
-      }
-      if (c === '`') { out += c; i += 1; out += template(); previous = 'x'; continue }
-      const regexStart = c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)
-      if (c === "'" || c === '"' || regexStart) {
-        let j = i + 1, slash = false, inClass = false
-        while (j < source.length) {
-          const r = source[j]
-          if (slash) slash = false
-          else if (r === '\\') slash = true
-          else if (regexStart && r === '\n') break
-          else if (regexStart && r === '[') inClass = true
-          else if (regexStart && r === ']') inClass = false
-          else if (r === (regexStart ? '/' : c) && !inClass) break
-          j += 1
-        }
-        out += source.slice(i, j + 1)
-        i = j + 1
-        previous = 'x'
-        continue
-      }
-      if (/[A-Za-z_$0-9]/.test(c)) {
-        let j = i
-        while (j < source.length && /[\w$]/.test(source[j])) j += 1
-        const word = source.slice(i, j)
-        previous = expressionKeywords.includes(word) ? '(' : 'x'
-        lastWord = word
-        out += word
-        i = j
-        continue
-      }
-      if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastWord))
-      if (c === ')') previous = parens.pop() ? '(' : 'x'
-      else if (c === ']') previous = 'x'
-      else if (!/\s/.test(c)) previous = c
-      if (!/\s/.test(c)) lastWord = ''
-      out += c
-      i += 1
-    }
-    return out
-  }
-  function template() {
-    let out = '', slash = false
-    while (i < source.length) {
-      const c = source[i]
-      if (slash) { slash = false; out += c; i += 1; continue }
-      if (c === '\\') { slash = true; out += c; i += 1; continue }
-      if (c === '`') { out += c; i += 1; return out }
-      if (c === '$' && source[i + 1] === '{') {
-        out += '${'; i += 2
-        out += code(true)
-        if (i < source.length) { out += '}'; i += 1 }
-        continue
-      }
-      out += c
-      i += 1
-    }
-    return out
-  }
-  return code(false)
-}
 // BLIND SPOT: computed deps['logLine'], alternate import aliases, and sinks inside quoted strings are outside this identifier grammar.
 // io.log(row(...)) is visible with wrapper null and is rejected by the inventory projection.
 // lean: identifier-level journal grammar; use a parser when syntax exceeds this grammar.
 function seatRefuseJournalSinks(text) {
   const lines = text.split('\n')
   const byLine = new Map()
-  for (const { line } of noncanonicalJournalSinks(text)) byLine.set(line, (byLine.get(line) ?? 0) + 1)
   const hidden = []
-  for (const [line, hitCount] of byLine) {
-    const sourceLine = lines[line - 1]
-    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log(?=\s*(?:,|$))/g)].length
-    if (hitCount > exemptCount) hidden.push(...Array(hitCount - exemptCount).fill(line))
-  }
+  for (const { line } of noncanonicalJournalSinks(text)) byLine.set(line, (byLine.get(line) ?? 0) + 1)
+  const tokens = tokenizeJs(text)
   const spans = [
     '{ taskDir, log, deps = {} }',
     '{ taskDir, log, emit, deps = {} }',
     'descendantCapture({ taskDir, log, deps })',
   ].flatMap((fragment) => [...text.matchAll(new RegExp(fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))]
     .map((match) => [match.index, match.index + match[0].length]))
-  const tokens = []
-  // A template's ${...} is code: each open interpolation keeps its own brace depth.
-  const interpolations = []
-  let quote = null, escaped = false, previous = '(', lastName = ''
-  const parens = []
-  for (let i = 0; i < text.length;) {
-    const c = text[i]
-    if (quote !== null) {
-      if (escaped) escaped = false
-      else if (c === '\\') escaped = true
-      else if (quote === '`' && c === '$' && text[i + 1] === '{') { interpolations.push(0); quote = null; previous = '('; i += 2; continue }
-      else if (c === quote) { quote = null; previous = 'x' }
-      i += 1
-      continue
+  const significant = tokens.filter((token) => token.kind !== 'whitespace' && token.kind !== 'comment')
+  const wrappedRow = (from, names) => {
+    const nameAt = significant.findIndex((token, index) => index >= from && names.includes(token.text))
+    if (nameAt < 0 || significant[nameAt + 1]?.text !== '(') return false
+    let depth = 0, close = -1
+    for (let at = nameAt + 1; at < significant.length; at++) {
+      if (significant[at].kind === 'punctuator' && significant[at].text === '(') depth++
+      else if (significant[at].kind === 'punctuator' && significant[at].text === ')' && --depth === 0) { close = at; break }
     }
-    if (interpolations.length > 0 && c === '{') interpolations[interpolations.length - 1] += 1
-    if (interpolations.length > 0 && c === '}') {
-      if (interpolations[interpolations.length - 1] === 0) { interpolations.pop(); quote = '`'; i += 1; continue }
-      interpolations[interpolations.length - 1] -= 1
-    }
-    if (c === "'" || c === '"' || c === '`') { quote = c; i += 1; continue }
-    // A / in expression position opens a regex literal, skipped as one opaque unit; elsewhere it is division.
-    if (c === '/' && /[(,=:[!&|?{};+\-*%<>~^]/.test(previous)) {
-      let j = i + 1, inClass = false, slash = false
-      while (j < text.length && text[j] !== '\n') {
-        const r = text[j]
-        if (slash) slash = false
-        else if (r === '\\') slash = true
-        else if (r === '[') inClass = true
-        else if (r === ']') inClass = false
-        else if (r === '/' && !inClass) break
-        j += 1
-      }
-      i = j + 1
-      previous = 'x'
-      continue
-    }
-    if (/[A-Za-z_$]/.test(c)) {
-      const start = i
-      i += 1
-      while (i < text.length && /[\w$]/.test(text[i])) i += 1
-      const name = text.slice(start, i)
-      if (['log', 'logLine', 'defaultLogLine'].includes(name)
-        && !/[.\w$]/.test(text[start - 1] ?? '')
-        && !/[\w$]/.test(text[i] ?? '')) tokens.push({ name, index: start })
-      previous = ['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'].includes(name) ? '(' : 'x'
-      lastName = name
-      continue
-    }
-    if (c === '(') parens.push(['if', 'while', 'for', 'with'].includes(lastName))
-    if (c === ')') previous = parens.pop() ? '(' : 'x'
-    else if (!/\s/.test(c)) previous = c
-    if (!/\s/.test(c)) lastName = ''
-    i += 1
+    return close >= 0 && significant[close + 1]?.kind === 'punctuator' && significant[close + 1]?.text === ')'
   }
-  for (const { name, index } of tokens) {
-    const after = text.slice(index + name.length)
-    const line = text.slice(0, index).split('\n').length
-    const sourceLine = lines[line - 1].trim()
-    const measured = spans.some(([start, end]) => index >= start && index < end)
+  for (let i = 0; i < significant.length; i++) {
+    const token = significant[i]
+    if (token.kind !== 'name' || !['log', 'logLine', 'defaultLogLine'].includes(token.text)) continue
+    const previous = significant[i - 1], next = significant[i + 1]
+    if (previous?.text === '.' || previous?.text === '?.' || (token.text === 'log' && next?.text === ':') || spans.some(([start, end]) => token.start >= start && token.start < end)) continue
+    const rowLine = text.slice(0, token.start).split('\n').length
+    const sourceLine = lines[rowLine - 1].trim()
+    if (SEAT_PASS_THROUGH.has(sourceLine)
       || sourceLine === 'closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,'
       || sourceLine === 'const logLine = deps.logLine || defaultLogLine'
-    const fullForwarder = SEAT_PASS_THROUGH.has(sourceLine)
-    const keyOrMethod = name === 'log' && (/^\s*:/.test(after) || after.startsWith('(obj) {'))
-    let sink = false
-    if (name !== 'defaultLogLine') {
-      const heads = name === 'log'
-        ? ['log?.(operationalRow(', 'log?.(recordRow(']
-        : ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow(", "logLine(join(paths.dir, 'journal.jsonl'), recordRow("]
-      const head = heads.find((candidate) => text.startsWith(candidate, index))
-      if (head) {
-        const wrapper = head.includes('operationalRow(') ? 'operationalRow(' : 'recordRow('
-        const open = index + head.lastIndexOf(wrapper) + wrapper.length - 1
-        let depth = 0, quote = null, escaped = false, regex = false, regexClass = false, previous = '('
-        for (let i = open; i < text.length; i += 1) {
-          const c = text[i]
-          if (quote) { if (escaped) escaped = false; else if (c === '\\') escaped = true; else if (c === quote) quote = null; continue }
-          if (regex) {
-            if (escaped) escaped = false
-            else if (c === '\\') escaped = true
-            else if (c === '[' && !regexClass) regexClass = true
-            else if (c === ']' && regexClass) regexClass = false
-            else if (c === '/' && !regexClass) regex = false
-            continue
-          }
-          if (c === "'" || c === '"' || c === '`') { quote = c; previous = ')'; continue }
-          if (c === '/' && '(,=:[!&|?{};'.includes(previous)) { regex = true; regexClass = false; escaped = false; previous = ')'; continue }
-          if (/\s/.test(c)) continue
-          if (c === '(') depth += 1
-          else if (c === ')') {
-            depth -= 1
-            if (depth === 0) { sink = /^\s*\)/.test(text.slice(i + 1)); break }
-          }
-          previous = c
-        }
-      }
-    }
-    const allowed = fullForwarder || measured || keyOrMethod || sink
-    if (!allowed) hidden.push(line)
+      || (token.text === 'log' && ['log?.(operationalRow(', 'log?.(recordRow('].some((head) => text.startsWith(head, token.start)) && wrappedRow(i + 3, ['operationalRow', 'recordRow']))
+      || (token.text === 'logLine' && ["logLine(join(paths.dir, 'journal.jsonl'), operationalRow(", "logLine(join(paths.dir, 'journal.jsonl'), recordRow("].some((head) => text.startsWith(head, token.start)) && wrappedRow(i + 1, ['recordRow', 'operationalRow']))) continue
+    hidden.push(rowLine)
   }
-  const callHits = [...text.matchAll(/(?<![\w$])io\s*\.\s*log\s*\.\s*call\b/g)]
-  for (const hit of callHits) {
-    const line = text.slice(0, hit.index).split('\n').length
-    if (!hidden.includes(line)) hidden.push(line)
+  for (const [line, hitCount] of byLine) {
+    const sourceLine = lines[line - 1]
+    const exemptCount = sourceLine.trim() === 'log: (obj) => io.log(obj),' ? 1 : [...sourceLine.matchAll(/(?<![\w$])log:\s*io\.log(?=\s*(?:,|$))/g)].length
+    if (hitCount > exemptCount) hidden.push(...Array(hitCount - exemptCount).fill(line))
   }
-  if (hidden.length > 0) throw new Error(`journal sink inventory: ${hidden.length} emit(s) hidden from SEAT_SINK at line(s) ${[...new Set(hidden)].join(', ')}`)
+  for (let i = 0; i < significant.length; i++) {
+    if (significant[i].text === 'io' && significant[i + 1]?.text === '.' && significant[i + 2]?.text === 'log' && significant[i + 3]?.text === '.' && significant[i + 4]?.text === 'call') hidden.push(text.slice(0, significant[i].start).split('\n').length)
+  }
+  if (hidden.length) throw new Error(`journal sink inventory: ${hidden.length} emit(s) hidden from SEAT_SINK at line(s) ${[...new Set(hidden)].join(', ')}`)
 }
 function seatPayloadElements(text, from) {
   let i = from
@@ -454,13 +300,15 @@ function seatPayloadElements(text, from) {
   return { events: events.join(' '), keys: keys.join(' ') }
 }
 function seatJournalSites(rawText) {
-  const text = blankComments(rawText)
+  const tokens = tokenizeJs(rawText)
+  const text = blankJsComments(rawText)
   seatRefuseJournalSinks(text);
   SEAT_SINK.lastIndex = 0
   const lines = text.split('\n')
   const out = []
   let hit
   while ((hit = SEAT_SINK.exec(text)) !== null) {
+    if (!tokens.some((token) => token.start === hit.index && token.kind === 'name')) continue
     const line = text.slice(0, hit.index).split('\n').length
     if (SEAT_PASS_THROUGH.has(lines[line - 1].trim())) continue
     const after = text.slice(hit.index + hit[0].length)
@@ -517,6 +365,82 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at reseat'],
   ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
 ])
+
+// Mutation TK1: truncating tokens or misclassifying regex/templates must fail corpus reconstruction and generated classifications.
+const corpusTokenPairs = []
+test('TK1', () => {
+  const paths = execFileSync('git', ['ls-files', '-z', '--', 'crew/', 'scripts/'], { cwd: ROOT }).toString().split('\0').filter((p) => p.endsWith('.mjs'))
+  for (const path of paths) {
+    const source = readFileSync(join(ROOT, path), 'utf8')
+    const tokens = tokenizeJs(source)
+    corpusTokenPairs.push([source, tokens])
+    assert.equal(tokens.map((token) => token.text).join(''), source, path)
+    let offset = 0
+    for (const token of tokens) { assert.equal(token.start, offset, path); assert.ok(token.end > token.start); assert.ok(['comment', 'string', 'template', 'regex', 'name', 'number', 'punctuator', 'whitespace'].includes(token.kind)); offset = token.end }
+    assert.equal(offset, source.length, path)
+  }
+  assert.deepEqual(tokenizeJs(''), [])
+  assert.deepEqual(tokenizeJs('name'), [{ kind: 'name', text: 'name', start: 0, end: 4 }])
+  for (const [source, kind, fragment] of [["'x'", 'string', "'x'"], ['/[//]/g', 'regex', '/[//]/g'], ['`a${x}`', 'template', '`a'], ['/*x*/', 'comment', '/*x*/'], ['name', 'name', 'name'], ['42', 'number', '42'], ['?.', 'punctuator', '?.'], [' ', 'whitespace', ' ']]) assert.ok(tokenizeJs(source).some((token) => token.kind === kind && token.text === fragment), source)
+  for (const source of ['"unterminated', '/*unfinished', '`unfinished', '`x ${', '`a ${`b ${/x/}`}`']) assert.equal(tokenizeJs(source).map((token) => token.text).join(''), source)
+  assert.equal(readFileSync(new URL('./js-tokens.mjs', import.meta.url), 'utf8').includes('import '), false)
+  forAll((random) => {
+    const productions = [[' ', 'whitespace'], ['//x', 'comment'], ["'x'", 'string'], ['`x`', 'template'], ['/[//]/g', 'regex'], ['name', 'name'], ['42', 'number'], ['?.', 'punctuator'], ['(', 'punctuator'], ['}', 'punctuator']]
+    return productions[Math.floor(random() * productions.length)]
+  }, ([source, expectedKind]) => {
+    const tokens = tokenizeJs(source)
+    assert.equal(tokens.map((token) => token.text).join(''), source)
+    assert.equal(tokens[0]?.kind, expectedKind, source)
+  }, { seed: 0x1729, runs: 200 })
+})
+// Mutation TK2: classifying every keyword as a statement head admits property-call sinks.
+test('TK2', () => {
+  for (const source of ['obj.if(log(row))', 'x.while(logLine(p, row))', 'obj?.if(log(row))', 'x /*a*/ . /*b*/ while(logLine(p, row))', 'x.return / log(row)']) assert.throws(() => seatJournalSites(source), /line\(s\) 1/)
+  for (const source of ['// fixture\nconst v = obj.if(k1) / log(row)', '// fixture\nx.while(k1) / logLine(p, row)']) assert.throws(() => seatJournalSites(source), /line\(s\) 2/)
+  for (const source of ['if (k) /re/.test(s)', 'x?.return /re/.test(s)', 'x /*a*/ . /*b*/ return /re/.test(s)']) assert.doesNotThrow(() => seatJournalSites(source))
+})
+// Mutation TK3: dropping literal opacity invents drive sinks from slash-containing literals.
+test('TK3', () => {
+  assert.deepEqual(noncanonicalJournalSinks("const u = 'http://x';"), [])
+  assert.deepEqual(noncanonicalJournalSinks('const r = /https?:\\/\\/x/; io.log(row)'), [{ line: 1, form: 'io.log' }])
+  assert.deepEqual(noncanonicalJournalSinks('const r = /https?:\\/\\/x/;'), [])
+  assert.deepEqual(noncanonicalJournalSinks('`outer ${io.log(row)}`'), [{ line: 1, form: 'io.log' }])
+  assert.deepEqual(noncanonicalJournalSinks('`outer ${`inner ${io.log(row)}`}`'), [{ line: 1, form: 'io.log' }])
+  assert.deepEqual(noncanonicalJournalSinks('io.log(recordRow({ at: \'x\', sig: `${fn}(${args})` }))'), [])
+})
+// Mutation TK4: treating regex tokens as source code invents a sink.
+test('TK4', () => {
+  assert.deepEqual(noncanonicalJournalSinks('const r = /io.log/'), [])
+  assert.deepEqual(noncanonicalJournalSinks("const s = 'io.log(row)'; const t = `io.log(row)`;"), [])
+  assert.deepEqual(noncanonicalJournalSinks('f(io.log(recordRow({ s: `${a}(${b}` }), extra))'), [{ line: 1, form: 'io.log' }])
+  assert.equal(seatJournalSites("const s = \"log?.(operationalRow({ at: 'ghost' }))\" ").length, 0)
+  const drive = readFileSync(new URL('./drive-fixtures.mjs', import.meta.url), 'utf8')
+  assert.match(drive, /if \(!tokens\.some\(\(token\) => token\.start === hit\.index && token\.kind === 'name'\)\) continue/)
+  assert.throws(() => seatJournalSites('const s = "log: io.log, y"; log(row)'), /line\(s\) 1/)
+})
+// Mutation TK5: restoring either private lexer violates the shared-grammar contract.
+test('TK5', () => {
+  const drive = readFileSync(new URL('./drive-fixtures.mjs', import.meta.url), 'utf8')
+  const seat = readFileSync(new URL('./seat-io-runclean.test.mjs', import.meta.url), 'utf8')
+  assert.match(drive, /import \{ tokenizeJs, blankJsComments \} from '\.\/js-tokens\.mjs'/)
+  assert.match(seat, /import \{ tokenizeJs, blankJsComments \} from '\.\/js-tokens\.mjs'/)
+  assert.equal(drive.includes('function blank' + 'Comments('), false)
+  assert.equal(seat.includes('function blank' + 'Comments('), false)
+})
+// Mutation TK6: suppressing injected disguises must be caught across the tracked corpus.
+test('TK6', () => {
+  const drive = readFileSync(new URL('./drive-fixtures.mjs', import.meta.url), 'utf8')
+  for (const [source, corpusTokens] of corpusTokenPairs) for (const token of corpusTokens.filter((item) => item.kind === 'regex')) {
+    const body = token.text.slice(1, token.text.lastIndexOf('/'))
+    const flags = token.text.slice(token.text.lastIndexOf('/') + 1)
+    assert.doesNotThrow(() => new RegExp(body, flags), token.text)
+  }
+  assert.deepEqual(noncanonicalJournalSinks("const u = 'http://x'; io.log(row)"), [{ line: 1, form: 'io.log' }])
+  const seat = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  const injected = seat.split('\n').map((line) => `log(row); ${line}`).join('\n')
+  assert.throws(() => seatJournalSites(injected), /line\(s\)/)
+  assert.deepEqual(noncanonicalJournalSinks("io?.['log'](x)"), [{ line: 1, form: 'io?.[' }])
+})
 
 // Mutation SL1: replacing the unique refusal push with a log-only guard admits bare log disguises.
 test('SL1', () => {
@@ -3929,4 +3853,30 @@ test('b416 D1 pane policy reports a strict unmeasured shape exactly once on an o
     assert.equal(policyRows[0].suite_policy, null)
     assert.equal(policyRows[0].suite_policy_absent, PANE_NO_INTERCEPT)
   })
+})
+
+// Hardened guards for the b1124 review findings, one named test per must-fix.
+// Mutation RV1-1: js-tokens.mjs treating a name after `.`/`?.` as a keyword hides the
+// issue 1729 sink behind a property call.
+test('RV1-1 a property named like a keyword never opens a regex', () => {
+  assert.throws(() => seatJournalSites('const v = obj.if(k1) / log(row)'), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites('const v = obj?.while(k1) / logLine(p, row)'), /line\(s\) 1/)
+  // A keyword-named property with no call (property flag) and a keyword-named method call (paren-head
+  // guard), each followed by a closing slash so a misread regex would actually terminate.
+  assert.throws(() => seatJournalSites('const v = x.return / log(row) / 2'), /line\(s\) 1/)
+  assert.throws(() => seatJournalSites('const v = obj.if(k1) / log(row) / 2'), /line\(s\) 1/)
+})
+// Mutation RV1-2: counting a string-held `io.log` name as an exemption hides the real sink.
+test('RV1-2 a sink name inside a string never discounts a real seat sink', () => {
+  assert.throws(() => seatJournalSites('const s = "log: io.log, y"; log(row)'), /line\(s\) 1/)
+})
+// Mutation RV1-3: counting template-text parens in the depth walk loses the call nesting.
+test('RV1-3 template text parentheses never shift the drive sink depth walk', () => {
+  assert.deepEqual(noncanonicalJournalSinks('f(io.log(recordRow({ s: `${a}(${b}` }), extra))'), [{ line: 1, form: 'io.log' }])
+  assert.deepEqual(noncanonicalJournalSinks('io.log(recordRow({ sig: `${fn}(${args})` }))'), [])
+})
+// Mutation RV1-4: matching sink text that is not an executable name token inventories a ghost emit.
+test('RV1-4 a sink spelled inside a string literal is never an inventoried emit', () => {
+  assert.deepEqual(driveJournalSites("const s = \"io.log(recordRow({ at: 'ghost' }))\""), [])
+  assert.deepEqual(noncanonicalJournalSinks("const s = \"io.log(recordRow({ at: 'ghost' }))\""), [])
 })

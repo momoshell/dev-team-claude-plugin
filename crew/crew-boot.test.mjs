@@ -2447,6 +2447,76 @@ test('Claude ACP reviewer boot persists alongside headless lead', async (t) => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('AC1', async () => {
+  const root = scratchDir('claude-acp-all-boot-')
+  const home = join(root, 'home'); const checkout = join(root, 'checkout')
+  mkdirSync(home); mkdirSync(checkout)
+  try {
+    await withHome(home, () => bootCmd({
+      task: 'claude-acp-all', checkout, roles: 'lead,reviewer,planner',
+      'agent-lead': 'claude', 'agent-reviewer': 'claude', 'agent-planner': 'pi',
+      acp: 'lead,reviewer', 'headless-all': true, 'headless-rpc': 'planner',
+      'claude-bin': process.execPath,
+    }, { openRun: () => ({ recordSeats() {} }), cmux() { throw new Error('unexpected workspace call') } }))
+    const crewDir = testCrewDir(home, checkout, 'claude-acp-all')
+    const crew = JSON.parse(readFileSync(join(crewDir, 'crew.json'), 'utf8'))
+    assert.deepEqual(Object.fromEntries(Object.entries(crew.members).map(([role, member]) => [role, { agent: member.agent, transport: member.transport }])), {
+      lead: { agent: 'claude', transport: 'acp' },
+      reviewer: { agent: 'claude', transport: 'acp' },
+      planner: { agent: 'pi', transport: 'headless-rpc' },
+    })
+    assert.equal(Object.values(crew.members).some((member) => member.transport === 'headless-json'), false)
+    assert.equal(crew.claude_bin, process.execPath)
+    assert.equal(isAbsolute(crew.claude_bin), true)
+
+    const taskDir = join(crewDir, 'task'); const returnsDir = join(crewDir, 'returns'); const binDir = join(root, 'bin')
+    mkdirSync(binDir)
+    const stub = join(binDir, 'claude-agent-acp')
+    writeFileSync(stub, '#!/bin/sh\nexit 0\n')
+    chmodSync(stub, 0o755)
+    const briefFile = join(taskDir, 'role-reviewer.md')
+    writeFileSync(briefFile, 'brief')
+    let launch
+    const io = acpIo({
+      crew, paths: { taskDir, returnsDir }, checkout, adapters: persistedAdapters(crew),
+      deps: { env: { PATH: binDir }, clientFactory(options) {
+        launch = options.launch
+        return { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt() { return 1 } }
+      } },
+    })
+    io.assign({ role: 'reviewer', briefFile })
+    assert.equal(launch.env.CLAUDE_CODE_EXECUTABLE, process.execPath)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// MUTATION: remove the claude agent guard from the ACP arm; pi-only boots must still need no binary.
+test('pi-only ACP boot needs no claude binary', async () => {
+  const root = scratchDir('pi-acp-no-claude-bin-')
+  const home = join(root, 'home'); const checkout = join(root, 'checkout')
+  mkdirSync(home); mkdirSync(checkout)
+  const previousClaudeBin = process.env.CREW_CLAUDE_BIN
+  delete process.env.CREW_CLAUDE_BIN
+  try {
+    await withHome(home, () => bootCmd({
+      task: 'pi-acp-no-claude-bin', checkout, roles: 'lead,builder,planner',
+      'agent-lead': 'pi', 'agent-builder': 'pi', 'agent-planner': 'pi',
+      acp: 'lead,builder', 'headless-all': true, 'headless-rpc': 'planner',
+    }, { openRun: () => ({ recordSeats() {} }), cmux() { throw new Error('unexpected workspace call') } }))
+    const crewDir = testCrewDir(home, checkout, 'pi-acp-no-claude-bin')
+    const crew = JSON.parse(readFileSync(join(crewDir, 'crew.json'), 'utf8'))
+    assert.deepEqual(Object.fromEntries(Object.entries(crew.members).map(([role, member]) => [role, { agent: member.agent, transport: member.transport }])), {
+      lead: { agent: 'pi', transport: 'acp' },
+      builder: { agent: 'pi', transport: 'acp' },
+      planner: { agent: 'pi', transport: 'headless-rpc' },
+    })
+    assert.equal(Object.hasOwn(crew, 'claude_bin'), false)
+  } finally {
+    if (previousClaudeBin === undefined) delete process.env.CREW_CLAUDE_BIN
+    else process.env.CREW_CLAUDE_BIN = previousClaudeBin
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('a tier boot records the handed roster and byte snapshot provenance', async () => {
   const home = scratchDir('crew-roster-boot-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-roster-boot-checkout-')

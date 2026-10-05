@@ -12,7 +12,7 @@ import {
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_SOURCE_BUDGET, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
+import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
 
 // The boot writes each role's mapped plugin skills after the charter; that section's
 // bytes are pinned by the skill-delivery tests in crew/crew-boot.test.mjs, so the
@@ -1428,7 +1428,26 @@ test('SB6 builder charter states step-local ownership within its original budget
   const clause = "a step owes only its own checks, never a later step's."
   assert.equal(charter.split(clause).length - 1, 1)
   assert.ok(Buffer.byteLength(charter, 'utf8') <= CHARTER_SOURCE_BUDGET.builder)
-  assert.equal(CHARTER_SOURCE_BUDGET.builder, 3963)
+  assert.equal(CHARTER_SOURCE_BUDGET.builder, 4171)
+})
+
+// Kills GC1: deleting the fresh must-fix instruction leaves the charter guard red.
+test('GC1 builder charter requires fresh top-level must-fix guards', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew/roles/builder.md'), 'utf8')
+  const lines = charter.split('\n')
+  const patterns = [/must-fix/i, /new\s+top-level\s+`?test\(/i, /name.*absent.*tree.*review.*read/i, /never.*assertion.*inside.*existing.*test/i, /red.*declared.*mutation/i]
+  const qualifying = lines.flatMap((line, index) => patterns.every((pattern) => pattern.test(line)) ? [index] : [])
+  assert.equal(qualifying.length, 1)
+  const index = qualifying[0]
+  assert.match(lines[index - 1] || '', /validation green BEFORE returning/i)
+})
+
+// Kills GC2: restoring builder: 3963, breaks the delivered-growth source budget.
+test('GC2 builder charter budget pins delivered growth below total cap', () => {
+  const card = readFileSync(join(REPO_ROOT, 'crew/roles/builder.md'), 'utf8')
+  assert.equal(CHARTER_SOURCE_BUDGET.builder, Buffer.byteLength(card, 'utf8'))
+  assert.ok(CHARTER_SOURCE_BUDGET.builder > 3963)
+  assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 })
 
 // RV1-1 (b847): every enforced row of the charter-preservation table must quote

@@ -438,7 +438,12 @@ test('TK6', () => {
   assert.deepEqual(noncanonicalJournalSinks("const u = 'http://x'; io.log(row)"), [{ line: 1, form: 'io.log' }])
   const seat = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   const injected = seat.split('\n').map((line) => `log(row); ${line}`).join('\n')
-  assert.throws(() => seatJournalSites(injected), /line\(s\)/)
+  // Every injected line must be reported, not just one: a suppressed injection anywhere
+  // (first, middle, last line) drops its number from the refusal.
+  const lineCount = seat.split('\n').length
+  let reported = null
+  try { seatJournalSites(injected) } catch (error) { reported = error.message.match(/line\(s\) ([\d, ]+)/)?.[1].split(', ').map(Number) ?? [] }
+  assert.deepEqual(reported, Array.from({ length: lineCount }, (_, index) => index + 1))
   assert.deepEqual(noncanonicalJournalSinks("io?.['log'](x)"), [{ line: 1, form: 'io?.[' }])
 })
 
@@ -3879,4 +3884,13 @@ test('RV1-3 template text parentheses never shift the drive sink depth walk', ()
 test('RV1-4 a sink spelled inside a string literal is never an inventoried emit', () => {
   assert.deepEqual(driveJournalSites("const s = \"io.log(recordRow({ at: 'ghost' }))\""), [])
   assert.deepEqual(noncanonicalJournalSinks("const s = \"io.log(recordRow({ at: 'ghost' }))\""), [])
+})
+
+// Mutation RV2-1: treating every 'of' as the for-of keyword reads a following division as a regex
+// and hides the emit behind an identifier named of.
+test('RV2-1 an identifier named of never opens a regex', () => {
+  assert.deepEqual(noncanonicalJournalSinks('const of = 2; const x = of / io.log(row) / 2'), [{ line: 1, form: 'io.log' }])
+  assert.equal(driveJournalSites('const of = 2; const x = of / io.log(recordRow({ at: 1 })) / 2').length, 1)
+  assert.throws(() => seatJournalSites('const of = 2; const x = of / log(row) / 2'), /line\(s\) 1/)
+  assert.ok(tokenizeJs('for (const x of /a/g.exec(s)) f(x)').some((token) => token.kind === 'regex' && token.text === '/a/g'))
 })

@@ -64,13 +64,15 @@ export function tokenizeJs(source) {
         i++; while (i < source.length && /[$_\u200c\u200d\p{ID_Continue}]/u.test(source[i])) i++
         const text = source.slice(start, i)
         const property = previous?.text === '.' || previous?.text === '?.'
-        significant('name', start, i, !property && keywords.has(text)); continue
+        // 'of' is contextual: a keyword only directly inside a for-head, otherwise a plain identifier.
+        const keyword = keywords.has(text) && (text !== 'of' || parens.at(-1) === 'for')
+        significant('name', start, i, !property && keyword); continue
       }
       if (/[0-9]/.test(c)) { i++; while (i < source.length && /[\w.]/.test(source[i])) i++; significant('number', start, i, false); continue }
       const op = operators.find(x => source.startsWith(x, i)) || c
       i += op.length
       const head = c === '(' && previous?.kind === 'name' && heads.has(previous.text) && beforePrevious?.text !== '.' && beforePrevious?.text !== '?.'
-      if (c === '(') parens.push(head)
+      if (c === '(') parens.push(head ? previous.text : false)
       if (interpolation && c === '{') braces++
       else if (interpolation && c === '}') braces--
       significant('punctuator', start, i, c === ')' ? Boolean(parens.pop()) : c === '}' || c === ']' ? false : !['.', '?.', '++', '--'].includes(op))

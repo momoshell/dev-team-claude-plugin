@@ -13,8 +13,8 @@ import {
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
-import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, driveTask, resumeTask, resumeWorktreeSha256, settleRetriedCold } from './drive.mjs'
-import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, fakeIo } from './drive-fixtures.mjs'
+import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, resumeTask, resumeWorktreeSha256, settleRetriedCold } from './drive.mjs'
+import { CTX, GATE_SUMMARY_PREFIX, closeoutIo, driveTask, fakeIo } from './drive-fixtures.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 import { noncanonicalJournalSinks } from './drive-fixtures.mjs'

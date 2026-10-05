@@ -90,6 +90,7 @@ export function assertHostQuiet(record) {
 export const SUITE_SLOT_KIND = 'suite'
 export const SLOT_WAIT_INTERVAL_MS = 2000
 export const SLOT_WAIT_CEILING_MS = 30 * 60 * 1000
+export const SLOT_UNRESOLVABLE_WAIT_MAX = 3
 
 // crew/reclaim.mjs's idiom, not a new one: a synchronous sleep with no busy
 // wait. It is duplicated rather than imported because reclaim does not export it.
@@ -113,12 +114,27 @@ function acquireSlot({ pool, owner, now, sleep, ceiling }) {
   const started = now()
   let depth = null
   let waits = 0
+  let unresolvableWaits = 0
+  // The pool state behind an unresolvable scan is unknown. If that is the scan the ceiling
+  // lands on, running unslotted would treat an unknown as admission, so its error escalates.
+  let unresolved = null
   for (;;) {
-    const attempt = pool.acquire({ owner })
+    let attempt
+    try {
+      attempt = pool.acquire({ owner }); unresolvableWaits = 0; unresolved = null
+    } catch (error) {
+      if (error?.stage !== 'reclaim-lock-unavailable') throw error
+      if (error.reason === 'lost') { unresolvableWaits = 0; unresolved = null }
+      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) { unresolvableWaits += 1; unresolved = error }
+      else throw error
+    }
     if (attempt?.handle) return { handle: attempt.handle, slot: attempt.slot ?? null, waits, depth, waitedMs: now() - started }
     depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
     waits += 1
-    if (now() - started >= ceiling) return { handle: null, slot: null, waits, depth, waitedMs: now() - started }
+    if (now() - started >= ceiling) {
+      if (unresolved) throw unresolved
+      return { handle: null, slot: null, waits, depth, waitedMs: now() - started }
+    }
     sleep(SLOT_WAIT_INTERVAL_MS)
   }
 }

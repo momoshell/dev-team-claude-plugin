@@ -10,7 +10,7 @@ import { parseFenceScope, validateFenceScope, fenceScopesIntersect, fenceScopeCo
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, slotPolicy } from './host-load.mjs'
+import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
@@ -13731,14 +13731,24 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   const maxScans = Math.max(1, Math.ceil(ceiling / interval) + 1)
   let depth = null, lockContended = 0, lockHolder = null
   let handle = null
+  let unresolvableWaits = 0
+  // An unresolvable final scan leaves the pool state unknown; it escalates rather than
+  // admitting the phase unslotted (see acquireSlot in crew/host-load.mjs).
+  let unresolved = null
   for (let scan = 0; scan < maxScans; scan += 1) {
-    // NO catch here, deliberately. A store that cannot answer is not admission:
-    // swallowing an unresolvable claim would let every affected lane exceed K at once,
-    // exactly when the pool cannot protect the host. The store exposes that state as a
-    // throw on purpose (crew/reclaim.mjs:1260-1264) and #825's wrapper does not swallow
-    // it either (crew/host-load.mjs:115-133). Only a COMPLETED wait that reaches the
-    // ceiling runs unslotted.
-    const attempt = pool.acquire({ owner }); if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
+    // A lost lock race is a wait; unresolvable waits are capped at SLOT_UNRESOLVABLE_WAIT_MAX.
+    // Beyond the cap the original error escalates; any other throw, including slot-claim-unresolvable,
+    // is not admission and still escalates.
+    let attempt
+    try {
+      attempt = pool.acquire({ owner }); unresolvableWaits = 0; unresolved = null
+    } catch (error) {
+      if (error?.stage !== 'reclaim-lock-unavailable') throw error
+      if (error.reason === 'lost') { unresolvableWaits = 0; unresolved = null }
+      else if (error.reason === 'unresolvable' && unresolvableWaits < SLOT_UNRESOLVABLE_WAIT_MAX) { unresolvableWaits += 1; unresolved = error }
+      else throw error
+    }
+    if (attempt?.contended) { lockContended += 1; lockHolder = attempt.contended.holder ?? null }
     if (attempt?.handle) { handle = attempt.handle; break }
     depth = Number.isSafeInteger(attempt?.depth) ? attempt.depth : null
     // The driver is ALIVE and this completed scan is the observation that proves it.
@@ -13760,6 +13770,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   // — hands the caller its phase back unslotted rather than failing a run that would
   // have succeeded. Nothing is held on this path, so the row is written outside any
   // release region.
+  if (!handle && unresolved) throw unresolved
   if (!handle) { recordWait(); return run() }
   // FINALLY, not a trailing statement, and the row write is INSIDE it. io.runCold THROWS
   // rather than report a verdict it could not take (crew/drive.mjs:4745) — and so does

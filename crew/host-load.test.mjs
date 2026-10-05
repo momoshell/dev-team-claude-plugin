@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet, slotPolicy, withSuiteSlot } from './host-load.mjs'
 
 test('loadPolicy is opt-in and strictly validates a positive finite threshold', () => {
@@ -182,4 +183,74 @@ test('withSuiteSlot does nothing when suite slots are disabled', () => {
   assert.equal(result, 'direct')
   assert.equal(constructed, 0)
   assert.deepEqual(logs, [])
+})
+
+const lockError = (reason, message = reason) => Object.assign(new Error(message), { stage: 'reclaim-lock-unavailable', reason })
+const hostSequence = ({ sequence, ceiling = 6000 } = {}) => {
+  let clock = 0, attempts = 0, runs = 0, releases = 0
+  const sleeps = [], logs = [], handle = sequence.find(item => !(item instanceof Error) && item?.handle)?.handle
+  const pool = { acquire() { attempts += 1; const item = sequence[Math.min(attempts - 1, sequence.length - 1)]; if (item instanceof Error) throw item; return item }, release(value) { assert.equal(value, handle); releases += 1 } }
+  const result = withSuiteSlot({ owner: 'host-owner', env: { CREW_SUITE_SLOTS: '1' }, slots: () => pool, now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling, log(line) { logs.push(line) } }, () => { runs += 1; return 'ran' })
+  return { result, attempts, runs, releases, sleeps, logs, handle }
+}
+
+// MUTATION: rename LW5's `const rows = []` to `const movedRows = []`; this guard must fail.
+test('RV1 LW5 keeps no-contention assertions in its original test body', () => {
+  const source = readFileSync(new URL('./drive.test.mjs', import.meta.url), 'utf8')
+  const lw5 = source.match(/test\('LW5', \(\) => \{([\s\S]*?)\n\}\)\n\nconst phaseLockError/)
+  assert.ok(lw5, 'LW5 must end before the phase retry test helpers')
+  assert.match(lw5[1], /  const rows = \[\]\n  withPhaseSlot\(\{ pool: \{ acquire: \(\) => \(\{ waiting: true, depth: 1 \}\), release\(\) \{\} \}, phase: 'gate', owner: 'none', now: \(\) => 0, sleep\(\) \{\}, ceiling: 0, log: row => rows\.push\(row\) \}, \(\) => 'unslotted'\)\n  assert\.equal\(rows\[0\]\.lock_contended, 0\)\n  assert\.equal\(rows\[0\]\.lock_holder, null\)/)
+})
+
+test('SR1', () => {
+  const out = hostSequence({ sequence: [lockError('lost'), { handle: { token: 'host-handle' }, depth: undefined, slot: 's' }] })
+  assert.equal(out.result, 'ran'); assert.equal(out.runs, 1); assert.equal(out.releases, 1)
+  assert.equal(out.attempts, 2); assert.deepEqual(out.sleeps, [2000]); assert.match(out.logs[0], /behind unknown/)
+  const many = hostSequence({ sequence: [lockError('lost'), lockError('lost'), lockError('lost'), lockError('lost'), { handle: { token: 'host-handle' } }], ceiling: 10000 })
+  assert.equal(many.attempts, 5); assert.equal(many.releases, 1)
+})
+test('SR2', () => {
+  const failure = Object.assign(lockError('unresolvable', 'slot claim failed'), { stage: 'slot-claim-unresolvable' })
+  let runs = 0
+  assert.throws(() => withSuiteSlot({ owner: 'o', env: { CREW_SUITE_SLOTS: '1' }, slots: () => ({ acquire() { if (!this.n++) throw lockError('lost'); throw failure }, n: 0, release() {} }), now: () => 0, sleep() {}, ceiling: 6000 }, () => { runs++ }), /slot claim failed/)
+  assert.equal(runs, 0)
+})
+test('SR3', () => {
+  const out = hostSequence({ sequence: [lockError('lost')], ceiling: 4000 })
+  assert.equal(out.runs, 1); assert.equal(out.releases, 0); assert.deepEqual(out.sleeps, [2000, 2000])
+  assert.deepEqual(out.logs, ['suite slots: K=1, waited 4s behind unknown and gave up; running unslotted'])
+})
+test('SR4', () => {
+  const same = lockError('unresolvable')
+  const sleeps = []; let clock = 0, attempts = 0
+  const pool = { acquire() { attempts++; throw same }, release() { assert.fail('unexpected release') } }
+  assert.throws(() => withSuiteSlot({ owner: 'o', env: { CREW_SUITE_SLOTS: '1' }, slots: () => pool, now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms } }, () => assert.fail('unexpected run')), e => e === same)
+  assert.equal(attempts, 4); assert.deepEqual(sleeps, [2000, 2000, 2000])
+})
+test('SR5', () => {
+  const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), { handle: { token: 'host-handle' }, slot: 's' }] })
+  assert.equal(out.attempts, 3); assert.equal(out.runs, 1); assert.equal(out.releases, 1)
+})
+// Mutation SR6: running unslotted after an unresolvable ceiling scan exceeds K on an unknown pool.
+test('SR6 an unresolvable scan at the ceiling escalates instead of running unslotted', () => {
+  const final = lockError('unresolvable')
+  const sleeps = []; let clock = 0, attempts = 0, runs = 0
+  const sequence = [{ waiting: true, depth: 1 }, { waiting: true, depth: 1 }, final]
+  const pool = { acquire() { const item = sequence[attempts++]; if (item instanceof Error) throw item; return item }, release() { assert.fail('unexpected release') } }
+  assert.throws(() => withSuiteSlot({ owner: 'o', env: { CREW_SUITE_SLOTS: '1' }, slots: () => pool, now: () => clock, sleep(ms) { sleeps.push(ms); clock += ms }, ceiling: 4000 }, () => { runs++ }), e => e === final)
+  assert.equal(attempts, 3); assert.equal(runs, 0); assert.deepEqual(sleeps, [2000, 2000])
+})
+test('H3 returned host acquisitions reset the error streak', () => {
+  for (const returned of [{ waiting: true, depth: 0 }, null, undefined]) {
+    const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), returned, lockError('unresolvable'), lockError('unresolvable'), { handle: { token: 'host-handle' } }], ceiling: 12000 })
+    assert.equal(out.attempts, 6)
+  }
+})
+test('H4 lost host errors reset the unresolvable streak', () => {
+  const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), lockError('lost'), lockError('unresolvable'), lockError('unresolvable'), { handle: { token: 'host-handle' } }], ceiling: 12000 })
+  assert.equal(out.attempts, 6)
+})
+test('H6 three host unresolvable waits can reach the ceiling unslotted', () => {
+  const out = hostSequence({ sequence: [lockError('unresolvable'), lockError('unresolvable'), lockError('unresolvable'), { waiting: true, depth: 1 }], ceiling: 6000 })
+  assert.equal(out.runs, 1); assert.equal(out.releases, 0); assert.equal(out.attempts, 4)
 })

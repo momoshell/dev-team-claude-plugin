@@ -1,11 +1,11 @@
-// The builder-seat read gate refuses oversized whole-file reads and caps UTF-8 result bytes.
-// Direct cat operands also have a byte refusal; other tool calls are untouched.
+// The whole-read and cat byte caps have a narrow exception for directly handed task files and declared planner briefs.
+// Direct cat operands also have a byte refusal, with the same narrow handed-file exception.
 // This extension intentionally has no pi or package dependency so checkout-pinned
 // pi can load it through its erasable TypeScript loader.
 
 import { createHash } from 'node:crypto'
-import { appendFileSync, readFileSync } from 'node:fs'
-import { basename, dirname, join, resolve as resolvePath } from 'node:path'
+import { appendFileSync, readFileSync, realpathSync, statSync, readdirSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 
 export const DEFAULT_MAX_LINES = 350
 export const MAX_LINES_ENV = 'CREW_READGATE_MAX_LINES'
@@ -461,6 +461,26 @@ export function createReadGate(options = {}) {
   const snapshotFile = input.snapshotFile || deps.snapshotFile || defaultSnapshotFile
   const readRanges = new Map()
   const pendingReads = new Map()
+
+  function isHandedFile(path, cwd = cwdDefault) {
+    try {
+      if (!taskDir) return false
+      const taskRoot = realpathSync(resolvePath(cwdDefault, taskDir))
+      const target = realpathSync(resolvePath(cwd, path))
+      if (!statSync(target).isFile()) return false
+      if (dirname(target) === taskRoot) return true
+      for (const name of readdirSync(taskRoot)) {
+        if (!/^planner-assignment-r[0-9]+\.md$/.test(name)) continue
+        const wrapper = realpathSync(join(taskRoot, name))
+        if (!statSync(wrapper).isFile() || dirname(wrapper) !== taskRoot) continue
+        for (const line of readFileSync(wrapper, 'utf8').split(/\r?\n/)) {
+          const match = /^(?:Read the current planner brief at |Planner source brief: |Original task brief: )(.+)\.$/.exec(line)
+          if (match && isAbsolute(match[1]) && realpathSync(match[1]) === target) return true
+        }
+      }
+      return false
+    } catch { return false }
+  }
   let currentTurn = 1
 
   const recordFailure = input.recordFailure || deps.recordFailure || ((row) => {
@@ -569,10 +589,12 @@ export function createReadGate(options = {}) {
     return undefined
   }
 
-  function onToolResult(event) {
+  function onToolResult(event, ctx) {
     try {
       if (event?.toolName !== 'read') return undefined
       if (event?.isError) { pendingReads.delete(event.toolCallId); return undefined }
+      const resultCwd = ctx?.cwd || cwdDefault
+      if (!hasRange(event.input) && isHandedFile(event.input?.path, resultCwd)) return undefined
       const parts = event?.content
       const allText = Array.isArray(parts) && parts.length > 0 && parts.every((part) => part?.type === 'text' && typeof part.text === 'string')
       let capped
@@ -632,6 +654,7 @@ export function createReadGate(options = {}) {
     const program = basename(words[0])
     for (const path of shellOperands(words, program)) {
       if (path === '-') continue
+      if (isHandedFile(path, cwd)) continue
       if (program === 'cat') {
         const catMaxBytes = parseMaxBytes(env[MAX_BYTES_ENV])
         const fileBytes = readFileSync(resolveFile(cwd, path)).length
@@ -649,8 +672,9 @@ export function createReadGate(options = {}) {
       const input = event?.input || {}
       if (isReadTool(event?.toolName)) {
         if (hasRange(input)) return inspectRangedRead(event, ctx)
-        const maxLines = configuredMaxLines()
         const cwd = ctx?.cwd || cwdDefault
+        if (isHandedFile(input.path, cwd)) return undefined
+        const maxLines = configuredMaxLines()
         return inspectPath(input.path, cwd, maxLines)
       }
       if (event?.toolName !== 'bash') return undefined
@@ -688,7 +712,7 @@ export function attachReadGate(pi, options = {}) {
   if (typeof pi?.on !== 'function') throw new Error('read gate extension needs pi.on')
   pi.on('turn_start', (event) => gate.onTurnStart(event))
   pi.on('tool_call', (event, ctx) => gate.onToolCall(event, ctx))
-  pi.on('tool_result', (event) => gate.onToolResult(event))
+  pi.on('tool_result', (event, ctx) => gate.onToolResult(event, ctx))
   return gate
 }
 

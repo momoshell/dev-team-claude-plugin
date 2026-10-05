@@ -8033,7 +8033,10 @@ for (const [why, inner] of [['a tilde marker inside a backtick fence', '~~~~'], 
     assert.deepEqual(acceptanceIds(brief), ['A1'])
     const io = fakeIo({
       files: { [CTX.briefFile]: brief },
-      envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }) },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
+        'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
+      },
       runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     })
     const result = driveTask(CTX, io)
@@ -8046,7 +8049,10 @@ for (const [form, line] of [['an indented dash bullet', '  - (A1) the asked-for 
   test(`an acceptance id written as ${form} is still owed a check by the driver`, () => {
     const io = fakeIo({
       files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', line].join('\n') },
-      envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }) },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
+        'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
+      },
       runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     })
     const result = driveTask(CTX, io)
@@ -8059,7 +8065,10 @@ for (const [form, line] of [['an indented dash bullet', '  - (A1) the asked-for 
 test('an acceptance id answered only by an exemption escalates, and the refusal and the row both name it waived', () => {
   const io = fakeIo({
     files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', '(A1) proven; (B1) only exempted'].join('\n') },
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }) },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
+      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
+    },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
   const result = driveTask(CTX, io)
@@ -8081,7 +8090,10 @@ test('a plan whose gate checks leave an acceptance id unanswered escalates at pl
   const brief = ['# Task', '', '## Acceptance', '(A1) the first check; (B1) the second check'].join('\n')
   const io = fakeIo({
     files: { [CTX.briefFile]: brief },
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }) },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
+      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
+    },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
   const result = driveTask(CTX, io)
@@ -8098,7 +8110,10 @@ test('a plan that declares no mutations at all still answers for every acceptanc
   const brief = ['# Task', '', '## Acceptance', '(A1) the only asked-for check'].join('\n')
   const io = fakeIo({
     files: { [CTX.briefFile]: brief },
-    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }) },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+    },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
   const result = driveTask(CTX, io)
@@ -8121,6 +8136,26 @@ test('a plan that answers every acceptance id proceeds, and an extra check is re
   // The plan is accepted: whatever this fixture does later, it is not a plan refusal.
   assert.notEqual(result.details.escalation?.where, 'plan')
   assert.equal(io.calls.assign.some((entry) => entry.role === 'lead'), true, 'the plan reached the lead')
+})
+
+// Mutation killed: joining with the literal backslash-n leaves this brief as one line.
+test('RV1-1 coverage bounce preserves real line boundaries', () => {
+  const brief = '# Task\n\n## Acceptance\n(A1) required\n'
+  const miss = { ...CHECK_MUTATION, check: 'X1' }
+  const repaired = { ...CHECK_MUTATION, check: 'A1' }
+  const io = fakeIo({
+    files: { [CTX.briefFile]: brief },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [miss] } }),
+      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [repaired] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  })
+  driveTask(CTX, io)
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.ok(bounce.split('\n').includes(`Original brief: ${CTX.briefFile}`))
+  assert.equal(bounce.split('\n')[0], '# Acceptance coverage miss — plan round 1')
 })
 
 // b870 phantom-check fixtures: bindable mutations over one checkout file, and the

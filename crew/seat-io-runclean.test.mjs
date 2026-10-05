@@ -3894,3 +3894,12 @@ test('RV2-1 an identifier named of never opens a regex', () => {
   assert.throws(() => seatJournalSites('const of = 2; const x = of / log(row) / 2'), /line\(s\) 1/)
   assert.ok(tokenizeJs('for (const x of /a/g.exec(s)) f(x)').some((token) => token.kind === 'regex' && token.text === '/a/g'))
 })
+
+// Mutation RV2-2: not recognising 'for await (' as a for-head turns its 'of' into an identifier,
+// so a regex holding // reads as a comment and hides the sink after it.
+test('RV2-2 a for-await head keeps its of-operand regex opaque', () => {
+  const source = "for await (const x of /[//]/g.exec('/')) io.log(row)"
+  assert.ok(tokenizeJs(source).some((token) => token.kind === 'regex' && token.text === '/[//]/g'))
+  assert.deepEqual(noncanonicalJournalSinks(source), [{ line: 1, form: 'io.log' }])
+  assert.throws(() => seatJournalSites("for await (const x of /[//]/g.exec('/')) log(row)"), /line\(s\) 1/)
+})

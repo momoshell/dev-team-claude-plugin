@@ -71,8 +71,10 @@ export function tokenizeJs(source) {
       if (/[0-9]/.test(c)) { i++; while (i < source.length && /[\w.]/.test(source[i])) i++; significant('number', start, i, false); continue }
       const op = operators.find(x => source.startsWith(x, i)) || c
       i += op.length
-      const head = c === '(' && previous?.kind === 'name' && heads.has(previous.text) && beforePrevious?.text !== '.' && beforePrevious?.text !== '?.'
-      if (c === '(') parens.push(head ? previous.text : false)
+      // 'for await (' opens a for-head too: the head name is two tokens back.
+      const forAwait = c === '(' && previous?.kind === 'name' && previous.text === 'await' && beforePrevious?.kind === 'name' && beforePrevious.text === 'for'
+      const head = forAwait ? 'for' : c === '(' && previous?.kind === 'name' && heads.has(previous.text) && beforePrevious?.text !== '.' && beforePrevious?.text !== '?.' ? previous.text : false
+      if (c === '(') parens.push(head)
       if (interpolation && c === '{') braces++
       else if (interpolation && c === '}') braces--
       significant('punctuator', start, i, c === ')' ? Boolean(parens.pop()) : c === '}' || c === ']' ? false : !['.', '?.', '++', '--'].includes(op))

@@ -3597,6 +3597,37 @@ test('D2 triage preservation records its dispatch source', () => {
   assert.deepEqual(row.preserved_admissions, [{ file, sources: ['census-carrier'] }])
 })
 
+// MUTATION: undoing the preserved-hit exclusion makes this inherited-only admission falsely require a claim.
+test('CP1 inherited prompt admission does not require a planner claim', () => {
+  const file = 'crew/roles/builder.md'
+  const journal = b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file, source: 'data-file' }])
+  const io = b624Io({
+    journal,
+    envelopes: { 'planner:1': b624Plan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const result = driveTask(b624Context({ files_in_scope: [...B624_INHERITED, file] }), io)
+  assert.doesNotMatch(result.details?.escalation?.why ?? '', /prompt-claim-missing/)
+  assert.equal(result.status, 'done')
+  const row = io.calls.logs.find((entry) => entry.plan_scope)?.plan_scope
+  assert.deepEqual(row.preserved_admissions, [{ file, sources: ['data-file'] }])
+  const builder = io.calls.assign.find(({ role }) => role === 'builder')
+  assert.deepEqual(builder.policy.fence, [...B624_PLANNED, file])
+})
+
+// MUTATION: neutralising the prompt condition lets an authored prompt admission bypass its required claim.
+test('authored prompt admission still requires a planner claim', () => {
+  const file = 'crew/roles/builder.md'
+  const journal = b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file, source: 'data-file' }])
+  const io = b624Io({
+    journal,
+    envelopes: { 'planner:1': b624Plan([...B624_PLANNED, file]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  })
+  const result = driveTask(b624Context({ files_in_scope: [...B624_INHERITED, file] }), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, /prompt-claim-missing/)
+})
+
 
 test('F1 no sourced admissions preserve legacy bytes', () => {
   const noRows = dispatchAdmissionsFromJournal('', B624_LANE, B624_INHERITED)

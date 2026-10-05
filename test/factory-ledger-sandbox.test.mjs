@@ -28,7 +28,7 @@ import { loadDurableEscalationRecord, proposalFromResponse, proposalPrompt, tria
 
 import { bootTieredRun } from './factory-ledger.test.mjs'
 
-import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse } from './factory-ledger.test.mjs'
+import { NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, runConcurrentEmitterTrial, mirrorAccounting, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse } from './factory-ledger.test.mjs'
 
 
 
@@ -319,20 +319,22 @@ test('A1: two live emitters on one adw_id lose no record', { skip: SKIP, timeout
   assert.equal(trial.exits[0].code, 0, 'emitter A crashed')
   assert.equal(trial.exits[1].code, 0, 'emitter B crashed')
   assert.equal(trial.jsonlCount, 50)
-  assert.equal(trial.sqliteCount, 50)
-  assert.equal(trial.replayCount, 50)
+  const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount: trial.sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+  assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
 })
 test('B1: concurrent emitter trial measures JSONL and SQLite together', { skip: SKIP, timeout: 30000 }, async () => {
   const trial = await runConcurrentEmitterTrial({ delayMs: resolveRendezvousDelayMs() })
-  assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount }, { jsonl: 50, sqlite: 50 })
+  assert.equal(trial.jsonlCount, 50)
+  const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount: trial.sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+  assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
   assert.equal(trial.sqliteMeasured, true)
 })
 test('C1: calibrated concurrent emitter window lands 50 of 50', { skip: SKIP, timeout: 90000 }, async () => {
   for (const delayMs of CALIBRATED_RENDEZVOUS_DELAYS_MS) {
     const trial = await runConcurrentEmitterTrial({ delayMs })
-    assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
-      jsonl: 50, sqlite: 50, replay: 50,
-    })
+    assert.equal(trial.jsonlCount, 50)
+    const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount: trial.sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+    assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
   }
 })
 test('D1: concurrent emitter contract remains two real processes with 25 records each', { skip: SKIP, timeout: 30000 }, async () => {
@@ -346,9 +348,9 @@ test('D1: concurrent emitter contract remains two real processes with 25 records
   assert.notEqual(trial.childPids[1], process.pid)
   assert.notEqual(trial.childPids[0], trial.childPids[1])
   assert.deepEqual(trial.perTagCounts, { A: 25, B: 25 })
-  assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
-    jsonl: 50, sqlite: 50, replay: 50,
-  })
+  assert.equal(trial.jsonlCount, 50)
+  const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount: trial.sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+  assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
 })
 test('H1: calibrated ledger checks need no rendezvous environment variable', { skip: SKIP, timeout: 30000 }, async () => {
   const saved = process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
@@ -357,14 +359,98 @@ test('H1: calibrated ledger checks need no rendezvous environment variable', { s
     const rendezvousDelayMs = resolveRendezvousDelayMs()
     assert.equal(rendezvousDelayMs, CALIBRATED_RENDEZVOUS_DELAY_MS)
     const trial = await runConcurrentEmitterTrial({ delayMs: rendezvousDelayMs })
-    assert.deepEqual({ jsonl: trial.jsonlCount, sqlite: trial.sqliteCount, replay: trial.replayCount }, {
-      jsonl: 50, sqlite: 50, replay: 50,
-    })
+    assert.equal(trial.jsonlCount, 50)
+    const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount: trial.sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+    assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
   } finally {
     if (saved === undefined) delete process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS
     else process.env.CREW_LEDGER_RENDEZVOUS_DELAY_MS = saved
   }
 })
+// MUTATION MA1: requiring exact SQLite coverage rejects a correctly counted mirror miss.
+test('MA1: a counted mirror miss preserves JSONL authority and replay accounting', { skip: SKIP, timeout: 30000 }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  let forced = false
+  const ledger = openLedger({
+    dbPath, jsonlPath, stderr: { write: () => {} },
+    _afterSequenceAllocatedForTest: ({ conn }) => {
+      if (conn !== null && !forced) { forced = true; throw new Error('forced counted mirror miss') }
+    },
+  })
+  let rebuilt
+  try {
+    for (let i = 0; i < 50; i += 1) ledger.recordEvent({ adw_id: 'ma1-counted-miss', type: 'log', payload: { level: 'info', message: String(i) } })
+    const jsonlCount = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent' && line.args.adw_id === 'ma1-counted-miss').length
+    const sqliteCount = ledger.dumpTable('events').filter((row) => row.adw_id === 'ma1-counted-miss').length
+    const mirrorErrors = ledger.stats().mirror_errors
+    rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+    replayJsonl(jsonlPath, rebuilt)
+    const replayCount = rebuilt.dumpTable('events').filter((row) => row.adw_id === 'ma1-counted-miss').length
+    const replayCollapsed = rebuilt.stats().seq_collisions
+    const counts = { expected: 50, jsonlCount, sqliteCount, mirrorErrors, replayCount, replayCollapsed }
+    assert.deepEqual(counts, { expected: 50, jsonlCount: 50, sqliteCount: 49, mirrorErrors: 1, replayCount: 50, replayCollapsed: 0 })
+    assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
+  } finally {
+    rebuilt?.close()
+    ledger.close()
+  }
+})
+
+// MUTATION MA2: allowing sqliteCount <= expected accepts an uncounted drop.
+test('MA2: refuses an uncounted mirror drop', () => {
+  const counts = { expected: 50, jsonlCount: 50, sqliteCount: 49, mirrorErrors: 0, replayCount: 50, replayCollapsed: 0 }
+  assert.deepEqual(mirrorAccounting(counts), { ok: false, clause: 'sqlite-plus-mirror-errors', counts })
+})
+
+// MUTATION MA3: only rejecting authority over-counts accepts authority loss.
+test('MA3: refuses missing JSONL authority despite balanced mirror accounting', () => {
+  const counts = { expected: 50, jsonlCount: 49, sqliteCount: 49, mirrorErrors: 1, replayCount: 50, replayCollapsed: 0 }
+  assert.deepEqual(mirrorAccounting(counts), { ok: false, clause: 'jsonl', counts })
+})
+
+// MUTATION MA4: removing Number.isInteger admits unknown or malformed mirror counts.
+test('MA4: refuses unknown and malformed mirror error counts', () => {
+  for (const mirrorErrors of [null, undefined, -1, 0.5, Infinity, NaN, '0']) {
+    const counts = { expected: 50, jsonlCount: 50, sqliteCount: 50, mirrorErrors, replayCount: 50, replayCollapsed: 0 }
+    assert.deepEqual(mirrorAccounting(counts), { ok: false, clause: 'mirror-errors', counts })
+  }
+})
+
+// MUTATION MA5: bypassing replay conservation and collapse bounds admits both defects.
+test('MA5: accounts for replay collapse and refuses unexplained loss', () => {
+  const accepted = { expected: 50, jsonlCount: 50, sqliteCount: 49, mirrorErrors: 1, replayCount: 49, replayCollapsed: 1 }
+  assert.deepEqual(mirrorAccounting(accepted), { ok: true, clause: null, counts: accepted })
+  const overBound = { expected: 50, jsonlCount: 50, sqliteCount: 50, mirrorErrors: 0, replayCount: 49, replayCollapsed: 1 }
+  assert.deepEqual(mirrorAccounting(overBound), { ok: false, clause: 'collapse-bound', counts: overBound })
+  const unexplained = { expected: 50, jsonlCount: 50, sqliteCount: 49, mirrorErrors: 1, replayCount: 49, replayCollapsed: 0 }
+  assert.deepEqual(mirrorAccounting(unexplained), { ok: false, clause: 'replay-plus-collapsed', counts: unexplained })
+})
+
+// MUTATION MA6: replacing the measured aggregate with null makes real-child accounting unknown.
+test('MA6: measures mirror reports and replay collisions from both emitter children', { skip: SKIP, timeout: 30000 }, async () => {
+  const trial = await runConcurrentEmitterTrial({ delayMs: resolveRendezvousDelayMs() })
+  assert.equal(trial.statsValid, true, `invalid child stats reports: ${JSON.stringify(trial.statsByTag)}`)
+  for (const tag of ['A', 'B']) {
+    const report = trial.statsByTag[tag]
+    assert.equal(report.tag, tag)
+    assert.ok(Number.isInteger(report.mirror_errors) && report.mirror_errors >= 0)
+    assert.equal(typeof report.degraded, 'boolean')
+  }
+  assert.equal(trial.mirrorErrors, trial.statsByTag.A.mirror_errors + trial.statsByTag.B.mirror_errors)
+  assert.ok(Number.isInteger(trial.mirrorErrors) && trial.mirrorErrors >= 0)
+  assert.ok(Number.isInteger(trial.replayCollapsed) && trial.replayCollapsed >= 0)
+  assert.deepEqual(trial.perTagCounts, { A: 25, B: 25 })
+  assert.equal(trial.exits[0].code, 0)
+  assert.equal(trial.exits[1].code, 0)
+  assert.equal(trial.jsonlCount, 50)
+  const sqliteCount = trial.sqliteCount
+  assert.equal(trial.sqliteMeasured, true)
+  const counts = { expected: 50, jsonlCount: trial.jsonlCount, sqliteCount, mirrorErrors: trial.mirrorErrors, replayCount: trial.replayCount, replayCollapsed: trial.replayCollapsed }
+  assert.deepEqual(mirrorAccounting(counts), { ok: true, clause: null, counts })
+})
+
 test('E1: synchronized degraded handles expose the replay-collapse bound', { skip: SKIP, timeout: 30000 }, async () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')

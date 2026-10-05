@@ -877,6 +877,15 @@ function waitForEmitterReady(child, tag) {
   })
 }
 
+function mirrorAccounting({ expected, jsonlCount, sqliteCount, mirrorErrors, replayCount, replayCollapsed }) {
+  const counts = { expected, jsonlCount, sqliteCount, mirrorErrors, replayCount, replayCollapsed }
+  if (jsonlCount !== expected) return { ok: false, clause: 'jsonl', counts }
+  if (!Number.isInteger(mirrorErrors) || mirrorErrors < 0) return { ok: false, clause: 'mirror-errors', counts }
+  if (sqliteCount + mirrorErrors !== expected) return { ok: false, clause: 'sqlite-plus-mirror-errors', counts }
+  if (replayCount + replayCollapsed !== expected || replayCollapsed > mirrorErrors) return { ok: false, clause: replayCount + replayCollapsed !== expected ? 'replay-plus-collapsed' : 'collapse-bound', counts }
+  return { ok: true, clause: null, counts }
+}
+
 async function runConcurrentEmitterTrial({ delayMs }) {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
@@ -895,6 +904,7 @@ async function runConcurrentEmitterTrial({ delayMs }) {
     for (let i = 0; i < 25; i += 1) {
       ledger.recordEvent({ adw_id: '541-race', type: 'log', payload: { level: 'info', message: tag + ':' + i } })
     }
+    await new Promise((resolve, reject) => process.send({ type: 'stats', tag, mirror_errors: ledger.stats().mirror_errors, degraded: ledger.degraded }, (err) => err ? reject(err) : resolve()))
     ledger.close()
     process.disconnect?.()
   `)
@@ -916,11 +926,23 @@ async function runConcurrentEmitterTrial({ delayMs }) {
   assert.notEqual(childA.pid, childB.pid, 'the emitters must be distinct processes')
   assert.equal(childA.exitCode, null, 'emitter A exited before release')
   assert.equal(childB.exitCode, null, 'emitter B exited before release')
-  const exitA = new Promise((resolve) => childA.once('exit', (code, signal) => resolve({ code, signal })))
-  const exitB = new Promise((resolve) => childB.once('exit', (code, signal) => resolve({ code, signal })))
+  const reports = { A: [], B: [] }
+  const onStatsA = (message) => { if (message?.type === 'stats') reports.A.push(message) }
+  const onStatsB = (message) => { if (message?.type === 'stats') reports.B.push(message) }
+  childA.on('message', onStatsA)
+  childB.on('message', onStatsB)
+  const exitA = new Promise((resolve) => childA.once('close', (code, signal) => resolve({ code, signal })))
+  const exitB = new Promise((resolve) => childB.once('close', (code, signal) => resolve({ code, signal })))
+  const disconnectA = new Promise((resolve) => childA.once('disconnect', resolve))
+  const disconnectB = new Promise((resolve) => childB.once('disconnect', resolve))
   childA.send('release')
   childB.send('release')
-  const [exitAInfo, exitBInfo] = await Promise.all([exitA, exitB])
+  const [[exitAInfo, exitBInfo]] = await Promise.all([Promise.all([exitA, exitB]), Promise.all([disconnectA, disconnectB])])
+  childA.off('message', onStatsA)
+  childB.off('message', onStatsB)
+  const validReport = (tag) => reports[tag].length === 1 && reports[tag][0].tag === tag && Number.isInteger(reports[tag][0].mirror_errors) && reports[tag][0].mirror_errors >= 0 && typeof reports[tag][0].degraded === 'boolean'
+  const statsValid = validReport('A') && validReport('B')
+  const mirrorErrors = statsValid ? reports.A[0].mirror_errors + reports.B[0].mirror_errors : null
   const jsonlEvents = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
     .map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-race')
   const live = openLedger({ dbPath, stderr: { write: () => {} } })
@@ -930,9 +952,11 @@ async function runConcurrentEmitterTrial({ delayMs }) {
   } finally { live.close() }
   const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
   let replayCount
+  let replayCollapsed
   try {
     replayJsonl(jsonlPath, rebuilt)
     replayCount = rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-race').length
+    replayCollapsed = rebuilt.stats().seq_collisions
   } finally { rebuilt.close() }
   const perTagCounts = Object.fromEntries(['A', 'B'].map((tag) => [
     tag, jsonlEvents.filter((line) => String(line.args.payload?.message).startsWith(`${tag}:`)).length,
@@ -944,6 +968,10 @@ async function runConcurrentEmitterTrial({ delayMs }) {
     perTagCounts,
     jsonlCount: jsonlEvents.length,
     replayCount,
+    replayCollapsed,
+    mirrorErrors: mirrorErrors,
+    statsValid,
+    statsByTag: { A: reports.A[0] ?? null, B: reports.B[0] ?? null },
     childPids: [childA.pid, childB.pid],
     emitterPath: emitter,
     dbPath,
@@ -1960,5 +1988,5 @@ function triageResponse(cause = 'budget', evidence = 'measured budget exhaustion
 
 
 export {
-  NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
+  NONCE_PREFIX, SCRIPT, require, SQLITE_OK, SKIP, bootTieredRun, bootBriefRun, fixture, paneReviewRun, trackChild, nextDir, run, openTestLedger, openB499Ledger, seedCellUsage, makeUnenforcedSeatIndexDb, exerciseEveryWriter, seedTaskAgentSession, MARKER_ADW, seedAllWritersWithMarker, MARKER_PLAIN, MARKER_NONCE_ONLY, CALIBRATED_RENDEZVOUS_DELAY_MS, CALIBRATED_RENDEZVOUS_DELAYS_MS, resolveRendezvousDelayMs, waitForEmitterReady, runConcurrentEmitterTrial, mirrorAccounting, RUNSET_SINCE, RUNSET_UNTIL, seedRun, seedConfigurationRun, seedConfigurationSeat, EXECUTION_AXIS_BOOT_CONFIGURATION, executionAxisState, writeExecutionAxisCrew, writeExecutionAxisJournal, executionAxisRuntime, executionAxisRow, readerFixture, ADVISOR_AB_EPOCH, advisorAbFixture, advisorAbEnvelope, advisorAbFinding, runAdvisorAb, advisorReasons, advisorNote, SANDBOX_LEDGER_URL, SANDBOX_DEFAULT_RESOLVER, runSandboxChild, B381_PROVIDER_FAILURE_LINE, B395_SLOT_WAIT_GATE_LINE, B395_SLOT_WAIT_WARM_LINE, B395_SLOT_WAIT_COLD_LINE, B395_OLD_CORPUS_LINES, B381_PLAN_SCOPE_LINE, B381_TIMEOUT_REASK_LINE, B381_RPC_EXIT_LINE, B381_PLAN_ADOPTION_LINE, B381_EXTERNAL_REGISTER, ingestJournalLine, journalFactsCli, measuredJournalFactsDb, assertMeasuredAndAbsent, writeTurnsCorpusJournal, turnsCorpusPayload, builderTurnRole, holdoutLedger, addHoldoutLane, holdoutRows, TRIAGE_MODEL, makeTriageFixture, triageLedger, triageResponse,
 }

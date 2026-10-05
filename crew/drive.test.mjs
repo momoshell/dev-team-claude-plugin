@@ -5699,8 +5699,9 @@ test('CS1', () => {
   assert.equal(io.calls.runCold.length, 2)
   assert.deepEqual(io.calls.runCold, [{ cmd: CTX.suite, names: [CTX.task] }, { cmd: CTX.suite, names: [CTX.task] }])
   assertColdSlotPairs(io.calls, 'runCold:suite-cmd', 2)
-  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/cold/second', counts: null, retried: { path: '/cold/first', kept: '/cold/first', output: 'x'.repeat(2000) } })
-  assert.ok(io.calls.logs.some((row) => row.cold_suite?.verdict === 'green' && row.cold_suite.retried?.path === '/cold/first'))
+  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/cold/second', counts: null, retried: { path: '/cold/first', kept: null, removed: true, output: 'x'.repeat(2000) } })
+  assert.deepEqual(io.calls.removeCold, ['/cold/first'])
+assert.ok(io.calls.logs.some((row) => row.cold_suite?.verdict === 'green' && row.cold_suite.retried?.path === '/cold/first'))
   assert.match(result.summary, /cold-verified from \/cold\/second/)
 })
 

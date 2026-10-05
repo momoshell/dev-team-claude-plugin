@@ -3462,6 +3462,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
       return { ok, output, path, kept: ok ? null : path }
     },
+    removeCold(path) {
+      const removal = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
+      if (removal.status !== 0) throw new Error(`removeCold: checkout could not be removed and is still registered at ${path}:\n${removal.stderr || removal.stdout || removal.error?.message || removal.signal || ''}`)
+
+    },
     // Reusable headless-rpc and ACP clients are swept here. headless-json is
     // deliberately not covered: it spawns one process per assignment which exits
     // on its own and ships no teardown operation — its absence from this record

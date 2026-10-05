@@ -20,7 +20,6 @@
   "crew/daemon.test.mjs:263": "assert.doesNotMatch(policyCode",
   "crew/daemon.test.mjs:261": "assert.doesNotMatch(slugCode",
   "crew/pi/extensions/subagent.test.mjs:174": "module is zero-dep, erasable, and carries",
-  "test/factory-emit.test.mjs:1713": "CLI: emit-cli-unknown-flag-refusal",
   "crew/pi/extensions/subagent.test.mjs:182": "assert.doesNotMatch(source, /^\\s*enum",
   "crew/pi/extensions/subagent.test.mjs:488": "Object.hasOwn(absent.result, 'usage')",
   "crew/pi/extensions/subagent.test.mjs:183": "assert.doesNotMatch(source, /^\\s*namespace",
@@ -31,7 +30,6 @@
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
   "docs/conventions.md:130": "A frozen exported enum's drift guard needs",
   "docs/conventions.md:53": "first TypeScript file on main, and every file under",
-  "scripts/factory/emit.mjs:1612": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8117": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8078": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:8125": "unknown flag --${name}",
@@ -41,5 +39,7 @@
   "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
-  "crew/drive.mjs:554": "export const DECISIONS = Object.freeze"
+  "crew/drive.mjs:554": "export const DECISIONS = Object.freeze",
+  "test/factory-emit.test.mjs:1743": "CLI: emit-cli-unknown-flag-refusal",
+  "scripts/factory/emit.mjs:1614": "function refuseUnknownFlags(verb, flags)"
 }

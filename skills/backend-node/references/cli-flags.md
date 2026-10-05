@@ -20,10 +20,10 @@ Pin the inverse direction so accepted window flags still work.
 Exhibit: `test/factory-ledger-cli.test.mjs:339`.
 
 Pin the process-level status as `exit 2` for the emit CLI.
-Exhibit: `test/factory-emit.test.mjs:1713`.
+Exhibit: `test/factory-emit.test.mjs:1743`.
 
-The same refusal shape is mirrored in `scripts/factory/emit.mjs:1612`.
-Exhibit: `scripts/factory/emit.mjs:1612`.
+The same refusal shape is mirrored in `scripts/factory/emit.mjs:1614`.
+Exhibit: `scripts/factory/emit.mjs:1614`.
 
 Do not let an unknown option become an omitted bound or a null filter.
 Exhibit: `scripts/factory/ledger.mjs:8125` and `test/factory-ledger-cli.test.mjs:332`.
@@ -42,7 +42,7 @@ If a value is missing, report usage rather than reading the next option as data.
 Status: this missing-value edge is unbacked in this checkout; see `evidence.md`.
 
 Test a typo, a valid option, and the exit status as three distinct observations.
-Exhibit: `test/factory-ledger-cli.test.mjs:332`, `test/factory-ledger-cli.test.mjs:339`, and `test/factory-emit.test.mjs:1713`.
+Exhibit: `test/factory-ledger-cli.test.mjs:332`, `test/factory-ledger-cli.test.mjs:339`, and `test/factory-emit.test.mjs:1743`.
 
 The test expectation must come from the CLI contract, not from parsed output.
 Exhibit: `test/factory-ledger-cli.test.mjs:332` and `test/factory-ledger-cli.test.mjs:339`.

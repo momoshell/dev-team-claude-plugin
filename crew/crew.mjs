@@ -3390,7 +3390,7 @@ export async function bootCmd(args, deps = {}) {
       throw err
     }
   }
-  const workerBin = roles.some((role) => adapters[role].transport === HEADLESS_TRANSPORT) ? resolveWorkerBin(args) : null
+  const workerBin = roles.some((role) => adapters[role].transport === HEADLESS_TRANSPORT || (adapters[role].transport === ACP_TRANSPORT && adapters[role].name === 'claude')) ? resolveWorkerBin(args) : null
 
   const paths = pathsFor(taskSlug, checkout)
   // The state dir keys on the checkout's BASENAME — two different checkouts

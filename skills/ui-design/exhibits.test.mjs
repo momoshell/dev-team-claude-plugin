@@ -56,7 +56,7 @@ const UNPINNABLE_PINS = [
   ["visualizer/web/src/lib/RunCard.svelte", 66, ".status.ok { color:var(--status-ok); }"],
   ["visualizer/web/src/lib/RunCard.svelte", 69, ".status.serious { color:var(--status-escalated); }"],
   ["visualizer/web/src/lib/RunCard.svelte", 71, ".events { white-space:nowrap; padding:.5rem; border-top:1px solid var(--line); }"],
-  ["visualizer/web/src/lib/RunDetail.svelte", 297, ".error-banner { margin:0; border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line));"],
+  ["visualizer/web/src/lib/RunDetail.svelte", 300, ".error-banner { margin:0; border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line));"],
   ["visualizer/web/src/lib/TeardownPanel.svelte", 63, ".chip.unproven { color:var(--status-running); }"],
   ["visualizer/web/src/lib/theme.css", 2, "--ink-ground: #090d12;"],
   ["visualizer/web/src/lib/theme.css", 3, "--ink-panel: #0f151d;"],

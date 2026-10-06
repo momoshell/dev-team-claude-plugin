@@ -3188,11 +3188,14 @@ test('PV8', () => {
 test('PV9', () => {
   const component = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8')
   const detail = readSource(new URL('../visualizer/web/src/lib/RunDetail.svelte', import.meta.url), 'utf8')
-  assert.match(component, /import \{ planSteps \} from '\.\/plan-steps\.js'/)
+  assert.match(component, /import \{ stepTimeline \} from '\.\/plan-steps\.js'/)
   assert.match(component, /let \{ journalState \} = \$props\(\)/)
-  assert.match(component, /checks_owned/)
-  assert.match(component, /step\.status \?\? `Unmeasured —/)
-  assert.match(component, /step\.rounds \?\? `Unmeasured —/)
+  assert.match(component, /step\.checks/)
+  assert.match(component, /step\.state \?\? `Unmeasured —/)
+  assert.match(component, /step\.rounds === null/)
+  assert.match(component, /<ol class="step-timeline">/)
+  assert.match(component, /aria-current=\{step\.state === 'active' \? 'step' : undefined\}/)
+  assert.match(detail, /\{#each stepView\.strip as entry \(entry\.id\)\}/)
   assert.match(component, /if view\.steps\.length === 0/)
   assert.match(component, /Loading accepted plan/)
   assert.match(component, /Inspect the accepted planner return/)
@@ -3200,5 +3203,164 @@ test('PV9', () => {
   assert.match(component, /var\(--panel\).*var\(--line\)/)
   const style = component.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
   assert.doesNotMatch(style, /#[0-9a-f]{3,8}\b|\b(?:rgb|hsl)a?\(/i)
-  assert.match(detail, /<PlanSteps \{journalState\} \/>/)
+  assert.match(detail, /<PlanSteps {journalState} \/>/)
+})
+
+// Stepped projection acceptance probes; import dynamically so missing behavior is an assertion failure.
+const steppedModule = await import('../visualizer/web/src/lib/plan-steps.js')
+const stepped = (...args) => typeof steppedModule.stepTimeline === 'function' ? steppedModule.stepTimeline(...args) : {}
+const steppedPayload = (rows=[], chunks=[{id:'a',files_in_scope:['a.js'],depends_on:[],checks_owned:['C1','C2']}]) => ({plan:{chunks},rows})
+const timelineStart = (step='a',round=1,at=100) => ({event:'step:start',step,round,at})
+const timelineDone = (step='a',round=1,at=200) => ({event:'step:done',step,round,at,passed:['C1','C2']})
+const timelineCensus = (at=150,turns=7,role='builder') => ({at,seat_turn_census:{role,turns,dispatch_id:89}})
+test('VS1', () => {
+ const v=stepped(steppedPayload([], [null,{id:'a',files_in_scope:['a.js'],depends_on:[],checks_owned:[]},{id:'b',files_in_scope:['b.js'],depends_on:['a']}]))
+ assert.deepEqual(v.steps.map(s=>[s.id,s.files,s.depends_on,s.intent,s.intent_reason]),[['a',['a.js'],[],null,'plan-chunk-carries-no-intent'],['b',['b.js'],['a'],null,'plan-chunk-carries-no-intent']])
+ for (const [p,r] of [[{},'plan-not-accepted'],[{plan:{absent:'plan-unreadable'}},'plan-unreadable'],[{plan:{chunks:[]}},'plan-has-no-chunks']]) assert.equal(stepped(p).absent,r)
+ assert.equal(stepped(steppedPayload([], [{id:'a',intent:'Recorded'}])).steps[0].intent,'Recorded')
+ const filtered=stepped(steppedPayload([null,{event:'step:done',step:'a',channel:'foreign'},{event:'step:start',step:'a',round:1,at:1,channel:null}]))
+ assert.deepEqual(filtered.steps[0].rounds.map(r=>r.outcome),[null])
+})
+test('VS2', () => {
+ const v=stepped(steppedPayload([timelineDone(),{event:'step:red',step:'a',round:2,failed:['C1'],regressed:['C1']}]))
+ assert.deepEqual(v.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.reason]),[['C1','failed',true,null],['C2',null,false,'no-gate-result']])
+ assert.deepEqual(stepped(steppedPayload([timelineDone()])).steps[0].checks.map(c=>c.result),['passed','passed'])
+ assert.equal(stepped(steppedPayload([timelineStart(),{event:'step:reverify-red',step:'a',failed:['C2'],regressed:['C2']}])).steps[0].checks[1].result,'failed')
+})
+test('VS3', () => {
+ const rows=[timelineStart(),{event:'step:bounce',step:'a',round:1,at:200,status:'blocked'},timelineStart('a',2,300),timelineDone('a',2,400),timelineStart('a',3,500),{event:'step:accepted-by-gate',step:'a',round:3,at:600,passed:['C1']}]
+ const rounds=stepped(steppedPayload(rows)).steps[0].rounds
+ assert.deepEqual(rounds.map(r=>r.outcome),['bounced','done','accepted-by-gate'])
+ assert.deepEqual([rounds[0].bounce_status,rounds[0].bounce_reason,rounds[0].bounce_reason_reason],['blocked',null,'bounce-summary-not-journaled'])
+ const red=stepped(steppedPayload([timelineStart(),timelineDone('outside'),{event:'step:red',step:'a',round:1,at:201,failed:['C2'],regressed:['C1']}])).steps[0].rounds[0]
+ assert.deepEqual([red.outcome,red.failed,red.regressed],['red',['C2'],['C1']])
+})
+test('VS4', () => {
+ for (const [a,b] of [[100,250],['2026-10-06T00:00:00.000Z','2026-10-06T00:00:00.150Z']]) assert.equal(stepped(steppedPayload([timelineStart('a',1,a),timelineDone('a',1,b)])).steps[0].rounds[0].duration_ms,150)
+ assert.deepEqual([stepped(steppedPayload([timelineStart()])).steps[0].rounds[0].duration_ms,stepped(steppedPayload([timelineStart()])).steps[0].rounds[0].duration_reason],[null,'round-open'])
+ const bad=stepped(steppedPayload([timelineStart('a',1,'bad'),timelineDone()])).steps[0].rounds[0]
+ assert.deepEqual([bad.duration_ms,bad.duration_reason],[null,'invalid-round-timestamps'])
+})
+test('VS5', () => {
+ for (const [cs,turns,reason] of [[[],null,'no-builder-census-in-window'],[[timelineCensus()],7,null],[[timelineCensus(),timelineCensus(160,9)],null,'ambiguous-builder-census']]) {
+ const r=stepped(steppedPayload([timelineCensus(50,88),timelineStart(),timelineCensus(140,99,'reviewer'),...cs,timelineDone(),timelineCensus(250,77)])).steps[0].rounds[0]
+ assert.deepEqual([r.turns,r.turns_reason,r.cost,r.cost_reason],[turns,reason,null,'no-per-step-cost-source'])
+ }
+ assert.equal(stepped(steppedPayload([timelineStart(),timelineCensus(150,0),timelineDone()])).steps[0].rounds[0].turns,0)
+})
+test('VS6', () => {
+ const v=stepped(steppedPayload([timelineStart(),{at:150,stage:'escalate:build'}])).steps[0]
+ assert.deepEqual([v.state,v.escalation,v.escalation_reason],['escalated','escalate:build',null])
+ assert.equal(stepped(steppedPayload([timelineStart()])).steps[0].state,'active')
+ const two=stepped(steppedPayload([timelineStart(),timelineStart('b',1,150)],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(two.steps.map(s=>[s.state,s.reason]),[[null,'superseded-open-round'],['active',null]])
+ const resumed=stepped(steppedPayload([timelineStart(),{event:'step:red',step:'a',round:1,at:120},timelineStart('a',2,130),{at:140,stage:'escalate:build'},timelineStart('a',1,150),timelineDone('a',1,170),timelineStart('b')],[{id:'a'},{id:'b'}]))
+ assert.equal(resumed.steps[0].state,'done')
+})
+test('VS7', () => {
+ const d={event:'step:degrade',step:'a',remaining:['a','b'],reason:'budget-reserved',budget:2,at:200}
+ const v=stepped(steppedPayload([timelineStart(),d,timelineDone('b',1,300)],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(v.degraded,{value:true,step:'a',remaining:['a','b'],reason:d.reason,budget:2})
+ assert.deepEqual(v.steps.map(s=>s.state),['degraded','done'])
+ assert.equal(stepped(steppedPayload([timelineStart()])).degraded.value,false)
+ assert.deepEqual([stepped(steppedPayload()).degraded.value,stepped(steppedPayload()).degraded.reason],[null,'no-step-events'])
+ const completed=stepped(steppedPayload([d,timelineDone('a',1,250)])).steps[0]
+ assert.equal(completed.state,'done')
+})
+test('VS8', () => {
+ const v=stepped(steppedPayload([timelineStart(),timelineDone(),timelineStart('b')],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(v.strip.map(s=>[s.id,s.state,s.reason,s.tone]),v.steps.map(s=>[s.id,s.state,s.reason,s.tone]))
+ const detail=readFileSync(new URL('../visualizer/web/src/lib/RunDetail.svelte',import.meta.url),'utf8')
+ const header=detail.match(/<header class="task-header">([\s\S]*?)<\/header>/)?.[1] ?? ''
+ assert.ok(header.includes('{#each stepView.strip as entry (entry.id)}'))
+ const component=readFileSync(new URL('../visualizer/web/src/lib/PlanSteps.svelte',import.meta.url),'utf8')
+ assert.match(component,/<ol\b[^>]*class="step-timeline"/)
+ assert.match(component,/aria-current=\{step.state === 'active' \? 'step' : undefined\}/)
+})
+test('VS9', () => {
+ for (const flag of [{error:'read denied'},{degraded:true}]) {
+ const v=stepped({...steppedPayload([timelineStart(),timelineCensus(),timelineDone()]),...flag}),s=v.steps[0]
+ assert.deepEqual([s.state,s.reason,s.rounds],[null,'journal-unavailable',null])
+ assert.deepEqual(s.checks.map(c=>[c.result,c.regressed,c.reason]),[[null,null,'journal-unavailable'],[null,null,'journal-unavailable']])
+ assert.deepEqual([v.degraded.value,v.degraded.reason],[null,'journal-unavailable'])
+ assert.deepEqual(v.strip.map(e=>[e.state,e.reason]),[[null,'journal-unavailable']])
+ }
+})
+test('RV1-1 resumed step round rows have unique presentation keys', () => {
+ const rows=[timelineStart(),{at:110,stage:'escalate:build'},timelineStart('a',1,120),timelineDone('a',1,130)]
+ const view=stepped(steppedPayload(rows))
+ assert.deepEqual(view.steps[0].rounds.map(r=>r.round),[1,1])
+ const source=readFileSync(new URL('../visualizer/web/src/lib/PlanSteps.svelte',import.meta.url),'utf8')
+ assert.match(source,/{#each step.rounds as round, i \(i\)}/)
+})
+test('RV1-2 only each card latest start can remain open', () => {
+ const rows=[timelineStart(),{event:'step:red',step:'a',round:1,at:110},timelineStart('a',2,120),{at:125,stage:'escalate:build'},timelineStart('a',1,130),timelineDone('a',1,140),timelineStart('b',1,150),timelineDone('b',1,160)]
+ assert.equal(stepped(steppedPayload(rows,[{id:'a'},{id:'b'}])).steps[0].state,'done')
+})
+test('RV1-3 plan header strip mirrors card IDs and states', () => {
+ assert.equal(stepped(steppedPayload([timelineStart(),timelineCensus(150,3),timelineCensus(160,4),timelineDone()])).steps[0].rounds[0].turns_reason,'ambiguous-builder-census')
+ const view=stepped(steppedPayload([timelineStart(),timelineDone()]))
+ assert.deepEqual(view.strip.map(x=>[x.id,x.state]),view.steps.map(x=>[x.id,x.state]))
+})
+test('RV1-1 duplicate starts retain separate ordered round rows and keyed rendering', () => {
+ const view=stepped(steppedPayload([timelineStart('a',1,100),{event:'step:bounce',step:'a',round:1,at:110,status:'retry'},timelineStart('a',1,120),timelineDone('a',1,130)]))
+ assert.deepEqual(view.steps[0].rounds.map(r=>[r.round,r.outcome]),[[1,'bounced'],[1,'done']])
+ const source=readFileSync(new URL('../visualizer/web/src/lib/PlanSteps.svelte',import.meta.url),'utf8')
+ assert.match(source,/{#each step.rounds as round, i \(i\)}/)
+})
+test('RV1-2 latest open start in journal order owns active state', () => {
+ const view=stepped(steppedPayload([timelineStart('a',1,100),timelineStart('b',1,110),timelineStart('a',2,120)],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(view.steps.map(s=>[s.state,s.reason]),[['active',null],[null,'superseded-open-round']])
+})
+test('RV1-3 task strip mirrors ordered card state and absence metadata', () => {
+ const view=stepped(steppedPayload([timelineStart(),{event:'step:red',step:'a',round:1,at:200,failed:['C1']}]))
+ assert.deepEqual(view.strip.map(x=>[x.id,x.state,x.reason,x.tone]),view.steps.map(x=>[x.id,x.state,x.reason,x.tone]))
+ const component=readFileSync(new URL('../visualizer/web/src/lib/RunDetail.svelte',import.meta.url),'utf8')
+ assert.match(component,/{#each stepView\.strip as entry \(entry\.id\)}/)
+})
+test('RV1-5 timeline vocabularies are frozen and consulted', () => {
+ const {STEP_TIMELINE_REASONS,STEP_TIMELINE_STATES,STEP_TIMELINE_OUTCOMES,STEP_TIMELINE_TONES}=steppedModule
+ assert.deepEqual(STEP_TIMELINE_REASONS,['plan-files-not-recorded','plan-dependencies-not-recorded','plan-checks-not-recorded','plan-chunk-carries-no-intent','no-gate-result','round-open','bounce-summary-not-journaled','not-a-bounce','gate-labels-not-recorded','invalid-round-timestamps','no-builder-census-in-window','ambiguous-builder-census','invalid-builder-census','no-per-step-cost-source','no-escalation-recorded','no-step-events','not-started','superseded-open-round','journal-unavailable','degrade-step-not-recorded','degrade-remaining-not-recorded','degrade-budget-not-recorded'])
+ assert.deepEqual(STEP_TIMELINE_STATES,['done','active','red','escalated','degraded','not-started'])
+ assert.deepEqual(STEP_TIMELINE_OUTCOMES,['done','red','bounced','accepted-by-gate'])
+ assert.deepEqual(STEP_TIMELINE_TONES,['ok','busy','fail','serious','muted'])
+ for(const values of [STEP_TIMELINE_REASONS,STEP_TIMELINE_STATES,STEP_TIMELINE_OUTCOMES,STEP_TIMELINE_TONES]) assert.equal(Object.isFrozen(values),true)
+})
+// MUTATION RV1-4b: drop the journal-unavailable branch of escalation_reason — an unreadable
+// journal then reports no-escalation-recorded, a measured absence nobody measured.
+test('RV1-4 an unreadable journal reports its escalation as journal-unavailable', () => {
+ for (const flag of [{error:'read denied'},{degraded:true}]) {
+  const s=stepped({...steppedPayload([timelineStart(),{at:150,stage:'escalate:build'}]),...flag}).steps[0]
+  assert.deepEqual([s.escalation,s.escalation_reason],[null,'journal-unavailable'])
+ }
+ const s=stepped(steppedPayload([timelineStart(),{at:150,stage:'escalate:build'}])).steps[0]
+ assert.deepEqual([s.escalation,s.escalation_reason],['escalate:build',null])
+})
+// MUTATION RV2-1: read regressions only from the step's own gate row — a later step's red gate
+// that regresses C1 then leaves step a green with C1 passed.
+// MUTATION RV3-1: keep any later regression sticky — b's passing retry then leaves a red forever.
+test('RV2-1 a regression seen by a later step marks the owning step until a later gate passes it', () => {
+ const chunks=[{id:'a',checks_owned:['C1','C2']},{id:'b',checks_owned:['C3']}]
+ const red=[timelineStart(),timelineDone(),timelineStart('b',1,300),{event:'step:red',step:'b',round:1,at:400,failed:['C1'],regressed:['C1']}]
+ const v=stepped(steppedPayload(red,chunks))
+ assert.deepEqual(v.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.tone]),[['C1','failed',true,'fail'],['C2','passed',false,'ok']])
+ assert.deepEqual([v.steps[0].state,v.steps[0].tone],['done','fail'])
+ assert.deepEqual(v.strip[0],{id:'a',state:'done',reason:null,tone:'fail'})
+ const retried=stepped(steppedPayload([...red,timelineStart('b',2,500),{event:'step:done',step:'b',round:2,at:600,passed:['C1','C2','C3']}],chunks))
+ assert.deepEqual(retried.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.tone]),[['C1','passed',false,'ok'],['C2','passed',false,'ok']])
+ assert.deepEqual(retried.strip[0],{id:'a',state:'done',reason:null,tone:'ok'})
+})
+
+// MUTATION RV2-2: let latestOpen fall back to any earlier unterminated start — step a, whose
+// terminal row is missing, is revived as active after step b finishes.
+test('RV2-2 an unterminated start superseded by a later step is never revived', () => {
+ const v=stepped(steppedPayload([timelineStart(),timelineStart('b',1,300),timelineDone('b',1,400)],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(v.steps.map(s=>[s.id,s.state,s.reason]),[['a',null,'superseded-open-round'],['b','done',null]])
+})
+
+// MUTATION RV2-3: drop the reversed-window check from turnsReason — a round ending before it
+// started then claims no builder census instead of invalid timestamps.
+test('RV2-3 a reversed round window reports invalid timestamps for turns too', () => {
+ const r=stepped(steppedPayload([timelineStart('a',1,200),timelineDone('a',1,100)])).steps[0].rounds[0]
+ assert.deepEqual([r.duration_reason,r.turns,r.turns_reason],['invalid-round-timestamps',null,'invalid-round-timestamps'])
 })

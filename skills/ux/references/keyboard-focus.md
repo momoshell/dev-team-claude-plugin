@@ -14,8 +14,8 @@ Literal census over the 34 `.svelte` files directly under the visualizer lib dir
 | `:focus-visible` selectors | 4 | 3 |
 | plain `:focus` selectors | 3 | 1 |
 | `tabindex` attributes | 1 | 1 |
-| `aria-` attributes | 125 | 29 |
-| `role=` attributes | 22 | 10 |
+| `aria-` attributes | 127 | 29 |
+| `role=` attributes | 23 | 10 |
 
 The remaining modern handlers live at `visualizer/web/src/lib/RosterPanel.svelte:426` and `visualizer/web/src/lib/RosterPanel.svelte:688`; the plain-`:focus` treatment and the single `tabindex` live at `visualizer/web/src/lib/RosterPanel.svelte:721` (the other two plain-`:focus` selectors sit on line 711) and `visualizer/web/src/lib/RosterPanel.svelte:688`. The other `:focus-visible` treatments are at `visualizer/web/src/lib/MetricsStrip.svelte:51` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
 

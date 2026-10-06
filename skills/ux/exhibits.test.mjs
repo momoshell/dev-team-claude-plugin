@@ -87,21 +87,21 @@ test('ux manifest pins carry current exact content', () => {
 test('ux absence vocabulary re-derives from the component tree', () => {
   const body = readFileSync(join(REF_DIR, 'absence.md'), 'utf8')
   const dash = census('—', 'g')
-  assert.equal(dash.occurrences, 134)
+  assert.equal(dash.occurrences, 149)
   assert.equal(dash.files, 24)
   const unavailable = census('unavailable', 'gi')
   assert.equal(unavailable.occurrences, 94)
   assert.equal(unavailable.files, 24)
   const unmeasured = census('unmeasured', 'gi')
-  assert.equal(unmeasured.occurrences, 37)
-  assert.equal(unmeasured.files, 11)
+  assert.equal(unmeasured.occurrences, 52)
+  assert.equal(unmeasured.files, 12)
   const notMeasured = census('not measured', 'gi')
   assert.equal(notMeasured.occurrences, 14)
   assert.equal(notMeasured.files, 7)
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
   assert.equal(union.size, 28)
   assert.equal(libFiles().length, 34)
-  for (const row of ['| `—` | 134 | 24 |', '| `unavailable` | 94 | 24 |', '| `unmeasured` | 37 | 11 |', '| `not measured` | 14 | 7 |']) {
+  for (const row of ['| `—` | 149 | 24 |', '| `unavailable` | 94 | 24 |', '| `unmeasured` | 52 | 12 |', '| `not measured` | 14 | 7 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
@@ -141,10 +141,10 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(tab.occurrences, 1)
   assert.equal(tab.files, 1)
   const aria = census('aria-', 'g')
-  assert.equal(aria.occurrences, 125)
+  assert.equal(aria.occurrences, 127)
   assert.equal(aria.files, 29)
   const role = census('role=', 'g')
-  assert.equal(role.occurrences, 22)
+  assert.equal(role.occurrences, 23)
   assert.equal(role.files, 10)
   for (const row of [
     '| legacy `on:keydown` attributes | 0 | 0 |',
@@ -152,8 +152,8 @@ test('ux keyboard and focus register re-derives', () => {
     '| `:focus-visible` selectors | 4 | 3 |',
     '| plain `:focus` selectors | 3 | 1 |',
     '| `tabindex` attributes | 1 | 1 |',
-    '| `aria-` attributes | 125 | 29 |',
-    '| `role=` attributes | 22 | 10 |',
+    '| `aria-` attributes | 127 | 29 |',
+    '| `role=` attributes | 23 | 10 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)
   }
@@ -198,7 +198,7 @@ test('ux stated gaps are counted and few', () => {
     gaps += (body.match(/\*\*Stated gap:\*\*/g) || []).length
   }
   assert.equal(gaps, 4)
-  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('4/34'), 'absence.md must record the canonical-phrase adoption count')
+  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('5/34'), 'absence.md must record the canonical-phrase adoption count')
   for (const body of readDocs()) {
     for (const line of body.split('\n')) {
       if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/34/, 'every stated gap carries a denominator')

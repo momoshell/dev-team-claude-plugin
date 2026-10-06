@@ -10,19 +10,19 @@ Case-insensitive literal census over the 34 `.svelte` files directly under the v
 
 | spelling | occurrences | files |
 |---|---|---|
-| `—` | 134 | 24 |
+| `—` | 149 | 24 |
 | `unavailable` | 94 | 24 |
-| `unmeasured` | 37 | 11 |
+| `unmeasured` | 52 | 12 |
 | `not measured` | 14 | 7 |
 
-`—` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunCard.svelte, RunDetail.svelte, RunSetPanel.svelte, SkillsPage.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte.
+`—` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunCard.svelte, RunDetail.svelte, RunSetPanel.svelte, SkillsPage.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte.
 
-`unavailable` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunDetail.svelte, RunSetPanel.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
+`unavailable` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunDetail.svelte, RunSetPanel.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
 
-`unmeasured` files: AgentsPage.svelte, AssurancePage.svelte, IntakePanel.svelte, MetricsStrip.svelte, PromptsPage.svelte, RosterPanel.svelte, RunSetPanel.svelte, SkillsPage.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
+`unmeasured` files: AgentsPage.svelte, AssurancePage.svelte, IntakePanel.svelte, MetricsStrip.svelte, PlanSteps.svelte, PromptsPage.svelte, RosterPanel.svelte, RunDetail.svelte, RunSetPanel.svelte, SkillsPage.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
 
 `not measured` files: FleetTable.svelte, OperationsOverview.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
 
-One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/AgentsPage.svelte:85`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:173`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/PromptsPage.svelte:52`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:598`.
+One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/AgentsPage.svelte:85`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:176`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/PromptsPage.svelte:52`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:598`.
 
-**Stated gap:** 4 spellings across 28/34 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears in 4/34 components (AgentsPage.svelte, PlanSteps.svelte, PromptsPage.svelte, SkillsPage.svelte).
+**Stated gap:** 4 spellings across 28/34 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears in 5/34 components (AgentsPage.svelte, PlanSteps.svelte, PromptsPage.svelte, RunDetail.svelte, SkillsPage.svelte).

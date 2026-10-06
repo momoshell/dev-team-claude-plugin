@@ -1302,3 +1302,96 @@ test('a single complete frame over 64 KiB within the stream total is rejected bo
     assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
   } finally { c.cleanup() }
 })
+
+// Consult-path guards for the delivery fix (lane b1147). They drive createAdvisor end to end:
+// a fake judgment child returns `reply`, and the journal rows and steers are observed.
+const adGood = (claim) => ({ class: 'edge-path', severity: 'medium', claim, evidence: ['lib/widget.mjs:1'] })
+async function adDrive(reply, { noCell = false, denyAppend = false } = {}) {
+  const root = scratchDir('advisor-ad-')
+  const taskDir = join(root, 'task'), tree = join(root, 'tree'), rows = [], sends = []
+  mkdirSync(taskDir); mkdirSync(join(root, 'returns')); mkdirSync(join(tree, 'lib'), { recursive: true })
+  writeFileSync(join(tree, 'lib/widget.mjs'), 'const widget = null\n')
+  writeFileSync(join(taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({
+    schema_version: 1, run_started_at: 1, tripwires: [],
+    ...(noCell ? {} : { cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' } }),
+  }))
+  writeFileSync(join(root, 'returns/d1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  let spawned = 0
+  const seat = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, deps: {
+    taskDir, cwd: tree, fileMtime: () => 2, readFile: (p) => readFileSync(p, 'utf8'), diffSize: () => null,
+    resolveBinary: () => ({ command: '/fake/pi', args: [] }),
+    appendFile: (_p, text) => {
+      const parsed = String(text).trim().split('\n').map((line) => JSON.parse(line))
+      if (denyAppend && parsed.some((row) => row.advisor_note?.tier === 0)) throw Object.assign(new Error('denied'), { code: 'EPERM' })
+      rows.push(...parsed)
+    },
+    send: (message, options) => sends.push({ message, options, journalFirst: rows.some((row) => JSON.stringify(row.advisor_note) === JSON.stringify(message.details)) }),
+    spawn: () => {
+      spawned++
+      const child = new EventEmitter()
+      child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+      child.stdin = { end() { setImmediate(() => {
+        child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: reply, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
+        child.emit('close', 0)
+      }) } }
+      return child
+    },
+  } })
+  try {
+    seat.onToolResult({ toolCallId: 'read', toolName: 'read', input: { path: join(tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'const widget = null' }] }, {})
+    const input = { path: join(tree, 'outside.mjs'), content: 'const outside = null\n' }
+    seat.onToolCall({ toolCallId: 'write', toolName: 'write', input }, {})
+    seat.onToolResult({ toolCallId: 'write', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+    await seat.settled()
+    return { rows, sends, spawned }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}
+const adTier1 = (r) => r.rows.filter((row) => row.advisor_note?.tier === 1).map((row) => row.advisor_note)
+const adSent1 = (r) => r.sends.filter((s) => s.message.details?.tier === 1)
+const adAccepted = (r) => ({ outcomes: adTier1(r).map((n) => n.outcome), claims: adTier1(r).map((n) => n.claim), sends: adSent1(r).map((s) => ({ content: s.message.content, delivery: s.options.deliverAs })) })
+
+// MUTATION AD1: revert the consult call site to validateJudgment — an array reply is rejected.
+test('AD1 an array reply delivers its first valid judgment as the steer', async () => {
+  assert.deepEqual(adAccepted(await adDrive(JSON.stringify([adGood('first grounded claim'), adGood('second grounded claim')]))),
+    { outcomes: ['injected'], claims: ['first grounded claim'], sends: [{ content: 'first grounded claim', delivery: 'steer' }] })
+})
+
+// MUTATION AD2: take the first element's verdict unconditionally — a valid second element is lost.
+test('AD2 an invalid first element does not hide a valid later judgment', async () => {
+  assert.deepEqual(adAccepted(await adDrive(JSON.stringify([{ ...adGood('invalid first claim'), class: 'bogus' }, adGood('second grounded claim')]))),
+    { outcomes: ['injected'], claims: ['second grounded claim'], sends: [{ content: 'second grounded claim', delivery: 'steer' }] })
+})
+
+// MUTATION AD3: report payload-not-an-object for any rejected array — per-element codes disappear.
+test('AD3 an array with no valid element is rejected with closed per-element codes', async () => {
+  const r = await adDrive(JSON.stringify([{ ...adGood('invalid class'), class: 'bogus' }, { ...adGood('invalid severity'), severity: 'bogus' }]))
+  const notes = adTier1(r), codes = notes[0]?.codes || []
+  assert.deepEqual(notes.map((n) => n.outcome), ['rejected'])
+  assert.deepEqual([...codes].sort(), ['class-invalid', 'severity-invalid'])
+  assert.equal(codes.every((c) => advisor.JUDGMENT_ERROR_CODES.includes(c)), true)
+  assert.equal(adSent1(r).length, 0)
+})
+
+// MUTATION AD4: drop reply_excerpt, or store the raw unbounded reply — rejections become undiagnosable
+// or leak a secret past the 512-byte redacted prefix.
+test('AD4 a rejected reply journals a bounded redacted excerpt', async () => {
+  const secret = 'AbCdEfGhIjKlMnOpQrStUv123456'
+  const replies = ['Bearer ' + secret + ' ' + '😀'.repeat(400), '42', JSON.stringify({ ...adGood('invalid claim'), class: 'bogus' })]
+  const results = await Promise.all(replies.map((reply) => adDrive(reply)))
+  const excerpts = results.map((r) => adTier1(r)[0]?.reply_excerpt)
+  assert.deepEqual(excerpts.map((e) => typeof e === 'string' && e.length > 0), [true, true, true])
+  assert.equal(Buffer.byteLength(excerpts[0]) <= 512, true)
+  assert.equal(advisor.redactDelta(replies[0]).text.startsWith(excerpts[0]), true)
+  assert.equal(excerpts[0].includes(secret), false)
+  assert.equal(results.reduce((n, r) => n + adSent1(r).length, 0), 0)
+})
+
+// MUTATION AD5: neutralise the emitTier0 send — a scope breach is journaled injected but never reaches the builder.
+test('AD5 a tier-zero note is journaled first and then sent as a steer', async () => {
+  const [r, denied] = await Promise.all([adDrive('', { noCell: true }), adDrive('', { noCell: true, denyAppend: true })])
+  assert.deepEqual(r.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note.outcome), ['injected'])
+  assert.deepEqual(r.sends.map((s) => ({ type: s.message.customType, content: s.message.content, delivery: s.options.deliverAs, display: s.message.display, noTriggerTurn: s.options.triggerTurn === undefined, journalFirst: s.journalFirst })),
+    [{ type: 'crew-advisor', content: 'The builder seat touched outside.mjs outside the declared scope.', delivery: 'steer', display: true, noTriggerTurn: true, journalFirst: true }])
+  assert.equal(r.spawned, 0)
+  assert.equal(denied.sends.length, 0)
+})

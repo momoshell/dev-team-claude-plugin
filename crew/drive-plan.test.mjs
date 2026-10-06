@@ -28,6 +28,8 @@ import {
   prescribedPlanCorrection,
   turnCeilingOf,
   zeroTurnNonStartOf,
+  renderSeatHandoff,
+  SEAT_HANDOFF_BYTE_LIMIT,
 } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 import { TRANSPORT_SETTLEMENT } from './headless-rpc.mjs'
@@ -3939,4 +3941,153 @@ test('L2 envelopefreeze acceptance label follows the accepted round, not an earl
   assert.deepEqual(result.details.stages.filter((stage) => /^(plan|check):/.test(stage)), ['plan:r1', 'check:r1', 'plan:r2'])
   const row = efRewriteRows(io).find(({ path }) => path === 'planner:2')
   assert.equal(row?.stage, 'plan', JSON.stringify(efRewriteRows(io)))
+})
+
+function seatHandoffPlanIo(customFindings = null, notes = null) {
+  const envelopes = {}
+  for (let i = 1; i <= 4; i++) envelopes['planner:' + i] = adversarialPlanEnv()
+  for (let i = 1; i <= 3; i++) {
+    envelopes['tech-lead:' + i] = {
+      status: 'done', role: 'tech-lead', details: {
+        verdict: 'revise', check_path: TD + '/plan-check.md',
+        findings: customFindings ?? [
+          { id: 'PC' + i + 'a', severity: 'major', correction: 'Guard alpha', details: { notes } },
+          { id: 'PC' + i + 'b', severity: 'blocker', correction: 'Guard beta', details: { notes } },
+        ],
+      },
+    }
+  }
+  envelopes['tech-lead:4'] = checkEnv('approve')
+  envelopes['lead:1'] = leadEnv('bounce')
+  envelopes['builder:1'] = buildEnv()
+  envelopes['reviewer:1'] = reviewEnv('pass')
+  return fakeIo({
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    writeThrough: true,
+    files: { [TD + '/tech-lead.stream.jsonl']: notes ?? '' },
+  })
+}
+function seatHandoffPlanScenario(customFindings = null, notes = null) {
+  const io = seatHandoffPlanIo(customFindings, notes)
+  driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  return io
+}
+const seatHandoffFindingLines = (out) => out.split('\n').filter((line) => /^- [^ ]+ \(/.test(line))
+const seatHandoffNames = (io, brief, name) => {
+  assert.deepEqual((io.calls.writes[TD + '/' + brief] ?? '(absent)').split('\n').filter((line) => line.startsWith('Handoff: ')), ['Handoff: ' + TD + '/' + name])
+}
+
+// MUTATION SH2: remove previousPlanCheck findings from the tech-lead renderer input.
+test('SH2', () => {
+  const io = seatHandoffPlanScenario()
+  const text = (name) => io.calls.writes[TD + '/' + name] ?? '(absent)'
+  const expected = {
+    2: ['- PC1a (major): Guard alpha', '- PC1b (blocker): Guard beta'],
+    3: ['- PC2a (major): Guard alpha', '- PC2b (blocker): Guard beta'],
+    4: ['- PC3a (major): Guard alpha', '- PC3b (blocker): Guard beta'],
+  }
+  for (const round of [2, 3, 4]) {
+    seatHandoffNames(io, 'check-brief-r' + round + '.md', 'tech-lead-handoff-r' + round + '.md')
+    assert.deepEqual(seatHandoffFindingLines(text('tech-lead-handoff-r' + round + '.md')), expected[round])
+  }
+})
+
+// MUTATION SH3: remove the current check findings from the planner renderer input.
+test('SH3', () => {
+  const io = seatHandoffPlanScenario()
+  const text = (name) => io.calls.writes[TD + '/' + name] ?? '(absent)'
+  const expected = {
+    1: ['- PC1a (major): Guard alpha', '- PC1b (blocker): Guard beta'],
+    2: ['- PC2a (major): Guard alpha', '- PC2b (blocker): Guard beta'],
+    3: ['- PC3a (major): Guard alpha', '- PC3b (blocker): Guard beta'],
+  }
+  for (const round of [1, 2, 3]) {
+    seatHandoffNames(io, 'plan-bounce-r' + round + '.md', 'planner-handoff-r' + round + '.md')
+    const out = text('planner-handoff-r' + round + '.md')
+    assert.deepEqual(out.split('\n').filter((x) => x.startsWith('Plan: ')), ['Plan: ' + TD + '/plan.md'])
+    assert.deepEqual(seatHandoffFindingLines(out), expected[round])
+  }
+})
+
+// MUTATION SH6: raise the cap to 8192; 200 long corrections produce an oversized handoff.
+test('SH6', () => {
+  const findings = Array.from({ length: 200 }, (_, i) => ({ id: 'F' + i, severity: 'major', correction: 'x'.repeat(400) }))
+  const direct = renderSeatHandoff({ seat: 'tech-lead', round: 2, paths: { plan: TD + '/plan.md', brief: CTX.briefFile, check: TD + '/plan-check.md' }, findings })
+  assert.equal(Buffer.byteLength(direct) <= SEAT_HANDOFF_BYTE_LIMIT && Buffer.byteLength(direct) <= 4096, true, 'direct crowded handoff obeys the cap')
+  assert.match(direct.trimEnd().split('\n').at(-1), /^\d+ more not listed$/)
+  const io = seatHandoffPlanScenario(findings)
+  const text = (name) => io.calls.writes[TD + '/' + name] ?? '(absent)'
+  for (const name of ['tech-lead-handoff-r2.md', 'planner-handoff-r1.md']) {
+    const out = text(name)
+    const bytes = Buffer.byteLength(out)
+    assert.equal(out.startsWith('# '), true, TD + '/' + name)
+    assert.equal(bytes <= SEAT_HANDOFF_BYTE_LIMIT && bytes <= 4096, true, TD + '/' + name + ' bytes=' + bytes)
+    const listed = seatHandoffFindingLines(out)
+    assert.ok(listed.length > 0 && listed.length < 200, TD + '/' + name + ' listed=' + listed.length)
+    assert.deepEqual(listed, findings.slice(0, listed.length).map((f) => '- ' + f.id + ' (major): ' + 'x'.repeat(400)), TD + '/' + name + ' retained prefix')
+    assert.equal(out.trimEnd().split('\n').at(-1), (200 - listed.length) + ' more not listed', TD + '/' + name + ' measured dropped lines')
+  }
+})
+
+test('seat handoff ancillary bounds and branches', () => {
+  assert.equal(
+    renderSeatHandoff({ seat: 'tech-lead', round: 2, paths: { plan: 'P', brief: 'B', check: 'C' }, findings: [{ id: 'F1', severity: 'major', correction: 'fix it' }] }),
+    '# tech-lead handoff\nRound: 2\nPlan: P\nBrief: B\nCheck: C\n- F1 (major): fix it\n',
+  )
+  for (const correction of ['\u00e9'.repeat(300), '\u{1F600}'.repeat(200), 'a\nb\nc']) {
+    const out = renderSeatHandoff({ seat: 's', findings: [{ id: 'F1', severity: 'major', correction }] })
+    for (const line of out.split('\n')) assert.ok(Buffer.byteLength(line) <= 512, 'clipped line exceeds 512 bytes')
+    assert.equal(out.includes('\uFFFD'), false, 'clipping split a code point')
+  }
+  assert.ok(renderSeatHandoff({ seat: 's', findings: [{ id: 'F1', severity: 'major', correction: 'a\nb\nc' }] }).includes('- F1 (major): a b c'))
+  const many = Array.from({ length: 40 }, (_, i) => ({ consult: i + 1, decision: 'bounce', reason: 'r'.repeat(200), brief: TD + '/decision-' + (i + 1) + '.md' }))
+  const crowded = renderSeatHandoff({ seat: 'lead', buildRound: 3, diffStat: 'stat', paths: { plan: 'P'.repeat(400), brief: 'B', check: 'C' }, decisions: many })
+  assert.ok(Buffer.byteLength(crowded) <= 4096, 'crowded decisions obey the cap')
+  const crowdedLines = crowded.trimEnd().split('\n')
+  const droppedCount = Number(crowdedLines.at(-1).match(/^(\d+) more not listed$/)[1])
+  assert.equal(droppedCount, 87 - (crowdedLines.length - 1), 'footer counts all remaining lines')
+  assert.deepEqual(crowdedLines.filter((l) => l.startsWith('- consult ')).map((l) => Number(l.match(/^- consult (\d+):/)[1])), crowdedLines.filter((l) => l.startsWith('- consult ')).map((_, i) => i + 1), 'retained decisions form the ordered prefix')
+  assert.ok(renderSeatHandoff({ seat: 'tech-lead', round: 1, findings: [] }).split('\n').includes('Findings: none'))
+  assert.ok(renderSeatHandoff({ seat: 'tech-lead', round: 1 }).split('\n').includes('Findings: unavailable (the previous round supplied no findings array)'))
+  const mixed = renderSeatHandoff({ seat: 'tech-lead', findings: [null, { id: 'OK1', severity: 'major', correction: 'x' }] })
+  assert.deepEqual(mixed.split('\n').filter((l) => /^- [^ ]+ \(/.test(l)), ['- OK1 (major): x'])
+  assert.ok(mixed.includes('Rejected finding entries: 1 (malformed, not listed)'))
+  const brief = '# T\n\n## Acceptance\n(CB1) required\n'
+  const mutation = { ...CHECK_MUTATION, check: 'X1' }
+  const coverage = fakeIo({ files: { [CTX.briefFile]: brief }, envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', needs_adversary: true, mutations: [mutation] } }), 'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', needs_adversary: true, mutations: [{ ...mutation, check: 'CB1' }] } }), 'tech-lead:1': checkEnv('approve') }, runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } } })
+  driveTask(CTX_TL, coverage)
+  assert.deepEqual((coverage.calls.writes[TD + '/check-brief-r2.md'] ?? '').split('\n').filter((l) => l.startsWith('Handoff: ')), [])
+  assert.equal(coverage.calls.writes[TD + '/tech-lead-handoff-r2.md'] ?? null, null)
+  const prescribed = { id: 'PC-A1', severity: 'blocker', correction: 'Split the plan into checked sections' }
+  const granted = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': prescribedCheck([]),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': prescribedCheck([prescribed]),
+      'planner:3': adversarialPlanEnv(), 'tech-lead:3': prescribedCheck([prescribed]),
+      'planner:4': adversarialPlanEnv(), 'tech-lead:4': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(grantSpentPlanContext, granted)
+  assert.deepEqual((granted.calls.writes[TD + '/plan-bounce-r2.md'] ?? '').split('\n').filter((l) => l.startsWith('Handoff: ')), ['Handoff: ' + TD + '/planner-handoff-r2.md'])
+  assert.ok((granted.calls.writes[TD + '/planner-handoff-r2.md'] ?? '').startsWith('# planner handoff'))
+  assert.deepEqual((granted.calls.writes[TD + '/plan-bounce-r3.md'] ?? '').split('\n').filter((l) => l.startsWith('Handoff: ')), ['Handoff: ' + TD + '/planner-handoff-r3.md'])
+  assert.ok((granted.calls.writes[TD + '/planner-handoff-r3.md'] ?? '').startsWith('# planner handoff'))
+  const denied = seatHandoffPlanIo()
+  const deniedWrite = denied.writeFile.bind(denied)
+  denied.writeFile = (path, content) => {
+    if (String(path).endsWith('tech-lead-handoff-r2.md')) throw new Error('denied: handoff')
+    return deniedWrite(path, content)
+  }
+  const deniedResult = driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, denied)
+  assert.equal(deniedResult.status, 'escalation')
+  assert.equal(deniedResult.details.escalation?.where, 'driver')
+  assert.match(deniedResult.details.escalation?.why ?? '', /denied: handoff/)
+  assert.equal(denied.calls.assign.filter((x) => x.role === 'tech-lead').length, 1)
+  assert.equal(denied.calls.assign.some((x) => x.briefFile === TD + '/check-brief-r2.md'), false)
+  assert.equal(Object.values(denied.calls.writes).some((body) => String(body).includes('tech-lead-handoff-r2.md')), false)
 })

@@ -10371,9 +10371,9 @@ test('LB11', () => { /* MUTATION: disable non-insufficient status trigger. */ co
 test('LB12', () => { /* MUTATION: delete central build_bounce row write. */ const s = lbScenario(); assert.deepEqual(lbRow(s), { round: 1, note: 'build-fix', source: 'driver', trigger: null, failing_checks: ['A1'], no_progress: null }) })
 test('LB13', () => { /* MUTATION: emit a decision from driver-owned bounce. */ const s = lbScenario({ emit: true }); assert.deepEqual(s.io.calls.emits.filter((x) => x.kind === 'decision').map((x) => x.decided), []) })
 test('LB14', () => { /* MUTATION: restrict journal row to non-done route. */ const s = lbScenario({ noGate: true, builders: [buildEnv()], laneRed: true }); assert.deepEqual(lbRow(s), { round: 1, note: 'lane-fix', source: 'driver', trigger: null, failing_checks: null, no_progress: null }) })
-test('LB15', () => { /* MUTATION: always choose full leadContextDelivery. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; assert.deepEqual([text.includes('## Since your last consult (delivery mode: delta)'), text.includes('Last consult: 1'), text.includes(`${TD}/decision-1.md`), text.includes(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`), lbRow(s)?.source], [true, true, true, true, 'lead-consult']) })
-test('LB16', () => { /* MUTATION: inline context bodies in delta. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; assert.deepEqual([text.includes(`${TD}/build-bounce-r1.md`), text.includes('LEAD_BODY_MARK')], [true, false]) })
-test('LB17', () => { /* MUTATION: omit resumed-lead diff-stat probe. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); assert.equal(/Diff stat:[\s\S]*a\.mjs \| 2 \+-/.test(s.io.calls.writes[`${TD}/decision-2.md`] ?? ''), true) })
+test('LB15', () => { /* MUTATION: drop the lead handoff write. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; const handoff = s.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? ''; assert.deepEqual([text.includes('## Context (delivery mode: inline)'), text.includes('LEAD_BODY_MARK'), text.split('\n').filter((line) => line.startsWith('Handoff: ')), handoff.includes('- consult 1: bounce \u2014 because'), /Diff stat:[\s\S]*a\.mjs \| 2 \+-/.test(handoff), lbRow(s)?.source], [true, true, [`Handoff: ${TD}/lead-handoff-2.md`], true, true, 'lead-consult']) })
+test('LB16', () => { /* MUTATION: drop current context paths from full delivery. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); const text = s.io.calls.writes[`${TD}/decision-2.md`] ?? ''; assert.deepEqual([text.includes(`${TD}/build-bounce-r1.md`), text.includes('LEAD_BODY_MARK')], [true, true]) })
+test('LB17', () => { /* MUTATION: omit the handoff diff-stat probe. */ const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN, LB_GREEN] }); assert.equal(/Diff stat:[\s\S]*a\.mjs \| 2 \+-/.test(s.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? ''), true) })
 
 test('LB extras pin trigger vocabulary, strict check labels, delta rows and journal failure tolerance', () => {
   assert.deepEqual([...LEAD_CONSULT_TRIGGERS], ['shape-conflict', 'final-round', 'repeated-failure'])
@@ -10382,15 +10382,15 @@ test('LB extras pin trigger vocabulary, strict check labels, delta rows and jour
   const lines = driverBounceLines({ round: 1, env: lbInsufficient({ residuals: [{ marker: 'R' }] }), gateCmd: null, gateRes: null, laneRes: null, planPath: '/plan' })
   assert.ok(lines.includes(JSON.stringify([{ marker: 'R' }])))
   const noGate = lbScenario({ noGate: true, builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })] })
-  assert.match(noGate.io.calls.writes[`${TD}/decision-2.md`], /no gate run since consult 1/)
-  assert.deepEqual(noGate.io.calls.logs.find((x) => x.lead_consult_context?.consult === 2)?.lead_consult_context, {
-    brief: `${TD}/decision-2.md`, consult: 2, round: 1, mode: 'delta',
-    sources: [`${TD}/build-bounce-r1.md`].map((path) => ({ path, mode: 'path', state: 'not-read', bytes: null, reason: 'delta' })),
-  })
+  assert.match(noGate.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? '', /Build round: /)
+  assert.match(noGate.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? '', /Diff stat:[\s\S]*a\.mjs \| 2 \+-/)
+  const noGateRow = noGate.io.calls.logs.find((x) => x.lead_consult_context?.consult === 2)?.lead_consult_context
+  assert.deepEqual([noGateRow?.brief, noGateRow?.consult, noGateRow?.round, noGateRow?.mode, noGateRow?.sources?.map((source) => [source.mode, source.state])], [`${TD}/decision-2.md`, 2, 1, 'inline', [['inline', 'present']]])
+  assert.deepEqual((noGate.io.calls.writes[`${TD}/decision-2.md`] ?? '').split('\n').filter((line) => line.includes('delivery mode:')), ['## Context (delivery mode: inline)'])
   const unavailable = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], statError: 'failed' })
-  assert.match(unavailable.io.calls.writes[`${TD}/decision-2.md`], /unavailable \(git diff --stat exited 128\)/)
+  assert.match(unavailable.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? '', /unavailable \(git diff --stat exited 128\)/)
   const interrupted = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion }), lbInsufficient({ questions: lbQuestion })], statError: 'throw' })
-  assert.match(interrupted.io.calls.writes[`${TD}/decision-2.md`], /unavailable \(stat interrupted\)/)
+  assert.match(interrupted.io.calls.writes[`${TD}/lead-handoff-2.md`] ?? '', /unavailable \(stat interrupted\)/)
   const rejected = lbScenario({ builders: [lbInsufficient({ questions: [{ question: 'missing id' }] })] })
   assert.equal(lbRow(rejected)?.trigger, 'shape-conflict')
   const blockedFinal = lbScenario({ builders: [buildEnv({ status: 'blocked' })], buildRounds: 1 })
@@ -10725,4 +10725,44 @@ test('RV1-4 final refusal contains literal refuted-row evidence', () => {
   assert.equal(repairedMissing.rows.find((row) => row.round === 3)?.outcome, 'killed')
   assert.equal(repeatedName.result.details.escalation?.why, nameWhy)
   assert.equal(repeatedMissing.result.details.escalation?.why, missingWhy)
+})
+
+// MUTATION SH1: drop current context paths from full delivery; consult 2 loses LEAD_BODY_MARK.
+test('SH1', () => {
+  const envelopes = { 'planner:1': planEnv(), 'builder:4': buildEnv(), 'reviewer:1': reviewEnv('pass') }
+  for (let i = 1; i <= 3; i++) {
+    envelopes['builder:' + i] = buildEnv({ status: 'insufficient', details: { questions: [{ id: 'q', question: 'Which helper?' }] } })
+    envelopes['lead:' + i] = leadEnv('bounce', 'LEAD_BODY_MARK continue', { reason: 'reason-' + i })
+  }
+  const io = fakeIo({
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, "git diff --stat 'deadbeefcafe'": { ok: true, output: 'a.mjs | 2 +-' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    writeThrough: true,
+  })
+  driveTask({ ...CTX, head: 'deadbeefcafe', limits: { build_rounds: 4, lead_consults: 8 } }, io)
+  const text = (name) => io.calls.writes[TD + '/' + name] ?? '(absent)'
+  const namesHandoff = (brief, name) => {
+    assert.deepEqual(text(brief).split('\n').filter((line) => line.startsWith('Handoff: ')), ['Handoff: ' + TD + '/' + name])
+  }
+  const decisionLines = (out) => out.split('\n').filter((line) => line.startsWith('- consult '))
+  namesHandoff('decision-2.md', 'lead-handoff-2.md')
+  assert.deepEqual(decisionLines(text('lead-handoff-2.md')), ['- consult 1: bounce \u2014 reason-1'])
+  const brief = text('decision-2.md')
+  assert.equal(brief.includes('LEAD_BODY_MARK'), true, 'decision-2.md keeps current context')
+  const row = io.calls.logs.find((x) => x.lead_consult_context?.consult === 2)?.lead_consult_context
+  assert.deepEqual([row?.mode, row?.sources?.map((x) => [x.mode, x.state])], ['inline', [['inline', 'present']]])
+  assert.deepEqual(brief.split('\n').filter((x) => x.includes('delivery mode:')), ['## Context (delivery mode: inline)'])
+  namesHandoff('decision-3.md', 'lead-handoff-3.md')
+  const out = text('lead-handoff-3.md')
+  assert.deepEqual(decisionLines(out), ['- consult 1: bounce \u2014 reason-1', '- consult 2: bounce \u2014 reason-2'])
+  for (const line of ['Previous decision brief: ' + TD + '/decision-1.md', 'Previous decision brief: ' + TD + '/decision-2.md', 'Build round: 3', 'Diff stat: a.mjs | 2 +-']) {
+    assert.equal(out.split('\n').includes(line), true, 'lead-handoff-3.md missing ' + line)
+  }
+})
+
+test('lead handoff is absent on the first consult', () => {
+  const s = lbScenario({ builders: [lbInsufficient({ questions: lbQuestion })], gates: [LB_GREEN] })
+  assert.equal(s.io.calls.writes[`${TD}/lead-handoff-1.md`] ?? null, null)
+  assert.deepEqual((s.io.calls.writes[`${TD}/decision-1.md`] ?? '').split('\n').filter((line) => line.startsWith('Handoff: ')), [])
 })

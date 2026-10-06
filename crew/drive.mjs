@@ -1379,6 +1379,82 @@ export function prescribedPlanCorrection(correction) {
   return PRESCRIBED_PLAN_EDIT.test(correction.trim())
 }
 
+export const SEAT_HANDOFF_BYTE_LIMIT = 4096;
+export function renderSeatHandoff({ seat, round = null, buildRound = null, diffStat = null, paths = {}, findings = null, rejected = 0, decisions = [] } = {}) {
+  const lineLimit = 512;
+  const clipLine = (value) => {
+    const flat = String(value ?? '').replace(/\s+/g, ' ').trim();
+    if (Buffer.byteLength(flat, 'utf8') <= lineLimit) return flat;
+    const ellipsis = '\u2026';
+    const ellipsisBytes = Buffer.byteLength(ellipsis, 'utf8');
+    let kept = '';
+    let used = 0;
+    for (const ch of flat) {
+      const size = Buffer.byteLength(ch, 'utf8');
+      if (used + size + ellipsisBytes > lineLimit) break;
+      kept += ch;
+      used += size;
+    }
+    return kept + ellipsis;
+  };
+  const lines = [];
+  lines.push('# ' + String(seat) + ' handoff');
+  if (round !== null && round !== undefined) lines.push('Round: ' + String(round));
+  if (buildRound !== null && buildRound !== undefined) lines.push('Build round: ' + String(buildRound));
+  if (diffStat !== null && diffStat !== undefined) lines.push('Diff stat: ' + String(diffStat));
+  const safePaths = paths && typeof paths === 'object' && !Array.isArray(paths) ? paths : {};
+  if (safePaths.plan) lines.push('Plan: ' + String(safePaths.plan));
+  if (safePaths.brief) lines.push('Brief: ' + String(safePaths.brief));
+  if (safePaths.check) lines.push('Check: ' + String(safePaths.check));
+  const list = Array.isArray(findings) ? findings : null;
+  const prior = Array.isArray(decisions) ? decisions : [];
+  let skipped = 0;
+  const kept2 = [];
+  if (list !== null) {
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) { skipped += 1; continue; }
+      kept2.push(entry);
+    }
+  }
+  const totalRejected = (Number(rejected) || 0) + skipped;
+  if (totalRejected > 0) lines.push('Rejected finding entries: ' + totalRejected + ' (malformed, not listed)');
+  if (list === null) {
+    lines.push('Findings: unavailable (the previous round supplied no findings array)');
+  } else if (kept2.length === 0) {
+    lines.push('Findings: none');
+  } else {
+    for (const finding of kept2) {
+      const detail = finding.correction || finding.summary || 'unavailable';
+      let line = '- ' + String(finding.id ?? 'unavailable') + ' (' + String(finding.severity ?? 'unavailable') + '): ' + String(detail);
+      if (finding.disposition) line += ' [disposition: ' + String(finding.disposition) + ']';
+      lines.push(line);
+    }
+  }
+  for (const record of prior) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+    lines.push('- consult ' + String(record.consult) + ': ' + String(record.decision) + ' \u2014 ' + String(record.reason ?? ''));
+    if (record.brief) lines.push('Previous decision brief: ' + String(record.brief));
+  }
+  const clipped = lines.map(clipLine);
+  const sized = (text) => Buffer.byteLength(text, 'utf8') + 1;
+  let prefix = new Array(clipped.length + 1).fill(0);
+  for (let i = 0; i < clipped.length; i += 1) prefix[i + 1] = prefix[i] + sized(clipped[i]);
+  let index = clipped.length;
+  for (let k = clipped.length; k >= 0; k -= 1) {
+    if (k < clipped.length) {
+      const footer = (clipped.length - k) + ' more not listed';
+      if (prefix[k] + sized(footer) > SEAT_HANDOFF_BYTE_LIMIT) continue;
+    } else if (prefix[k] > SEAT_HANDOFF_BYTE_LIMIT) continue;
+    index = k;
+    break;
+  }
+  const keptLines = clipped.slice(0, index);
+  if (index < clipped.length) {
+    const footer = `${lines.length - index} more not listed`;
+    keptLines.push(footer);
+  }
+  return keptLines.join('\n') + '\n';
+}
 export function planCheckFindings(details) {
   if (!Array.isArray(details?.findings)) return null
   const findings = []
@@ -5497,11 +5573,12 @@ function settleConvergence({ why, where, gateOutput, gateRed = true, ctx, io, la
   return result
 }
 
-function renderPlanRevisionBrief({ round, check, taskDir, briefFile, growth }) {
+function renderPlanRevisionBrief({ round, check, taskDir, briefFile, growth, handoffPath = null }) {
   const checkPath = check.details?.check_path || `${taskDir}/plan-check.md`
   return [
     `# Plan revision (round ${round})`, '',
     `Revise plan.md per the check at ${checkPath}. Close every must-fix. Original brief: ${briefFile}`,
+    ...(handoffPath ? [`Handoff: ${handoffPath}`] : []),
     ...applyPrescriptionLines('the plan check'),
     '',
     ...growthLines(growth.at(-1)),
@@ -6117,7 +6194,7 @@ function runTask(ctx, io, crash) {
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
-  const S = { consults: 0, stages: [], commit: null, lastLeadDecision: null, bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, latestBuildGate: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  const S = { consults: 0, stages: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
@@ -6875,9 +6952,10 @@ function runTask(ctx, io, crash) {
         try { io.log(recordRow({ at: io.now(), envelope_id_reask: { role, dispatch: identity.id, path: identity.returnPath, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* the id re-ask journal is never load-bearing */ }
         if (graceSpentBy) return env
         const retryPath = join(dirname(identity.returnPath), `${identity.id}.id-reask.${role}.json`)
-        const preamble = refusalDetail.reason === 'run-mismatch'
+        const correction = refusalDetail.reason === 'run-mismatch'
           ? `Your envelope was refused. Return run_id=${JSON.stringify(refusalDetail.expected)}.`
           : `Your envelope was refused. Return assignment_id=${JSON.stringify(identity.id)}. run_id is never the assignment_id.`
+        const preamble = `${correction}\n` + `Refused envelope: ${identity.returnPath}` + `\nRefusal reason: ${refusalDetail.reason}`
         const originalBrief = typeof opts.briefBuilder === 'function'
           ? opts.briefBuilder({ id: identity.id, role, runId: typeof ctx.run_id === 'string' ? ctx.run_id : undefined })
           : `Original brief: ${briefFile}`
@@ -7049,8 +7127,16 @@ function runTask(ctx, io, crash) {
       replyContract,
       `guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer.`,
     ]
-    const delivery = leadDecisionDelivery({ S, io, ctx, round, label, contextPaths, prefixLines, suffixLines, fullDelivery: leadContextDelivery })
-    io.writeFile(briefPath, delivery.brief)
+    let leadHandoffLine = null
+    if (S.consults > 1) {
+      const handoffPath = art(`lead-handoff-${S.consults}.md`)
+      const prior = S.leadDecisions.filter((record) => record.consult < S.consults)
+      const knownPlan = S.returns.planner?.details?.plan_path || null
+      io.writeFile(handoffPath, renderSeatHandoff({ seat: 'lead', buildRound: S.buildRound ?? 'none', diffStat: S.buildRound === null ? 'none' : leadDiffStat(io, ctx), paths: { ...(knownPlan ? { plan: knownPlan } : {}), brief: ctx.briefFile }, decisions: prior }))
+      leadHandoffLine = `Handoff: ${handoffPath}`
+    }
+    const delivery = leadContextDelivery(contextPaths, prefixLines, suffixLines)
+    io.writeFile(briefPath, leadHandoffLine ? `${delivery.brief}\n${leadHandoffLine}\n` : delivery.brief)
     io.log(recordRow({ at: io.now(), lead_consult_context: { brief: briefPath, consult: S.consults, round, mode: delivery.mode, sources: delivery.sources } }))
     const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
     const refusalWhy = handledEnvelopeRefusalWhy(env)
@@ -7096,7 +7182,7 @@ function runTask(ctx, io, crash) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
     if (decided !== d.decision) io.log(recordRow({ at: io.now(), bounce_target_mapped: { answered: d.decision, treated_as: decided, consult: S.consults, round } }))
-    io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason })); rememberLeadDecision(S, { consult: S.consults, brief: briefPath, decision: decided })
+    io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason })); rememberLeadDecision(S, { consult: S.consults, brief: briefPath, decision: decided, reason: d.reason || '' })
     emit({ kind: 'decision', decided, why: d.reason || '', consult: S.consults, round })
     return {
       decision: decided, reason: d.reason || '', guidance: requestedGuidance || d.guidance || '', from: d.from,
@@ -8356,6 +8442,12 @@ function runTask(ctx, io, crash) {
   let prescribedPlanApplications = 0
   let planScopeBaseline = Array.isArray(ctx.files_in_scope) ? [...ctx.files_in_scope] : []
   let divergenceConsulted = false
+  let previousPlanCheck = null
+  const preparePlanRevisionBrief = ({ round, check }) => {
+    const handoffPath = art(`planner-handoff-r${round}.md`)
+    io.writeFile(handoffPath, renderSeatHandoff({ seat: 'planner', round, paths: { plan: planEnv?.details?.plan_path || art('plan.md'), brief: ctx.briefFile, check: check.details?.check_path || art('plan-check.md') }, findings: planCheckFindings(check.details)?.findings, rejected: planCheckFindings(check.details)?.rejected.length ?? 0 }))
+    return renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth, handoffPath })
+  }
   const readOrNull = (path) => { try { const text = io.readFile(path); return typeof text === 'string' ? text : null } catch { return null } }
   let dispatchAdmissions = null
   const readDispatchAdmissions = () => {
@@ -8712,16 +8804,24 @@ function runTask(ctx, io, crash) {
     stage(`check:r${round}`)
     const planPath = env.details?.plan_path || art('plan.md')
     const checkBrief = art(`check-brief-r${round}.md`)
+    let checkHandoffLine = null
+    if (previousPlanCheck !== null) {
+      const handoffPath = art(`tech-lead-handoff-r${round}.md`)
+      io.writeFile(handoffPath, renderSeatHandoff({ seat: 'tech-lead', round, paths: { plan: planPath, brief: ctx.briefFile, check: previousPlanCheck.details?.check_path || art('plan-check.md') }, findings: planCheckFindings(previousPlanCheck.details)?.findings, rejected: planCheckFindings(previousPlanCheck.details)?.rejected.length ?? 0 }))
+      checkHandoffLine = `Handoff: ${handoffPath}`
+    }
     io.writeFile(checkBrief, [
       `# Plan check (round ${round})`, '',
       `Read the task brief at ${ctx.briefFile} and the plan at ${planPath}.`,
       `Falsify the plan's ground truth against the repo at ${ctx.checkout}.`,
       `Planner consult questions: ${JSON.stringify(env.details?.consult_questions || [])}`,
       `Write plan-check.md in the task dir. details.verdict must be approve or revise.`,
+      ...(checkHandoffLine ? [checkHandoffLine] : []),
       '',
       ...growthLines(S.growth.at(-1)),
     ].join('\n'))
     const check = assignAndWait('tech-lead', checkBrief, 'plan-check')
+    previousPlanCheck = check
     const v = verdictOf(check)
     if (v === 'pass') {
       stageComplete()
@@ -8776,7 +8876,7 @@ function runTask(ctx, io, crash) {
           io.log(recordRow({ at: io.now(), plan_prescription_applied: { round, findings: prescribedBlockers.map(({ id, correction }) => ({ id, correction })) } }))
           const b = art(`plan-bounce-r${round}.md`)
           failureUpgrade('plan', 'planner')
-          io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
+          io.writeFile(b, preparePlanRevisionBrief({ round, check }))
           planBrief = b
           planEnv = null
           stageComplete()
@@ -8805,7 +8905,7 @@ function runTask(ctx, io, crash) {
         if (exhausted) { grant('plan-check', round); extraPlanRounds += 1 }
         const b = art(`plan-bounce-r${round}.md`)
         failureUpgrade('plan', 'planner')
-        io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
+        io.writeFile(b, preparePlanRevisionBrief({ round, check }))
         planBrief = b
         planEnv = null
         stageComplete()
@@ -8828,7 +8928,7 @@ function runTask(ctx, io, crash) {
     }
     const b = art(`plan-bounce-r${round}.md`)
     failureUpgrade('plan', 'planner')
-    io.writeFile(b, renderPlanRevisionBrief({ round, check, taskDir: ctx.taskDir, briefFile: ctx.briefFile, growth: S.growth }))
+    io.writeFile(b, preparePlanRevisionBrief({ round, check }))
     planBrief = b
     planEnv = null
     stageComplete()
@@ -10828,6 +10928,8 @@ function runTask(ctx, io, crash) {
   let lastReviewPath = art('review.md')
   let staleVerdict = null
   let panelBriefText = ''
+  let previousReviewerFindings = null
+  let previousReviewerRejected = 0
   let panelBounceFindings = ''
   const panelStandingQuestion = 'state the invariant the prior rounds\' instances share; does this diff close it?'
   const panelLog = (entry) => {
@@ -10898,7 +11000,7 @@ function runTask(ctx, io, crash) {
     const laneAfter = io.run(lane)
     if (!laneAfter.ok) { const afterFailures = failingTestsSection(laneAfter.output); return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failing tests (${afterFailures.found} found):\n${afterFailures.text}\n\nFailures:\n${String(laneAfter.output || '').slice(-4000)}`) }
     if (gateCmd) {
-      const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd); S.latestBuildGate = { output: gateAfter?.output, consult: S.lastLeadDecision?.consult ?? 0 }
+      const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd)
       lastGateOutput = gateAfter.output
       if (!gateAfter.ok) return failed('gate', `The ACCEPTANCE GATE is red after the patch. The gate is immutable to you:\n\n    ${gateCmd}`, `Failures (verbatim):\n${String(gateAfter.output || '').slice(-4000)}`)
     }
@@ -10978,7 +11080,6 @@ function runTask(ctx, io, crash) {
   let previousBuilderEndpoint = null
   const buildLoopGate = (label, command) => {
     const result = runGate(label, command)
-    S.latestBuildGate = { output: result?.output, consult: S.lastLeadDecision?.consult ?? 0 }
     return result
   }
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
@@ -11181,7 +11282,6 @@ function runTask(ctx, io, crash) {
       // `insufficient` at the triage threshold never runs the gate, so the round reaches the
       // lead with the gate unobserved and the repair valve unreachable — the b464-createslane defect.
       const valve = gateBeforeConsult(round)                                           // ANCHOR VD4
-      if (valve.gateRes) S.latestBuildGate = { output: valve.gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
       if (valve.escalation) return valve.escalation
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
@@ -11308,7 +11408,6 @@ function runTask(ctx, io, crash) {
       const valved = gateDefectValve(round, gateRes, { committedBaseline })                                   // ANCHOR VD1
       if (valved.escalation) { stageComplete(); return valved.escalation }
       gateRes = valved.gateRes
-      S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
       forceFullCheckProof = valved.forceFullCheckProof === true
       // First green of this generation: measure, once. A generation repaired
       // above was already proven by its re-proof, so this is a no-op there —
@@ -11324,7 +11423,6 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) {
           forceFullCheckProof = settled.forceFullCheckProof === true
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
-          S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       // Per-CHECK proof, post-green BY CONSTRUCTION. An observed green built-tree
@@ -11392,7 +11490,6 @@ function runTask(ctx, io, crash) {
         if (settled.repaired) {
           forceFullCheckProof = settled.forceFullCheckProof === true
           gateRes = runGate(settled.runLabel || `gate-repair:${gateRepairs}`, gateCmd)
-          S.latestBuildGate = { output: gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       if (!pendingRebaseConflict && gateRes.ok && gateDiscrimination === 'proven' && (!proofMutations.length || checkProofVerdict === 'proven')) {
@@ -11413,7 +11510,6 @@ function runTask(ctx, io, crash) {
             return refreshed.escalation
           }
           gateRes = refreshed.gateRes || gateRes
-          if (refreshed.gateRes) S.latestBuildGate = { output: refreshed.gateRes?.output, consult: S.lastLeadDecision?.consult ?? 0 }
         }
       }
       if (gateRes?.ok) recordStaleSpawnProof();
@@ -11625,6 +11721,12 @@ function runTask(ctx, io, crash) {
       const revBrief = art(`review-brief-${roundNo}.md`)
       const openCarried = carriedOpen()
       const carriedHead = carriedPreambleLines(openCarried)
+      let reviewerHandoffLine = null
+      if (roundNo >= 2) {
+        const handoffPath = art(`reviewer-handoff-${roundNo}.md`)
+        io.writeFile(handoffPath, renderSeatHandoff({ seat: 'reviewer', round: roundNo, paths: { plan: planPath, brief: ctx.briefFile }, findings: previousReviewerFindings, rejected: previousReviewerRejected }))
+        reviewerHandoffLine = `Handoff: ${handoffPath}`
+      }
       let screenerResult = runScreenerRound(roundNo)
       if (screenerResult.answered > 0) {
         try {
@@ -11647,6 +11749,7 @@ function runTask(ctx, io, crash) {
         'An explicitly supplied vacuity_claim outside "mutation-survived" and "source-text-only" is refused; do not invent values or rely on natural-language matching.',
         ...staleVerdictLines(staleVerdict),
         ...screenerBriefLines(screenerResult.proposals),
+        ...(reviewerHandoffLine ? [reviewerHandoffLine] : []),
         // Before the diff-mutant findings: that section ends the brief with a JSON array,
         // and a reader (and a test) takes everything after its heading as that array.
         ...falsificationLines(io, PLUGIN_ROOT),
@@ -11673,6 +11776,8 @@ function runTask(ctx, io, crash) {
       } finally {
         journalScreenerProposals(roundNo, screenerResult, reviewerA)
       }
+      previousReviewerFindings = reviewFindings(reviewerA?.details)?.findings ?? null
+      previousReviewerRejected = reviewFindings(reviewerA?.details)?.rejected.length ?? 0
       const refusalWhy = handledEnvelopeRefusalWhy(review)
       if (refusalWhy) {
         stageComplete()
@@ -16033,7 +16138,7 @@ export function driverBounceLines({ round, env, gateCmd, gateRes, laneRes, planP
 }
 
 function rememberLeadDecision(S, decision) {
-  S.lastLeadDecision = { consult: decision.consult, brief: decision.brief }
+  S.leadDecisions.push({ ...decision })
   if (decision.decision.startsWith('bounce')) S.bounceDecisionSinceBuild = true
 }
 
@@ -16046,29 +16151,6 @@ function leadDiffStat(io, ctx) {
     return result.output
   } catch (err) {
     return `unavailable (${err?.message ?? String(err)})`
-  }
-}
-
-function leadDecisionDelivery({ S, io, ctx, round, label, contextPaths, prefixLines, suffixLines, fullDelivery }) {
-  const resumed = round === 1 && label === '' && S.lastLeadDecision !== null && S.lastLeadDecision.consult < S.consults
-  if (!resumed) return fullDelivery(contextPaths, prefixLines, suffixLines)
-  const stat = S.buildRound === null ? 'none' : leadDiffStat(io, ctx)
-  const latest = S.latestBuildGate?.consult >= S.lastLeadDecision.consult
-    ? String(S.latestBuildGate.output ?? '').slice(-3000)
-    : `no gate run since consult ${S.lastLeadDecision.consult}`
-  const contextLines = [
-    '## Since your last consult (delivery mode: delta)',
-    `Last consult: ${S.lastLeadDecision.consult} (${S.lastLeadDecision.brief})`,
-    `Build round: ${S.buildRound ?? 'none'}`,
-    'Diff stat:', stat,
-    'Latest gate output:', latest,
-    'Context paths:',
-  ]
-  for (const path of contextPaths) contextLines.push(`- ${path}`)
-  return {
-    brief: [...prefixLines, ...contextLines, ...suffixLines].join('\n'),
-    mode: 'delta',
-    sources: contextPaths.map((path) => ({ path, mode: 'path', state: 'not-read', bytes: null, reason: 'delta' })),
   }
 }
 

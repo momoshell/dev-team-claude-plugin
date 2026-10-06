@@ -646,6 +646,20 @@ export async function readBoundedBody(response, cap = RESPONSE_CAP_BYTES) {
   try { return { ok: true, text: Buffer.concat(chunks, total).toString('utf8') } } catch { return { ok: false, code: 'body-unreadable' } }
 }
 
+export const JUDGMENT_REPLY_MAX = 4
+
+export function validateReply(value, options = {}) {
+  if (!Array.isArray(value)) return validateJudgment(value, options)
+  if (!value.length || value.length > JUDGMENT_REPLY_MAX) return { codes: ['payload-not-an-object'] }
+  const codes = []
+  for (const element of value) {
+    const verdict = validateJudgment(element, options)
+    if (verdict.judgment) return verdict
+    codes.push(...verdict.codes)
+  }
+  return { codes: errorCodeSet(codes) }
+}
+
 export function validateJudgment(value, { anchors = new Set(), scopeFiles = [] } = {}) {
   const codes = []
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { codes: ['payload-not-an-object'] }
@@ -690,6 +704,8 @@ function noteTextForTier0(kind, target, signature, role) {
   if (kind === TRIPWIRE_TOUCH) return `The ${role} seat touched the declared tripwire ${target || 'an unknown path'}.`
   return 'The repository growth crossed the measured divergence threshold.'
 }
+
+export const REPLY_EXCERPT_CAP_BYTES = 512
 
 export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const role = roleOf(env)
@@ -824,6 +840,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const ok = appendAdvisorRow('advisor_note', payload)
     if (!ok) return false
     notes.push(payload)
+    const tier0Text = noteTextForTier0(kind, cleanTarget, payload.signature, role)
+    rememberInjected(normalizeNote(tier0Text))
+    try {
+      const delivered = send?.({ customType: ADVISOR_MESSAGE_TYPE, content: tier0Text, display: true, details: payload }, { deliverAs: 'steer' })
+      delivered?.catch?.(() => {})
+    } catch {}
     return true
   }
 
@@ -1058,6 +1080,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const request = (async () => {
       let codes = []
       let judgment = null
+      let replyText = null
       let foldedUsage = null
       // The priced spend row (advisor_usage) is measured IFF all hold: the child closed with
       // exit code 0 and no signal; the consult did not fail, abort, time out or hit a cap; the
@@ -1170,10 +1193,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
             const content = childResult.text
             if (!content) codes = ['content-missing']
             else {
+              replyText = content
               let value
               try { value = JSON.parse(content) } catch { codes = ['body-not-json'] }
               if (!codes.length) {
-                const verdict = validateJudgment(value, { anchors: captured.anchors, scopeFiles: context?.files_in_scope || [] })
+                const verdict = validateReply(value, { anchors: captured.anchors, scopeFiles: context?.files_in_scope || [] })
                 codes = verdict.codes || []
                 judgment = verdict.judgment || null
               }
@@ -1220,6 +1244,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
           kind: TIER1_FINDING, target: '', target_kind: 'assertion', role,
           outcome: 'rejected', codes: errorCodeSet(codes), ...captured.tier1Stamp,
+          ...(typeof replyText === 'string' && !codes.some((code) => ['timeout', 'transport-failed', 'body-too-large'].includes(code))
+            ? { reply_excerpt: boundText(redactDelta(replyText).text, REPLY_EXCERPT_CAP_BYTES) } : {}),
         }
         if (appendAdvisorRow('advisor_note', payload)) notes.push(payload)
         return

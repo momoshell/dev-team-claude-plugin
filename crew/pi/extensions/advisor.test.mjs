@@ -417,6 +417,18 @@ test('attach is default-off, refuses wrong roles, and journals before handlers',
   assert.equal(p.tools.length, 0)
 })
 
+test('AD1 AD2 AD3 reply validation accepts first valid member and unions invalid codes', () => {
+  const options = { anchors: new Set(['lib/widget.mjs:2']) }
+  const valid = { class: 'edge-path', severity: 'medium', claim: 'grounded', evidence: ['lib/widget.mjs:2'] }
+  assert.equal(advisor.validateReply([valid, { ...valid, claim: 'later' }], options).judgment.claim, 'grounded')
+  assert.equal(advisor.validateReply([{ ...valid, class: 'bad' }, valid], options).judgment.claim, 'grounded')
+  const invalid = advisor.validateReply([{ ...valid, class: 'bad' }, { ...valid, severity: 'bad' }], options)
+  assert.deepEqual(invalid.codes, ['class-invalid', 'severity-invalid'])
+  assert.equal(advisor.validateReply([], options).codes[0], 'payload-not-an-object')
+  assert.equal(advisor.validateReply([valid, valid, valid, valid], options).judgment.claim, 'grounded')
+  assert.equal(advisor.validateReply([valid, valid, valid, valid, valid], options).codes[0], 'payload-not-an-object')
+})
+
 test('validation and failure helpers are closed and payload-free', () => {
   assert.equal(advisor.isValidationCommand('npm test-not', 'npm test'), false)
   assert.equal(advisor.isValidationCommand("echo 'make check'", 'make check'), false)
@@ -428,7 +440,36 @@ test('validation and failure helpers are closed and payload-free', () => {
   assert.ok(verdict.codes.every((code) => !code.includes('secret')))
 })
 
-test('tier-zero notes are deterministic and tier one is journal-first', async () => {
+test('RV1-1 tier-zero steer is stripped from a later consult delta', async () => {
+  const f = fixture(); const journal = sink(); let childInput
+  const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+  child.stdin = { end(value) { childInput = value; setImmediate(() => {
+    const frame = { type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'medium', claim: 'ordinary evidence remains grounded', evidence: ['lib/widget.mjs:2'] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }
+    child.stdout.write(JSON.stringify(frame) + '\n')
+    child.emit('close', 0)
+  }) } }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    resolveBinary: () => ({ command: '/fake/pi', args: [] }), spawn: () => child,
+  } })
+  const sentence = 'The builder seat touched outside.mjs outside the declared scope.'
+  const outside = join(f.tree, 'outside.mjs')
+  a.onToolCall(call('breach', 'write', { path: outside, content: 'outside' }), {})
+  const source = join(f.tree, 'lib/widget.mjs')
+  a.onToolCall(call('echo-read', 'read', { path: source }), {})
+  a.onToolResult(result('echo-read', 'read', { path: source }, `${sentence}\nlib/widget.mjs:2: ordinary grounded evidence`), {})
+  a.onToolResult(result('breach', 'write', { path: outside, content: 'outside' }, 'ok'), {})
+  await a.settled()
+  const request = JSON.parse(childInput)
+  const delta = request.delta.map((entry) => entry.text).join('\n')
+  assert.equal(request.trigger, 'tier0-note')
+  assert.equal(delta.includes(sentence), false)
+  assert.equal(delta.includes('lib/widget.mjs:2: ordinary grounded evidence'), true)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
+test('AD5 tier-zero notes are deterministic and tier one is journal-first', async () => {
   const f = fixture(); const journal = sink(); const sends = []; const fetchFn = fetcher()
   const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
@@ -442,9 +483,11 @@ test('tier-zero notes are deterministic and tier one is journal-first', async ()
   const notes = journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
   assert.ok(notes.some((note) => note.tier === 0 && note.kind === advisor.SCOPE_BREACH))
   assert.ok(notes.some((note) => note.tier === 1 && note.outcome === 'injected'))
-  assert.equal(sends.length, 1)
-  assert.equal(sends[0].options.deliverAs, 'steer')
-  assert.equal(sends[0].options.triggerTurn, undefined)
+  assert.equal(sends.length, 2)
+  assert.ok(sends.every((send) => send.options.deliverAs === 'steer'))
+  assert.ok(sends.every((send) => send.options.triggerTurn === undefined))
+  assert.ok(sends.some((send) => send.message.details.tier === 0))
+  assert.ok(sends.some((send) => send.message.details.tier === 1))
   rmSync(f.root, { recursive: true, force: true })
 })
 

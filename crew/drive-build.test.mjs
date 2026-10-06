@@ -10549,7 +10549,7 @@ test('HN7 cargo lane bounces and escalates', () => {
   assert.equal(autoBriefs.includes(nodeSentence), false, 'auto-fix retained legacy node guidance')
 })
 
-function b1145HardenLane({ missing = false, repaired = false, mixed = false, buildRounds = 2 } = {}) {
+function b1145HardenLane({ missing = false, repaired = false, mixed = false, buildRounds = 2, prepare = null } = {}) {
   const source = Object.freeze({ test: "import { test } from 'node:test'\ntest('F1 guard', () => {})\n", impl: 'const guard = false\n' })
   const files = { [CTX.checkout + '/a.test.mjs']: source.test, [CTX.checkout + '/a.mjs']: source.impl }
   const reused = { ...B376_HARDENED, class: 'coverage' }
@@ -10574,6 +10574,7 @@ function b1145HardenLane({ missing = false, repaired = false, mixed = false, bui
     }
     return result
   }
+  if (typeof prepare === 'function') prepare(io)
   const result = driveTask({ ...CTX, limits: { build_rounds: buildRounds, review_rounds: 4 } }, io)
   return { io, result, rows: io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : []), bounces: io.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-fix') }
 }
@@ -10662,6 +10663,25 @@ test('RV2-1b a non-final hardening bounce leaves the final bounce unspent', () =
   assert.deepEqual(rows.filter((row) => row.finding === 'F1').map((row) => [row.round, row.outcome]), [[2, 'name-not-new'], [3, 'name-not-new'], [4, 'name-not-new']])
   assert.equal(result.details.escalation?.where, 'harden')
   assert.match(result.details.escalation?.why ?? '', /^# Hardening bounce \(round 4\) /)
+})
+
+// MUTATION RV3-2: write the hardening bounce brief with an unguarded io.writeFile — a denied
+// write then crashes the driver instead of escalating harden with its evidence.
+test('RV3-2 a denied final hardening bounce brief escalates harden without a grant', () => {
+  const { io, result, bounces } = b1145HardenLane({
+    prepare(io) {
+      const write = io.writeFile
+      io.writeFile = function (path, content) {
+        if (path.includes('build-bounce-r2')) throw new Error('EACCES: bounce brief write denied')
+        return write.call(this, path, content)
+      }
+    },
+  })
+  assert.equal(bounces.length, 0)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.match(result.details.escalation?.why ?? '', /^# Hardening bounce \(round 2\) /)
+  assert.match(result.details.evidence_unavailable ?? '', /hardening bounce brief write failed: .*EACCES: bounce brief write denied/)
 })
 
 // MUTATION RV1-3: count executions outside the assign/build stage round boundary.

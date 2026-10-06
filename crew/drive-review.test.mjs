@@ -5274,7 +5274,8 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
     if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd === hardenCommand(guardFile, 'F1 guard')) {
       const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
-      return proofOutputs[count - 1] ?? proofOutputs.at(-1)
+      // A proof runs control, pre-repair and mutant; a later re-proof replays the same three.
+      return proofOutputs[(count - 1) % proofOutputs.length]
     }
     if (cmd === `git rev-parse ${shellArg('origin/main')}`) return { ok: true, output: 'base1111\n' }
     if (cmd === `git merge-base HEAD ${shellArg('origin/main')}`) return { ok: true, output: `${head.rebased ? 'base1111' : 'older000'}\n` }
@@ -6938,6 +6939,30 @@ test('RV1-1 preservation bounce records only a persisted, evidenced grant', () =
   assert.equal(missingResult.details.escalation?.why, '[witnessed-test-altered] finding F1 (accept): the built tree no longer has a.test.mjs, so its pinned checks are gone')
 })
 
+
+// MUTATION RV3-1: skip the accept-time re-proof of guards proven before the preservation
+// bounce — the restoring builder deletes the guard and the lane still reaches done.
+test('RV3-1 a guard deleted during the preservation bounce is re-proved and refused', () => {
+  const guardPath = CTX.checkout + '/' + PIN_GUARD_FILE
+  const { io, result, bounces } = b1145PreservationLane({
+    restore: true,
+    prepare(io) {
+      const wait = io.wait
+      io.wait = function (path, timeout) {
+        const env = wait.call(this, path, timeout)
+        if (path === 'builder:3') delete this.calls.files[guardPath]
+        return env
+      }
+    },
+  })
+  assert.equal(bounces.length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.match(result.details.escalation?.why ?? '', /^a guard proven before the preservation bounce no longer holds on the tree about to be committed: /)
+  assert.equal(result.details.stages.includes('commit'), false)
+  const reproved = pinRows(io).filter((row) => row.finding === 'F1')
+  assert.equal(reproved.length, 2)
+  assert.notEqual(reproved.at(-1).outcome, 'killed')
+})
 
 // MUTATION RV2-1: declare hardenFinalBounces at the suiteCycle head instead of beside
 // postCommitCensusBounces — the preservation re-entry then mints a second final grant.

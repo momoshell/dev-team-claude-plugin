@@ -10410,6 +10410,9 @@ function runTask(ctx, io, crash) {
   let postCommitCensusBounces = 0
   let hardenFinalBounces = 0
   let hardenPreservationBounces = 0
+  // Guards proven before a preservation bounce, with their witness. The re-entered cycle
+  // starts with no hardening debt, so these are re-proved before the commit instead.
+  let preservationReproof = []
   // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
   // conflict may re-enter that cycle, but it must not mint a fresh rebase budget.
   let rebaseConflictBounces = 0
@@ -10776,6 +10779,7 @@ function runTask(ctx, io, crash) {
   let accepted = null
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
+  let hardenProven = []                 // [{ entry, witness, prescribed }] killed in this cycle
   let hardenWitness = new Map()         // Map<finding id, Map<repo-relative path, {state, bytes}>>
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the
@@ -11501,6 +11505,8 @@ function runTask(ctx, io, crash) {
       const finalHardenBounce = plans && finalRound() && hardenFinalBounces < HARDEN_FINAL_BOUNCE_MAX
       if (hardenCleared(liveRefusals, liveRows)) {
         const stillOwed = new Set(liveRows.filter((row) => row.outcome === 'unproven').map((row) => row.finding))
+        const killed = new Set(liveRows.filter((row) => row.outcome === 'killed').map((row) => row.finding))
+        for (const entry of entries) if (killed.has(entry.finding)) hardenProven.push({ entry, witness: hardenWitness.get(entry.finding), prescribed: prescribed.has(entry.finding) })
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => stillOwed.has(id)), exempt: hardenOwed.exempt }
         for (const id of [...hardenWitness.keys()]) if (!stillOwed.has(id)) hardenWitness.delete(id)
         const latest = new Map(liveRows.map((row) => [row.finding, row]))
@@ -11517,10 +11523,14 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '))
       } else {
-        if (finalRound()) { hardenFinalBounces += 1; grantBuilderAllowance() }
         const b = art(`build-bounce-r${round}.md`)
+        const writeError = guardedWrite(io, b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
+        if (writeError) {
+          stageComplete()
+          return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '), [], { evidence_unavailable: `hardening bounce brief write failed: ${writeError}` })
+        }
+        if (finalRound()) { hardenFinalBounces += 1; grantBuilderAllowance() }
         failureUpgrade('harden', 'builder')
-        io.writeFile(b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
         buildBrief = b; buildNote = 'harden-fix'
         stageComplete()
         continue
@@ -11952,11 +11962,25 @@ function runTask(ctx, io, crash) {
     ].join('\n'))
     if (writeError) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit, evidence_unavailable: `preservation bounce brief write failed: ${writeError}` })
     hardenPreservationBounces += 1
+    preservationReproof = [...preservationReproof, ...hardenProven]
     if (builderRemaining() <= 0) grantBuilderAllowance()
     panelLog({ hardening_preservation_bounce: { round: carriedRound, finding: pinnedBeforeCommit.finding, file: pinnedBeforeCommit.file, brief: bounce, bounces: hardenPreservationBounces } })
     suiteBuildBrief = bounce
     suiteBuildNote = 'harden-preservation-fix'
     continue suiteCycle
+  }
+  // MUTATION RV3-1: skip this re-proof and a preservation-fix builder may delete a guard it
+  // proved before the bounce; the re-entered review passes and the lane commits without it.
+  if (preservationReproof.length > 0) {
+    const reproof = preservationReproof
+    preservationReproof = []
+    const witness = new Map(reproof.filter(({ witness: w }) => w).map(({ entry, witness: w }) => [entry.finding, w]))
+    const { rows, fatal } = proveHardeningEntries({ entries: reproof.map(({ entry }) => entry), hardenWitness: witness, ctx, io, hardenRun, dirtyAfterFailure, prescribed: new Set(reproof.filter((r) => r.prescribed).map(({ entry }) => entry.finding)), placement: () => null })
+    for (const row of rows) logHardened(carriedRound, row)
+    if (fatal) return escalate('harden', `the hardening re-proof after the preservation bounce could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
+    if (rows.length !== reproof.length || rows.some((row) => row.outcome !== 'killed')) {
+      return escalate('harden', `a guard proven before the preservation bounce no longer holds on the tree about to be committed: ${hardeningBounceLines(carriedRound, [], rows, ctx.testRunner).join(' ')}`)
+    }
   }
 
   // The reviewer can accept only the tree that is about to be committed. This

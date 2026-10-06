@@ -688,6 +688,76 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   })
 })
 
+test('CM1 nested whole read refusal is softened and redacted', () => {
+  const f = fixture(), gate = gateFor(f)
+  const top = call(gate, 'read', { path: f.large }, f.root)
+  const child = gate.onToolCall({ toolName: 'read', toolCallId: 'cm1-read', parentToolCallId: 'cm1', input: { path: f.large } }, { cwd: f.root })
+  assert.equal(child, undefined)
+  const result = gate.onToolResult({ toolName: 'read', toolCallId: 'cm1-read', parentToolCallId: 'cm1', input: { path: f.large }, content: [{ type: 'text', text: 'SECRET-FILE-CONTENT' }] }, { cwd: f.root })
+  assert.equal(result.isError, false)
+  assert.equal(result.content[0].text, top.reason)
+  assert.equal(result.content[0].text.includes('SECRET-FILE-CONTENT'), false)
+  for (const command of ['cat', 'head', 'tail']) assert.equal(call(gate, 'bash', { command: `${command} '${f.large}'` }, f.root)?.block, true)
+})
+
+test('CM2 nested repeated range refusal is softened even on read error', () => {
+  const f = fixture(), gate = gateFor(f), input = { path: f.ranged, offset: 1, limit: 20 }
+  call(gate, 'read', input, f.root, 'cm2-first')
+  gate.onToolResult({ toolName: 'read', toolCallId: 'cm2-first', input, content: [{ type: 'text', text: 'range content' }] })
+  const top = call(gate, 'read', input, f.root, 'cm2-top')
+  assert.equal(top.block, true)
+  gate.onToolCall({ toolName: 'read', toolCallId: 'cm2-child', parentToolCallId: 'cm2', input }, { cwd: f.root })
+  const result = gate.onToolResult({ toolName: 'read', toolCallId: 'cm2-child', parentToolCallId: 'cm2', input, isError: true, content: [{ type: 'text', text: 'SECRET-FILE-CONTENT' }] })
+  assert.equal(result.isError, false)
+  assert.equal(result.content[0].text, top.reason)
+  assert.match(result.content[0].text, /Use grep/)
+  assert.equal(result.content[0].text.includes('SECRET-FILE-CONTENT'), false)
+})
+
+test('CM3 codemode annotates unsuccessful inner calls and fails open on malformed data', () => {
+  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: (row) => rows.push(row) })
+  const original = [{ type: 'text', text: 'Script completed' }]
+  const structuredContent = { result: 'preserved' }
+  const result = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm3', content: original, structuredContent, details: { calls: [{ id: 'a', name: 'bash', status: 'error' }, { id: 'b', name: 'edit', status: 'cancelled' }, { id: 'c', name: 'read', status: 'ok' }] } })
+  assert.equal(result.content[0].text, '[crew] 2 of 3 inner calls did not succeed: bash (error), edit (cancelled)')
+  assert.deepEqual(result.content.slice(1), original)
+  assert.deepEqual(result.structuredContent, structuredContent)
+  assert.equal(result.isError, undefined)
+  const cutOff = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm-cutoff', content: original, details: { calls: [{ id: 'cm/1', name: 'bash', status: 'ok' }, { id: 'cm-cutoff/?', name: 'bash', status: 'cancelled' }, { id: 'cm-cutoff/?', name: 'bash', status: 'cancelled' }] } })
+  assert.equal(cutOff.content[0].text, '[crew] 2 of 3 inner calls did not succeed: bash (cancelled), bash (cancelled)')
+  assert.deepEqual(cutOff.content.slice(1), original)
+  assert.equal(rows.length, 0)
+  for (const details of [undefined, { calls: {} }, { calls: [null] }, { calls: [{ id: 'x', name: 'x', status: 'unknown' }] }]) assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'bad', content: original, details }), undefined)
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'nested', parentToolCallId: 'outer', content: original, details: { calls: [] } }), undefined)
+  assert.equal(rows.length, 4)
+  const duplicate = gate.onToolResult({ toolName: 'codemode', toolCallId: 'duplicate', content: original, details: { calls: [{ id: 'real/1', name: 'bash', status: 'error' }, { id: 'real/1', name: 'bash', status: 'cancelled' }] } })
+  assert.equal(duplicate, undefined)
+  assert.equal(rows.length, 5)
+  const throws = gateFor(f, { recordFailure: () => { throw new Error('logging failed') } })
+  assert.equal(throws.onToolResult({ toolName: 'codemode', toolCallId: 'bad', content: original, details: { calls: {} } }), undefined)
+  assert.equal(rows.length, 5)
+})
+
+test('CM4 codemode attaches parent refusals once and isolates parent state', () => {
+  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: (row) => rows.push(row) })
+  gate.onToolCall({ toolName: 'read', toolCallId: 'cm/1', parentToolCallId: 'cm', input: { path: f.large } }, { cwd: f.root })
+  gate.onToolResult({ toolName: 'read', toolCallId: 'cm/1', parentToolCallId: 'cm', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root })
+  const result = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm', content: [{ type: 'text', text: 'done' }], details: { calls: [{ id: 'cm/?', name: 'read', status: 'cancelled' }, { id: 'cm/2', name: 'bash', status: 'error' }] } })
+  assert.equal(result.content[0].text, '[crew] 2 of 2 inner calls did not succeed: read (cancelled), bash (error)')
+  assert.equal(rows.length, 0)
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm', content: [], details: { calls: [{ id: 'cm/1', name: 'read', status: 'ok' }] } }), undefined)
+
+  gate.onToolCall({ toolName: 'read', toolCallId: 'c/1', parentToolCallId: 'c', input: { path: f.large } }, { cwd: f.root })
+  gate.onToolResult({ toolName: 'read', toolCallId: 'c/1', parentToolCallId: 'c', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root })
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'c', content: [], details: { calls: {} } }), undefined)
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'c', content: [], details: { calls: [{ id: 'c/1', name: 'read', status: 'ok' }] } }), undefined)
+  assert.equal(rows.length, 1)
+  for (const parent of ['p', 'q']) gate.onToolCall({ toolName: 'read', toolCallId: `${parent}/1`, parentToolCallId: parent, input: { path: f.large } }, { cwd: f.root })
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'p', content: [], details: { calls: [{ id: 'p/1', name: 'read', status: 'ok' }] } }).content[0].text, '[crew] 1 of 1 inner calls did not succeed: read (refused by read gate)')
+  assert.equal(gate.onToolResult({ toolName: 'read', toolCallId: 'q/1', parentToolCallId: 'q', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root }).content[0].text.includes('secret'), false)
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'q', content: [], details: { calls: [{ id: 'q/1', name: 'read', status: 'ok' }] } }).content[0].text, '[crew] 1 of 1 inner calls did not succeed: read (refused by read gate)')
+})
+
 function byteFixture({ lines = 300, width = 100, env = {} } = {}) {
   const f = fixture()
   const path = join(f.root, `bytes-${lines}-${width}.txt`)

@@ -77,6 +77,7 @@ transport stage below reaches an escalation record as a `where`. These are
 | `rpc-unresolvable-reservation` | An RPC reservation could not be resolved. | Preserve the reservation evidence and reconcile its owner. |
 | `seat-died` | A seat's measured process death interrupted its turn. | Read the seat record and reclaim evidence before retrying. |
 | `seat-refused` | A seat refused the assignment or its envelope. | Read the refusal and the re-ask budget before assigning again. |
+| `session-persist-failed` | A seat's first assignment could not record `started` in crew.json, so delivery was refused rather than let a restarted driver resume that session without renewal; the message names the crew.json failure reason. | Fix the crew.json read/write failure it names (permissions, lock, malformed file), then re-run the lane. |
 | `slot-claim-unresolvable` | A seat could not resolve its claimed slot. | Inspect the slot claim and the current crew topology. |
 | `substrate-gone` | The seat substrate disappeared during the turn. | Re-derive liveness from the control plane before acting. |
 | `variant` | The selected variant could not be resolved. | Read the variant refusal and verify the requested shape. |

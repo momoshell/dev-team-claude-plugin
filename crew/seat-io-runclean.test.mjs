@@ -4084,6 +4084,25 @@ test('SF1 a restarted driver still renews a pane seat that already took an assig
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+// Mutation: ignore a failed `started` write and deliver anyway, then run this test and restore it.
+test('SF4 a failed started write refuses delivery instead of leaving a restart to resume', () => {
+  const root = scratchDir('fresh-pane-persist-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  writeFileSync(join(root, 'crew.json'), '{ not json')
+  const sends = []
+  const io = seatIo(crew, paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {}, cmux() { return { ok: true, stdout: '' } }, awaitSeatsReady() {},
+    sendLine(surface) { sends.push(surface) },
+  })
+  try {
+    assert.throws(() => io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') }), /crew\.json started write failed \(unreadable\)/)
+    assert.deepEqual(sends, [])
+    assert.equal(crew.members.reviewer.started, false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 // Mutation: keep the pane return path reserved when renewal throws, then run this test and restore it.
 test('SF2 a pane correction whose renewal failed can be retried on the same return path', () => {
   const root = scratchDir('fresh-pane-retry-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }

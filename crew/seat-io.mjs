@@ -3154,17 +3154,22 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (member.started) renewal = io.freshSession(role)
       recordable = true
       if (member.transport === DEFAULT_TRANSPORT && renewal.session !== 'fresh') throw Object.assign(new Error(renewal.why), { stage: renewal.why })
-      result = send()
-      for (const target of [member, crew.seats?.[role]]) if (target) target.started = true
       // A restarted driver reloads crew.json: without a durable `started` its next
-      // assignment would skip renewal and send into this session (Sol, b1155).
-      try {
-        updateCrewJson(paths, (disk) => {
+      // assignment would skip renewal and send into this session (Sol, b1155). So the
+      // flag is persisted BEFORE delivery, and a failed write refuses the delivery. An
+      // absent crew.json has nothing a restart could reload, so it is not a failure.
+      if (!member.started) {
+        const persisted = updateCrewJson(paths, (disk) => {
           let changed = false
           for (const target of [disk.members?.[role], disk.seats?.[role]]) if (target && target.started !== true) { target.started = true; changed = true }
           return changed
         }, { writeFileSync, renameSync, readFileSync, existsSync })
-      } catch { /* the in-memory flag still renews within this driver */ }
+        if (!persisted?.ok && !['absent', 'no-dir'].includes(persisted?.reason)) {
+          throw Object.assign(new Error(`crew.json started write failed (${persisted?.reason ?? 'unknown'}): delivery refused so a restart cannot resume this session`), { stage: 'session-persist-failed' })
+        }
+      }
+      result = send()
+      for (const target of [member, crew.seats?.[role]]) if (target) target.started = true
       return result
     } finally {
       if (recordable) {

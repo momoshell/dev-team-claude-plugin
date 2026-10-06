@@ -2964,7 +2964,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         for (;;) {
           deliveryAttempts = polls + 1
           try {
-            const assigned = transport.assign(headlessReaskSpec(info, { role, briefFile: briefPath, id: retryId, returnPath: retryPath }))
+            const assigned = withAssignmentSession(role, retryId, () => transport.assign(headlessReaskSpec(info, { role, briefFile: briefPath, id: retryId, returnPath: retryPath })))
             let identity = null
             try { identity = bindHeadlessIdentity(info, assigned) } catch { identity = null }
             toRunId = identity?.workerId ?? null
@@ -3156,6 +3156,15 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (member.transport === DEFAULT_TRANSPORT && renewal.session !== 'fresh') throw Object.assign(new Error(renewal.why), { stage: renewal.why })
       result = send()
       for (const target of [member, crew.seats?.[role]]) if (target) target.started = true
+      // A restarted driver reloads crew.json: without a durable `started` its next
+      // assignment would skip renewal and send into this session (Sol, b1155).
+      try {
+        updateCrewJson(paths, (disk) => {
+          let changed = false
+          for (const target of [disk.members?.[role], disk.seats?.[role]]) if (target && target.started !== true) { target.started = true; changed = true }
+          return changed
+        }, { writeFileSync, renameSync, readFileSync, existsSync })
+      } catch { /* the in-memory flag still renews within this driver */ }
       return result
     } finally {
       if (recordable) {
@@ -3228,10 +3237,16 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         seatFor.set(returnPath, { role, surface_id: m.surface_id, id, brief: briefFile, at: assignedAt, returnPath, transport: m.transport })
         refusalFloor.set(role, assignedAt)
         lastRefusal.delete(role)
-        withAssignmentSession(role, id, () => {
-          sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
-          return { id, returnPath }
-        })
+        try {
+          withAssignmentSession(role, id, () => {
+            sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+            return { id, returnPath }
+          })
+        } catch (sendErr) {
+          // Nothing was delivered: release the path so the same correction can be retried.
+          seatFor.delete(returnPath)
+          throw sendErr
+        }
         // The correction is an ask and spends the grace once it is sent, so a
         // later silence re-send declines; a provider-rejection reprompt of it is delivery.
         if (reask) spendGrace(seatFor.get(returnPath), returnPath, 'caller-reask')

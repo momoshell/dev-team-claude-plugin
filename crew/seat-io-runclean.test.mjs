@@ -4065,6 +4065,48 @@ test('FS9 pane renewal failures refuse delivery and record the closed reason', (
   }
 })
 
+// Mutation: drop the durable `started` write in withAssignmentSession, then run this test and restore it.
+test('SF1 a restarted driver still renews a pane seat that already took an assignment', () => {
+  const root = scratchDir('fresh-pane-restart-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir); writeFileSync(join(paths.taskDir, 'launch-reviewer.sh'), 'exit 0\n')
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  writeFileSync(join(root, 'crew.json'), JSON.stringify({ claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }))
+  const events = []
+  const boot = () => seatIo(JSON.parse(readFileSync(join(root, 'crew.json'), 'utf8')), paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {},
+    cmux(verb, args) { events.push([verb, args]); return { ok: true, stdout: '' } },
+    awaitSeatsReady() {}, sendLine(surface) { events.push(['send', surface]) },
+  })
+  try {
+    boot().assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    boot().assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    assert.deepEqual(events.map(([kind]) => kind), ['send', 'respawn-pane', 'send'])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// Mutation: keep the pane return path reserved when renewal throws, then run this test and restore it.
+test('SF2 a pane correction whose renewal failed can be retried on the same return path', () => {
+  const root = scratchDir('fresh-pane-retry-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir); writeFileSync(join(paths.taskDir, 'launch-reviewer.sh'), 'exit 0\n')
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  let respawnOk = false
+  const sends = []
+  const io = seatIo(crew, paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {},
+    cmux(verb) { return verb === 'respawn-pane' && !respawnOk ? { ok: false } : { ok: true, stdout: '' } },
+    awaitSeatsReady() {}, sendLine(surface, line) { sends.push(line) },
+  })
+  try {
+    const first = io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.reviewer.reask.json`) }
+    assert.throws(() => io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md'), reask }), /pane-respawn-failed/)
+    respawnOk = true
+    assert.deepEqual(io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md'), reask }), { id: first.id, returnPath: reask.returnPath })
+    assert.equal(sends.length, 2)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 // Mutation: point the child at a path that is not crew.mjs, then run this test and restore it.
 test('DEFAULT-RESOLVER uses the isolated crew readiness child', () => {
   assert.throws(() => awaitSeatsReadyChild({ members: {} }, 'bogus'), /needs an explicit readiness mode/)

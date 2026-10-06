@@ -461,6 +461,7 @@ export function createReadGate(options = {}) {
   const snapshotFile = input.snapshotFile || deps.snapshotFile || defaultSnapshotFile
   const readRanges = new Map()
   const pendingReads = new Map()
+  const softRefusals = new Map()
 
   function isHandedFile(path, cwd = cwdDefault) {
     try {
@@ -511,6 +512,13 @@ export function createReadGate(options = {}) {
 
   function recordTrackerFailure(error, event) {
     return recordAndAllow(error, event)
+  }
+
+  function softenReadRefusal(event, result) {
+    if (result?.block !== true || typeof result.reason !== 'string' || !result.reason || typeof event?.parentToolCallId !== 'string' || !event.parentToolCallId || typeof event?.toolCallId !== 'string' || !event.toolCallId) return result
+    softRefusals.set(event.toolCallId, { parent: event.parentToolCallId, reason: result.reason })
+    pendingReads.delete(event.toolCallId)
+    return undefined
   }
 
   function normalizeRange(input, lineCount) {
@@ -591,7 +599,38 @@ export function createReadGate(options = {}) {
 
   function onToolResult(event, ctx) {
     try {
+      if (event?.toolName === 'codemode' && !event?.parentToolCallId) {
+        try {
+          const calls = event?.details?.calls
+          if (!Array.isArray(calls) || !Array.isArray(event?.content)) throw new Error('codemode result has malformed calls or content')
+          const placeholder = `${event.toolCallId}/?`
+          const ids = new Set()
+          for (const call of calls) {
+            if (!call || typeof call.id !== 'string' || !call.id || typeof call.name !== 'string' || !call.name || !['ok', 'error', 'cancelled', 'running'].includes(call.status) || (call.id !== placeholder && ids.has(call.id))) throw new Error('codemode result has malformed call entry')
+            ids.add(call.id)
+          }
+          const refusals = []
+          // lean: scan pending refusals per parent result; index by parent if nested-call volume grows
+          for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) refusals.push([id, refusal])
+          const refusalIds = new Set(refusals.map(([id]) => id))
+          const presentIds = new Set(calls.map((call) => call.id))
+          const absentRefusals = refusals.filter(([id]) => !presentIds.has(id)).length
+          const cancelledReadPlaceholders = calls.filter((call) => call.id === placeholder && call.name === 'read' && call.status === 'cancelled').length
+          if (absentRefusals > cancelledReadPlaceholders) throw new Error('codemode result omitted a refused child call')
+          const failed = calls.filter((call) => call.status === 'error' || call.status === 'cancelled')
+          const failures = []
+          for (const call of calls) {
+            if (refusalIds.has(call.id)) failures.push({ name: call.name, status: 'refused by read gate' })
+            else if (failed.includes(call)) failures.push({ name: call.name, status: call.status })
+          }
+          if (failures.length === 0) return undefined
+          const names = failures.map(({ name, status }) => `${name} (${status})`).join(', ')
+          return { content: [{ type: 'text', text: `[crew] ${failures.length} of ${calls.length} inner calls did not succeed: ${names}` }, ...event.content], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
+        } catch (error) { return recordTrackerFailure(error, event) }
+        finally { for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) softRefusals.delete(id) }
+      }
       if (event?.toolName !== 'read') return undefined
+      if (softRefusals.has(event?.toolCallId)) { pendingReads.delete(event.toolCallId); return { content: [{ type: 'text', text: softRefusals.get(event.toolCallId).reason }], isError: false } }
       if (event?.isError) { pendingReads.delete(event.toolCallId); return undefined }
       const resultCwd = ctx?.cwd || cwdDefault
       if (!hasRange(event.input) && isHandedFile(event.input?.path, resultCwd)) return undefined
@@ -671,11 +710,11 @@ export function createReadGate(options = {}) {
       if (event?.toolName === 'grep') return undefined
       const input = event?.input || {}
       if (isReadTool(event?.toolName)) {
-        if (hasRange(input)) return inspectRangedRead(event, ctx)
+        if (hasRange(input)) return softenReadRefusal(event, inspectRangedRead(event, ctx))
         const cwd = ctx?.cwd || cwdDefault
         if (isHandedFile(input.path, cwd)) return undefined
         const maxLines = configuredMaxLines()
-        return inspectPath(input.path, cwd, maxLines)
+        return softenReadRefusal(event, inspectPath(input.path, cwd, maxLines))
       }
       if (event?.toolName !== 'bash') return undefined
       const command = input.command

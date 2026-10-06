@@ -7047,6 +7047,119 @@ test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a 
   assert.equal(result.status, 'done')
 })
 
+function seatHandoffReviewerScenario(panel, notes = null) {
+  const finding = { id: 'OWN', severity: 'must-fix', location: 'a.mjs:1', summary: 'own prior finding', disposition: 'ask-user', hardening: 'ungateable', hardening_why: 'fixture cannot gate class', details: { notes } }
+  const envelopes = { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('changes-needed', [finding]), 'reviewer:2': reviewEnv('pass', []) }
+  let io
+  for (let i = 1; i <= 8; i++) {
+    envelopes['tech-lead:' + i] = () => ({ status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [], must_fix: 0 } })
+    envelopes['lead:' + i] = () => io.calls.assign.at(-1)?.note === 'panel-adjudication'
+      ? { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'fixture class', closes_class: true } }
+      : leadEnv('bounce-builder')
+  }
+  io = fakeIo({ files: { [TD + '/reviewer.stream.jsonl']: notes ?? '' }, envelopes, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], writeThrough: true })
+  driveTask({ ...CTX_TL, continuation: panel, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  return io
+}
+function seatHandoffSH7PlanScenario(notes) {
+  const envelopes = {}
+  for (let i = 1; i <= 4; i++) envelopes['planner:' + i] = adversarialPlanEnv()
+  for (let i = 1; i <= 3; i++) {
+    envelopes['tech-lead:' + i] = {
+      status: 'done', role: 'tech-lead', details: {
+        verdict: 'revise', check_path: TD + '/plan-check.md',
+        findings: [
+          { id: 'PC' + i + 'a', severity: 'major', correction: 'Guard alpha', details: { notes } },
+          { id: 'PC' + i + 'b', severity: 'blocker', correction: 'Guard beta', details: { notes } },
+        ],
+      },
+    }
+  }
+  envelopes['tech-lead:4'] = checkEnv('approve')
+  envelopes['lead:1'] = leadEnv('bounce')
+  envelopes['builder:1'] = buildEnv()
+  envelopes['reviewer:1'] = reviewEnv('pass')
+  const io = fakeIo({
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    writeThrough: true,
+    files: { [TD + '/tech-lead.stream.jsonl']: notes ?? '' },
+  })
+  driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  return io
+}
+function seatHandoffLeadScenario() {
+  const envelopes = { 'planner:1': planEnv(), 'builder:4': buildEnv(), 'reviewer:1': reviewEnv('pass') }
+  for (let i = 1; i <= 3; i++) {
+    envelopes['builder:' + i] = buildEnv({ status: 'insufficient', details: { questions: [{ id: 'q', question: 'Which helper?' }] } })
+    envelopes['lead:' + i] = leadEnv('bounce', 'LEAD_BODY_MARK continue', { reason: 'reason-' + i, notes: SEAT_HANDOFF_SENTINEL })
+  }
+  const io = fakeIo({
+    envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, "git diff --stat 'deadbeefcafe'": { ok: true, output: 'a.mjs | 2 +-' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    writeThrough: true,
+    files: { [TD + '/lead.stream.jsonl']: SEAT_HANDOFF_SENTINEL },
+  })
+  driveTask({ ...CTX, head: 'deadbeefcafe', limits: { build_rounds: 4, lead_consults: 8 } }, io)
+  return io
+}
+const SEAT_HANDOFF_SENTINEL = 'SEAT_STREAM_FORBIDDEN_7fdb'
+const seatHandoffLeaks = (entries) => entries.filter(([, body]) => body.includes(SEAT_HANDOFF_SENTINEL)).map(([path]) => path)
+
+// MUTATION SH4: discard reviewer A's findings before preparing review round 2.
+test('SH4', () => {
+  for (const panel of [false, true]) {
+    const io = seatHandoffReviewerScenario(panel)
+    const brief = io.calls.writes[TD + '/review-brief-2.md'] ?? '(absent)'
+    assert.deepEqual(brief.split('\n').filter((line) => line.startsWith('Handoff: ')), ['Handoff: ' + TD + '/reviewer-handoff-2.md'], 'review-brief-2 panel=' + panel)
+    const out = io.calls.writes[TD + '/reviewer-handoff-2.md'] ?? '(absent)'
+    assert.deepEqual(out.split('\n').filter((line) => /^- [^ ]+ \(/.test(line)), ['- OWN (must-fix): own prior finding [disposition: ask-user]'], 'reviewer-handoff-2 panel=' + panel)
+  }
+})
+
+// MUTATION SH7: make planCheckFindings carry details.notes into the correction field, so the notes reach the plan handoffs.
+test('SH7', () => {
+  const control = [[TD + '/planner-handoff-r1.md', '# planner handoff\n']]
+  const injected = [[control[0][0], control[0][1] + SEAT_HANDOFF_SENTINEL]]
+  assert.deepEqual(seatHandoffLeaks(injected), [control[0][0]], 'forbidden-byte injection control')
+  assert.deepEqual(seatHandoffLeaks(control), [], 'forbidden-byte removal control')
+  const ios = [seatHandoffSH7PlanScenario(SEAT_HANDOFF_SENTINEL), seatHandoffReviewerScenario(false, SEAT_HANDOFF_SENTINEL), seatHandoffLeadScenario()]
+  const all = []
+  for (const io of ios) {
+    const entries = Object.entries(io.calls.writes).filter(([path]) => /\/(?:lead|tech-lead|planner|reviewer)-handoff-[^/]+\.md$/.test(path))
+    assert.ok(entries.length > 0, 'driver handoffs emitted by scenario; paths=' + Object.keys(io.calls.writes).join(','))
+    all.push(...entries)
+  }
+  assert.deepEqual(seatHandoffLeaks(all), [], 'driver-written handoffs carry no notes or stream bytes')
+})
+
+// MUTATION review RV1-1: stringify the lead response as its recorded reason, leaking details.notes.
+test('lead handoff excludes lead details and stream bytes', () => {
+  const entries = Object.entries(seatHandoffLeadScenario().calls.writes)
+    .filter(([path]) => /\/lead-handoff-[^/]+\.md$/.test(path))
+  assert.ok(entries.length > 0, 'lead handoffs emitted')
+  assert.deepEqual(seatHandoffLeaks(entries), [])
+})
+
+test('reviewer handoff ancillary first-round and disposition', () => {
+  const first = seatHandoffReviewerScenario(false)
+  assert.equal(first.calls.writes[TD + '/reviewer-handoff-1.md'] ?? null, null)
+  assert.deepEqual((first.calls.writes[TD + '/review-brief-1.md'] ?? '').split('\n').filter((line) => line.startsWith('Handoff: ')), [])
+  const finding = { id: 'O1', severity: 'consider', location: 'a.mjs:1', summary: 'an observation' }
+  const envelopes = { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('changes-needed', [finding]), 'reviewer:2': reviewEnv('pass', []) }
+  let io
+  for (let i = 1; i <= 8; i++) {
+    envelopes['tech-lead:' + i] = () => ({ status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [], must_fix: 0 } })
+    envelopes['lead:' + i] = () => leadEnv('bounce-builder')
+  }
+  io = fakeIo({ envelopes, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], writeThrough: true })
+  driveTask({ ...CTX_TL, continuation: false, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const out = io.calls.writes[TD + '/reviewer-handoff-2.md'] ?? '(absent)'
+  assert.deepEqual(out.split('\n').filter((line) => /^- [^ ]+ \(/.test(line)), ['- O1 (consider): an observation'])
+})
+
 // MUTATION LF1: replaying the sidecar unfiltered must make this fixture fail.
 test('LF1', () => {
   const dir = scratchDir('b127-lf1-')

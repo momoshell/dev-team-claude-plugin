@@ -5873,3 +5873,41 @@ test('resume retry red-red and throws preserve evidence and release slots', () =
   assert.equal(retryThrow.run().details.cold_suite.verdict, 'unproven')
   assert.equal(retryThrow.attempts(), 2)
 })
+
+function seatHandoffIdentityScenario(kind) {
+  const run = 'current-run'
+  const queues = {
+    planner: [planEnv()],
+    builder: [buildEnv(kind === 'assignment' ? { assignment_id: 'stale-id' } : { run_id: 'stale-run' }), buildEnv()],
+    reviewer: [reviewEnv('pass')],
+    lead: [leadEnv('escalate')],
+  }
+  const io = fakeIo({ runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], writeThrough: true })
+  const assign = io.assign.bind(io)
+  const ids = new Map()
+  io.assign = (spec) => {
+    const a = assign(spec)
+    const path = spec.reask?.returnPath ?? '/returns/' + run + '/' + a.id + '.' + spec.role + '.json'
+    ids.set(path, { role: spec.role, id: a.id })
+    return { id: a.id, returnPath: path }
+  }
+  io.wait = (path) => {
+    const id = ids.get(path)
+    const env = queues[id.role]?.shift()
+    return env ? { ...env, assignment_id: env.assignment_id ?? id.id, run_id: env.run_id ?? run } : null
+  }
+  driveTask({ ...CTX, run_id: run }, io)
+  const retry = io.calls.assign.find((x) => x.reask)
+  return { io, body: retry ? io.calls.writes[retry.briefFile] : '(absent)', refused: '/returns/' + run + '/builder1.builder.json' }
+}
+
+// MUTATION SH5: hide the refused envelope path; both original-identity cases must name it.
+test('SH5', () => {
+  for (const [kind, reason] of [['assignment', 'assignment-id-mismatch'], ['run', 'run-mismatch']]) {
+    const x = seatHandoffIdentityScenario(kind)
+    assert.deepEqual(x.body.split('\n').filter((line) => /^(Refused envelope|Refusal reason): /.test(line)), [
+      'Refused envelope: ' + x.refused, 'Refusal reason: ' + reason,
+    ], 'id re-ask ' + kind)
+    assert.ok(x.body.includes('Original brief: '), 'id re-ask ' + kind + ' regenerates the original brief')
+  }
+})

@@ -2097,12 +2097,12 @@ const b376Build = (hardened) => buildEnv({ details: { ...buildEnv().details, ...
 
 const b376Review = (verdict, findings = []) => reviewEnv(verdict, findings)
 
-function b376ProofIo({ hardened = [B376_HARDENED], reviewer1 = b376Review('changes-needed', [B376_FINDING]), reviewer2 = b376Review('pass', []), reviewer3 = b376Review('pass', []), builder2 = b376Build(hardened), builder3 = b376Build(hardened), limits = { build_rounds: 2 }, files = B376_FILES, witnessOutput = { ok: true, output: `ok 1 - a.test.mjs\n# pass 1\n# fail 0` }, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], plan = {}, runs = {}, changed = ['a.mjs', 'a.test.mjs'], cleanRuns = null, throwOn = null } = {}) {
+function b376ProofIo({ hardened = [B376_HARDENED], reviewer1 = b376Review('changes-needed', [B376_FINDING]), reviewer2 = b376Review('pass', []), reviewer3 = b376Review('pass', []), reviewer4 = b376Review('pass', []), builder2 = b376Build(hardened), builder3 = b376Build(hardened), builder4 = b376Build(hardened), limits = { build_rounds: 2 }, files = B376_FILES, witnessOutput = { ok: true, output: `ok 1 - a.test.mjs\n# pass 1\n# fail 0` }, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], plan = {}, runs = {}, changed = ['a.mjs', 'a.test.mjs'], cleanRuns = null, throwOn = null } = {}) {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, ...plan } }),
-      'builder:1': buildEnv(), 'builder:2': builder2, 'builder:3': builder3,
-      'reviewer:1': reviewer1, 'reviewer:2': reviewer2, 'reviewer:3': reviewer3,
+      'builder:1': buildEnv(), 'builder:2': builder2, 'builder:3': builder3, 'builder:4': builder4,
+      'reviewer:1': reviewer1, 'reviewer:2': reviewer2, 'reviewer:3': reviewer3, 'reviewer:4': reviewer4,
     },
     files, writeThrough: true, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
     changed, cleanRuns, throwOn,

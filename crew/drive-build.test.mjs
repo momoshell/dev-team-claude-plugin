@@ -4078,8 +4078,15 @@ test('NN2', () => {
   const builtSource = 'const guard = false\n// built\n'
   const mutant = 'const guard = true\n// built\n'
   const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES, [`${CTX.checkout}/${B376_TEST_FILE}`]: reviewTest } }), builtSource, builtTest)
+  const timeline = []
+  const assign = io.assign
+  io.assign = function (spec) {
+    timeline.push({ kind: 'assign', role: spec.role, n: this.calls.assign.filter((row) => row.role === spec.role).length + 1 })
+    return assign.call(this, spec)
+  }
   const run = io.run
   io.run = function (cmd) {
+    timeline.push({ kind: 'run', cmd })
     const result = run.call(this, cmd)
     const source = this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`]
     const check = this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`]
@@ -4095,8 +4102,11 @@ test('NN2', () => {
   const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
   assert.equal(result.status, 'escalation')
   assert.equal(row.outcome, 'survived')
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === filtered).length, 1)
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === witness).length, 4)
+  const build2 = timeline.findIndex((row) => row.kind === 'assign' && row.role === 'builder' && row.n === 2)
+  const build3 = timeline.findIndex((row, index) => index > build2 && row.kind === 'assign' && row.role === 'builder' && row.n === 3)
+  const round2 = timeline.slice(build2 + 1, build3).filter((row) => row.kind === 'run').map((row) => row.cmd)
+  assert.equal(round2.filter((cmd) => cmd === filtered).length, 1)
+  assert.equal(round2.filter((cmd) => cmd === witness).length, 4)
 })
 
 // Kills coverage command propagation by using the selected unfiltered nested command at review time.
@@ -4521,7 +4531,7 @@ test('b376 B10 hardening paths cannot escape a directory scope', () => {
     const escapedAbsolute = `${CTX.checkout}/${escaped}`
     assert.equal(result.status, 'escalation')
     assert.match(bounce, new RegExp(`F1: ${reason}`))
-    assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 1)
+    assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 2)
     assert.equal(io.calls.read.includes(escapedAbsolute), false)
     assert.equal(io.calls.writeLog.some(({ path }) => path === escapedAbsolute), false)
     assert.equal(io.calls.run.some(({ cmd }) => cmd.includes(escaped)), false)
@@ -7089,6 +7099,18 @@ const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) =>
 }
 const invocationRows = (io) => io.calls.logs.filter((logged) => logged.finding_hardened?.finding === 'F1').map((logged) => logged.finding_hardened)
 const invocationExecutions = (io, invocation = B863_INVOCATION) => io.calls.run.filter(({ cmd }) => cmd === invocation)
+// RV2-2 (b1145 review): a lane total hides a run that moves between rounds. Mark
+// where each builder assignment falls in the run log so a count can be pinned to
+// the window between builder assignment n and the next one.
+function roundTimeline(io) {
+  const marks = []
+  const assign = io.assign
+  io.assign = function (spec) {
+    if (spec.role === 'builder') marks.push(this.calls.run.length)
+    return assign.call(this, spec)
+  }
+  return (round, invocation = B863_INVOCATION) => io.calls.run.slice(marks[round - 1], marks[round]).filter(({ cmd }) => cmd === invocation).length
+}
 
 test('A1 invocation guard proves a green control and red mutant', () => {
   const entry = b863InvocationEntry()
@@ -7107,21 +7129,25 @@ test('A1 invocation guard proves a green control and red mutant', () => {
 test('B1 invocation guard refutes a green mutant and reports both statuses', () => {
   const entry = b863InvocationEntry()
   const survivedIo = invocationProofIo({ entry, runFn: (text, n) => (n === 1 ? b863Green(1) : b863Green(0)) })
+  const survivedIn = roundTimeline(survivedIo)
   const survived = driveTask({ ...CTX, limits: { build_rounds: 2 } }, survivedIo)
   assert.equal(survived.status, 'escalation')
   assert.equal(survived.details.escalation.where, 'harden')
-  const survivedRow = invocationRows(survivedIo).at(-1)
+  const survivedRow = invocationRows(survivedIo).find((row) => row.round === 2)
   assert.equal(survivedRow.outcome, 'survived')
   assert.equal(hardeningRowBucket(survivedRow), 'refuted')
   assert.match(survivedRow.why, /control 0/)
   assert.match(survivedRow.why, /mutant 0/)
   assert.match(survivedRow.why, new RegExp(INVOCATION_LIMIT_TEXT))
-  assert.equal(invocationExecutions(survivedIo).length, 3)
+  assert.equal(invocationExecutions(survivedIo).length, 4)
+  assert.deepEqual([survivedIn(2), survivedIn(3)], [3, 1])
   const redIo = invocationProofIo({ entry, runFn: () => b863Green(3) })
+  const redIn = roundTimeline(redIo)
   const red = driveTask({ ...CTX, limits: { build_rounds: 2 } }, redIo)
   assert.equal(red.status, 'escalation')
-  assert.equal(invocationExecutions(redIo).length, 2)
-  const redRow = invocationRows(redIo).at(-1)
+  assert.equal(invocationExecutions(redIo).length, 4)
+  assert.deepEqual([redIn(2), redIn(3)], [2, 2])
+  const redRow = invocationRows(redIo).find((row) => row.round === 2)
   assert.equal(redRow.outcome, 'control-red')
   assert.equal(hardeningRowBucket(redRow), 'refuted')
   assert.match(redRow.why, /3/)
@@ -7292,7 +7318,7 @@ test('E1 every invocation result states the exit-status-only limitation', () => 
     const io = invocationProofIo({ entry: options.entry ?? entry, files: options.files ?? { ...B863_FILES }, fingerprints: options.fingerprints ?? null, runFn: options.runFn, flipTo: options.flipTo ?? null })
     if (typeof options.wrap === 'function') options.wrap(io)
     driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-    const row = invocationRows(io).at(-1)
+    const row = invocationRows(io).find((entry) => entry.round === 2)
     assert.equal(row?.outcome, outcome, label)
     assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT), label)
     if (match !== undefined) assert.match(row?.why ?? '', match, label)
@@ -7385,9 +7411,11 @@ test('a failed tree reset aborts before git clean and escalates harden', () => {
 
 test('a behavioural invocation passing on witnessed bytes is refuted pre-repair-green', () => {
   const io = invocationProofIo({ runFn: () => b863Green(0) })
+  const ranIn = roundTimeline(io)
   driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
-  assert.equal(invocationExecutions(io).length, 1)
-  const row = invocationRows(io).at(-1)
+  assert.equal(invocationExecutions(io).length, 2)
+  assert.deepEqual([ranIn(2), ranIn(3)], [1, 1])
+  const row = invocationRows(io).find((entry) => entry.round === 2)
   assert.equal(row?.outcome, 'pre-repair-green')
   assert.match(row?.why ?? '', /does not fail on the witnessed pre-repair/)
   assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT))
@@ -8523,10 +8551,10 @@ test('P2 two independently unproven guards complete with two blind spots', () =>
 test('P3 a refuted F2 guard escalates the lane despite unproven F1', () => {
   const io = pTwoFindingIo({ f2Witness: P_F2_PROVING_WITNESS, f2Proof: [pGreenFor('F2 guard'), pGreenFor('F2 guard'), pRedFor('F2 guard')] })
   const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
-  const f1 = pRowsFor(io, 'F1')
+  const f1 = pRowsFor(io, 'F1').filter((row) => row.round === 2)
   assert.ok(f1.length >= 1, JSON.stringify(f1))
   for (const row of f1) assert.equal(row.outcome, 'unproven', JSON.stringify(row))
-  const f2 = pRowsFor(io, 'F2')
+  const f2 = pRowsFor(io, 'F2').filter((row) => row.round === 3)
   assert.ok(f2.length >= 1, JSON.stringify(f2))
   assert.equal(f2.at(-1).outcome, 'pre-repair-green', JSON.stringify(f2.at(-1)))
   assert.equal(result.status, 'escalation')
@@ -8571,7 +8599,7 @@ test('a guard that passed on the review-time bytes is refuted even when its muta
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'harden')
-  const row = io.calls.logs.filter((entry) => entry.finding_hardened).at(-1)?.finding_hardened
+  const row = io.calls.logs.map((entry) => entry.finding_hardened).find((entry) => entry?.round === 2)
   assert.equal(row.outcome, 'pre-repair-green', JSON.stringify(row))
 })
 
@@ -10519,4 +10547,162 @@ test('HN7 cargo lane bounces and escalates', () => {
   const autoBriefs = Object.values(autoIo.calls.writes).filter((text) => typeof text === 'string').join('\n')
   assertText(autoBriefs, ['cargo', '#[test]'], 'auto-fix hardening brief')
   assert.equal(autoBriefs.includes(nodeSentence), false, 'auto-fix retained legacy node guidance')
+})
+
+function b1145HardenLane({ missing = false, repaired = false, mixed = false, buildRounds = 2 } = {}) {
+  const source = Object.freeze({ test: "import { test } from 'node:test'\ntest('F1 guard', () => {})\n", impl: 'const guard = false\n' })
+  const files = { [CTX.checkout + '/a.test.mjs']: source.test, [CTX.checkout + '/a.mjs']: source.impl }
+  const reused = { ...B376_HARDENED, class: 'coverage' }
+  const fresh = { ...reused, name: 'F1 fresh' }
+  const other = { ...reused, finding: 'F2', name: 'F2 guard' }
+  const first = missing ? [] : mixed ? [reused, other] : [reused]
+  const second = repaired ? [fresh] : first
+  const io = b376ProofIo({ files, hardened: first, builder2: b376Build(first), builder3: b376Build(second), reviewer1: b376Review('changes-needed', mixed ? [B376_FINDING, { ...B376_FINDING, id: 'F2' }] : [B376_FINDING]) })
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:2' || path === 'builder:3') this.calls.files[CTX.checkout + '/a.test.mjs'] = source.test + "test('F1 fresh', () => {})\ntest('F2 guard', () => {})\n"
+    return env
+  }
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    if (cmd === hardenWitnessCommand('a.test.mjs')) return { ok: true, output: 'ok 1 - F1 guard\n# pass 1\n# fail 0' }
+    for (const name of ['F1 guard', 'F1 fresh', 'F2 guard']) if (cmd === hardenCommand('a.test.mjs', name)) {
+      const red = name !== 'F2 guard' && this.calls.files[CTX.checkout + '/a.mjs'] === 'const guard = true\n'
+      return { ok: !red, output: (red ? 'not ok' : 'ok') + ' 1 - ' + name + '\n# pass ' + (red ? 0 : 1) + '\n# fail ' + (red ? 1 : 0) }
+    }
+    return result
+  }
+  const result = driveTask({ ...CTX, limits: { build_rounds: buildRounds, review_rounds: 4 } }, io)
+  return { io, result, rows: io.calls.logs.flatMap((row) => row.finding_hardened ? [row.finding_hardened] : []), bounces: io.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-fix') }
+}
+
+// MUTATION HB1: remove the reused-name repair line or final-round allowance in runTask.
+test('HB1 final hardening bounce repairs a reused declaration', () => {
+  const { io, result, rows, bounces } = b1145HardenLane({ repaired: true })
+  assert.equal(bounces.length, 1)
+  assert.match(io.calls.writes[bounces[0].briefFile], /do not reuse F1 guard/)
+  assert.deepEqual(rows.filter((row) => row.finding === 'F1').map((row) => [row.round, row.outcome]), [[2, 'name-not-new'], [3, 'killed']])
+  assert.equal(result.status, 'done')
+})
+
+// MUTATION HB2: change `hardenFinalBounces += 1` to `hardenFinalBounces += 0`.
+test('HB2 spends the final hardening bounce once before terminal refusal', () => {
+  const { result, rows, bounces } = b1145HardenLane()
+  const finalWhy = [
+    '# Hardening bounce (round 3)',
+    '',
+    'Every owed must-fix needs a permanent named guard proven by its declared mutation.',
+    '- F1: name-not-new — the declared name F1 guard already exists in the witnessed a.test.mjs: passed',
+    '- F1: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse F1 guard.',
+    '',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Hardening proof for round 3 did not close every finding.',
+    'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
+  ].join(' ')
+  assert.equal(bounces.length, 1)
+  assert.deepEqual(rows.filter((row) => row.finding === 'F1').map((row) => [row.round, row.outcome]), [[2, 'name-not-new'], [3, 'name-not-new']])
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.equal(result.details.escalation?.why, finalWhy)
+})
+
+// MUTATION HB3: restrict final-round grants to a subset of live hardening debt.
+test('HB3 grants the final hardening bounce for mixed live debt', () => {
+  const { io, rows, bounces } = b1145HardenLane({ mixed: true })
+  assert.equal(bounces.length, 1)
+  assert.deepEqual(rows.filter((row) => row.round === 2).map((row) => row.outcome), ['name-not-new', 'survived'])
+  assert.match(io.calls.writes[bounces[0].briefFile], /F2: survived/)
+})
+
+// MUTATION HB6: require a prior proof row before granting the final hardening bounce.
+test('HB6 final hardening bounce repairs a missing declaration', () => {
+  const { io, result, rows, bounces } = b1145HardenLane({ missing: true, repaired: true })
+  assert.equal(bounces.length, 1)
+  assert.match(io.calls.writes[bounces[0].briefFile], /declare a NEW top-level test\(\.\.\.\) guard/)
+  assert.deepEqual(rows.filter((row) => row.finding === 'F1').map((row) => [row.round, row.outcome]), [[3, 'killed']])
+  assert.equal(result.status, 'done')
+})
+
+// MUTATION HB7: change `if (refusal.reason === 'no-declaration')` to never match.
+test('HB7 terminal hardening refusal retains missing-declaration evidence', () => {
+  const { result, bounces } = b1145HardenLane({ missing: true })
+  const finalWhy = [
+    '# Hardening bounce (round 3)',
+    '',
+    'Every owed must-fix needs a permanent named guard proven by its declared mutation.',
+    '- F1: no-declaration — no details.hardened entry names finding F1',
+    '- F1: declare a NEW top-level test(...) guard for this review finding in details.hardened; its name must be absent from the reviewed tree.',
+    'No guard was declared for:',
+    '- F1',
+    '',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Hardening proof for round 3 did not close every finding.',
+    'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
+  ].join(' ')
+  assert.equal(bounces.length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.equal(result.details.escalation?.why, finalWhy)
+})
+
+// MUTATION: change `hardenFinalBounces += 1` to `+= 0`. The suiteCycle re-entry mutation
+// this test was first named for is killed by RV2-1 in crew/drive-review.test.mjs.
+test('RV1-2 final hardening budget is spent once for a lane', () => {
+  const { io, result, bounces } = b1145HardenLane()
+  assert.equal(bounces.length, 1)
+  assert.equal(io.calls.assign.filter((row) => row.note === 'harden-fix').length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+})
+
+// MUTATION RV2-1b: spend hardenFinalBounces on every hardening bounce instead of only
+// on the final round — a non-final miss then eats the final grant.
+test('RV2-1b a non-final hardening bounce leaves the final bounce unspent', () => {
+  const { result, rows, bounces } = b1145HardenLane({ buildRounds: 3 })
+  assert.equal(bounces.length, 2)
+  assert.deepEqual(rows.filter((row) => row.finding === 'F1').map((row) => [row.round, row.outcome]), [[2, 'name-not-new'], [3, 'name-not-new'], [4, 'name-not-new']])
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.match(result.details.escalation?.why ?? '', /^# Hardening bounce \(round 4\) /)
+})
+
+// MUTATION RV1-3: count executions outside the assign/build stage round boundary.
+test('RV1-3 final-round proof rows preserve their round-delimited outcomes', () => {
+  const { rows } = b1145HardenLane({ repaired: true })
+  assert.deepEqual(rows.filter((row) => row.round === 2).map((row) => row.outcome), ['name-not-new'])
+  assert.deepEqual(rows.filter((row) => row.round === 3).map((row) => row.outcome), ['killed'])
+})
+
+// MUTATION RV1-4: pass [] instead of liveRows to the terminal hardening escalation.
+test('RV1-4 final refusal contains literal refuted-row evidence', () => {
+  const repairedName = b1145HardenLane({ repaired: true })
+  const repairedMissing = b1145HardenLane({ missing: true, repaired: true })
+  const repeatedName = b1145HardenLane()
+  const repeatedMissing = b1145HardenLane({ missing: true })
+  const nameWhy = [
+    '# Hardening bounce (round 3)',
+    '',
+    'Every owed must-fix needs a permanent named guard proven by its declared mutation.',
+    '- F1: name-not-new — the declared name F1 guard already exists in the witnessed a.test.mjs: passed',
+    '- F1: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse F1 guard.',
+    '',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Hardening proof for round 3 did not close every finding.',
+    'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
+  ].join(' ')
+  const missingWhy = [
+    '# Hardening bounce (round 3)',
+    '',
+    'Every owed must-fix needs a permanent named guard proven by its declared mutation.',
+    '- F1: no-declaration — no details.hardened entry names finding F1',
+    '- F1: declare a NEW top-level test(...) guard for this review finding in details.hardened; its name must be absent from the reviewed tree.',
+    'No guard was declared for:',
+    '- F1',
+    '',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Hardening proof for round 3 did not close every finding.',
+    'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
+  ].join(' ')
+  assert.equal(repairedName.rows.find((row) => row.round === 3)?.outcome, 'killed')
+  assert.equal(repairedMissing.rows.find((row) => row.round === 3)?.outcome, 'killed')
+  assert.equal(repeatedName.result.details.escalation?.why, nameWhy)
+  assert.equal(repeatedMissing.result.details.escalation?.why, missingWhy)
 })

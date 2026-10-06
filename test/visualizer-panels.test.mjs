@@ -3336,14 +3336,19 @@ test('RV1-4 an unreadable journal reports its escalation as journal-unavailable'
  const s=stepped(steppedPayload([timelineStart(),{at:150,stage:'escalate:build'}])).steps[0]
  assert.deepEqual([s.escalation,s.escalation_reason],['escalate:build',null])
 })
-// MUTATION RV2-1: read regressions only from the step's own gate row — a later step's gate
+// MUTATION RV2-1: read regressions only from the step's own gate row — a later step's red gate
 // that regresses C1 then leaves step a green with C1 passed.
-test('RV2-1 a regression seen by a later step marks the owning step check and tone', () => {
+// MUTATION RV3-1: keep any later regression sticky — b's passing retry then leaves a red forever.
+test('RV2-1 a regression seen by a later step marks the owning step until a later gate passes it', () => {
  const chunks=[{id:'a',checks_owned:['C1','C2']},{id:'b',checks_owned:['C3']}]
- const v=stepped(steppedPayload([timelineStart(),timelineDone(),timelineStart('b',1,300),{event:'step:done',step:'b',round:1,at:400,passed:['C3'],regressed:['C1']}],chunks))
+ const red=[timelineStart(),timelineDone(),timelineStart('b',1,300),{event:'step:red',step:'b',round:1,at:400,failed:['C1'],regressed:['C1']}]
+ const v=stepped(steppedPayload(red,chunks))
  assert.deepEqual(v.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.tone]),[['C1','failed',true,'fail'],['C2','passed',false,'ok']])
  assert.deepEqual([v.steps[0].state,v.steps[0].tone],['done','fail'])
  assert.deepEqual(v.strip[0],{id:'a',state:'done',reason:null,tone:'fail'})
+ const retried=stepped(steppedPayload([...red,timelineStart('b',2,500),{event:'step:done',step:'b',round:2,at:600,passed:['C1','C2','C3']}],chunks))
+ assert.deepEqual(retried.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.tone]),[['C1','passed',false,'ok'],['C2','passed',false,'ok']])
+ assert.deepEqual(retried.strip[0],{id:'a',state:'done',reason:null,tone:'ok'})
 })
 
 // MUTATION RV2-2: let latestOpen fall back to any earlier unterminated start — step a, whose

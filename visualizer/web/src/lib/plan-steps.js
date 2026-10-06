@@ -106,12 +106,15 @@ export function stepTimeline(payload = {}) {
     const owned = Array.isArray(chunk.checks_owned) ? chunk.checks_owned.filter(x=>typeof x==='string') : null
     const related = events.filter(({row})=>row.step===chunk.id)
     const gateEntry = related.filter(({row})=>GATE_EVENTS.has(row.event)).at(-1), gate = gateEntry?.row
-    const passed = Array.isArray(gate?.passed)?gate.passed:[], failed = Array.isArray(gate?.failed)?gate.failed:[]
-    // A regression is attributed to the step that OWNS the check, whichever step's gate saw it.
-    const laterRegressed = new Set(events.filter(({row,index})=>GATE_EVENTS.has(row.event) && row.step!==chunk.id && index>(gateEntry?.index ?? -1) && Array.isArray(row.regressed)).flatMap(({row})=>row.regressed))
+    // A check is owned by this step but observed by every later step gate too: the latest gate
+    // row that names it (this step's last gate, or any later one) decides its result, so a
+    // regression a later step saw marks it here and a later passing retry clears it again.
+    const named = (list, id) => Array.isArray(list) && list.includes(id)
+    const observations = events.filter(({row,index})=>GATE_EVENTS.has(row.event) && (index===gateEntry?.index || (row.step!==chunk.id && index>(gateEntry?.index ?? -1))))
     const checks = owned?.map((id) => {
-      const regressed = (Array.isArray(gate?.regressed) && gate.regressed.includes(id)) || laterRegressed.has(id)
-      const result = laterRegressed.has(id) ? 'failed' : passed.includes(id) ? 'passed' : failed.includes(id) ? 'failed' : null
+      const seen = observations.findLast(({row})=>named(row.passed,id)||named(row.failed,id)||named(row.regressed,id))?.row
+      const regressed = named(seen?.regressed, id)
+      const result = !seen ? null : named(seen.passed, id) && !regressed ? 'passed' : 'failed'
       return { id, result, regressed, reason: result === null ? 'no-gate-result' : null, tone: toneFor(null, result, regressed) }
     }) ?? null
     const ownStarts=starts.filter(({row})=>row.step===chunk.id)

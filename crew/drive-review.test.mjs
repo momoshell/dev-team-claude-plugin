@@ -5274,7 +5274,8 @@ function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_
     if (cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(files[testAbs])}\n` }
     if (cmd === hardenCommand(guardFile, 'F1 guard')) {
       const count = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
-      return proofOutputs[count - 1] ?? proofOutputs.at(-1)
+      // A proof runs control, pre-repair and mutant; a later re-proof replays the same three.
+      return proofOutputs[(count - 1) % proofOutputs.length]
     }
     if (cmd === `git rev-parse ${shellArg('origin/main')}`) return { ok: true, output: 'base1111\n' }
     if (cmd === `git merge-base HEAD ${shellArg('origin/main')}`) return { ok: true, output: `${head.rebased ? 'base1111' : 'older000'}\n` }
@@ -5411,14 +5412,28 @@ test('HP1', () => {
 test('HP2', () => {
   const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
   const io = pinIo({ built: edited })
+  const wait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    const env = wait.call(this, returnPath, timeoutS)
+    if (returnPath === 'builder:3') {
+      const path = CTX.checkout + '/' + B376_TEST_FILE
+      io.calls.files[path] = `${io.calls.files[path]}// preservation bounce edit\n`
+    }
+    return env
+  }
   const log = io.log
   io.log = function (row) {
     log.call(this, row)
-    if (row.hardening_prescription_repinned?.round === 2) io.calls.files[CTX.checkout + '/' + B376_TEST_FILE] = edited + '// unreviewed edit\n'
+    if (row.hardening_prescription_repinned?.round >= 2 || io.calls.assign.some(({ note }) => note === 'harden-preservation-fix')) {
+    const path = CTX.checkout + '/' + B376_TEST_FILE
+    io.calls.files[path] = `${io.calls.files[path]}// unreviewed edit r${row.hardening_prescription_repinned?.round ?? 'preservation'}\n`
   }
-  const result = driveTask(PIN_CTX, io)
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
   const row = pinRepins(io).find((entry) => entry.round === 2)
   assert.equal(row?.moved, true)
+  // RV2-4 (b1145 review): the first accept-time alteration is a bounce, not the escalation.
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-preservation-fix').length, 1)
   assert.equal(result.details.escalation.where, 'harden')
   assert.equal(result.details.escalation.why, '[witnessed-test-altered] finding F1 (accept): a.test.mjs must ship byte-identical to its review version; it was edited — restore it and put the new guard in a different test file')
 })
@@ -5465,6 +5480,9 @@ test('HP5', () => {
   const missingKept = pinRepins(missing).find((row) => row.round === 2)
   assert.deepEqual([missingSaved?.bytes, missingKept?.kept, missingKept?.why], [PIN_WITNESSED, 'prior', 'the review-time bytes were unreadable'])
   assert.equal(missingResult.details.escalation.why, '[witnessed-test-altered] finding F1 (accept): the built tree no longer has a.test.mjs, so its pinned checks are gone')
+  const missingBounces = missing.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-preservation-fix')
+  assert.equal(missingBounces.length, 1)
+  assert.match(missing.calls.writes[missingBounces[0].briefFile] ?? '', /\(built file is absent\)/)
 
   const fatal = pinIo({})
   let reviewed = false
@@ -5600,27 +5618,35 @@ test('HP4', () => {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
   let builder3 = false
+  let postRepinEdit = false
   const baseWait = io.wait
   io.wait = function (returnPath, timeoutS) {
     const env = baseWait.call(this, returnPath, timeoutS)
     if (returnPath === 'builder:3') { builder3 = true; io.calls.files[testAbs] = edited }
+    if (returnPath === 'builder:4') io.calls.files[testAbs] = `${io.calls.files[testAbs]}// preservation bounce edit\n`
     return env
   }
   let suites = 0
   const baseRun = io.run
   io.run = function (cmd) {
     if (cmd === 'suite-cmd') { suites += 1; baseRun.call(this, cmd); return suites === 1 ? { ok: false, output: '✖ unrelated (1ms)\nnot ok 1 - unrelated\n  location: b.test.mjs:3:1\n# pass 0\n# fail 1' } : { ok: true, output: '# pass 1\n# fail 0' } }
+    if (postRepinEdit && cmd === `git hash-object --no-filters -- ${shellArg(B376_TEST_FILE)}`) return { ok: true, output: `${blobOid(io.calls.files[testAbs])}\n` }
     return baseRun.call(this, cmd)
   }
   const log = io.log
   io.log = function (row) {
     log.call(this, row)
-    if (builder3 && row.hardening_prescription_repinned) io.calls.files[testAbs] = edited + '// unreviewed edit\n'
+    if (builder3 && row.hardening_prescription_repinned) {
+      postRepinEdit = true
+      io.calls.files[testAbs] = `${io.calls.files[testAbs]}// unreviewed edit r${row.hardening_prescription_repinned.round}\n`
+    }
   }
-  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
   const row = pinRepins(io).find((entry) => entry.moved === true && entry.oid === blobOid(edited))
   assert.equal(io.calls.assign.some(({ role, n }) => role === 'builder' && n === 3), true)
   assert.deepEqual([row?.source, row?.oid, row?.moved], ['review', blobOid(edited), true])
+  // RV2-2 (b1145 review): exactly one preservation bounce precedes the terminal refusal.
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-preservation-fix').length, 1)
   assert.equal(result.details.escalation.where, 'harden')
   assert.match(result.details.escalation.why, /^\[witnessed-test-altered\] finding F1 \(accept\): a\.test\.mjs must ship byte-identical to its review version/)
 })
@@ -6799,4 +6825,224 @@ test('an unterminated block comment leaves the held file unmeasured', () => {
   assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), { path: 'a.test.mjs', measured: false, reason: 'base-unreadable' })
   const good = "test('x', () => {\n  setup()\n})\n"
   assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base: good, diff: '', current: `${good}/* never closed\n` }), { path: 'a.test.mjs', measured: false, reason: 'current-unreadable' })
+})
+
+function b1145PreservationLane({ restore = false, prepare = null } = {}) {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const io = pinIo({ built: restore ? PIN_WITNESSED : edited })
+  const testPath = CTX.checkout + '/' + B376_TEST_FILE
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:3' && restore) this.calls.files[testPath] = PIN_WITNESSED
+    if (path === 'builder:3' && !restore) this.calls.files[testPath] += '// b1145 preservation-bounce edit\n'
+    return env
+  }
+  const log = io.log
+  io.log = function (row) {
+    log.call(this, row)
+    const round = row.hardening_prescription_repinned?.round
+    if (restore && round === 2) this.calls.files[testPath] = edited
+    if (!restore && (round >= 2 || this.calls.assign.some(({ note }) => note === 'harden-preservation-fix'))) this.calls.files[testPath] += '// b1145 post-repin edit r' + (round ?? 'preservation') + '\n'
+  }
+  if (typeof prepare === 'function') prepare(io, testPath)
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
+  return { io, result, bounces: io.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-preservation-fix') }
+}
+
+// MUTATION HB4: omit the in-process full-file preservation diff.
+test('HB4 preservation bounce supplies byte evidence and permits restoration', () => {
+  const { io, result, bounces } = b1145PreservationLane({ restore: true })
+  assert.equal(bounces.length, 1)
+  const brief = io.calls.writes[bounces[0].briefFile] ?? ''
+  assert.match(brief, /Restore a\.test\.mjs byte-identically/)
+  assert.equal(brief.split('\n').some((line) => line.startsWith('-') && line.includes('assert.equal(1, 1)')), true)
+  assert.equal(brief.split('\n').some((line) => line.startsWith('+') && line.includes('assert.ok(true)')), true)
+  assert.equal(result.status, 'done')
+})
+
+// MUTATION HB5: remove spending of the preservation counter after the brief persists.
+test('HB5 preservation bounce is spent before a second accept-time refusal', () => {
+  const { result, bounces } = b1145PreservationLane()
+  assert.equal(bounces.length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.equal(result.details.escalation?.why, '[witnessed-test-altered] finding F1 (accept): a.test.mjs must ship byte-identical to its review version; it was edited — restore it and put the new guard in a different test file')
+})
+
+// MUTATION RV1-1: remove the accept-time evidence-read catch; the second read then escapes instead of escalating.
+// MUTATION RV1-1b: delete `if (writeError) return escalate(...)` — the write-denied scenario then spends the
+// bounce on an unwritten brief and assigns a builder to it.
+test('RV1-1 preservation bounce records only a persisted, evidenced grant', () => {
+  const why = '[witnessed-test-altered] finding F1 (accept): a.test.mjs must ship byte-identical to its review version; it was edited — restore it and put the new guard in a different test file'
+  const noBounce = pinIo({})
+  driveTask(PIN_CTX, noBounce)
+  const noBounceBuilders = noBounce.calls.assign.filter((row) => row.role === 'builder').length
+
+  // The verification read must return the altered record first; the next file read is
+  // the evidence collection this branch must contain.
+  let alteredAtAccept = false
+  let deniedReads = 0
+  const denied = b1145PreservationLane({
+    restore: true,
+    prepare(io, path) {
+      const log = io.log
+      io.log = function (row) {
+        log.call(this, row)
+        const preservation = row.hardening_preservation
+        if (preservation?.when === 'accept' && preservation.reason === 'witnessed-test-altered') alteredAtAccept = true
+      }
+      const read = io.readFile
+      io.readFile = function (candidate) {
+        if (candidate === path && alteredAtAccept) {
+          deniedReads += 1
+          throw new Error('EACCES: second evidence read denied')
+        }
+        return read.call(this, candidate)
+      }
+    },
+  })
+  assert.equal(alteredAtAccept, true)
+  assert.equal(deniedReads, 1)
+  assert.equal(denied.result.details.escalation?.where, 'harden')
+  assert.equal(denied.result.details.escalation?.why, why)
+  assert.equal(typeof denied.result.details.evidence_unavailable, 'string')
+  assert.match(denied.result.details.evidence_unavailable, /EACCES: second evidence read denied/)
+  assert.equal(denied.bounces.length, 0)
+  assert.equal(denied.io.calls.assign.filter((row) => row.role === 'builder').length, noBounceBuilders)
+  assert.equal(denied.io.calls.logs.some((row) => row.hardening_preservation_bounce), false)
+
+  const writeDenied = b1145PreservationLane({
+    restore: true,
+    prepare(io) {
+      const write = io.writeFile
+      io.writeFile = function (path, content) {
+        if (path.includes('harden-preservation-bounce-r')) throw new Error('EACCES: preservation brief write denied')
+        return write.call(this, path, content)
+      }
+    },
+  })
+  assert.equal(writeDenied.result.details.escalation?.where, 'harden')
+  assert.equal(writeDenied.result.details.escalation?.why, why)
+  assert.equal(typeof writeDenied.result.details.evidence_unavailable, 'string')
+  assert.match(writeDenied.result.details.evidence_unavailable, /brief write failed/)
+  assert.equal(writeDenied.bounces.length, 0)
+  assert.equal(writeDenied.io.calls.assign.filter((row) => row.role === 'builder').length, noBounceBuilders)
+  assert.equal(writeDenied.io.calls.logs.some((row) => row.hardening_preservation_bounce), false)
+
+  const missing = pinIo({ missingAfterReview: true })
+  const missingResult = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, missing)
+  const missingBounces = missing.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-preservation-fix')
+  assert.equal(missingBounces.length, 1)
+  const missingBrief = missing.calls.writes[missingBounces[0].briefFile] ?? ''
+  assert.match(missingBrief, /\(built file is absent\)/)
+  assert.equal(missingBrief.split('\n').some((line) => line.startsWith('-') && line.includes('assert.equal(1, 1)')), true)
+  assert.equal(missingResult.details.escalation?.why, '[witnessed-test-altered] finding F1 (accept): the built tree no longer has a.test.mjs, so its pinned checks are gone')
+})
+
+
+// MUTATION RV3-1: skip the accept-time re-proof of guards proven before the preservation
+// bounce — the restoring builder deletes the guard and the lane still reaches done.
+test('RV3-1 a guard deleted during the preservation bounce is re-proved and refused', () => {
+  const guardPath = CTX.checkout + '/' + PIN_GUARD_FILE
+  const { io, result, bounces } = b1145PreservationLane({
+    restore: true,
+    prepare(io) {
+      const wait = io.wait
+      io.wait = function (path, timeout) {
+        const env = wait.call(this, path, timeout)
+        if (path === 'builder:3') delete this.calls.files[guardPath]
+        return env
+      }
+    },
+  })
+  assert.equal(bounces.length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.match(result.details.escalation?.why ?? '', /^a guard proven before the preservation bounce no longer holds on the tree about to be committed: /)
+  assert.equal(result.details.stages.includes('commit'), false)
+  const reproved = pinRows(io).filter((row) => row.finding === 'F1')
+  assert.equal(reproved.length, 2)
+  assert.notEqual(reproved.at(-1).outcome, 'killed')
+})
+
+// MUTATION RV2-1: declare hardenFinalBounces at the suiteCycle head instead of beside
+// postCommitCensusBounces — the preservation re-entry then mints a second final grant.
+test('RV2-1 a suiteCycle re-entry does not refill the final hardening bounce', () => {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  // Round 2 is final: its first proof survives, so the lane spends its one final bounce;
+  // round 3's proof kills the mutant and review passes.
+  const io = pinIo({ proofOutputs: [B376_GREEN, B376_PRE_RED, B376_GREEN, B376_GREEN, B376_PRE_RED, B376_MUT_RED] })
+  const testPath = CTX.checkout + '/' + B376_TEST_FILE
+  const log = io.log
+  let repinned = false
+  io.log = function (row) {
+    log.call(this, row)
+    // An edit after the passing review's repin makes the accept check bounce the
+    // builder through `continue suiteCycle` (the preservation re-entry).
+    if (row.hardening_prescription_repinned && !repinned) { repinned = true; this.calls.files[testPath] = edited }
+  }
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:4') this.calls.files[testPath] = PIN_WITNESSED
+    // After the re-entry a new must-fix is raised, the lead grants the round, and the
+    // final-round builder declares no guard for it.
+    if (path === 'reviewer:3') return reviewEnv('changes-needed', [{ ...B376_FINDING, id: 'F2', summary: 'a second defect after the re-entry' }])
+    if (path === 'lead:1') return leadEnv('bounce-builder', 'fix F2 and declare its guard')
+    if (path === 'builder:5') return buildEnv()
+    return env
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 2, review_rounds: 8 } }, io)
+  const builders = io.calls.assign.filter(({ role }) => role === 'builder').map(({ note }) => note)
+  assert.deepEqual(builders, ['build', 'review-fix', 'harden-fix', 'harden-preservation-fix', 'review-fix'])
+  assert.deepEqual(pinRows(io).map(({ finding, round, outcome }) => [finding, round, outcome]), [['F1', 2, 'survived'], ['F1', 3, 'killed']])
+  assert.equal(result.details.escalation?.where, 'harden')
+  assert.match(result.details.escalation?.why ?? '', /^# Hardening bounce \(round 5\) .* - F2: no-declaration — no details\.hardened entry names finding F2 /)
+})
+
+// MUTATION RV3-3: key the re-proof witnesses by finding id — the second review's F1
+// witness then overwrites the first and the first guard reads name-not-new.
+test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a finding id', () => {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const testPath = CTX.checkout + '/' + B376_TEST_FILE
+  const guardPath = CTX.checkout + '/' + PIN_GUARD_FILE
+  const second = { ...B376_HARDENED, test: PIN_GUARD_FILE, name: 'F1 guard two', find: 'const guard = false', replace: 'const guard = 2' }
+  const io = pinIo({})
+  const twoCmd = hardenCommand(PIN_GUARD_FILE, 'F1 guard two')
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    if (cmd === hardenWitnessCommand(PIN_GUARD_FILE)) return pinTap(this.calls.files[guardPath])
+    if (cmd === twoCmd) {
+      // control, pre-repair, mutant — replayed for the accept-time re-proof
+      const n = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      const green = { ok: true, output: 'ok 1 - F1 guard two\n# pass 1\n# fail 0' }
+      const red = { ok: false, output: 'not ok 1 - F1 guard two\n# pass 0\n# fail 1' }
+      return [green, red, red][(n - 1) % 3]
+    }
+    return result
+  }
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    if (path === 'reviewer:2') { wait.call(this, path, timeout); return reviewEnv('changes-needed', [{ ...B376_FINDING, summary: 'a different defect reusing F1' }]) }
+    if (path === 'builder:3') {
+      wait.call(this, path, timeout)
+      this.calls.files[guardPath] += "\ntest('F1 guard two', () => {\n  assert.equal(3, 3)\n})\n"
+      return buildEnv({ details: { ...buildEnv().details, hardened: [second] } })
+    }
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:4') this.calls.files[testPath] = PIN_WITNESSED
+    return env
+  }
+  // The second passing review's repin is followed by an edit, so the accept check takes
+  // the preservation bounce and builder:4 restores the pinned file.
+  const log = io.log
+  let n = 0
+  io.log = function (row) {
+    log.call(this, row)
+    if (row.hardening_prescription_repinned && this.calls.waits.some(({ returnPath }) => returnPath === 'reviewer:3') && ++n === 1) this.calls.files[testPath] = edited
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
+  assert.equal(io.calls.assign.filter(({ note }) => note === 'harden-preservation-fix').length, 1)
+  assert.deepEqual(pinRows(io).map(({ round, check, outcome }) => [round, check, outcome]), [[2, 'F1 guard', 'killed'], [3, 'F1 guard two', 'killed'], [4, 'F1 guard', 'killed'], [4, 'F1 guard two', 'killed']])
+  assert.equal(result.status, 'done')
 })

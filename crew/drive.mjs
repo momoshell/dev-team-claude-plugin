@@ -10408,6 +10408,11 @@ function runTask(ctx, io, crash) {
 
   const censusEnabled = !io.calls || typeof io.runClean === 'function'
   let postCommitCensusBounces = 0
+  let hardenFinalBounces = 0
+  let hardenPreservationBounces = 0
+  // Guards proven before a preservation bounce, with their witness. The re-entered cycle
+  // starts with no hardening debt, so these are re-proved before the commit instead.
+  let preservationReproof = []
   // This counter belongs to the whole accepted lane, not to suiteCycle: a retained
   // conflict may re-enter that cycle, but it must not mint a fresh rebase budget.
   let rebaseConflictBounces = 0
@@ -10774,6 +10779,7 @@ function runTask(ctx, io, crash) {
   let accepted = null
   let extraReviews = 0
   let hardenOwed = { owed: [], exempt: [] }
+  let hardenProven = []                 // [{ entry, witness, prescribed }] killed in this cycle
   let hardenWitness = new Map()         // Map<finding id, Map<repo-relative path, {state, bytes}>>
   // #910/#900 — ONE reviewer appeal per REVIEWED DEBT GENERATION (R4-1). The turn exists so
   // a request only the reviewer can grant is not held behind a gate scheduled before the
@@ -11496,8 +11502,11 @@ function runTask(ctx, io, crash) {
       }
       const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding))
       const liveRows = rows.filter((row) => !excused.has(row.finding))
+      const finalHardenBounce = plans && finalRound() && hardenFinalBounces < HARDEN_FINAL_BOUNCE_MAX
       if (hardenCleared(liveRefusals, liveRows)) {
         const stillOwed = new Set(liveRows.filter((row) => row.outcome === 'unproven').map((row) => row.finding))
+        const killed = new Set(liveRows.filter((row) => row.outcome === 'killed').map((row) => row.finding))
+        for (const entry of entries) if (killed.has(entry.finding)) hardenProven.push({ entry, witness: hardenWitness.get(entry.finding), prescribed: prescribed.has(entry.finding) })
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => stillOwed.has(id)), exempt: hardenOwed.exempt }
         for (const id of [...hardenWitness.keys()]) if (!stillOwed.has(id)) hardenWitness.delete(id)
         const latest = new Map(liveRows.map((row) => [row.finding, row]))
@@ -11510,13 +11519,18 @@ function runTask(ctx, io, crash) {
           else hardenBlindSpots[at] = next
         }
         stageComplete()
-      } else if (!plans || finalRound()) {
+      } else if (!plans || (finalRound() && !finalHardenBounce)) {
         stageComplete()
         return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '))
       } else {
         const b = art(`build-bounce-r${round}.md`)
+        const writeError = guardedWrite(io, b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
+        if (writeError) {
+          stageComplete()
+          return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '), [], { evidence_unavailable: `hardening bounce brief write failed: ${writeError}` })
+        }
+        if (finalRound()) { hardenFinalBounces += 1; grantBuilderAllowance() }
         failureUpgrade('harden', 'builder')
-        io.writeFile(b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
         buildBrief = b; buildNote = 'harden-fix'
         stageComplete()
         continue
@@ -11910,7 +11924,71 @@ function runTask(ctx, io, crash) {
   // MUTATION P4: skip this check and the builder's promise to leave the witnessed checks
   // as they were is taken on trust — the false clean Sol reproduced on b1074.
   const pinnedBeforeCommit = verifyPrescriptionPins('accept')                             // ANCHOR P4
-  if (pinnedBeforeCommit) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit })
+  if (pinnedBeforeCommit) {
+    if (pinnedBeforeCommit.reason !== 'witnessed-test-altered' || hardenPreservationBounces >= HARDEN_PRESERVATION_BOUNCE_MAX) {
+      return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit })
+    }
+    const pin = prescriptionPins.get(pinnedBeforeCommit.file)
+    const builtPath = `${ctx.checkout}/${pinnedBeforeCommit.file}`
+    let builtText
+    let evidenceError = null
+    try {
+      builtText = io.readFile(builtPath)
+      if (builtText !== null && typeof builtText !== 'string') evidenceError = 'built file read returned a non-string value'
+      else if (typeof pin?.bytes !== 'string') evidenceError = 'pinned snapshot bytes are unavailable'
+    } catch (err) {
+      evidenceError = `built file evidence read failed: ${String(err?.message ?? err ?? 'unknown read error')}`
+    }
+    if (evidenceError) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit, evidence_unavailable: evidenceError })
+    // lean: full-file replacement diff; trim common prefix/suffix lines if preservation briefs get noisy
+    const diffLines = (label, value) => {
+      if (value === null) return [`(${label} file is absent)`]
+      const lines = value.split('\n')
+      if (lines.at(-1) === '') lines.pop()
+      return lines.length ? lines : [`(${label} file is empty: zero lines)`]
+    }
+    const preservationDiff = [
+      `--- pinned/${pinnedBeforeCommit.file}`, `+++ built/${pinnedBeforeCommit.file}`,
+      ...diffLines('pinned', pin.bytes).map((line) => `-${line}`),
+      ...(pin.bytes.endsWith('\n') ? [] : ['\\ No newline at end of file']),
+      ...diffLines('built', builtText).map((line) => `+${line}`),
+      ...(builtText !== null && !builtText.endsWith('\n') ? ['\\ No newline at end of file'] : []),
+    ]
+    const bounce = art(`harden-preservation-bounce-r${carriedRound}.md`)
+    const writeError = guardedWrite(io, bounce, [
+      '# Witnessed test preservation bounce', '', preservationWhy(pinnedBeforeCommit),
+      `Restore ${pinnedBeforeCommit.file} byte-identically to its pinned ${pin.source} version and put the new guard in a different test file.`,
+      '', '```diff', ...preservationDiff, '```',
+    ].join('\n'))
+    if (writeError) return escalate('harden', preservationWhy(pinnedBeforeCommit), [], { hardening_preservation: pinnedBeforeCommit, evidence_unavailable: `preservation bounce brief write failed: ${writeError}` })
+    hardenPreservationBounces += 1
+    preservationReproof = [...preservationReproof, ...hardenProven]
+    if (builderRemaining() <= 0) grantBuilderAllowance()
+    panelLog({ hardening_preservation_bounce: { round: carriedRound, finding: pinnedBeforeCommit.finding, file: pinnedBeforeCommit.file, brief: bounce, bounces: hardenPreservationBounces } })
+    suiteBuildBrief = bounce
+    suiteBuildNote = 'harden-preservation-fix'
+    continue suiteCycle
+  }
+  // MUTATION RV3-1: skip this re-proof and a preservation-fix builder may delete a guard it
+  // proved before the bounce; the re-entered review passes and the lane commits without it.
+  if (preservationReproof.length > 0) {
+    const reproof = preservationReproof
+    preservationReproof = []
+    // One proof per record: two reviews may reuse a finding id, so a map keyed by finding
+    // would hand the earlier guard the later guard's witness.
+    const rows = []
+    let fatal = null
+    for (const { entry, witness: w, prescribed: p } of reproof) {
+      const proved = proveHardeningEntries({ entries: [entry], hardenWitness: new Map(w ? [[entry.finding, w]] : []), ctx, io, hardenRun, dirtyAfterFailure, prescribed: new Set(p ? [entry.finding] : []), placement: () => null })
+      rows.push(...proved.rows)
+      if (proved.fatal) { fatal = proved.fatal; break }
+    }
+    for (const row of rows) logHardened(carriedRound, row)
+    if (fatal) return escalate('harden', `the hardening re-proof after the preservation bounce could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
+    if (rows.length !== reproof.length || rows.some((row) => row.outcome !== 'killed')) {
+      return escalate('harden', `a guard proven before the preservation bounce no longer holds on the tree about to be committed: ${hardeningBounceLines(carriedRound, [], rows, ctx.testRunner).join(' ')}`)
+    }
+  }
 
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
@@ -14761,6 +14839,8 @@ export function hardeningPrescriptionConflict(details, witness, authored = new M
 }
 
 export const HARDEN_APPEAL_MAX = 1
+export const HARDEN_FINAL_BOUNCE_MAX = 1
+export const HARDEN_PRESERVATION_BOUNCE_MAX = 1
 // #910/#900 — the ONE state a bounce provably cannot fix. `builder-exemption` is the
 // builder asking, in the contract's own vocabulary, for a mark only the reviewer may
 // set — and Gate B3 runs before Gate C, so the seat that could grant it is never
@@ -15015,10 +15095,12 @@ export function hardeningBounceLines(round, refusals, rows, testRunner) {
   const lines = [`# Hardening bounce (round ${round})`, '', 'Every owed must-fix needs a permanent named guard proven by its declared mutation.']
   for (const refusal of Array.isArray(refusals) ? refusals : []) {
     lines.push(`- ${refusal.finding ?? '(unknown finding)'}: ${refusal.reason} — ${refusal.why}`)
+    if (refusal.reason === 'no-declaration') lines.push(`- ${refusal.finding}: declare a NEW top-level test(...) guard for this review finding in details.hardened; its name must be absent from the reviewed tree.`)
   }
   for (const row of Array.isArray(rows) ? rows : []) {
     if (hardeningRowBucket(row) !== 'refuted') continue
     lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
+    if (row.outcome === 'name-not-new') lines.push(`- ${row.finding}: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse ${row.name}.`)
   }
   // RV1-2 (b851 review): a bounce that lists only the refuted rows tells a builder its other
   // findings are settled. A finding with NO row at all is the commonest bounce of all — the

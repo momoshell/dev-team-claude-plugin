@@ -210,6 +210,13 @@ export function providerFailureKind(status) {
   return PROVIDER_FAILURE_KINDS.UNCLASSIFIED
 }
 
+export function acpProviderFailureKind(errorKind) {
+  if (errorKind === 'rate_limit') return PROVIDER_FAILURE_KINDS.RATE_LIMIT
+  if (errorKind === 'overloaded' || errorKind === 'server_error') return PROVIDER_FAILURE_KINDS.SERVER_ERROR
+  if (errorKind === 'authentication_failed' || errorKind === 'oauth_org_not_allowed' || errorKind === 'verification_required') return PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED
+  return null
+}
+
 // --- provider retry: routing the kind the stream already carried ------------
 // #887. Four lanes died on 2026-09-03 because a 529, a 429 and a 401 all
 // collapse into one `budget-refused` and the driver escalates. b401 lost a
@@ -1802,6 +1809,230 @@ function persistCrew(paths, role, patch, deps) {
   }, deps)
 }
 
+export function providerRetryRouter({ paths, deps = {}, persistDeps = deps, notePersist = null, reassign, resume }) {
+  const crewDeps = persistDeps
+  const now = deps.now || (() => Date.now())
+  const read = deps.readFileSync || fsReadFileSync
+  const write = deps.writeFileSync || fsWriteFileSync
+  const delay = deps.delay || deps.sleep || defaultSleep
+  const emit = deps.emit
+  const injectedLog = deps.log
+  function log(obj) {
+    if (injectedLog) return injectedLog(obj)
+    try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(obj)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
+  }
+  if (!notePersist) notePersist = (role, result) => {
+    if (result?.ok || result?.reason === 'absent' || result?.reason === 'no-dir') return
+    log({ at: now(), event: 'crew-json-persist-failed', role, reason: result?.reason ?? 'unknown', error: result?.error ?? null })
+  }
+  const providerRetries = new Map()
+  function providerRetryState(run) {
+    return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0, declined: null }
+  }
+  // [P2] #948 ask 2. The park is readable from crew.json WITHOUT the journal, so a
+  // reader that never opens journal.jsonl — crew-watch's readout, an operator with
+  // `cat` — still gets what the lane waits on and until when.
+  function writePark(state) {
+    return updateCrewJson(paths, (disk) => { disk.park = state; return true }, crewDeps)
+  }
+  // Returning false when there is nothing to clear keeps an UNPARKED lane's crew.json
+  // byte-identical: a run that never parks never rewrites the file. A backoff carries
+  // park state only for liveness, so it cannot consume its wake marker on cleanup.
+  function clearPark(clearWake = true) {
+    return updateCrewJson(paths, (disk) => {
+      if (disk.park == null && (!clearWake || !Object.hasOwn(disk, 'wake'))) return false
+      if (disk.park != null) disk.park = null
+      if (clearWake && Object.hasOwn(disk, 'wake')) delete disk.wake
+      return true
+    }, crewDeps)
+  }
+  function wakeReadFailed(state, err) {
+    const reason = String(err?.message ?? err)
+    try { log({ at: now(), event: 'provider-park-wake-read-failed', role: state.role, assignment_id: state.assignment_id, reason, error: reason }) } catch { /* diagnostics only */ }
+    return null
+  }
+  function readParkWake(state) {
+    if (state.action !== 'park') return null
+    const path = crewJsonPath(paths)
+    if (!path) return wakeReadFailed(state, new Error('no-crew-dir'))
+    try {
+      const disk = JSON.parse(String(read(path, 'utf8')))
+      if (!disk || typeof disk !== 'object' || Array.isArray(disk)) throw new Error('malformed')
+      if (disk.wake == null) return null
+      if (typeof disk.wake !== 'object' || Array.isArray(disk.wake)) throw new Error('malformed')
+      if (typeof disk.wake.by !== 'string' || !disk.wake.by.trim() || !Number.isFinite(disk.wake.requested_at) || typeof disk.wake.assignment_id !== 'string' || !Number.isFinite(disk.wake.started_at)) throw new Error('malformed')
+      if (disk.wake.assignment_id !== state.assignment_id || disk.wake.started_at !== state.started_at) return null
+      return disk.wake
+    } catch (err) { return wakeReadFailed(state, err) }
+  }
+  // [P1] #948 ask 1. This loop runs IN the driver process, so now() at a tick is a
+  // MEASURED reading of the driver's own liveness — not a wall clock standing in for
+  // an observation nobody made (#297), and not a claim about a seat that by design
+  // does not exist during a park. ADR-026: instrumentation is never load-bearing, so
+  // every write here is wrapped and a beat that fails leaves the wait as it found it.
+  function parkBeat(park, at) {
+    try { emit?.({ kind: 'heartbeat', at, role: park.role ?? null }) } catch { /* never load-bearing */ }
+    try { log({ at, event: PARK_BEAT_EVENT, role: park.role, assignment_id: park.assignment_id, kind: park.kind, status: park.status, waited_on: park.waited_on, reset_at: park.reset_at, until: park.until, beat_ms: PARK_BEAT_MS, source: PARK_BEAT_SOURCE }) } catch { /* diagnostics only */ }
+    try { notePersist(park.role, writePark({ ...park, beat_at: at })) } catch { /* never load-bearing */ }
+  }
+  // Park in WAIT_POLL_MS steps rather than one long block, so the wait keeps the
+  // cadence every other wait in this module runs on. Returns the wait MEASURED off the
+  // clock — never the one that was intended. The clear runs in a `finally` so a throw
+  // out of the wait never leaves crew.json claiming a park that ended; a SIGKILL runs
+  // no finally, which is exactly the case crew-watch reports as abandoned. The clear is
+  // WRAPPED for the same reason every other write here is: updateCrewJson calls
+  // existsSync outside its own catch (updateCrewJson) and a failed persist reaches the
+  // injected logger (notePersist), so either could otherwise replace a healthy retry
+  // result with a throw.
+  function parkFor(waitMs, park = null) {
+    const startedAt = now()
+    const until = startedAt + waitMs
+    const state = park ? { ...park, started_at: startedAt, until } : null
+    let lastBeat = startedAt
+    let wake = null
+    let wokenAt = null
+    if (state) parkBeat(state, startedAt)
+    try {
+      while (parkPending(now(), until, wake)) {
+        delay(Math.min(WAIT_POLL_MS, until - now()))
+        const at = now()
+        if (state) wake = readParkWake(state)
+        if (state && at - lastBeat >= PARK_BEAT_MS) { lastBeat = at; parkBeat(state, at) }
+        if (state && wake !== null) wokenAt = at
+      }
+    } finally {
+      if (state) { try { notePersist(state.role, clearPark(state.action === 'park')) } catch { /* never load-bearing */ } }
+    }
+    const waitedMs = now() - startedAt
+    return { waited_ms: waitedMs, started_at: state ? startedAt : null, woken_at: wokenAt, skipped_wait_ms: wokenAt === null ? 0 : Math.max(0, until - wokenAt), wake }
+  }
+  // A provider failure is not a judgment failure and it is not the seat's fault:
+  // route on the kind the stream already carried, act INSIDE the run, and the
+  // lane keeps its crew dir, its plan, its gate and every envelope it has
+  // already collected.
+  //
+  // [F2] TRI-STATE, and the three states are not interchangeable.
+  //   'none'   — stream.providerFailure is absent, or its kind is
+  //              provider-unclassified. This is today's behaviour: only an
+  //              absent or unrecognised status can reach the model fallback.
+  //              Recorded 429/401/403/5xx statuses are classified provider
+  //              conditions, not model refusals.
+  //   'retry'  — parked or backed off; resume the same assignment.
+  //   'refuse' — a classified terminal decision (a credential fault, a reset
+  //              this driver cannot read, a bound that is spent). It must NOT
+  //              fall through to the model fallback. Fallback answers "this
+  //              MODEL is refusing"; rate limits, credential faults, and
+  //              capacity outages are provider conditions for this retry
+  //              ladder. reaskOnFallback also refuses authentication_failed
+  //              outright, so auth is stated policy rather than a routing
+  //              accident. A 429 with an eligible reset parks through reset plus
+  //              settle within PROVIDER_RETRY_TOTAL_WAIT_MS, then declines when
+  //              its declared bound is spent instead of trying another model.
+  // Shared by headlessIo and acpIo; headlessRpcIo owns the Pi transport
+  // separately, so the Pi tech-lead's declared fallback keeps its existing
+  // behaviour.
+  function providerRetryOnFailure(run, returnPath, deadline, stream) {
+    const failure = stream.providerFailure
+    if (!failure) return { act: 'none' }
+    const key = `${run.role}:${run.id}`
+    const state = providerRetryState(run)
+    const decision = providerRetryDecision({
+      kind: failure.kind, status: failure.status, reset: stream.providerReset,
+      attempts: state.attempts, waitedMs: state.waited_ms, at: now(),
+    })
+    const base = { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, action: decision.action }
+    // [F7] The DECISION, recorded on the run so the escalation can carry it out.
+    // #968: three lanes on 2026-09-06 were declined with an honest sentence in
+    // the journal and an escalation that said only `0 of 3 retry attempts spent
+    // over 0ms`. A count with no reason reads as a ladder that was never
+    // entered, and that is how the issue was written. The count stays; the
+    // reason joins it. attempts and waited_ms are RE-READ rather than copied
+    // from `state`, because the crossed-bound site below has already written the
+    // measured wait and this must not overwrite it with a stale copy.
+    const decline = (why) => {
+      const latest = providerRetryState(run)
+      providerRetries.set(key, { attempts: latest.attempts, waited_ms: latest.waited_ms, declined: why })
+      return { act: 'refuse' }
+    }
+    // [F5] The SECOND call site (waitUntil, after endDispatch) is reached only after the wait loop ran
+    // out on now() >= deadline and endDispatch already killed the worker. A park
+    // there would spend real minutes and then hand the replacement a deadline
+    // that the same park has already moved past — an attempt burnt on a worker
+    // that could never return an envelope. Refuse before the wait, before the
+    // respawn, and before the fallback, naming the budget that is gone.
+    if (decision.retry && now() >= deadline) {
+      const budgetWhy = `the work budget for this dispatch is already exhausted, so a ${failure.kind} retry would spend ${decision.wait_ms}ms and then leave the replacement no time at all`
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: budgetWhy })
+      return decline(budgetWhy)
+    }
+    if (!decision.retry) {
+      // `none` is TODAY'S behaviour, byte for byte: no row, no wait, no respawn.
+      if (decision.action === 'none') return { act: 'none' }
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: decision.attempts_spent, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: decision.why })
+      return decline(decision.why)
+    }
+    // SCHEDULED. The park can be long, so the row that says one is starting is
+    // written before it, not after — but nothing here is called `resumed` yet.
+    log({ at: now(), event: 'provider-retry', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, wait_ms: decision.wait_ms, waited_on: decision.waited_on, reset_at: decision.reset_at, total_waited_ms: state.waited_ms, bound: { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS } })
+    const parkState = { action: decision.action, role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, waited_on: decision.waited_on, reset_at: decision.reset_at, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX }
+    const parkResult = parkFor(decision.wait_ms, parkState)
+    const waitedMs = parkResult.waited_ms
+    const totalWaitedMs = state.waited_ms + waitedMs
+    // [F6] The measured wait is recorded whatever happens next — it was really
+    // spent. The ATTEMPT is not, and must not be: an escalation that reports a
+    // retry with no worker behind it destroys the one distinction #887 asks the
+    // operator to be able to make, between a lane that retried and one that only
+    // waited. The attempt is spent below, after a replacement exists.
+    providerRetries.set(key, { attempts: state.attempts, waited_ms: totalWaitedMs })
+    // [F4] The decision bounded the wait it INTENDED. This bounds the wait
+    // actually taken: an oversleep at the edge must not buy a retry after the
+    // bound has already been crossed.
+    if (totalWaitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) {
+      const crossedWhy = `the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms was crossed by the wait actually taken for ${failure.kind}: ${totalWaitedMs}ms, and no replacement was started`
+      // `providerRetryState(run)` and not `state`: the map was just written with
+      // the measured wait and an UNCHANGED attempt count, and the row must report
+      // what was recorded rather than a second copy of it. It is also the one
+      // spelling of attempts_spent unique to this row, which is what lets A12b's
+      // kill-mutation bind here and nowhere else.
+      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: providerRetryState(run).attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, reset_at: decision.reset_at, why: crossedWhy })
+      return decline(crossedWhy)
+    }
+    let spawned = true
+    try {
+      reassign(run, returnPath)
+    } catch (err) {
+      log({ at: now(), event: 'provider-retry-failed', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, error: String(err?.message ?? err) })
+      spawned = false
+    }
+    if (!spawned) return decline(`a replacement worker for ${failure.kind} could not be started after the wait, so the attempt was never taken`)
+    // [F6] A replacement worker exists. NOW the attempt is spent and NOW the
+    // wait is `resumed`.
+    providerRetries.set(key, { attempts: state.attempts + 1, waited_ms: totalWaitedMs })
+    const wakeFields = parkResult.wake ? { parked_at: parkResult.started_at, woken_at: parkResult.woken_at, skipped_wait_ms: parkResult.skipped_wait_ms, resumed_by: parkResult.wake.by } : {}
+    log({ at: now(), event: 'provider-retry-resumed', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, waited_ms: waitedMs, intended_wait_ms: decision.wait_ms, waited_on: decision.waited_on, ...wakeFields })
+    // The deadline moves by the wait TAKEN and by nothing else: the seat gets
+    // the working budget it would have had, shifted by the park.
+    return { act: 'retry', resume: () => resume(returnPath, deadline + waitedMs) }
+  }
+  // The escalation NAMES the provider cause and what the bound bought. The
+  // clause is APPENDED and never woven in: escalationCause
+  // (scripts/factory/ledger.mjs, escalationCause) matches PROSE for several rules that
+  // precede the budget rule, and the tokens that would re-route it are
+  // deliberately absent from this sentence. A kind whose action is `none` is
+  // annotated with nothing, so today's message stays byte-identical.
+  function providerAnnotated(err, run, stream) {
+    const failure = stream.providerFailure
+    if (!failure || (PROVIDER_RETRY_ACTIONS[failure.kind] ?? 'none') === 'none') return err
+    const state = providerRetryState(run)
+    const declined = state.declined ? `; no further attempt: ${state.declined}` : ''
+    err.providerFailure = failure
+    err.providerRetry = { attempts: state.attempts, bound: PROVIDER_RETRY_MAX, waited_ms: state.waited_ms, declined: state.declined ?? null }
+    err.message = `${err.message}\n[provider ${failure.kind} status ${failure.status}: ${state.attempts} of ${PROVIDER_RETRY_MAX} retry attempts spent over ${state.waited_ms}ms${declined}]`
+    return err
+  }
+  return { providerRetryOnFailure, providerAnnotated }
+}
+
 export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turnCeilings = null, deps = {} }) {
   const spawn = deps.spawn || cpSpawn
   const now = deps.now || (() => Date.now())
@@ -2124,7 +2355,6 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   // One counter per (role, assignment id): a NEW assignment gets a fresh
   // allowance, the SAME one does not.
   const fallbacksUsed = new Map()
-  const providerRetries = new Map()
   // The seat the crew booted refused this turn for BUDGET — not for anything the
   // brief said. Swap in the next declared cell and let the caller re-ask.
   // Returns null when there is nothing to fall back to, or no lawful budget
@@ -2166,211 +2396,17 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     log({ at: now(), event: 'seat-fallback', role: run.role, from, to, cause: 'budget', assignment_id: run.id })
     return { from, to }
   }
-  function providerRetryState(run) {
-    return providerRetries.get(`${run.role}:${run.id}`) ?? { attempts: 0, waited_ms: 0, declined: null }
-  }
-  // [P2] #948 ask 2. The park is readable from crew.json WITHOUT the journal, so a
-  // reader that never opens journal.jsonl — crew-watch's readout, an operator with
-  // `cat` — still gets what the lane waits on and until when.
-  function writePark(state) {
-    return updateCrewJson(paths, (disk) => { disk.park = state; return true }, crewDeps)
-  }
-  // Returning false when there is nothing to clear keeps an UNPARKED lane's crew.json
-  // byte-identical: a run that never parks never rewrites the file. A backoff carries
-  // park state only for liveness, so it cannot consume its wake marker on cleanup.
-  function clearPark(clearWake = true) {
-    return updateCrewJson(paths, (disk) => {
-      if (disk.park == null && (!clearWake || !Object.hasOwn(disk, 'wake'))) return false
-      if (disk.park != null) disk.park = null
-      if (clearWake && Object.hasOwn(disk, 'wake')) delete disk.wake
-      return true
-    }, crewDeps)
-  }
-  function wakeReadFailed(state, err) {
-    const reason = String(err?.message ?? err)
-    try { log({ at: now(), event: 'provider-park-wake-read-failed', role: state.role, assignment_id: state.assignment_id, reason, error: reason }) } catch { /* diagnostics only */ }
-    return null
-  }
-  function readParkWake(state) {
-    if (state.action !== 'park') return null
-    const path = crewJsonPath(paths)
-    if (!path) return wakeReadFailed(state, new Error('no-crew-dir'))
-    try {
-      const disk = JSON.parse(String(read(path, 'utf8')))
-      if (!disk || typeof disk !== 'object' || Array.isArray(disk)) throw new Error('malformed')
-      if (disk.wake == null) return null
-      if (typeof disk.wake !== 'object' || Array.isArray(disk.wake)) throw new Error('malformed')
-      if (typeof disk.wake.by !== 'string' || !disk.wake.by.trim() || !Number.isFinite(disk.wake.requested_at) || typeof disk.wake.assignment_id !== 'string' || !Number.isFinite(disk.wake.started_at)) throw new Error('malformed')
-      if (disk.wake.assignment_id !== state.assignment_id || disk.wake.started_at !== state.started_at) return null
-      return disk.wake
-    } catch (err) { return wakeReadFailed(state, err) }
-  }
-  // [P1] #948 ask 1. This loop runs IN the driver process, so now() at a tick is a
-  // MEASURED reading of the driver's own liveness — not a wall clock standing in for
-  // an observation nobody made (#297), and not a claim about a seat that by design
-  // does not exist during a park. ADR-026: instrumentation is never load-bearing, so
-  // every write here is wrapped and a beat that fails leaves the wait as it found it.
-  function parkBeat(park, at) {
-    try { emit?.({ kind: 'heartbeat', at, role: park.role ?? null }) } catch { /* never load-bearing */ }
-    try { log({ at, event: PARK_BEAT_EVENT, role: park.role, assignment_id: park.assignment_id, kind: park.kind, status: park.status, waited_on: park.waited_on, reset_at: park.reset_at, until: park.until, beat_ms: PARK_BEAT_MS, source: PARK_BEAT_SOURCE }) } catch { /* diagnostics only */ }
-    try { notePersist(park.role, writePark({ ...park, beat_at: at })) } catch { /* never load-bearing */ }
-  }
-  // Park in WAIT_POLL_MS steps rather than one long block, so the wait keeps the
-  // cadence every other wait in this module runs on. Returns the wait MEASURED off the
-  // clock — never the one that was intended. The clear runs in a `finally` so a throw
-  // out of the wait never leaves crew.json claiming a park that ended; a SIGKILL runs
-  // no finally, which is exactly the case crew-watch reports as abandoned. The clear is
-  // WRAPPED for the same reason every other write here is: updateCrewJson calls
-  // existsSync outside its own catch (updateCrewJson) and a failed persist reaches the
-  // injected logger (notePersist), so either could otherwise replace a healthy retry
-  // result with a throw.
-  function parkFor(waitMs, park = null) {
-    const startedAt = now()
-    const until = startedAt + waitMs
-    const state = park ? { ...park, started_at: startedAt, until } : null
-    let lastBeat = startedAt
-    let wake = null
-    let wokenAt = null
-    if (state) parkBeat(state, startedAt)
-    try {
-      while (parkPending(now(), until, wake)) {
-        delay(Math.min(WAIT_POLL_MS, until - now()))
-        const at = now()
-        if (state) wake = readParkWake(state)
-        if (state && at - lastBeat >= PARK_BEAT_MS) { lastBeat = at; parkBeat(state, at) }
-        if (state && wake !== null) wokenAt = at
-      }
-    } finally {
-      if (state) { try { notePersist(state.role, clearPark(state.action === 'park')) } catch { /* never load-bearing */ } }
-    }
-    const waitedMs = now() - startedAt
-    return { waited_ms: waitedMs, started_at: state ? startedAt : null, woken_at: wokenAt, skipped_wait_ms: wokenAt === null ? 0 : Math.max(0, until - wokenAt), wake }
-  }
-  // A provider failure is not a judgment failure and it is not the seat's fault:
-  // route on the kind the stream already carried, act INSIDE the run, and the
-  // lane keeps its crew dir, its plan, its gate and every envelope it has
-  // already collected.
-  //
-  // [F2] TRI-STATE, and the three states are not interchangeable.
-  //   'none'   — stream.providerFailure is absent, or its kind is
-  //              provider-unclassified. This is today's behaviour: only an
-  //              absent or unrecognised status can reach the model fallback.
-  //              Recorded 429/401/403/5xx statuses are classified provider
-  //              conditions, not model refusals.
-  //   'retry'  — parked or backed off; resume the same assignment.
-  //   'refuse' — a classified terminal decision (a credential fault, a reset
-  //              this driver cannot read, a bound that is spent). It must NOT
-  //              fall through to the model fallback. Fallback answers "this
-  //              MODEL is refusing"; rate limits, credential faults, and
-  //              capacity outages are provider conditions for this retry
-  //              ladder. reaskOnFallback also refuses authentication_failed
-  //              outright, so auth is stated policy rather than a routing
-  //              accident. A 429 with an eligible reset parks through reset plus
-  //              settle within PROVIDER_RETRY_TOTAL_WAIT_MS, then declines when
-  //              its declared bound is spent instead of trying another model.
-  // This routing is local to headlessIo. headlessRpcIo owns the Pi transport
-  // separately, so the Pi tech-lead's declared fallback keeps its existing
-  // behaviour.
-  function providerRetryOnFailure(run, returnPath, deadline, stream) {
-    const failure = stream.providerFailure
-    if (!failure) return { act: 'none' }
-    const key = `${run.role}:${run.id}`
-    const state = providerRetryState(run)
-    const decision = providerRetryDecision({
-      kind: failure.kind, status: failure.status, reset: stream.providerReset,
-      attempts: state.attempts, waitedMs: state.waited_ms, at: now(),
-    })
-    const base = { role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, action: decision.action }
-    // [F7] The DECISION, recorded on the run so the escalation can carry it out.
-    // #968: three lanes on 2026-09-06 were declined with an honest sentence in
-    // the journal and an escalation that said only `0 of 3 retry attempts spent
-    // over 0ms`. A count with no reason reads as a ladder that was never
-    // entered, and that is how the issue was written. The count stays; the
-    // reason joins it. attempts and waited_ms are RE-READ rather than copied
-    // from `state`, because the crossed-bound site below has already written the
-    // measured wait and this must not overwrite it with a stale copy.
-    const decline = (why) => {
-      const latest = providerRetryState(run)
-      providerRetries.set(key, { attempts: latest.attempts, waited_ms: latest.waited_ms, declined: why })
-      return { act: 'refuse' }
-    }
-    // [F5] The SECOND call site (waitUntil, after endDispatch) is reached only after the wait loop ran
-    // out on now() >= deadline and endDispatch already killed the worker. A park
-    // there would spend real minutes and then hand the replacement a deadline
-    // that the same park has already moved past — an attempt burnt on a worker
-    // that could never return an envelope. Refuse before the wait, before the
-    // respawn, and before the fallback, naming the budget that is gone.
-    if (decision.retry && now() >= deadline) {
-      const budgetWhy = `the work budget for this dispatch is already exhausted, so a ${failure.kind} retry would spend ${decision.wait_ms}ms and then leave the replacement no time at all`
-      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: budgetWhy })
-      return decline(budgetWhy)
-    }
-    if (!decision.retry) {
-      // `none` is TODAY'S behaviour, byte for byte: no row, no wait, no respawn.
-      if (decision.action === 'none') return { act: 'none' }
-      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: decision.attempts_spent, of: PROVIDER_RETRY_MAX, total_waited_ms: state.waited_ms, reset_at: decision.reset_at, why: decision.why })
-      return decline(decision.why)
-    }
-    // SCHEDULED. The park can be long, so the row that says one is starting is
-    // written before it, not after — but nothing here is called `resumed` yet.
-    log({ at: now(), event: 'provider-retry', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, wait_ms: decision.wait_ms, waited_on: decision.waited_on, reset_at: decision.reset_at, total_waited_ms: state.waited_ms, bound: { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS } })
-    const parkState = { action: decision.action, role: run.role, assignment_id: run.id, kind: failure.kind, status: failure.status, waited_on: decision.waited_on, reset_at: decision.reset_at, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX }
-    const parkResult = parkFor(decision.wait_ms, parkState)
-    const waitedMs = parkResult.waited_ms
-    const totalWaitedMs = state.waited_ms + waitedMs
-    // [F6] The measured wait is recorded whatever happens next — it was really
-    // spent. The ATTEMPT is not, and must not be: an escalation that reports a
-    // retry with no worker behind it destroys the one distinction #887 asks the
-    // operator to be able to make, between a lane that retried and one that only
-    // waited. The attempt is spent below, after a replacement exists.
-    providerRetries.set(key, { attempts: state.attempts, waited_ms: totalWaitedMs })
-    // [F4] The decision bounded the wait it INTENDED. This bounds the wait
-    // actually taken: an oversleep at the edge must not buy a retry after the
-    // bound has already been crossed.
-    if (totalWaitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) {
-      const crossedWhy = `the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms was crossed by the wait actually taken for ${failure.kind}: ${totalWaitedMs}ms, and no replacement was started`
-      // `providerRetryState(run)` and not `state`: the map was just written with
-      // the measured wait and an UNCHANGED attempt count, and the row must report
-      // what was recorded rather than a second copy of it. It is also the one
-      // spelling of attempts_spent unique to this row, which is what lets A12b's
-      // kill-mutation bind here and nowhere else.
-      log({ at: now(), event: 'provider-retry-declined', ...base, attempts_spent: providerRetryState(run).attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, reset_at: decision.reset_at, why: crossedWhy })
-      return decline(crossedWhy)
-    }
-    let spawned = true
-    try {
+  const { providerRetryOnFailure, providerAnnotated } = providerRetryRouter({
+    paths,
+    deps: { ...deps, now, readFileSync: read, writeFileSync: write, delay, log, emit },
+    persistDeps: crewDeps,
+    notePersist,
+    reassign: (run, returnPath) => {
       runs.delete(returnPath)
       assign({ role: run.role, briefFile: run.briefFile, note: run.note, policy: run.policy, reask: { id: run.id, returnPath: run.returnPath } })
-    } catch (err) {
-      log({ at: now(), event: 'provider-retry-failed', ...base, attempts_spent: state.attempts, of: PROVIDER_RETRY_MAX, total_waited_ms: totalWaitedMs, error: String(err?.message ?? err) })
-      spawned = false
-    }
-    if (!spawned) return decline(`a replacement worker for ${failure.kind} could not be started after the wait, so the attempt was never taken`)
-    // [F6] A replacement worker exists. NOW the attempt is spent and NOW the
-    // wait is `resumed`.
-    providerRetries.set(key, { attempts: state.attempts + 1, waited_ms: totalWaitedMs })
-    const wakeFields = parkResult.wake ? { parked_at: parkResult.started_at, woken_at: parkResult.woken_at, skipped_wait_ms: parkResult.skipped_wait_ms, resumed_by: parkResult.wake.by } : {}
-    log({ at: now(), event: 'provider-retry-resumed', ...base, attempt: state.attempts + 1, of: PROVIDER_RETRY_MAX, waited_ms: waitedMs, intended_wait_ms: decision.wait_ms, waited_on: decision.waited_on, ...wakeFields })
-    // The deadline moves by the wait TAKEN and by nothing else: the seat gets
-    // the working budget it would have had, shifted by the park.
-    return { act: 'retry', resume: () => waitUntil(returnPath, deadline + waitedMs) }
-  }
-  // The escalation NAMES the provider cause and what the bound bought. The
-  // clause is APPENDED and never woven in: escalationCause
-  // (scripts/factory/ledger.mjs, escalationCause) matches PROSE for several rules that
-  // precede the budget rule, and the tokens that would re-route it are
-  // deliberately absent from this sentence. A kind whose action is `none` is
-  // annotated with nothing, so today's message stays byte-identical.
-  function providerAnnotated(err, run, stream) {
-    const failure = stream.providerFailure
-    if (!failure || (PROVIDER_RETRY_ACTIONS[failure.kind] ?? 'none') === 'none') return err
-    const state = providerRetryState(run)
-    const declined = state.declined ? `; no further attempt: ${state.declined}` : ''
-    err.providerFailure = failure
-    err.providerRetry = { attempts: state.attempts, bound: PROVIDER_RETRY_MAX, waited_ms: state.waited_ms, declined: state.declined ?? null }
-    err.message = `${err.message}\n[provider ${failure.kind} status ${failure.status}: ${state.attempts} of ${PROVIDER_RETRY_MAX} retry attempts spent over ${state.waited_ms}ms${declined}]`
-    return err
-  }
+    },
+    resume: (returnPath, deadline) => waitUntil(returnPath, deadline),
+  })
   // A re-ask is not a new assignment: same id, same return path, same brief
   // (the reask contract in assign), and the SAME absolute deadline. A re-assign
   // that THROWS is journalled and yields null, so the caller escalates on the

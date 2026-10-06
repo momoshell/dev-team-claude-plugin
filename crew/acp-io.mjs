@@ -2,7 +2,7 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync 
 import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
-import { readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
+import { acpProviderFailureKind, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
@@ -31,6 +31,15 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   const parseLogged = new Set()
   let seq = 0
   let cancelWriteFailed = false
+  const delay = deps.delay || sleep
+  const { providerRetryOnFailure, providerAnnotated } = providerRetryRouter({
+    paths,
+    deps: { ...deps, now, readFileSync: read, delay, log, emit },
+    persistDeps: { existsSync: exists, readFileSync: read, unlinkSync: unlink, now, sleep, pid: deps.pid },
+    notePersist: null,
+    reassign: (run) => assign({ role: run.role, briefFile: run.briefFile, reask: { id: run.id, returnPath: run.returnPath } }),
+    resume: (returnPath, deadline) => waitUntil(returnPath, deadline),
+  })
   function getClient(role) {
     if (clients.has(role)) return clients.get(role)
     const member = crew?.members?.[role]
@@ -88,6 +97,11 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       if (!a) return
       a.sawUpdate = true
       const frame = update.update ?? update
+      if (frame?.sessionUpdate === 'usage_update' && frame._meta?.['_claude/rateLimit']?.status === PROVIDER_RESET_STATUS) {
+        const meta = frame._meta?.['_claude/rateLimit'] ?? {}
+        const resetAt = providerResetInstant(meta.resetsAt)
+        a.providerReset = { at_ms: resetAt, absent_reason: resetAt === null ? PROVIDER_RESET_ABSENT.NO_RESET_FIELD : null }
+      }
       if (frame?.sessionUpdate === 'tool_call' || frame?.sessionUpdate === 'tool_call_update') {
         const data = frame.toolCall ?? frame
         const id = data.toolCallId ?? null
@@ -127,7 +141,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       if (profile.session_resume) client.resumeSession(client.sessionId)
     }
     const promptId = client.beginPrompt([{ type: 'text', text }])
-    assignments.set(returnPath, { id, role, returnPath, promptId, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false })
+    assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
     current.set(role, returnPath)
     return { id, returnPath }
   }
@@ -215,8 +229,13 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   function wait(returnPath, timeoutS) {
     const assignment = assignments.get(returnPath)
     if (!assignment) throw new Error(`acp assignment not found at ${returnPath}`)
+    const deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
+    return waitUntil(returnPath, deadline)
+  }
+  function waitUntil(returnPath, deadline) {
+    const assignment = assignments.get(returnPath)
+    if (!assignment) throw new Error(`acp assignment not found at ${returnPath}`)
     let lastTurn = assignment.lastTurn
-    let deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
     let priorWall = now(), priorMono
     try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
     // lean: synchronous one-seat wait; move to an async pump if multi-seat throughput matters
@@ -225,7 +244,14 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       if (envelope) { settle(assignment); return envelope }
       try { lastTurn = assignment.lastTurn = settle(assignment, { strict: true }) }
       catch (cause) { throw noEnvelope(cause, returnPath, assignment) }
-      if (lastTurn?.refusal) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
+      if (lastTurn?.refusal) {
+        const kind = acpProviderFailureKind(lastTurn.refusal?.errorKind)
+        if (!kind) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
+        const stream = { providerFailure: { kind, status: null }, providerReset: assignment.providerReset }
+        const routed = providerRetryOnFailure({ role: assignment.role, id: assignment.id, briefFile: assignment.briefFile, returnPath: assignment.returnPath }, returnPath, deadline, stream)
+        if (routed.act === 'retry') return routed.resume()
+        throw providerAnnotated(noEnvelope(lastTurn.refusal, returnPath, assignment), { role: assignment.role, id: assignment.id }, stream)
+      }
       const wall = now(); let mono
       try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }
       if (priorMono === undefined || mono === undefined) { priorWall = wall; priorMono = mono }

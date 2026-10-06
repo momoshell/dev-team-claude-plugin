@@ -52,5 +52,5 @@
   "test/visualizer-panels.test.mjs:1777": "source.includes('identityFor(lane)')",
   "test/visualizer-panels.test.mjs:1784": "/#each markers as marker/",
   "test/visualizer-panels.test.mjs:1850": "/class=\"bounce-layer\"/",
-  "visualizer/web/src/lib/RunDetail.svelte:289": "4rem; display:grid; gap:1rem; }"
+  "visualizer/web/src/lib/RunDetail.svelte:292": "4rem; display:grid; gap:1rem; }"
 }

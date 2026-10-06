@@ -803,12 +803,30 @@ const shQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`
 // $#=2 and makes `return 0` succeed (measured).
 const GATE_REAP_LAUNCHER = [
   'set -m',
-  `/bin/sh -c 'p=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); printf %s "$p" > "$1"; c=$(cat "$2"); exec /bin/sh -c "$c"' crew-gate-reap "$1" "$2" &`,
+  `/bin/sh -c 'exec 2>&3 3>&-; p=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); printf %s "$p" > "$1"; c=$(cat "$2"); exec /bin/sh -c "$c"' crew-gate-reap "$1" "$2" &`,
   '__crew_job=$!',
   'set +m', // suppresses bash's "[1]+ Done ..." notice, so the gate's output is untouched
   'wait "$__crew_job"',
   'exit $?',
 ].join('\n')
+
+const GATE_REAP_STDERR_FILTER = String.raw`
+const { readFileSync, writeFileSync } = require('node:fs')
+const bytes = readFileSync(process.argv[1])
+const prefix = Buffer.from(process.argv[2] + ': child setpgid (')
+const kept = []
+for (let start = 0; start < bytes.length;) {
+  const lf = bytes.indexOf(10, start)
+  const end = lf === -1 ? bytes.length : lf + 1
+  const line = bytes.subarray(start, lf === -1 ? end : lf)
+  if (!line.subarray(0, prefix.length).equals(prefix) || !/^[0-9]+ to [0-9]+\): Operation not permitted$/.test(line.subarray(prefix.length).toString('latin1'))) kept.push(bytes.subarray(start, end))
+  start = end
+}
+writeFileSync(2, Buffer.concat(kept))
+`
+
+// The measured pgid and root-identity guard stay unchanged. Gate stderr remains
+// immediate; only launcher stderr is buffered and replayed after filtering.
 
 // `sleepCmd`, `killCmd` and `psCmd` exist so the settle ladder and the signal
 // accounting can be pinned by injection instead of by racing real processes;
@@ -860,7 +878,12 @@ export function gateReapCommand({ cmd, cmdFile, launchFile, pgidFile, report, sh
     `  return "$__crew_probe"`,
     `}`,
     `if [ -x "$__crew_shell" ]; then`,
-    `  "$__crew_shell" "$__crew_launch_file" "$__crew_pgid_file" "$__crew_cmd_file"`,
+    `  (`,
+    `    "$__crew_shell" "$__crew_launch_file" "$__crew_pgid_file" "$__crew_cmd_file" 3>&2 2>"$__crew_pgid_file.launcher.stderr"`,
+    `    __crew_launch_status=$?`,
+    `    ${shQuote(process.execPath)} -e ${shQuote(GATE_REAP_STDERR_FILTER)} "$__crew_pgid_file.launcher.stderr" "$__crew_launch_file"`,
+    `    exit "$__crew_launch_status"`,
+    `  )`,
     `else`,
     `  __crew_fallback=$(cat "$__crew_cmd_file"); /bin/sh -c "$__crew_fallback"`,
     `fi`,

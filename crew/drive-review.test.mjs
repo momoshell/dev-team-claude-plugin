@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { cpSync, mkdirSync } from 'node:fs'
 import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
-  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
+  ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
 import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
@@ -7045,4 +7045,71 @@ test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a 
   assert.equal(io.calls.assign.filter(({ note }) => note === 'harden-preservation-fix').length, 1)
   assert.deepEqual(pinRows(io).map(({ round, check, outcome }) => [round, check, outcome]), [[2, 'F1 guard', 'killed'], [3, 'F1 guard two', 'killed'], [4, 'F1 guard', 'killed'], [4, 'F1 guard two', 'killed']])
   assert.equal(result.status, 'done')
+})
+
+// MUTATION LF1: replaying the sidecar unfiltered must make this fixture fail.
+test('LF1', () => {
+  const dir = scratchDir('b127-lf1-')
+  try {
+    const run = b127InvokeGate({ dir, cmd: 'echo clean\nexit 0', overrides: {
+      shell: b127Spy(dir, 'launcher-spy', `#!/bin/sh\nprintf '%s: child setpgid (123 to 456): Operation not permitted\n' "$1" >&2\nexec /bin/bash "$@"\n`),
+    } })
+    assert.equal(run.status, 0)
+    assert.equal(run.stdout, 'clean\n')
+    assert.equal(run.stderr, '')
+    assert.equal(run.verdict.outcome, 'already-dead')
+    assert.equal(run.verdict.signals, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// MUTATION LF2: discarding the sidecar must lose unrelated and non-matching bytes.
+test('LF2', () => {
+  const dir = scratchDir('b127-lf2-')
+  const oddDir = join(dir, "quote ' space [x].")
+  mkdirSync(oddDir)
+  const paths = b127GatePaths(oddDir)
+  const spy = (name, extra) => b127Spy(oddDir, name, `#!/bin/sh\nprintf '%s: child setpgid (123 to 456): Operation not permitted\n' "$1" >&2\n${extra}exec /bin/bash "$@"\n`)
+  try {
+    const mixed = b127InvokeGate({ dir: oddDir, cmd: `printf '%s\n' 'gate: child setpgid (123 to 456): Operation not permitted' >&2; echo gate-out; if echo probe 2>/dev/null >&3; then exit 97; fi; exit 23`, overrides: {
+      shell: spy('mixed-spy', `echo unrelated-launcher-line >&2\nprintf '%s: child setpgid (123 to 456): Operation not permitted extra\n' "$1" >&2\n`),
+    } })
+    assert.equal(mixed.status, 23)
+    assert.equal(mixed.stdout, 'gate-out\n')
+    assert.equal(mixed.stderr, `gate: child setpgid (123 to 456): Operation not permitted\nunrelated-launcher-line\n${paths.launchFile}: child setpgid (123 to 456): Operation not permitted extra\n`)
+
+    const binary = b127InvokeGate({ dir: oddDir, cmd: 'exit 0', overrides: {
+      shell: spy('binary-spy', "printf 'launcher-tail\\000\\t  ' >&2\n"),
+    } })
+    assert.equal(binary.status, 0)
+    assert.equal(binary.stderr, 'launcher-tail\0\t  ')
+
+    const edgeWarning = `${paths.launchFile}: child setpgid (1 to 2): Operation not permitted`
+    const edgeCmd = `cat <<'LF2_WARNING' >&2\n${edgeWarning}\nLF2_WARNING`
+    const edges = b127InvokeGate({ dir: oddDir, cmd: edgeCmd, overrides: {
+      shell: spy('edge-spy', `echo 'wrong-prefix: child setpgid (1 to 2): Operation not permitted' >&2\necho 'bad: child setpgid (x to 2): Operation not permitted' >&2\nprintf '%s\\r' "$1: child setpgid (1 to 2): Operation not permitted" >&2\necho >&2\n`),
+    } })
+    assert.equal(edges.status, 0)
+    assert.equal(edges.stderr, `${edgeWarning}\nwrong-prefix: child setpgid (1 to 2): Operation not permitted\nbad: child setpgid (x to 2): Operation not permitted\n${paths.launchFile}: child setpgid (1 to 2): Operation not permitted\r\n`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// MUTATION RV1-1: remove the trailing newline after echo so exec becomes an echo redirect
+// and the gate-owned own-prefix warning is never reached.
+test('RV1-1 edge spy runs the gate-owned warning', () => {
+  const dir = scratchDir('b127-rv1-1-')
+  try {
+    const paths = b127GatePaths(dir)
+    const warning = `${paths.launchFile}: child setpgid (1 to 2): Operation not permitted`
+    const run = b127InvokeGate({ dir, cmd: `cat <<'RV1_1_WARNING' >&2\n${warning}\nRV1_1_WARNING`, overrides: {
+      shell: b127Spy(dir, 'edge-spy', `#!/bin/sh\nprintf '%s: child setpgid (123 to 456): Operation not permitted\\n' "$1" >&2\necho >&2\nexec /bin/bash "$@"\n`),
+    } })
+    assert.equal(run.status, 0)
+    assert.equal(run.stderr, `${warning}\n\n`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

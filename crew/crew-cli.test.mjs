@@ -3421,14 +3421,19 @@ test('RV1-1 advisor vacuity pin stays synchronized', () => {
   assert.ok(vacuity.includes(`crew/pi/extensions/advisor.test.mjs:${sourceAbsenceLine}`))
 })
 
-test('RV2-1 emitTier0 remains journal-only', () => {
+test('RV2-1 emitTier0 journals before it steers', () => {
   const source = readFileSync(join(ROOT, 'crew', 'pi', 'extensions', 'advisor.ts'), 'utf8')
   const start = source.indexOf('  function emitTier0(')
   const end = source.indexOf('\n  function queue(', start)
   assert.ok(start >= 0 && end > start)
   const tierZero = source.slice(start, end)
-  assert.match(tierZero, /notes\.push\(payload\)\n    return true/)
-  assert.doesNotMatch(tierZero, /\bsend(?:\?\.|\s*\()/)
+  assert.match(tierZero, /appendAdvisorRow\('advisor_note', payload\)\n    if \(!ok\) return false\n    notes\.push\(payload\)/)
+  assert.ok(tierZero.indexOf('notes.push(payload)') < tierZero.indexOf("deliverAs: 'steer'"))
+  assert.equal((tierZero.match(/send\?\.\(/g) || []).length, 1)
+  assert.equal(tierZero.includes("deliverAs: 'steer'"), true)
+  assert.doesNotMatch(tierZero, /trigger[T]urn/)
+  assert.match(tierZero, /delivered\?\.catch\?\.\(\(\) => \{\}\)/)
+  assert.ok(tierZero.includes('} catch {}'))
 })
 
 test('shadowCandidates deduplicates roster cells and retains their tiers', () => {

@@ -620,3 +620,215 @@ test('T15 an empty or relative PATH segment is skipped, never resolved against t
     assert.equal(resolved, '/opt/acp/pi')
   } finally { cleanup(f) }
 })
+
+import { acpProviderFailureKind, PROVIDER_RESET_ABSENT, PARK_BEAT_EVENT, PARK_BEAT_SOURCE } from './headless.mjs'
+
+const AR_CAPTURE_USAGE = '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"b7b4cf9e-5ed2-4cde-8bb3-fe0220dd3331","update":{"sessionUpdate":"usage_update","used":92883,"size":1000000,"_meta":{"_claude/rateLimit":{"status":"rejected","resetsAt":1791236400,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":1,"resetsAt":1791236400},"seven_day":{"utilization":0.69,"resetsAt":1791590400}}},"_claude/model":"claude-opus-5-5"}}}}'
+const AR_CAPTURE_REFUSAL = '{"jsonrpc":"2.0","id":5,"error":{"code":-32603,"message":"Internal error: You\'ve hit your session limit · resets 11:40pm (Europe/Belgrade)","data":{"errorKind":"rate_limit"}}}'
+const AR_RESET_AT = 1791236400000
+function arReadDisk(paths) { return JSON.parse(readFileSync(join(paths.dir, 'crew.json'), 'utf8')) }
+function arHarness({ updates = true, errorKind = 'rate_limit', integrated = false } = {}) {
+  const root = scratchDir('acp-provider-ar-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'Recorded provider refusal replay.')
+  const crew = { claude_bin: '/bin/true', members: { reviewer: { agent: 'pi', model: 'test', transport: 'acp' } } }
+  writeFileSync(join(root, 'crew.json'), JSON.stringify(crew))
+  const logs = [], prompts = [], parks = []
+  let clock = AR_RESET_AT - 10000, sinks, count = 0, refused = false, workStarted = null, activeId = integrated ? 'd1' : 'd2'
+  const rejectionPrompt = integrated ? 2 : 1
+  const pathFor = (id) => join(paths.returnsDir, id + '.reviewer.json')
+  const envelope = (id) => ({ assignment_id: id, role: 'reviewer', status: 'done', summary: 'replayed', artifacts: [], details: {} })
+  const writeEnvelope = (id) => writeFileSync(pathFor(id), JSON.stringify(envelope(id)))
+  function advance(ms) {
+    try { const park = arReadDisk(paths).park; if (park) parks.push(structuredClone(park)) } catch {}
+    clock += ms
+    if (workStarted !== null && clock - workStarted >= 500) { writeEnvelope(activeId); workStarted = null }
+  }
+  const fake = {
+    sessionId: 'b7b4cf9e-5ed2-4cde-8bb3-fe0220dd3331',
+    start() {}, initialize() {}, newSession() {}, setMode() {}, resumeSession() {},
+    beginPrompt(blocks) {
+      count++; prompts.push(structuredClone(blocks))
+      if (integrated && count === 1) writeEnvelope('d1')
+      if (count > rejectionPrompt) workStarted = clock
+      return count
+    },
+    pollPrompt() {
+      if (integrated && count === 1) return { stopReason: 'end_turn', usage: null, refusal: null }
+      if (count === rejectionPrompt && !refused) {
+        refused = true
+        const update = JSON.parse(AR_CAPTURE_USAGE)
+        if (updates) sinks.usage_update({ sessionId: update.params.sessionId, kind: 'usage_update', update: update.params.update, at: clock })
+        const frame = JSON.parse(AR_CAPTURE_REFUSAL)
+        frame.error.data.errorKind = errorKind
+        const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null }
+        return { stopReason: null, usage: null, refusal }
+      }
+      return null
+    },
+    cancelPrompt() {}, cancel() {}, close() { return { outcome: 'proven', reason: 'fake' } },
+  }
+  const deps = { now: () => clock, monotonic: () => clock, sleep: advance, delay: advance, log: (row) => logs.push(row),
+    clientFactory(opts) { sinks = opts.sinks; return fake } }
+  const directArgs = { crew, paths, taskDir: paths.taskDir, checkout: root, bin: '/bin/true', deps }
+  const io = integrated
+    ? seatIo(crew, paths, root, null, {}, {}, { now: () => clock, sleep: advance, resolveWorkerBin: () => '/bin/true',
+        logLine(_path, row) { logs.push(row) }, acpIo: (args) => acpIo({ ...args, bin: '/bin/true', deps: { ...args.deps, ...deps } }) })
+    : acpIo(directArgs)
+  if (integrated) {
+    const first = io.assign({ role: 'reviewer', briefFile, id: 'd1', returnPath: pathFor('d1') })
+    io.wait(first.returnPath, 1)
+    activeId = 'd2'
+  }
+  const assignment = io.assign({ role: 'reviewer', briefFile, id: 'd2', returnPath: pathFor('d2') })
+  function observe() {
+    try { return { envelope: io.wait(assignment.returnPath, 1), error: null } }
+    catch (error) { return { envelope: null, error } }
+  }
+  function sendUsage(updateObj) { sinks.usage_update({ sessionId: 'b7b4cf9e-5ed2-4cde-8bb3-fe0220dd3331', kind: 'usage_update', update: updateObj, at: clock }) }
+  return { io, root, paths, briefFile, logs, prompts, parks, assignment, observe, envelope, pathFor, writeEnvelope, sendUsage, readDisk: () => arReadDisk(paths),
+    cleanup() { rmSync(root, { recursive: true, force: true }) } }
+}
+function arWithHarness(options, fn) { const f = arHarness(options); try { return fn(f) } finally { f.cleanup() } }
+function arErrorView(error) { return error ? { stage: error.stage ?? null, message: error.message, providerFailure: error.providerFailure ?? null, providerRetry: error.providerRetry ?? null } : null }
+
+// MUTATION AR1: classify the measured rate_limit as null rather than rate_limit.
+test('AR1', () => {
+  const table = [
+    ['rate_limit', 'rate_limit'], ['overloaded', 'server_error'], ['server_error', 'server_error'],
+    ['authentication_failed', 'authentication_failed'], ['oauth_org_not_allowed', 'authentication_failed'], ['verification_required', 'authentication_failed'],
+    ...['no_result', 'unknown', 'billing_error', 'account_on_hold', 'cloud_credential_error', 'invalid_request', 'model_not_found', 'max_output_tokens', 'incomplete_tool_call', 'worker_shutdown', 'transport_lost', 'not-a-kind', null, undefined].map((x) => [x, null]),
+  ]
+  const observed = table.map(([input]) => [input, acpProviderFailureKind?.(input) ?? null])
+  assert.deepEqual(observed, table)
+})
+
+// MUTATION AR2: drop the measured reset instant when recording usage_update.
+test('AR2', () => {
+  arWithHarness({}, (f) => {
+    const out = f.observe()
+    assert.deepEqual(out.envelope ?? arErrorView(out.error), f.envelope('d2'))
+    const row = f.logs.find((x) => x.event === 'provider-retry')
+    assert.deepEqual(row && { kind: row.kind, status: row.status, waited_on: row.waited_on, reset_at: row.reset_at },
+      { kind: 'rate_limit', status: null, waited_on: 'reset-time', reset_at: AR_RESET_AT })
+    assert.equal(f.prompts.length, 2)
+    for (const blocks of f.prompts) {
+      assert.match(blocks[0].text, /ASSIGNMENT d2/)
+      assert.ok(blocks[0].text.includes(f.assignment.returnPath), 're-prompt preserves returnPath')
+    }
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry-resumed').length, 1)
+  })
+  arWithHarness({ errorKind: 'overloaded' }, (f) => {
+    const out = f.observe()
+    assert.deepEqual(out.envelope ?? arErrorView(out.error), f.envelope('d2'))
+    const row = f.logs.find((x) => x.event === 'provider-retry')
+    assert.equal(row?.kind, 'server_error')
+    assert.equal(row?.waited_on, 'backoff-ladder')
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry-resumed').length, 1)
+  })
+})
+
+// MUTATION AR3: remove the providerFailure annotation from the thrown error.
+test('AR3', () => {
+  arWithHarness({ updates: false, errorKind: 'authentication_failed' }, (f) => {
+    const { error } = f.observe()
+    assert.deepEqual(error?.providerFailure ?? null, { kind: 'authentication_failed', status: null })
+    assert.equal(error?.providerRetry?.attempts ?? null, 0)
+    assert.match(error.message, /\[provider authentication_failed status null: 0 of 3 retry attempts spent over 0ms/)
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry-declined').length, 1)
+    assert.equal(f.prompts.length, 1)
+  })
+})
+
+// MUTATION AR4: report NO_RESET_FIELD instead of NO_FRAME for an assignment without usage_update.
+test('AR4', () => {
+  arWithHarness({ updates: false }, (f) => {
+    const { error } = f.observe()
+    assert.ok(typeof error?.providerRetry?.declined === 'string' && error.providerRetry.declined.includes(PROVIDER_RESET_ABSENT.NO_FRAME),
+      JSON.stringify(arErrorView(error)))
+    assert.equal(f.parks.length, 0)
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
+  })
+  arWithHarness({ updates: false }, (f) => {
+    f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'allowed', resetsAt: 1791236400 } } })
+    const { error } = f.observe()
+    assert.ok(String(error?.providerRetry?.declined ?? '').includes(PROVIDER_RESET_ABSENT.NO_FRAME), JSON.stringify(arErrorView(error)))
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
+  })
+  arWithHarness({ updates: false }, (f) => {
+    f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 1791236400 } } })
+    f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 'tomorrow' } } })
+    const { error } = f.observe()
+    assert.ok(String(error?.providerRetry?.declined ?? '').includes(PROVIDER_RESET_ABSENT.NO_RESET_FIELD), JSON.stringify(arErrorView(error)))
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
+  })
+  const sf = (() => {
+    const root = scratchDir('acp-provider-ar-stale-');
+    const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') };
+    mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir);
+    const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'Recorded provider refusal replay.');
+    const crew = { claude_bin: '/bin/true', members: { reviewer: { agent: 'pi', model: 'test', transport: 'acp' } } };
+    writeFileSync(join(root, 'crew.json'), JSON.stringify(crew));
+    const logs = [];
+    let clock = AR_RESET_AT - 10000, sinks, count = 0, refused = false;
+    const pathFor = (id) => join(paths.returnsDir, id + '.reviewer.json');
+    const fake = {
+      sessionId: 'stale-test',
+      start() {}, initialize() {}, newSession() {}, setMode() {}, resumeSession() {},
+      beginPrompt(blocks) { count++; return count },
+      pollPrompt() {
+        if (count === 1) return { stopReason: 'end_turn', usage: null, refusal: null };
+        if (count === 2 && !refused) {
+          refused = true;
+          return { stopReason: null, usage: null, refusal: { code: -32603, message: 'stale-limit', errorKind: 'rate_limit' } };
+        }
+        return null;
+      },
+      cancelPrompt() {}, cancel() {}, close() { return { outcome: 'proven', reason: 'fake' } },
+    };
+    const io = acpIo({ crew, paths, taskDir: paths.taskDir, checkout: root, bin: '/bin/true', deps: { now: () => clock, monotonic: () => clock, sleep: (ms) => { clock += ms }, delay: (ms) => { clock += ms }, log: (row) => logs.push(row), clientFactory(opts) { sinks = opts.sinks; return fake } } });
+    return { io, root, paths, briefFile, logs, pathFor, sendValid() { sinks.usage_update({ sessionId: 'stale-test', kind: 'usage_update', update: { sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 1791236400 } } }, at: clock }) }, cleanup() { rmSync(root, { recursive: true, force: true }) } };
+  })();
+  try {
+    const d1 = sf.io.assign({ role: 'reviewer', briefFile: sf.briefFile, id: 'd1', returnPath: sf.pathFor('d1') });
+    sf.sendValid();
+    writeFileSync(sf.pathFor('d1'), JSON.stringify({ assignment_id: 'd1', role: 'reviewer', status: 'done', summary: 'replayed', artifacts: [], details: {} }));
+    assert.equal(sf.io.wait(d1.returnPath, 1).assignment_id, 'd1');
+    const d2 = sf.io.assign({ role: 'reviewer', briefFile: sf.briefFile, id: 'd2', returnPath: sf.pathFor('d2') });
+    let error = null;
+    try { sf.io.wait(d2.returnPath, 1) } catch (e) { error = e }
+    assert.ok(String(error && error.providerRetry && error.providerRetry.declined || '').includes(PROVIDER_RESET_ABSENT.NO_FRAME), JSON.stringify(arErrorView(error)));
+  } finally { sf.cleanup() }
+});
+
+// MUTATION AR5: make ACP's shared-factory reassign callback throw instead of re-prompting d2.
+test('AR5', () => {
+  arWithHarness({ integrated: true }, (f) => {
+    const out = f.observe()
+    assert.deepEqual(out.envelope ?? arErrorView(out.error), f.envelope('d2'))
+    assert.equal(f.prompts.length, 3)
+    assert.equal(f.logs.filter((x) => x.event === 'provider-retry-resumed').length, 1)
+  })
+})
+
+// MUTATION AR6: persist null instead of the live park object in writePark.
+test('AR6', () => {
+  arWithHarness({}, (f) => {
+    f.observe()
+    const beats = f.logs.filter((x) => x.event === PARK_BEAT_EVENT)
+    assert.ok(beats.length > 0, JSON.stringify({ beats: beats.length, parks: f.parks.length }))
+    assert.ok(beats.every((x) => x.source === PARK_BEAT_SOURCE && x.role === 'reviewer'))
+    assert.ok(f.parks.some((x) => x.assignment_id === 'd2' && x.role === 'reviewer'), JSON.stringify(f.parks.slice(0, 2)))
+    assert.equal(f.readDisk().park, null)
+  })
+  const f = arHarness({})
+  try {
+    const origSleep = f.io ? null : null
+    void origSleep
+    f.observe()
+    const beats = f.logs.filter((x) => x.event === PARK_BEAT_EVENT)
+    assert.ok(beats.length > 0)
+    assert.ok(beats.every((x) => x.source === PARK_BEAT_SOURCE))
+  } finally { f.cleanup() }
+})

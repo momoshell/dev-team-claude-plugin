@@ -6998,3 +6998,51 @@ test('RV2-1 a suiteCycle re-entry does not refill the final hardening bounce', (
   assert.equal(result.details.escalation?.where, 'harden')
   assert.match(result.details.escalation?.why ?? '', /^# Hardening bounce \(round 5\) .* - F2: no-declaration — no details\.hardened entry names finding F2 /)
 })
+
+// MUTATION RV3-3: key the re-proof witnesses by finding id — the second review's F1
+// witness then overwrites the first and the first guard reads name-not-new.
+test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a finding id', () => {
+  const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
+  const testPath = CTX.checkout + '/' + B376_TEST_FILE
+  const guardPath = CTX.checkout + '/' + PIN_GUARD_FILE
+  const second = { ...B376_HARDENED, test: PIN_GUARD_FILE, name: 'F1 guard two', find: 'const guard = false', replace: 'const guard = 2' }
+  const io = pinIo({})
+  const twoCmd = hardenCommand(PIN_GUARD_FILE, 'F1 guard two')
+  const run = io.run
+  io.run = function (cmd) {
+    const result = run.call(this, cmd)
+    if (cmd === hardenWitnessCommand(PIN_GUARD_FILE)) return pinTap(this.calls.files[guardPath])
+    if (cmd === twoCmd) {
+      // control, pre-repair, mutant — replayed for the accept-time re-proof
+      const n = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
+      const green = { ok: true, output: 'ok 1 - F1 guard two\n# pass 1\n# fail 0' }
+      const red = { ok: false, output: 'not ok 1 - F1 guard two\n# pass 0\n# fail 1' }
+      return [green, red, red][(n - 1) % 3]
+    }
+    return result
+  }
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    if (path === 'reviewer:2') { wait.call(this, path, timeout); return reviewEnv('changes-needed', [{ ...B376_FINDING, summary: 'a different defect reusing F1' }]) }
+    if (path === 'builder:3') {
+      wait.call(this, path, timeout)
+      this.calls.files[guardPath] += "\ntest('F1 guard two', () => {\n  assert.equal(3, 3)\n})\n"
+      return buildEnv({ details: { ...buildEnv().details, hardened: [second] } })
+    }
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:4') this.calls.files[testPath] = PIN_WITNESSED
+    return env
+  }
+  // The second passing review's repin is followed by an edit, so the accept check takes
+  // the preservation bounce and builder:4 restores the pinned file.
+  const log = io.log
+  let n = 0
+  io.log = function (row) {
+    log.call(this, row)
+    if (row.hardening_prescription_repinned && this.calls.waits.some(({ returnPath }) => returnPath === 'reviewer:3') && ++n === 1) this.calls.files[testPath] = edited
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
+  assert.equal(io.calls.assign.filter(({ note }) => note === 'harden-preservation-fix').length, 1)
+  assert.deepEqual(pinRows(io).map(({ round, check, outcome }) => [round, check, outcome]), [[2, 'F1 guard', 'killed'], [3, 'F1 guard two', 'killed'], [4, 'F1 guard', 'killed'], [4, 'F1 guard two', 'killed']])
+  assert.equal(result.status, 'done')
+})

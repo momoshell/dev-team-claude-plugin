@@ -11974,8 +11974,15 @@ function runTask(ctx, io, crash) {
   if (preservationReproof.length > 0) {
     const reproof = preservationReproof
     preservationReproof = []
-    const witness = new Map(reproof.filter(({ witness: w }) => w).map(({ entry, witness: w }) => [entry.finding, w]))
-    const { rows, fatal } = proveHardeningEntries({ entries: reproof.map(({ entry }) => entry), hardenWitness: witness, ctx, io, hardenRun, dirtyAfterFailure, prescribed: new Set(reproof.filter((r) => r.prescribed).map(({ entry }) => entry.finding)), placement: () => null })
+    // One proof per record: two reviews may reuse a finding id, so a map keyed by finding
+    // would hand the earlier guard the later guard's witness.
+    const rows = []
+    let fatal = null
+    for (const { entry, witness: w, prescribed: p } of reproof) {
+      const proved = proveHardeningEntries({ entries: [entry], hardenWitness: new Map(w ? [[entry.finding, w]] : []), ctx, io, hardenRun, dirtyAfterFailure, prescribed: new Set(p ? [entry.finding] : []), placement: () => null })
+      rows.push(...proved.rows)
+      if (proved.fatal) { fatal = proved.fatal; break }
+    }
     for (const row of rows) logHardened(carriedRound, row)
     if (fatal) return escalate('harden', `the hardening re-proof after the preservation bounce could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
     if (rows.length !== reproof.length || rows.some((row) => row.outcome !== 'killed')) {

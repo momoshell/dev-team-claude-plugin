@@ -97,13 +97,23 @@ export function stepTimeline(payload = {}) {
     {value:anyEvents?false:null,reason:anyEvents?null:'no-step-events'}
   const starts = events.filter(({row})=>row.event==='step:start' && typeof row.step==='string' && Number.isInteger(row.round) && row.round>0)
   const lastStarts = [...new Map(starts.map((entry) => [entry.row.step, entry])).values()].sort((a, b) => a.index - b.index)
-  const latestOpen = lastStarts.filter(({row,index})=>!events.some(({row:t,index:ti})=>ti>index && TERMINALS.has(t.event) && t.step===row.step && t.round===row.round)).at(-1)
+  const terminated = ({row,index}) => events.some(({row:t,index:ti})=>ti>index && TERMINALS.has(t.event) && t.step===row.step && t.round===row.round)
+  // Only the journal's latest start can be open. An earlier start left unterminated (a row
+  // the reader skipped, a crash) is superseded by any later start and is never revived.
+  const latestStart = lastStarts.at(-1)
+  const latestOpen = latestStart && !terminated(latestStart) ? latestStart : undefined
   const steps = validChunks.map((chunk) => {
     const owned = Array.isArray(chunk.checks_owned) ? chunk.checks_owned.filter(x=>typeof x==='string') : null
     const related = events.filter(({row})=>row.step===chunk.id)
-    const gate = related.filter(({row})=>GATE_EVENTS.has(row.event)).at(-1)?.row
+    const gateEntry = related.filter(({row})=>GATE_EVENTS.has(row.event)).at(-1), gate = gateEntry?.row
     const passed = Array.isArray(gate?.passed)?gate.passed:[], failed = Array.isArray(gate?.failed)?gate.failed:[]
-    const checks = owned?.map((id) => ({ id, result: passed.includes(id) ? 'passed' : failed.includes(id) ? 'failed' : null, regressed: Array.isArray(gate?.regressed)?gate.regressed.includes(id):false, reason:gate?(!passed.includes(id)&&!failed.includes(id)?'no-gate-result':null):'no-gate-result', tone:toneFor(null,passed.includes(id)?'passed':failed.includes(id)?'failed':null,Array.isArray(gate?.regressed)&&gate.regressed.includes(id)) })) ?? null
+    // A regression is attributed to the step that OWNS the check, whichever step's gate saw it.
+    const laterRegressed = new Set(events.filter(({row,index})=>GATE_EVENTS.has(row.event) && row.step!==chunk.id && index>(gateEntry?.index ?? -1) && Array.isArray(row.regressed)).flatMap(({row})=>row.regressed))
+    const checks = owned?.map((id) => {
+      const regressed = (Array.isArray(gate?.regressed) && gate.regressed.includes(id)) || laterRegressed.has(id)
+      const result = laterRegressed.has(id) ? 'failed' : passed.includes(id) ? 'passed' : failed.includes(id) ? 'failed' : null
+      return { id, result, regressed, reason: result === null ? 'no-gate-result' : null, tone: toneFor(null, result, regressed) }
+    }) ?? null
     const ownStarts=starts.filter(({row})=>row.step===chunk.id)
     const rounds=ownStarts.map(({row,index}, si)=>{
       const next=ownStarts.slice(si+1).find(x=>x.row.round===row.round)
@@ -112,7 +122,7 @@ export function stepTimeline(payload = {}) {
       const duration_ms = startMs !== null && endMs !== null && endMs >= startMs ? endMs - startMs : null
       const duration_reason=terminal?(duration_ms===null?'invalid-round-timestamps':null):'round-open'
       const censuses=rows.filter((r)=>r.seat_turn_census?.role==='builder' && timeValue(r.at)!==null && startMs!==null && endMs!==null && timeValue(r.at)>=startMs && timeValue(r.at)<=endMs)
-      let turnsReason=terminal?(startMs===null||endMs===null?'invalid-round-timestamps':censuses.length===0?'no-builder-census-in-window':censuses.length>1?'ambiguous-builder-census':null):'round-open'
+      let turnsReason=terminal?(startMs===null||endMs===null||endMs<startMs?'invalid-round-timestamps':censuses.length===0?'no-builder-census-in-window':censuses.length>1?'ambiguous-builder-census':null):'round-open'
       const turns = censuses.length === 1 ? censuses[0].seat_turn_census.turns : null
       const validTurns=Number.isInteger(turns)&&turns>=0
       if(censuses.length === 1 && !validTurns) turnsReason='invalid-builder-census'
@@ -134,13 +144,13 @@ export function stepTimeline(payload = {}) {
     else if(!related.length){state='not-started';reason='not-started'}
     else {const last=related.at(-1).row;state=last.event==='step:done'||last.event==='step:accepted-by-gate'||last.event==='step:reverified'?'done':last.event==='step:red'||last.event==='step:reverify-red'||last.event==='step:bounce'?'red':'not-started';reason=state==='not-started'?'not-started':null}
     const ownLastStart=lastStarts.find(({row})=>row.step===chunk.id)
-    if(latestOpen && ownLastStart && ownLastStart.index<latestOpen.index && !open && !events.some(({row:t,index:ti})=>ti>ownLastStart.index&&TERMINALS.has(t.event)&&t.step===ownLastStart.row.step&&t.round===ownLastStart.row.round)){state=null;reason='superseded-open-round'}
+    if(latestStart && ownLastStart && ownLastStart.index<latestStart.index && !open && !terminated(ownLastStart)){state=null;reason='superseded-open-round'}
     const unavailable=Boolean(safePayload.error || safePayload.degraded)
     const finalChecks=unavailable?owned?.map(id=>({id,result:null,regressed:null,reason:'journal-unavailable',tone:'muted'})):checks
     const finalRounds=unavailable?null:rounds
     const finalEscalation=unavailable?null:escalation
     const finalState=unavailable?null:timelineState(state), finalReason=timelineReason(unavailable?'journal-unavailable':reason)
-    const tone=unavailable?'muted':toneFor(finalState,null,finalChecks?.some(c=>c.regressed))
+    const tone=unavailable?'muted':finalChecks?.some(c=>c.regressed)?STEP_TIMELINE_TONES[2]:toneFor(finalState,null,false)
     return {id:chunk.id,files: Array.isArray(chunk.files_in_scope) ? [...chunk.files_in_scope] : null,files_reason:Array.isArray(chunk.files_in_scope)?null:'plan-files-not-recorded',depends_on:Array.isArray(chunk.depends_on)?[...chunk.depends_on]:null,depends_on_reason:Array.isArray(chunk.depends_on)?null:'plan-dependencies-not-recorded',intent:typeof chunk.intent==='string'?chunk.intent:null,intent_reason:typeof chunk.intent==='string'?null:'plan-chunk-carries-no-intent',checks:finalChecks,checks_reason:owned?null:'plan-checks-not-recorded',rounds:finalRounds,state:finalState,reason:finalReason,escalation:finalEscalation,escalation_reason:unavailable?'journal-unavailable':finalEscalation?null:'no-escalation-recorded',tone}
   })
   return {steps,absent:legacy.absent,unplanned:legacy.unplanned,degraded,strip:steps.map(({id,state,reason,tone})=>({id,state,reason,tone}))}

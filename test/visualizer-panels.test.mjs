@@ -3336,3 +3336,26 @@ test('RV1-4 an unreadable journal reports its escalation as journal-unavailable'
  const s=stepped(steppedPayload([timelineStart(),{at:150,stage:'escalate:build'}])).steps[0]
  assert.deepEqual([s.escalation,s.escalation_reason],['escalate:build',null])
 })
+// MUTATION RV2-1: read regressions only from the step's own gate row — a later step's gate
+// that regresses C1 then leaves step a green with C1 passed.
+test('RV2-1 a regression seen by a later step marks the owning step check and tone', () => {
+ const chunks=[{id:'a',checks_owned:['C1','C2']},{id:'b',checks_owned:['C3']}]
+ const v=stepped(steppedPayload([timelineStart(),timelineDone(),timelineStart('b',1,300),{event:'step:done',step:'b',round:1,at:400,passed:['C3'],regressed:['C1']}],chunks))
+ assert.deepEqual(v.steps[0].checks.map(c=>[c.id,c.result,c.regressed,c.tone]),[['C1','failed',true,'fail'],['C2','passed',false,'ok']])
+ assert.deepEqual([v.steps[0].state,v.steps[0].tone],['done','fail'])
+ assert.deepEqual(v.strip[0],{id:'a',state:'done',reason:null,tone:'fail'})
+})
+
+// MUTATION RV2-2: let latestOpen fall back to any earlier unterminated start — step a, whose
+// terminal row is missing, is revived as active after step b finishes.
+test('RV2-2 an unterminated start superseded by a later step is never revived', () => {
+ const v=stepped(steppedPayload([timelineStart(),timelineStart('b',1,300),timelineDone('b',1,400)],[{id:'a'},{id:'b'}]))
+ assert.deepEqual(v.steps.map(s=>[s.id,s.state,s.reason]),[['a',null,'superseded-open-round'],['b','done',null]])
+})
+
+// MUTATION RV2-3: drop the reversed-window check from turnsReason — a round ending before it
+// started then claims no builder census instead of invalid timestamps.
+test('RV2-3 a reversed round window reports invalid timestamps for turns too', () => {
+ const r=stepped(steppedPayload([timelineStart('a',1,200),timelineDone('a',1,100)])).steps[0].rounds[0]
+ assert.deepEqual([r.duration_reason,r.turns,r.turns_reason],['invalid-round-timestamps',null,'invalid-round-timestamps'])
+})

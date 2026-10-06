@@ -505,14 +505,14 @@ test('assign composes through adapter, removes stale envelope, and resumes one s
 
 // The planted legacy `starting` marker is the #134 bug: it proves nothing about whether spawn ran.
 // RESERVED is the only pre-effect shape that can be reclaimed automatically.
-test('a dead RESERVED reservation is reclaimed and keeps its session id', () => {
+test('a dead RESERVED reservation is reclaimed with a fresh session id', () => {
   const f = fixture()
   try {
     mkdirSync(join(f.taskDir, 'headless'), { recursive: true })
     writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old-reservation', key: 'builder', phase: 'reserved', owner: { pid: 999999999 }, sessionId: 'old-session', id: 'd0', exit: join(f.taskDir, 'headless', 'd0', 'exit') }))
     const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
     assert.equal(run.id, 'd1')
-    assert.equal(f.calls[0].sessionId, 'old-session')
+    assert.notEqual(f.calls[0].sessionId, 'old-session')
   } finally { f.cleanup() }
 })
 
@@ -1448,7 +1448,7 @@ test('failed SPAWNING advance does not spawn and clears marker', () => { let spa
 test('failed command write does not spawn and clears marker', () => { let spawned = 0; const f = makeFixture({ spawn: () => { spawned += 1; return { pid: 900, unref() {} } }, writeFileSync(path, data, options) { if (String(path).endsWith('cmd.json')) throw Error('command'); return writeFileSync(path, data, options) } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(spawned, 0); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false) } finally { f.cleanup() } })
 test('proven-dead pgid reservation is reclaimed', () => { let spawned = 0; const f = makeFixture({ kill: (pid, signal) => { if (signal === 0) { const e = Error(); e.code = 'ESRCH'; throw e } if (Math.abs(pid) === 111) { const e = Error(); e.code = 'ESRCH'; throw e } }, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '111'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(spawned, 1) } finally { f.cleanup() } })
 test('live pgid reservation is busy', () => { let clock = 0; let spawned = 0; const f = makeFixture({ now: () => clock, delay: (ms) => { clock += ms }, kill: () => true, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '222'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' }), (e) => e.stage === 'headless-session-busy'); assert.equal(spawned, 0) } finally { f.cleanup() } })
-test('completed legacy marker frees seat', () => { const f = makeFixture(); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); const exit = join(f.taskDir, 'headless', 'd1', 'exit'); writeFileSync(exit, '0'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'running', role: 'builder', id: 'd1', exit, sessionId: 'old' })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(f.calls[0].sessionId, 'old') } finally { f.cleanup() } })
+test('completed legacy marker frees seat', () => { const f = makeFixture(); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); const exit = join(f.taskDir, 'headless', 'd1', 'exit'); writeFileSync(exit, '0'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'running', role: 'builder', id: 'd1', exit, sessionId: 'old' })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.notEqual(f.calls[0].sessionId, 'old') } finally { f.cleanup() } })
 test('an active marker that VANISHES between reads yields a fresh uuid rather than a throw (a genuinely malformed marker is REFUSED as unresolvable, not healed)', () => {
   let consumed = false
   const f = makeFixture({
@@ -5188,4 +5188,50 @@ test('Claude context peak survives a stream too long to spread into Math.max', (
   const frames = Array.from({ length: count }, (_, i) => JSON.stringify({ type: 'assistant', message: { id: `m${i}`, usage: { input_tokens: i === 7 ? 9_000 : 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, content: [] } })).join('\n')
   const census = claudeCensus(frames)
   assert.deepEqual([census.context_peak_tokens, census.context_calls], [9_000, count])
+})
+
+function freshJsonSeat(role) {
+  const dir = scratchDir(`fresh-json-${role}-`)
+  const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const member = { transport: 'headless-json', started: false, session_id: null, agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', members: { [role]: member }, seats: { [role]: { ...member } } }
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew))
+  const calls = []; let sequence = 0
+  const io = seatIo(crew, paths, dir, null, { [role]: { adapter: { headlessCommand(spec) { calls.push(spec); return { bin: '/bin/true', args: [], env: {} } } } } }, {}, {
+    headlessIo: (options) => headlessIo({ ...options, deps: { ...options.deps, uuid: () => `fresh-${role}-${++sequence}`, spawn: () => ({ pid: 700000 + sequence, unref() {} }), delay() {} } }),
+    logLine() {}, sleep() {},
+  })
+  return { dir, paths, crew, calls, io, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+// Mutation: preserve the old JSON id during reset, then run this test and restore it.
+test('FS1 second JSON assignments start fresh sessions for every role', () => {
+  for (const role of ['lead', 'reviewer', 'tech-lead']) {
+    const f = freshJsonSeat(role)
+    try {
+      const first = f.io.assign({ role, briefFile: join(f.paths.taskDir, 'brief.md') })
+      mkdirSync(join(f.paths.taskDir, 'headless', first.id), { recursive: true }); writeFileSync(join(f.paths.taskDir, 'headless', first.id, 'exit'), '0')
+      f.io.assign({ role, briefFile: join(f.paths.taskDir, 'brief.md') })
+      assert.deepEqual(f.calls.map((call) => call.resume), [false, false])
+      assert.notEqual(f.calls[0].sessionId, f.calls[1].sessionId)
+      assert.equal(JSON.parse(readFileSync(join(f.dir, 'crew.json'), 'utf8')).members[role].session_id, f.calls[1].sessionId)
+    } finally { f.cleanup() }
+  }
+})
+
+// Mutation: force workerCommand resume true, then run this test and restore it.
+test('FS2 caller JSON re-asks use a fresh session without changing refused bytes', () => {
+  const f = freshJsonSeat('builder')
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: join(f.paths.taskDir, 'brief.md') })
+    mkdirSync(join(f.paths.taskDir, 'headless', first.id), { recursive: true }); writeFileSync(join(f.paths.taskDir, 'headless', first.id, 'exit'), '0')
+    writeFileSync(first.returnPath, 'original refused bytes')
+    const returnPath = join(f.paths.returnsDir, 'correction.json')
+    const next = f.io.assign({ role: 'builder', briefFile: join(f.paths.taskDir, 'brief.md'), reask: { id: first.id, returnPath } })
+    assert.equal(f.calls[1].resume, false)
+    assert.notEqual(f.calls[0].sessionId, f.calls[1].sessionId)
+    assert.deepEqual(next, { id: first.id, returnPath })
+    assert.equal(readFileSync(first.returnPath, 'utf8'), 'original refused bytes')
+  } finally { f.cleanup() }
 })

@@ -67,6 +67,7 @@ export const TREE_WITNESS_REFUSAL = 'tree-witness'
 export const HEADLESS_TRANSPORT = 'headless-json'
 export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const ACP_TRANSPORT = 'acp'
+export const SEAT_SESSION_KEPT_REASONS = Object.freeze(['retire-refused', 'worker-adoptable', 'pane-respawn-failed', 'pane-ready-timeout'])
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 // #813: the journal vocabulary for one liveness OBSERVATION. Owned here
@@ -1706,7 +1707,7 @@ export function silenceReaskDecision({ frameAt, latest, at, sentAt = null, quiet
 // (crew/driver.mjs:69), and #359's message carries both — so the verbatim
 // failure travels in a FILE and the line points at it, exactly as every other
 // brief does.
-export function reaskBrief({ role, id, returnPath, message }) {
+export function reaskBrief({ role, id, briefFile, refusedReturnPath, returnPath, message }) {
   return [
     `# Re-ask ${id}: your ReturnEnvelope could not be parsed`,
     '',
@@ -1715,6 +1716,9 @@ export function reaskBrief({ role, id, returnPath, message }) {
     're-encodes or rewrites it.',
     '',
     `verbatim parse failure: ${message}`,
+    `Original brief: ${briefFile}`,
+    `Refused envelope: ${refusedReturnPath}`,
+    'Read both files before reproducing the JSON.',
     '',
     `Write the SAME ReturnEnvelope again as valid JSON to ${returnPath}, with one`,
     'complete write. The usual cause is a literal control character (most often a',
@@ -2155,6 +2159,13 @@ export function neutralColdPath(names = [], deps = {}) {
     rejected.push(`${root}: ${attempts} candidates all shared ${JSON.stringify(last)}`)
   }
   throw new Error(`neutralColdPath: no neutral cold checkout path for ${JSON.stringify(names)} — every candidate root was rejected [${rejected.join('; ')}]; point TMPDIR (or the cold tmpRoots dep) at a directory whose CANONICAL path shares no substring with this lane or repository`)
+}
+
+export function awaitSeatsReadyChild(single, mode, journal = null) {
+  // lean: literal mirrors SEAT_READY_FRESH_TIMEOUT_S; import it once crew.mjs readiness moves to a leaf module
+  const script = "const { awaitSeatsReady } = await import(process.argv[1]); awaitSeatsReady(JSON.parse(process.argv[2]), process.argv[3], process.argv[4] || null)"
+  const child = cpSpawnSync(process.execPath, ['--input-type=module', '-e', script, new URL('./crew.mjs', import.meta.url).href, JSON.stringify(single), mode, journal ?? ''], { encoding: 'utf8', timeout: 190000 })
+  if (child.error || child.status !== 0) throw new Error(String(child.stderr || child.error?.message || 'readiness child did not exit successfully'))
 }
 
 export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
@@ -2801,17 +2812,17 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     try {
       // The brief is written BEFORE the message is annotated, so what the seat
       // reads is the parse failure verbatim and nothing else.
-      writeFileSync(briefPath, reaskBrief({ role, id: reaskId, returnPath: reassignable ? reaskPath : returnPath, message: err.message }))
+      writeFileSync(briefPath, reaskBrief({ role, id: reaskId, briefFile: info?.brief, refusedReturnPath: returnPath, returnPath: reassignable ? reaskPath : returnPath, message: err.message }))
       if (reassignable) {
         // The id is the ORIGINAL one: an envelope carrying the re-ask's own id
         // would be refused by the driver's anti-replay check (crew/drive.mjs:631)
         // and the recovery would be spent for nothing. EVERY delivery attempt is
         // journalled with its ordinal — a minute of refused deliveries that only
         // reported its own last line would be a minute nobody can read back.
-        const attempt = assignWithReask(transport, info, headlessReaskSpec(info, { role, briefFile: briefPath, id: reaskId, returnPath: reaskPath }), (ordinal, assignErr) => {
+        const attempt = withAssignmentSession(role, reaskId, () => assignWithReask(transport, info, headlessReaskSpec(info, { role, briefFile: briefPath, id: reaskId, returnPath: reaskPath }), (ordinal, assignErr) => {
           attempts = ordinal + 1
           note('busy', { attempt: ordinal, why: assignErr.message })
-        })
+        }))
         collectPath = attempt?.returnPath || reaskPath
         bindHeadlessIdentity(info, attempt)
       } else {
@@ -2927,6 +2938,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         `The previous attempt was lost (${kind}) after ${spentForBrief}: it was cut off mid-flight, so whatever it had already written may be PARTIAL.`,
         'This is a bounded recovery of the same logical assignment. Read the repo state before you trust it — edits from the lost attempt may be half-applied.',
         'Finish the assignment from what is actually there, and report status: done only when the work is complete.',
+        `Original brief: ${info?.brief}`,
+        `Lost attempt's return path: ${returnPath}`,
+        'Read the original brief first before continuing the assignment.',
         `Write your ReturnEnvelope as valid JSON to ${retryPath}.`,
         `Then print exactly: CREW-DONE ${role} ${retryId}`,
         '',
@@ -3130,6 +3144,30 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
     }
   }
+  const withAssignmentSession = (role, requestedId, send) => {
+    const member = crew.members?.[role]
+    let renewal = { session: 'fresh', why: null }
+    let recordable = false
+    let result = null
+    try {
+      if (!member) throw new Error(`role ${role} is not seated in this crew`)
+      if (member.started) renewal = io.freshSession(role)
+      recordable = true
+      if (member.transport === DEFAULT_TRANSPORT && renewal.session !== 'fresh') throw Object.assign(new Error(renewal.why), { stage: renewal.why })
+      result = send()
+      for (const target of [member, crew.seats?.[role]]) if (target) target.started = true
+      return result
+    } finally {
+      if (recordable) {
+        const why = renewal.session === 'fresh' ? null
+          : renewal.session === 'held' ? 'worker-adoptable'
+            : SEAT_SESSION_KEPT_REASONS.includes(renewal.why) ? renewal.why : 'retire-refused'
+        const outcome = why === null ? 'fresh' : 'kept'
+        try { io.log(recordRow({ at: now(), event: 'seat-session', role, id: result?.id ?? requestedId ?? null, transport: member?.transport ?? null, outcome, why })) }
+        catch { /* the journal is diagnostics, never load-bearing for delivery */ }
+      }
+    }
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -3147,21 +3185,24 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         if (m.transport !== DEFAULT_TRANSPORT) {
           const transport = transportIo(m.transport, role)
           let result
-          if (spec.reask) {
-            let attempt = 0
-            const reaskSpec = headlessReaskSpec({ role, policy: spec.policy ?? null }, { role, briefFile, id: spec.reask.id, returnPath: spec.reask.returnPath })
-            try {
-              result = assignWithReask(transport, { role, policy: spec.policy ?? null }, reaskSpec, (ordinal, assignErr) => {
-                attempt = ordinal
-                try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'busy', attempt: ordinal, why: assignErr?.message || String(assignErr) })) }
+          result = withAssignmentSession(role, spec.reask?.id ?? null, () => {
+            if (spec.reask) {
+              let attempt = 0
+              const reaskSpec = headlessReaskSpec({ role, policy: spec.policy ?? null }, { role, briefFile, id: spec.reask.id, returnPath: spec.reask.returnPath })
+              try {
+                return assignWithReask(transport, { role, policy: spec.policy ?? null }, reaskSpec, (ordinal, assignErr) => {
+                  attempt = ordinal
+                  try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'busy', attempt: ordinal, why: assignErr?.message || String(assignErr) })) }
+                  catch { /* the journal is diagnostics, never load-bearing for a delivery */ }
+                })
+              } catch (assignErr) {
+                try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'undelivered', attempt: attempt + 1, why: assignErr?.message || String(assignErr) })) }
                 catch { /* the journal is diagnostics, never load-bearing for a delivery */ }
-              })
-            } catch (assignErr) {
-              try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: spec.reask.id, returnPath: spec.reask.returnPath, transport: m.transport, outcome: 'undelivered', attempt: attempt + 1, why: assignErr?.message || String(assignErr) })) }
-              catch { /* the journal is diagnostics, never load-bearing for a delivery */ }
-              throw assignErr
+                throw assignErr
+              }
             }
-          } else result = transport.assign(spec)
+            return transport.assign(spec)
+          })
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
           const assignedAt = now()
@@ -3187,7 +3228,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         seatFor.set(returnPath, { role, surface_id: m.surface_id, id, brief: briefFile, at: assignedAt, returnPath, transport: m.transport })
         refusalFloor.set(role, assignedAt)
         lastRefusal.delete(role)
-        sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+        withAssignmentSession(role, id, () => {
+          sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+          return { id, returnPath }
+        })
         // The correction is an ask and spends the grace once it is sent, so a
         // later silence re-send declines; a provider-rejection reprompt of it is delivery.
         if (reask) spendGrace(seatFor.get(returnPath), returnPath, 'caller-reask')
@@ -3840,27 +3884,43 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   io.freshSession = (role) => {
     const member = crew.members?.[role]
     if (!member) return { session: 'kept', why: `role ${role} is not seated in this crew` }
-    if (member.transport !== HEADLESS_RPC_TRANSPORT) return { session: 'kept', why: `transport ${String(member.transport)} does not support fresh sessions` }
+    let result = { session: 'fresh', why: null }
     try {
-      const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
-      if (typeof transport?.retire !== 'function') return { session: 'kept', why: `headless-rpc seat ${role} has no retire operation` }
-      const retired = transport.retire(role, { freshSession: true })
-      if (retired?.session === 'held') return { session: 'held', why: retired.why || 'worker-adoptable' }
-      if (retired?.session !== 'fresh') return { session: 'kept', why: retired?.why || retired?.reason || 'headless-rpc retirement did not grant a fresh session' }
-      const persisted = updateCrewJson(paths, (disk) => {
-        for (const target of [disk.members?.[role], disk.seats?.[role]]) {
-          if (target) Object.assign(target, { session_id: null, started: false })
-        }
+      if (member.transport === HEADLESS_RPC_TRANSPORT) {
+        const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
+        if (typeof transport?.retire !== 'function') return { session: 'kept', why: 'retire-refused' }
+        const retired = transport.retire(role, { freshSession: true })
+        if (retired?.session === 'held') return { session: 'held', why: 'worker-adoptable' }
+        if (retired?.session !== 'fresh') return { session: 'kept', why: 'retire-refused' }
+      } else if (member.transport === ACP_TRANSPORT) {
+        const retired = transportIo(ACP_TRANSPORT, role).retire(role)
+        if (retired?.reason !== 'client-not-created' && retired?.outcome !== 'proven') return { session: 'kept', why: 'retire-refused' }
+      } else if (member.transport === DEFAULT_TRANSPORT) {
+        const launcher = join(paths.taskDir, `launch-${role}.sh`).replace(/'/g, "'\\''")
+        const respawn = cmux('respawn-pane', ['--workspace', crew.workspace_id, '--surface', member.surface_id, '--command', `/bin/sh '${launcher}'`])
+        if (!respawn?.ok) return { session: 'kept', why: 'pane-respawn-failed' }
+        const single = { ...crew, members: { [role]: member } }
+        const readinessLog = deps.logLine || (() => {})
+        const readinessDeps = { cmux, now, sleep, ['log' + 'Line']: readinessLog }
+        try { (deps.awaitSeatsReady || awaitSeatsReadyChild)(single, 'fresh', null, readinessDeps) }
+        catch { return { session: 'kept', why: 'pane-ready-timeout' } }
+      }
+    } catch {
+      return { session: 'kept', why: member.transport === DEFAULT_TRANSPORT ? 'pane-respawn-failed' : 'retire-refused' }
+    }
+    const nextSessionId = member.transport === HEADLESS_TRANSPORT ? randomUUID() : null
+    let persisted
+    try {
+      persisted = updateCrewJson(paths, (disk) => {
+        for (const target of [disk.members?.[role], disk.seats?.[role]]) if (target) Object.assign(target, { session_id: nextSessionId, started: false })
         return true
       }, { writeFileSync, renameSync, readFileSync, existsSync })
-      if (!persisted.ok && persisted.reason !== 'absent') return { session: 'kept', why: `crew.json session reset failed (${persisted.reason}${persisted.error ? `: ${persisted.error}` : ''})` }
-      for (const target of [member, crew.seats?.[role]]) {
-        if (target) Object.assign(target, { session_id: null, started: false })
-      }
-      return { session: 'fresh' }
     } catch (err) {
-      return { session: 'kept', why: err?.message || String(err) }
+      throw new Error(`crew.json session reset failed (${err?.message || String(err)})`)
     }
+    if (!persisted.ok && persisted.reason !== 'absent') throw new Error(`crew.json session reset failed (${persisted.reason}${persisted.error ? `: ${persisted.error}` : ''})`)
+    for (const target of [member, crew.seats?.[role]]) if (target) Object.assign(target, { session_id: nextSessionId, started: false })
+    return result
   }
   return io
 }

@@ -67,6 +67,7 @@ test('pane seatIo reasks preserve assignment identity and original envelope byte
     const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
       sendLine: (_surface, line) => sent.push(line), assignmentLine: (spec) => JSON.stringify(spec),
       tree: () => ({ windows: [] }), locate: () => ({ id: 'pane' }),
+      cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
     })
     const original = io.assign({ role: 'builder', briefFile: '/first.md' })
     writeFileSync(original.returnPath, 'original bytes')
@@ -148,6 +149,7 @@ test('a pane correction that returns unusable bytes is never asked a third time'
     const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
       sendLine: (_surface, line) => sent.push(line), assignmentLine: (spec) => JSON.stringify(spec), sleep: () => {}, logLine: () => {},
       tree: () => ({ windows: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }), locate: () => ({ id: 'pane' }),
+      cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
     })
     const first = io.assign({ role: 'builder', briefFile: '/first.md' })
     const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) }
@@ -171,6 +173,7 @@ test('a provider rejection on a pane correction is delivery: it is reprompted an
       sendLine: (_surface, line) => { const spec = JSON.parse(line); sent.push(spec); if (sent.length === 3) writeFileSync(spec.returnPath, JSON.stringify({ assignment_id: spec.id, role: 'builder', status: 'done', summary: 'fixed', artifacts: [], details: {} })) },
       assignmentLine: (spec) => JSON.stringify(spec), refusalFrames: () => queue.shift() || [],
       tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
+      cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
     })
     const first = io.assign({ role: 'builder', briefFile: '/first.md' })
     const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) }
@@ -243,6 +246,7 @@ test('an undelivered pane correction charges no grace', () => {
     const io = seatIo({ workspace_id: 'workspace', window_id: 'window', members: { builder: { surface_id: 'pane', transport: 'pane' } } }, paths, parent, null, null, {}, {
       sendLine: () => { sends += 1; if (sends === 2) throw new Error('surface refused the keystrokes') }, assignmentLine: (spec) => JSON.stringify(spec),
       tree: () => ({ windows: [] }), locate: () => ({ id: 'pane' }), logLine: () => {},
+      cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
     })
     const first = io.assign({ role: 'builder', briefFile: '/first.md' })
     assert.throws(() => io.assign({ role: 'builder', briefFile: '/second.md', reask: { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.shape-reask.builder.json`) } }), /surface refused/)

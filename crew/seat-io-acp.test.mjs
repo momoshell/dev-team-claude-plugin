@@ -135,7 +135,8 @@ test('A7', () => {
     const cancelAt = f.calls.findIndex((call) => Array.isArray(call) && call[0] === 'cancelPrompt')
     const resumeAt = f.calls.indexOf('resumeSession')
     const beginAt = f.calls.findIndex((call, index) => index > cancelAt && Array.isArray(call) && call[0] === 'beginPrompt')
-    assert.ok(cancelAt >= 0 && cancelAt < resumeAt && resumeAt < beginAt)
+    assert.ok(cancelAt >= 0 && cancelAt < beginAt)
+    assert.equal(resumeAt, -1)
     assert.equal(f.logs.filter((row) => row.acp_turn?.assignment_id === prior.id).length, 1)
   } finally { cleanup(f) }
 })
@@ -831,4 +832,31 @@ test('AR6', () => {
     assert.ok(beats.length > 0)
     assert.ok(beats.every((x) => x.source === PARK_BEAT_SOURCE))
   } finally { f.cleanup() }
+})
+
+// Mutation: bypass ACP retire before the second assignment, then run this test and restore it.
+test('FS4 fresh ACP assignments create distinct clients and never resume', () => {
+  const f = fixture(); const events = []; let clients = 0
+  const crew = { claude_bin: '/bin/true', members: { builder: { transport: ACP_TRANSPORT, started: false, agent: 'pi', model: 'test' } }, seats: { builder: { transport: ACP_TRANSPORT, started: false, agent: 'pi', model: 'test' } } }
+  const adapter = { acpLaunch: () => ({ bin: '/bin/true', args: [], env: {} }), capabilitiesFor: () => ({ session_resume: true }) }
+  const clientFactory = () => {
+    const id = ++clients
+    return {
+      sessionId: `client-${id}`, start() {}, initialize() {}, newSession() { events.push(['new', id]) },
+      beginPrompt() { events.push(['prompt', id]); return id }, pollPrompt() { return { stopReason: 'end_turn', usage: null } },
+      cancelPrompt() {}, cancel() {}, resumeSession() { events.push(['resume', id]) },
+      close() { events.push(['close', id]); return { outcome: 'proven', reason: 'fixture' } },
+    }
+  }
+  const io = seatIo(crew, f.paths, f.root, null, { builder: { adapter } }, {}, {
+    logLine() {}, acpIo: (options) => acpIo({ ...options, bin: '/bin/true', deps: { ...options.deps, clientFactory, closeSettleMs: 0, cancelSettleMs: 0 } }),
+  })
+  try {
+    const first = io.assign({ role: 'builder', briefFile: f.briefFile })
+    io.assign({ role: 'builder', briefFile: f.briefFile })
+    io.assign({ role: 'builder', briefFile: f.briefFile, reask: { id: first.id, returnPath: join(f.paths.returnsDir, 'correction.json') } })
+    assert.deepEqual(events.filter(([kind]) => kind === 'new' || kind === 'prompt' || kind === 'resume'), [
+      ['new', 1], ['prompt', 1], ['new', 2], ['prompt', 2], ['new', 3], ['prompt', 3],
+    ])
+  } finally { cleanup(f) }
 })

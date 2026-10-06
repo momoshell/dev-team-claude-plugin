@@ -1205,13 +1205,13 @@ test('freshSession handles a missing retire seam, thrown retirement and non-rpc 
   missing.rpc.retire = undefined
   const missingResult = missing.io.freshSession('builder')
   assert.equal(missingResult.session, 'kept')
-  assert.match(missingResult.why, /no retire operation/)
+  assert.equal(missingResult.why, 'retire-refused')
   assert.deepEqual({ member: missing.crew.members.builder, seat: missing.crew.seats.builder, disk: fsReadFileSync(missing.diskPath, 'utf8'), saved: fsReadFileSync(missing.savedPath, 'utf8') }, missing.before)
 
   const thrown = seatFreshFixture()
   thrown.rpc.retire = () => { throw new Error('retirement interrupted') }
   const thrownResult = thrown.io.freshSession('builder')
-  assert.deepEqual(thrownResult, { session: 'kept', why: 'retirement interrupted' })
+  assert.deepEqual(thrownResult, { session: 'kept', why: 'retire-refused' })
   assert.deepEqual({ member: thrown.crew.members.builder, seat: thrown.crew.seats.builder, disk: fsReadFileSync(thrown.diskPath, 'utf8'), saved: fsReadFileSync(thrown.savedPath, 'utf8') }, thrown.before)
 
   for (const transport of ['pane', 'headless-json', 'acp']) {
@@ -1219,8 +1219,15 @@ test('freshSession handles a missing retire seam, thrown retirement and non-rpc 
     f.crew.members.builder.transport = transport
     f.crew.seats.builder.transport = transport
     const before = { member: structuredClone(f.crew.members.builder), seat: structuredClone(f.crew.seats.builder), disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }
-    assert.equal(f.io.freshSession('builder').session, 'kept')
-    assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, before)
+    const result = f.io.freshSession('builder')
+if (transport === 'headless-json' || transport === 'acp') {
+  assert.equal(result.session, 'fresh')
+  assert.equal(f.crew.members.builder.started, false)
+  if (transport === 'headless-json') assert.notEqual(f.crew.members.builder.session_id, before.member.session_id)
+} else {
+  assert.equal(result.session, 'kept')
+  assert.deepEqual({ member: f.crew.members.builder, seat: f.crew.seats.builder, disk: fsReadFileSync(f.diskPath, 'utf8'), saved: fsReadFileSync(f.savedPath, 'utf8') }, before)
+}
   }
 })
 

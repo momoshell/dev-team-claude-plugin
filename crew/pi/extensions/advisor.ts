@@ -691,8 +691,10 @@ function requestUrl(endpoint) {
   return `${String(endpoint).replace(/\/+$/, '')}/chat/completions`
 }
 
-export const BUILDER_SYSTEM_PROMPT = 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.'
-export const PLANNER_SYSTEM_PROMPT = 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON with class, severity, claim, and evidence.'
+const REPLY_CONTRACT = `Return JSON alone: one object or an array of 1 to ${JUDGMENT_REPLY_MAX} objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of ${JUDGMENT_CLASSES.join(', ')}. severity must be one of ${SEVERITIES.join(', ')}. claim must be a non-empty string of at most ${CLAIM_CAP_BYTES} UTF-8 bytes. evidence must be an array of 1 to ${EVIDENCE_MAX} strings, each at most ${EVIDENCE_ITEM_CAP_BYTES} UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example's evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}`
+
+export const BUILDER_SYSTEM_PROMPT = `Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). ${REPLY_CONTRACT}`
+export const PLANNER_SYSTEM_PROMPT = `Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). ${REPLY_CONTRACT}`
 
 function systemPrompt(role) {
   return role === 'planner' ? PLANNER_SYSTEM_PROMPT : BUILDER_SYSTEM_PROMPT

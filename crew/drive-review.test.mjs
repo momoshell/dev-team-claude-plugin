@@ -7396,3 +7396,14 @@ test('reshape test-path guard covers every node --test default name', () => {
   for (const path of ['test.mjs', 'pkg/test.cjs', 'test-a.js', 'a_test.mjs', 'a-test.mjs', 'a.test.mjs', 'test/x.mjs', 'pkg/test/x.js']) assert.equal(RESHAPE_TEST_PATH.test(path), true, path)
   for (const path of ['a.mjs', 'contest.mjs', 'latest.mjs', 'tests.md', 'testing/x.mjs']) assert.equal(RESHAPE_TEST_PATH.test(path), false, path)
 })
+
+// MUTATION: restore the old /(^|\/)test\/|\.test\./ at the reshapeScopeDefect call site; a root test.mjs edit is kept.
+test('reshape that edits a root test.mjs is reverted', () => {
+  const root = CTX.checkout + '/test.mjs'
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[root] = "test('weakened', () => {})\n" },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0test.mjs\0' : 'test.mjs\0',
+  })
+  assert.equal(why, 'test-edited')
+  assert.equal(files[root], undefined)
+})

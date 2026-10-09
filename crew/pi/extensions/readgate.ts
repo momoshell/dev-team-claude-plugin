@@ -140,6 +140,36 @@ function capReadText(text, maxBytes, start, path) {
   return { text: prefix + notice, wholeLines }
 }
 
+function capCodemodeText(text, maxBytes, path) {
+  const totalBytes = Buffer.byteLength(text, 'utf8')
+  if (totalBytes <= maxBytes) return undefined
+  const lines = text.match(/[^\n]*\n|[^\n]+$/g) || []
+  const totalLines = countTextLines(text)
+  const headBudget = Math.floor(maxBytes / 2)
+  const tailBudget = maxBytes - headBudget
+  let headCount = 0, headBytes = 0, tailCount = 0, tailBytes = 0
+  for (const line of lines) {
+    const size = Buffer.byteLength(line, 'utf8')
+    if (headBytes + size > headBudget) break
+    headBytes += size; headCount += 1
+  }
+  for (let i = lines.length - 1; i >= headCount; i -= 1) {
+    const size = Buffer.byteLength(lines[i], 'utf8')
+    if (tailBytes + size > tailBudget) break
+    tailBytes += size; tailCount += 1
+  }
+  const gapStart = headCount + 1
+  const headText = lines.slice(0, headCount).join('')
+  const tailText = tailCount ? lines.slice(-tailCount).join('') : ''
+  const ranges = []
+  if (headCount) ranges.push({ start: 1, end: headCount })
+  if (tailCount) ranges.push({ start: totalLines - tailCount + 1, end: totalLines })
+  const span = (start, end) => start <= end ? `${start}-${end}` : 'none'
+  const gapLength = totalLines - headCount - tailCount
+  const notice = `\n\n[codemode read gate: ${String(path)}; total ${totalLines} lines, ${totalBytes} UTF-8 bytes; delivered head ${span(1, headCount)}, tail ${span(totalLines - tailCount + 1, tailCount ? totalLines : 0)}; cap ${maxBytes}. Continue with read { path: ${JSON.stringify(String(path))}, offset: ${gapStart}, limit: ${gapLength} } or targeted grep.]`
+  return { text: headText + tailText + notice, ranges }
+}
+
 function hasRange(input) {
   return Boolean(input && typeof input === 'object' && (own(input, 'offset') || own(input, 'limit')))
 }
@@ -597,6 +627,25 @@ export function createReadGate(options = {}) {
     return undefined
   }
 
+  function rewriteCodemodeSpill(event, ctx) {
+    try {
+      const spill = event?.details?.fullOutputPath
+      if (typeof spill !== 'string' || !spill || event.content?.[0]?.type !== 'text') return undefined
+      const resolved = resolveFile(ctx?.cwd || cwdDefault, spill)
+      const raw = readFileSync(resolved)
+      const text = raw.toString('utf8')
+      const preview = capCodemodeText(text, parseMaxBytes(env[MAX_BYTES_ENV]), spill)
+      if (!preview) return undefined
+      const snapshot = validSnapshot(snapshotFile(resolved))
+      const fingerprint = createHash('sha256').update(raw).digest('hex')
+      if (snapshot.fingerprint !== fingerprint) return undefined
+      try { for (const range of preview.ranges) rememberDelivery(resolved, snapshot.fingerprint, { ...range, turn: currentTurn }) }
+      catch (error) { recordTrackerFailure(error, event) }
+      const content = [event.content[0], { type: 'text', text: preview.text }, ...event.content.slice(1).filter(part => part?.type !== 'text')]
+      return { content }
+    } catch (error) { recordTrackerFailure(error, event); return undefined }
+  }
+
   function onToolResult(event, ctx) {
     try {
       if (event?.toolName === 'codemode' && !event?.parentToolCallId) {
@@ -623,9 +672,11 @@ export function createReadGate(options = {}) {
             if (refusalIds.has(call.id)) failures.push({ name: call.name, status: 'refused by read gate' })
             else if (failed.includes(call)) failures.push({ name: call.name, status: call.status })
           }
-          if (failures.length === 0) return undefined
+          const preview = rewriteCodemodeSpill(event, ctx)
+          const parts = preview?.content ?? event.content
+          if (failures.length === 0) return preview ? { content: parts, ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) } : undefined
           const names = failures.map(({ name, status }) => `${name} (${status})`).join(', ')
-          return { content: [{ type: 'text', text: `[crew] ${failures.length} of ${calls.length} inner calls did not succeed: ${names}` }, ...event.content], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
+          return { content: [{ type: 'text', text: `[crew] ${failures.length} of ${calls.length} inner calls did not succeed: ${names}` }, ...parts], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
         } catch (error) { return recordTrackerFailure(error, event) }
         finally { for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) softRefusals.delete(id) }
       }

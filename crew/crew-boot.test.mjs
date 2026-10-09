@@ -2095,7 +2095,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 4387, lead: 9099, planner: 16790, reviewer: 7522, 'tech-lead': 6295 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 4387, lead: 9099, planner: 16848, reviewer: 7522, 'tech-lead': 6295 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
@@ -2104,10 +2104,10 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.ok(delta > 0)
   for (const role of roles) {
     const base = CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role]
-    assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + delta : base)
+    assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + (role === 'planner' ? 2 * delta : delta) : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49035)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49093)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 
@@ -2126,22 +2126,32 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   }
 })
 
-test('composed charters resolve the three authored guideline references to absolute plugin paths', () => {
+test('composed charters resolve authored guideline references to absolute plugin paths', () => {
   // Built from parts so the census sees no new static path literal here.
   const checklistBase = 'seat-pre-return-checklist.md'
   const flagBase = 'review-do-not-flag.md'
+  const vitestBase = 'vitest-gates.md'
   const checklistRel = join('crew', 'guidelines', checklistBase)
   const flagRel = join('crew', 'guidelines', flagBase)
+  const vitestRel = join('crew', 'guidelines', vitestBase)
   const names = ['_shared', 'builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const sources = Object.fromEntries(names.map((name) => [name, readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8')]))
   const guidedRoles = ['builder', 'planner', 'reviewer']
   const countIn = (text, needle) => text.split(needle).length - 1
   let authored = 0
-  for (const name of names) authored += countIn(sources[name], checklistRel) + countIn(sources[name], flagRel)
-  assert.equal(authored, 3)
+  for (const name of names) authored += countIn(sources[name], checklistRel) + countIn(sources[name], flagRel) + countIn(sources[name], vitestRel)
+  assert.equal(authored, 4)
   assert.equal(countIn(sources.builder, checklistRel), 1)
   assert.equal(countIn(sources.planner, checklistRel), 1)
   assert.equal(countIn(sources.reviewer, flagRel), 1)
+  assert.equal(countIn(sources.planner, vitestRel), 1)
+  const vitestDoc = readFileSync(join(ROOT, vitestRel), 'utf8')
+  assert.ok(vitestDoc.includes('vitestTitlePattern'))
+  assert.ok(vitestDoc.includes('vitestSummaryPassed'))
+  assert.ok(vitestDoc.includes('absolute file URL'))
+  assert.ok(vitestDoc.includes('same directory'))
+  assert.ok(vitestDoc.includes('pathToFileURL(join(dirname(guidelinePath), \'gate-kit.mjs\')).href'))
+  assert.ok(vitestDoc.includes('dynamically import both helpers'))
   const builderInstruction = `Self-apply \`${checklistRel}\` items \`B1\`-\`B3\`, restated below; do not open it.`
   const plannerInstruction = `\`${checklistRel}\` and self-apply its planner items\n\`P1\`-\`P3\` before you write the envelope.`
   const reviewerInstruction = `Before writing findings, load the do-not-flag guidelines\n(\`${flagRel}\`) with`
@@ -2161,10 +2171,26 @@ test('composed charters resolve the three authored guideline references to absol
     assert.equal(readFileSync(found, 'utf8'), readFileSync(join(ROOT, rel), 'utf8'))
     assert.ok(isAbsolute(found))
   }
+  const vitestPath = join(ROOT, vitestRel)
+  const composedPlanner = composeRolePrompt(sources._shared, sources.planner)
+  const foundVitestPath = composedPlanner.match(/`([^`]*vitest-gates\.md)`/)?.[1] ?? ''
+  assert.equal(foundVitestPath, vitestPath)
   const prefix = join('crew', 'guidelines')
   for (const role of ['lead', 'tech-lead']) {
     assert.equal(composeRolePrompt(sources._shared, sources[role]).includes(prefix), false)
   }
+})
+
+// Mutation: throw the red-run finding instead of returning it.
+test('RV1-1 guideline gate body adjudicates red runs without throwing', () => {
+  const guideline = readFileSync(join(ROOT, 'crew', 'guidelines', 'vitest-gates.md'), 'utf8')
+  const body = guideline.match(/A minimal executable gate-check body returns a finding string when red:\n\n```js\n([\s\S]+?)\n```/)
+  assert.notEqual(body, null)
+  const run = new Function('spawnSync', 'vitestTitlePattern', 'vitestSummaryPassed', 'testFile', 'title', body[1])
+  const red = run(() => ({ error: null, status: 1, stdout: '', stderr: 'expected red' }), () => '^target$', () => true, 'target.test.mjs', 'target')
+  assert.equal(red, 'vitest gate failed for target.test.mjs: expected red')
+  const green = run(() => ({ error: null, status: 0, stdout: 'Tests  1 passed (1)', stderr: '' }), () => '^target$', () => true, 'target.test.mjs', 'target')
+  assert.equal(green, null)
 })
 
 test('BH1', () => {

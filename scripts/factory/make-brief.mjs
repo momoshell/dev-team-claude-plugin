@@ -1125,11 +1125,16 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
       encoding: 'utf8',
       env: colourNeutralEnv(),
       timeout: BASELINE_TIMEOUT_MS,
+      // The suite's spec output passed Node's 1 MiB default on 2026-10-06; ENOBUFS made every
+      // baseline unknown and every dispatch run the suite twice.
+      maxBuffer: 64 * 1024 * 1024,
     })
   } catch {
     return unknownBaseline(selectedLane, 'spawn-error', basis)
   }
   if (!result || result.error) {
+    // ENOBUFS also kills the child with SIGTERM, so it is classified before the signal.
+    if (result?.error?.code === 'ENOBUFS') return unknownBaseline(selectedLane, 'output-overflow', basis)
     const timeout = result && (result.signal === 'SIGTERM' || result.error?.code === 'ETIMEDOUT')
     return unknownBaseline(selectedLane, timeout ? 'timeout' : 'spawn-error', basis)
   }

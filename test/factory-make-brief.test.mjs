@@ -18,7 +18,7 @@ import {
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
-  canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere, issueBindingFor,
+  canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere, issueBindingFor, gatherBaseline,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS, parseProposalBrief } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo, profileProtectedPaths } from '../scripts/factory/probe-repo.mjs'
@@ -4055,3 +4055,21 @@ test('CW6 packed warnings stay beside the pointer and valid idioms stay in the s
   assert.ok(sidecar.indexOf('idiom packed: sidecar') > sidecar.indexOf('conventions of record'))
 })
 
+
+// MUTATION: drop gatherBaseline's maxBuffer; a suite printing over 1 MiB reads as unknown and
+// every dispatch re-runs it (2026-10-06 regression).
+test('gatherBaseline measures a suite whose output exceeds 1 MiB', () => {
+  const lane = `node -e "process.stdout.write('x'.repeat(2 * 1024 * 1024) + '\\nℹ pass 3\\nℹ fail 0\\n')"`
+  const baseline = gatherBaseline({ checkout: ROOT, lane })
+  assert.equal(baseline.status, 'green')
+  assert.equal(baseline.pass, 3)
+  assert.equal(baseline.fail, 0)
+})
+
+// MUTATION: classify the signal before ENOBUFS; output past the 64 MiB cap reads as a timeout.
+test('gatherBaseline names output past its buffer as output-overflow, not timeout', () => {
+  const lane = `node -e "process.stdout.write('x'.repeat(65 * 1024 * 1024))"`
+  const baseline = gatherBaseline({ checkout: ROOT, lane })
+  assert.equal(baseline.status, 'unknown')
+  assert.equal(baseline.reason, 'output-overflow')
+})

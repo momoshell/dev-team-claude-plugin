@@ -12,7 +12,7 @@ Run the acceptance gate and the test files you are changing — never the full s
 - Batch independent reads and edits into one turn. Run the gate at most once before returning; never rerun a command without an intervening edit.
 - Use cited ranges; read outside them only when an edit fails to bind or test names another line.
 - Output the code, then at most three lines of `skipped X, add when Y`.
-- Read plan.md fully before the first edit. If it is ambiguous or wrong, do NOT improvise: implement what is unambiguous; if a gap blocks you, return `insufficient`. Return all blocking gaps in one `details.questions` array.
+- Your brief carries the plan or your step's section; open plan.md only if the brief says it is not included. If it is ambiguous or wrong, do NOT improvise: implement what is unambiguous; if a gap blocks you, return `insufficient`. Return all blocking gaps in one `details.questions` array.
 - Touch only files the plan names (plus a version bump when the plan says so). The driver records an ORDINARY out-of-context write and proceeds. Three things still refuse: a `returns/*.json` envelope left in the checkout, an unresolved mutation anchor, and a malformed scope path (glob, absolute root, `.`/`..` segment). Stay inside the plan anyway: a file the plan never named is a file its acceptance never covered.
 - Match surrounding code style. Comments only for constraints the code cannot show.
 - Match exemplars' signature style, parameter types and names, and logging placement; otherwise record why in details.exemplar_deviations.
@@ -44,7 +44,7 @@ A refused correction or an absent anchor with none escalates `anchor-absent`; an
 
 ## Before you return (pre-return checklist)
 
-Read `crew/guidelines/seat-pre-return-checklist.md` and self-apply its builder items `B1`-`B3`.
+Self-apply `crew/guidelines/seat-pre-return-checklist.md` items `B1`-`B3`, restated below; do not open it.
 - **B1** — every new read, spawn, probe, or parse answers EPERM, unknown, interrupted, and empty; if impossible, explain why in your summary.
 - **B2** — nothing recorded is stronger than measured: downgrade unobserved statuses/counts; unknown is not failed and interrupted is not a result.
 - **B3** — the plan lane reran after the last edit and ran green; report its final pass/fail counts in details and summary.

@@ -10919,3 +10919,55 @@ const record = fixture.io.calls.logs.find((entry) => entry.event === 'plan-exemp
 assert.deepEqual(record?.plan_exemplars, { round: 1, exemplar_count: 3, exemplars_none: null }, label)
 }
 })
+
+// MUTATION BR1: replace the fresh handoff plan spread with its original path-only entry.
+test('BR1 fresh builder handoff includes the complete plan verbatim', () => {
+  const io = builderBounceFixture()
+  const plan = '# Distinctive plan — α'
+  const readFile = io.readFile
+  io.readFile = path => path.includes('plan') ? plan : readFile(path)
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const handoff = io.calls.writes[second.briefFile]
+  assert.ok(handoff.includes(`--- PLAN BEGINS ---\n${plan}\n--- PLAN ENDS ---`))
+  assert.match(handoff, /^Plan: .* — included in full below; do not read it\.$/m)
+  assert.match(handoff, /Read the current builder brief at .*build-bounce-r1\.md\./)
+  assert.ok(handoff.includes('builder-wip-2.diff'))
+  assert.ok(handoff.includes('Untracked files'))
+})
+
+// MUTATION BR2: neutralise the exemplar plan-equality notice.
+test('BR2 exemplar wrapper identifies its inlined plan and does not reread it', () => {
+  const fixture = steppedAcceptanceIo({ omitChunks: true })
+  const planPath = fixture.plan.details.plan_path
+  const plan = '# Distinctive plan — α'
+  const readFile = fixture.io.readFile
+  fixture.io.readFile = path => path.includes('plan') ? plan : readFile(path)
+  fixture.plan.details.exemplars = [{ function: 'alpha', exemplars: [{ path: 'a.mjs', start: 1, end: 1 }] }]
+  delete fixture.plan.details.exemplars_none
+  driveTask(CTX, fixture.io)
+  const first = fixture.io.calls.assign.find(({ role }) => role === 'builder')
+  const brief = fixture.io.calls.writes[first.briefFile]
+  assert.ok(brief.includes(`--- PLAN BEGINS ---\n${plan}\n--- PLAN ENDS ---`))
+  assert.ok(brief.includes(`Plan: ${planPath} — included in full below; do not read it.`))
+  assert.ok(brief.includes(`Read the current builder brief at ${planPath}. — it is the plan, included below`))
+})
+
+// MUTATION BR3: change the oversize comparison from > to >=.
+test('BR3 builder plan formatter measures exact UTF-8 byte boundaries', async () => {
+  const { builderPlanLines, BUILDER_PLAN_INLINE_BYTE_LIMIT } = await import('./drive.mjs')
+  const path = '/tmp/plan.md'
+  const inline = value => [`Plan: ${path} — included in full below; do not read it.`, '--- PLAN BEGINS ---', value, '--- PLAN ENDS ---']
+  const fallback = value => [`Plan: ${path} — not included (${value}); read it.`]
+  const cases = [
+    [null, fallback('unreadable')], [undefined, fallback('unreadable')], [42, fallback('unreadable')],
+    [Buffer.from('x'), fallback('unreadable')], ['', fallback('empty')],
+    ['x'.repeat(32769), fallback('1 bytes over the 32768-byte cap')],
+    ['é'.repeat(16385), fallback('2 bytes over the 32768-byte cap')],
+    ['x'.repeat(32768), inline('x'.repeat(32768))],
+    ['é'.repeat(16384), inline('é'.repeat(16384))], ['   ', inline('   ')],
+  ]
+  assert.deepEqual({ limit: BUILDER_PLAN_INLINE_BYTE_LIMIT, outputs: cases.map(([value]) => builderPlanLines(path, value)) },
+    { limit: 32768, outputs: cases.map(([, expected]) => expected) })
+})

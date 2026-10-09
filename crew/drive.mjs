@@ -10519,8 +10519,8 @@ function runTask(ctx, io, crash) {
       if (Array.isArray(planEnv.details?.exemplars) && planEnv.details.exemplars.length > 0) {
         const exemplarPath = art('builder-exemplars.md')
         const contents = [
-          `Read the current builder brief at ${briefPath}.`,
-          `Plan: ${planPath}`,
+          `Read the current builder brief at ${briefPath}.${briefPath === planPath ? ' — it is the plan, included below' : ''}`,
+          ...builderPlanLines(planPath, readOrNull(planPath)),
           '',
           ...builderExemplarLines(planEnv.details.exemplars),
         ].join('\n')
@@ -10554,8 +10554,8 @@ function runTask(ctx, io, crash) {
     io.writeFile(diffPath, diff.output)
     io.writeFile(handoffPath, [
       '# Fresh builder handoff', '',
-      `Read the current builder brief at ${wrappedPath}.`,
-      `Plan: ${planPath}`, '',
+      `Read the current builder brief at ${wrappedPath}.${wrappedPath === planPath ? ' — it is the plan, included below' : ''}`,
+      ...builderPlanLines(planPath, readOrNull(planPath)), '',
       'Diff stat:', '', stat.output, '',
       `Changes already in the working tree (reference only — already applied, do not apply): ${diffPath}`,
       '', 'Untracked files (new files are not in the diff above; read them in the tree):', '', untracked.output || '(none)',
@@ -16528,3 +16528,14 @@ export function acceptanceCoverageBounceLines(round, coverage, briefFile) {
 }
 // Every file node --test discovers by default, plus any path under a test/ directory.
 export const RESHAPE_TEST_PATH = /(^|\/)(test\/|test\.[cm]?js$|test-[^/]*\.[cm]?js$|[^/]*[._-]test\.[cm]?js$)|\.test\./
+
+export const BUILDER_PLAN_INLINE_BYTE_LIMIT = 32 * 1024
+
+export function builderPlanLines(planPath, planText) {
+  const prefix = `Plan: ${planPath}`
+  if (typeof planText !== 'string') return [`${prefix} — not included (unreadable); read it.`]
+  const bytes = Buffer.byteLength(planText, 'utf8')
+  if (bytes === 0) return [`${prefix} — not included (empty); read it.`]
+  if (bytes > BUILDER_PLAN_INLINE_BYTE_LIMIT) return [`${prefix} — not included (${bytes - BUILDER_PLAN_INLINE_BYTE_LIMIT} bytes over the ${BUILDER_PLAN_INLINE_BYTE_LIMIT}-byte cap); read it.`]
+  return [`${prefix} — included in full below; do not read it.`, '--- PLAN BEGINS ---', planText, '--- PLAN ENDS ---']
+}

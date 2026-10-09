@@ -3031,7 +3031,7 @@ function renderWriteSurface(writeSurface, discovery, tripwiresOmitted = false) {
   ].join('\n')
 }
 
-function renderConventions(profileConventions) {
+function renderConventionFiles(profileConventions) {
   if (!profileConventions) {
     return 'conventions of record: (not available) — basis: no profile consulted'
   }
@@ -3043,6 +3043,54 @@ function renderConventions(profileConventions) {
     return `conventions of record: (not available) — basis: ${profileConventions.basis} (value.files must be an array of strings)`
   }
   return `conventions of record (basis: ${profileConventions.basis}): ${files.length ? files.join(', ') : '(none)'}`
+}
+
+export const CONVENTIONS_IDIOM_LIMIT = 12
+export const CONVENTIONS_IDIOM_BYTE_LIMIT = 4096
+
+function renderIdioms(idioms) {
+  if (idioms.length === 0) return ''
+  const oneLine = (value) => value.replace(/[\r\n]/g, ' ')
+  const format = (entry, index) => {
+    let reason = null
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) reason = 'entry must be an object'
+    else if (typeof entry.class !== 'string' || !entry.class.trim()) reason = 'class must be a non-empty string'
+    else if (typeof entry.rule !== 'string' || !entry.rule.trim()) reason = 'rule must be a non-empty string'
+    else if (!Array.isArray(entry.exemplars)) reason = 'exemplars must be an array'
+    else for (let i = 0; i < entry.exemplars.length; i++) {
+      const ex = entry.exemplars[i]
+      if (ex === null || typeof ex !== 'object' || Array.isArray(ex)) { reason = `exemplars[${i}] must be an object`; break }
+      if (typeof ex.path !== 'string') { reason = `exemplars[${i}].path must be a string`; break }
+      if (!Number.isInteger(ex.start) || !Number.isInteger(ex.end) || ex.start <= 0 || ex.start > ex.end) { reason = `exemplars[${i}].start/end must be integers with 0 < start <= end`; break }
+    }
+    if (reason) return `idiom [${index}]: malformed (${reason})`
+    const examples = entry.exemplars.slice(0, 3).map((exemplar) => `${oneLine(exemplar.path)}:${exemplar.start}-${exemplar.end}`)
+    return `idiom ${oneLine(entry.class)}: ${oneLine(entry.rule)}${examples.length ? ` — exemplars: ${examples.join(', ')}` : ''}${entry.exemplars.length > 3 ? ` (+${entry.exemplars.length - 3} more)` : ''}`
+  }
+  const lines = []
+  let stopped = false
+  for (let i = 0; i < idioms.length && i < CONVENTIONS_IDIOM_LIMIT; i++) {
+    const line = format(idioms[i], i)
+    const remains = i + 1 < idioms.length || idioms.length > CONVENTIONS_IDIOM_LIMIT
+    const candidateBlock = [...lines, line, ...(remains ? [`idioms truncated: ${lines.length + 1} of ${idioms.length} rendered (cap 12 idioms / 4096 bytes)`] : [])].join('\n')
+    if (Buffer.byteLength(candidateBlock, 'utf8') > CONVENTIONS_IDIOM_BYTE_LIMIT) { stopped = true; break }
+    lines.push(line)
+  }
+  if (stopped || idioms.length > CONVENTIONS_IDIOM_LIMIT) lines.push(`idioms truncated: ${lines.length} of ${idioms.length} rendered (cap 12 idioms / 4096 bytes)`)
+  return lines.join('\n')
+}
+
+function renderConventions(profileConventions) {
+  const record = renderConventionFiles(profileConventions)
+  const idioms = profileConventions?.used && Array.isArray(profileConventions.value?.idioms) ? renderIdioms(profileConventions.value.idioms) : ''
+  return idioms ? `${record}\n${idioms}` : record
+}
+
+function renderConventionsWarning(profileConventions) {
+  if (profileConventions?.used && Array.isArray(profileConventions.value?.idioms)) return null
+  let basis = profileConventions ? profileConventions.basis : 'no profile consulted'
+  if (profileConventions?.used) basis += ' (value.idioms must be an array)'
+  return `CONVENTIONS WARNING: no ratified idioms — basis: ${basis}; ratify conventions.idioms in the profile`
 }
 
 const NO_ISSUE_CITED = 'no-issue-cited'
@@ -3482,6 +3530,7 @@ function renderBriefSections(gathered) {
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const tierLines = pack == null ? [renderProposedTier(proposal)] : [`proposal rationale: ${pack.proposal} — read it once with: cat ${pack.proposal}`, ...renderProposedTier(proposal).split('\n').filter((line) => line.startsWith(MISCLASSIFIED_PREFIX))]
+  const conventionsWarning = renderConventionsWarning(profile?.conventions)
   const sections = [
     briefSection('task', null, ['# Task']),
     ...(pack?.issue?.number == null ? [] : [briefSection('bound issue', null, [`<!-- crew:bound-issue #${pack.issue.number} -->`])]),
@@ -3504,6 +3553,7 @@ function renderBriefSections(gathered) {
     briefSection('conventions', null, [
       '## Conventions',
       renderConventionsSlot(writeSurface, pack),
+      ...(conventionsWarning ? [conventionsWarning] : []),
       ...(pack == null ? [
         renderConventions(profile?.conventions),
         generatedGrep(discovery),

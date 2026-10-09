@@ -7417,6 +7417,8 @@ test('recordBaselineCache never caches an unmeasured baseline', () => {
     write(null, null)
     assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), null)
     assert.equal(fsExistsSync(join(baselineCacheRoot(deps), 'abc.json')), false)
+    writeFileSync(measured, JSON.stringify({ sha: 'abc', command: 'npm test', pass: 3, fail: 0, status: 'unknown', reason: 'nonzero-exit' }))
+    assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), null)
     write(7, 0)
     assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), join(baselineCacheRoot(deps), 'abc.json'))
   } finally { rmSync(home, { recursive: true, force: true }) }

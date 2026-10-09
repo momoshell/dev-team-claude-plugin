@@ -4065,3 +4065,11 @@ test('gatherBaseline measures a suite whose output exceeds 1 MiB', () => {
   assert.equal(baseline.pass, 3)
   assert.equal(baseline.fail, 0)
 })
+
+// MUTATION: classify the signal before ENOBUFS; output past the 64 MiB cap reads as a timeout.
+test('gatherBaseline names output past its buffer as output-overflow, not timeout', () => {
+  const lane = `node -e "process.stdout.write('x'.repeat(65 * 1024 * 1024))"`
+  const baseline = gatherBaseline({ checkout: ROOT, lane })
+  assert.equal(baseline.status, 'unknown')
+  assert.equal(baseline.reason, 'output-overflow')
+})

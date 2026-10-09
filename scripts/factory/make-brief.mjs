@@ -1133,8 +1133,10 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
     return unknownBaseline(selectedLane, 'spawn-error', basis)
   }
   if (!result || result.error) {
+    // ENOBUFS also kills the child with SIGTERM, so it is classified before the signal.
+    if (result?.error?.code === 'ENOBUFS') return unknownBaseline(selectedLane, 'output-overflow', basis)
     const timeout = result && (result.signal === 'SIGTERM' || result.error?.code === 'ETIMEDOUT')
-    return unknownBaseline(selectedLane, timeout ? 'timeout' : result?.error?.code === 'ENOBUFS' ? 'output-overflow' : 'spawn-error', basis)
+    return unknownBaseline(selectedLane, timeout ? 'timeout' : 'spawn-error', basis)
   }
   if (result.signal) return unknownBaseline(selectedLane, 'timeout', basis)
 

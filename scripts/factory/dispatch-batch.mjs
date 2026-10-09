@@ -3025,7 +3025,7 @@ export function recordBaselineCache({ measured, sha, deps } = {}) {
   try { record = JSON.parse(textOf(d.readFileSync(measured, 'utf8'))) } catch { return null }
   if (!record || record.sha !== sha || typeof record.command !== 'string' || !record.command.trim()) return null
   // An unmeasured baseline is never cached: make-brief refuses it as malformed and re-measures.
-  if (!Number.isInteger(record.pass) || !Number.isInteger(record.fail)) return null
+  if (!Number.isInteger(record.pass) || !Number.isInteger(record.fail) || record.status === 'unknown') return null
   const path = baselineCachePath({ sha, deps: d })
   try {
     mkdirSync(dirname(path), { recursive: true })

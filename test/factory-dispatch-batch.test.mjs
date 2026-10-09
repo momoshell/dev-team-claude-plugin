@@ -17,6 +17,7 @@ import {
   WARNING_ROWS_UNPERSISTED_PREFIX,
   baseContains,
   baselineCacheRoot,
+  recordBaselineCache,
   batchSeatsFrom,
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
@@ -7403,4 +7404,20 @@ test('PC8', async () => {
   const empty = await dispatchFixture({ label: 'pc-8-empty', names: ['lane-a'] })
   const emptyRow = empty.appended.flatMap(x => x.content.split('\n').filter(Boolean).map(JSON.parse)).find(x => x.event === 'pi-codemode')
   assert.deepEqual(emptyRow.codemode_seats, [])
+})
+
+// MUTATION: drop the integer check in recordBaselineCache; an unknown baseline is cached and
+// every later dispatch on that sha hands make-brief a record it refuses.
+test('recordBaselineCache never caches an unmeasured baseline', () => {
+  const home = scratchDir('baseline-cache-')
+  try {
+    const deps = { home, env: {} }
+    const measured = join(home, 'measured.json')
+    const write = (pass, fail) => writeFileSync(measured, JSON.stringify({ sha: 'abc', command: 'npm test', pass, fail, status: pass === null ? 'unknown' : 'green' }))
+    write(null, null)
+    assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), null)
+    assert.equal(fsExistsSync(join(baselineCacheRoot(deps), 'abc.json')), false)
+    write(7, 0)
+    assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), join(baselineCacheRoot(deps), 'abc.json'))
+  } finally { rmSync(home, { recursive: true, force: true }) }
 })

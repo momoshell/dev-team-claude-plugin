@@ -261,6 +261,11 @@
           "callee": "recordGateProof",
           "label": "gate-proof:${gateGeneration}",
           "occurrence": 2
+        },
+        {
+          "callee": "recordGateProof",
+          "label": "gate-proof:${gateGeneration}",
+          "occurrence": 3
         }
       ]
     }

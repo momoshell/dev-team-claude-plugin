@@ -2,6 +2,7 @@
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
+import { seatWaitCeilingMs } from '../scripts/factory/lane-watch.mjs'
 import assert from 'node:assert/strict'
 import {
   B318_GATED_RUNS, B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, ACCEPT_FINDINGS_SOFT, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
@@ -160,6 +161,130 @@ test('an absent wait budget resolves to the recorded WAITS_S value', () => {
   assert.equal(res.status, 'escalation')
   assert.match(res.details.escalation.why, /planner: no valid envelope .* within 1800s/)
   assert.equal(io.calls.waits[0].timeoutS, WAITS_S.planner)
+})
+
+const builderWaitRun = (requested, waits = undefined) => {
+  const acceptedPlan = planEnv({ details: { ...planEnv().details, builder_wait_s: requested } })
+  const io = fakeIo({
+    now: () => '2026-10-09T00:00:00.000Z',
+    envelopes: { 'planner:1': acceptedPlan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask({ ...CTX, ...(waits ? { waits } : {}) }, io)
+  return { io, waits: io.calls.waits.filter((call) => call.returnPath.startsWith('builder:')).map((call) => call.timeoutS), rows: io.calls.logs.filter((row) => row.event === 'waits') }
+}
+
+// MUTATION BW1: do not apply the accepted plan's wait to builder dispatch.
+test('BW1', () => assert.deepEqual(builderWaitRun(4800).waits, [4800]))
+// MUTATION BW2: report the accepted plan's increase as an operator flag.
+test('BW2', () => {
+  const { rows } = builderWaitRun(4800)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].channel, 'record')
+  assert.equal(rows[0].builder, 4800)
+  assert.equal(rows[0].source.builder, 'plan')
+})
+// MUTATION BW3: let a shorter plan request lower an explicit operator budget.
+test('BW3', () => {
+  const { waits, rows } = builderWaitRun(4800, { builder: 9000 })
+  assert.deepEqual(waits, [9000])
+  assert.equal(rows[0].source.builder, 'flag')
+})
+// MUTATION BW4: remove the builder wait ceiling.
+test('BW4', () => assert.deepEqual(builderWaitRun(50000).waits, [21600]))
+// MUTATION BW5: label a default-dominated request as plan-sourced.
+test('BW5', () => {
+  const { waits, rows } = builderWaitRun(100)
+  assert.deepEqual(waits, [2400])
+  assert.equal(rows[0].source.builder, 'default')
+  assert.deepEqual(rows[0].requested, { builder: 100 })
+})
+// MUTATION BW6: flatten the raw request into the effective table.
+test('BW6', () => {
+  for (const [request, expected, ceiling] of [[4800, 4800, 18000000], [50000, 21600, 21600000]]) {
+    const { rows } = builderWaitRun(request, { planner: 18000, reviewer: 12000 })
+    assert.equal(rows.length, 1)
+    const row = rows[0]
+    assert.deepEqual(WAIT_ROLES.map((role) => row[role]), [18000, 1500, expected, 12000, 900])
+    assert.deepEqual(row.source, { planner: 'flag', 'tech-lead': 'default', builder: 'plan', reviewer: 'flag', lead: 'default' })
+    assert.deepEqual(Object.entries(row).filter(([, value]) => typeof value === 'number').map(([key]) => key).sort(), [...WAIT_ROLES].sort())
+    assert.deepEqual(row.requested, { builder: request })
+    assert.equal(seatWaitCeilingMs({ waits: row }), ceiling)
+  }
+})
+// MUTATION BW7: restore the obsolete --wait-builder instruction.
+test('BW7', () => {
+  const line = readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8').split('\n').find((entry) => entry.startsWith('  `Risks/consults`'))
+  assert.equal(line, '  `Risks/consults`; set `details.builder_wait_s` to ≈ `2400 + N × suite_time`.')
+})
+
+// MUTATION RV1-1: ignore a present request unless it is a valid positive integer.
+test('RV1-1 present invalid requests still emit a complete waits row', () => {
+  for (const raw of [null, '4800', true, 0, -1, 1.5, [], {}]) {
+    const { rows } = builderWaitRun(raw)
+    assert.equal(rows.length, 1, String(raw))
+    assert.deepEqual(rows[0].requested, { builder: raw })
+    assert.deepEqual(WAIT_ROLES.map((role) => rows[0][role]), [1800, 1500, 2400, 1800, 900])
+    assert.deepEqual(Object.keys(rows[0].source).sort(), [...WAIT_ROLES].sort())
+    assert.equal(rows[0].channel, 'record')
+  }
+})
+
+// MUTATION RV1-1: emit a plan waits row even when the field was omitted.
+test('RV1-1 omitted request preserves operator wait without a waits row', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask({ ...CTX, waits: { builder: 9000 } }, io)
+  assert.equal(io.calls.logs.filter((row) => row.event === 'waits').length, 0)
+  assert.deepEqual(io.calls.waits.filter((call) => call.returnPath.startsWith('builder:')).map((call) => call.timeoutS), [9000])
+})
+
+// MUTATION RV1-1: apply a rejected plan's request instead of only the accepted revision.
+test('RV1-1 rejected request is not journaled when an accepted revision replaces it', () => {
+  const first = adversarialPlanEnv({ details: { ...planEnv().details, builder_wait_s: 20000 } })
+  const accepted = planEnv({ details: { ...planEnv().details, builder_wait_s: 6000 } })
+  const io = fakeIo({
+    now: () => '2026-10-09T00:00:00.000Z',
+    envelopes: { 'planner:1': first, 'tech-lead:1': checkEnv('revise'), 'planner:2': accepted, 'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX_TL, io)
+  assert.deepEqual(io.calls.logs.filter((row) => row.event === 'waits').map((row) => row.requested), [{ builder: 6000 }])
+  assert.deepEqual(io.calls.waits.filter((call) => call.returnPath.startsWith('builder:')).map((call) => call.timeoutS), [6000])
+})
+
+// MUTATION RV1-1: journal a wait request before the plan-accept sensitivity floor refuses dispatch.
+test('RV1-1 sensitivity-floor refusal emits no waits row and dispatches no builder', () => {
+  const base = protectedPlanEnv(undefined, 'proved')
+  const refused = planEnv({ details: { ...base.details, builder_wait_s: 6000 } })
+  const io = fakeIo({ envelopes: { 'planner:1': refused } })
+  driveTask(CTX, io)
+  assert.equal(io.calls.logs.filter((row) => row.event === 'waits').length, 0)
+  assert.equal(io.calls.assign.some(({ role }) => role === 'builder'), false)
+})
+
+// MUTATION RV1-1: reset the raised wait between builder assignments after a bounce.
+test('RV1-1 builder bounce retains the raised wait on every builder call', () => {
+  const io = fakeIo({
+    now: () => '2026-10-09T00:00:00.000Z',
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, builder_wait_s: 6000 } }),
+      'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('bounce'),
+      'builder:2': buildEnv(),
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  assert.deepEqual(io.calls.waits.filter((call) => call.returnPath.startsWith('builder:')).map((call) => call.timeoutS), [6000, 6000])
 })
 
 test('a malformed wait budget refuses at the boundary instead of defaulting', () => {

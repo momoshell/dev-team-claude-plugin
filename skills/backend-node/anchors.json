@@ -39,7 +39,7 @@
   "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
-  "crew/drive.mjs:554": "export const DECISIONS = Object.freeze",
   "test/factory-emit.test.mjs:1743": "CLI: emit-cli-unknown-flag-refusal",
-  "scripts/factory/emit.mjs:1614": "function refuseUnknownFlags(verb, flags)"
+  "scripts/factory/emit.mjs:1614": "function refuseUnknownFlags(verb, flags)",
+  "crew/drive.mjs:563": "export const DECISIONS = Object.freeze"
 }

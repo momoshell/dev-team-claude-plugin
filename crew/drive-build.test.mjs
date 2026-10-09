@@ -9982,13 +9982,37 @@ test('FB4 handoff preserves the git diff stat output verbatim', () => {
   assert.ok(io.calls.writes[second.briefFile].includes('Diff stat:\n\nSTAT LINE ONE\nSTAT LINE TWO\n\n'))
 })
 
+// MUTATION HW1: restore `Full diff: ${diffPath}`.
+test('HW1 fresh builder handoff labels the diff as already-applied reference only', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const handoff = io.calls.writes[second.briefFile]
+  assert.match(handoff, /Changes already in the working tree \(reference only — already applied, do not apply\):/)
+  assert.match(handoff, /already applied, do not apply/)
+  assert.doesNotMatch(handoff, /Full diff:/)
+})
+
+// MUTATION HW2: restore `builder-diff-${builderAttempts}.patch`.
+test('HW2 fresh builder handoff names and preserves the working-tree diff artifact', () => {
+  const io = builderBounceFixture()
+  io.freshSession = () => ({ session: 'fresh' })
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const handoff = io.calls.writes[second.briefFile]
+  assert.match(handoff, /Changes already in the working tree \(reference only — already applied, do not apply\): \S*builder-wip-2\.diff/)
+  assert.doesNotMatch(handoff, /\.patch/)
+  assert.equal(io.calls.writes[`${TD}/builder-wip-2.diff`], 'DIFF LINE ONE\nDIFF LINE TWO\n')
+})
+
 // MUTATION FB5: replace the full-diff write with void diffPath.
 test('FB5 handoff full-diff artifact preserves git output verbatim', () => {
   const io = builderBounceFixture()
   io.freshSession = () => ({ session: 'fresh' })
   driveTask(CTX, io)
   const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
-  const fullDiff = /Full diff: (.+)/.exec(io.calls.writes[second.briefFile])
+  const fullDiff = /Changes already in the working tree \(reference only — already applied, do not apply\): (.+)/.exec(io.calls.writes[second.briefFile])
   assert.ok(fullDiff)
   assert.equal(io.calls.writes[fullDiff[1]], 'DIFF LINE ONE\nDIFF LINE TWO\n')
 })
@@ -10053,7 +10077,7 @@ test('fresh builder handoff reports failed and throwing diff probes', () => {
   driveTask(CTX, io)
   const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
   assert.match(io.calls.writes[second.briefFile], /unavailable: boom/)
-  assert.match(io.calls.writes[`${TD}/builder-diff-2.patch`], /^unavailable: kaboom/)
+  assert.match(io.calls.writes[`${TD}/builder-wip-2.diff`], /^unavailable: kaboom/)
 })
 
 

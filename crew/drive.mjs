@@ -10523,7 +10523,7 @@ function runTask(ctx, io, crash) {
     try { io.log(recordRow({ at: io.now(), event: 'builder-session', attempt: builderAttempts, note, outcome, why })) } catch { /* journal diagnostics are not load-bearing */ }
     if (outcome !== 'fresh') return wrappedPath
     const handoffPath = art(`builder-handoff-${builderAttempts}.md`)
-    const diffPath = art(`builder-diff-${builderAttempts}.patch`)
+    const diffPath = art(`builder-wip-${builderAttempts}.diff`)
     const base = shellArg(ctx.head || 'HEAD')
     const probe = (cmd) => {
       try {
@@ -10541,7 +10541,7 @@ function runTask(ctx, io, crash) {
       `Read the current builder brief at ${wrappedPath}.`,
       `Plan: ${planPath}`, '',
       'Diff stat:', '', stat.output, '',
-      `Full diff: ${diffPath}`,
+      `Changes already in the working tree (reference only — already applied, do not apply): ${diffPath}`,
       '', 'Untracked files (new files are not in the diff above; read them in the tree):', '', untracked.output || '(none)',
     ].join('\n'))
     return handoffPath

@@ -55,20 +55,23 @@ function usageError(message) {
 function parseOpening(line) {
   for (const { call, re } of OPENINGS) {
     const m = re.exec(line)
-    if (m && !CONTROL_WORDS.has(m[1])) return { name: m[1], params: m[2] ?? m[3] ?? '', call }
+    if (m && !CONTROL_WORDS.has(m[1])) return { name: m[1], params: m[2] ?? m[3] ?? '', call, bodyAt: call ? 0 : line.lastIndexOf('=>') }
   }
   return null
 }
 
 // Returns the line index where the braces opened on `from` close, and the deepest nesting.
-function closeBraces(rows, from) {
+// Counting starts at column `col` of the first line (an arrow's `=>`, so braces in a TS
+// return type are not body nesting), and a line with no brace yet keeps the search open:
+// `class A` followed by `{` on the next line is one class, not an empty one.
+function closeBraces(rows, from, col = 0) {
   let depth = 0, deepest = 0
   for (let i = from; i < rows.length; i++) {
-    for (const ch of codeOf(rows[i])) {
+    for (const ch of codeOf(rows[i]).slice(i === from ? col : 0)) {
       if (ch === '{') deepest = Math.max(deepest, ++depth)
       else if (ch === '}') depth--
     }
-    if (depth === 0) return { end: i, depth: deepest }
+    if (deepest > 0 && depth === 0) return { end: i, depth: deepest }
   }
   return null
 }
@@ -99,7 +102,7 @@ function findFunctions(rows, { path, side, limited }) {
       continue
     }
     if (!texts[i].includes('{')) { blind(i, opening.name, 'unsupported-opening'); continue }
-    const closed = closeBraces(texts, i)
+    const closed = closeBraces(texts, i, opening.bodyAt)
     if (!closed) { blind(i, opening.name, limited ? 'missing-context' : 'unclosed-braces'); continue }
     const params = parameterNames(opening.params)
     if (params.unsupported.length) blind(i, opening.name, 'unsupported-parameters')

@@ -258,3 +258,18 @@ test('RV3-2 a typed arrow is measured, and an unsupported arrow form is reported
   assert.deepEqual(r.files[0].nesting.map((n) => n.name), ['typed'])
   assert.deepEqual(r.undelimited.map((u) => [u.name, u.reason]), [['generic', 'unsupported-opening']])
 })
+
+test('RV4-1 a class whose brace opens on the next line still owns its methods', () => {
+  // Mutation: closeBraces returns at the first line whose depth is zero, braces seen or not.
+  const a = 'class A\n{\n  run() {\n    return 1\n  }\n}', b = 'class B\n{\n  run() {\n    if (x) {\n      return 2\n    }\n  }\n}'
+  const r = scanDiff({ diff: diff('allman.js', `${a}\n${b}`, `${b}\n${a}`) })
+  assert.equal(r.files[0].functions_scanned, 0)
+})
+
+test('RV4-2 braces in an arrow return type are not body nesting', () => {
+  // Mutation: an arrow's brace count starts at column 0 instead of its =>.
+  const before = 'const make = (): { a: number } => {\n  return build()\n}'
+  const after = 'const make = (): { a: { b: number } } => {\n  return build()\n}'
+  const r = scanDiff({ diff: diff('ret.ts', before, after) })
+  assert.deepEqual(r.files[0].nesting, [{ name: 'make', before: 1, after: 1, delta: 0 }])
+})

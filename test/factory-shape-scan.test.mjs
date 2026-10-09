@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from './helpers.mjs'
 import { spawnSync, execFileSync } from 'node:child_process'
-import { scanDiff, render } from '../scripts/factory/shape-scan.mjs'
+import { scanDiff, scanRange, render } from '../scripts/factory/shape-scan.mjs'
 import { parseMarker } from '../scripts/factory/lean-debt.mjs'
 
 function diff(path, before, after) {
@@ -109,7 +109,7 @@ test('RV1-1 runtime fixture guards one-caller behavior', () => {
   // Mutation: replace if (callSites === 1) with if (false).
   const x=repo(), name='rv11Unique'+process.pid
   try {
-    writeFileSync(join(x.dir,'calls.js'), `${name}();\\n`)
+    writeFileSync(join(x.dir,'calls.js'), `${name}();\n`)
     const result=scanDiff({checkout:x.dir,diff:diff('changed.js','const oldValue = 0;',`function ${name}() { return 1; }`)})
     assert.deepEqual(result.files[0].single_caller,[{name,call_sites:1,one_statement:true}])
   } finally {x.cleanup()}
@@ -119,7 +119,7 @@ test('RV1-2 applies checkout regardless of CLI option order', () => {
   // Mutation: replace checkout=args[++i] with checkout=process.cwd().
   const x=repo(), name='rv12Checkout'+process.pid
   try {
-    writeFileSync(join(x.dir,'base.js'),'const oldValue = 1;\\n')
+    writeFileSync(join(x.dir,'base.js'),'const oldValue = 1;\n')
     x.git('add','.');x.git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','base source')
     writeFileSync(join(x.dir,'base.js'),`function ${name}() { return 1; }\n`)
     writeFileSync(join(x.dir,'calls.js'),`${name}();\n`)
@@ -138,4 +138,84 @@ test('RV1-3 never joins diff hunks and preserves original line positions', () =>
   assert.ok(result.undelimited.some(x=>x.name==='shapeGap'&&x.line===1&&x.side==='head'&&x.reason==='missing-context'))
   const history=scanDiff({diff:'--- a/history.js\n+++ b/history.js\n@@ -120,1 +120,2 @@\n const keep = 1;\n+// RV8-1 must-fix\n'})
   assert.deepEqual(history.files[0].review_history,[{line:121,text:'// RV8-1 must-fix'}])
+})
+
+const commit = (x, message) => { x.git('add', '-A'); x.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', message) }
+
+test('RV1-4 reads quoted and tab-suffixed diff headers and NUL-separated range paths', () => {
+  // Mutation: headerPath stops C-unquoting (drop the startsWith('"') branch).
+  const quoted = scanDiff({ diff: '--- "a/na\\303\\257ve.mjs"\n+++ "b/na\\303\\257ve.mjs"\n@@ -1 +1 @@\n-const a = 0\n+const a = 1\n' })
+  assert.deepEqual(quoted.files.map((f) => f.path), ['naïve.mjs'])
+  const tabbed = scanDiff({ diff: '--- a/my file.mjs\t\n+++ b/my file.mjs\t\n@@ -1 +1 @@\n-const a = 0\n+const a = 1\n' })
+  assert.deepEqual(tabbed.files.map((f) => f.path), ['my file.mjs'])
+  const x = repo()
+  try {
+    writeFileSync(join(x.dir, 'naïve.mjs'), 'const a = 0\n'); commit(x, 'base')
+    writeFileSync(join(x.dir, 'naïve.mjs'), 'const a = 1\n'); commit(x, 'head')
+    assert.deepEqual(scanRange({ range: 'HEAD~1..HEAD', checkout: x.dir }).files.map((f) => f.path), ['naïve.mjs'])
+  } finally { x.cleanup() }
+})
+
+test('RV1-5 every usage error exits 2, distinct from an unreadable input', () => {
+  // Mutation: parseArgs throws a plain Error (no usage flag) for an unknown option.
+  const cli = join(process.cwd(), 'scripts/factory/shape-scan.mjs')
+  for (const args of [['--bogus'], ['--checkout'], ['--diff'], ['--diff', 'a.diff', 'HEAD~1..HEAD'], ['HEAD']]) {
+    const run = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' })
+    assert.equal(run.status, 2, `${args.join(' ')}: ${run.stderr}`)
+    assert.match(run.stderr, /^usage: /)
+  }
+})
+
+test('RV1-6 counts method calls and $-prefixed names, discounting only declarations', () => {
+  // Mutation: the method opening stops counting as a declaration (call: false), so runOnce reads two call sites.
+  const x = repo()
+  try {
+    writeFileSync(join(x.dir, 'calls.js'), 'obj.runOnce(1)\n$helper()\n')
+    const source = 'class A {\n  runOnce(x) {\n    return x\n  }\n}\nfunction $helper() { return 1 }'
+    const r = scanDiff({ checkout: x.dir, diff: diff('changed.js', 'const before = 0', source) })
+    assert.deepEqual(r.files[0].single_caller.map((s) => s.name).sort(), ['$helper', 'runOnce'])
+  } finally { x.cleanup() }
+})
+
+test('RV1-7 reports unsupported openings and parameters instead of dropping them', () => {
+  // Mutation: findFunctions skips the LOOKS_LIKE_FUNCTION report for an unmatched opening.
+  const r = scanDiff({ diff: diff('forms.ts', 'const keep = 0', 'const twice = (x) => x * 2\nfunction pick({ a }) {\n  return a\n}\nfunction note(value: number, label: string) {\n  console.log(label)\n  return value\n}') })
+  assert.deepEqual(r.undelimited.map((u) => [u.name, u.reason]), [['twice', 'unsupported-opening'], ['pick', 'unsupported-parameters']])
+  assert.deepEqual(r.files[0].log_only, [{ function: 'note', parameter: 'label' }])
+})
+
+test('RV1-8 diff-mode callers come from unignored checkout files and absent changed files', () => {
+  // Mutation: checkoutCorpus ignores the git listing and always walks the directory.
+  const x = repo()
+  try {
+    writeFileSync(join(x.dir, '.gitignore'), 'dist/\n')
+    mkdirSync(join(x.dir, 'dist'))
+    writeFileSync(join(x.dir, 'dist', 'bundle.js'), 'onlyCaller()\n')
+    writeFileSync(join(x.dir, 'calls.js'), 'onlyCaller()\n')
+    const ignored = scanDiff({ checkout: x.dir, diff: diff('lib.js', 'const before = 0', 'function onlyCaller() { return 1 }') })
+    assert.deepEqual(ignored.files[0].single_caller.map((s) => s.name), ['onlyCaller'])
+    const absent = scanDiff({ checkout: x.dir, diff: diff('new.js', 'const before = 0', 'function inner() { return 1 }\ninner()') })
+    assert.deepEqual(absent.files[0].single_caller.map((s) => s.name), ['inner'])
+  } finally { x.cleanup() }
+})
+
+test('RV1-9 a skipped path is never read, so an unreadable gitlink does not fail the scan', () => {
+  // Mutation: scanRange reads both blobs before the extension check.
+  const x = repo()
+  try {
+    writeFileSync(join(x.dir, 'a.js'), 'const a = 0\n'); commit(x, 'base')
+    // A gitlink to a commit this repository does not hold: `git show` on it fails.
+    x.git('update-index', '--add', '--cacheinfo', '160000,1234567890abcdef1234567890abcdef12345678,vendored')
+    writeFileSync(join(x.dir, 'a.js'), 'const a = 1\n'); x.git('add', 'a.js')
+    x.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'head')
+    const r = scanRange({ range: 'HEAD~1..HEAD', checkout: x.dir })
+    assert.deepEqual(r.skipped, [{ path: 'vendored', extension: '' }])
+  } finally { x.cleanup() }
+})
+
+test('RV1-10 output order is byte order and CRLF never leaks into reported text', () => {
+  // Mutation: byPath compares with localeCompare.
+  const r = scanDiff({ diff: diff('b.js', 'const a = 0', 'const a = 1') + diff('B.js', 'const a = 0', 'const a = 1') + '--- a/crlf.js\r\n+++ b/crlf.js\r\n@@ -1 +1,2 @@\r\n const a = 0\r\n+// RV3-1 asked for this\r\n' })
+  assert.deepEqual(r.files.map((f) => f.path), ['B.js', 'b.js', 'crlf.js'])
+  assert.deepEqual(r.files[2].review_history, [{ line: 2, text: '// RV3-1 asked for this' }])
 })

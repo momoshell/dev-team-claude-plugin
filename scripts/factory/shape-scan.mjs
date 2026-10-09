@@ -26,17 +26,18 @@ const REVIEW_HISTORY = /RV\d+-\d+|SF\d+|HP\d+|must-fix|should-fix|reviewer|revie
 const COMMENT_LINE = /^\s*(\/\/|\/\*|\*)/
 const LOG_CALL = /(?:console\.|logger\.|\blog\s*\()[^)]*\)/g
 const STRINGS_AND_COMMENTS = /(['"`])(?:\\.|(?!\1)[^\\])*?\1|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g
+const CLASS_OPENING = /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([\w$]+)/
 const CONTROL_WORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'return'])
 
 // Openings this scan can delimit. `call` openings put the name directly before its `(`, so
 // the call-site count must discount the declaration itself; an arrow binding does not.
 const OPENINGS = [
   { call: true, re: /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(([^)]*)\)/ },
-  { call: false, re: /^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|([\w$]+))\s*=>\s*\{/ },
+  { call: false, re: /^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)(?:\s*:[^=]+?)?|([\w$]+))\s*=>\s*\{/ },
   { call: true, re: /^(?:static\s+)?(?:async\s+)?([\w$]+)\s*\(([^)]*)\)\s*\{/ },
 ]
 // A named binding or declaration that matched no opening above is reported, never dropped.
-const LOOKS_LIKE_FUNCTION = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w$]+)\s*=>/
+const LOOKS_LIKE_FUNCTION = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]+)?=\s*(?:async\s+)?(?:<[^>]*>\s*)?(?:\([^)]*\)[^=]*|[\w$]+\s*)=>/
 
 const isScanned = (path) => SCANNED_EXTENSIONS.includes(extname(path))
 const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -78,8 +79,20 @@ function closeBraces(rows, from) {
 function findFunctions(rows, { path, side, limited }) {
   const texts = rows.map(([, text]) => text), functions = [], undelimited = []
   const blind = (i, name, reason) => undelimited.push({ path, name, line: rows[i][0], side, reason })
+  const owners = []   // open classes and functions: { name, end }
+  const ownerKey = (i, name) => {
+    while (owners.length && owners.at(-1).end < i) owners.pop()
+    return [...owners.map((o) => o.name), name].join('.')
+  }
   for (let i = 0; i < texts.length; i++) {
     const code = codeOf(texts[i])
+    const cls = CLASS_OPENING.exec(code)
+    if (cls) {
+      const closed = closeBraces(texts, i)
+      ownerKey(i, cls[1])
+      if (closed) owners.push({ name: cls[1], end: closed.end })
+      continue
+    }
     const opening = parseOpening(code)
     if (!opening) {
       if (LOOKS_LIKE_FUNCTION.test(code)) blind(i, code.match(/([\w$]+)\s*(?:=|\()/)?.[1] ?? null, 'unsupported-opening')
@@ -91,12 +104,14 @@ function findFunctions(rows, { path, side, limited }) {
     const params = parameterNames(opening.params)
     if (params.unsupported.length) blind(i, opening.name, 'unsupported-parameters')
     functions.push({
+      key: ownerKey(i, opening.name),
       name: opening.name,
       params: params.names,
       start: rows[i][0],
       depth: closed.depth,
       body: texts.slice(i, closed.end + 1).join('\n'),
     })
+    owners.push({ name: opening.name, end: closed.end })
   }
   return { functions, undelimited }
 }
@@ -153,12 +168,13 @@ export function callSiteCounter(corpus) {
 }
 
 function measureFile({ path, before, after, reviewHistory }, callSites) {
-  // Identical bodies pair first, so reordering two same-named methods changes nothing;
-  // only then does a remaining function pair with the first unpaired one of its name.
+  // A function pairs only with the first unpaired one of its owner-qualified key, so
+  // `A.run` never pairs with `B.run` and reordering whole classes changes nothing.
   const unpaired = [...before]
-  const take = (match) => { const at = unpaired.findIndex(match); return at < 0 ? null : unpaired.splice(at, 1)[0] }
-  const exact = after.map((fn) => take((b) => b.name === fn.name && b.body === fn.body))
-  const pairs = after.map((fn, i) => [exact[i] ?? take((b) => b.name === fn.name), fn])
+  const pairs = after.map((fn) => {
+    const at = unpaired.findIndex((b) => b.key === fn.key)
+    return [at < 0 ? null : unpaired.splice(at, 1)[0], fn]
+  })
   const added = pairs.filter(([previous]) => !previous).length
   const removed = unpaired.length
   const changed = pairs.filter(([previous, fn]) => !previous || previous.body !== fn.body)

@@ -236,9 +236,25 @@ test('RV2-2 a nested helper and a one-line method are measured, not silently zer
 })
 
 test('RV2-3 reordering two same-named methods reports no change', () => {
-  // Mutation: pairing ignores identical bodies and matches the first function of each name.
+  // Mutation: pairing matches by bare name instead of the owner-qualified key.
   const a = 'class A {\n  run() {\n    return 1\n  }\n}', b = 'class B {\n  run() {\n    if (x) {\n      return 2\n    }\n  }\n}'
   const r = scanDiff({ diff: diff('order.js', `${a}\n${b}`, `${b}\n${a}`) })
   assert.deepEqual(r.files[0].nesting, [])
   assert.equal(r.files[0].functions_scanned, 0)
+})
+
+test('RV3-1 same-named methods of different classes never pair across classes', () => {
+  // Mutation: identical bodies pair across owners before the key match (the pass-2 defect).
+  const a1 = 'class A {\n  run() {\n    return 1\n  }\n}', b1 = 'class B {\n  run() {\n    if (x) {\n      return 2\n    }\n  }\n}'
+  const a2 = a1.replace('return 1', 'if (x) {\n      return 2\n    }'), b2 = b1.replace('if (x) {\n      return 2\n    }', 'return 1')
+  const r = scanDiff({ diff: diff('swap.js', `${a1}\n${b1}`, `${a2}\n${b2}`) })
+  assert.equal(r.files[0].functions_scanned, 2)
+  assert.deepEqual(r.files[0].nesting.map((n) => n.delta).sort(), [-1, 1])
+})
+
+test('RV3-2 a typed arrow is measured, and an unsupported arrow form is reported', () => {
+  // Mutation: the arrow opening stops accepting a return-type annotation.
+  const r = scanDiff({ diff: diff('typed.ts', 'const keep = 0', 'const typed = (x: number): number => {\n  return x\n}\nconst generic = <T>(x: T) => x') })
+  assert.deepEqual(r.files[0].nesting.map((n) => n.name), ['typed'])
+  assert.deepEqual(r.undelimited.map((u) => [u.name, u.reason]), [['generic', 'unsupported-opening']])
 })

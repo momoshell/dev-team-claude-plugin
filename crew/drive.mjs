@@ -12300,7 +12300,7 @@ function runTask(ctx, io, crash) {
         '# Reshape closeout', '', `Whole-change diff: ${art('reshape-before.diff')}`,
         `Shape report: ${art('reshape-before.scan.json')}`,
         'Re-read the whole diff as one change; fold one-line helpers, flatten branches, trim review-history narration, and preserve behaviour and assertions.',
-        `Do not edit ${pinned.length ? pinned.join(', ') : '(none)'}; a reshape that touches a witnessed test file is reverted.`,
+        `Edit only non-test files already in the whole-change diff; do not edit ${pinned.length ? pinned.join(', ') : 'any test file'}. A reshape that edits a test file or any other file, or leaves the validation lane red, is reverted.`,
         'Do not edit the accepted plan or gate.',
       ].join('\n')
       try { io.writeFile(reshapeBriefPath, brief); reshapeAssigned = true; reshapeReason = null } catch { reshapeReason = 'diff-write-failed' }
@@ -12316,10 +12316,24 @@ function runTask(ctx, io, crash) {
           activeChunkSummary: activeChunkState?.summary,
         }
         let reshapeWhy = null
+        const reshapePaths = (from, to) => {
+          const res = io.run(`git -C ${shellArg(ctx.checkout)} diff --name-only -z --no-renames ${shellArg(from)} ${shellArg(to)} --`)
+          return res?.ok === true && typeof res.output === 'string' ? res.output.split('\0').filter(Boolean) : null
+        }
+        // Proofs, hardening and the scope gate ran on the pre-reshape tree: a reshape that edits a
+        // test can drop a proven guard, and one that leaves the lane's file set skips the scope gate.
+        const reshapeScopeDefect = () => {
+          const touched = reshapePaths(reshapeSnapshot.tree, captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }).tree)
+          const laneFiles = reshapePaths(ctx.head, reshapeSnapshot.tree)
+          if (touched === null || laneFiles === null) return 'scope-unmeasured'
+          if (touched.some((path) => /(^|\/)test\/|\.test\./.test(path))) return 'test-edited'
+          if (touched.some((path) => !laneFiles.includes(path))) return 'scope-widened'
+          return null
+        }
         try {
           const env = assignAndWait('builder', reshapeBriefPath, 'reshape')
           if (env?.status !== 'done') reshapeWhy = 'builder-not-done'
-          else {
+          else if ((reshapeWhy = reshapeScopeDefect()) === null) {
             const reshapeGate = runGate('gate:reshape', gateCmd)
             if (!reshapeGate.ok) reshapeWhy = 'gate-red'
             else {
@@ -12330,6 +12344,7 @@ function runTask(ctx, io, crash) {
               if (gateProofFatal || gateDiscrimination !== 'proven') reshapeWhy = 'gate-proof-red'
               else if (checkProofVerdict !== 'proven' || checkProofUnbound.length || (checkProofs || []).some((row) => row.outcome !== 'killed' && row.outcome !== 'exempt')) reshapeWhy = 'check-proof-red'
               else if (verifyPrescriptionPins('accept')) reshapeWhy = 'pinned-test-altered'
+              else if (io.run(lane)?.ok !== true) reshapeWhy = 'lane-red'
               else {
                 captureProofTree(carriedRound)
                 const after = (() => { try { return captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }) } catch { return null } })()

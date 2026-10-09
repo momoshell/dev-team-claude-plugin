@@ -7227,8 +7227,8 @@ test('RV1-1 edge spy runs the gate-owned warning', () => {
   }
 })
 
-// MUTATION: drop verifyPrescriptionPins('accept') from the reshape green path; the pinned edit commits and no pinned-test-altered row is written.
-test('reshape rolls back an altered witnessed test after fresh proof', () => {
+// A two-fix-round lane whose reshape builder runs onReshape(files); nameOnly(cmd) answers git diff --name-only.
+function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false }) {
   let io
   const extra = {
     plan: { files_in_scope: PIN_SCOPE, gate_cmd: 'gate-cmd', gate_path: TD + '/gate.mjs',
@@ -7244,7 +7244,6 @@ test('reshape rolls back an altered witnessed test after fresh proof', () => {
   }
   io = pinIo({ extra })
   const files = io.calls.files
-  const testAbs = CTX.checkout + '/a.test.mjs'
   const prefix = CTX.checkout + '/'
   const trees = new Map()
   let head = PIN_CTX.head
@@ -7283,17 +7282,16 @@ test('reshape rolls back an altered witnessed test after fresh proof', () => {
         return { ok: true, output: oid + '\n' }
       }
       if (cmd.includes(' diff ') && cmd.includes('--numstat')) return { ok: true, output: '1\t0\ta.mjs\0' }
-      if (cmd.includes(' diff ') && cmd.includes('--name-only')) return { ok: true, output: '' }
+      if (cmd.includes(' diff ') && cmd.includes('--name-only')) return { ok: true, output: nameOnly(cmd) }
       if (cmd.includes(' diff ')) return { ok: true, output: 'diff --git a/a.mjs b/a.mjs\n+const guard = false\n' }
     }
+    if (cmd === 'lane-cmd' && laneRed(files)) return { ok: false, output: 'not ok 1 - lane\n# fail 1' }
     return run.call(this, cmd)
   }
-  let preReshapeBytes = null
   const wait = io.wait
   io.wait = function (returnPath, timeoutS) {
     if (io.calls.assign.at(-1)?.role === 'builder' && io.calls.assign.at(-1)?.note === 'reshape') {
-      preReshapeBytes = files[testAbs]
-      files[testAbs] += "test('reshape added', () => {})\n"
+      onReshape(files)
       return buildEnv()
     }
     return wait.call(this, returnPath, timeoutS)
@@ -7301,8 +7299,50 @@ test('reshape rolls back an altered witnessed test after fresh proof', () => {
   const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 8, review_rounds: 8 } }, io)
   assert.equal(result.status, 'done')
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'reshape').length, 1)
-  assert.equal(io.calls.logs.find((row) => row.reshape_reverted)?.reshape_reverted?.why, 'pinned-test-altered')
-  assert.equal(files[testAbs], preReshapeBytes)
   assert.ok(io.calls.commits.length >= 1)
   assert.equal(io.calls.assign.some(({ note }) => note === 'gate-repair' || note === 'harden-preservation-fix'), false)
+  return { io, files, why: io.calls.logs.find((row) => row.reshape_reverted)?.reshape_reverted?.why }
+}
+const RESHAPE_TEST = CTX.checkout + '/a.test.mjs'
+const RESHAPE_SOURCE = CTX.checkout + '/a.mjs'
+
+// MUTATION: drop verifyPrescriptionPins('accept') from the reshape green path; the pinned edit commits and no pinned-test-altered row is written.
+test('reshape rolls back an altered witnessed test after fresh proof', () => {
+  let before = null
+  const { files, why } = reshapeRun({ onReshape: (files) => { before = files[RESHAPE_TEST]; files[RESHAPE_TEST] += "test('reshape added', () => {})\n" } })
+  assert.equal(why, 'pinned-test-altered')
+  assert.equal(files[RESHAPE_TEST], before)
+})
+
+// MUTATION: drop the test-edited return from reshapeScopeDefect; a reshape that deletes a proven guard's test commits.
+test('reshape that edits any test file is reverted before the gate re-runs', () => {
+  let before = null
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { before = files[RESHAPE_TEST]; files[RESHAPE_TEST] = '' },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0a.test.mjs\0' : 'a.test.mjs\0',
+  })
+  assert.equal(why, 'test-edited')
+  assert.equal(files[RESHAPE_TEST], before)
+})
+
+// MUTATION: drop the scope-widened return from reshapeScopeDefect; a file outside the lane's diff commits without a scope gate.
+test('reshape that touches a file outside the lane diff is reverted', () => {
+  const added = CTX.checkout + '/crew/drive.mjs'
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[added] = '// out of plan\n' },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0' : 'crew/drive.mjs\0',
+  })
+  assert.equal(why, 'scope-widened')
+  assert.equal(files[added], undefined)
+})
+
+// MUTATION: drop the lane-red branch; a reshape that reddens the validation lane commits with a green gate.
+test('reshape that reddens the validation lane is reverted', () => {
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[RESHAPE_SOURCE] += '// reshaped\n' },
+    nameOnly: (cmd) => 'a.mjs\0',
+    laneRed: (files) => String(files[RESHAPE_SOURCE]).includes('// reshaped'),
+  })
+  assert.equal(why, 'lane-red')
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('// reshaped'), false)
 })

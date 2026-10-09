@@ -3039,13 +3039,15 @@ test('A1.variable-callers', () => {
   const drive = readFileSync(join(ROOT, 'crew/drive.mjs'), 'utf8')
   const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   const calls = scanStageSites(drive)
-  for (const [callee, label] of [
-    ['recordGateProof', 'gate-proof:${gateGeneration}'],
-    ['acceptRepairedGate', 'gate-reverify:${gateRepairs}'],
-  ]) assert.equal(calls.filter((site) => site.callee === callee && site.label === label).length, 2, `${callee} callers are not both scanned`)
+  // recordGateProof's third caller is the reshape re-proof (issue 1760).
+  for (const [callee, label, count] of [
+    ['recordGateProof', 'gate-proof:${gateGeneration}', 3],
+    ['acceptRepairedGate', 'gate-reverify:${gateRepairs}', 2],
+  ]) assert.equal(calls.filter((site) => site.callee === callee && site.label === label).length, count, `${callee} callers are not all scanned`)
   assert.deepEqual(docs['gate-proof'].source.sites, [
     { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 1 },
     { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 2 },
+    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 3 },
   ])
   assert.deepEqual(docs['gate-reverify'].source.sites, [
     { callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}', occurrence: 1 },

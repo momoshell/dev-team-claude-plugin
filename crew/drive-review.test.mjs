@@ -8,7 +8,7 @@ import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace, RESHAPE_TEST_PATH } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -5245,13 +5245,13 @@ const pinTap = (bytes) => {
   }
   return { ok: true, output: `${lines.join('\n')}\n# pass ${n}\n# fail 0` }
 }
-function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, missingAfterReview = false, onRebase = null, hardened = null }) {
+function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, missingAfterReview = false, onRebase = null, hardened = null, extra = {} }) {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const guardAbs = `${CTX.checkout}/${guardFile}`
   const files = { ...B376_FILES, [testAbs]: PIN_WITNESSED }
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
   const declared = hardened ?? [{ ...B376_HARDENED, test: guardFile }]
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, hardened: declared, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE })
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, hardened: declared, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE, ...extra })
   let reviewed = false
   const head = { rebased: false }
   const baseWait = io.wait
@@ -7225,4 +7225,185 @@ test('RV1-1 edge spy runs the gate-owned warning', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// A two-fix-round lane whose reshape builder runs onReshape(files); nameOnly(cmd) answers git diff --name-only.
+function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false, numstat = '1\t0\ta.mjs\0', reshapeVerdict = 'pass', reshapeEnv = () => reviewEnv(reshapeVerdict, []) }) {
+  let io
+  const extra = {
+    plan: { files_in_scope: PIN_SCOPE, gate_cmd: 'gate-cmd', gate_path: TD + '/gate.mjs',
+      mutations: [{ check: 'check-one', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }] },
+    reviewer2: reviewEnv('changes-needed', [B376_FINDING]), reviewer3: reviewEnv('changes-needed', [B376_FINDING]), reviewer4: reviewEnv('pass', []),
+    runs: {
+      'gate-cmd': (_, n) => n === 1 ? { ok: false, output: RED() }
+        : (io.calls.files[CTX.checkout + '/a.mjs'] || '').includes('const guard = true')
+          ? { ok: false, output: 'FAIL check-one: expected false, found true at a.mjs\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}' }
+          : { ok: true, output: REVIEW_GATE_PASS },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED() } },
+  }
+  io = pinIo({ extra })
+  const files = io.calls.files
+  const prefix = CTX.checkout + '/'
+  const trees = new Map()
+  let head = PIN_CTX.head
+  let treeNo = 3
+  trees.set('2'.repeat(40), Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix) && !p.endsWith('/a.test.mjs') && !p.endsWith('/b.test.mjs'))))
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd.includes('shape-scan.mjs')) return { ok: true, output: JSON.stringify({
+      files: [{ path: 'a.mjs', nesting: [{ delta: 1 }] }],
+      totals: { one_statement: 1, review_history: 0, helper_count: { added: 0, removed: 0, delta: 0 } },
+      skipped: [], undelimited: [],
+    }) }
+    if (cmd.startsWith('GIT_INDEX_FILE=')) {
+      if (cmd.includes(' read-tree ')) return { ok: true, output: '' }
+      if (cmd.includes(' add -A')) return { ok: true, output: '' }
+      if (cmd.includes(' write-tree')) {
+        const oid = (treeNo++).toString(16).padStart(40, '0')
+        trees.set(oid, Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix))))
+        return { ok: true, output: oid + '\n' }
+      }
+    }
+    if (cmd.startsWith('git -C ' + shellArg(CTX.checkout) + ' ')) {
+      if (cmd.includes('rev-parse HEAD')) return { ok: true, output: '1'.repeat(40) + '\n' }
+      if (cmd.includes('read-tree --reset -u ')) {
+        const oid = /read-tree --reset -u ([0-9a-f]+)/.exec(cmd)?.[1]
+        for (const key of Object.keys(files)) if (key.startsWith(prefix)) delete files[key]
+        Object.assign(files, structuredClone(trees.get(oid) || {}))
+        return { ok: true, output: '' }
+      }
+      if (cmd.includes('reset --soft ')) { head = cmd.split('reset --soft ')[1].trim(); return { ok: true, output: '' } }
+      if (cmd.includes('read-tree ')) return { ok: true, output: '' }
+      if (/ add -[Au]/.test(cmd)) return { ok: true, output: '' }
+      if (cmd.includes('write-tree')) {
+        const oid = (treeNo++).toString(16).padStart(40, '0')
+        trees.set(oid, Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix))))
+        return { ok: true, output: oid + '\n' }
+      }
+      if (cmd.includes(' diff ') && cmd.includes('--numstat')) return { ok: true, output: numstat }
+      if (cmd.includes(' diff ') && cmd.includes('--name-only')) return { ok: true, output: nameOnly(cmd) }
+      if (cmd.includes(' diff ')) return { ok: true, output: 'diff --git a/a.mjs b/a.mjs\n+const guard = false\n' }
+    }
+    if (cmd === 'lane-cmd' && laneRed(files)) return { ok: false, output: 'not ok 1 - lane\n# fail 1' }
+    return run.call(this, cmd)
+  }
+  const wait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    if (io.calls.assign.at(-1)?.role === 'builder' && io.calls.assign.at(-1)?.note === 'reshape') {
+      onReshape(files)
+      return buildEnv()
+    }
+    if (io.calls.assign.at(-1)?.note === 'reshape-review') return reshapeEnv()
+    return wait.call(this, returnPath, timeoutS)
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 8, review_rounds: 8 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'reshape').length, 1)
+  assert.ok(io.calls.commits.length >= 1)
+  assert.equal(io.calls.assign.some(({ note }) => note === 'gate-repair' || note === 'harden-preservation-fix'), false)
+  return { io, files, why: io.calls.logs.find((row) => row.reshape_reverted)?.reshape_reverted?.why }
+}
+const RESHAPE_TEST = CTX.checkout + '/a.test.mjs'
+const RESHAPE_SOURCE = CTX.checkout + '/a.mjs'
+// The hardening guard file is not prescription-pinned, so only the test-edited branch can revert it.
+const RESHAPE_GUARD = CTX.checkout + '/' + PIN_GUARD_FILE
+
+// MUTATION: drop verifyPrescriptionPins('accept') from the reshape green path; the pinned edit commits and no pinned-test-altered row is written.
+test('reshape rolls back an altered witnessed test after fresh proof', () => {
+  let before = null
+  const { files, why } = reshapeRun({ onReshape: (files) => { before = files[RESHAPE_TEST]; files[RESHAPE_TEST] += "test('reshape added', () => {})\n" } })
+  assert.equal(why, 'pinned-test-altered')
+  assert.equal(files[RESHAPE_TEST], before)
+})
+
+// MUTATION: drop the test-edited return from reshapeScopeDefect; a reshape that deletes a proven guard's test commits.
+test('reshape that edits any test file is reverted before the gate re-runs', () => {
+  let before = null
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { before = files[RESHAPE_GUARD]; files[RESHAPE_GUARD] = '' },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0b.test.mjs\0' : 'b.test.mjs\0',
+  })
+  assert.equal(why, 'test-edited')
+  assert.equal(files[RESHAPE_GUARD], before)
+})
+
+// MUTATION: drop the scope-widened return from reshapeScopeDefect; a file outside the lane's diff commits without a scope gate.
+test('reshape that touches a file outside the lane diff is reverted', () => {
+  const added = CTX.checkout + '/crew/drive.mjs'
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[added] = '// out of plan\n' },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0' : 'crew/drive.mjs\0',
+  })
+  assert.equal(why, 'scope-widened')
+  assert.equal(files[added], undefined)
+})
+
+// MUTATION: drop the lane-red branch; a reshape that reddens the validation lane commits with a green gate.
+test('reshape that reddens the validation lane is reverted', () => {
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[RESHAPE_SOURCE] += '// reshaped\n' },
+    nameOnly: (cmd) => 'a.mjs\0',
+    laneRed: (files) => String(files[RESHAPE_SOURCE]).includes('// reshaped'),
+  })
+  assert.equal(why, 'lane-red')
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('// reshaped'), false)
+})
+
+// MUTATION: drop the reshape-review assignment; a reshape the gate and lane cannot see commits unreviewed.
+test('reshape the reviewer does not pass is reverted', () => {
+  const { io, files, why } = reshapeRun({
+    onReshape: (files) => { files[RESHAPE_SOURCE] += 'export const boom = () => { throw new Error() }\n' },
+    nameOnly: () => 'a.mjs\0',
+    reshapeVerdict: 'changes-needed',
+  })
+  assert.equal(why, 'review-refused')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'reshape-review').length, 1)
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('boom'), false)
+})
+
+test('reshape the reviewer passes is kept and journals its delta', () => {
+  const { io, files, why } = reshapeRun({ onReshape: (files) => { files[RESHAPE_SOURCE] += '// folded\n' }, nameOnly: () => 'a.mjs\0' })
+  assert.equal(why, undefined)
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('// folded'), true)
+  assert.ok(io.calls.logs.some((row) => row.reshape_delta))
+})
+
+// MUTATION: drop the binary reset; a binary-only diff journals lines_added 0 as if measured.
+test('reshape keeps binary line totals unknown instead of zero', () => {
+  const { io } = reshapeRun({ onReshape: () => {}, numstat: '-\t-\tlogo.png\0', reshapeVerdict: 'changes-needed', nameOnly: () => '' })
+  const before = io.calls.logs.find((row) => row.reshape)?.reshape?.before
+  assert.equal(before.lines_added, null)
+  assert.equal(before.lines_removed, null)
+  assert.equal(before.lines_unmeasured, 'binary-file')
+})
+
+// MUTATION: drop the findings/must_fix check; a pass verdict carrying a must-fix finding keeps the reshape.
+test('reshape review that passes with a finding still reverts', () => {
+  let io
+  const run = reshapeRun({
+    onReshape: (files) => { files[RESHAPE_SOURCE] += '// changed\n' },
+    nameOnly: () => 'a.mjs\0',
+    reshapeEnv: () => reviewEnv('pass', [B376_FINDING]),
+  })
+  io = run.io
+  assert.equal(run.why, 'review-refused')
+  assert.equal(String(run.files[RESHAPE_SOURCE]).includes('// changed'), false)
+})
+
+// MUTATION: narrow RESHAPE_TEST_PATH back to .test. and test/; a root test.mjs or a foo_test.mjs edit passes.
+test('reshape test-path guard covers every node --test default name', () => {
+  for (const path of ['test.mjs', 'pkg/test.cjs', 'test-a.js', 'a_test.mjs', 'a-test.mjs', 'a.test.mjs', 'test/x.mjs', 'pkg/test/x.js']) assert.equal(RESHAPE_TEST_PATH.test(path), true, path)
+  for (const path of ['a.mjs', 'contest.mjs', 'latest.mjs', 'tests.md', 'testing/x.mjs']) assert.equal(RESHAPE_TEST_PATH.test(path), false, path)
+})
+
+// MUTATION: restore the old /(^|\/)test\/|\.test\./ at the reshapeScopeDefect call site; a root test.mjs edit is kept.
+test('reshape that edits a root test.mjs is reverted', () => {
+  const root = CTX.checkout + '/test.mjs'
+  const { files, why } = reshapeRun({
+    onReshape: (files) => { files[root] = "test('weakened', () => {})\n" },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0test.mjs\0' : 'test.mjs\0',
+  })
+  assert.equal(why, 'test-edited')
+  assert.equal(files[root], undefined)
 })

@@ -10582,6 +10582,7 @@ function runTask(ctx, io, crash) {
   let mergedStepEnv = null
   let seededStepEnv = null
   let wholeBuildRound = 1
+  let reshapeAttempted = false
   if (steppedChunks) stepLoop: for (const [index, step] of steppedChunks.entries()) {
     if (index < reverifyIndex) doneEnvelopes.push(savedEnvelopes[index])
     if (index < reverifyIndex) { done.push(step); stepEnvelopes.push(savedEnvelopes[index]); lastStepEnv = savedEnvelopes[index]; continue }
@@ -12239,6 +12240,175 @@ function runTask(ctx, io, crash) {
     }
   }
 
+  const reshapeFixRounds = wholeBuildRound - 2
+  const reshapeEligible = !reshapeAttempted && !pendingRebaseConflict && gateCmd && reshapeFixRounds >= 2
+  if (reshapeEligible) {
+    reshapeAttempted = true
+    let reshapeSnapshot = null
+    let beforeMeasurement = { shape: null, reason: 'snapshot-failed', unmeasured_files: [] }
+    try { reshapeSnapshot = captureInvocationSnapshot({ ctx, io }) } catch { /* measured below as unavailable */ }
+    const measureReshape = (phase, snapshot) => {
+      const result = { shape: null, reason: null, unmeasured_files: [] }
+      if (!snapshot) return { ...result, reason: 'snapshot-failed' }
+      const diffPath = art(`reshape-${phase}.diff`)
+      const reportPath = art(`reshape-${phase}.scan.json`)
+      const base = ctx.head
+      let diff, numstat, scan
+      try { diff = io.run(`git -C ${shellArg(ctx.checkout)} diff --binary --no-ext-diff --no-renames ${shellArg(base)} ${shellArg(snapshot.tree)} --`) }
+      catch { return { ...result, reason: 'diff-failed' } }
+      if (diff?.ok !== true || typeof diff.output !== 'string') return { ...result, reason: 'diff-failed' }
+      try { io.writeFile(diffPath, diff.output) } catch { return { ...result, reason: 'diff-write-failed' } }
+      try { numstat = io.run(`git -C ${shellArg(ctx.checkout)} diff --numstat -z --no-renames ${shellArg(base)} ${shellArg(snapshot.tree)} --`) }
+      catch { return { ...result, reason: 'numstat-failed' } }
+      if (numstat?.ok !== true || typeof numstat.output !== 'string') return { ...result, reason: 'numstat-failed' }
+      if (!numstat.output.length && diff.output.length) return { ...result, reason: 'numstat-unmeasured' }
+      let lines_added = 0, lines_removed = 0, binary = false
+      for (const record of numstat.output.split('\0').filter(Boolean)) {
+        const match = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(record)
+        if (!match) return { ...result, reason: 'numstat-unmeasured' }
+        if (match[1] === '-' || match[2] === '-') { result.unmeasured_files.push(match[3]); binary = true }
+        else { lines_added += Number(match[1]); lines_removed += Number(match[2]) }
+      }
+      // A binary file has no line count: the totals are unknown, never a measured zero.
+      if (binary) { lines_added = null; lines_removed = null }
+      try { scan = io.run(`node ${shellArg(`${ctx.pluginRoot || process.cwd()}/scripts/factory/shape-scan.mjs`)} --diff ${shellArg(diffPath)} --checkout ${shellArg(ctx.checkout)} --json`) }
+      catch { return { ...result, reason: 'scan-failed' } }
+      if (scan?.ok !== true || typeof scan.output !== 'string' || !scan.output.trim()) return { ...result, reason: 'scan-failed' }
+      let report
+      try { report = JSON.parse(scan.output) } catch { return { ...result, reason: 'scan-report-invalid' } }
+      try { io.writeFile(reportPath, scan.output) } catch { return { ...result, reason: 'scan-report-write-failed' } }
+      const totals = report?.totals, helper = totals?.helper_count
+      if (!report || typeof report !== 'object' || !Array.isArray(report.files) || !Array.isArray(report.skipped) || !Array.isArray(report.undelimited)
+        || !Number.isInteger(totals?.one_statement) || totals.one_statement < 0
+        || !Number.isInteger(totals?.review_history) || totals.review_history < 0
+        || !Number.isInteger(helper?.delta)
+        || report.files.some((file) => !Array.isArray(file?.nesting) || file.nesting.some(({ delta }) => delta !== null && (typeof delta !== 'number' || !Number.isFinite(delta))))) return { ...result, reason: 'scan-report-invalid' }
+      result.unmeasured_files.push(...report.skipped.map((f) => typeof f === 'string' ? f : f?.path).filter(Boolean), ...report.undelimited.map((f) => typeof f === 'string' ? f : f?.path).filter(Boolean))
+      result.shape = {
+        helper_delta: helper.delta,
+        nesting_growth: report.files.reduce((n, file) => n + file.nesting.filter(({ delta }) => delta !== null && delta > 0).length, 0),
+        one_statement: totals.one_statement, review_history: totals.review_history, lines_added, lines_removed,
+        ...(binary ? { lines_unmeasured: 'binary-file' } : {}),
+      }
+      return result
+    }
+    beforeMeasurement = reshapeSnapshot ? measureReshape('before', reshapeSnapshot) : beforeMeasurement
+    const reshapeBefore = beforeMeasurement.shape
+    const reshapeAccreted = reshapeBefore !== null && (reshapeBefore.one_statement > 0 || reshapeBefore.review_history > 0 || (reshapeBefore.helper_delta > 0 && reshapeBefore.nesting_growth > 0))
+    let reshapeAssigned = false, reshapeReason = beforeMeasurement.reason
+    if (reshapeAccreted) {
+      const reshapeBriefPath = art('reshape.md')
+      const pinned = [...prescriptionPins.keys()]
+      const brief = [
+        '# Reshape closeout', '', `Whole-change diff: ${art('reshape-before.diff')}`,
+        `Shape report: ${art('reshape-before.scan.json')}`,
+        'Re-read the whole diff as one change; fold one-line helpers, flatten branches, trim review-history narration, and preserve behaviour and assertions.',
+        `Edit only non-test files already in the whole-change diff; do not edit ${pinned.length ? pinned.join(', ') : 'any test file'}. A reshape that edits a test file or any other file, or leaves the validation lane red, is reverted.`,
+        'Do not edit the accepted plan or gate.',
+      ].join('\n')
+      try { io.writeFile(reshapeBriefPath, brief); reshapeAssigned = true; reshapeReason = null } catch { reshapeReason = 'diff-write-failed' }
+      if (reshapeAssigned) {
+        const reshapeProofState = {
+          gateGeneration, gateProvenGeneration, gateDiscrimination, gateProofNote, gateProofOutput, gateReverified,
+          gateHistory: [...gateHistory], gateRepairs, failDelimiterRepairs, lastGateOutput,
+          checkProofs: checkProofs?.map((row) => ({ ...row })), checkProofOutput, checkProofNote, checkProofVerdict,
+          checkProofPending, checkProofBinds: checkProofBinds.map((row) => ({ ...row })), checkProofUnbound: checkProofUnbound.map((row) => ({ ...row })),
+          checkProofUnlabelledRefusals: checkProofUnlabelledRefusals.map((row) => ({ ...row })), checkProofBindMeasured,
+          gateProofFatal, proofTreeWitness, proofTreeBuildRound,
+          carriedCorrections: new Map([...carriedCorrections].map(([key, value]) => [key, structuredClone(value)])),
+          activeChunkSummary: activeChunkState?.summary,
+        }
+        let reshapeWhy = null
+        const reshapePaths = (from, to) => {
+          const res = io.run(`git -C ${shellArg(ctx.checkout)} diff --name-only -z --no-renames ${shellArg(from)} ${shellArg(to)} --`)
+          return res?.ok === true && typeof res.output === 'string' ? res.output.split('\0').filter(Boolean) : null
+        }
+        // Proofs, hardening and the scope gate ran on the pre-reshape tree: a reshape that edits a
+        // test can drop a proven guard, and one that leaves the lane's file set skips the scope gate.
+        const reshapeScopeDefect = () => {
+          const touched = reshapePaths(reshapeSnapshot.tree, captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }).tree)
+          const laneFiles = reshapePaths(ctx.head, reshapeSnapshot.tree)
+          if (touched === null || laneFiles === null) return 'scope-unmeasured'
+          if (touched.some((path) => RESHAPE_TEST_PATH.test(path))) return 'test-edited'
+          if (touched.some((path) => !laneFiles.includes(path))) return 'scope-widened'
+          return null
+        }
+        // The review passed on the pre-reshape tree; the gate and lane cannot see behaviour
+        // they do not exercise, so the reshape diff itself goes back to the reviewer.
+        const reshapeReviewDefect = () => {
+          const after = captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot })
+          const diff = io.run(`git -C ${shellArg(ctx.checkout)} diff --binary --no-ext-diff --no-renames ${shellArg(reshapeSnapshot.tree)} ${shellArg(after.tree)} --`)
+          if (diff?.ok !== true || typeof diff.output !== 'string') return 'review-unmeasured'
+          io.writeFile(art('reshape-review.diff'), diff.output)
+          io.writeFile(art('reshape-review.md'), ['# Reshape review', '', `Reshape diff: ${art('reshape-review.diff')}`,
+            'This diff was applied after your review passed. Return status done with details.verdict "pass" only if it preserves the reviewed behaviour exactly; any other verdict reverts it.'].join('\n'))
+          const env = assignAndWait('reviewer', art('reshape-review.md'), 'reshape-review', { reviewSemantics: false })
+          const findings = env?.details?.findings
+          const clean = env?.status === 'done' && env.details?.verdict === 'pass' && Number(env.details?.must_fix ?? 0) === 0
+            && (findings === undefined || (Array.isArray(findings) && findings.length === 0))
+          return clean ? null : 'review-refused'
+        }
+        try {
+          const env = assignAndWait('builder', reshapeBriefPath, 'reshape')
+          if (env?.status !== 'done') reshapeWhy = 'builder-not-done'
+          else if ((reshapeWhy = reshapeScopeDefect()) === null) {
+            const reshapeGate = runGate('gate:reshape', gateCmd)
+            if (!reshapeGate.ok) reshapeWhy = 'gate-red'
+            else {
+              gateGeneration += 1
+              lastGateOutput = reshapeGate.output
+              recordGateProof(`gate-proof:${gateGeneration}`)
+              completeCheckProof(`gate-proof:${gateGeneration}:checks`, { mutations: proofMutations, fresh: true })
+              if (gateProofFatal || gateDiscrimination !== 'proven') reshapeWhy = 'gate-proof-red'
+              else if (checkProofVerdict !== 'proven' || checkProofUnbound.length || (checkProofs || []).some((row) => row.outcome !== 'killed' && row.outcome !== 'exempt')) reshapeWhy = 'check-proof-red'
+              else if (verifyPrescriptionPins('accept')) reshapeWhy = 'pinned-test-altered'
+              else if (io.run(lane)?.ok !== true) reshapeWhy = 'lane-red'
+              else if ((reshapeWhy = reshapeReviewDefect()) === null) {
+                captureProofTree(carriedRound)
+                const after = (() => { try { return captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }) } catch { return null } })()
+                const afterMeasurement = after ? measureReshape('after', after) : { shape: null, reason: 'snapshot-failed', unmeasured_files: [] }
+                io.log(recordRow({ at: io.now(), reshape_delta: { before: reshapeBefore, after: afterMeasurement.shape, reason: afterMeasurement.reason, unmeasured_files: afterMeasurement.unmeasured_files } }))
+              }
+            }
+          }
+        } catch { reshapeWhy = 'reshape-error' }
+        if (reshapeWhy) {
+          let after = null
+          try { after = captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }) } catch { /* unknown after-state is restored conservatively */ }
+          const reshapeRestoreError = restoreInvocationSnapshot({ ctx, io, snapshot: reshapeSnapshot, after })
+          gateGeneration = reshapeProofState.gateGeneration
+          gateProvenGeneration = reshapeProofState.gateProvenGeneration
+          gateDiscrimination = reshapeProofState.gateDiscrimination
+          gateProofNote = reshapeProofState.gateProofNote
+          gateProofOutput = reshapeProofState.gateProofOutput
+          gateReverified = reshapeProofState.gateReverified
+          gateHistory = reshapeProofState.gateHistory
+          gateRepairs = reshapeProofState.gateRepairs
+          failDelimiterRepairs = reshapeProofState.failDelimiterRepairs
+          lastGateOutput = reshapeProofState.lastGateOutput
+          checkProofs = reshapeProofState.checkProofs
+          checkProofOutput = reshapeProofState.checkProofOutput
+          checkProofNote = reshapeProofState.checkProofNote
+          checkProofVerdict = reshapeProofState.checkProofVerdict
+          checkProofPending = reshapeProofState.checkProofPending
+          checkProofBinds = reshapeProofState.checkProofBinds
+          checkProofUnbound = reshapeProofState.checkProofUnbound
+          checkProofUnlabelledRefusals = reshapeProofState.checkProofUnlabelledRefusals
+          checkProofBindMeasured = reshapeProofState.checkProofBindMeasured
+          gateProofFatal = reshapeProofState.gateProofFatal
+          proofTreeWitness = reshapeProofState.proofTreeWitness
+          proofTreeBuildRound = reshapeProofState.proofTreeBuildRound
+          carriedCorrections.clear()
+          for (const [key, value] of reshapeProofState.carriedCorrections) carriedCorrections.set(key, value)
+          if (activeChunkState) activeChunkState.summary = reshapeProofState.activeChunkSummary
+          const why = reshapeRestoreError ? 'restore-failed' : reshapeWhy
+          io.log(recordRow({ at: io.now(), reshape_reverted: { why } }))
+          if (reshapeRestoreError) { stageComplete(); return escalate('build', `reshape rollback failed: ${reshapeRestoreError}`) }
+        }
+      }
+    }
+    io.log(recordRow({ at: io.now(), reshape: { fix_rounds: reshapeFixRounds, before: reshapeBefore, assigned: reshapeAssigned, reason: reshapeReason, unmeasured_files: beforeMeasurement.unmeasured_files } }))
+  }
   // The reviewer can accept only the tree that is about to be committed. This
   // second call is deliberately after hardening and all review-side mechanisms.
   if (!pendingRebaseConflict && gateCmd && proofTreeWitness) {
@@ -15603,7 +15773,7 @@ function captureInvocationAfter({ ctx, io, snapshot }) {
 function restoreInvocationSnapshot({ ctx, io, snapshot, after, fileAbs, fileBytes }) {
   let firstError = null
   const note = (err) => { if (firstError === null) firstError = err?.message ?? String(err) }
-  try { io.writeFile(fileAbs, fileBytes) } catch (err) { note(err) }
+  if (fileAbs !== undefined) { try { io.writeFile(fileAbs, fileBytes) } catch (err) { note(err) } }
   const run = (args, what) => {
     try {
       const res = io.run(`git -C ${shQuote(ctx.checkout)} ${args}`)
@@ -16356,3 +16526,5 @@ export function acceptanceCoverageBounceLines(round, coverage, briefFile) {
     `Original brief: ${briefFile}`,
   ]
 }
+// Every file node --test discovers by default, plus any path under a test/ directory.
+export const RESHAPE_TEST_PATH = /(^|\/)(test\/|test\.[cm]?js$|test-[^/]*\.[cm]?js$|[^/]*[._-]test\.[cm]?js$)|\.test\./

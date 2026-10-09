@@ -55,7 +55,7 @@ function usageError(message) {
 function parseOpening(line) {
   for (const { call, re } of OPENINGS) {
     const m = re.exec(line)
-    if (m && !CONTROL_WORDS.has(m[1])) return { name: m[1], params: m[2] ?? m[3] ?? '', call, bodyAt: call ? 0 : line.lastIndexOf('=>') }
+    if (m && !CONTROL_WORDS.has(m[1])) return { name: m[1], params: m[2] ?? m[3] ?? '', call, bodyAt: call ? 0 : m.index + m[0].lastIndexOf('=>') }
   }
   return null
 }

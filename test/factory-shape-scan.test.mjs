@@ -273,3 +273,11 @@ test('RV4-2 braces in an arrow return type are not body nesting', () => {
   const r = scanDiff({ diff: diff('ret.ts', before, after) })
   assert.deepEqual(r.files[0].nesting, [{ name: 'make', before: 1, after: 1, delta: 0 }])
 })
+
+test('RV5-1 an inline arrow on the opening line does not move the outer body start', () => {
+  // Mutation: bodyAt takes the last => on the whole line instead of inside the matched opening.
+  const before = 'const f = () => { const inner = () => {}\n  return 1\n}'
+  const after = 'const f = () => { const inner = () => {}\n  if (a) {\n    if (b) {\n      return 1\n    }\n  }\n}'
+  const r = scanDiff({ diff: diff('inline.js', before, after) })
+  assert.deepEqual(r.files[0].nesting.find((n) => n.name === 'f'), { name: 'f', before: 2, after: 3, delta: 1 })
+})

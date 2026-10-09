@@ -70,6 +70,12 @@ export const UNKNOWN_REASONS = Object.freeze([
   'gh_scope_missing',
   'none_found',
 ])
+export const IDIOM_CLASSES = Object.freeze(['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+export const IDIOM_UNMEASURED_REASONS = Object.freeze(['no_sources', 'no_sample', 'insufficient_sample', 'no_majority', 'no_exemplar', 'ls_files_failed', 'ls_files_oversized', 'source_read_failed', 'source_path_invalid'])
+const IDIOM_SAMPLE_MIN = 2
+const IDIOM_DENSITY_MIN_FILES = 1
+const IDIOM_LIST_MAX_BYTES = 1024 * 1024
+const IDIOM_SUPPORTED_EXTENSIONS = Object.freeze(['.js', '.mjs', '.ts', '.svelte'])
 
 // This is an exported register rather than a hidden blacklist: a future
 // consumer can show exactly which heuristic produced a protected-path
@@ -245,19 +251,23 @@ function proposedCell(value, source, extra = {}) {
   return cell('proposed', value, source, extra)
 }
 
-function runProcess(command, args, { cwd, timeout = 10_000, env } = {}) {
+function runProcess(command, args, { cwd, timeout = 10_000, env, maxBuffer = 1024 * 1024, rawResult = false } = {}) {
+  let result
   try {
-    const result = spawnSync(command, args, {
+    result = spawnSync(command, args, {
       cwd,
       encoding: 'utf8',
       timeout,
       env,
+      maxBuffer,
     })
-    if (!result || result.error || result.status !== 0) return null
-    return String(result.stdout || '').trim()
-  } catch {
+  } catch (error) {
+    if (rawResult) return { status: null, error }
     return null
   }
+  if (rawResult) return result
+  if (!result || result.error || result.status !== 0) return null
+  return String(result.stdout || '').trim()
 }
 
 function checkoutDirectory(checkout) {
@@ -275,11 +285,12 @@ function checkoutDirectory(checkout) {
 
 // Git access is read-only by construction. This is the complete allowlist:
 // `git rev-parse --show-toplevel`, `git symbolic-ref`, `git remote get-url
-// origin`, `git config --get`, and `git log --format=%s -n 50`. In
-// particular, no `git status` or index-refreshing command is used: the probe
-// must not write .git/index or alter the target in any other way.
-function gitOutput(root, args) {
-  return runProcess('git', ['-C', root, ...args], { cwd: root })
+// origin`, `git config --get`, `git log --format=%s -n 50`, and
+// `git ls-files -z`. In particular, no `git status` or index-refreshing
+// command is used: the probe must not write .git/index or alter the target
+// in any other way.
+function gitOutput(root, args, options = {}) {
+  return runProcess('git', ['-C', root, ...args], { ...options, cwd: root })
 }
 
 function gitRoot(root) {
@@ -699,6 +710,681 @@ function gatherProtectedPaths(root) {
   return proposedCell([...found].sort(), 'heuristic')
 }
 
+// Idiom mining is deterministic, read-only, and honestly sampled: every miner
+// shares one offset-preserving lexical masker, one crude function collector,
+// one strict-majority decision, and one unmeasured shape. All five classes
+// measure from the tracked partition; anything unmeasurable stays null with a
+// closed reason instead of a guessed rule.
+// lean: tracked listing capped at 1 MiB; raise IDIOM_LIST_MAX_BYTES if large checkouts report ls_files_oversized.
+function listTrackedSources(root) {
+  const result = gitOutput(root, ['ls-files', '-z'], { rawResult: true, maxBuffer: IDIOM_LIST_MAX_BYTES })
+  if (!result || result.error || result.signal != null || result.status !== 0) {
+    const code = result && result.error ? result.error.code : null
+    const message = result && result.error && result.error.message ? String(result.error.message) : ''
+    if (code === 'ENOBUFS' || message.includes('ENOBUFS')) return { ok: false, reason: 'ls_files_oversized' }
+    return { ok: false, reason: 'ls_files_failed' }
+  }
+  const stdout = typeof result.stdout === 'string' ? result.stdout : String(result.stdout === undefined ? '' : result.stdout)
+  if (stdout.length > 0 && stdout.charAt(stdout.length - 1) !== '\0') return { ok: false, reason: 'ls_files_failed' }
+  const seen = new Set()
+  const files = []
+  const entries = stdout.split('\0')
+  for (let ei = 0; ei < entries.length; ei += 1) {
+    const entry = entries[ei]
+    if (!entry || seen.has(entry)) continue
+    seen.add(entry)
+    files.push(entry)
+  }
+  return { ok: true, files }
+}
+
+function scanIdiomSources(root) {
+  const listed = listTrackedSources(root)
+  if (!listed.ok) return listed
+  const supported = []
+  let skipped = 0
+  const extensions = new Set()
+  const realRoot = realpathOr(root)
+  for (const name of listed.files) {
+    const extension = IDIOM_SUPPORTED_EXTENSIONS.find((candidate) => name.endsWith(candidate))
+    if (!extension) {
+      skipped += 1
+      continue
+    }
+    if (isAbsolute(name) || name.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+      return { ok: false, reason: 'source_path_invalid' }
+    }
+    const absolute = resolve(root, name)
+    const rel = relative(realRoot, resolve(realRoot, name))
+    if (rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
+      return { ok: false, reason: 'source_path_invalid' }
+    }
+    let entry
+    let target
+    try {
+      entry = lstatSync(absolute)
+      target = realpathSync(absolute)
+    } catch {
+      return { ok: false, reason: 'source_read_failed' }
+    }
+    if (target !== realRoot && target.startsWith(realRoot + sep) === false) {
+      return { ok: false, reason: 'source_path_invalid' }
+    }
+    if (entry.isSymbolicLink()) {
+      let targetStat
+      try {
+        targetStat = statSync(absolute)
+      } catch {
+        return { ok: false, reason: 'source_read_failed' }
+      }
+      if (!targetStat.isFile()) return { ok: false, reason: 'source_read_failed' }
+    } else if (!entry.isFile()) {
+      return { ok: false, reason: 'source_read_failed' }
+    }
+    let text
+    try {
+      text = readFileSync(absolute, 'utf8')
+    } catch {
+      return { ok: false, reason: 'source_read_failed' }
+    }
+    supported.push({ name, text })
+    extensions.add(extension)
+  }
+  const result = { ok: true, supported, skipped, extensions }
+  result.corpus = idiomCorpus(result)
+  return result
+}
+
+function textLineStarts(text) {
+  const starts = [0]
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charAt(index) === '\n') starts.push(index + 1)
+  }
+  return starts
+}
+
+function textLineOf(starts, index) {
+  let low = 0
+  let high = starts.length - 1
+  while (low < high) {
+    const mid = (low + high + 1) >> 1
+    if (starts[mid] <= index) low = mid
+    else high = mid - 1
+  }
+  return low
+}
+
+function svelteScriptBody(text) {
+  const keep = new Array(text.length).fill(false)
+  const openPattern = /<script(\s[^>]*)?>/g
+  let found = openPattern.exec(text)
+  while (found !== null) {
+    const bodyStart = found.index + found[0].length
+    const close = text.indexOf('</script>', bodyStart)
+    if (close < 0) break
+    for (let index = bodyStart; index < close; index += 1) keep[index] = true
+    openPattern.lastIndex = close + 9
+    found = openPattern.exec(text)
+  }
+  let out = ''
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text.charAt(index)
+    if (keep[index] || char === '\n' || char === '\r') out += char
+    else out += ' '
+  }
+  return out
+}
+
+// lean: regex literals are not masked; use a JS parser if regex-heavy sources distort measured samples.
+// lean: opaque template bodies including interpolation are blanked whole; use a JS parser if template-heavy sources distort measured samples.
+function maskSource(text) {
+  const chars = text.split('')
+  const starts = textLineStarts(text)
+  const comment = new Array(starts.length).fill(false)
+  const blank = (index) => {
+    if (chars[index] !== '\n' && chars[index] !== '\r') chars[index] = ' '
+  }
+  const blankLiteral = (start, end) => {
+    for (let index = start; index < end; index += 1) blank(index)
+    chars[start] = '0'
+  }
+  let index = 0
+  while (index < text.length) {
+    const char = text.charAt(index)
+    const next = text.charAt(index + 1)
+    if (char === '/' && next === '/') {
+      comment[textLineOf(starts, index)] = true
+      blank(index)
+      blank(index + 1)
+      index += 2
+      while (index < text.length && text.charAt(index) !== '\n') {
+        blank(index)
+        index += 1
+      }
+      continue
+    }
+    if (char === '/' && next === '*') {
+      const end = text.indexOf('*/', index + 2)
+      const stop = end < 0 ? text.length : end + 2
+      for (let cursor = index; cursor < stop; cursor += 1) {
+        comment[textLineOf(starts, cursor)] = true
+        blank(cursor)
+      }
+      index = stop
+      continue
+    }
+    if (char === "'" || char === '"') {
+      let cursor = index + 1
+      let closed = false
+      while (cursor < text.length) {
+        const cur = text.charAt(cursor)
+        if (cur === '\\') {
+          cursor += 2
+          continue
+        }
+        if (cur === '\n') break
+        if (cur === char) {
+          closed = true
+          break
+        }
+        cursor += 1
+      }
+      const stop = closed ? cursor + 1 : cursor
+      blankLiteral(index, stop)
+      index = stop
+      continue
+    }
+    if (char === '`') {
+      let cursor = index + 1
+      let closed = false
+      while (cursor < text.length) {
+        const cur = text.charAt(cursor)
+        if (cur === '\\') {
+          cursor += 2
+          continue
+        }
+        if (cur === '`') {
+          closed = true
+          break
+        }
+        cursor += 1
+      }
+      const stop = closed ? cursor + 1 : cursor
+      blankLiteral(index, stop)
+      index = stop
+      continue
+    }
+    index += 1
+  }
+  const masked = chars.join('')
+  const code = masked.split('\n').map((line) => line.search(/[^ \t\r\f\v]/) !== -1)
+  return { masked, comment, code }
+}
+
+const IDIOM_DECL_SOURCE = '(?:^|[;{}])\\s*(?:export\\s+(?:default\\s+)?)?(?:async\\s+)?function\\s*\\*?\\s*([A-Za-z_$][\\w$]*)\\s*\\('
+const IDIOM_ARROW_SOURCE = '(?:^|[;{}\n])\\s*(?:export\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(async\\s+)?'
+const IDIOM_INJECTION_WORDS = Object.freeze(['io', 'deps', 'dependencies', 'contracts'])
+const IDIOM_PREDICATE_PATTERN = /^(?:is|has|can|should)(?:[A-Z]|$)/
+
+function balanceCloser(text, openIndex, openChar, closeChar) {
+  let depth = 0
+  for (let index = openIndex; index < text.length; index += 1) {
+    if (text.charAt(index) === openChar) depth += 1
+    else if (text.charAt(index) === closeChar) {
+      depth -= 1
+      if (depth === 0) return index
+    }
+  }
+  return -1
+}
+
+function splitTopLevelParams(params) {
+  const parts = []
+  let depth = 0
+  let current = ''
+  for (let pi = 0; pi < params.length; pi += 1) {
+    const char = params.charAt(pi)
+    if (char === '(' || char === '{' || char === '[') depth += 1
+    else if (char === ')' || char === '}' || char === ']') depth = Math.max(0, depth - 1)
+    if (char === ',' && depth === 0) {
+      parts.push(current)
+      current = ''
+    } else {
+      current += char
+    }
+  }
+  parts.push(current)
+  return parts
+}
+
+function idiomInjectionFlags(params) {
+  const braced = params.match(/\{[^}]*\}/g) || []
+  const destructuredInjection = braced.some((group) => IDIOM_INJECTION_WORDS.some((word) => group.indexOf(word) !== -1 && group.search(new RegExp('\\b' + word + '\\b')) !== -1))
+  let positionalInjection = false
+  const parts = splitTopLevelParams(params)
+  for (let pi = 0; pi < parts.length; pi += 1) {
+    const noDefault = parts[pi].split('=')[0].trim().replace(/^\.\.\./, '').trim()
+    const head = noDefault.match(/^([A-Za-z_$][\w$]*)\??(?:\s*:.*)?$/)
+    if (head && IDIOM_INJECTION_WORDS.indexOf(head[1]) !== -1) positionalInjection = true
+  }
+  return { destructuredInjection, positionalInjection }
+}
+
+function makeIdiomFunction(path, name, params, sigStart, endOffset, signature, starts, expressionBody, expression) {
+  const flags = idiomInjectionFlags(params)
+  return {
+    path,
+    name,
+    start: textLineOf(starts, sigStart) + 1,
+    end: textLineOf(starts, Math.max(endOffset, sigStart)) + 1,
+    signature,
+    predicateName: IDIOM_PREDICATE_PATTERN.test(name),
+    returnsValue: expressionBody && expression !== null,
+    returnExpressions: expressionBody ? [expression] : [],
+    destructuredInjection: flags.destructuredInjection,
+    positionalInjection: flags.positionalInjection,
+    expressionBody,
+    _start: sigStart,
+    _end: endOffset,
+  }
+}
+
+function idiomOwnerAt(functions, offset) {
+  let best = null
+  for (const fn of functions) {
+    if (fn._start <= offset && offset <= fn._end) {
+      if (!best || fn._start >= best._start) best = fn
+    }
+  }
+  return best
+}
+
+// lean: function signatures and brace spans are parsed crudely without an AST, and a function naming both injection shapes counts as destructured; use a JS parser if nested or multiline signatures misclassify functions.
+function collectIdiomFunctions(path, body, maskedText) {
+  const functions = []
+  const starts = textLineStarts(maskedText)
+  const originalLines = body.split('\n')
+  const signatureAt = (offset) => originalLines[textLineOf(starts, offset)].trim()
+  const skipSpaces = (offset) => {
+    while (offset < maskedText.length && maskedText.charAt(offset).search(/\s/) !== -1) offset += 1
+    return offset
+  }
+  const decls = maskedText.matchAll(new RegExp(IDIOM_DECL_SOURCE, 'gm'))
+  for (const match of decls) {
+    const name = match[1]
+    const sigStart = match.index + match[0].lastIndexOf('function')
+    const openParen = match.index + match[0].length - 1
+    const closeParen = balanceCloser(maskedText, openParen, '(', ')')
+    if (closeParen < 0) continue
+    const params = maskedText.slice(openParen + 1, closeParen)
+    let cursor = skipSpaces(closeParen + 1)
+    if (maskedText.charAt(cursor) === ':') {
+      let end = cursor + 1
+      while (end < maskedText.length && maskedText.charAt(end) !== '{' && maskedText.charAt(end) !== ';') end += 1
+      if (end >= maskedText.length || maskedText.charAt(end) !== '{') continue
+      cursor = end
+    }
+    if (maskedText.charAt(cursor) !== '{') continue
+    const bodyClose = balanceCloser(maskedText, cursor, '{', '}')
+    if (bodyClose < 0) continue
+    functions.push(makeIdiomFunction(path, name, params, sigStart, bodyClose, signatureAt(sigStart), starts, false, null))
+  }
+  const arrows = maskedText.matchAll(new RegExp(IDIOM_ARROW_SOURCE, 'gm'))
+  for (const match of arrows) {
+    const name = match[1]
+    let cursor = skipSpaces(match.index + match[0].length)
+    let params = null
+    if (maskedText.charAt(cursor) === '(') {
+      const closeParen = balanceCloser(maskedText, cursor, '(', ')')
+      if (closeParen < 0) continue
+      params = maskedText.slice(cursor + 1, closeParen)
+      cursor = skipSpaces(closeParen + 1)
+    } else if (cursor < maskedText.length && maskedText.charAt(cursor).search(/[A-Za-z_$]/) !== -1) {
+      const tail = maskedText.slice(cursor).match(/^[A-Za-z_$][\w$]*/)
+      if (!tail) continue
+      params = tail[0]
+      cursor = skipSpaces(cursor + params.length)
+    } else {
+      continue
+    }
+    if (maskedText.slice(cursor, cursor + 2) !== '=>') continue
+    cursor = skipSpaces(cursor + 2)
+    const keyword = match[0].match(/(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s+)?$/)
+    const sigStart = match.index + (keyword ? match[0].lastIndexOf(keyword[0]) : match[0].length)
+    if (maskedText.charAt(cursor) === '{') {
+      const bodyClose = balanceCloser(maskedText, cursor, '{', '}')
+      if (bodyClose < 0) continue
+      functions.push(makeIdiomFunction(path, name, params, sigStart, bodyClose, signatureAt(sigStart), starts, false, null))
+    } else {
+      let end = cursor
+      while (end < maskedText.length && maskedText.charAt(end) !== ';' && maskedText.charAt(end) !== '\n') end += 1
+      const expression = maskedText.slice(cursor, end).trim()
+      functions.push(makeIdiomFunction(path, name, params, sigStart, end, signatureAt(sigStart), starts, true, expression || null))
+    }
+  }
+  const anonymous = maskedText.matchAll(/\bfunction\s*\(/g)
+  for (const match of anonymous) {
+    const openParen = match.index + match[0].lastIndexOf('(')
+    const closeParen = balanceCloser(maskedText, openParen, '(', ')')
+    if (closeParen < 0) continue
+    const cursor = skipSpaces(closeParen + 1)
+    if (maskedText.charAt(cursor) !== '{') continue
+    const end = balanceCloser(maskedText, cursor, '{', '}')
+    if (end < 0) continue
+    const fn = makeIdiomFunction(path, '<callback>', maskedText.slice(openParen + 1, closeParen), match.index, end, signatureAt(match.index), starts, false, null)
+    fn.ownerOnly = true
+    functions.push(fn)
+  }
+  const callbacks = maskedText.matchAll(/(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g)
+  for (const match of callbacks) {
+    const arrow = match.index + match[0].lastIndexOf('=>')
+    const open = maskedText.indexOf('{', arrow + 2)
+    const end = balanceCloser(maskedText, open, '{', '}')
+    if (end < 0) continue
+    if (functions.some((fn) => fn._end === end)) continue
+    const params = match[0].slice(0, match[0].lastIndexOf('=>')).trim().replace(/^async\s+/, '').replace(/^\(|\)$/g, '')
+    const fn = makeIdiomFunction(path, '<callback>', params, match.index, end, signatureAt(match.index), starts, false, null)
+    fn.ownerOnly = true
+    functions.push(fn)
+  }
+  const returns = maskedText.matchAll(/\breturn\b/g)
+  for (const match of returns) {
+    const owner = idiomOwnerAt(functions, match.index)
+    if (!owner || owner.expressionBody) continue
+    let cursor = match.index + 6
+    const gap = cursor < maskedText.length ? maskedText.charAt(cursor) : ''
+    if (gap === ' ' || gap === '\t' || gap === '\r') {
+      let probe = cursor
+      while (probe < maskedText.length && (maskedText.charAt(probe) === ' ' || maskedText.charAt(probe) === '\t' || maskedText.charAt(probe) === '\r')) probe += 1
+      const probeChar = probe < maskedText.length ? maskedText.charAt(probe) : ''
+      if (probeChar === '' || probeChar === '\n' || probeChar === ';' || probeChar === '}') {
+        owner.returnExpressions.push(null)
+        continue
+      }
+    } else if (gap === '' || gap === ';' || gap === '}' || gap === '\n') {
+      owner.returnExpressions.push(null)
+      continue
+    }
+    let end = cursor
+    while (end < maskedText.length && maskedText.charAt(end) !== ';' && maskedText.charAt(end) !== '\n') end += 1
+    const expression = maskedText.slice(cursor, end).trim()
+    owner.returnExpressions.push(expression || null)
+  }
+  for (const fn of functions) {
+    if (fn.expressionBody === false && fn.returnExpressions.some((entry) => entry !== null && entry !== '')) {
+      fn.returnsValue = true
+    }
+  }
+  return functions
+}
+
+function unmeasuredIdiom(kind, reason, sampleSize = null) {
+  return { class: kind, rule: null, exemplars: [], sample_size: sampleSize, basis: null, reason }
+}
+
+function mineCommentDensity(scan) {
+  if (scan.ok === false) return unmeasuredIdiom('comment_density', scan.reason, null)
+  if (scan.supported.length < IDIOM_DENSITY_MIN_FILES) return unmeasuredIdiom('comment_density', 'no_sources', null)
+  let commentLines = 0
+  let codeLines = 0
+  const functions = []
+  for (const file of idiomCorpus(scan)) {
+    for (let line = 0; line < file.comment.length; line += 1) {
+      if (file.comment[line]) commentLines += 1
+      if (file.code[line]) codeLines += 1
+    }
+    for (const fn of file.functions) if (!fn.ownerOnly) functions.push(fn)
+  }
+  if (codeLines === 0) return unmeasuredIdiom('comment_density', 'no_sample', null)
+  const ordered = functions.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.start - b.start))
+  const exemplars = ordered.slice(0, 3).map((fn) => ({ path: fn.path, name: fn.name, start: fn.start, end: fn.end }))
+  if (exemplars.length === 0) return unmeasuredIdiom('comment_density', 'no_exemplar', scan.supported.length)
+  const density = Number((commentLines * 100 / codeLines).toFixed(2))
+  const count = scan.supported.length
+  const ruleText = density + ' comment lines per 100 code lines across ' + count + ' scanned files (sample_size ' + count + ')'
+  return {
+    class: 'comment_density',
+    rule: ruleText,
+    exemplars,
+    sample_size: count,
+    basis: 'line comment/code density',
+    value: density,
+  }
+}
+function idiomCorpus(scan) {
+  if (scan.corpus) return scan.corpus
+  const files = []
+  for (const file of scan.supported) {
+    const body = file.name.endsWith('.svelte') ? svelteScriptBody(file.text) : file.text
+    const masked = maskSource(body)
+    files.push({ name: file.name, body, ...masked, functions: collectIdiomFunctions(file.name, body, masked.masked) })
+  }
+  return files
+}
+
+function idiomExemplars(functions) {
+  const seen = new Set()
+  const unique = []
+  for (const fn of functions) {
+    if (fn !== null && fn !== undefined && fn.ownerOnly !== true && !seen.has(fn)) {
+      seen.add(fn)
+      unique.push(fn)
+    }
+  }
+  return unique.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.start - b.start)).slice(0, 3).map((fn) => ({ path: fn.path, name: fn.name, start: fn.start, end: fn.end }))
+}
+
+function decideIdiomMajority(kind, sampleSize, buckets) {
+  if (sampleSize < IDIOM_SAMPLE_MIN) return unmeasuredIdiom(kind, 'insufficient_sample', sampleSize)
+  const ordered = buckets.slice().sort((a, b) => b.count - a.count)
+  const largest = ordered[0]
+  if (largest.count * 2 <= sampleSize) return unmeasuredIdiom(kind, 'no_majority', sampleSize)
+  return { measured: true, largest }
+}
+
+function idiomDepthZero(text) {
+  let depth = 0
+  let out = ''
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text.charAt(index)
+    if (char === '(' || char === '[' || char === '{') {
+      depth += 1
+      out += ' '
+    } else if (char === ')' || char === ']' || char === '}') {
+      depth = Math.max(0, depth - 1)
+      out += ' '
+    } else {
+      out += depth === 0 ? char : ' '
+    }
+  }
+  return out
+}
+
+function stripBalancedParens(expression) {
+  let current = String(expression).trim()
+  while (current.length >= 2 && current.charAt(0) === '(' && balanceCloser(current, 0, '(', ')') === current.length - 1) {
+    current = current.slice(1, -1).trim()
+  }
+  return current
+}
+
+function isBooleanShaped(expression) {
+  const inner = stripBalancedParens(expression)
+  if (inner === 'true' || inner === 'false') return true
+  if (inner.charAt(0) === '!') return true
+  const top = idiomDepthZero(inner)
+  if (/(^|[^?])\?(?![.?])/.test(top)) return false
+  if (/===|!==|==|!=|<=|>=/.test(top)) return true
+  if (/\b(?:in|instanceof)\b/.test(top)) return true
+  if (/(^|\s)<(?![=>])(?:\s|$)/.test(top)) return true
+  if (/(^|\s)>(?![=>])(?:\s|$)/.test(top.replace(/=>/g, '  '))) return true
+  return false
+}
+
+function mineDependencyInjection(scan) {
+  const kind = 'dependency_injection'
+  if (scan.ok === false) return unmeasuredIdiom(kind, scan.reason, null)
+  if (scan.supported.length === 0) return unmeasuredIdiom(kind, 'no_sources', null)
+  const injected = []
+  const positionalOnly = []
+  for (const file of idiomCorpus(scan)) {
+    for (const fn of file.functions) {
+      if (fn.ownerOnly) continue
+      if (fn.destructuredInjection) injected.push(fn)
+      else if (fn.positionalInjection) {
+        injected.push(fn)
+        positionalOnly.push(fn)
+      }
+    }
+  }
+  const sampleSize = injected.length
+  if (sampleSize === 0) return unmeasuredIdiom(kind, 'no_sample', null)
+  const destructured = injected.filter(fn => fn.destructuredInjection).length
+  const destructuredFns = injected.filter((fn) => fn.destructuredInjection)
+  const buckets = [
+    { shape: 'destructured', count: destructured, matchingFunctions: destructuredFns },
+    { shape: 'positional', count: positionalOnly.length, matchingFunctions: positionalOnly },
+  ]
+  const decision = decideIdiomMajority(kind, sampleSize, buckets)
+  if (decision.measured !== true) return decision
+  const exemplars = idiomExemplars(decision.largest.matchingFunctions)
+  if (exemplars.length === 0) return unmeasuredIdiom(kind, 'no_exemplar', sampleSize)
+  const shape = decision.largest.shape === 'destructured' ? 'destructured object parameters' : 'positional named parameters'
+  const rule = decision.largest.count + ' of ' + sampleSize + ' injected functions in the sample use ' + shape + ' (sample_size ' + sampleSize + ')'
+  return { class: kind, rule, exemplars, sample_size: sampleSize, basis: 'injected parameter shape dominance' }
+}
+
+function mineBooleanHelpers(scan) {
+  const kind = 'boolean_helpers'
+  if (scan.ok === false) return unmeasuredIdiom(kind, scan.reason, null)
+  if (scan.supported.length === 0) return unmeasuredIdiom(kind, 'no_sources', null)
+  const predicates = []
+  for (const file of idiomCorpus(scan)) {
+    for (const fn of file.functions) {
+      if (fn.ownerOnly) continue
+      const returns = fn.returnExpressions
+      const everyBoolean = returns.length > 0 && returns.every((entry) => entry !== null && entry !== '' && isBooleanShaped(entry))
+      if (fn.predicateName || everyBoolean) predicates.push(fn)
+    }
+  }
+  const sampleSize = predicates.length
+  if (sampleSize === 0) return unmeasuredIdiom(kind, 'no_sample', null)
+  const prefixed = predicates.filter(fn => fn.predicateName).length
+  const buckets = [
+    { shape: 'prefixed', count: prefixed, matchingFunctions: predicates.filter((fn) => fn.predicateName) },
+    { shape: 'nonprefix', count: sampleSize - prefixed, matchingFunctions: predicates.filter((fn) => !fn.predicateName) },
+  ]
+  const decision = decideIdiomMajority(kind, sampleSize, buckets)
+  if (decision.measured !== true) return decision
+  const exemplars = idiomExemplars(decision.largest.matchingFunctions)
+  if (exemplars.length === 0) return unmeasuredIdiom(kind, 'no_exemplar', sampleSize)
+  let rule = prefixed + ' of ' + sampleSize + ' predicate functions in the sample are named is*/has*/can*/should*'
+  if (decision.largest.shape !== 'prefixed') rule += ' with non-prefix naming dominant'
+  rule += ' (sample_size ' + sampleSize + ')'
+  return { class: kind, rule, exemplars, sample_size: sampleSize, basis: 'predicate naming and return-shape dominance' }
+}
+
+// lean: only literal console and logger receivers are counted and aliased loggers are missed; use a binding-aware parser if logger aliases carry the convention.
+function mineLoggingPlacement(scan) {
+  const kind = 'logging_placement'
+  if (scan.ok === false) return unmeasuredIdiom(kind, scan.reason, null)
+  if (scan.supported.length === 0) return unmeasuredIdiom(kind, 'no_sources', null)
+  const logs = []
+  for (const file of idiomCorpus(scan)) {
+    const calls = file.masked.matchAll(/\b(?:console|logger)\s*\.\s*[A-Za-z_$][\w$]*\s*\(|\blogger\s*\(/g)
+    for (const match of calls) logs.push({ owner: idiomOwnerAt(file.functions, match.index) })
+  }
+  const sampleSize = logs.length
+  if (sampleSize === 0) return unmeasuredIdiom(kind, 'no_sample', null)
+  const helperLogs = logs.filter(log => log.owner?.returnsValue).length
+  const helperOwners = []
+  const callerOwners = []
+  for (const log of logs) {
+    if (log.owner === null || log.owner === undefined) continue
+    if (log.owner.returnsValue === true) helperOwners.push(log.owner)
+    else callerOwners.push(log.owner)
+  }
+  const buckets = [
+    { shape: 'helper', count: helperLogs, matchingFunctions: helperOwners },
+    { shape: 'caller', count: sampleSize - helperLogs, matchingFunctions: callerOwners },
+  ]
+  const decision = decideIdiomMajority(kind, sampleSize, buckets)
+  if (decision.measured !== true) return decision
+  const exemplars = idiomExemplars(decision.largest.matchingFunctions)
+  if (exemplars.length === 0) return unmeasuredIdiom(kind, 'no_exemplar', sampleSize)
+  const rule = decision.largest.count + ' of ' + sampleSize + ' logging calls in the sample are in ' + decision.largest.shape + ' functions (sample_size ' + sampleSize + ')'
+  return { class: kind, rule, exemplars, sample_size: sampleSize, basis: 'logging call-site ownership dominance' }
+}
+
+// lean: catch bodies and loop spans are matched with crude brace counting and only for and while loops enclose retries; use a JS parser if single-statement or nested loop bodies misclassify catches.
+function collectIdiomLoopSpans(masked) {
+  const spans = []
+  const loops = masked.matchAll(/\b(?:for|while)\b/g)
+  for (const match of loops) {
+    let cursor = match.index + match[0].length
+    while (cursor < masked.length && /\s/.test(masked.charAt(cursor))) cursor += 1
+    if (masked.charAt(cursor) === '(') {
+      const close = balanceCloser(masked, cursor, '(', ')')
+      if (close < 0) continue
+      cursor = close + 1
+      while (cursor < masked.length && /\s/.test(masked.charAt(cursor))) cursor += 1
+    }
+    if (masked.charAt(cursor) !== '{') continue
+    const end = balanceCloser(masked, cursor, '{', '}')
+    if (end < 0) continue
+    spans.push({ start: cursor, end })
+  }
+  return spans
+}
+
+function mineErrorRetryShape(scan) {
+  const kind = 'error_retry_shape'
+  if (scan.ok === false) return unmeasuredIdiom(kind, scan.reason, null)
+  if (scan.supported.length === 0) return unmeasuredIdiom(kind, 'no_sources', null)
+  const catches = []
+  for (const file of idiomCorpus(scan)) {
+    const loops = collectIdiomLoopSpans(file.masked)
+    const found = file.masked.matchAll(/\bcatch\b/g)
+    for (const match of found) {
+      let cursor = match.index + 5
+      while (cursor < file.masked.length && /\s/.test(file.masked.charAt(cursor))) cursor += 1
+      if (file.masked.charAt(cursor) === '(') {
+        const close = balanceCloser(file.masked, cursor, '(', ')')
+        if (close < 0) continue
+        cursor = close + 1
+        while (cursor < file.masked.length && /\s/.test(file.masked.charAt(cursor))) cursor += 1
+      }
+      if (file.masked.charAt(cursor) !== '{') continue
+      const end = balanceCloser(file.masked, cursor, '{', '}')
+      if (end < 0) continue
+      const body = file.masked.slice(cursor + 1, end)
+      let shape = 'other'
+      if (loops.some((span) => span.start <= match.index && match.index <= span.end)) shape = 'retry-loop'
+      else if (/^\s*return\s+null\b/.test(body)) shape = 'swallow-and-return-null'
+      else if (/^\s*throw\b/.test(body)) shape = 'rethrow'
+      catches.push({ path: file.name, offset: match.index, shape, owner: idiomOwnerAt(file.functions, match.index) })
+    }
+  }
+  const sampleSize = catches.length
+  if (sampleSize === 0) return unmeasuredIdiom(kind, 'no_sample', null)
+  const swallow = catches.filter(block => block.shape === 'swallow-and-return-null').length
+  const shapeOwners = { 'retry-loop': [], 'swallow-and-return-null': [], rethrow: [], other: [] }
+  for (const block of catches) {
+    if (block.owner !== null && block.owner !== undefined) shapeOwners[block.shape].push(block.owner)
+  }
+  const buckets = [
+    { shape: 'retry-loop', count: catches.filter((block) => block.shape === 'retry-loop').length, matchingFunctions: shapeOwners['retry-loop'] },
+    { shape: 'swallow-and-return-null', count: swallow, matchingFunctions: shapeOwners['swallow-and-return-null'] },
+    { shape: 'rethrow', count: catches.filter((block) => block.shape === 'rethrow').length, matchingFunctions: shapeOwners.rethrow },
+    { shape: 'other', count: catches.filter((block) => block.shape === 'other').length, matchingFunctions: shapeOwners.other },
+  ]
+  const decision = decideIdiomMajority(kind, sampleSize, buckets)
+  if (decision.measured !== true) return decision
+  const exemplars = idiomExemplars(decision.largest.matchingFunctions)
+  if (exemplars.length === 0) return unmeasuredIdiom(kind, 'no_exemplar', sampleSize)
+  const rule = decision.largest.count + ' of ' + sampleSize + ' catch handlers in the sample use ' + decision.largest.shape + ' (sample_size ' + sampleSize + ')'
+  return { class: kind, rule, exemplars, sample_size: sampleSize, basis: 'catch-handler shape dominance' }
+}
 function gatherConventions(root) {
   const names = [
     'CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md', 'README.md',
@@ -715,15 +1401,38 @@ function gatherConventions(root) {
   const subjects = output == null ? [] : output.split(/\r?\n/).filter((line) => line.length > 0)
   const conventional = subjects.filter((subject) => /^\w+(\([^)]+\))?!?: /.test(subject))
   const types = [...new Set(conventional.map((subject) => subject.match(/^(\w+)/)?.[1]).filter(Boolean))].sort()
-  if (files.length === 0 && subjects.length === 0) return unknownCell('none_found')
-  return proposedCell({
+  const scan = scanIdiomSources(root)
+  const density = mineCommentDensity(scan)
+  const idioms = IDIOM_CLASSES.map((kind) => {
+    if (kind === 'comment_density') return density
+    if (kind === 'dependency_injection') return mineDependencyInjection(scan)
+    if (kind === 'boolean_helpers') return mineBooleanHelpers(scan)
+    if (kind === 'logging_placement') return mineLoggingPlacement(scan)
+    return mineErrorRetryShape(scan)
+  })
+  let idiom_scan
+  if (scan.ok) {
+    const skipped = scan.skipped
+    idiom_scan = {
+      files_scanned: scan.supported.length,
+      files_skipped_by_extension: skipped,
+      extensions: [...scan.extensions].sort(),
+    }
+  } else {
+    idiom_scan = { files_scanned: null, files_skipped_by_extension: null, extensions: [] }
+  }
+  const value = {
     files,
     commit_style: {
       sampled: subjects.length,
       conventional: subjects.length === 0 ? 0 : conventional.length / subjects.length,
       types,
     },
-  }, files.length > 0 ? 'convention markers and git log' : 'git log')
+    idioms,
+    idiom_scan,
+  }
+  if (files.length === 0 && subjects.length === 0) return proposedCell(value, 'tracked source heuristics')
+  return proposedCell(value, files.length > 0 ? 'convention markers and git log' : 'git log')
 }
 
 function classifyGhFailure(stderr) {

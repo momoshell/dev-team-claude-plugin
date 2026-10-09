@@ -34,6 +34,8 @@ The profile carries `repo_key`, `repo_slug` and these fields:
 `protected_paths_candidates` · `conventions` · `default_branch` ·
 `pr_conventions` · `intake_board`
 
+`conventions` also carries `conventions.value.idioms`: five fixed classes — dependency_injection, boolean_helpers, logging_placement, error_retry_shape and comment_density — each reporting a one-sentence rule, the sample_size behind it and up to three function exemplars with file spans, alongside an idiom_scan count of scanned versus extension-skipped tracked files (unsupported extensions never open, so markup outside Svelte script bodies cannot count as code). An unmeasured idiom has rule: null and a closed reason, never a guessed rule or numeric zero. A human ratifies idioms by promoting the conventions cell as a whole; the probe never ratifies them.
+
 Every cell carries one of exactly three statuses — **`ratified`**,
 **`proposed`**, **`unknown`** — and a fresh probe emits only the latter two. An
 `unknown` cell carries `null` and one closed reason, never a zero and never a

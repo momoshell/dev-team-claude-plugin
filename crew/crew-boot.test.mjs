@@ -2095,7 +2095,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 4387, lead: 9099, planner: 16704, reviewer: 7522, 'tech-lead': 6295 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 4387, lead: 9099, planner: 16790, reviewer: 7522, 'tech-lead': 6295 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
@@ -2107,7 +2107,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
     assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + delta : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48949)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49035)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 

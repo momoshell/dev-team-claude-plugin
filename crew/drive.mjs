@@ -3664,12 +3664,12 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, 
   // issues stayed open because the trailer said the wrong word. The plan DECLARES
   // which issues the lane closes; everything else stays a reference, and a lane
   // that declares nothing emits exactly today's trailer.
-  const boundIssue = boundIssueOf(brief)
-  const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => ref === `#${boundIssue}` || askClosingIssues(brief).includes(ref))
+  const boundIssue = boundIssueOf(brief); const explicitRefs = normalizeIssues(planEnv?.details?.refs)
+  const promoted = normalizeIssues(planEnv?.details?.issues).filter((ref) => !explicitRefs.includes(ref) && (ref === `#${boundIssue}` || askClosingIssues(brief).includes(ref)))
   const closes = normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes), ...promoted])
   const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref) && !askClosingIssues(brief).includes(ref))
   try { if (boundPromoted.length) onBoundIssuePromotion?.(boundPromoted) } catch {}
-  const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
+  const issues = normalizeIssues([...normalizeIssues(planEnv?.details?.issues), ...explicitRefs]).filter((ref) => !closes.includes(ref))
   const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
   return [subject, bodyPart, closesTrailer, refs].filter(Boolean).join('\n\n')
@@ -3743,8 +3743,8 @@ export function issueStatementDefect({ brief, details } = {}) {
   const issue = boundIssueOf(brief)
   if (issue === null) return null
   if (Array.isArray(details?.closes) && details.closes.length > 0) return null
-  if (Array.isArray(details?.issues) && details.issues.length > 0) return null
-  return `issue-bound lane must declare details.closes or details.issues before publication; dispatched issue #${issue}`
+  if (Array.isArray(details?.issues) && details.issues.length > 0) return null; if (Array.isArray(details?.refs) && details.refs.length > 0) return null
+  return `issue-bound lane must declare details.closes or details.issues or details.refs before publication; dispatched issue #${issue}`
 }
 
 function publishDiffFiles(io, baseSha) {
@@ -8394,7 +8394,7 @@ function runTask(ctx, io, crash) {
       `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
       '  details.plan_path: one of those artifacts, containing the triage note the builder will be briefed from',
       '  details.files_in_scope: optional concrete context update, validated for shape but not membership',
-      '  details.commit_subject / details.issues: optional',
+      '  details.commit_subject / details.issues / details.refs: optional',
     ].join('\n'))
     const env = assignAndWait('planner', briefPath, 'triage')
     const refusalWhy = handledEnvelopeRefusalWhy(env)
@@ -8455,7 +8455,7 @@ function runTask(ctx, io, crash) {
         files_in_scope: scope,
         validation_lane: laneCmd,
         commit_subject: env.details.commit_subject,
-        issues: env.details.issues, ...(Array.isArray(env.details.closes) ? { closes: env.details.closes } : {}),
+        issues: env.details.issues, refs: env.details.refs, ...(Array.isArray(env.details.closes) ? { closes: env.details.closes } : {}),
       },
     } }
   }

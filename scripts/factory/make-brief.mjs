@@ -3106,7 +3106,7 @@ const JOURNAL_UNREADABLE = 'journal-unreadable'
 export const PACK_ABSENT_REASONS = Object.freeze([NO_ISSUE_CITED, NO_ISSUE_BODY, ISSUE_BODY_UNREADABLE, NO_JOURNAL_NAMED, JOURNAL_UNREADABLE])
 const TREE_ENTRY_LIMIT = 40
 const FIXTURE_ROW_LIMIT = 500
-const ISSUE_CITATION = /\bCloses:?\s+#(\d{1,6})\b/i
+const ISSUE_CITATION = /^Closes #([1-9]\d*)$/
 const JOURNAL_CITATION = /\/[A-Za-z0-9._\-/]+\.jsonl\b/g
 
 function readAndKeepGreenFiles(writeSurface, discovery) {
@@ -3126,7 +3126,7 @@ function conventionsFile(discovery, writeSurface, profile, tripwiresOmitted = fa
 }
 
 export function issueBindingFor(request) {
-  const match = typeof request?.ask === 'string' ? ISSUE_CITATION.exec(request.ask) : null
+  const match = typeof request?.ask === 'string' ? request.ask.split(/\r?\n/).map((line) => ISSUE_CITATION.exec(line)).find(Boolean) : null
   const prose = match ? Number(match[1]) : null
   let declared = null
   const doneMeans = typeof request?.done_means === 'string' ? request.done_means : ''

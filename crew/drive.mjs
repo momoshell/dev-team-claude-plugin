@@ -12262,13 +12262,15 @@ function runTask(ctx, io, crash) {
       catch { return { ...result, reason: 'numstat-failed' } }
       if (numstat?.ok !== true || typeof numstat.output !== 'string') return { ...result, reason: 'numstat-failed' }
       if (!numstat.output.length && diff.output.length) return { ...result, reason: 'numstat-unmeasured' }
-      let lines_added = 0, lines_removed = 0
+      let lines_added = 0, lines_removed = 0, binary = false
       for (const record of numstat.output.split('\0').filter(Boolean)) {
         const match = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(record)
         if (!match) return { ...result, reason: 'numstat-unmeasured' }
-        if (match[1] === '-' || match[2] === '-') result.unmeasured_files.push(match[3])
+        if (match[1] === '-' || match[2] === '-') { result.unmeasured_files.push(match[3]); binary = true }
         else { lines_added += Number(match[1]); lines_removed += Number(match[2]) }
       }
+      // A binary file has no line count: the totals are unknown, never a measured zero.
+      if (binary) { lines_added = null; lines_removed = null }
       try { scan = io.run(`node ${shellArg(`${ctx.pluginRoot || process.cwd()}/scripts/factory/shape-scan.mjs`)} --diff ${shellArg(diffPath)} --checkout ${shellArg(ctx.checkout)} --json`) }
       catch { return { ...result, reason: 'scan-failed' } }
       if (scan?.ok !== true || typeof scan.output !== 'string' || !scan.output.trim()) return { ...result, reason: 'scan-failed' }
@@ -12286,6 +12288,7 @@ function runTask(ctx, io, crash) {
         helper_delta: helper.delta,
         nesting_growth: report.files.reduce((n, file) => n + file.nesting.filter(({ delta }) => delta !== null && delta > 0).length, 0),
         one_statement: totals.one_statement, review_history: totals.review_history, lines_added, lines_removed,
+        ...(binary ? { lines_unmeasured: 'binary-file' } : {}),
       }
       return result
     }
@@ -12330,6 +12333,18 @@ function runTask(ctx, io, crash) {
           if (touched.some((path) => !laneFiles.includes(path))) return 'scope-widened'
           return null
         }
+        // The review passed on the pre-reshape tree; the gate and lane cannot see behaviour
+        // they do not exercise, so the reshape diff itself goes back to the reviewer.
+        const reshapeReviewDefect = () => {
+          const after = captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot })
+          const diff = io.run(`git -C ${shellArg(ctx.checkout)} diff --binary --no-ext-diff --no-renames ${shellArg(reshapeSnapshot.tree)} ${shellArg(after.tree)} --`)
+          if (diff?.ok !== true || typeof diff.output !== 'string') return 'review-unmeasured'
+          io.writeFile(art('reshape-review.diff'), diff.output)
+          io.writeFile(art('reshape-review.md'), ['# Reshape review', '', `Reshape diff: ${art('reshape-review.diff')}`,
+            'This diff was applied after your review passed. Return status done with details.verdict "pass" only if it preserves the reviewed behaviour exactly; any other verdict reverts it.'].join('\n'))
+          const env = assignAndWait('reviewer', art('reshape-review.md'), 'reshape-review', { reviewSemantics: false })
+          return env?.status === 'done' && env.details?.verdict === 'pass' ? null : 'review-refused'
+        }
         try {
           const env = assignAndWait('builder', reshapeBriefPath, 'reshape')
           if (env?.status !== 'done') reshapeWhy = 'builder-not-done'
@@ -12345,7 +12360,7 @@ function runTask(ctx, io, crash) {
               else if (checkProofVerdict !== 'proven' || checkProofUnbound.length || (checkProofs || []).some((row) => row.outcome !== 'killed' && row.outcome !== 'exempt')) reshapeWhy = 'check-proof-red'
               else if (verifyPrescriptionPins('accept')) reshapeWhy = 'pinned-test-altered'
               else if (io.run(lane)?.ok !== true) reshapeWhy = 'lane-red'
-              else {
+              else if ((reshapeWhy = reshapeReviewDefect()) === null) {
                 captureProofTree(carriedRound)
                 const after = (() => { try { return captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }) } catch { return null } })()
                 const afterMeasurement = after ? measureReshape('after', after) : { shape: null, reason: 'snapshot-failed', unmeasured_files: [] }

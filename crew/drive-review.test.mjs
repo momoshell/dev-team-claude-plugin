@@ -7228,7 +7228,7 @@ test('RV1-1 edge spy runs the gate-owned warning', () => {
 })
 
 // A two-fix-round lane whose reshape builder runs onReshape(files); nameOnly(cmd) answers git diff --name-only.
-function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false }) {
+function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false, numstat = '1\t0\ta.mjs\0', reshapeVerdict = 'pass' }) {
   let io
   const extra = {
     plan: { files_in_scope: PIN_SCOPE, gate_cmd: 'gate-cmd', gate_path: TD + '/gate.mjs',
@@ -7281,7 +7281,7 @@ function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false }) {
         trees.set(oid, Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix))))
         return { ok: true, output: oid + '\n' }
       }
-      if (cmd.includes(' diff ') && cmd.includes('--numstat')) return { ok: true, output: '1\t0\ta.mjs\0' }
+      if (cmd.includes(' diff ') && cmd.includes('--numstat')) return { ok: true, output: numstat }
       if (cmd.includes(' diff ') && cmd.includes('--name-only')) return { ok: true, output: nameOnly(cmd) }
       if (cmd.includes(' diff ')) return { ok: true, output: 'diff --git a/a.mjs b/a.mjs\n+const guard = false\n' }
     }
@@ -7294,6 +7294,7 @@ function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false }) {
       onReshape(files)
       return buildEnv()
     }
+    if (io.calls.assign.at(-1)?.note === 'reshape-review') return reviewEnv(reshapeVerdict, [])
     return wait.call(this, returnPath, timeoutS)
   }
   const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 8, review_rounds: 8 } }, io)
@@ -7305,6 +7306,8 @@ function reshapeRun({ onReshape, nameOnly = () => '', laneRed = () => false }) {
 }
 const RESHAPE_TEST = CTX.checkout + '/a.test.mjs'
 const RESHAPE_SOURCE = CTX.checkout + '/a.mjs'
+// The hardening guard file is not prescription-pinned, so only the test-edited branch can revert it.
+const RESHAPE_GUARD = CTX.checkout + '/' + PIN_GUARD_FILE
 
 // MUTATION: drop verifyPrescriptionPins('accept') from the reshape green path; the pinned edit commits and no pinned-test-altered row is written.
 test('reshape rolls back an altered witnessed test after fresh proof', () => {
@@ -7318,11 +7321,11 @@ test('reshape rolls back an altered witnessed test after fresh proof', () => {
 test('reshape that edits any test file is reverted before the gate re-runs', () => {
   let before = null
   const { files, why } = reshapeRun({
-    onReshape: (files) => { before = files[RESHAPE_TEST]; files[RESHAPE_TEST] = '' },
-    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0a.test.mjs\0' : 'a.test.mjs\0',
+    onReshape: (files) => { before = files[RESHAPE_GUARD]; files[RESHAPE_GUARD] = '' },
+    nameOnly: (cmd) => cmd.includes('base-head') ? 'a.mjs\0b.test.mjs\0' : 'b.test.mjs\0',
   })
   assert.equal(why, 'test-edited')
-  assert.equal(files[RESHAPE_TEST], before)
+  assert.equal(files[RESHAPE_GUARD], before)
 })
 
 // MUTATION: drop the scope-widened return from reshapeScopeDefect; a file outside the lane's diff commits without a scope gate.
@@ -7345,4 +7348,32 @@ test('reshape that reddens the validation lane is reverted', () => {
   })
   assert.equal(why, 'lane-red')
   assert.equal(String(files[RESHAPE_SOURCE]).includes('// reshaped'), false)
+})
+
+// MUTATION: drop the reshape-review assignment; a reshape the gate and lane cannot see commits unreviewed.
+test('reshape the reviewer does not pass is reverted', () => {
+  const { io, files, why } = reshapeRun({
+    onReshape: (files) => { files[RESHAPE_SOURCE] += 'export const boom = () => { throw new Error() }\n' },
+    nameOnly: () => 'a.mjs\0',
+    reshapeVerdict: 'changes-needed',
+  })
+  assert.equal(why, 'review-refused')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'reshape-review').length, 1)
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('boom'), false)
+})
+
+test('reshape the reviewer passes is kept and journals its delta', () => {
+  const { io, files, why } = reshapeRun({ onReshape: (files) => { files[RESHAPE_SOURCE] += '// folded\n' }, nameOnly: () => 'a.mjs\0' })
+  assert.equal(why, undefined)
+  assert.equal(String(files[RESHAPE_SOURCE]).includes('// folded'), true)
+  assert.ok(io.calls.logs.some((row) => row.reshape_delta))
+})
+
+// MUTATION: drop the binary reset; a binary-only diff journals lines_added 0 as if measured.
+test('reshape keeps binary line totals unknown instead of zero', () => {
+  const { io } = reshapeRun({ onReshape: () => {}, numstat: '-\t-\tlogo.png\0', reshapeVerdict: 'changes-needed', nameOnly: () => '' })
+  const before = io.calls.logs.find((row) => row.reshape)?.reshape?.before
+  assert.equal(before.lines_added, null)
+  assert.equal(before.lines_removed, null)
+  assert.equal(before.lines_unmeasured, 'binary-file')
 })

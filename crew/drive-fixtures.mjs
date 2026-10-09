@@ -507,7 +507,7 @@ const triageEnv = (over = {}) => ({
 const planEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'planned',
   artifacts: [`${TD}/plan.md`],
-  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed', needs_adversary: false },
+  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed', needs_adversary: false, exemplars: [], exemplars_none: 'Fixture plans declare mutations but do not add or change functions.' },
   ...over,
 })
 
@@ -1136,6 +1136,7 @@ const ZERO_CAPACITY_LOGS = Object.freeze([
   { plan_growth: { round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null, combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2, ratio: null, divergent: false }, channel: 'record' },
   { adversary_trigger: 'none', channel: 'record' },
   { stage_done: 'plan:r1', channel: 'record' },
+  { event: 'plan-exemplars', plan_exemplars: { round: 1, exemplar_count: 0, exemplars_none: 'Fixture plans declare mutations but do not add or change functions.' }, channel: 'record' },
   { plan_frozen: { plan_path: '/tmp/fake-task/plan.md', plan_sha256: null, envelope_path: 'planner:1', envelope_sha256: null, plan_absent: 'read-unavailable', envelope_absent: 'planner-return-unavailable' }, channel: 'record' },
   { event: 'acceptance-coverage', status: 'unmeasured', reason: 'brief-unreadable', ids: null, covered: null, uncovered: null, waived: null, extra: null, channel: 'record' },
   { stage: 'build:r1', channel: 'record' },
@@ -1536,6 +1537,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at adversary_trigger"],
   ["recordRow", "", "at adversary_unavailable"],
   ["recordRow", "", "at plan_converged"],
+  ["recordRow", "event='plan-exemplars'", "at plan_exemplars"],
   ["recordRow", "event='acceptance-coverage'", "at ...coverage"],
   ["recordRow", "", "at carried_correction"],
   ["recordRow", "", "at gate_discrimination gate_generation gate_summary gate_proof_note"],

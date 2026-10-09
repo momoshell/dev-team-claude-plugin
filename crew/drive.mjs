@@ -2322,6 +2322,59 @@ export function validateScopeEntries(entries) {
   return errors
 }
 
+function validatePlanExemplars(details, read) {
+  const source = details && typeof details === 'object' && !Array.isArray(details) ? details : {}
+  const required = Array.isArray(source.mutations) && source.mutations.some((entry) => typeof entry?.file === 'string' && /\.(?:mjs|js|cjs|ts|tsx|svelte)$/.test(entry.file) && !/\.test\./.test(entry.file))
+  const present = Object.hasOwn(source, 'exemplars')
+  const errors = []
+  let exemplar_count = 0
+  let exemplars_none = null
+  if (required && !present) {
+    errors.push('details.exemplars is required for code-function mutations')
+  }
+  if (!present) return { checked: false, errors, exemplar_count, exemplars_none }
+  if (!Array.isArray(source.exemplars)) {
+    errors.push('details.exemplars must be an array')
+    return { checked: true, errors, exemplar_count, exemplars_none }
+  }
+  if (source.exemplars.length === 0) {
+    if (typeof details.exemplars_none !== 'string' || !details.exemplars_none.trim()) {
+      errors.push('details.exemplars_none must be a non-empty reason when exemplars is []')
+    } else exemplars_none = details.exemplars_none
+    return { checked: true, errors, exemplar_count, exemplars_none }
+  }
+  for (const entry of source.exemplars) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.function !== 'string' || !entry.function.trim() || !Array.isArray(entry.exemplars) || entry.exemplars.length < 1 || entry.exemplars.length > 3) {
+      errors.push('each exemplar declaration needs a function and 1-3 span objects')
+      continue
+    }
+    for (const span of entry.exemplars) {
+      const path = span?.path
+      const start = span?.start
+      const end = span?.end
+      const location = `${String(path)}:${String(start)}-${String(end)}`
+      const invalidPath = typeof path !== 'string' || validateScopeEntries([path]).length > 0 || path.endsWith('/') || path.includes(String.fromCharCode(92)) || path.includes(String.fromCharCode(0)) || path.split('/').some((part) => part.length === 0) || /^[A-Za-z]:/.test(path)
+      if (!span || typeof span !== 'object' || Array.isArray(span) || invalidPath) {
+        errors.push(`${location} is not a plain repo-relative file path`)
+        continue
+      }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+        errors.push(`${location} has invalid inclusive line bounds`)
+        continue
+      }
+      let text = null
+      try { const result = read(path); if (typeof result === 'string' && result.length > 0) text = result }
+      catch (error) { errors.push(`${location} could not be read: ${error?.message || String(error)}`) }
+      if (typeof text !== 'string' || end > text.split('\n').length) {
+        if (!errors.some((error) => error.startsWith(`${location} `))) errors.push(`${location} is unreadable, empty, or outside the file`)
+        continue
+      }
+      exemplar_count += 1
+    }
+  }
+  return { checked: true, errors, exemplar_count, exemplars_none }
+}
+
 // The directed shape's PLAN IS THE TASK BRIEF. The orchestrator authors exactly
 // one fenced ```directed block carrying the acceptance gate command and the write
 // surface. Closed key set, same posture as sourcesDefect (:88): a key nothing
@@ -8433,6 +8486,9 @@ function runTask(ctx, io, crash) {
   let adversaryLogged = false
   let laneDeferred = []
   let planBounceWhy = null
+  let exemplarsBounced = false
+  let acceptedExemplars = null
+  let acceptedExemplarsRound = null
   let planBrief = ctx.briefFile
   // A bounce that has its own machine-readable reason sets this; it is CONSUMED once, so
   // the plan-check bounces keep the 'plan-revision' note they have always carried (#843).
@@ -8709,6 +8765,26 @@ function runTask(ctx, io, crash) {
       }
       laneDeferred = laneResolved.deferred ?? []
     }
+    const candidateExemplars = validatePlanExemplars(env.details, (path) => io.readFile(join(ctx.checkout, path)))
+    if (candidateExemplars.errors.length > 0) {
+      const why = `Plan exemplars are invalid: ${candidateExemplars.errors.join('; ')}. Declare details.exemplars with 1-3 existing repo-relative path:start-end spans for each changed function, or use [] with non-empty details.exemplars_none only when no function changes.`
+      if (exemplarsBounced || round >= planRounds()) {
+        stageComplete()
+        return escalate('plan', `${why} ${exemplarsBounced ? 'The one exemplar correction bounce was already used.' : 'The final plan round cannot be bounced again.'}`, env.artifacts || [])
+      }
+      exemplarsBounced = true
+      const b = art(`plan-bounce-r${round}.md`)
+      failureUpgrade('plan', 'planner')
+      io.writeFile(b, [`# Plan exemplars invalid (round ${round})`, '', why, ...candidateExemplars.errors.map((error) => `- ${error}`), '', `Original task brief: ${ctx.briefFile}`].join('\n'))
+      planBrief = b
+      planNote = 'exemplars-invalid'
+      planBounceWhy = why
+      planEnv = null
+      stageComplete()
+      continue
+    }
+    acceptedExemplars = candidateExemplars
+    acceptedExemplarsRound = round
     const roundCoverage = acceptanceCoverage(briefText, env.details?.mutations ?? [])
     if (roundCoverage.status === 'measured' && roundCoverage.uncovered.length > 0) {
       if (round >= planRounds()) {
@@ -8941,6 +9017,10 @@ function runTask(ctx, io, crash) {
     planEnv = sourced.plan
   }
   if (!planEnv) return escalate('plan', planExhaustedWhy(planRounds(), planBounceWhy))
+  if (acceptedExemplars?.checked) {
+    const exemplarRecord = { round: acceptedExemplarsRound, exemplar_count: acceptedExemplars.exemplar_count, exemplars_none: acceptedExemplars.exemplars_none }
+    io.log(recordRow({ at: io.now(), event: 'plan-exemplars', plan_exemplars: exemplarRecord }))
+  }
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (stepCheckpoint) {
     const acceptedPlan = readOrNull(art('plan.accepted.md'))
@@ -10413,9 +10493,27 @@ function runTask(ctx, io, crash) {
     }
   }
 
+  let builderBriefError = null
+  function builderExemplarLines(exemplars) {
+    return ['## Plan exemplars', ...exemplars.flatMap((item) => [item.function, ...item.exemplars.map((span) => `- ${span.path}:${span.start}-${span.end}`)]), 'match these: signature style, parameter types and names, logging placement; or record why not in details.exemplar_deviations']
+  }
   function prepareBuilderAssignment(briefPath, note) {
-    const wrappedPath = briefPath
-    if (builderAttempts <= 1) return wrappedPath
+    let wrappedPath = briefPath
+    if (builderAttempts <= 1) {
+      if (Array.isArray(planEnv.details?.exemplars) && planEnv.details.exemplars.length > 0) {
+        const exemplarPath = art('builder-exemplars.md')
+        const contents = [
+          `Read the current builder brief at ${briefPath}.`,
+          `Plan: ${planPath}`,
+          '',
+          ...builderExemplarLines(planEnv.details.exemplars),
+        ].join('\n')
+        builderBriefError = guardedWrite(io, exemplarPath, contents)
+        if (builderBriefError) { builderBriefError = `could not write first builder exemplar brief ${exemplarPath}: ${builderBriefError}`; return null }
+        wrappedPath = exemplarPath
+      }
+      return wrappedPath
+    }
     let renewal = { session: 'kept', why: 'io.freshSession is unavailable' }
     if (typeof io.freshSession === 'function') {
       try { renewal = io.freshSession('builder') } catch (err) { renewal = { session: 'kept', why: err?.message || String(err) } }
@@ -10482,7 +10580,9 @@ function runTask(ctx, io, crash) {
       io.writeFile(stepBrief, stepBriefText({ step, round: stepRound, done, planPath, planText: readOrNull(planPath), priorFailure: priorStepFailure }))
       stage(`build:${step.id}:r${stepRound}`)
       builderAttempts = builderAttempts + 1
-      const env = assignAndWait('builder', prepareBuilderAssignment(stepBrief, 'step-build'), 'step-build')
+      const preparedStepBrief = prepareBuilderAssignment(stepBrief, 'step-build')
+      if (builderBriefError) { stageComplete(); return escalate('build', builderBriefError) }
+      const env = assignAndWait('builder', preparedStepBrief, 'step-build')
       if (!handledEnvelopeRefusalWhy(env) && (env?.status === 'insufficient' || env?.status === 'blocked')) {
         stageComplete(); const acceptGate = runGate(`gate:${step.id}:r${stepRound}`, gateCmd); const acceptVerdict = steppedGateVerdict(acceptGate.output, step, done, steppedChunks, validatedExemptLabels, acceptGate.ok === true); if (acceptVerdict.ok) { io.log(recordRow({ at: io.now(), event: 'step:accepted-by-gate', step: step.id, round: stepRound, status: env.status, reason: STEP_ACCEPT_REASONS[0], passed: step.checks_owned })); const acceptedEnv = { ...env, status: 'done' }; S.returns.builder = acceptedEnv; stepEnvelopes.push(acceptedEnv); stepEnv = acceptedEnv; done.push(step); doneEnvelopes.push(acceptedEnv); break }
         priorStepFailure = [`${env.status}: ${env.summary || '(no summary)'}`, ...(parseQuestions(env.details)?.questions || []).map(({ id, question }) => `${id}: ${question}`)].join('\n')
@@ -11214,7 +11314,12 @@ function runTask(ctx, io, crash) {
       builderAttempts += 1
       wholeBuildRound += 1
     }
-    const env = seededBuild ? seededStepEnv : assignAndWait('builder', prepareBuilderAssignment(buildBrief, buildNote), buildNote)
+    let env = seededStepEnv
+    if (!seededBuild) {
+      const preparedBuildBrief = prepareBuilderAssignment(buildBrief, buildNote)
+      if (builderBriefError) { stageComplete(); return escalate('build', builderBriefError) }
+      env = assignAndWait('builder', preparedBuildBrief, buildNote)
+    }
     if (seededBuild) { seededStepEnv = null; wholeBuildRound = 2 }
     const refusalWhy = handledEnvelopeRefusalWhy(env)
     if (refusalWhy) {

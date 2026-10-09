@@ -5,7 +5,7 @@
   "crew/crew.mjs:4140": "escalation -> NEVER teardown",
   "crew/crew.mjs:4807": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:4694": "const seats = rows.length",
-  "crew/drive.mjs:9248": "const completeCheckProof = (label, options = {}) => {",
   "crew/seat-io.mjs:130": "export const TRANSCRIPT_STALE_MS = 900_000",
-  "crew/seat-io.mjs:1762": "export function recogniseProviderRetry(text) {"
+  "crew/seat-io.mjs:1762": "export function recogniseProviderRetry(text) {",
+  "crew/drive.mjs:9328": "const completeCheckProof = (label, options = {}) => {"
 }

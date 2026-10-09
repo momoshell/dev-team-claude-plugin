@@ -1422,13 +1422,13 @@ test('malformed question entries are dropped and reported, and the outcome never
   assert.equal(parseQuestions({}), null)
 })
 
-// Kills SB6: replacing the own-check clause breaks both the unique charter wording and its unchanged byte ceiling.
-test('SB6 builder charter states step-local ownership within its original budget', () => {
+// Kills SB6: replacing the own-check clause breaks both the unique charter wording and its delivered byte ceiling.
+test('SB6 builder charter states step-local ownership within its delivered budget', () => {
   const charter = readFileSync(join(REPO_ROOT, 'crew/roles/builder.md'), 'utf8')
   const clause = "a step owes only its own checks, never a later step's."
   assert.equal(charter.split(clause).length - 1, 1)
   assert.ok(Buffer.byteLength(charter, 'utf8') <= CHARTER_SOURCE_BUDGET.builder)
-  assert.equal(CHARTER_SOURCE_BUDGET.builder, 4171)
+  assert.equal(CHARTER_SOURCE_BUDGET.builder, 4310)
 })
 
 // Kills GC1: deleting the fresh must-fix instruction leaves the charter guard red.

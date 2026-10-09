@@ -10766,3 +10766,132 @@ test('lead handoff is absent on the first consult', () => {
   assert.equal(s.io.calls.writes[`${TD}/lead-handoff-1.md`] ?? null, null)
   assert.deepEqual((s.io.calls.writes[`${TD}/decision-1.md`] ?? '').split('\n').filter((line) => line.startsWith('Handoff: ')), [])
 })
+
+// MUTATION RV1-1: remove the required declaration, once-only bounce, or first-brief
+// escalation guard. Missing plans must bounce once; a denied wrapper must never dispatch.
+test('RV1-1 plan exemplar enforcement preserves the one-bounce and wrapper-write boundaries', () => {
+  const exemplars = [{ function: 'fixture', exemplars: [{ path: 'a.mjs', start: 1, end: 1 }] }]
+  const validPlan = () => {
+    const fixture = steppedAcceptanceIo({ omitChunks: true })
+    fixture.plan.details.exemplars = exemplars
+    delete fixture.plan.details.exemplars_none
+    return fixture
+  }
+  const missingPlan = () => {
+    const fixture = validPlan()
+    delete fixture.plan.details.exemplars
+    delete fixture.plan.details.exemplars_none
+    return fixture
+  }
+
+  const missing = missingPlan()
+  const corrected = validPlan()
+  const missingWait = missing.io.wait
+  missing.io.wait = function (path, timeout) {
+    if (path === 'planner:2') return corrected.plan
+    return missingWait.call(this, path, timeout)
+  }
+  driveTask({ ...CTX, limits: { plan_rounds: 2 } }, missing.io)
+  assert.equal(missing.io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(missing.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+  assert.match(missing.io.calls.writes[`${TD}/plan-bounce-r1.md`], /details\.exemplars/)
+
+  const repeated = missingPlan()
+  const repeatedWait = repeated.io.wait
+  repeated.io.wait = function (path, timeout) {
+    if (path === 'planner:2') return missing.plan
+    return repeatedWait.call(this, path, timeout)
+  }
+  const repeatedResult = driveTask({ ...CTX, limits: { plan_rounds: 4 } }, repeated.io)
+  assert.equal(repeatedResult.details.escalation?.where, 'plan')
+  assert.equal(repeated.io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(repeated.io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+
+  for (const stepped of [false, true]) {
+    const fixture = stepped ? steppedAcceptanceIo() : validPlan()
+    fixture.plan.details.exemplars = exemplars
+    const write = fixture.io.writeFile
+    fixture.io.writeFile = function (path, content) {
+      if (path === `${TD}/builder-exemplars.md`) throw new Error('EPERM: builder exemplar brief denied')
+      return write.call(this, path, content)
+    }
+    const result = driveTask({ ...CTX, ...(stepped ? { variant: 'stepped' } : {}) }, fixture.io)
+    assert.equal(result.details.escalation?.where, 'build', stepped ? 'stepped' : 'whole')
+    assert.match(result.details.escalation?.why ?? '', /EPERM: builder exemplar brief denied/)
+    assert.equal(fixture.io.calls.assign.filter(({ role }) => role === 'builder').length, 0, stepped ? 'stepped' : 'whole')
+  }
+})
+
+// MUTATION RV2-1: if (typeof text !== 'string' || end > text.split('\\n').length) { -> if (false) {.
+test('RV2-1 unresolvable exemplar spans bounce naming each location', () => {
+const invalid = steppedAcceptanceIo({ omitChunks: true })
+invalid.plan.details.exemplars = [{ function: 'fixture', exemplars: [{ path: 'missing.mjs', start: 1, end: 1 }, { path: 'a.mjs', start: 1, end: 999 }] }]
+delete invalid.plan.details.exemplars_none
+const corrected = steppedAcceptanceIo({ omitChunks: true })
+corrected.plan.details.exemplars = [{ function: 'fixture', exemplars: [{ path: 'a.mjs', start: 1, end: 1 }] }]
+delete corrected.plan.details.exemplars_none
+const wait = invalid.io.wait
+invalid.io.wait = function (path, timeout) {
+if (path === 'planner:2') return corrected.plan
+return wait.call(this, path, timeout)
+}
+driveTask({ ...CTX, limits: { plan_rounds: 2 } }, invalid.io)
+assert.equal(invalid.io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+assert.equal(invalid.io.calls.assign.filter(({ role }) => role === 'builder').length, 1)
+const bounce = invalid.io.calls.writes[`${TD}/plan-bounce-r1.md`]
+assert.match(bounce, /missing\.mjs:1-1/)
+assert.match(bounce, /a\.mjs:1-999/)
+})
+
+// MUTATION RV2-2: if (typeof details.exemplars_none !== 'string' || !details.exemplars_none.trim()) { -> if (false) {.
+test('RV2-2 empty exemplars without a nonblank reason bounce', () => {
+for (const reason of [undefined, '  ', 7]) {
+const label = reason === undefined ? 'undefined' : JSON.stringify(reason)
+const invalid = steppedAcceptanceIo({ omitChunks: true })
+invalid.plan.details.exemplars = []
+if (reason === undefined) delete invalid.plan.details.exemplars_none
+else invalid.plan.details.exemplars_none = reason
+const corrected = steppedAcceptanceIo({ omitChunks: true })
+const wait = invalid.io.wait
+invalid.io.wait = function (path, timeout) {
+if (path === 'planner:2') return corrected.plan
+return wait.call(this, path, timeout)
+}
+driveTask({ ...CTX, limits: { plan_rounds: 2 } }, invalid.io)
+const planners = invalid.io.calls.assign.filter(({ role }) => role === 'planner')
+const secondPlannerIndex = invalid.io.calls.assign.indexOf(planners[1])
+const builderIndex = invalid.io.calls.assign.findIndex(({ role }) => role === 'builder')
+assert.equal(planners.length, 2, label)
+assert.ok(builderIndex > secondPlannerIndex, label)
+assert.match(invalid.io.calls.writes[`${TD}/plan-bounce-r1.md`], /exemplars_none/, label)
+}
+})
+
+// MUTATION RV2-3: ...builderExemplarLines(planEnv.details.exemplars), -> ...[].
+test('RV2-3 first builder brief carries every exemplar span and the matching guidance', () => {
+const exemplars = [
+{ function: 'alpha', exemplars: [{ path: 'a.mjs', start: 1, end: 1 }, { path: 'a.mjs', start: 1, end: 2 }] },
+{ function: 'beta', exemplars: [{ path: 'a.mjs', start: 2, end: 2 }] },
+]
+const guidance = 'match these: signature style, parameter types and names, logging placement; or record why not in details.exemplar_deviations'
+for (const stepped of [false, true]) {
+const label = stepped ? 'stepped' : 'whole'
+const fixture = stepped ? steppedAcceptanceIo() : steppedAcceptanceIo({ omitChunks: true })
+fixture.plan.details.exemplars = exemplars
+delete fixture.plan.details.exemplars_none
+driveTask({ ...CTX, ...(stepped ? { variant: 'stepped' } : {}) }, fixture.io)
+const builder = fixture.io.calls.assign.find(({ role }) => role === 'builder')
+assert.equal(builder?.briefFile, `${TD}/builder-exemplars.md`, label)
+const brief = fixture.io.calls.writes[builder.briefFile]
+assert.ok(brief.includes(`Read the current builder brief at`), label)
+assert.ok(brief.includes(`Plan: ${fixture.plan.details.plan_path}`), label)
+assert.ok(brief.includes('## Plan exemplars'), label)
+for (const { function: name, exemplars: spans } of exemplars) {
+assert.ok(brief.includes(name), `${label} ${name}`)
+for (const { path, start, end } of spans) assert.ok(brief.includes(`- ${path}:${start}-${end}`), `${label} ${path}:${start}-${end}`)
+}
+assert.ok(brief.split('\n').includes(guidance), label)
+const record = fixture.io.calls.logs.find((entry) => entry.event === 'plan-exemplars')
+assert.deepEqual(record?.plan_exemplars, { round: 1, exemplar_count: 3, exemplars_none: null }, label)
+}
+})

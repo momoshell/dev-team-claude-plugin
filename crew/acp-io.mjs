@@ -137,9 +137,6 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const prior = priorPath ? assignments.get(priorPath) : null
     const { client, profile } = getClient(role)
     if (prior) settlePriorBeforePrompt(prior, id, client)
-    if (spec.reask) {
-      if (profile.session_resume) client.resumeSession(client.sessionId)
-    }
     const promptId = client.beginPrompt([{ type: 'text', text }])
     assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
     current.set(role, returnPath)
@@ -273,6 +270,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const assignment = activePath ? assignments.get(activePath) : null
     if (assignment) settle(assignment, { closing: true, windowMs })
     clients.delete(role)
+    current.delete(role)
     return { role, transport: 'acp', ...state.client.close() }
   }
   function abort(role) {

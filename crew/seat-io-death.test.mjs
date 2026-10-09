@@ -940,3 +940,44 @@ test('D2 absent signal has closed absence reason', () => {
     UNREADABLE_OR_MALFORMED: 'signal-file-unreadable-or-malformed',
   })
 })
+
+// Mutation: remove the Original brief line from retryLostSeat, then run this test and restore it.
+test('LOST-BRIEF lost-seat retries retain both original evidence paths', () => {
+  const dir = scratchDir('lost-brief-'); const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const original = join(taskDir, 'original.md'); writeFileSync(original, '# original\n')
+  const crew = { claude_bin: '/bin/true', members: { builder: { transport: HEADLESS_TRANSPORT, agent: 'pi', model: 'test' } } }
+  let calls = 0
+  const transport = {
+    assign(spec) { calls++; return { id: spec.reask?.id || 'd1', returnPath: spec.reask?.returnPath || join(returnsDir, 'd1.builder.json') } },
+    wait() { if (calls === 1) throw Object.assign(new Error('lost worker'), { stage: 'headless-timeout', role: 'builder' }); return { assignment_id: 'd1', role: 'builder', status: 'done', summary: 'recovered', artifacts: [], details: {} } },
+  }
+  const io = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, { headlessIo: () => transport, logLine() {}, sleep() {} })
+  try {
+    const first = io.assign({ role: 'builder', briefFile: original })
+    assert.equal(io.wait(first.returnPath, 1).status, 'done')
+    const retry = readFileSync(join(taskDir, 'retry-d1.builder.md'), 'utf8')
+    assert.match(retry, new RegExp(`Original brief: ${original}`))
+    assert.match(retry, new RegExp(`Lost attempt's return path: ${first.returnPath}`))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Mutation: call transport.assign directly in the lost-seat retry (no withAssignmentSession), then run this test and restore it.
+test('SF3 a lost-seat retry starts its own fresh session', () => {
+  const dir = scratchDir('lost-fresh-'); const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const original = join(taskDir, 'original.md'); writeFileSync(original, '# original\n')
+  const crew = { claude_bin: '/bin/true', members: { builder: { transport: HEADLESS_TRANSPORT, agent: 'pi', model: 'test' } } }
+  let calls = 0
+  const rows = []
+  const transport = {
+    assign(spec) { calls++; return { id: spec.reask?.id || 'd1', returnPath: spec.reask?.returnPath || join(returnsDir, 'd1.builder.json') } },
+    wait() { if (calls === 1) throw Object.assign(new Error('lost worker'), { stage: 'headless-timeout', role: 'builder' }); return { assignment_id: 'd1', role: 'builder', status: 'done', summary: 'recovered', artifacts: [] } },
+  }
+  const io = seatIo(crew, { dir, taskDir, returnsDir }, dir, null, {}, {}, { headlessIo: () => transport, logLine: (_path, row) => rows.push(row), sleep() {} })
+  try {
+    const first = io.assign({ role: 'builder', briefFile: original })
+    assert.equal(io.wait(first.returnPath, 1).status, 'done')
+    assert.deepEqual(rows.filter((row) => row.event === 'seat-session').map((row) => [row.role, row.outcome]), [['builder', 'fresh'], ['builder', 'fresh']])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

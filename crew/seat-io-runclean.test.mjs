@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown, turnCeilingValues,
+  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
@@ -421,6 +421,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at seat_turn_census'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
+  ['recordRow', "event='seat-session'", 'at role id transport outcome why'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome attempt why'],
   ['operationalRow', "event='host_suspended'", 'at ...record'],
@@ -636,11 +637,11 @@ test('SS4', () => {
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 39)
+  assert.equal(sites.length, 40)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 28)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 11)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 12)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -3969,4 +3970,179 @@ test('RV2-2 a for-await head keeps its of-operand regex opaque', () => {
   assert.ok(tokenizeJs(source).some((token) => token.kind === 'regex' && token.text === '/[//]/g'))
   assert.deepEqual(noncanonicalJournalSinks(source), [{ line: 1, form: 'io.log' }])
   assert.throws(() => seatJournalSites("for await (const x of /[//]/g.exec('/')) log(row)"), /line\(s\) 1/)
+})
+
+function freshRpcSeat(retired = { session: 'fresh' }, { started = false } = {}) {
+  const root = scratchDir('fresh-rpc-seat-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const member = { transport: 'headless-rpc', started, agent: 'pi', model: 'test', session_id: 'stale' }
+  const crew = { claude_bin: '/bin/true', members: { planner: member }, seats: { planner: { ...member } } }
+  writeFileSync(join(root, 'crew.json'), JSON.stringify(crew))
+  const events = [], logs = []; let n = 0
+  const transport = {
+    retire(role, options) { events.push(['retire', role, options]); return retired },
+    assign() { events.push(['assign']); return { id: `d${++n}`, returnPath: join(paths.returnsDir, `d${n}.planner.json`) } },
+    wait() { return null },
+  }
+  const io = seatIo(crew, paths, root, null, {}, {}, { headlessRpcIo: () => transport, logLine: (_path, row) => logs.push(row), now: () => 1, sleep() {} })
+  return { root, paths, crew, events, logs, transport, io, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+// Mutation: bypass the RPC retire call before assigning, then run this test and restore it.
+test('FS3 RPC renewal retires once before the next delivery', () => {
+  const f = freshRpcSeat()
+  try {
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') })
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') })
+    assert.deepEqual(f.events, [['assign'], ['retire', 'planner', { freshSession: true }], ['assign']])
+    f.io.freshSession('planner')
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') })
+    assert.equal(f.events.filter(([kind]) => kind === 'retire').length, 2)
+  } finally { f.cleanup() }
+})
+
+// Mutation: rename seat-session, then run this test and restore it.
+test('FS5 seat-session rows use the frozen kept vocabulary', () => {
+  assert.equal(Object.isFrozen(SEAT_SESSION_KEPT_REASONS), true)
+  for (const [retired, expected] of [
+    [{ session: 'held', why: 'distinctive held prose' }, 'worker-adoptable'],
+    [{ session: 'kept', why: 'distinctive refusal prose' }, 'retire-refused'],
+  ]) {
+    const f = freshRpcSeat(retired)
+    try {
+      f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') })
+      f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') })
+      const rows = f.logs.filter((row) => row.event === 'seat-session')
+      assert.deepEqual(rows.map((row) => [row.outcome, row.why]), [['fresh', null], ['kept', expected]])
+      assert.ok(rows.every((row) => row.why === null || SEAT_SESSION_KEPT_REASONS.includes(row.why)))
+    } finally { f.cleanup() }
+  }
+})
+
+// Mutation: remove both re-ask evidence links, then run this test and restore them.
+test('FS6 re-ask briefs retain original and refused evidence paths', () => {
+  const brief = reaskBrief({ role: 'planner', id: 'd1', briefFile: '/tmp/original.md', refusedReturnPath: '/tmp/refused.json', returnPath: '/tmp/correction.json', message: 'bad JSON' })
+  assert.match(brief, /Original brief: \/tmp\/original.md/)
+  assert.match(brief, /Refused envelope: \/tmp\/refused.json/)
+})
+
+function freshPaneSeat(failure = null) {
+  const root = scratchDir('fresh-pane-seat-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir); writeFileSync(join(paths.taskDir, 'launch-reviewer.sh'), 'exit 0\n')
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  const events = [], logs = []
+  const io = seatIo(crew, paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine: (_path, row) => logs.push(row),
+    cmux(verb, args) { events.push([verb, args]); return verb === 'respawn-pane' && failure === 'respawn' ? { ok: false } : { ok: true, stdout: '' } },
+    awaitSeatsReady() { if (failure === 'ready') throw new Error('timeout') },
+    sendLine(surface) { events.push(['send', surface]) },
+  })
+  return { root, paths, events, logs, io, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+// Mutation: fabricate respawn success without cmux, then run this test and restore it.
+test('FS8 second pane delivery respawns and waits only for its role', () => {
+  const f = freshPaneSeat()
+  try {
+    f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') })
+    f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') })
+    assert.deepEqual(f.events.map(([kind]) => kind), ['send', 'respawn-pane', 'send'])
+    assert.deepEqual(f.events[1][1].slice(0, 4), ['--workspace', 'workspace-test', '--surface', 'surface-reviewer'])
+  } finally { f.cleanup() }
+})
+
+// Mutation: disable the shared kept-pane refusal, then run this test and restore it.
+test('FS9 pane renewal failures refuse delivery and record the closed reason', () => {
+  for (const [failure, expected] of [['respawn', 'pane-respawn-failed'], ['ready', 'pane-ready-timeout']]) {
+    const f = freshPaneSeat(failure)
+    try {
+      f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') }); f.events.length = 0
+      assert.throws(() => f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') }), new RegExp(expected))
+      assert.deepEqual(f.events.filter(([kind]) => kind === 'send'), [])
+      assert.equal(f.logs.filter((row) => row.event === 'seat-session').at(-1).why, expected)
+    } finally { f.cleanup() }
+  }
+})
+
+// Mutation: drop the durable `started` write in withAssignmentSession, then run this test and restore it.
+test('SF1 a restarted driver still renews a pane seat that already took an assignment', () => {
+  const root = scratchDir('fresh-pane-restart-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir); writeFileSync(join(paths.taskDir, 'launch-reviewer.sh'), 'exit 0\n')
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  writeFileSync(join(root, 'crew.json'), JSON.stringify({ claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }))
+  const events = []
+  const boot = () => seatIo(JSON.parse(readFileSync(join(root, 'crew.json'), 'utf8')), paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {},
+    cmux(verb, args) { events.push([verb, args]); return { ok: true, stdout: '' } },
+    awaitSeatsReady() {}, sendLine(surface) { events.push(['send', surface]) },
+  })
+  try {
+    boot().assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    boot().assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    assert.deepEqual(events.map(([kind]) => kind), ['send', 'respawn-pane', 'send'])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// Mutation: ignore a failed `started` write and deliver anyway, then run this test and restore it.
+test('SF4 a failed started write refuses delivery instead of leaving a restart to resume', () => {
+  const root = scratchDir('fresh-pane-persist-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  writeFileSync(join(root, 'crew.json'), '{ not json')
+  const sends = []
+  const io = seatIo(crew, paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {}, cmux() { return { ok: true, stdout: '' } }, awaitSeatsReady() {},
+    sendLine(surface) { sends.push(surface) },
+  })
+  try {
+    assert.throws(() => io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') }), /crew\.json started write failed \(unreadable\)/)
+    assert.deepEqual(sends, [])
+    assert.equal(crew.members.reviewer.started, false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// Mutation: keep the pane return path reserved when renewal throws, then run this test and restore it.
+test('SF2 a pane correction whose renewal failed can be retried on the same return path', () => {
+  const root = scratchDir('fresh-pane-retry-'); const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir); writeFileSync(join(paths.taskDir, 'launch-reviewer.sh'), 'exit 0\n')
+  const member = { transport: 'pane', started: false, surface_id: 'surface-reviewer', agent: 'pi', model: 'test' }
+  const crew = { claude_bin: '/bin/true', workspace_id: 'workspace-test', members: { reviewer: member }, seats: { reviewer: { ...member } } }
+  let respawnOk = false
+  const sends = []
+  const io = seatIo(crew, paths, root, null, {}, {}, {
+    now: () => 1, sleep() {}, logLine() {},
+    cmux(verb) { return verb === 'respawn-pane' && !respawnOk ? { ok: false } : { ok: true, stdout: '' } },
+    awaitSeatsReady() {}, sendLine(surface, line) { sends.push(line) },
+  })
+  try {
+    const first = io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    const reask = { id: first.id, returnPath: join(paths.returnsDir, `${first.id}.reviewer.reask.json`) }
+    assert.throws(() => io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md'), reask }), /pane-respawn-failed/)
+    respawnOk = true
+    assert.deepEqual(io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md'), reask }), { id: first.id, returnPath: reask.returnPath })
+    assert.equal(sends.length, 2)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// Mutation: point the child at a path that is not crew.mjs, then run this test and restore it.
+test('DEFAULT-RESOLVER uses the isolated crew readiness child', () => {
+  assert.throws(() => awaitSeatsReadyChild({ members: {} }, 'bogus'), /needs an explicit readiness mode/)
+  assert.doesNotThrow(() => awaitSeatsReadyChild({ members: {} }, 'fresh'))
+})
+
+// Mutation: let a reset persistence failure proceed to transport.assign, then run this test and restore it.
+test('PERSIST renewal persistence errors prevent transport delivery', () => {
+  const f = freshRpcSeat({ session: 'fresh' }, { started: true })
+  const original = readFileSync
+  const io = seatIo(f.crew, f.paths, f.root, null, {}, {}, {
+    headlessRpcIo: () => f.transport, logLine: (_path, row) => f.logs.push(row), now: () => 1, sleep() {},
+    readFileSync(path, ...args) { if (path === join(f.root, 'crew.json')) throw new Error('EPERM persistence fixture'); return original(path, ...args) },
+  })
+  try {
+    assert.throws(() => io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') }), /crew.json session reset failed \(unreadable/)
+    assert.deepEqual(f.events, [['retire', 'planner', { freshSession: true }]])
+    assert.equal(f.logs.some((row) => row.event === 'seat-session' && row.outcome === 'fresh'), false)
+  } finally { f.cleanup() }
 })

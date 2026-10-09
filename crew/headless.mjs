@@ -2265,7 +2265,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     const prior = [...runs.values()].reverse().find((r) => r.role === role)
     const persisted = activeRun(role)
-    const sessionId = member.session_id || persisted?.sessionId || uuid()
+    const sessionId = member.started ? (member.session_id || persisted?.sessionId || uuid()) : (member.session_id || uuid())
     // ONE deadline, taken once, read by BOTH waits. Neither mints its own.
     const deadline = now() + SESSION_BUSY_SETTLE_MS
     const roundFor = roundResolver(role, !!reask)

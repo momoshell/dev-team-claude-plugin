@@ -3020,6 +3020,7 @@ function paneGraceRun({ frames, transcript = false, failSend = 0 }) {
         if (sends.length === failSend) throw new Error('surface refused the keystrokes')
       },
       refusalFrames: () => queue.shift() || [],
+cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
       ...(transcript ? { transcriptPaths: () => ['/x/planner.jsonl'], statSync: () => ({ mtimeMs: 0 }) } : {}),
       tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
     })
@@ -3072,7 +3073,8 @@ test(`pane ${label} after an unusable-envelope re-ask: ${expected === 2 ? 'a sil
         fired = true
         return [{ at: clock + 1, member, message: 'prompt_cache_retention is not supported on this model', source: 'claude' }]
       },
-      ...(transcript ? { transcriptPaths: () => ['/x/planner.jsonl'], statSync: () => ({ mtimeMs: 0 }) } : {}),
+      cmux: () => ({ ok: true, stdout: '' }), awaitSeatsReady: () => {},
+...(transcript ? { transcriptPaths: () => ['/x/planner.jsonl'], statSync: () => ({ mtimeMs: 0 }) } : {}),
       tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'pane' }] }] }] }] }), locate: (_tree, id) => id === 'pane',
     })
     const first = seat.assign({ role: 'planner', briefFile: '/first.md' })

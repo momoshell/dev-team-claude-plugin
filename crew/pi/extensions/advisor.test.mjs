@@ -978,8 +978,8 @@ test('I1 extension and boot role gates agree', async () => {
 })
 
 test('K1 planner edge-path gloss fits plan and gate', () => {
-  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON with class, severity, claim, and evidence.')
-  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON with class, severity, claim, and evidence.')
+  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}')
+  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}')
   assert.match(advisor.PLANNER_SYSTEM_PROMPT, /plan or gate omits or mishandles a required boundary, failure case, or acceptance path/)
   assert.match(advisor.PLANNER_SYSTEM_PROMPT, /Ground truth citation that does not hold at the ref where the plan was written/)
   assert.doesNotMatch(advisor.PLANNER_SYSTEM_PROMPT, /EPERM, unknown, interrupted, and empty paths/)
@@ -1394,4 +1394,63 @@ test('AD5 a tier-zero note is journaled first and then sent as a steer', async (
     [{ type: 'crew-advisor', content: 'The builder seat touched outside.mjs outside the declared scope.', delivery: 'steer', display: true, noTriggerTurn: true, journalFirst: true }])
   assert.equal(r.spawned, 0)
   assert.equal(denied.sends.length, 0)
+})
+
+// MUTATION AS1: replace the severity interpolation with an invalid value.
+test('AS1 both role prompts carry the complete constant-backed reply contract', () => {
+  const prompts = [advisor.BUILDER_SYSTEM_PROMPT, advisor.PLANNER_SYSTEM_PROMPT]
+  const clauses = [
+    'Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line.',
+    'Each object has exactly the four keys class, severity, claim and evidence.',
+    'class must be one of edge-path, over-claim.', 'severity must be one of low, medium, high.',
+    'claim must be a non-empty string of at most 500 UTF-8 bytes.',
+    'evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line',
+    'The first evidence item must cite a line shown in the delta.',
+    'Do not copy the example\'s evidence unless that line is shown in the delta.',
+  ]
+  for (const prompt of prompts) for (const clause of clauses) assert.ok(prompt.includes(clause), clause)
+  for (const value of advisor.JUDGMENT_CLASSES) for (const prompt of prompts) assert.ok(prompt.includes(value))
+  for (const value of advisor.SEVERITIES) for (const prompt of prompts) assert.ok(prompt.includes(value))
+  assert.equal(advisor.CLAIM_CAP_BYTES, 500)
+  assert.equal(advisor.EVIDENCE_MAX, 5)
+  assert.equal(advisor.EVIDENCE_ITEM_CAP_BYTES, 200)
+  assert.equal(advisor.JUDGMENT_REPLY_MAX, 4)
+})
+
+// MUTATION AS2: replace evidence's array requirement with prose.
+test('AS2 malformed reply shapes are rejected and mapped to prompt clauses', () => {
+  const badEvidence = 'The path is not handled.'
+  const shapes = [
+    [{ class: 'edge-path', severity: 'unassessed', claim: 'The empty input path is not handled.', evidence: [badEvidence] }, ['evidence-invalid', 'severity-invalid']],
+    [{ class: 'edge-path', severity: 'low', claim: 'The empty input path is not handled.', evidence: badEvidence }, ['evidence-invalid']],
+    [{ judgments: [{ class: 'edge-path', severity: 'low', claim: 'The empty input path is not handled.', evidence: ['src/widget.mjs:12'] }] }, ['claim-invalid', 'class-invalid', 'evidence-invalid', 'severity-invalid', 'unknown-key']],
+  ]
+  for (const [shape, expected] of shapes) {
+    const verdict = advisor.validateReply(shape, { anchors: new Set(['src/widget.mjs:12']) })
+    assert.equal('judgment' in verdict, false)
+    assert.deepEqual([...verdict.codes].sort(), expected)
+  }
+  const required = {
+    'unknown-key': 'exactly the four keys class, severity, claim and evidence',
+    'class-invalid': 'class must be one of edge-path, over-claim',
+    'severity-invalid': 'severity must be one of low, medium, high',
+    'claim-invalid': 'claim must be a non-empty string of at most 500 UTF-8 bytes',
+    'evidence-invalid': 'evidence must be an array of 1 to 5 strings',
+  }
+  for (const clause of new Set(shapes.flatMap(([, codes]) => codes).map((code) => required[code]))) assert.ok(advisor.BUILDER_SYSTEM_PROMPT.includes(clause), clause)
+  assert.ok(advisor.BUILDER_SYSTEM_PROMPT.includes('exactly a bare path:line'))
+})
+
+// MUTATION AS3: make the embedded example severity invalid.
+test('AS3 both prompt examples validate as objects and one-element arrays', () => {
+  for (const prompt of [advisor.BUILDER_SYSTEM_PROMPT, advisor.PLANNER_SYSTEM_PROMPT]) {
+    const marker = 'Example reply: '
+    const index = prompt.lastIndexOf(marker)
+    assert.notEqual(index, -1)
+    const example = JSON.parse(prompt.slice(index + marker.length))
+    assert.equal(Array.isArray(example), false)
+    const anchors = new Set([example.evidence?.[0]])
+    assert.deepEqual(advisor.validateReply(example, { anchors }), { codes: [], judgment: example })
+    assert.deepEqual(advisor.validateReply([example], { anchors }), { codes: [], judgment: example })
+  }
 })

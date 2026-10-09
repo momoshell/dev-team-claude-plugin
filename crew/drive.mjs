@@ -12329,7 +12329,7 @@ function runTask(ctx, io, crash) {
           const touched = reshapePaths(reshapeSnapshot.tree, captureInvocationAfter({ ctx, io, snapshot: reshapeSnapshot }).tree)
           const laneFiles = reshapePaths(ctx.head, reshapeSnapshot.tree)
           if (touched === null || laneFiles === null) return 'scope-unmeasured'
-          if (touched.some((path) => /(^|\/)test\/|\.test\./.test(path))) return 'test-edited'
+          if (touched.some((path) => RESHAPE_TEST_PATH.test(path))) return 'test-edited'
           if (touched.some((path) => !laneFiles.includes(path))) return 'scope-widened'
           return null
         }
@@ -12343,7 +12343,10 @@ function runTask(ctx, io, crash) {
           io.writeFile(art('reshape-review.md'), ['# Reshape review', '', `Reshape diff: ${art('reshape-review.diff')}`,
             'This diff was applied after your review passed. Return status done with details.verdict "pass" only if it preserves the reviewed behaviour exactly; any other verdict reverts it.'].join('\n'))
           const env = assignAndWait('reviewer', art('reshape-review.md'), 'reshape-review', { reviewSemantics: false })
-          return env?.status === 'done' && env.details?.verdict === 'pass' ? null : 'review-refused'
+          const findings = env?.details?.findings
+          const clean = env?.status === 'done' && env.details?.verdict === 'pass' && Number(env.details?.must_fix ?? 0) === 0
+            && (findings === undefined || (Array.isArray(findings) && findings.length === 0))
+          return clean ? null : 'review-refused'
         }
         try {
           const env = assignAndWait('builder', reshapeBriefPath, 'reshape')
@@ -16523,3 +16526,5 @@ export function acceptanceCoverageBounceLines(round, coverage, briefFile) {
     `Original brief: ${briefFile}`,
   ]
 }
+// Every file node --test discovers by default, plus any path under a test/ directory.
+export const RESHAPE_TEST_PATH = /(^|\/)(test\/|test\.[cm]?js$|test-[^/]*\.[cm]?js$|[^/]*[._-]test\.[cm]?js$)|\.test\./

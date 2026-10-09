@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { git, ROOT, scratchDir } from './helpers.mjs'
 import {
-  ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
+  ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CONVENTIONS_IDIOM_BYTE_LIMIT, CONVENTIONS_IDIOM_LIMIT, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
@@ -3961,3 +3961,97 @@ test('OB5 keep-green names every candidate exactly once across names and narrow 
   for (const file of tripwires) assert.ok(narrowPaths.includes(file), `${file} missing from narrow paths: ${narrowLine}`)
   assert.equal(namedParts.filter((part) => part === NARROW_REFERENCE(2)).length, 1, `reference count in ${keep}`)
 })
+
+function conventionsFixture(label, value, packed = false) {
+  const root = fixture('cw-' + label, { scripts: FAST_FIXTURE_TEST })
+  const fields = { test_command: ratified(FAST_FIXTURE_TEST) }
+  if (value !== undefined) fields.conventions = value
+  const profilePath = profile('cw-' + label, fields)
+  const extra = ['--profile', profilePath]
+  let pack = null
+  if (packed) { pack = join(root, 'pack'); mkdirSync(pack); extra.push('--pack', pack) }
+  return { ...compile(root, {}, extra, label + '.md'), pack }
+}
+
+test('CW1 unavailable conventions warn exactly once and preserve their record', () => {
+  // MUTATION: drop the warning return from renderConventionsWarning.
+  for (const [label, value, basis] of [
+    ['proposed', proposed({ files: [], idioms: [] }), /profile field conventions is proposed/],
+    ['none', undefined, /profile field conventions is absent, not ratified/], ['unknown', unknown(), /profile field conventions is unknown/],
+    ['invalid', ratified({ files: 'bad', idioms: 'bad' }), /value.files must be an array of strings/],
+  ]) {
+    const body = section(conventionsFixture('cw1-' + label, value).brief, '## Conventions')
+    assert.equal((body.match(/^CONVENTIONS WARNING:/gm) || []).length, 1, label)
+    assert.match(body, basis, label)
+    assert.match(body, /conventions of record: \(not available\)/, label)
+  }
+})
+
+test('CW2 only ratified idiom arrays suppress the warning', () => {
+  // MUTATION: disable the valid-array early return in renderConventionsWarning.
+  for (const [label, value] of [['missing', ratified({ files: [] })], ['null', ratified({ idioms: null })], ['nonarray', ratified({ idioms: {} })]]) {
+    assert.match(section(conventionsFixture('cw2-' + label, value).brief, '## Conventions'), /value\.idioms must be an array/)
+  }
+  for (const [label, idioms] of [['empty', []], ['entries', [{ class: 'style', rule: 'Prefer it', exemplars: [] }]]]) {
+    const body = section(conventionsFixture('cw2-' + label, ratified({ files: [], idioms })).brief, '## Conventions')
+    assert.equal((body.match(/^CONVENTIONS WARNING:/gm) || []).length, 0, label)
+    assert.match(body, /conventions of record \(basis: ratified profile field conventions/)
+  }
+})
+
+test('CW3 idioms render ordered coordinates and cap exemplar display', () => {
+  // MUTATION: remove coordinates from the exemplar expression.
+  const idiom = { class: 'ordered', rule: 'Use each source', exemplars: [1, 2, 3, 4].map((n) => ({ path: 'lib/cw-' + n + '-fixture.mjs', start: n, end: n + 1 })) }
+  const body = section(conventionsFixture('cw3', ratified({ files: [], idioms: [idiom] })).brief, '## Conventions')
+  assert.ok(body.indexOf('idiom ordered:') > body.indexOf('conventions of record'))
+  assert.match(body, /idiom ordered: Use each source — exemplars: lib\/cw-1-fixture\.mjs:1-2, lib\/cw-2-fixture\.mjs:2-3, lib\/cw-3-fixture\.mjs:3-4 \(\+1 more\)/)
+})
+
+test('CW4 malformed idioms are diagnosed while valid siblings remain', () => {
+  // MUTATION: silently drop a malformed entry instead of rendering its diagnostic.
+  const good = (className) => ({ class: className, rule: 'rule', exemplars: [] })
+  const idioms = [good('before'), null, good(''), { class: 'x', rule: '', exemplars: [] }, { class: 'x', rule: 'x', exemplars: null }, { class: 'x', rule: 'x', exemplars: [{ path: 3, start: 1, end: 1 }] }, { class: 'x', rule: 'x', exemplars: [{ path: 'x', start: 2, end: 1 }] }, good('after')]
+  const { brief, result } = conventionsFixture('cw4', ratified({ files: [], idioms }))
+  assert.equal(result.status, 0)
+  const lines = section(brief, '## Conventions').split('\n')
+  assert.ok(lines.includes('idiom before: rule'))
+  assert.ok(lines.includes('idiom after: rule'))
+  for (const [i, reason] of [[1, 'entry must be an object'], [2, 'class must be a non-empty string'], [3, 'rule must be a non-empty string'], [4, 'exemplars must be an array'], [5, 'exemplars[0].path must be a string'], [6, 'exemplars[0].start/end must be integers with 0 < start <= end']]) {
+    assert.ok(lines.includes('idiom [' + i + ']: malformed (' + reason + ')'), 'missing malformed index ' + i)
+  }
+})
+
+test('CW5 idiom count and UTF-8 budgets include the exact truncation footer', () => {
+  // MUTATION: remove the UTF-8 candidateBlock budget guard.
+  const ordinary = (i) => ({ class: 'c' + i, rule: 'r', exemplars: [] })
+  const output = (label, idioms) => section(conventionsFixture(label, ratified({ files: [], idioms })).brief, '## Conventions')
+  assert.equal(CONVENTIONS_IDIOM_LIMIT, 12)
+  assert.equal(CONVENTIONS_IDIOM_BYTE_LIMIT, 4096)
+  const capped = output('cw5-count', Array.from({ length: 15 }, (_, i) => ordinary(i)))
+  assert.equal(capped.split('\n').filter((line) => line.startsWith('idiom c')).length, 12)
+  assert.ok(capped.includes('idioms truncated: 12 of 15 rendered (cap 12 idioms / 4096 bytes)'))
+  const huge = output('cw5-large', [{ class: 'huge', rule: 'x'.repeat(5000), exemplars: [] }])
+  assert.ok(huge.includes('idioms truncated: 0 of 1 rendered (cap 12 idioms / 4096 bytes)'))
+  const multi = output('cw5-utf8', Array.from({ length: 14 }, (_, i) => ({ class: 'm' + i, rule: '界'.repeat(220), exemplars: [] })))
+  const block = multi.split('\n').filter((line) => line.startsWith('idiom ') || line.startsWith('idioms truncated:')).join('\n')
+  assert.ok(Buffer.byteLength(block, 'utf8') <= 4096)
+  assert.ok(multi.includes('idioms truncated:'))
+  const twelve = output('cw5-twelve', Array.from({ length: 12 }, (_, i) => ordinary(i)))
+  assert.ok(Buffer.byteLength(twelve.split('\n').filter((line) => line.startsWith('idiom ')).join('\n'), 'utf8') < 5000)
+  assert.equal(BRIEF_BYTE_LIMIT, 51200)
+})
+
+test('CW6 packed warnings stay beside the pointer and valid idioms stay in the sidecar', () => {
+  // MUTATION: gate the brief warning on unpacked mode.
+  const missing = conventionsFixture('cw6-missing', proposed({ files: [], idioms: [] }), true)
+  const lines = section(missing.brief, '## Conventions').split('\n')
+  const pointer = lines.findIndex((line) => line.includes('cat ') && line.includes('.conventions.md'))
+  assert.ok(pointer >= 0)
+  assert.match(lines[pointer + 1], /^CONVENTIONS WARNING:/)
+  assert.equal(lines.filter((line) => line.startsWith('CONVENTIONS WARNING:')).length, 1)
+  const valid = conventionsFixture('cw6-valid', ratified({ files: [], idioms: [{ class: 'packed', rule: 'sidecar', exemplars: [] }] }), true)
+  const sidecar = readFileSync(join(valid.pack, 'cw6-valid.conventions.md'), 'utf8')
+  assert.match(sidecar, /conventions of record \(basis: ratified profile field conventions/)
+  assert.ok(sidecar.indexOf('idiom packed: sidecar') > sidecar.indexOf('conventions of record'))
+})
+

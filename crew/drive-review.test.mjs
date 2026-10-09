@@ -5245,13 +5245,13 @@ const pinTap = (bytes) => {
   }
   return { ok: true, output: `${lines.join('\n')}\n# pass ${n}\n# fail 0` }
 }
-function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, missingAfterReview = false, onRebase = null, hardened = null }) {
+function pinIo({ built = PIN_WITNESSED, guardFile = PIN_GUARD_FILE, guard = PIN_TOP_GUARD, proofOutputs = [B376_GREEN, B376_PRE_RED, B376_MUT_RED], throwAfterReview = false, missingAfterReview = false, onRebase = null, hardened = null, extra = {} }) {
   const testAbs = `${CTX.checkout}/${B376_TEST_FILE}`
   const guardAbs = `${CTX.checkout}/${guardFile}`
   const files = { ...B376_FILES, [testAbs]: PIN_WITNESSED }
   const finding = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
   const declared = hardened ?? [{ ...B376_HARDENED, test: guardFile }]
-  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, hardened: declared, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE })
+  const io = b376ProofIo({ reviewer1: reviewEnv('changes-needed', [finding]), files, hardened: declared, plan: { files_in_scope: PIN_SCOPE }, changed: PIN_SCOPE, ...extra })
   let reviewed = false
   const head = { rebased: false }
   const baseWait = io.wait
@@ -7225,4 +7225,84 @@ test('RV1-1 edge spy runs the gate-owned warning', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// MUTATION: drop verifyPrescriptionPins('accept') from the reshape green path; the pinned edit commits and no pinned-test-altered row is written.
+test('reshape rolls back an altered witnessed test after fresh proof', () => {
+  let io
+  const extra = {
+    plan: { files_in_scope: PIN_SCOPE, gate_cmd: 'gate-cmd', gate_path: TD + '/gate.mjs',
+      mutations: [{ check: 'check-one', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }] },
+    reviewer2: reviewEnv('changes-needed', [B376_FINDING]), reviewer3: reviewEnv('changes-needed', [B376_FINDING]), reviewer4: reviewEnv('pass', []),
+    runs: {
+      'gate-cmd': (_, n) => n === 1 ? { ok: false, output: RED() }
+        : (io.calls.files[CTX.checkout + '/a.mjs'] || '').includes('const guard = true')
+          ? { ok: false, output: 'FAIL check-one: expected false, found true at a.mjs\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}' }
+          : { ok: true, output: REVIEW_GATE_PASS },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED() } },
+  }
+  io = pinIo({ extra })
+  const files = io.calls.files
+  const testAbs = CTX.checkout + '/a.test.mjs'
+  const prefix = CTX.checkout + '/'
+  const trees = new Map()
+  let head = PIN_CTX.head
+  let treeNo = 3
+  trees.set('2'.repeat(40), Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix) && !p.endsWith('/a.test.mjs') && !p.endsWith('/b.test.mjs'))))
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd.includes('shape-scan.mjs')) return { ok: true, output: JSON.stringify({
+      files: [{ path: 'a.mjs', nesting: [{ delta: 1 }] }],
+      totals: { one_statement: 1, review_history: 0, helper_count: { added: 0, removed: 0, delta: 0 } },
+      skipped: [], undelimited: [],
+    }) }
+    if (cmd.startsWith('GIT_INDEX_FILE=')) {
+      if (cmd.includes(' read-tree ')) return { ok: true, output: '' }
+      if (cmd.includes(' add -A')) return { ok: true, output: '' }
+      if (cmd.includes(' write-tree')) {
+        const oid = (treeNo++).toString(16).padStart(40, '0')
+        trees.set(oid, Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix))))
+        return { ok: true, output: oid + '\n' }
+      }
+    }
+    if (cmd.startsWith('git -C ' + shellArg(CTX.checkout) + ' ')) {
+      if (cmd.includes('rev-parse HEAD')) return { ok: true, output: '1'.repeat(40) + '\n' }
+      if (cmd.includes('read-tree --reset -u ')) {
+        const oid = /read-tree --reset -u ([0-9a-f]+)/.exec(cmd)?.[1]
+        for (const key of Object.keys(files)) if (key.startsWith(prefix)) delete files[key]
+        Object.assign(files, structuredClone(trees.get(oid) || {}))
+        return { ok: true, output: '' }
+      }
+      if (cmd.includes('reset --soft ')) { head = cmd.split('reset --soft ')[1].trim(); return { ok: true, output: '' } }
+      if (cmd.includes('read-tree ')) return { ok: true, output: '' }
+      if (/ add -[Au]/.test(cmd)) return { ok: true, output: '' }
+      if (cmd.includes('write-tree')) {
+        const oid = (treeNo++).toString(16).padStart(40, '0')
+        trees.set(oid, Object.fromEntries(Object.entries(files).filter(([p]) => p.startsWith(prefix))))
+        return { ok: true, output: oid + '\n' }
+      }
+      if (cmd.includes(' diff ') && cmd.includes('--numstat')) return { ok: true, output: '1\t0\ta.mjs\0' }
+      if (cmd.includes(' diff ') && cmd.includes('--name-only')) return { ok: true, output: '' }
+      if (cmd.includes(' diff ')) return { ok: true, output: 'diff --git a/a.mjs b/a.mjs\n+const guard = false\n' }
+    }
+    return run.call(this, cmd)
+  }
+  let preReshapeBytes = null
+  const wait = io.wait
+  io.wait = function (returnPath, timeoutS) {
+    if (io.calls.assign.at(-1)?.role === 'builder' && io.calls.assign.at(-1)?.note === 'reshape') {
+      preReshapeBytes = files[testAbs]
+      files[testAbs] += "test('reshape added', () => {})\n"
+      return buildEnv()
+    }
+    return wait.call(this, returnPath, timeoutS)
+  }
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 8, review_rounds: 8 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'reshape').length, 1)
+  assert.equal(io.calls.logs.find((row) => row.reshape_reverted)?.reshape_reverted?.why, 'pinned-test-altered')
+  assert.equal(files[testAbs], preReshapeBytes)
+  assert.ok(io.calls.commits.length >= 1)
+  assert.equal(io.calls.assign.some(({ note }) => note === 'gate-repair' || note === 'harden-preservation-fix'), false)
 })

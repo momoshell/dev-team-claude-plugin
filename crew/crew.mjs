@@ -2755,21 +2755,21 @@ export const CHARTER_BASELINE_BYTES = Object.freeze({
 // Delivered source bytes, per file. Every card is below its baseline above.
 export const CHARTER_SOURCE_BUDGET = Object.freeze({
   _shared: 4942,
-  builder: 4171,
+  builder: 4310,
   lead: 9099,
-  planner: 16905,
+  planner: 16704,
   reviewer: 7522,
   'tech-lead': 6295,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 48934
+export const CHARTER_SOURCE_TOTAL_BUDGET = 48872
 
 // Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
 // plus the installation-path delta for the three seats whose cards name a guideline.
 const CHARTER_GUIDELINE_DELTA = Buffer.byteLength(CHARTER_GUIDELINES_DIR, 'utf8') - Buffer.byteLength('crew/guidelines', 'utf8')
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 9115 + CHARTER_GUIDELINE_DELTA,
+  builder: 9254 + CHARTER_GUIDELINE_DELTA,
   lead: 14043,
-  planner: 21849 + CHARTER_GUIDELINE_DELTA,
+  planner: 21648 + CHARTER_GUIDELINE_DELTA,
   reviewer: 12466 + CHARTER_GUIDELINE_DELTA,
   'tech-lead': 11239,
 })

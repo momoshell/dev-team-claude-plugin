@@ -168,7 +168,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:8964` (scope) and `crew/drive.mjs:9032` (mutations)) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:9044` (scope) and `crew/drive.mjs:9112` (mutations)) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say
@@ -187,6 +187,8 @@ not restate it. The three items, one line each:
 - **Kill mutations** — every gate check names the mutation that kills it, in a
   comment and in `details.mutations`. The entry shape is machine-applied and
   refused if it is prose: see [Declaring per-check mutations](#declaring-per-check-mutations-detailsmutations).
+
+- For each function added/changed, declare details.exemplars: [{ function, exemplars: [{ path, start, end }] }], citing 1-3 existing repo functions by repo-relative path and inclusive 1-based line span; use [] only with non-empty details.exemplars_none explaining no function change.
 
 ## Declaring per-check mutations (`details.mutations`)
 
@@ -218,13 +220,8 @@ Every compiled brief repeats this contract under `## Per-check mutations`.
 Rationale: #330.
 
 A `find` must be a **single contiguous statement or line that the plan does not itself instruct
-the builder to interrupt**. b384-suiteslot lost a lane to exactly this: check `B2`'s `find` joined
-two lines of `crew/drive.mjs` with one newline, while §2 of the SAME plan prescribed a nine-line
-comment block between them. The builder wrote what the plan said; the anchor bound
-nowhere; 15 of 16 checks bound exact and the lane escalated with a green gate and a complete tree.
-The anchor binds by TOKEN SEQUENCE, so an interposed comment is not whitespace — it is tokens your
-`find` claims are not there. Prefer a one-line `find`. If the behaviour you are killing spans a
-block you also prescribe comments inside, anchor on the single line that carries the decision.
+the builder to interrupt**. Prefer a one-line `find`: comments are tokens, not whitespace.
+If a behaviour spans a block containing prescribed comments, anchor its single decision line.
 
 An absent anchor is no longer the lead's to repair and never was: since #874 the driver
 bind-checks every declaration before it applies one, and an anchor that does not reach the built

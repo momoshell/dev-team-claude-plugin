@@ -218,3 +218,27 @@ test('RV1-10 output order is byte order and CRLF never leaks into reported text'
   assert.deepEqual(r.files.map((f) => f.path), ['B.js', 'b.js', 'crlf.js'])
   assert.deepEqual(r.files[2].review_history, [{ line: 2, text: '// RV3-1 asked for this' }])
 })
+
+test('RV2-1 the human report shows helper-count and nesting growth', () => {
+  // Mutation: render drops the nesting lines.
+  const r = scanDiff({ diff: diff('grow.js', 'function shallow() {\nreturn 1\n}', 'function shallow() {\nif (a) {\nreturn 1\n}\n}\nfunction extra() {\nreturn 2\n}') })
+  const text = render(r)
+  assert.match(text, /^helpers: added 1, removed 0, delta 1$/m)
+  assert.match(text, /^nesting grow\.js shallow: 1 -> 2 \(\+1\)$/m)
+  assert.match(text, /^nesting grow\.js extra: new, depth 1$/m)
+})
+
+test('RV2-2 a nested helper and a one-line method are measured, not silently zero', () => {
+  // Mutation: findFunctions skips past each body again (i = closed.end).
+  const r = scanDiff({ diff: diff('nest.js', 'function outer() {\nreturn 1\n}', 'function outer() {\nfunction inner() {\nreturn 1\n}\nreturn inner()\n}\nclass A {\nrun() { return 2 }\n}') })
+  assert.deepEqual(r.files[0].nesting.map((n) => n.name).sort(), ['inner', 'outer', 'run'])
+  assert.deepEqual(r.files[0].helper_count, { added: 2, removed: 0, delta: 2 })
+})
+
+test('RV2-3 reordering two same-named methods reports no change', () => {
+  // Mutation: pairing ignores identical bodies and matches the first function of each name.
+  const a = 'class A {\n  run() {\n    return 1\n  }\n}', b = 'class B {\n  run() {\n    if (x) {\n      return 2\n    }\n  }\n}'
+  const r = scanDiff({ diff: diff('order.js', `${a}\n${b}`, `${b}\n${a}`) })
+  assert.deepEqual(r.files[0].nesting, [])
+  assert.equal(r.files[0].functions_scanned, 0)
+})

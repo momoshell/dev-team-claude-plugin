@@ -33,10 +33,10 @@ const CONTROL_WORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 
 const OPENINGS = [
   { call: true, re: /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(([^)]*)\)/ },
   { call: false, re: /^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|([\w$]+))\s*=>\s*\{/ },
-  { call: true, re: /^(?:static\s+)?(?:async\s+)?([\w$]+)\s*\(([^)]*)\)\s*\{\s*$/ },
+  { call: true, re: /^(?:static\s+)?(?:async\s+)?([\w$]+)\s*\(([^)]*)\)\s*\{/ },
 ]
 // A named binding or declaration that matched no opening above is reported, never dropped.
-const LOOKS_LIKE_FUNCTION = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=.*=>/
+const LOOKS_LIKE_FUNCTION = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b|^(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w$]+)\s*=>/
 
 const isScanned = (path) => SCANNED_EXTENSIONS.includes(extname(path))
 const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -74,6 +74,7 @@ function closeBraces(rows, from) {
 
 // `rows` are [lineNumber, text] pairs, so a diff excerpt keeps its original line numbers.
 // `limited` marks an excerpt: braces that do not close there are missing context, not a defect.
+// Scanning continues inside each body, so a helper nested in a function is measured too.
 function findFunctions(rows, { path, side, limited }) {
   const texts = rows.map(([, text]) => text), functions = [], undelimited = []
   const blind = (i, name, reason) => undelimited.push({ path, name, line: rows[i][0], side, reason })
@@ -96,7 +97,6 @@ function findFunctions(rows, { path, side, limited }) {
       depth: closed.depth,
       body: texts.slice(i, closed.end + 1).join('\n'),
     })
-    i = closed.end
   }
   return { functions, undelimited }
 }
@@ -153,11 +153,12 @@ export function callSiteCounter(corpus) {
 }
 
 function measureFile({ path, before, after, reviewHistory }, callSites) {
+  // Identical bodies pair first, so reordering two same-named methods changes nothing;
+  // only then does a remaining function pair with the first unpaired one of its name.
   const unpaired = [...before]
-  const pairs = after.map((fn) => {
-    const at = unpaired.findIndex((b) => b.name === fn.name)
-    return [at < 0 ? null : unpaired.splice(at, 1)[0], fn]
-  })
+  const take = (match) => { const at = unpaired.findIndex(match); return at < 0 ? null : unpaired.splice(at, 1)[0] }
+  const exact = after.map((fn) => take((b) => b.name === fn.name && b.body === fn.body))
+  const pairs = after.map((fn, i) => [exact[i] ?? take((b) => b.name === fn.name), fn])
   const added = pairs.filter(([previous]) => !previous).length
   const removed = unpaired.length
   const changed = pairs.filter(([previous, fn]) => !previous || previous.body !== fn.body)
@@ -365,7 +366,10 @@ export function render(r) {
     `${label}: files scanned ${files}; functions ${functions}/${files}; single caller ${counts.single_caller}/${functions}, log-only ${counts.log_only}/${functions}, review history ${counts.review_history}/${files}`
   return [
     summary('totals', r.totals.files_scanned, r.totals, r.totals.functions_scanned),
+    `helpers: added ${r.totals.helper_count.added}, removed ${r.totals.helper_count.removed}, delta ${r.totals.helper_count.delta}`,
     ...r.files.map((f) => summary(f.path, f.files_scanned, f.counts, f.functions_scanned)),
+    ...r.files.flatMap((f) => f.nesting.filter((n) => n.delta === null || n.delta > 0).map((n) =>
+      n.delta === null ? `nesting ${f.path} ${n.name}: new, depth ${n.after}` : `nesting ${f.path} ${n.name}: ${n.before} -> ${n.after} (+${n.delta})`)),
     ...r.skipped.map((x) => `skipped ${x.path} (${x.extension})`),
     ...r.undelimited.map((x) => `undelimited ${x.path}:${x.line} ${x.name} [${x.reason}]`),
     ...r.blind_spots,

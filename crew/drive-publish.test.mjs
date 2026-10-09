@@ -8,7 +8,7 @@ import { chmodSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
-  COMMIT_TRAILER, CONVERGE_CTX, CTX, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg,
+  COMMIT_TRAILER, CONVERGE_CTX, CTX, CTX_REPAIR, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, TRIAGE_FILES, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg, triageEnv,
 } from './drive-fixtures.mjs'
 import { boundIssueOf, anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
 
@@ -2097,6 +2097,44 @@ test('BI3 issues-only bound publication closes and commits the dispatched issue'
   assert.doesNotMatch(partial.io.calls.writes[`${TD}/pr-body.md`], /Closes #1467/)
 })
 
+// MUTATION RB5: drop explicit refs from the Refs trailer union; refs-only publication loses its reference.
+test('RB5 refs-only bound publication leaves issue open and preserves refs through PR body', () => {
+  const briefText = ISSUE_BOUND_BRIEF.replace('1467', '42')
+  const run = runPublished({ briefText, task: 'bound-partial-refs', envelopes: {
+    'planner:1': planEnv({ details: { ...planEnv().details, refs: [42] } }),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  } })
+  assert.equal(run.result.status, 'done')
+  const message = run.io.calls.commits[0].message
+  assert.deepEqual(issueTrailers(message), { closes: [], refs: ['#42'] })
+  assert.match(message, /^Refs: #42$/m)
+  assert.match(run.io.calls.writes[`${TD}/pr-body.md`], /^Refs #42$/m)
+  const closesWins = issueTrailers(composeCommitMessage({ task: 'refs-veto', brief: briefText,
+    planEnv: planEnv({ details: { ...planEnv().details, refs: [42], closes: [42] } }), builderEnv: buildEnv() }))
+  assert.deepEqual(closesWins, { closes: ['#42'], refs: [] })
+  const builderClosesWins = issueTrailers(composeCommitMessage({ task: 'builder-refs-veto', brief: briefText,
+    planEnv: planEnv({ details: { ...planEnv().details, refs: [42] } }), builderEnv: buildEnv({ details: { ...buildEnv().details, closes: [42] } }) }))
+  assert.deepEqual(builderClosesWins, { closes: ['#42'], refs: [] })
+  const askPromoted = issueTrailers(composeCommitMessage({ task: 'ask-veto', brief: '# Task\n<!-- crew:bound-issue #42 -->\n## The ask\nCloses #42\n## Context pack\nissue: #42\n',
+    planEnv: planEnv({ details: { ...planEnv().details, refs: [42], issues: [42, 9] } }), builderEnv: buildEnv() }))
+  assert.deepEqual(askPromoted, { closes: [], refs: ['#42', '#9'] })
+})
+
+// MUTATION RV1-RB6: omit refs when reconstructing the triage plan; publication refuses its issue statement.
+test('RV1-RB6 triage reconstruction preserves refs for bound publication', () => {
+  const briefText = ISSUE_BOUND_BRIEF.replace('1467', '42')
+  const io = withPublicationDiff(publicationIo({ envelopes: {
+    'planner:1': triageEnv({ details: { ...triageEnv().details, refs: [42] } }),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  } }))
+  const read = io.readFile.bind(io)
+  io.readFile = (path) => path === CTX.briefFile ? briefText : Object.hasOwn(TRIAGE_FILES, path) ? TRIAGE_FILES[path] : read(path)
+  const result = driveTask({ ...CTX_REPAIR, task: 'triage-partial-refs', publish: { branch: 'feature/ship', base: 'main' } }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(issueTrailers(io.calls.commits.at(-1).message), { closes: [], refs: ['#42'] })
+  assert.match(io.calls.writes[`${TD}/pr-body.md`], /^Refs #42$/m)
+})
+
 // MUTATION BI1: remove the bound equality from the promoted filter; punctuated asks fall back to Refs.
 test('BI1 bound named issues close despite ask punctuation suffix and case', () => {
   const cases = ['Closes #4242.', 'Closes #4242. Make lane:harden do work.', 'cLoSeS: #4242']
@@ -2135,9 +2173,12 @@ test('BI4 both commit paths journal only implicit promotion and survive logger e
 // MUTATION BI5: discard marker capture; a compiler-owned binding becomes null.
 test('BI5 extracted issue binding retains the exact publication refusal guard', () => {
   assert.deepEqual([boundIssueOf(ISSUE_BOUND_BRIEF), boundIssueOf(NO_DISPATCH_BRIEF), boundIssueOf('issue #1467 in prose')], ['1467', null, null])
-  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: {} }), 'issue-bound lane must declare details.closes or details.issues before publication; dispatched issue #1467')
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: {} }), 'issue-bound lane must declare details.closes or details.issues or details.refs before publication; dispatched issue #1467')
   assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { issues: [1467] } }), null)
   assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { closes: [1467] } }), null)
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { refs: [1467] } }), null)
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { refs: [] } }), 'issue-bound lane must declare details.closes or details.issues or details.refs before publication; dispatched issue #1467')
+  assert.equal(issueStatementDefect({ brief: ISSUE_BOUND_BRIEF, details: { refs: '1467' } }), 'issue-bound lane must declare details.closes or details.issues or details.refs before publication; dispatched issue #1467')
   assert.equal(issueStatementDefect({ brief: NO_DISPATCH_BRIEF, details: {} }), null)
 })
 

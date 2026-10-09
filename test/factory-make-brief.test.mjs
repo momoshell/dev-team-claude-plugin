@@ -9,7 +9,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { git, ROOT, scratchDir } from './helpers.mjs'
+import { forAll, git, ROOT, scratchDir } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CONVENTIONS_IDIOM_BYTE_LIMIT, CONVENTIONS_IDIOM_LIMIT, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
@@ -331,11 +331,11 @@ test('IB2 background-only packed brief passes issue publication defect check', (
   assert.equal(issueStatementDefect({ brief, details: {} }), null)
 })
 
-test('IB3 first Closes citation binds after background hash, including mixed-case colon', () => {
+test('IB3 exact-line Closes binds in the ask and fetches issue context', () => {
   const root = fixture('ib3-closes')
   const pack = join(root, 'pack')
   mkdirSync(pack)
-  const { brief } = compile(root, { ask: 'Background #910. cLoSeS: #1676 is the issue.' }, ['--pack', pack], 'ib3.md')
+  const { brief } = compile(root, { ask: 'Background #910.\nCloses #1676' }, ['--pack', pack], 'ib3.md')
   assert.match(section(brief, '## Context pack'), /^issue: #1676\b/m)
 })
 
@@ -349,10 +349,39 @@ test('IB4 non-closing issue language stays unbound', () => {
   }
 })
 
-test('RV1-1 Closes binding ignores an unrelated background issue citation', () => {
-  assert.deepEqual(issueBindingFor({ ask: 'Background #910. Closes #1676.' }), {
-    issue: 1676, source: 'closes', declared: null, prose: 1676, disagreement: false,
-  })
+// MUTATION RB1: restore the inline case-insensitive citation regex; rejected productions bind.
+test('RB1 issue binding rejects inline and malformed closing mentions', () => {
+  forAll((random) => {
+    const issue = 1 + Math.floor(random() * 90000000)
+    const forms = [
+      `do NOT write \`Closes #${issue}\``, `Background #910. Closes #${issue}.`, `Closes: #${issue}`,
+      `closes #${issue}`, ` Closes #${issue}`, `Closes  #${issue}`, `Closes #${issue} `,
+      'Closes #0', `Closes #0${issue}`, `Closes #${issue} trailing.`,
+    ]
+    return { ask: forms[Math.floor(random() * forms.length)] }
+  }, ({ ask }) => assert.equal(issueBindingFor({ ask }).issue, null, ask), { runs: 80, seed: 0xb1173 })
+  assert.deepEqual(issueBindingFor({ ask: 'do NOT write `Closes #42`' }), { issue: null, source: null, declared: null, prose: null, disagreement: false })
+  const root = fixture('rb1-negated-binding')
+  const pack = join(root, 'pack')
+  mkdirSync(pack)
+  const { brief } = compile(root, { ask: 'do NOT write `Closes #42`' }, ['--pack', pack], 'rb1.md')
+  assert.match(section(brief, '## Context pack'), /^issue: \(none\) — basis: no-issue-cited$/m)
+})
+
+// MUTATION RB2: discard the first exact-line match; later close lines win.
+test('RB2 first standalone LF or CRLF close line wins without a digit cap', () => {
+  const accepted = [{ ask: 'Closes #1234567' }, { ask: 'Background #910\r\nCloses #1676\r\nCloses #99' }]
+  assert.equal(issueBindingFor(accepted[0]).issue, 1234567)
+  assert.equal(issueBindingFor(accepted[1]).issue, 1676)
+})
+
+// MUTATION RB2: discard the first exact-line match; generated citations return the later issue.
+test('RB2 generated standalone issue citations bind their carried issue', () => {
+  forAll((random) => {
+    const issue = 1 + Math.floor(random() * 90000000)
+    const newline = random() < 0.5 ? '\n' : '\r\n'
+    return { ask: `Background #910${newline}Closes #${issue}${newline}Closes #${issue + 1}`, issue }
+  }, ({ ask, issue }) => assert.equal(issueBindingFor({ ask }).issue, issue), { runs: 80, seed: 0xb1173 })
 })
 
 test('IB7 declared close after placeholder binds compiled issue literally', () => {
@@ -373,7 +402,7 @@ test('pack mode moves boilerplate to sidecars and preserves the inline verdict',
   const issueBody = 'Issue body line one.\nIssue body line two.'
   const issue = put(root, 'issue-body.md', `${issueBody}\n`)
   const journal = put(root, 'journal.jsonl', '{"event":"plan"}\n{"event":"build"}\n')
-  const ask = `Closes #123 Move the widget cache contract into a smaller brief and point at sidecars. Journal: ${journal}`
+  const ask = `Closes #123\nMove the widget cache contract into a smaller brief and point at sidecars. Journal: ${journal}`
   const bareBefore = compile(root, { ask: ASK }, [], 'bare-before.md').brief
   const pack = join(root, 'pack')
   mkdirSync(pack)
@@ -699,8 +728,8 @@ test('every packed absence uses one closed reason and never invents a value', ()
   const journalPath = join(root, 'missing-journal.jsonl')
   const cases = [
     { ask: ASK, reason: 'no-issue-cited' },
-    { ask: 'Closes #321 Move the widget cache contract into a smaller brief.', reason: 'no-issue-body-supplied' },
-    { ask: 'Closes #321 Move the widget cache contract into a smaller brief.', extra: ['--issue-body', issuePath], reason: 'issue-body-unreadable' },
+    { ask: 'Closes #321\nMove the widget cache contract into a smaller brief.', reason: 'no-issue-body-supplied' },
+    { ask: 'Closes #321\nMove the widget cache contract into a smaller brief.', extra: ['--issue-body', issuePath], reason: 'issue-body-unreadable' },
     { ask: ASK, reason: 'no-journal-named' },
     { ask: `${ASK} Journal: ${journalPath}`, reason: 'journal-unreadable' },
   ]
@@ -1126,7 +1155,7 @@ test('context pack records complete source data beyond argv limits', () => {
   git(root, 'add', '-A')
   const pack = join(root, 'pack')
   mkdirSync(pack)
-  const ask = `Closes #456 Keep generated context data complete. Journal: ${journal}`
+  const ask = `Closes #456\nKeep generated context data complete. Journal: ${journal}`
   const packed = compile(root, { ask, where: ['lib/generated.mjs'] }, [
     '--pack', pack, '--issue-body', issue,
   ], 'context-at-scale.brief.md').brief

@@ -1629,7 +1629,8 @@ test('CC1 planner charter teaches closing and reference issues', () => {
   assert.ok(charter.includes('             "closes": [112], // emits Closes:\n             "issues": [114], // emits Refs:'))
   assert.ok(prose.includes('`closes` lists issues this change fully delivers; other issues go under `issues` (Refs:).'))
   assert.ok(prose.includes("The brief's bound issue (`issue: #N` under its Context pack) closes on merge from EITHER list"))
-  assert.ok(prose.includes('partial delivery of it cannot be expressed: ask in `details.questions`'))
+  assert.ok(prose.includes('unless `details.refs` names it. Use `details.refs=[N]` for partial delivery: it publishes Refs: and leaves the issue open; explicit `details.closes` still wins.'))
+  assert.equal(prose.includes('partial delivery of it cannot be expressed: ask in `details.questions`'), false)
   assert.ok(prose.includes('`commit_subject` falls back to a subject derived from your summary.'))
 })
 
@@ -1765,5 +1766,5 @@ Self-apply \`crew/guidelines/seat-pre-return-checklist.md\` items \`B1\`-\`B3\`,
 `
   assert.equal(outside, expected)
   assert.equal(CHARTER_SOURCE_BUDGET.builder, 4387)
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 48949)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49035)
 })

@@ -48,7 +48,7 @@ than surfacing one gap at a time.
 
 Required: `plan_path`, `files_in_scope`, `validation_lane`. Omitting
 `commit_subject` falls back to a subject derived from your summary.
-`closes` lists issues this change fully delivers; other issues go under `issues` (Refs:). The brief's bound issue (`issue: #N` under its Context pack) closes on merge from EITHER list, so partial delivery of it cannot be expressed: ask in `details.questions`.
+`closes` lists issues this change fully delivers; other issues go under `issues` (Refs:). The brief's bound issue (`issue: #N` under its Context pack) closes on merge from EITHER list, unless `details.refs` names it. Use `details.refs=[N]` for partial delivery: it publishes Refs: and leaves the issue open; explicit `details.closes` still wins.
 
 "details": { "plan_path": "<abs>",
              "files_in_scope": ["<repo-relative literal path, or a trailing-slash

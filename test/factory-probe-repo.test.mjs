@@ -13,7 +13,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 import { slug } from '../crew/slug.mjs'
 import {
-  FIELD_KIND_NAMES, FIELD_KINDS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
+  FIELD_KIND_NAMES, FIELD_KINDS, IDIOM_CLASSES, IDIOM_UNMEASURED_REASONS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
   checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
@@ -1205,3 +1205,583 @@ test('R5 present malformed profile refuses unreadable', () => {
   symlinkSync(join(root, 'missing-target.json'), dangling)
   assert.throws(() => checkoutBaseBranch({ checkout: root, profilePath: dangling }), e => e.reason === 'profile-unreadable')
 })
+test('idiom density measures comment lines per 100 code lines', () => {
+  const root = nextRoot('idiom-density')
+  const lines = ['function density() {']
+  for (let i = 0; i < 10; i += 1) lines.push('// note ' + i)
+  for (let i = 0; i < 97; i += 1) lines.push('  const item' + i + ' = ' + i)
+  lines.push('  return item0', '}')
+  for (let i = 0; i < 27; i += 1) lines.splice(8, 0, '')
+  put(root, 'density.mjs', lines.join('\n') + '\n')
+  initGit(root, { commit: true })
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: 1, files_skipped_by_extension: 0, extensions: ['.mjs'] })
+  const entry = value.idioms.find((idiom) => idiom.class === 'comment_density')
+  assert.equal(entry.sample_size, 1)
+  assert.equal(entry.value, 10)
+  assert.ok(entry.rule.includes('10 comment lines per 100 code lines'))
+  assert.ok(entry.rule.includes('sample_size 1'))
+  assert.equal(entry.basis, 'line comment/code density')
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['density'])
+  const span = entry.exemplars[0]
+  const body = readFileSync(join(root, span.path), 'utf8').split('\n')
+  assert.ok(body.slice(span.start - 1, span.end).join('\n').includes('function density('))
+})
+
+test('idiom readme-only checkout is honestly unmeasured', () => {
+  const root = coldFixture('idiom-readme')
+  git(root, 'add', 'README.md')
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: 0, files_skipped_by_extension: 1, extensions: [] })
+  assert.deepEqual(IDIOM_CLASSES, ['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+  assert.equal(Object.isFrozen(IDIOM_CLASSES), true)
+  assert.equal(Object.isFrozen(IDIOM_UNMEASURED_REASONS), true)
+  assert.deepEqual([...IDIOM_UNMEASURED_REASONS].sort(), ['insufficient_sample', 'ls_files_failed', 'ls_files_oversized', 'no_exemplar', 'no_majority', 'no_sample', 'no_sources', 'source_path_invalid', 'source_read_failed'])
+  assert.deepEqual(value.idioms.map((idiom) => idiom.class), ['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+  for (const entry of value.idioms) {
+    assert.equal(entry.rule, null)
+    assert.deepEqual(entry.exemplars, [])
+    assert.equal(entry.basis, null)
+    assert.equal(entry.sample_size, null)
+    assert.equal(entry.reason, 'no_sources')
+    assert.equal(Object.hasOwn(entry, 'value'), false)
+  }
+})
+
+test('idiom scan accounts tracked extensions and ignores markup', () => {
+  const root = nextRoot('idiom-extensions')
+  put(root, 'one.mjs', 'function one() {\n  return 1\n}\n')
+  put(root, 'two.ts', 'function two(): number {\n  return 2\n}\n')
+  put(root, 'three.svelte', '<script>\nfunction three() {\n  return 3\n}\n</script>\n<p>function decoy() { return 4 }</p>\n')
+  put(root, 'four.py', 'def not_javascript():\n  return True\n')
+  initGit(root, { commit: true })
+  const first = probeRepo({ checkout: root })
+  const value = first.fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: 3, files_skipped_by_extension: 1, extensions: ['.mjs', '.svelte', '.ts'] })
+  const density = value.idioms.find((idiom) => idiom.class === 'comment_density')
+  assert.equal(density.sample_size, 3)
+  assert.equal(density.value, 0)
+  assert.ok(density.rule.includes('0 comment lines per 100 code lines'))
+  assert.ok(density.rule.includes('sample_size 3'))
+  assert.deepEqual(density.exemplars.map((ex) => ex.name), ['one', 'three', 'two'])
+  const second = probeRepo({ checkout: root })
+  assert.deepEqual(profileBody(first), profileBody(second))
+  assert.equal(first.meta.body_digest, second.meta.body_digest)
+  assert.equal(JSON.stringify(profileBody(first)).includes(root), false)
+})
+
+test('idiom masking states its regex literal ceiling', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const lines = source.split('\n')
+  const ceiling = '// lean: regex literals are not masked; use a JS parser if regex-heavy sources distort measured samples.'
+  assert.ok(lines.some((line) => line.trim() === ceiling))
+})
+
+test('idiom comments strings and templates cannot contribute functions', () => {
+  const root = nextRoot('idiom-decoys')
+  put(root, 'decoy.mjs', [
+    '// function decoyOne() {',
+    '//   return true',
+    '// }',
+    'function real() {',
+    '  return "function decoyTwo() { return true }"',
+    '}',
+    'const tpl = `function decoyThree() { return true }`',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const density = probeRepo({ checkout: root }).fields.conventions.value.idioms
+    .find((idiom) => idiom.class === 'comment_density')
+  assert.equal(density.sample_size, 1)
+  assert.equal(density.value, 75)
+  assert.deepEqual(density.exemplars.map((ex) => ex.name), ['real'])
+})
+
+test('idiom escaping symlinks invalidate the scan instead of counting zero', () => {
+  const root = nextRoot('idiom-symlink')
+  put(root, 'real.mjs', 'function real() {\n  return 1\n}\n')
+  const outside = join(fixtureRoot, 'idiom-outside.txt')
+  writeFileSync(outside, 'outside\n')
+  symlinkSync(outside, join(root, 'evil.mjs'))
+  initGit(root, { commit: true })
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: null, files_skipped_by_extension: null, extensions: [] })
+  for (const entry of value.idioms) {
+    assert.equal(entry.rule, null)
+    assert.equal(entry.reason, 'source_path_invalid')
+    assert.equal(entry.sample_size, null)
+  }
+})
+function idiomSpan(root, exemplar) {
+  assert.ok(typeof exemplar.path === 'string' && exemplar.path.length > 0)
+  assert.equal(exemplar.path.startsWith('/'), false)
+  assert.equal(exemplar.path.split('/').includes('..'), false)
+  const lines = readFileSync(join(root, exemplar.path), 'utf8').split('\n')
+  assert.ok(Number.isInteger(exemplar.start) && Number.isInteger(exemplar.end))
+  assert.ok(exemplar.start >= 1 && exemplar.start <= exemplar.end && exemplar.end <= lines.length)
+  return lines.slice(exemplar.start - 1, exemplar.end).join('\n')
+}
+
+function idiomEntry(root, kind) {
+  return probeRepo({ checkout: root }).fields.conventions.value.idioms.find((idiom) => idiom.class === kind)
+}
+
+test('IP1', () => {
+  const profile = probeRepo({ checkout: ROOT })
+  everyCell(profile)
+  const idioms = profile.fields.conventions.value?.idioms
+  assert.deepEqual(idioms?.map((entry) => entry.class), ['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+  assert.deepEqual(IDIOM_CLASSES, ['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+  assert.equal(Object.isFrozen(IDIOM_CLASSES), true)
+  assert.equal(Object.isFrozen(IDIOM_UNMEASURED_REASONS), true)
+  for (const entry of idioms) {
+    if (entry.rule === null) {
+      assert.deepEqual(entry.exemplars, [])
+      assert.equal(entry.basis, null)
+      assert.ok(IDIOM_UNMEASURED_REASONS.includes(entry.reason))
+      assert.ok(entry.sample_size === null || (Number.isInteger(entry.sample_size) && entry.sample_size >= 0))
+      assert.equal(Object.hasOwn(entry, 'value'), false)
+    } else {
+      assert.ok(Number.isInteger(entry.sample_size) && entry.sample_size > 0)
+      assert.ok(typeof entry.rule === 'string' && entry.rule.includes('sample_size ' + entry.sample_size))
+      assert.ok((entry.rule.match(/[.!?](?:\s|$)/g) || []).length <= 1)
+      assert.ok(typeof entry.basis === 'string' && entry.basis.length > 0)
+      assert.ok(Array.isArray(entry.exemplars) && entry.exemplars.length >= 1 && entry.exemplars.length <= 3)
+      for (const exemplar of entry.exemplars) idiomSpan(ROOT, exemplar)
+    }
+  }
+})
+
+test('IP2', () => {
+  const entry = probeRepo({ checkout: ROOT }).fields.conventions.value.idioms.find((idiom) => idiom.class === 'comment_density')
+  assert.ok(typeof entry.value === 'number' && Number.isFinite(entry.value) && entry.value > 0)
+  assert.ok(typeof entry.rule === 'string' && entry.rule.includes('sample_size ' + entry.sample_size))
+  assert.ok(entry.exemplars.length >= 1 && entry.exemplars.length <= 3)
+  for (const exemplar of entry.exemplars) idiomSpan(ROOT, exemplar)
+})
+
+test('IP3', () => {
+  const root = nextRoot('ip3-injection')
+  put(root, 'di.mjs', [
+    'function alpha({ io }) {',
+    '  return io.read()',
+    '}',
+    'function beta({ io }) {',
+    '  return io.read()',
+    '}',
+    'function gamma({ io }) {',
+    '  return io.read()',
+    '}',
+    'function delta(io) {',
+    '  return io.read()',
+    '}',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const before = snapshot(root)
+  const entry = idiomEntry(root, 'dependency_injection')
+  assert.deepEqual(snapshot(root), before)
+  assert.equal(entry.sample_size, 4)
+  assert.ok(entry.rule.includes('3 of 4'))
+  assert.ok(entry.rule.includes('destructured'))
+  assert.ok(entry.rule.includes('sample_size 4'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['alpha', 'beta', 'gamma'])
+  for (const exemplar of entry.exemplars) {
+    assert.ok(idiomSpan(root, exemplar).includes('function ' + exemplar.name + '('))
+  }
+})
+
+test('IP4', () => {
+  const root = nextRoot('ip4-boolean')
+  put(root, 'bool.mjs', [
+    'function isReady(state) {',
+    '  return true',
+    '}',
+    'function hasToken(token) {',
+    '  return !!token',
+    '}',
+    'function canRetry(n) {',
+    '  return n < 3',
+    '}',
+    'function ready(state) {',
+    "  return state === 'ready'",
+    '}',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'boolean_helpers')
+  assert.equal(entry.sample_size, 4)
+  assert.ok(entry.rule.startsWith('3 of 4'))
+  assert.ok(entry.rule.includes('is*/has*/can*/should*'))
+  assert.equal(entry.rule.includes('1 of 4'), false)
+  assert.ok(entry.rule.includes('sample_size 4'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['isReady', 'hasToken', 'canRetry'])
+  for (const exemplar of entry.exemplars) {
+    assert.ok(idiomSpan(root, exemplar).includes('function ' + exemplar.name + '('))
+  }
+})
+
+test('IP5', () => {
+  const caller = nextRoot('ip5-caller')
+  put(caller, 'cli.mjs', 'function main() {\n  console.error("one")\n  console.error("two")\n}\nmain()\n')
+  initGit(caller, { commit: true })
+  const callerEntry = idiomEntry(caller, 'logging_placement')
+  assert.equal(callerEntry.sample_size, 2)
+  assert.ok(callerEntry.rule.includes('2 of 2'))
+  assert.ok(callerEntry.rule.includes('caller'))
+  assert.ok(callerEntry.rule.includes('sample_size 2'))
+  assert.deepEqual(callerEntry.exemplars.map((ex) => ex.name), ['main'])
+  assert.ok(idiomSpan(caller, callerEntry.exemplars[0]).includes('function main('))
+
+  const helper = nextRoot('ip5-helper')
+  put(helper, 'helper.mjs', 'function read() {\n  console.error("one")\n  console.error("two")\n  return 1\n}\n')
+  initGit(helper, { commit: true })
+  const helperEntry = idiomEntry(helper, 'logging_placement')
+  assert.equal(helperEntry.sample_size, 2)
+  assert.ok(helperEntry.rule.includes('2 of 2'))
+  assert.ok(helperEntry.rule.includes('helper'))
+  assert.ok(helperEntry.rule.includes('sample_size 2'))
+  assert.deepEqual(helperEntry.exemplars.map((ex) => ex.name), ['read'])
+  assert.ok(idiomSpan(helper, helperEntry.exemplars[0]).includes('function read('))
+})
+
+test('IP6', () => {
+  const root = nextRoot('ip6-catch')
+  const rows = ['a', 'b', 'c'].map((name) => 'function ' + name + '() {\n  try { work() } catch (error) { return null }\n}\n')
+  rows.push('function d() {\n  try { work() } catch (error) { throw error }\n}\n')
+  put(root, 'catch.mjs', rows.join(''))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'error_retry_shape')
+  assert.equal(entry.sample_size, 4)
+  assert.ok(entry.rule.includes('3 of 4'))
+  assert.ok(entry.rule.includes('swallow-and-return-null'))
+  assert.ok(entry.rule.includes('sample_size 4'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['a', 'b', 'c'])
+
+  const loops = nextRoot('ip6-loops')
+  put(loops, 'loops.mjs', [
+    'function poll() {',
+    '  for (let i = 0; i < 3; i += 1) {',
+    '    try { work() } catch (error) { continue }',
+    '  }',
+    '}',
+    'function unrelated() {',
+    '  for (let i = 0; i < 3; i += 1) { compute(i) }',
+    '  try { work() } catch (error) { console.error(error) }',
+    '}',
+    '',
+  ].join('\n'))
+  initGit(loops, { commit: true })
+  const loopEntry = idiomEntry(loops, 'error_retry_shape')
+  assert.equal(loopEntry.sample_size, 2)
+  assert.equal(loopEntry.rule, null)
+  assert.equal(loopEntry.reason, 'no_majority')
+})
+
+test('IP7', () => {
+  const lines = ['function density() {', ...Array.from({ length: 10 }, (_, i) => '// note ' + i), ...Array.from({ length: 97 }, (_, i) => '  const item' + i + ' = ' + i), '  return item0', '}']
+  lines.splice(8, 0, ...Array(27).fill(''))
+  const root = nextRoot('ip7-density')
+  put(root, 'density.mjs', lines.join('\n') + '\n')
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'comment_density')
+  assert.equal(entry.sample_size, 1)
+  assert.equal(entry.value, 10)
+  assert.ok(entry.rule.includes('10 comment lines per 100 code lines'))
+  assert.ok(entry.rule.includes('sample_size 1'))
+  assert.equal(entry.basis, 'line comment/code density')
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['density'])
+})
+
+test('IP8', () => {
+  const root = coldFixture('ip8-readme')
+  git(root, 'add', 'README.md')
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idioms.map((idiom) => idiom.class), ['dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density'])
+  assert.deepEqual(value.idiom_scan, { files_scanned: 0, files_skipped_by_extension: 1, extensions: [] })
+  for (const entry of value.idioms) {
+    assert.equal(entry.rule, null)
+    assert.deepEqual(entry.exemplars, [])
+    assert.equal(entry.basis, null)
+    assert.equal(entry.sample_size, null)
+    assert.equal(entry.reason, 'no_sources')
+    assert.equal(Object.hasOwn(entry, 'value'), false)
+  }
+})
+
+test('IP9', () => {
+  const root = nextRoot('ip9-extensions')
+  put(root, 'one.mjs', 'function isOne() {\n  return true\n}\n')
+  put(root, 'two.ts', 'function hasTwo(): boolean {\n  return false\n}\n')
+  put(root, 'three.svelte', '<script>\nfunction canThree() {\n  return true\n}\n</script>\n<p>function ready() { return true }</p>\n')
+  put(root, 'four.py', 'def not_javascript():\n  return True\n')
+  initGit(root, { commit: true })
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: 3, files_skipped_by_extension: 1, extensions: ['.mjs', '.svelte', '.ts'] })
+  const entry = value.idioms.find((idiom) => idiom.class === 'boolean_helpers')
+  assert.equal(entry.sample_size, 3)
+  assert.ok(entry.rule.includes('3 of 3'))
+  assert.ok(entry.rule.includes('is*/has*/can*/should*'))
+  assert.ok(entry.rule.includes('sample_size 3'))
+  for (const exemplar of entry.exemplars) idiomSpan(root, exemplar)
+  const first = probeRepo({ checkout: root })
+  const second = probeRepo({ checkout: root })
+  assert.deepEqual(profileBody(first), profileBody(second))
+  assert.equal(first.meta.body_digest, second.meta.body_digest)
+  assert.equal(JSON.stringify(profileBody(first)).includes(root), false)
+})
+
+test('IP10', () => {
+  const path = join(ROOT, 'skills', 'crew-onboard', 'references', 'foreign-checkout.md')
+  const text = readFileSync(path, 'utf8')
+  for (const word of ['conventions.value.idioms', 'dependency_injection', 'boolean_helpers', 'logging_placement', 'error_retry_shape', 'comment_density']) {
+    assert.equal(text.split(word).length - 1, 1, word)
+  }
+  assert.ok(text.includes('An unmeasured idiom has rule: null and a closed reason, never a guessed rule or numeric zero.'))
+  assert.ok(text.includes('A human ratifies idioms by promoting the conventions cell as a whole; the probe never ratifies them.'))
+})
+
+test('IP11', () => {
+  const blocks = ['return null', 'return null', 'throw error', 'throw error', 'console.error(error)', 'console.error(error)']
+  const root = nextRoot('ip11-tie')
+  put(root, 'mixed.mjs', blocks.map((body, i) => 'function mixed' + i + '() {\n  try { work() } catch (error) { ' + body + ' }\n}\n').join(''))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'error_retry_shape')
+  assert.equal(entry.sample_size, 6)
+  assert.equal(entry.rule, null)
+  assert.deepEqual(entry.exemplars, [])
+  assert.equal(entry.basis, null)
+  assert.equal(entry.reason, 'no_majority')
+})
+
+test('idiom arrow bindings require an arrow RHS', () => {
+  const root = nextRoot('idiom-arrows')
+  put(root, 'arrows.mjs', [
+    'const isArrow = (x) => x > 0',
+    'const hasArrow = async (y) => {',
+    '  return !!y',
+    '}',
+    'const ident = isArrow',
+    "const req = require('x')",
+    'const waited = await done()',
+    'const built = new Maker()',
+    'const called = make()',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'boolean_helpers')
+  assert.equal(entry.sample_size, 2)
+  assert.ok(entry.rule.includes('2 of 2'))
+  assert.ok(entry.rule.includes('is*/has*/can*/should*'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['isArrow', 'hasArrow'])
+})
+
+test('idiom boolean sampling excludes comparison-containing nonpredicates', () => {
+  const root = nextRoot('idiom-nonpredicates')
+  put(root, 'shapes.mjs', [
+    'function isReady(state) {',
+    "  return state === 'ready'",
+    '}',
+    'function hasToken(token) {',
+    '  return !!token',
+    '}',
+    'function ordinary(config) {',
+    "  if (config.mode === 'fast') { return { mode: config.mode } }",
+    '  return config.items.filter((item) => item.score > 0)',
+    '}',
+    'function filtered(xs) {',
+    '  return xs.filter((x) => x > 0)',
+    '}',
+    'function mixed(value) {',
+    '  if (value) return value > 0',
+    '  return { value }',
+    '}',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'boolean_helpers')
+  assert.equal(entry.sample_size, 2)
+  assert.ok(entry.rule.includes('2 of 2'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['isReady', 'hasToken'])
+  // MUTATION returns.every -> returns.some must admit mixed(); dropping idiomDepthZero must admit filtered().
+})
+
+test('idiom boolean sampling excludes ternary and generic returns', () => {
+  const root = nextRoot('idiom-ternary-generic')
+  put(root, 'shapes.mjs', [
+    'function isReady(state) { return state === "ready" }',
+    'function hasToken(token) { return !!token }',
+    'function pick(xs) { return xs.length > 0 ? xs[0] : null }',
+    'const byPath = (a, b) => a.path < b.path ? -1 : 1',
+    '',
+  ].join('\n'))
+  put(root, 'generic.ts', 'function make() { return new Map<string, number>() }\n')
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'boolean_helpers')
+  assert.equal(entry.sample_size, 2)
+  assert.ok(entry.rule.includes('2 of 2'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['isReady', 'hasToken'])
+  // MUTATION delete the conditional-'?' rejection; pick and byPath must re-enter the boolean sample.
+})
+
+test('idiom callbacks own returns and logging calls without entering samples', () => {
+  const root = nextRoot('idiom-callback-owners')
+  put(root, 'callbacks.mjs', [
+    'function run(items) {',
+    '  const out = items.map((x) => {',
+    '    console.log(x)',
+    '    return x.score > 0',
+    '  })',
+    '  console.log(out)',
+    '}',
+    'function runAgain(items) {',
+    '  return items.map(function (x) {',
+    '    return x.score > 0',
+    '  })',
+    '}',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const predicates = idiomEntry(root, 'boolean_helpers')
+  assert.equal(predicates.rule, null)
+  assert.equal(predicates.reason, 'no_sample')
+  const logs = idiomEntry(root, 'logging_placement')
+  assert.equal(logs.rule, null)
+  assert.equal(logs.reason, 'no_majority')
+})
+
+test('idiom named block arrows retain predicate, log, and catch ownership', () => {
+  const root = nextRoot('idiom-named-arrow-ownership')
+  put(root, 'named.mjs', [
+    "const ready = (s) => { console.log(s); try { work() } catch (error) { throw error }; return s === 'ready' }",
+    "const done = (s) => { console.log(s); try { work() } catch (error) { throw error }; return s === 'done' }",
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const predicates = idiomEntry(root, 'boolean_helpers')
+  assert.equal(predicates.sample_size, 2)
+  assert.ok(predicates.rule.startsWith('0 of 2'))
+  assert.ok(predicates.rule.includes('with non-prefix naming dominant'))
+  assert.deepEqual(predicates.exemplars.map((ex) => ex.name), ['ready', 'done'])
+  const logs = idiomEntry(root, 'logging_placement')
+  assert.equal(logs.sample_size, 2)
+  assert.ok(logs.rule.includes('in helper functions'))
+  assert.deepEqual(logs.exemplars.map((ex) => ex.name), ['ready', 'done'])
+  const catches = idiomEntry(root, 'error_retry_shape')
+  assert.equal(catches.sample_size, 2)
+  assert.ok(catches.rule.includes('2 of 2'))
+  assert.ok(catches.rule.includes('rethrow'))
+  assert.deepEqual(catches.exemplars.map((ex) => ex.name), ['ready', 'done'])
+})
+
+test('idiom tracked files under an escaping parent symlink invalidate the scan', () => {
+  const root = nextRoot('idiom-parent-symlink')
+  put(root, 'lib/a.js', 'function safe() { return true }\n')
+  initGit(root, { commit: true })
+  const outside = join(fixtureRoot, 'idiom-outside-parent')
+  mkdirSync(outside, { recursive: true })
+  put(outside, 'a.js', 'function outside() { return true }\n')
+  rmSync(join(root, 'lib'), { recursive: true, force: true })
+  symlinkSync(outside, join(root, 'lib'), 'dir')
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: null, files_skipped_by_extension: null, extensions: [] })
+  assert.ok(value.idioms.every((entry) => entry.reason === 'source_path_invalid'))
+})
+
+test('idiom catches retain same-offset observations in distinct files', () => {
+  const root = nextRoot('idiom-offsets')
+  const body = (name) => 'function ' + name + '() {\n  try { work() } catch (error) { return null }\n}\n'
+  put(root, 'a.mjs', body('sameA'))
+  put(root, 'b.mjs', body('sameB'))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'error_retry_shape')
+  assert.equal(entry.sample_size, 2)
+  assert.ok(entry.rule.includes('2 of 2'))
+  assert.ok(entry.rule.includes('swallow-and-return-null'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['sameA', 'sameB'])
+})
+
+test('idiom enumeration failure has null counts and no untracked fallback', () => {
+  const plain = nextRoot('idiom-nongit')
+  put(plain, 'README.md', '# fixture\n')
+  put(plain, 'code.mjs', 'function untracked() {\n  return 1\n}\n')
+  const plainValue = probeRepo({ checkout: plain }).fields.conventions.value
+  assert.deepEqual(plainValue.idiom_scan, { files_scanned: null, files_skipped_by_extension: null, extensions: [] })
+  for (const entry of plainValue.idioms) {
+    assert.equal(entry.rule, null)
+    assert.equal(entry.reason, 'ls_files_failed')
+    assert.equal(entry.sample_size, null)
+  }
+
+  const removed = nextRoot('idiom-removed')
+  put(removed, 'gone.mjs', 'function gone() {\n  return 1\n}\n')
+  initGit(removed, { commit: true })
+  rmSync(join(removed, 'gone.mjs'))
+  const removedValue = probeRepo({ checkout: removed }).fields.conventions.value
+  assert.deepEqual(removedValue.idiom_scan, { files_scanned: null, files_skipped_by_extension: null, extensions: [] })
+  for (const entry of removedValue.idioms) {
+    assert.equal(entry.rule, null)
+    assert.equal(entry.reason, 'source_read_failed')
+    assert.equal(entry.sample_size, null)
+  }
+
+  const staged = nextRoot('idiom-staged-only')
+  put(staged, 'README.md', '# fixture\n')
+  initGit(staged)
+  git(staged, 'add', 'README.md')
+  put(staged, 'sneaky.mjs', 'function isSneaky() {\n  return true\n}\n')
+  const stagedValue = probeRepo({ checkout: staged }).fields.conventions.value
+  assert.deepEqual(stagedValue.idiom_scan, { files_scanned: 0, files_skipped_by_extension: 1, extensions: [] })
+  for (const entry of stagedValue.idioms) {
+    assert.equal(entry.rule, null)
+    assert.equal(entry.reason, 'no_sources')
+    assert.equal(entry.sample_size, null)
+  }
+})
+
+test('idiom oversized tracked listing is unmeasured', () => {
+  const root = nextRoot('idiom-oversized')
+  put(root, 'README.md', '# fixture\n')
+  initGit(root)
+  const hash = git(root, 'hash-object', '-w', 'README.md').trim()
+  const rows = []
+  let size = 0
+  let counter = 0
+  while (size <= 1024 * 1024 && counter < 20000) {
+    const name = 'oversized/padded-name-' + String(counter).padStart(6, '0') + '-' + 'x'.repeat(180) + '.mjs'
+    rows.push('100644 ' + hash + '\t' + name + '\n')
+    size += name.length + 1
+    counter += 1
+  }
+  assert.ok(size > 1024 * 1024)
+  execFileSync('git', ['-C', root, 'update-index', '--index-info'], { input: rows.join(''), encoding: 'utf8' })
+  const value = probeRepo({ checkout: root }).fields.conventions.value
+  assert.deepEqual(value.idiom_scan, { files_scanned: null, files_skipped_by_extension: null, extensions: [] })
+  for (const entry of value.idioms) {
+    assert.equal(entry.rule, null)
+    assert.equal(entry.reason, 'ls_files_oversized')
+    assert.equal(entry.sample_size, null)
+  }
+})
+
+test('idiom typescript annotations keep function spans', () => {
+  const root = nextRoot('idiom-ts')
+  put(root, 'typed.ts', [
+    'function isTyped(input: string): boolean {',
+    '  return !!input',
+    '}',
+    'function hasOther(input?: string): boolean {',
+    '  return input !== undefined',
+    '}',
+    '',
+  ].join('\n'))
+  initGit(root, { commit: true })
+  const entry = idiomEntry(root, 'boolean_helpers')
+  assert.equal(entry.sample_size, 2)
+  assert.ok(entry.rule.includes('2 of 2'))
+  assert.deepEqual(entry.exemplars.map((ex) => ex.name), ['isTyped', 'hasOther'])
+  for (const exemplar of entry.exemplars) {
+    assert.ok(idiomSpan(root, exemplar).includes('function ' + exemplar.name + '('))
+  }
+})
+

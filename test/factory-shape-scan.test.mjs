@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchDir } from './helpers.mjs'
-import { spawnSync, execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { scratchDir, git } from './helpers.mjs'
+import { spawnSync } from 'node:child_process'
 import { scanDiff, scanRange, render } from '../scripts/factory/shape-scan.mjs'
 import { parseMarker } from '../scripts/factory/lean-debt.mjs'
 
@@ -11,11 +12,12 @@ function diff(path, before, after) {
   return `--- a/${path}\n+++ b/${path}\n@@ -1,${before.split('\n').length} +1,${after.split('\n').length} @@\n${before.split('\n').map(x=>'-'+x).join('\n')}\n${after.split('\n').map(x=>'+'+x).join('\n')}\n`
 }
 function repo() {
-  const dir=scratchDir('shape-scan-test-')
-  const git=(...args)=>execFileSync('git',['-C',dir,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']})
-  git('init','-q'); git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','--allow-empty','-qm','base')
-  return {dir,git,cleanup:()=>rmSync(dir,{recursive:true,force:true})}
+  const dir = scratchDir('shape-scan-test-')
+  git(dir, 'init', '-q')
+  git(dir, 'commit', '--allow-empty', '-qm', 'base')
+  return { dir, git: (...args) => git(dir, ...args), cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
+const CLI = fileURLToPath(new URL('../scripts/factory/shape-scan.mjs', import.meta.url))
 
 test('SC1 counts one real whole-checkout call and excludes a repeated call', () => {
   // Mutation: replace if (callSites === 1) with if (false).
@@ -67,20 +69,19 @@ test('SC7 RV1-2 parses options and ranges against the selected checkout', () => 
   // Mutation: replace process.exitCode = 0 with process.exitCode = 1.
   const x=repo(), probe='checkoutProbe'+process.pid
   try {
-    writeFileSync(join(x.dir,'base.js'),'const oldValue = 1;\n'); x.git('add','.');x.git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','base source')
-    writeFileSync(join(x.dir,'base.js'),'const newValue = 2;\n'); x.git('add','.');x.git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','head')
+    writeFileSync(join(x.dir,'base.js'),'const oldValue = 1;\n'); x.git('add','.');x.git('commit','-qm','base source')
+    writeFileSync(join(x.dir,'base.js'),'const newValue = 2;\n'); x.git('add','.');x.git('commit','-qm','head')
     const f=join(x.dir,'input.diff');writeFileSync(f,diff('added.mjs','const old = 1;',`function ${probe}() { return 1; }`))
     writeFileSync(join(x.dir,'calls.mjs'),`${probe}();\n`)
-    const cli=join(process.cwd(),'scripts/factory/shape-scan.mjs')
-    const ok=spawnSync(process.execPath,[cli,'--diff',f,'--checkout',x.dir,'--json'],{encoding:'utf8'})
+    const ok=spawnSync(process.execPath,[CLI,'--diff',f,'--checkout',x.dir,'--json'],{encoding:'utf8'})
     assert.equal(ok.status,0,ok.stderr);assert.deepEqual(JSON.parse(ok.stdout).files[0].single_caller,[{name:probe,call_sites:1,one_statement:true}])
-    const no=spawnSync(process.execPath,[cli],{encoding:'utf8'});assert.equal(no.status,2)
-    const wrong=spawnSync(process.execPath,[cli,'--diff',join(x.dir,'missing'),'--checkout',x.dir],{encoding:'utf8'});assert.equal(wrong.status,1);assert.match(wrong.stderr,/missing|ENOENT/i)
+    const no=spawnSync(process.execPath,[CLI],{encoding:'utf8'});assert.equal(no.status,2)
+    const wrong=spawnSync(process.execPath,[CLI,'--diff',join(x.dir,'missing'),'--checkout',x.dir],{encoding:'utf8'});assert.equal(wrong.status,1);assert.match(wrong.stderr,/missing|ENOENT/i)
     writeFileSync(join(x.dir,'empty.diff'),'')
-    const emptyReadable=spawnSync(process.execPath,[cli,'--diff',join(x.dir,'empty.diff'),'--checkout',x.dir,'--json'],{encoding:'utf8'})
+    const emptyReadable=spawnSync(process.execPath,[CLI,'--diff',join(x.dir,'empty.diff'),'--checkout',x.dir,'--json'],{encoding:'utf8'})
     assert.equal(emptyReadable.status,0,emptyReadable.stderr);assert.deepEqual(JSON.parse(emptyReadable.stdout).undelimited,[])
-    const malformed=spawnSync(process.execPath,[cli,'not-a-range'],{encoding:'utf8'});assert.equal(malformed.status,2);assert.match(malformed.stderr,/malformed/i)
-    const range=spawnSync(process.execPath,[cli,'HEAD~1..HEAD','--checkout',x.dir,'--json'],{encoding:'utf8',cwd:process.cwd()})
+    const malformed=spawnSync(process.execPath,[CLI,'not-a-range'],{encoding:'utf8'});assert.equal(malformed.status,2);assert.match(malformed.stderr,/malformed/i)
+    const range=spawnSync(process.execPath,[CLI,'HEAD~1..HEAD','--checkout',x.dir,'--json'],{encoding:'utf8'})
     assert.equal(range.status,0,range.stderr);assert.deepEqual(JSON.parse(range.stdout).files.map(f=>f.path),['base.js'])
     const humanDiff=join(x.dir,'human.diff')
     writeFileSync(humanDiff,`--- a/broken.mjs
@@ -95,7 +96,7 @@ test('SC7 RV1-2 parses options and ranges against the selected checkout', () => 
 -print(0)
 +print(1)
 `)
-    const human=spawnSync(process.execPath,[cli,'--diff',humanDiff,'--checkout',x.dir],{encoding:'utf8'})
+    const human=spawnSync(process.execPath,[CLI,'--diff',humanDiff,'--checkout',x.dir],{encoding:'utf8'})
     assert.equal(human.status,0,human.stderr);assert.match(human.stdout,/skipped/);assert.match(human.stdout,/undelimited/)
   } finally {x.cleanup()}
 })
@@ -120,12 +121,11 @@ test('RV1-2 applies checkout regardless of CLI option order', () => {
   const x=repo(), name='rv12Checkout'+process.pid
   try {
     writeFileSync(join(x.dir,'base.js'),'const oldValue = 1;\n')
-    x.git('add','.');x.git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','base source')
+    x.git('add','.');x.git('commit','-qm','base source')
     writeFileSync(join(x.dir,'base.js'),`function ${name}() { return 1; }\n`)
     writeFileSync(join(x.dir,'calls.js'),`${name}();\n`)
-    x.git('add','.');x.git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','head')
-    const cli=join(process.cwd(),'scripts/factory/shape-scan.mjs')
-    const range=spawnSync(process.execPath,[cli,'HEAD~1..HEAD','--checkout',x.dir,'--json'],{encoding:'utf8'})
+    x.git('add','.');x.git('commit','-qm','head')
+    const range=spawnSync(process.execPath,[CLI,'HEAD~1..HEAD','--checkout',x.dir,'--json'],{encoding:'utf8'})
     assert.equal(range.status,0,range.stderr)
     assert.deepEqual(JSON.parse(range.stdout).files[0].single_caller,[{name,call_sites:1,one_statement:true}])
   } finally {x.cleanup()}
@@ -140,7 +140,7 @@ test('RV1-3 never joins diff hunks and preserves original line positions', () =>
   assert.deepEqual(history.files[0].review_history,[{line:121,text:'// RV8-1 must-fix'}])
 })
 
-const commit = (x, message) => { x.git('add', '-A'); x.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', message) }
+const commit = (x, message) => { x.git('add', '-A'); x.git('commit', '-qm', message) }
 
 test('RV1-4 reads quoted and tab-suffixed diff headers and NUL-separated range paths', () => {
   // Mutation: headerPath stops C-unquoting (drop the startsWith('"') branch).
@@ -158,9 +158,8 @@ test('RV1-4 reads quoted and tab-suffixed diff headers and NUL-separated range p
 
 test('RV1-5 every usage error exits 2, distinct from an unreadable input', () => {
   // Mutation: parseArgs throws a plain Error (no usage flag) for an unknown option.
-  const cli = join(process.cwd(), 'scripts/factory/shape-scan.mjs')
   for (const args of [['--bogus'], ['--checkout'], ['--diff'], ['--diff', 'a.diff', 'HEAD~1..HEAD'], ['HEAD']]) {
-    const run = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' })
+    const run = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8' })
     assert.equal(run.status, 2, `${args.join(' ')}: ${run.stderr}`)
     assert.match(run.stderr, /^usage: /)
   }
@@ -207,7 +206,7 @@ test('RV1-9 a skipped path is never read, so an unreadable gitlink does not fail
     // A gitlink to a commit this repository does not hold: `git show` on it fails.
     x.git('update-index', '--add', '--cacheinfo', '160000,1234567890abcdef1234567890abcdef12345678,vendored')
     writeFileSync(join(x.dir, 'a.js'), 'const a = 1\n'); x.git('add', 'a.js')
-    x.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'head')
+    x.git('commit', '-qm', 'head')
     const r = scanRange({ range: 'HEAD~1..HEAD', checkout: x.dir })
     assert.deepEqual(r.skipped, [{ path: 'vendored', extension: '' }])
   } finally { x.cleanup() }

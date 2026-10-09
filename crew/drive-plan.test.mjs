@@ -2,6 +2,7 @@
 // lane fencing one driver concern no longer locks every driver test.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
+import { planBuilderWait } from './drive.mjs'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -97,6 +98,23 @@ test('protected directory typed refusal fails closed without a tech lead', () =>
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan')
   assert.equal(result.details.escalation.why, 'adversary-unavailable')
+})
+
+test('planBuilderWait preserves floors, provenance, cap, and raw request', () => {
+  for (const [requested, current, flagged, expected] of [
+    [4800, 2400, false, { wait_s: 4800, source: 'plan', requested: 4800 }],
+    [2400, 2400, false, { wait_s: 2400, source: 'default', requested: 2400 }],
+    [100, 2400, false, { wait_s: 2400, source: 'default', requested: 100 }],
+    [100, 300, true, { wait_s: 2400, source: 'default', requested: 100 }],
+    [4800, 9000, true, { wait_s: 9000, source: 'flag', requested: 4800 }],
+    [50000, 2400, false, { wait_s: 21600, source: 'plan', requested: 50000 }],
+  ]) assert.deepEqual(planBuilderWait(requested, current, flagged), expected)
+})
+test('planBuilderWait leaves invalid requests and current provenance unchanged', () => {
+  for (const raw of [undefined, null, '12', true, 0, -1, 1.5, Number.NaN, Infinity, [], {}]) {
+    assert.deepEqual(planBuilderWait(raw, 300, true), { wait_s: 300, source: 'flag', requested: raw })
+    assert.deepEqual(planBuilderWait(raw, 2400, false), { wait_s: 2400, source: 'default', requested: raw })
+  }
 })
 
 const plannerWrapper = () => {

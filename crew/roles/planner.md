@@ -168,7 +168,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:9044` (scope) and `crew/drive.mjs:9112` (mutations)) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:9053` (scope) and `crew/drive.mjs:9128` (mutations)) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say
@@ -248,4 +248,4 @@ wrong, not a licence to guess.
 - Lever 9: a plan demanding N isolated kill-mutations must size its own budget.
   The builder wait is **2400s**, and b187-jsonleaf escalated at builder while
   healthy because six isolated proofs plus 14 files never fit it. Say so under
-  `Risks/consults` and ask for **`--wait-builder`** ≈ `2400 + N × suite_time`.
+  `Risks/consults`; set `details.builder_wait_s` to ≈ `2400 + N × suite_time`.

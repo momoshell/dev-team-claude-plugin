@@ -133,6 +133,15 @@ export function waitsRecord(resolved, defaults) {
   return record
 }
 
+export function planBuilderWait(requested, current, flagged) {
+  if (!Number.isInteger(requested) || requested <= 0) return { wait_s: current, source: flagged ? 'flag' : 'default', requested }
+  const base = Math.max(WAITS_S.builder, current)
+  const capped = Math.min(requested, WAIT_SECONDS_MAX)
+  const wait_s = Math.max(base, capped)
+  const source = flagged && current >= WAITS_S.builder ? 'flag' : 'default'
+  return { wait_s, source: wait_s > base ? 'plan' : source, requested }
+}
+
 // --- the per-role turn ceiling (#870) --------------------------------------
 // Measurable headless boots receive ratified defaults for planner and lead
 // seats. Pane boots opt out because transport emits no census; authored pane
@@ -9105,6 +9114,13 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
     for (const path of floorHits) flooredProtectedPaths.add(path)
+  }
+  if (Object.hasOwn(planEnv.details ?? {}, 'builder_wait_s')) {
+    const decision = planBuilderWait(planEnv.details.builder_wait_s, waits.builder, Object.hasOwn(ctx.waits ?? {}, 'builder'))
+    waits.builder = decision.wait_s
+    const source = Object.fromEntries(WAIT_ROLES.map(role => [role, Object.hasOwn(ctx.waits ?? {}, role) ? 'flag' : 'default']))
+    source.builder = decision.source
+    io.log(recordRow({ at: io.now(), event: 'waits', ...waits, source, requested: { builder: decision.requested } }))
   }
   acceptedGatePath = taskLocalPath(planEnv.details?.gate_path) ?? art('gate.mjs')
   let gateCmd = planEnv.details?.gate_cmd || null

@@ -451,6 +451,9 @@ test('TK1', () => {
   assert.deepEqual(tokenizeJs('name'), [{ kind: 'name', text: 'name', start: 0, end: 4 }])
   for (const [source, kind, fragment] of [["'x'", 'string', "'x'"], ['/[//]/g', 'regex', '/[//]/g'], ['`a${x}`', 'template', '`a'], ['/*x*/', 'comment', '/*x*/'], ['name', 'name', 'name'], ['42', 'number', '42'], ['?.', 'punctuator', '?.'], [' ', 'whitespace', ' ']]) assert.ok(tokenizeJs(source).some((token) => token.kind === kind && token.text === fragment), source)
   for (const source of ['"unterminated', '/*unfinished', '`unfinished', '`x ${', '`a ${`b ${/x/}`}`']) assert.equal(tokenizeJs(source).map((token) => token.text).join(''), source)
+  assert.equal(readFileSync(new URL('./js-tokens.mjs', import.meta.url), 'utf8').split('\n')[0], '// BLIND SPOT: block-closing } versus object-literal } cannot be distinguished by this tokenizer; a regex statement immediately after a bare block-closing brace (without else or do) may be classified as division.')
+  for (const source of ['if (ok) {} else /re/.test(x)', 'do /re/.test(x); while (ok)']) assert.deepEqual(tokenizeJs(source).filter((token) => token.kind === 'regex').map((token) => token.text), ['/re/'])
+  for (const source of ['x.else / 2', 'x?.else / 2', 'x.do / 2', 'x?.do / 2']) assert.deepEqual(tokenizeJs(source).filter((token) => token.text === '/' || token.kind === 'regex').map((token) => [token.kind, token.text]), [['punctuator', '/']])
   assert.equal(readFileSync(new URL('./js-tokens.mjs', import.meta.url), 'utf8').includes('import '), false)
   forAll((random) => {
     const productions = [[' ', 'whitespace'], ['//x', 'comment'], ["'x'", 'string'], ['`x`', 'template'], ['/[//]/g', 'regex'], ['name', 'name'], ['42', 'number'], ['?.', 'punctuator'], ['(', 'punctuator'], ['}', 'punctuator']]
@@ -466,6 +469,15 @@ test('TK2', () => {
   for (const source of ['obj.if(log(row))', 'x.while(logLine(p, row))', 'obj?.if(log(row))', 'x /*a*/ . /*b*/ while(logLine(p, row))', 'x.return / log(row)']) assert.throws(() => seatJournalSites(source), /line\(s\) 1/)
   for (const source of ['// fixture\nconst v = obj.if(k1) / log(row)', '// fixture\nx.while(k1) / logLine(p, row)']) assert.throws(() => seatJournalSites(source), /line\(s\) 2/)
   for (const source of ['if (k) /re/.test(s)', 'x?.return /re/.test(s)', 'x /*a*/ . /*b*/ return /re/.test(s)']) assert.doesNotThrow(() => seatJournalSites(source))
+  for (const source of ['for (let of = 0; of / 2 < n; of++) {}', 'for (of / 2; ; ) {}', 'for (let of / 2; ; ) {}', 'for (x = of / 2; ; ) {}']) assert.deepEqual(tokenizeJs(source).filter((token) => token.text === '/' || token.kind === 'regex').map((token) => [token.kind, token.text]), [['punctuator', '/']])
+  for (const source of ['for (const x of /a/g.exec(s)) f(x)', 'for await (const x of /a/g.exec(s)) f(x)', 'for (const [x] of /a/g.exec(s)) f(x)', 'for (const {x} of /a/g.exec(s)) f(x)', 'for (const of of /a/g.exec(s)) f(of)']) assert.ok(tokenizeJs(source).some((token) => token.kind === 'regex' && token.text === '/a/g'), source)
+  const productions = [
+    ...['item', 'of', '[item]', '{item}'].map((binding) => [`for (const ${binding} of /a/g) {}`, 'regex']),
+    ...['of', 'let of', 'const of', 'var of', 'item = of'].map((expression) => [`for (${expression} / 2; ; ) {}`, 'punctuator']),
+  ]
+  forAll((random) => productions[Math.floor(random() * productions.length)], ([source, expectedKind]) => {
+    assert.deepEqual(tokenizeJs(source).filter((token) => token.text === '/' || token.kind === 'regex').map((token) => token.kind), [expectedKind], source)
+  }, { seed: 0x0f, runs: 120 })
 })
 // Mutation TK3: dropping literal opacity invents drive sinks from slash-containing literals.
 test('TK3', () => {

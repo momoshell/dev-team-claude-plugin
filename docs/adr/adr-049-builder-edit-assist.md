@@ -65,7 +65,7 @@ tool vocabulary on its own, but it does justify a cheap fix and an instrument.
 - **The builder's result hook.** `crew/pi/extensions/builderloop.ts` is granted to every pi builder (`crew/capabilities.json`,
   `roles.builder.by_agent.pi.extensions`). It runs fenced tests after a successful edit or write, and its eligibility
   check skips failed edits (`eligible`, `crew/pi/extensions/builderloop.ts:808-812`). Extensions already rewrite results through
-  `pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts:822`; `attachReadGate`, `crew/pi/extensions/readgate.ts:620`).
+  `pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts`; `attachReadGate`, `crew/pi/extensions/readgate.ts`).
 - **Changing a call's arguments.** pi's `ToolCallEventResult` says "To modify arguments, mutate `event.input` in place"
   (`core/extensions/types.d.ts:887-888`). No extension in this repository does that yet.
 - **A symbol index.** `exportEntries` (`scripts/factory/make-brief.mjs:2248`) lists **exported** symbols only

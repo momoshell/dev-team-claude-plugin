@@ -1,6 +1,6 @@
-// BLIND SPOT: block-closing } versus object-literal } cannot be distinguished by this tokenizer; a regex statement immediately after a block may be classified as division.
+// BLIND SPOT: block-closing } versus object-literal } cannot be distinguished by this tokenizer; a regex statement immediately after a bare block-closing brace (without else or do) may be classified as division.
 // lean: lexical-only brace disambiguation; upgrade to a parser if block/object regex syntax becomes required.
-const keywords = new Set(['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await'])
+const keywords = new Set(['return', 'typeof', 'case', 'void', 'in', 'of', 'delete', 'throw', 'new', 'yield', 'await', 'else', 'do'])
 const heads = new Set(['if', 'while', 'for', 'with'])
 const operators = ['>>>=', '&&=', '||=', '??=', '===', '!==', '**=', '>>>', '<<=', '>>=', '?.', '=>', '==', '!=', '<=', '>=', '++', '--', '&&', '||', '??', '+=', '-=', '*=', '/=', '%=', '**', '<<', '>>', '&=', '|=', '^=', '...']
 export function tokenizeJs(source) {
@@ -64,8 +64,9 @@ export function tokenizeJs(source) {
         i++; while (i < source.length && /[$_\u200c\u200d\p{ID_Continue}]/u.test(source[i])) i++
         const text = source.slice(start, i)
         const property = previous?.text === '.' || previous?.text === '?.'
-        // 'of' is contextual: a keyword only directly inside a for-head, otherwise a plain identifier.
-        const keyword = keywords.has(text) && (text !== 'of' || parens.at(-1) === 'for')
+        // 'of' is contextual: a keyword after a complete binding directly inside a for-head.
+        const binding = (previous?.kind === 'name' && !['let', 'const', 'var'].includes(previous.text) && !regexAllowed) || previous?.text === ']' || previous?.text === '}'
+        const keyword = keywords.has(text) && (text !== 'of' || (parens.at(-1) === 'for' && binding))
         significant('name', start, i, !property && keyword); continue
       }
       if (/[0-9]/.test(c)) { i++; while (i < source.length && /[\w.]/.test(source[i])) i++; significant('number', start, i, false); continue }

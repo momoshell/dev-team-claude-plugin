@@ -101,6 +101,32 @@ function charterSource(role) {
   }
 }
 
+// MUTATION AD1: restoring the readgate line suffix must break the exact citation pin.
+test('AD1', () => {
+  const source = readFileSync(join(REPO_ROOT, 'docs/adr/adr-049-builder-edit-assist.md'), 'utf8')
+  assert.ok(source.includes("`pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts`; `attachReadGate`, `crew/pi/extensions/readgate.ts`)."))
+  assert.equal(source.includes('`crew/pi/extensions/builderloop.ts:822`; `attachReadGate`'), false)
+  assert.equal(source.includes('`crew/pi/extensions/readgate.ts:620`'), false)
+})
+
+// MUTATION DC1: adding a numeric line suffix to the runCold citation must change the projection.
+test('DC1', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/drive.mjs'), 'utf8')
+  const start = source.indexOf('export function withPhaseSlot(')
+  assert.ok(start >= 0, 'withPhaseSlot source boundary unavailable')
+  const end = source.indexOf('\n}', start)
+  assert.ok(end > start, 'withPhaseSlot closing top-level brace unavailable')
+  const body = source.slice(start, end + 2)
+  const expected = ['crew/host-load.mjs', 'crew/seat-io.mjs (emitAdapter)', 'crew/reclaim.mjs (DELIBERATE DIVERGENCE)', 'crew/drive.mjs (io contract, runCold)', 'crew/drive-fixtures.mjs (crashIo)']
+  const cites = value => [...value.matchAll(/crew\/[\w./-]+\.mjs(?::\d+(?:-\d+)?|\s+\([^)\n]+\))?/g)].map(match => match[0])
+  const projection = expected.map(cite => '// ' + cite).join('\n')
+  assert.deepEqual(cites(projection), expected)
+  assert.notDeepEqual(cites(projection.replace('crew/drive.mjs (io contract, runCold)', 'crew/drive.mjs:4745 (io contract, runCold)')), expected)
+  assert.deepEqual(cites(body), expected)
+  assert.ok(body.includes('io.runCold THROWS'))
+  assert.equal(/\.mjs:\d/.test(body), false)
+})
+
 test('bootCmd writes terse charter tails for every seated role', async () => {
   const fixture = charterBootFixture('terse')
   try {

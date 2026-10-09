@@ -14286,7 +14286,7 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
     // The driver is ALIVE and this completed scan is the observation that proves it.
     // Without this a lane queued behind K suites goes quiet for up to the ceiling and
     // reads as DEAD to exactly the liveness code that exists to prevent it
-    // (crew/seat-io.mjs:1416, #813).
+    // (crew/seat-io.mjs (emitAdapter), #813).
     emit({ kind: 'heartbeat', at: now(), role: null })
     if (now() - startedAt >= ceiling) break
     sleep(interval)
@@ -14298,16 +14298,16 @@ export function withPhaseSlot({ pool, phase, owner, now, sleep = slotNap, log = 
   // this helper sink and therefore accounts for the operational row below.
   const recordWait = () => log?.(operationalRow({ at: now(), event: PHASE_SLOT_WAIT_EVENT, kind: phase,
     queue_depth: depth, waited_ms: now() - startedAt, slotted: handle !== null, lock_contended: lockContended, lock_holder: lockHolder }))
-  // A queue is not a refusal (crew/reclaim.mjs:1140): a ceiling REACHED — and only that
+  // A queue is not a refusal (crew/reclaim.mjs (DELIBERATE DIVERGENCE)): a ceiling REACHED — and only that
   // — hands the caller its phase back unslotted rather than failing a run that would
   // have succeeded. Nothing is held on this path, so the row is written outside any
   // release region.
   if (!handle && unresolved) throw unresolved
   if (!handle) { recordWait(); return run() }
   // FINALLY, not a trailing statement, and the row write is INSIDE it. io.runCold THROWS
-  // rather than report a verdict it could not take (crew/drive.mjs:4745) — and so does
+  // rather than report a verdict it could not take (crew/drive.mjs (io contract, runCold)) — and so does
   // io.log: the driver turns a journal fault into an escalation
-  // (crew/drive.test.mjs:7440-7457). Every now() and every journal operation performed
+  // (crew/drive-fixtures.mjs (crashIo)). Every now() and every journal operation performed
   // after a successful acquire therefore sits inside the release region; a phase — or a
   // row — that escalates or crashes holding its slot would otherwise strand it for every
   // other lane until the pool reclaims a dead pid, which it cannot do while this driver

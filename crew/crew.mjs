@@ -2758,10 +2758,10 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
   builder: 4171,
   lead: 9099,
   planner: 16905,
-  reviewer: 7675,
+  reviewer: 7522,
   'tech-lead': 6295,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 49087
+export const CHARTER_SOURCE_TOTAL_BUDGET = 48934
 
 // Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
 // plus the installation-path delta for the three seats whose cards name a guideline.
@@ -2770,7 +2770,7 @@ export const CHARTER_CEILINGS = Object.freeze({
   builder: 9115 + CHARTER_GUIDELINE_DELTA,
   lead: 14043,
   planner: 21849 + CHARTER_GUIDELINE_DELTA,
-  reviewer: 12619 + CHARTER_GUIDELINE_DELTA,
+  reviewer: 12466 + CHARTER_GUIDELINE_DELTA,
   'tech-lead': 11239,
 })
 
@@ -5298,8 +5298,8 @@ export const SKILL_BLOCK_CEILINGS = Object.freeze({
   builder: 21659 + 6 * SKILL_ROOT_BYTES,
   lead: 1704 + SKILL_ROOT_BYTES,
   planner: 18102 + 5 * SKILL_ROOT_BYTES,
-  reviewer: 26219 + 7 * SKILL_ROOT_BYTES,
-  'tech-lead': 12656 + 3 * SKILL_ROOT_BYTES,
+  reviewer: 26581 + 7 * SKILL_ROOT_BYTES,
+  'tech-lead': 13018 + 3 * SKILL_ROOT_BYTES,
 })
 export const ROLE_PROMPT_CEILINGS = Object.freeze(Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, bytes + 2 + SKILL_BLOCK_CEILINGS[role]])))
 export const ROLE_PROMPT_REFUSAL = 'role-prompt-over-ceiling'

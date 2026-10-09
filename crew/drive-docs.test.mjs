@@ -1632,3 +1632,67 @@ test('CC1 planner charter teaches closing and reference issues', () => {
   assert.ok(prose.includes('partial delivery of it cannot be expressed: ask in `details.questions`'))
   assert.ok(prose.includes('`commit_subject` falls back to a subject derived from your summary.'))
 })
+
+// MUTATION RS1: changing a closed SHAPE signal must invalidate the charter.
+test('RS1 reviewer charter adds three ordered questions and seven closed SHAPE signals', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8')
+  const method = charter.slice(charter.indexOf('## Method'), charter.indexOf('## Verdict contract'))
+  assert.ok(method.includes('2. Judge three separate questions, in order:'))
+  assert.ok(method.indexOf('b. CORRECTNESS') < method.indexOf('c. SHAPE'))
+  assert.ok(method.indexOf('c. SHAPE') < method.indexOf('3. Write'))
+  for (const phrase of ['existing pattern for each', "brief's conventions of record", "plan's named exemplars", "one-sentence summary"]) assert.ok(method.includes(phrase), phrase)
+  const signals = ['a new single-caller or one-line helper', 'a function mixing I/O, logic and logging', 'a parameter used only for a log line', 'a parameter name disagreeing with its type', 'nesting growth', 'non-null assertions', 'comments narrating review history']
+  const list = method.split('The signals are closed:')[1].split('3. Write')[0]
+  assert.deepEqual([...list.matchAll(/^\s*- (.+)$/gm)].map((m) => m[1]), signals)
+})
+
+// MUTATION RS2: restoring the retired style-nits sentence must invalidate grading.
+test('RS2 SHAPE signals carry consequence grading and exclude unlisted cosmetics', () => {
+  const charter = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8')
+  const method = charter.slice(charter.indexOf('## Method'), charter.indexOf('## Verdict contract'))
+  assert.ok(method.includes('A listed SHAPE signal is a consequence: should-fix'))
+  assert.ok(method.includes('citing the exemplar'))
+  assert.ok(method.includes('or idiom to match as file:line'))
+  assert.ok(method.includes('must-fix only when it hides a correctness defect.'))
+  assert.ok(method.includes('A cosmetic preference with no listed signal is not a finding.'))
+  assert.equal(method.includes('No style nits without consequence.'), false)
+})
+
+// MUTATION RS3: changing procedure's then-shape clause must invalidate its rubric mirror.
+test('RS3 procedure and rubric mirror shape order and unmeasured grading', () => {
+  const procedure = readFileSync(join(REPO_ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8').replace(/\s+/g, ' ')
+  assert.ok(procedure.includes("then correctness (do the acceptance criteria hold?), then shape (existing pattern per job; reads like the change's one-sentence summary)."))
+  const skill = readFileSync(join(REPO_ROOT, 'skills/pr-review/SKILL.md'), 'utf8')
+  const rows = skill.split('\n')
+  const index = rows.findIndex((line) => line.startsWith('| 8 | plan conformance'))
+  assert.equal(rows[index + 1]?.startsWith('| 8b | shape: '), true)
+  const row = rows[index + 1]
+  for (const phrase of ['a new single-caller or one-line helper', 'a function mixing I/O, logic and logging', 'a parameter used only for a log line', 'a parameter name disagreeing with its type', 'nesting growth', 'non-null assertions', 'comments narrating review history']) assert.ok(row.includes(phrase), phrase)
+  assert.ok(row.includes('| none | unmeasured; no exhibit or yield claimed; should-fix; must-fix only when it hides a correctness defect |'))
+  assert.equal(rows.filter((line) => line.startsWith('| 8b | shape: ')).length, 1)
+})
+
+// MUTATION RS4: restoring "two" in the manifest Judge value must invalidate the pin.
+test('RS4 reviewer anchor manifest matches four live reviewer lines', () => {
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'skills/pr-review/anchors.json'), 'utf8'))
+  const lines = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8').split('\n')
+  for (const [key, value] of Object.entries(manifest).filter(([key]) => key.startsWith('crew/roles/reviewer.md:'))) {
+    const line = Number(key.split(':').at(-1))
+    assert.equal(lines[line - 1], value, key)
+  }
+  assert.equal(manifest['crew/roles/reviewer.md:13'], '2. Judge three separate questions, in order:')
+})
+
+// MUTATION RS5: restoring the two-question divergence claim must invalidate its range.
+test('RS5 divergence cites the complete three-question SHAPE rule range', () => {
+  const divergence = readFileSync(join(REPO_ROOT, 'skills/pr-review/references/divergence.md'), 'utf8')
+  assert.ok(divergence.includes('different questions — conformance, correctness and shape, the three questions the'))
+  const citation = divergence.match(/charter separates at `crew\/roles\/reviewer\.md:(\d+)-(\d+)`/)
+  assert.ok(citation)
+  const charter = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8').split('\n')
+  const start = Number(citation[1]), end = Number(citation[2])
+  assert.equal(charter[start - 1], '2. Judge three separate questions, in order:')
+  assert.ok(end >= charter.findIndex((line) => line.includes('A cosmetic preference with no listed signal')) + 1)
+  assert.ok(end <= charter.length)
+  assert.ok(charter.slice(start - 1, end).join('\n').includes('must-fix only when it hides a correctness defect.'))
+})

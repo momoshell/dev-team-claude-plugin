@@ -1766,5 +1766,5 @@ Self-apply \`crew/guidelines/seat-pre-return-checklist.md\` items \`B1\`-\`B3\`,
 `
   assert.equal(outside, expected)
   assert.equal(CHARTER_SOURCE_BUDGET.builder, 4387)
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49035)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49093)
 })

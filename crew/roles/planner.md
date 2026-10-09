@@ -131,7 +131,7 @@ outside the builder's reach. Rules the driver enforces mechanically:
   it red on the untouched tree; a correct one was seen to print `FAIL <check>`
   with the forbidden thing present and to pass once it was removed. The
   catch-and-rethrow shape is in
-  `skills/qa-test-writing/references/gates.md` (Mechanics that bite). #581
+  `skills/qa-test-writing/references/gates.md` (Mechanics that bite). #581 For vitest gates, read `crew/guidelines/vitest-gates.md`.
   Call `scripts/factory/absence.mjs` rather than hand-rolling `git grep`.
 - A check may assert only against an authoritative stream or mutable data,
   never against the presence of a service, method, key or symbol. A gate check

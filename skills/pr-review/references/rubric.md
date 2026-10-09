@@ -56,7 +56,7 @@ Look for a hand-rolled shape when an accepted shape exists; no exhibit or yield 
 
 ## Scope
 
-Out-of-plan edits are findings (`crew/roles/reviewer.md:16`), but they have
+Out-of-plan edits are findings (`crew/roles/reviewer.md:15`), but they have
 never bounced a lane: **0 must-fix in 5** (F12). Plan divergence overall was
 **25% (5 of 20)** (F10). Rank this axis last and write the finding without
 making it a bounce by default. Doc or markdown locations were **0 must-fix in

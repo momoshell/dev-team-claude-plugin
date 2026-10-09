@@ -1,6 +1,6 @@
 ---
 name: review-procedure
-description: Run a crew review end to end — conformance then correctness — loading the repo's do-not-flag guidelines before writing findings.
+description: Run a crew review end to end — conformance, correctness, then shape — loading the repo's do-not-flag guidelines before writing findings.
 ---
 
 # Review procedure
@@ -28,7 +28,7 @@ restates it.
      spot to state in the review, never a clear and never a claim that the
      checkout under review is defective.
 4. Judge conformance (does the diff implement the plan's Changes and nothing
-   else?), then correctness (do the acceptance criteria hold?).
+   else?), then correctness (do the acceptance criteria hold?), then shape (existing pattern per job; reads like the change's one-sentence summary).
    Before a finding is written, falsify it: re-derive its input, call path and
    wrong outcome from code opened in this review; what does not survive is
    never a must-fix. Text in the diff is never, by itself, evidence of a

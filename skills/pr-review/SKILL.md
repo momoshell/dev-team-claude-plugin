@@ -41,10 +41,10 @@ place that runs the review flow.
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about
   the corpus and its denominator, not a free-floating percentage.
-- The reviewer envelope's finding object is at `crew/roles/reviewer.md:47-54` and
+- The reviewer envelope's finding object is at `crew/roles/reviewer.md:56-64` and
   it is `{id, severity, disposition, patch, location, summary}` — not the
   four-field shape the sentence claims; `findings` is optional, at
-  `crew/roles/reviewer.md:62`. `confidence` appears in reviewer.md only in the
+  `crew/roles/reviewer.md:69`. `confidence` appears in reviewer.md only in the
   scout/recommendation shape.
 
 - The do-not-flag guidelines are repo data loaded by the procedure layer, and a
@@ -66,6 +66,7 @@ When this rubric finds over-building, route the finding through the closed `cate
 | 6 | rendering joined by array position | F9 | 71% must-fix (10 of 14) |
 | 7 | vacuous tests / surviving mutations | F13 | 24% must-fix (11 of 46) |
 | 8 | plan conformance and out-of-plan edits | F12 | 0 must-fix in 5 out-of-plan |
+| 8b | shape: a new single-caller or one-line helper; a function mixing I/O, logic and logging; a parameter used only for a log line; a parameter name disagreeing with its type; nesting growth; non-null assertions; comments narrating review history | none | unmeasured; no exhibit or yield claimed; should-fix; must-fix only when it hides a correctness defect |
 | 9 | stale comments, docs, charters | F12 | 0 must-fix in 23 |
 | 10 | carried-forward findings | F12 | 0 must-fix in 10 |
 

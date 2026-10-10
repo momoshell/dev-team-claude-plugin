@@ -34,7 +34,7 @@ import {
 } from './drive.mjs'
 import { suiteRunPolicy } from './headless.mjs'
 import { TRANSPORT_SETTLEMENT } from './headless-rpc.mjs'
-import { CHECK_MUTATION } from './drive-fixtures.mjs'
+import { CHECK_MUTATION, DRIVE_JOURNAL_EXPECTED, driveJournalSites } from './drive-fixtures.mjs'
 
 const A1_BOUNCE_TRACE = Object.freeze(['plan', 'build', 'scope-gate', 'lane', 'review', 'build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'suite'])
 
@@ -4346,4 +4346,53 @@ test('CF3 includes draft-plan misses in the lead consult without another consult
   const decision = Object.entries(io.calls.writes).find(([path]) => /\/decision-1\.md$/.test(path))?.[1] || ''
   assert.match(decision, /Uncovered ids: CB1/)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+})
+
+// MUTATION: delete the result journal call; retry outcomes then disappear.
+// MUTATION: replace `!retryRefused && retryDeclared ?` with `!retryRefused ?`; the undeclared retry is falsely measured.
+test('LR1', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const draft=(mutations, extra={})=>planEnv({status:'insufficient',details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,questions:[{id:'q1',question:'What?'}],mutations,...extra}})
+ const fixture=(retry, options={})=>{
+  const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':draft([miss]),'planner1.coverage-reask.planner.json':retry,'tech-lead:1':checkEnv('approve')}})
+  if(options.failResult){const log=io.log.bind(io);io.log=(row)=>{if(row.acceptance_coverage_reask_result)throw new Error('journal unavailable');return log(row)}}
+  if(options.grace)io.reaskGraceSpent=()=> 'planner'
+  driveTask(CTX_TL,io)
+  return io
+ }
+ const rows=(io)=>io.calls.logs.filter(x=>x.acceptance_coverage_reask_result).map(x=>x.acceptance_coverage_reask_result)
+ const repaired=fixture(draft([fixed]))
+ assert.deepEqual(rows(repaired),[{round:1,repaired:true,uncovered_after:[]}])
+ assert.deepEqual(repaired.calls.logs.map(x=>x.acceptance_coverage_reask).filter(Boolean).map(({round,uncovered,extra,outcome})=>({round,uncovered,extra,outcome})),[{round:1,uncovered:['CB1'],extra:['X1'],outcome:'asked'}])
+ const ordinary=fixture(draft([miss]))
+ assert.deepEqual(rows(ordinary),[{round:1,repaired:false,uncovered_after:['CB1']}])
+ const refused=fixture({...planEnv({assignment_id:'stale-planner'}),details:{...planEnv().details,mutations:[fixed]}})
+ assert.deepEqual(rows(refused),[{round:1,repaired:null,uncovered_after:null,reason:'envelope-refusal'}])
+ const undeclaredEnv=planEnv({status:'insufficient',details:{...planEnv().details,questions:[{id:'q1',question:'What?'}]}})
+ const undeclared=fixture(undeclaredEnv)
+ assert.deepEqual(rows(undeclared),[{round:1,repaired:null,uncovered_after:null,reason:'no-declared-checks'}])
+ const spent=fixture(draft([fixed]),{grace:true})
+ assert.deepEqual(rows(spent),[])
+ assert.equal(spent.calls.assign.filter(x=>x.role==='planner'&&x.reask).length,0)
+ const failedIo=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':draft([miss]),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[fixed]}}),'tech-lead:1':checkEnv('approve')}})
+ const failedLog=failedIo.log.bind(failedIo);failedIo.log=(row)=>{if(row.acceptance_coverage_reask_result)throw new Error('journal unavailable');return failedLog(row)}
+ driveTask(CTX_TL,failedIo)
+ assert.equal(failedIo.calls.assign.find(x=>x.role==='tech-lead')?.briefFile,`${TD}/check-brief-r1.md`)
+})
+
+// MUTATION: use the initial coverage's uncovered list for uncovered_after.
+test('LR2', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n(CB2) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const retry=planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[fixed]}})
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[miss]}}),'planner1.coverage-reask.planner.json':retry,'tech-lead:1':checkEnv('approve')}})
+ driveTask(CTX_TL,io)
+ assert.deepEqual(io.calls.logs.filter(x=>x.acceptance_coverage_reask_result).map(x=>x.acceptance_coverage_reask_result),[{round:1,repaired:false,uncovered_after:['CB2']}])
+})
+
+// MUTATION: delete the inventory tuple; the canonical census membership assertion fails.
+test('LR3', () => {
+ const tuple=['recordRow','','at acceptance_coverage_reask_result']
+ assert.ok(DRIVE_JOURNAL_EXPECTED.some(entry=>JSON.stringify(entry)===JSON.stringify(tuple)))
+ const sites=driveJournalSites(readFileSync(new URL('./drive.mjs',import.meta.url),'utf8'))
+ assert.ok(sites.some(({wrapper,events,keys})=>JSON.stringify([wrapper,events,keys])===JSON.stringify(tuple)))
 })

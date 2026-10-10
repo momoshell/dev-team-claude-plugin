@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
+import { appendFileSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, symlinkSync, lstatSync } from 'node:fs'
 import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,10 +21,11 @@ import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { seatIo, paneTeardownRows, nextModelRung, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+import { CACHE_SIGNATURE, isCacheDir, pruneCacheDirs } from './cache-prune.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct]
+void [test, assert, createHash, appendFileSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct]
 
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
@@ -2476,4 +2477,259 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Son
   assert.match(String(frontier.membership_basis), /openai\/gpt-6\.1-sol replaces openai\/gpt-6-sol in this same band by operator ratification on 2026-09-30/)
   assert.match(String(workhorse.membership_basis), /anthropic\/claude-sonnet-5-5 replaces anthropic\/claude-sonnet-5 in this same band by operator ratification on 2026-09-30/)
   for (const band of [frontier, workhorse]) assert.match(String(band.membership_basis), /2026-09-30; no successor benchmark score was supplied/)
+})
+
+
+test('cache pruning recognizes standard leading tags and leaves invalid tags intact', () => {
+  const root = scratchDir('cache-prune-tags-')
+  const valid = join(root, 'valid')
+  const invalid = join(root, 'invalid')
+  mkdirSync(valid)
+  mkdirSync(invalid)
+  writeFileSync(join(valid, 'CACHEDIR.TAG'), CACHE_SIGNATURE + '\r\n')
+  writeFileSync(join(invalid, 'CACHEDIR.TAG'), 'x' + CACHE_SIGNATURE)
+  assert.equal(isCacheDir(valid), true)
+  assert.equal(isCacheDir(invalid), false)
+  const expected = lstatSync(join(valid, 'CACHEDIR.TAG')).size
+  const report = pruneCacheDirs({ taskDir: root })
+  assert.deepEqual(report.removed.map(({ path }) => path), ['valid'])
+  assert.equal(existsSync(invalid), true)
+  assert.equal(report.freed_bytes, expected)
+  assert.deepEqual(report.failed, [])
+})
+
+test('cache pruning counts nested tagged content once and never follows symlinks', () => {
+  const root = scratchDir('cache-prune-nested-')
+  const cache = join(root, 'cache')
+  const nested = join(cache, 'nested')
+  const outside = join(root, 'outside')
+  mkdirSync(nested, { recursive: true })
+  mkdirSync(outside)
+  writeFileSync(join(cache, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(cache, 'evidence'), Buffer.from([0, 1, 255]))
+  writeFileSync(join(nested, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(nested, 'payload'), 'four')
+  writeFileSync(join(outside, 'kept'), 'keep')
+  symlinkSync(outside, join(cache, 'external'), 'dir')
+  const expected = lstatSync(join(cache, 'CACHEDIR.TAG')).size + 3 +
+    lstatSync(join(nested, 'CACHEDIR.TAG')).size + 4 + lstatSync(join(cache, 'external')).size
+  const report = pruneCacheDirs({ taskDir: root })
+  assert.deepEqual(report.removed, [{ path: 'cache', bytes: expected }])
+  assert.equal(report.freed_bytes, expected)
+  assert.equal(existsSync(join(outside, 'kept')), true)
+  assert.equal(existsSync(cache), false)
+})
+
+test('cache pruning removes after measurement failure and records deletion failure without blocking', () => {
+  const root = scratchDir('cache-prune-errors-')
+  const cache = join(root, 'cache')
+  mkdirSync(cache)
+  writeFileSync(join(cache, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(cache, 'payload'), 'data')
+  const measured = pruneCacheDirs({ taskDir: root }, {
+    lstatSync(path) {
+      if (path === join(cache, 'payload')) throw Object.assign(new Error('measurement denied'), { code: 'EPERM' })
+      return lstatSync(path)
+    },
+  })
+  assert.deepEqual(measured.removed, [{ path: 'cache', bytes: null }])
+  assert.equal(measured.freed_bytes, null)
+  assert.deepEqual(measured.failed, [{ path: 'cache', error: 'measurement denied' }])
+
+  const denied = join(root, 'denied')
+  mkdirSync(denied)
+  writeFileSync(join(denied, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  let logged = 0
+  const report = pruneCacheDirs({ taskDir: root, log: () => { logged++; throw new Error('ignored') } }, {
+    rmSync() { throw Object.assign(new Error('delete denied'), { code: 'EPERM' }) },
+  })
+  assert.equal(logged, 1)
+  assert.ok(report.failed.some((entry) => entry.path === 'denied' && entry.error === 'delete denied'))
+  assert.doesNotThrow(() => pruneCacheDirs({ taskDir: join(root, 'missing') }))
+})
+
+test('RV1-2 cache pruning recognizes every standard tag shape and rejects malformed markers', () => {
+  const root = scratchDir('cache-prune-markers-')
+  const tagged = ['lf', 'crlf', 'bare'].map((name) => join(root, name))
+  for (const path of tagged) mkdirSync(path)
+  writeFileSync(join(tagged[0], 'CACHEDIR.TAG'), `${CACHE_SIGNATURE}\n`)
+  writeFileSync(join(tagged[1], 'CACHEDIR.TAG'), `${CACHE_SIGNATURE}\r\n`)
+  writeFileSync(join(tagged[2], 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  for (const path of tagged) assert.equal(isCacheDir(path), true)
+
+  const partial = join(root, 'partial')
+  const wrong = join(root, 'wrong')
+  const empty = join(root, 'empty')
+  const offset = join(root, 'offset')
+  const plain = join(root, 'plain')
+  const file = join(root, 'file')
+  for (const path of [partial, wrong, empty, offset, plain]) mkdirSync(path)
+  writeFileSync(join(partial, 'CACHEDIR.TAG'), CACHE_SIGNATURE.slice(0, -1))
+  writeFileSync(join(wrong, 'CACHEDIR.TAG'), 'Signature: 00000000000000000000000000000000')
+  writeFileSync(join(empty, 'CACHEDIR.TAG'), '')
+  writeFileSync(join(offset, 'CACHEDIR.TAG'), `x${CACHE_SIGNATURE}`)
+  writeFileSync(file, CACHE_SIGNATURE)
+  symlinkSync(tagged[0], join(root, 'tagged-link'), 'dir')
+  for (const path of [partial, wrong, empty, offset, plain, file, join(root, 'tagged-link')]) assert.equal(isCacheDir(path), false)
+})
+
+test('RV1-2 cache pruning records inspection and discovery errors without deleting candidates', () => {
+  const root = scratchDir('cache-prune-inspection-')
+  const denied = join(root, 'denied')
+  const plain = join(root, 'plain')
+  mkdirSync(denied)
+  mkdirSync(plain)
+  writeFileSync(join(denied, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  const deniedRead = () => { throw Object.assign(new Error('marker denied'), { code: 'EACCES' }) }
+  assert.throws(() => isCacheDir(denied, { readFileSync: deniedRead }), /marker denied/)
+  const reports = []
+  const inspected = pruneCacheDirs({ taskDir: root, log: (report) => reports.push(report) }, { readFileSync: deniedRead })
+  assert.equal(existsSync(denied), true)
+  assert.ok(inspected.failed.some((entry) => entry.path === 'denied' && entry.error === 'marker denied'))
+  assert.equal(reports.length, 1)
+
+  const unreadable = pruneCacheDirs({ taskDir: root }, {
+    readdirSync(path) {
+      if (path === plain) throw new Error('discovery denied')
+      return readdirSync(path)
+    },
+  })
+  assert.ok(unreadable.failed.some((entry) => entry.path === 'plain' && entry.error === 'discovery denied'))
+
+  const rootUnreadable = pruneCacheDirs({ taskDir: root }, {
+    readdirSync(path) {
+      if (path === root) throw new Error('root denied')
+      return readdirSync(path)
+    },
+  })
+  assert.ok(rootUnreadable.failed.some((entry) => entry.path === '.' && entry.error === 'root denied'))
+})
+
+test('RV1-2 cache pruning never traverses task-root or descendant symlinks', () => {
+  const root = scratchDir('cache-prune-links-')
+  const plain = join(root, 'plain')
+  const outside = scratchDir('cache-prune-outside-')
+  const outsideCache = join(outside, 'tagged')
+  mkdirSync(plain)
+  mkdirSync(outsideCache)
+  writeFileSync(join(outsideCache, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(outsideCache, 'payload'), 'outside')
+  // Kill mutation: make walk's lstat follow symlink directories.
+  symlinkSync(outside, join(plain, 'link'), 'dir')
+  symlinkSync(join(root, 'missing'), join(root, 'broken'), 'dir')
+  const report = pruneCacheDirs({ taskDir: root })
+  assert.deepEqual(report.removed, [])
+  assert.deepEqual(report.failed, [])
+  assert.equal(readFileSync(join(outsideCache, 'payload'), 'utf8'), 'outside')
+
+  const linkedRoot = `${root}-link`
+  symlinkSync(root, linkedRoot, 'dir')
+  const rootReport = pruneCacheDirs({ taskDir: linkedRoot })
+  assert.deepEqual(rootReport.removed, [])
+  assert.deepEqual(rootReport.failed, [])
+  assert.equal(existsSync(outsideCache), true)
+})
+
+test('RV1-2 cache pruning reports genuine empty, missing, and failed-removal outcomes', () => {
+  const root = scratchDir('cache-prune-outcomes-')
+  const logs = []
+  const empty = pruneCacheDirs({ taskDir: root, log: (report) => logs.push(report) })
+  assert.deepEqual(empty, { event: 'cache-pruned', removed: [], failed: [], freed_bytes: 0 })
+  assert.equal(logs.length, 1)
+  const missing = pruneCacheDirs({ taskDir: join(root, 'missing') })
+  assert.deepEqual(missing, { event: 'cache-pruned', removed: [], failed: [], freed_bytes: 0 })
+
+  const cache = join(root, 'cache')
+  mkdirSync(cache)
+  writeFileSync(join(cache, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  const removal = pruneCacheDirs({ taskDir: root }, {
+    rmSync() { throw Object.assign(new Error('already gone'), { code: 'ENOENT' }) },
+  })
+  assert.deepEqual(removal.removed, [])
+  assert.equal(removal.freed_bytes, 0)
+  assert.ok(removal.failed.some((entry) => entry.path === 'cache' && entry.error === 'already gone'))
+  assert.equal(existsSync(cache), true)
+})
+
+test('RV1-1 teardownCore archives pruned caches and journals their measured outcome', () => {
+  const parent = scratchDir('crew-teardown-cache-archive-')
+  const dir = join(parent, 'crew')
+  const task = join(dir, 'task')
+  const direct = join(task, 'target')
+  const nested = join(task, 'sub', 'nested-cache')
+  const evidence = join(task, 'evidence')
+  mkdirSync(direct, { recursive: true })
+  mkdirSync(nested, { recursive: true })
+  writeFileSync(join(direct, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(direct, 'payload'), 'direct')
+  writeFileSync(join(nested, 'CACHEDIR.TAG'), CACHE_SIGNATURE)
+  writeFileSync(join(nested, 'payload'), 'nested')
+  writeFileSync(evidence, Buffer.from([0, 1, 255]))
+  const directBytes = lstatSync(join(direct, 'CACHEDIR.TAG')).size + lstatSync(join(direct, 'payload')).size
+  const nestedBytes = lstatSync(join(nested, 'CACHEDIR.TAG')).size + lstatSync(join(nested, 'payload')).size
+  const record = teardownCore({ dir }, { members: {} }, {
+    closeSurface: () => {}, closeWorkspace: () => {}, probe: () => false, sleep: () => {},
+    settleSeatRoots: () => null, reclaimDescendants: () => null,
+    io: { log: (row) => appendFileSync(join(dir, 'journal.jsonl'), `${JSON.stringify(row)}\n`), emit: () => true },
+  })
+  assert.equal(existsSync(join(record.archived, 'task', 'target')), false)
+  assert.equal(existsSync(join(record.archived, 'task', 'sub', 'nested-cache')), false)
+  assert.deepEqual(readFileSync(join(record.archived, 'task', 'evidence')), Buffer.from([0, 1, 255]))
+  const rows = readFileSync(join(record.archived, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const pruned = rows.filter((row) => row.event === 'cache-pruned')
+  assert.equal(pruned.length, 1)
+  assert.equal(pruned[0].event, 'cache-pruned')
+  assert.deepEqual(pruned[0].removed.sort((a, b) => a.path.localeCompare(b.path)), [{ path: 'sub/nested-cache', bytes: nestedBytes }, { path: 'target', bytes: directBytes }])
+  assert.deepEqual(pruned[0].failed, [])
+  assert.equal(pruned[0].freed_bytes, directBytes + nestedBytes)
+})
+
+// Kill mutation: replace teardownCore's injected prune call with `try {}`.
+test('RV1-1 teardownCore runs pruning after reclaim and never lets either failure block archive', () => {
+  const order = []
+  const paths = { dir: scratchDir('crew-teardown-cache-order-') }
+  teardownCore(paths, { members: {} }, {
+    closeSurface: () => {}, closeWorkspace: () => {}, probe: () => false, sleep: () => {},
+    settleSeatRoots: () => { order.push('roots'); return null },
+    reclaimDescendants: () => { order.push('reclaim'); return null },
+    pruneCacheDirs: () => { order.push('prune') },
+    renameSync: () => { order.push('rename') },
+    io: { log: () => {}, emit: () => true },
+  })
+  assert.deepEqual(order, ['roots', 'reclaim', 'prune', 'rename'])
+
+  const failures = []
+  let pruneCalls = 0
+  let renamed = 0
+  const reclaimRecord = teardownCore({ dir: scratchDir('crew-teardown-cache-reclaim-') }, { members: {} }, {
+    closeSurface: () => {}, closeWorkspace: () => {}, probe: () => false, sleep: () => {},
+    settleSeatRoots: () => null,
+    reclaimDescendants: () => { throw new Error('reclaim boom') },
+    pruneCacheDirs: ({ taskDir }) => { pruneCalls++; assert.match(taskDir, /\/task$/) },
+    renameSync: () => { renamed++ },
+    io: { log: (row) => failures.push(row), emit: () => true },
+  })
+  assert.equal(pruneCalls, 1)
+  assert.equal(renamed, 1)
+  assert.equal(typeof reclaimRecord.archived, 'string')
+  assert.equal(failures.filter((row) => row.event === 'descendant-reclaim-failed').length, 1)
+
+  let thrownPruneCalls = 0
+  let thrownPruneRenames = 0
+  const pruneRecord = teardownCore({ dir: scratchDir('crew-teardown-cache-prune-') }, { members: {} }, {
+    closeSurface: () => {}, closeWorkspace: () => {}, probe: () => false, sleep: () => {},
+    settleSeatRoots: () => null, reclaimDescendants: () => null,
+    pruneCacheDirs: () => { thrownPruneCalls++; throw new Error('prune boom') },
+    renameSync: () => { thrownPruneRenames++ },
+    io: { log: () => {}, emit: () => true },
+  })
+  assert.equal(thrownPruneCalls, 1)
+  assert.equal(thrownPruneRenames, 1)
+  assert.equal(typeof pruneRecord.archived, 'string')
+})
+
+// Kill mutation: replace teardownCore's cache-prune integration catch with `try {}`.
+test('RV1-1 teardown source retains the cache-prune integration catch', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes("try { (deps.pruneCacheDirs || pruneCacheDirs)({ taskDir: descendantTaskDir, log: io?.log }, deps) } catch {}"))
 })

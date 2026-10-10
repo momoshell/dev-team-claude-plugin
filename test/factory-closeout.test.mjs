@@ -2,12 +2,15 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   chmodSync,
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
   statSync,
+  symlinkSync,
   utimesSync,
   unlinkSync,
   writeFileSync,
@@ -80,7 +83,7 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, realCopy = false, copyError = null, filterProbe = null } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   let clock = 0
@@ -95,7 +98,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     newest,
     ...(openLedger ? { openLedger } : {}),
     ...(ingestJournal ? { ingestJournal } : {}),
-    cpSync: (from, to, options) => calls.cp.push([from, to, options]),
+    cpSync: (from, to, options) => { calls.cp.push([from, to, options]); if (filterProbe) options.filter(filterProbe); if (copyError) throw copyError; if (realCopy) cpSync(from, to, options) },
     renameSync: (from, to) => {
       calls.rename.push([from, to])
       if (to === queuePath || from.startsWith(join(dirname(queuePath), `.${basename(queuePath)}.`))) renameSync(from, to)
@@ -1057,9 +1060,19 @@ test('recover treats incomplete and seats-null teardown evidence as unproven', (
 
 test('RV1-1 recover reads the archived crew directory after a real teardown', () => {
   const fixture = laneFixture('closeout-recover-real-teardown-')
+  const cache = join(fixture.crewDir, 'task', 'standard-cache')
+  const outside = join(fixture.home, 'outside-cache')
+  put(join(cache, 'CACHEDIR.TAG'), 'Signature: 8a477f597d28d172789f06886806bc55\n')
+  put(join(cache, 'payload'), 'cache bytes')
+  put(join(outside, 'CACHEDIR.TAG'), 'Signature: 8a477f597d28d172789f06886806bc55\n')
+  put(join(outside, 'payload'), 'outside bytes')
+  symlinkSync(outside, join(fixture.crewDir, 'task', 'external-cache'), 'dir')
+  put(join(fixture.crewDir, 'task', 'ordinary', 'evidence.txt'), 'retain evidence')
+  put(join(fixture.crewDir, 'task', 'invalid', 'CACHEDIR.TAG'), 'not a cache')
   const archived = `${fixture.crewDir}${ARCHIVE_MARK}2026-09-04T10-50-36-577Z`
   const { deps, calls } = harness({
     home: fixture.home,
+    realCopy: true,
     answers: [['crew.mjs teardown', () => {
       renameSync(fixture.crewDir, archived)
       return teardownReply({ archived })
@@ -1072,9 +1085,40 @@ test('RV1-1 recover reads the archived crew directory after a real teardown', ()
   assert.equal(result.code, 0)
   assert.equal(result.report.crew_dir, archived)
   assert.equal(result.report.adopt.archive, `${fixture.crewDir}.recovery-copy`)
+  assert.equal(existsSync(join(result.report.adopt.archive, 'task', 'standard-cache')), false)
+  assert.equal(readFileSync(join(archived, 'task', 'standard-cache', 'payload'), 'utf8'), 'cache bytes')
+  assert.equal(readFileSync(join(result.report.adopt.archive, 'task', 'ordinary', 'evidence.txt'), 'utf8'), 'retain evidence')
+  assert.equal(readFileSync(join(result.report.adopt.archive, 'task', 'invalid', 'CACHEDIR.TAG'), 'utf8'), 'not a cache')
+  assert.equal(lstatSync(join(result.report.adopt.archive, 'task', 'external-cache')).isSymbolicLink(), true)
+  assert.equal(readFileSync(join(outside, 'payload'), 'utf8'), 'outside bytes')
   assert.equal(result.lines.at(-1).step, 'closeout')
   assert.equal(spawned(calls, 'dispatch-batch').length, 0)
 })
+
+test('RV1-2 recover refuses preserve copy errors without mutating the source crew', () => {
+  const fixture = laneFixture('closeout-recover-copy-error-')
+  const { deps } = harness({ home: fixture.home, copyError: new Error('copy denied') })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.PRESERVE_FAILED)
+  assert.equal(result.refusal.step, 'preserve')
+  assert.equal(result.lines.at(-1).step, 'preserve')
+  assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), true)
+})
+
+test('RV1-2 recover refuses marker inspection errors and preserves the source crew', () => {
+  const fixture = laneFixture('closeout-recover-marker-error-')
+  const badMarker = join(fixture.crewDir, 'task', 'bad-marker')
+  mkdirSync(join(badMarker, 'CACHEDIR.TAG'), { recursive: true })
+  const { deps } = harness({ home: fixture.home, filterProbe: badMarker })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.PRESERVE_FAILED)
+  assert.equal(result.refusal.step, 'preserve')
+  assert.equal(existsSync(join(fixture.crewDir, 'crew.json')), true)
+  assert.equal(existsSync(join(badMarker, 'CACHEDIR.TAG')), true)
+})
+
 
 test('recover probes crew.json checkout unless checkout was explicit', () => {
   const fixture = laneFixture('closeout-recover-probe-root-')

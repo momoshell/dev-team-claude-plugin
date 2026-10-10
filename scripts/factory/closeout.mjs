@@ -1589,7 +1589,7 @@ export function recover({ lane, checkout, checkoutExplicit, deps } = {}) {
     },
     preserve: () => {
       const to = `${crewDir}${RECOVERY_COPY_SUFFIX}`
-      try { d.cpSync(crewDir, to, { recursive: true }) } catch (error) {
+      try { d.cpSync(crewDir, to, { recursive: true, filter: (source) => !isCacheDir(source) }) } catch (error) {
         refuse(`could not preserve ${crewDir}: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.PRESERVE_FAILED, 'preserve')
       }
       report.archive = to
@@ -1875,3 +1875,5 @@ export function main(argv, deps = {}) {
 
 const invokedDirectly = import.meta.main
 if (invokedDirectly) process.exitCode = await main(process.argv.slice(2))
+
+import { isCacheDir } from '../../crew/cache-prune.mjs'

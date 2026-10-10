@@ -4704,7 +4704,7 @@ export function teardownCore(paths, crew, deps = {}) {
   try { roots = settleRootsFn({ taskDir: descendantTaskDir, log: io?.log }) }
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'seat-root-settle-failed', error: err.message }) } catch {} }
   try { descendants = reclaimFn({ taskDir: descendantTaskDir, log: io?.log, emit: io?.emit }) }
-  catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} }
+  catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} } try { (deps.pruneCacheDirs || pruneCacheDirs)({ taskDir: descendantTaskDir, log: io?.log }, deps) } catch {}
   // INVARIANT — one writer at a time, CONDITIONALLY. Three sweeps have just run
   // over this crew's writers: the pane seats, then their seat ROOTS, then their
   // descendant groups. Whether they SETTLED them is exactly what
@@ -5339,3 +5339,5 @@ export function omitInlinedPiSkills(adapters, skillResults, root) {
     adapters[role] = { ...entry, grants: { ...entry.grants, skills } }
   }
 }
+
+import { pruneCacheDirs } from './cache-prune.mjs'

@@ -1866,7 +1866,7 @@ function setupChildFailure(result) { return result?.error?.message || result?.st
 export async function runWorktreeSetup({ checkout, laneDir, lane = laneDir, steps, fenceFiles = [], deps } = {}) {
   const refuse = (message, reason) => { throw new ProfileRefusal(message, reason) }
   const source = deps && typeof deps === 'object' ? deps : {}
-  const d = { appendFileSync: source.appendFileSync || appendFileSync, mkdirSync: source.mkdirSync || mkdirSync, lstatSync: source.lstatSync || lstatSync, realpathSync: source.realpathSync || realpathSync, symlinkSync: source.symlinkSync || symlinkSync, spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })) }
+  const d = { appendFileSync: source.appendFileSync || appendFileSync, mkdirSync: source.mkdirSync || mkdirSync, lstatSync: source.lstatSync || lstatSync, realpathSync: source.realpathSync || realpathSync, symlinkSync: source.symlinkSync || symlinkSync, writeFileSync: source.writeFileSync || writeFileSync, rmSync: source.rmSync || rmSync, statSync: source.statSync || statSync, spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })) }
   validateWorktreeSetup(steps)
   if (steps.length === 0) return
   const within = (root, path) => {
@@ -1921,7 +1921,7 @@ export async function runWorktreeSetup({ checkout, laneDir, lane = laneDir, step
       try {
         d.mkdirSync(dirname(excludePath), { recursive: true })
         const ownerLine = '# worktree-setup-owner: ' + JSON.stringify(laneDir)
-        d.appendFileSync(excludePath, '\n' + ownerLine + '\n' + excludePattern + '\n')
+        withExcludeLock(excludePath, d, () => d.appendFileSync(excludePath, '\n' + ownerLine + '\n' + excludePattern + '\n'))
       } catch (error) { failIo(error) }
       }
     } else if (step.kind === 'submodules') {
@@ -1945,41 +1945,59 @@ export async function runWorktreeSetup({ checkout, laneDir, lane = laneDir, step
 
 
 
-// lean: serialized exclude lifecycle writes; shared wx lock if multiple processes edit excludes concurrently
+// Every append to and rewrite of the shared exclude file holds this lock, so a cleanup's read-then-rename can
+// never drop a pair another lane appended in between. A lock older than 30s is a crashed holder and is reclaimed.
+function withExcludeLock(excludePath, d, fn) {
+  const lock = excludePath + '.worktree-setup.lock'
+  const deadline = Date.now() + 10000
+  for (;;) {
+    try { d.writeFileSync(lock, String(process.pid), { flag: 'wx' }); break } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      try { if (Date.now() - d.statSync(lock).mtimeMs > 30000) { d.rmSync(lock, { force: true }); continue } } catch {}
+      if (Date.now() > deadline) throw new Error('exclude lock busy: ' + lock)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+  try { return fn() } finally { try { d.rmSync(lock, { force: true }) } catch {} }
+}
+
 export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
   const source = deps && typeof deps === 'object' ? deps : {}
-  const d = { spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })), readFileSync: source.readFileSync || readFileSync, writeFileSync: source.writeFileSync || writeFileSync, renameSync: source.renameSync || renameSync, rmSync: source.rmSync || rmSync }
+  const d = { spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })), readFileSync: source.readFileSync || readFileSync, writeFileSync: source.writeFileSync || writeFileSync, renameSync: source.renameSync || renameSync, rmSync: source.rmSync || rmSync, statSync: source.statSync || statSync }
   let temporary = null
   try {
     const result = d.spawn({ file: 'git', args: ['-C', checkout, 'rev-parse', '--git-path', 'info/exclude'], cwd: checkout })
     if (!result || result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string' || !result.stdout.trim()) throw new Error('exclude path unresolved')
     const excludePath = resolve(checkout, result.stdout.trim())
-    let original
-    try { original = d.readFileSync(excludePath) } catch (error) { if (error?.code === 'ENOENT') return { removed: 0, reason: null }; throw error }
-    const bytes = Buffer.isBuffer(original) ? original : Buffer.from(original)
-    const text = bytes.toString('latin1')
-    const records = text.match(/[^\n]*\n|[^\n]+$/g) || []
-    const kept = []
-    let removed = 0
-    for (let i = 0; i < records.length; i++) {
-      const record = records[i]
-      const content = record.replace(/\r?\n$/, '')
-      if (content.startsWith('# worktree-setup-owner: ') && i + 1 < records.length) {
-        let decodedOwner
-        // Records are split as latin1 to keep every byte; the owner was appended as UTF-8, so decode it as UTF-8.
-        try { decodedOwner = JSON.parse(Buffer.from(content.slice('# worktree-setup-owner: '.length), 'latin1').toString('utf8')) } catch {}
-        const nextLine = records[i + 1].replace(/\r?\n$/, '')
-        if (decodedOwner === laneDir && nextLine.startsWith('/')) { removed++; i++; continue }
+    try { d.statSync(excludePath) } catch (error) { if (error?.code === 'ENOENT') return { removed: 0, reason: null }; throw error }
+    return withExcludeLock(excludePath, d, () => {
+      let original
+      try { original = d.readFileSync(excludePath) } catch (error) { if (error?.code === 'ENOENT') return { removed: 0, reason: null }; throw error }
+      const bytes = Buffer.isBuffer(original) ? original : Buffer.from(original)
+      const text = bytes.toString('latin1')
+      const records = text.match(/[^\n]*\n|[^\n]+$/g) || []
+      const kept = []
+      let removed = 0
+      for (let i = 0; i < records.length; i++) {
+        const record = records[i]
+        const content = record.replace(/\r?\n$/, '')
+        if (content.startsWith('# worktree-setup-owner: ') && i + 1 < records.length) {
+          let decodedOwner
+          // Records are split as latin1 to keep every byte; the owner was appended as UTF-8, so decode it as UTF-8.
+          try { decodedOwner = JSON.parse(Buffer.from(content.slice('# worktree-setup-owner: '.length), 'latin1').toString('utf8')) } catch {}
+          const nextLine = records[i + 1].replace(/\r?\n$/, '')
+          if (decodedOwner === laneDir && nextLine.startsWith('/')) { removed++; i++; continue }
+        }
+        kept.push(record)
       }
-      kept.push(record)
-    }
-    if (!removed) return { removed: 0, reason: null }
-    const output = Buffer.from(kept.join(''), 'latin1')
-    temporary = join(dirname(excludePath), `.info-exclude-${randomUUID()}.tmp`)
-    d.writeFileSync(temporary, output, { flag: 'wx' })
-    d.renameSync(temporary, excludePath)
-    temporary = null
-    return { removed, reason: null }
+      if (!removed) return { removed: 0, reason: null }
+      const output = Buffer.from(kept.join(''), 'latin1')
+      temporary = join(dirname(excludePath), `.info-exclude-${randomUUID()}.tmp`)
+      d.writeFileSync(temporary, output, { flag: 'wx' })
+      d.renameSync(temporary, excludePath)
+      temporary = null
+      return { removed, reason: null }
+    })
   } catch { if (temporary) { try { d.rmSync(temporary, { force: true }) } catch {} } return { removed: null, reason: 'worktree-exclude-cleanup-failed' } }
 }
 

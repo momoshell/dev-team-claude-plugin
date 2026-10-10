@@ -4,8 +4,8 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
-  statSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+  statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
@@ -1933,7 +1933,44 @@ test('L2A exclude cleanup that cannot resolve, read or rename reports null with 
   const removedTemps = []
   assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn, renameSync: () => { throw new Error('EXDEV') }, rmSync: (path) => { removedTemps.push(path); rmSync(path, { force: true }) } } }), failed)
   assert.equal(readFileSync(exclude, 'utf8'), before)
-  assert.equal(removedTemps.length, 1)
-  assert.equal(existsSync(removedTemps[0]), false)
+  const temps = removedTemps.filter((path) => basename(path).startsWith('.info-exclude-'))
+  assert.equal(temps.length, 1)
+  assert.equal(existsSync(temps[0]), false)
+  assert.equal(existsSync(exclude + '.worktree-setup.lock'), false)
   assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir: join(checkout, 'dt-missing'), deps: { spawn: () => ({ status: 0, stdout: join(checkout, 'absent', 'exclude') + '\n' }) } }), { removed: 0, reason: null })
+})
+
+// MUTATION: call the cleanup body without withExcludeLock; it reads and replaces the shared file unlocked.
+test('L2A exclude cleanup holds the shared lock from its read until its rename, then releases it', () => {
+  const checkout = nextRoot('l2a-lock-clean'), laneDir = join(checkout, 'dt-a')
+  const exclude = put(checkout, 'info/exclude', '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n'), lock = exclude + '.worktree-setup.lock'
+  const held = []
+  const spawn = () => ({ status: 0, stdout: exclude + '\n' })
+  const deps = { spawn, readFileSync: (path) => { held.push(['read', existsSync(lock)]); return readFileSync(path) }, renameSync: (from, to) => { held.push(['rename', existsSync(lock)]); return renameSync(from, to) } }
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps }), { removed: 1, reason: null })
+  assert.deepEqual(held, [['read', true], ['rename', true]])
+  assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: append the owner pair without withExcludeLock; a concurrent cleanup can overwrite it.
+test('L2A setup appends its owner pair while holding the shared exclude lock', async () => {
+  const checkout = nextRoot('l2a-lock-append'), laneDir = nextRoot('l2a-lock-append-lane')
+  put(checkout, 'node_modules/pkg/index.js', 'export default 1')
+  const exclude = put(checkout, 'info/exclude', ''), lock = exclude + '.worktree-setup.lock', held = []
+  const spawn = (call) => call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n' } : { status: 0, stdout: '' }
+  await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }], deps: { spawn, appendFileSync: (path, text) => { held.push(existsSync(lock)); return appendFileSync(path, text) } } })
+  assert.deepEqual(held, [true])
+  assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: never reclaim a stale lock; a crashed holder blocks every later cleanup.
+test('L2A a stale exclude lock left by a crashed holder is reclaimed', () => {
+  const checkout = nextRoot('l2a-lock-stale'), laneDir = join(checkout, 'dt-a')
+  const exclude = put(checkout, 'info/exclude', '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n'), lock = exclude + '.worktree-setup.lock'
+  writeFileSync(lock, '1')
+  const old = new Date(Date.now() - 60000)
+  utimesSync(lock, old, old)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 0, stdout: exclude + '\n' }) } }), { removed: 1, reason: null })
+  assert.equal(readFileSync(exclude, 'utf8'), '')
+  assert.equal(existsSync(lock), false)
 })

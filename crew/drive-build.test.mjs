@@ -7146,7 +7146,7 @@ const b863InvocationEntry = (over = {}) => ({
 const B863_FILES = { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' }
 const INVOCATION_LIMIT_TEXT = 'based only on process exit status'
 const b863Green = (status = 0) => ({ ok: status === 0, status, output: '', stderr: '' })
-const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], flipTo = null } = {}) => {
+const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], flipTo = undefined } = {}) => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(),
@@ -7158,6 +7158,10 @@ const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) =>
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, [entry.invocation]: runFn, ...extraRuns },
     changed, fingerprints,
   })
+  if (flipTo === undefined) {
+    const path = `${CTX.checkout}/${entry.file}`
+    flipTo = { set: files[path] === undefined ? {} : { [path]: `${files[path]}// invocation repair\n` } }
+  }
   if (flipTo !== null) {
     const baseWait = io.wait.bind(io)
     io.wait = (returnPath, timeoutS) => {
@@ -7184,6 +7188,67 @@ function roundTimeline(io) {
   }
   return (round, invocation = B863_INVOCATION) => io.calls.run.slice(marks[round - 1], marks[round]).filter(({ cmd }) => cmd === invocation).length
 }
+
+test('IV1 an unchanged behavioural invocation file is unproven and never executed', () => {
+  // MUTATION IV1: delete the early unchanged-byte return.
+  const files = { ...B863_FILES }
+  const io = invocationProofIo({ entry: b863InvocationEntry(), files, flipTo: null, runFn: () => { throw new Error('must not execute') } })
+  const ranIn = roundTimeline(io)
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = invocationRows(io).find((entry) => entry.round === 2)
+  assert.equal(row?.outcome, 'unproven')
+  assert.equal(hardeningRowBucket(row), 'unmeasured')
+  assert.equal(result.status, 'done')
+  assert.equal(ranIn(2), 0)
+  assert.match(row?.why ?? '', /invocation-unchanged-unprovable:.*a\.mjs.*byte-identical to the review-time witness/)
+  assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT))
+  assert.equal(result.details.hardening_unmeasured.length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+})
+
+test('IV2 a changed behavioural invocation file keeps the pre-repair conjunct', () => {
+  // MUTATION IV2: remove the repairedFile === S.bytes && conjunct.
+  const files = { ...B863_FILES }
+  const io = invocationProofIo({ entry: b863InvocationEntry(), files, runFn: () => b863Green(0) })
+  const ranIn = roundTimeline(io)
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = invocationRows(io).find((entry) => entry.round === 2)
+  assert.equal(row?.outcome, 'pre-repair-green')
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.deepEqual([ranIn(2), ranIn(3)], [1, 1])
+})
+
+test('C2 unchanged invocation bytes skip execution before anchor adjudication', () => {
+  // MUTATION C2: move unchanged-byte refusal below anchor adjudication.
+  for (const entry of [b863InvocationEntry(), b863InvocationEntry({ find: 'anchor absent' })]) {
+    const files = { ...B863_FILES }
+    const io = invocationProofIo({ entry, files, flipTo: null, runFn: () => { throw new Error('must not execute') } })
+    driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = invocationRows(io).find((candidate) => candidate.round === 2)
+    assert.equal(row?.outcome, 'unproven')
+    assert.equal(invocationExecutions(io).length, 0)
+  }
+})
+
+test('C5 changed byte-driven invocation proof uses witness, repair, mutant and restores repair', () => {
+  // MUTATION C5: omit restoring the witnessed bytes before the pre-repair run.
+  const files = { ...B863_FILES }
+  const observed = []
+  const repaired = 'const guard = false\n// invocation repair\n'
+  const io = invocationProofIo({
+    files,
+    runFn: () => {
+      const bytes = files[`${CTX.checkout}/a.mjs`]
+      observed.push(bytes)
+      return b863Green(bytes === repaired ? 0 : 1)
+    },
+  })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  const row = invocationRows(io).find((entry) => entry.round === 2)
+  assert.equal(row?.outcome, 'killed')
+  assert.deepEqual(observed, ['const guard = false\n', repaired, 'const guard = true\n// invocation repair\n'])
+  assert.equal(files[`${CTX.checkout}/a.mjs`], repaired)
+})
 
 test('A1 invocation guard proves a green control and red mutant', () => {
   const entry = b863InvocationEntry()
@@ -7269,7 +7334,9 @@ test('D1 invocation side effects are unproven and the checkout is restored', () 
     sh(['git', 'add', 'keep.txt'])
     const OUTSIDE = 'side-effect-outside.txt'
     const entry = b863InvocationEntry()
+    let before
     const realIo = (onInvocation) => {
+      writeFileSync(join(checkout, 'a.mjs'), 'const guard = false\n')
       const io = fakeIo({
         envelopes: {
           'planner:1': planEnv(),
@@ -7309,6 +7376,15 @@ test('D1 invocation side effects are unproven and the checkout is restored', () 
         return String(res.stdout || '').split('\n').filter(Boolean).map((line) => line.slice(3))
       }
       io.fingerprintTree = (target) => fingerprintTree(target)
+      const baseWait = io.wait.bind(io)
+      io.wait = (returnPath, timeoutS) => {
+        const env = baseWait(returnPath, timeoutS)
+        if (returnPath === 'builder:2') {
+          writeFileSync(join(checkout, 'a.mjs'), `${readFileSync(join(checkout, 'a.mjs'), 'utf8')}// invocation repair\n`)
+          before = stateOf()
+        }
+        return env
+      }
       return io
     }
     const stateOf = () => ({
@@ -7318,7 +7394,6 @@ test('D1 invocation side effects are unproven and the checkout is restored', () 
       status: sh(['git', 'status', '--porcelain', '-uall']).stdout,
       fingerprint: ((fp) => ({ measured: fp.measured, checkout: fp.checkout, head: fp.head, entries: fp.entries }))(fingerprintTree(checkout)),
     })
-    const before = stateOf()
     const controlIo = realIo((text, n) => {
       if (n === 1) return b863Green(1)
       writeFileSync(join(checkout, OUTSIDE), 'smuggled by the control run\n')
@@ -7380,7 +7455,8 @@ test('E1 every invocation result states the exit-status-only limitation', () => 
     ['unsafe', { entry: unsafeEntry, files: { [`${CTX.checkout}/a.mjs`]: 'const tag = 1 // the guard\nconst  guard = false\n' }, runFn: () => b863Green(0) }, 'anchor-unsafe'],
     ['pre-repair-green', { runFn: () => b863Green(0) }, 'pre-repair-green', /does not fail on the witnessed pre-repair/],
     ['source-regressed', { entry: coverageEntry, files: { [`${CTX.checkout}/a.mjs`]: 'const guard = true\n' }, flipTo: { set: { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' } }, runFn: () => b863Green(0) }, 'source-regressed'],
-    ['coverage-unprovable', { entry: coverageEntry, runFn: () => b863Green(0) }, 'unproven', /cannot be adjudicated/],
+    ['coverage-unprovable', { entry: coverageEntry, runFn: () => b863Green(0), flipTo: null }, 'unproven', /cannot be adjudicated/],
+    ['unchanged-behaviour', { flipTo: null, runFn: () => b863Green(0) }, 'unproven', /invocation-unchanged-unprovable:/],
     ['control-interruption', { runFn: (text, n) => { if (n === 2) throw new Error('boom-control'); return b863Green(1) } }, 'unproven'],
     ['mutant-interruption', { runFn: (text, n) => { if (n === 3) throw new Error('boom-mutant'); return b863Green(n === 2 ? 0 : 1) } }, 'unproven'],
     ['survived', { runFn: (text, n) => (n === 1 ? b863Green(1) : b863Green(0)) }, 'survived'],
@@ -7388,13 +7464,15 @@ test('E1 every invocation result states the exit-status-only limitation', () => 
     ['side-effects', { fingerprints: (target, calls) => (calls.run.filter(({ cmd }) => cmd === B863_INVOCATION).length >= 2 ? fpOutside : fpBefore), runFn: (text, n) => (n === 2 ? b863Green(0) : b863Green(1)) }, 'unproven'],
   ]
   for (const [label, options, outcome, match] of cases) {
-    const io = invocationProofIo({ entry: options.entry ?? entry, files: options.files ?? { ...B863_FILES }, fingerprints: options.fingerprints ?? null, runFn: options.runFn, flipTo: options.flipTo ?? null })
+    const io = invocationProofIo({ entry: options.entry ?? entry, files: options.files ?? { ...B863_FILES }, fingerprints: options.fingerprints ?? null, runFn: options.runFn, flipTo: options.flipTo })
     if (typeof options.wrap === 'function') options.wrap(io)
     driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
     const row = invocationRows(io).find((entry) => entry.round === 2)
     assert.equal(row?.outcome, outcome, label)
     assert.match(row?.why ?? '', new RegExp(INVOCATION_LIMIT_TEXT), label)
     if (match !== undefined) assert.match(row?.why ?? '', match, label)
+    // MUTATION RV1-1: move coverage adjudication below invocation execution.
+    if (['source-regressed', 'coverage-unprovable', 'unchanged-behaviour'].includes(label)) assert.equal(invocationExecutions(io).length, 0, label)
   }
 })
 

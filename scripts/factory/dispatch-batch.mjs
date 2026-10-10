@@ -3,7 +3,7 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsLstatSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, renameSync, rmSync, statSync as fsStatSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, lstatSync as fsLstatSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, realpathSync, renameSync, rmSync, statSync as fsStatSync, symlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
@@ -18,7 +18,7 @@ import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SH
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
-import { checkoutBaseBranch } from './probe-repo.mjs'
+import { checkoutBaseBranch, checkoutWorktreeSetup, validateWorktreeSetup } from './probe-repo.mjs'
 import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, issueBindingFor, validateRequest } from './make-brief.mjs'
@@ -32,6 +32,8 @@ const WHERE_OUTSIDE_FENCE = 'where-outside-fence'
 const WORKTREE_EXISTS = 'worktree-exists'
 const BRANCH_TAKEN = 'branch-taken'
 const WORKTREE_FAILED = 'worktree-failed'
+const WORKTREE_SETUP_INVALID = 'worktree-setup-invalid'
+const WORKTREE_SETUP_FAILED = 'worktree-setup-failed'
 const COMPILE_REFUSED = 'compile-refused'
 const READS_UNRESOLVED = 'reads-unresolved'
 const TIER_FLOOR_CONFLICT = 'tier-floor-conflict'
@@ -74,6 +76,8 @@ export const REFUSAL_REASONS = Object.freeze([
   WORKTREE_EXISTS,
   BRANCH_TAKEN,
   WORKTREE_FAILED,
+  'worktree-setup-invalid',
+  'worktree-setup-failed',
   COMPILE_REFUSED,
   TIER_FLOOR_CONFLICT,
   PROMPT_SURFACE_CONFLICT,
@@ -989,6 +993,10 @@ export function normalDeps(deps = {}) {
       ? spawnBackground(options)
       : spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: options.timeout })),
     statSync: deps.statSync || fsStatSync,
+    lstatSync: deps.lstatSync || fsLstatSync,
+    realpathSync: deps.realpathSync || realpathSync,
+    symlinkSync: deps.symlinkSync || symlinkSync,
+    worktreeSetup: deps.worktreeSetup || ((options) => checkoutWorktreeSetup({ ...options, factoryRoot: deps.factoryRoot })),
     env: deps.env || process.env,
     spawnAsync: deps.spawnAsync || deps.spawn || spawnAsyncDefault,
     assertQuiet: deps.assertQuiet || ((env) => assertHostQuiet(hostLoad({ policy: loadPolicy(env) }))),
@@ -2599,6 +2607,78 @@ export function createWorktrees({ plans, checkout, created = [], deps } = {}) {
     created.push(plan)
   }
   return plans
+}
+
+export async function setupWorktree({ checkout, laneDir, lane = laneDir, steps, deps } = {}) {
+  const d = normalDeps(deps)
+  validateWorktreeSetup(steps)
+  if (steps.length === 0) return
+  const within = (root, path) => {
+    const rel = relative(root, path)
+    return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
+  }
+  let activeIndex = -1, activeKind = 'profile'
+  const failIo = (error) => refuse(`worktree setup lane=${lane} step=${activeIndex} kind=${activeKind}: ${error?.message || String(error)}`, WORKTREE_SETUP_FAILED)
+  const lstatExists = (path) => {
+    try { d.lstatSync(path); return true } catch (error) { if (error?.code === 'ENOENT') return false; return failIo(error) }
+  }
+  let realRoot, laneRoot
+  try { realRoot = d.realpathSync(checkout); laneRoot = d.realpathSync(laneDir) } catch (error) { failIo(error) }
+  const links = []
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]
+    activeIndex = index
+    activeKind = step.kind
+    let result
+    if (step.kind === 'symlink') {
+      const source = resolve(checkout, step.path)
+      const destination = resolve(laneDir, step.path)
+      if (!within(checkout, source) || !within(laneDir, destination) || !lstatExists(source)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: readiness: missing source ' + step.path, WORKTREE_SETUP_FAILED)
+      let realSource
+      try { realSource = d.realpathSync(source) } catch (error) { failIo(error) }
+      if (!within(realRoot, realSource)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: source escapes checkout', WORKTREE_SETUP_FAILED)
+      let parent = dirname(destination)
+      const missing = []
+      while (!lstatExists(parent)) {
+        missing.unshift(parent)
+        const next = dirname(parent)
+        if (next === parent) break
+        parent = next
+      }
+      let realParent
+      try { realParent = d.realpathSync(parent) } catch (error) { failIo(error) }
+      if (!within(laneRoot, realParent)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: destination ancestor escapes lane', WORKTREE_SETUP_FAILED)
+      for (const dir of missing) { try { d.mkdirSync(dir) } catch (error) { failIo(error) } }
+      const collision = lstatExists(destination)
+      if (collision) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: destination collision ' + destination, WORKTREE_SETUP_FAILED)
+      try { d.symlinkSync(source, destination) } catch (error) { failIo(error) }
+      links.push({ source, destination })
+      try { result = d.spawn({ file: 'git', args: ['-C', laneDir, 'rev-parse', '--git-path', 'info/exclude'], cwd: laneDir }) } catch (error) { failIo(error) }
+      if (!result || result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string' || !result.stdout.trim()) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: unable to resolve git info/exclude', WORKTREE_SETUP_FAILED)
+      const excludePath = resolve(laneDir, result.stdout.trim())
+      const excludePathLiteral = relative(laneDir, destination).split(sep).join('/').replace(/[\\ #!*?\[\]]/g, (ch) => '\\' + ch)
+      const excludePattern = '/' + excludePathLiteral
+      try {
+        d.mkdirSync(dirname(excludePath), { recursive: true })
+        d.appendFileSync(excludePath, '\n' + excludePattern + '\n')
+      } catch (error) { failIo(error) }
+    } else if (step.kind === 'submodules') {
+      try { result = d.spawn({ file: 'git', args: ['-C', laneDir, 'submodule', 'update', '--init'], cwd: laneDir }) } catch (error) { failIo(error) }
+    } else {
+      try { result = d.spawn({ file: '/bin/sh', args: ['-c', step.run], cwd: laneDir }) } catch (error) { failIo(error) }
+    }
+    if (!result || result.error || result.signal || result.status !== 0) refuse(`worktree setup lane=${lane} step=${index} kind=${step.kind}: ${JSON.stringify(childFailure(result))}`, 'worktree-setup-failed')
+  }
+  for (const { source, destination } of links) {
+    try {
+      if (!d.lstatSync(destination).isSymbolicLink() || d.realpathSync(destination) !== d.realpathSync(source)) throw new Error('link mismatch')
+    } catch { refuse('worktree setup lane=' + lane + ': readiness: declared symlink is dangling or changed', WORKTREE_SETUP_FAILED) }
+  }
+  activeKind = 'readiness'
+  let readiness
+  try { readiness = d.spawn({ file: 'git', args: ['-C', laneDir, 'status', '--porcelain'], cwd: laneDir }) } catch (error) { failIo(error) }
+  if (!readiness || readiness.error || readiness.signal || readiness.status !== 0 || typeof readiness.stdout !== 'string') refuse('worktree setup lane=' + lane + ': readiness: git status unavailable', WORKTREE_SETUP_FAILED)
+  if (String(readiness.stdout ?? '').trim()) refuse(`worktree setup lane=${lane}: readiness: dirty porcelain ${readiness.stdout}`, 'worktree-setup-failed')
 }
 
 export function attachBranches({ plans, attached = [], deps } = {}) {
@@ -4780,6 +4860,25 @@ async function compileDispatchWave(prepared) {
   }
 
   attachBranches({ plans, attached: attachedBranches, deps: d })
+  let setup
+  try {
+    setup = await d.worktreeSetup({ checkout: root })
+    if (!setup || !Array.isArray(setup.steps) || !['profile-absent', 'field-absent', 'unknown', 'ratified'].includes(setup.basis)) throw new Error('invalid worktree setup profile result')
+    validateWorktreeSetup(setup.steps)
+  } catch (error) {
+    d.log('dispatch-batch: worktree setup refusal reason=' + (error?.reason || 'worktree-setup-invalid') + ' message=' + (error?.message || String(error)))
+    refuse('worktree setup profile refused: ' + (error?.message || String(error)), WORKTREE_SETUP_INVALID)
+  }
+  for (const plan of plans) {
+    if (setup.steps.length === 0) d.log(`dispatch-batch: worktree setup lane=${plan.lane} steps=0 basis=${setup.basis}`)
+    else {
+      try { await setupWorktree({ checkout: root, laneDir: plan.dir, lane: plan.lane, steps: setup.steps, deps: d }) }
+      catch (error) {
+        d.log('dispatch-batch: worktree setup refusal lane=' + plan.lane + ' reason=' + (error?.reason || 'worktree-setup-failed') + ' message=' + (error?.message || String(error)))
+        throw error
+      }
+    }
+  }
   return { ...prepared, plannerSymbolsArms, settled }
 }
 

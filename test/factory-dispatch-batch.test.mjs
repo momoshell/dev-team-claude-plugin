@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, symlinkSync, lstatSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
@@ -100,6 +100,7 @@ import {
   measureBatchBaseline,
   mergeCheckLine,
   normalDeps,
+  setupWorktree,
   retractAdvisorReservations,
   parseCliArgs,
   resolveAdoptions,
@@ -3153,6 +3154,7 @@ test('dispatchBatch accepts an overlapping register before subprocess work', asy
       return readFileSync(text, 'utf8')
     },
     existsSync: () => false,
+    worktreeSetup: () => ({ steps: [], basis: 'field-absent' }),
     spawn: (call) => {
       spawned.push(call)
       const args = (call.args || []).map(String)
@@ -3201,6 +3203,7 @@ test('dispatchBatch compiles lanes concurrently and then boots and runs them', a
       }
       return readFileSync(text, 'utf8')
     },
+    worktreeSetup: () => ({ steps: [], basis: 'field-absent' }),
     spawn: (call) => {
       spawned.push(call)
       if (call.args.includes('rev-parse') && call.args.includes('HEAD')) return { status: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
@@ -5015,7 +5018,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'realpathSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -7438,4 +7441,108 @@ test('recordBaselineCache never caches an unmeasured baseline', () => {
     write(7, 0)
     assert.equal(recordBaselineCache({ measured, sha: 'abc', deps }), join(baselineCacheRoot(deps), 'abc.json'))
   } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+// Kills removal of destination-ancestor, collision, or ignore-path normalization guards.
+test('RV1-1 setupWorktree guards collisions, escaping ancestors, child signals and normalized ignore literals', async () => {
+  const checkout = scratchDir('worktree-setup-checkout-')
+  const laneDir = scratchDir('worktree-setup-lane-')
+  mkdirSync(join(checkout, 'node_modules'), { recursive: true })
+  mkdirSync(join(checkout, 'collision'), { recursive: true })
+  mkdirSync(join(checkout, 'vendor', '[deps]'), { recursive: true })
+  mkdirSync(join(laneDir, 'vendor'), { recursive: true })
+  const appended = []
+  const spawn = ({ args }) => args.includes('rev-parse')
+    ? { status: 0, stdout: 'info/exclude\n' }
+    : { status: 0, stdout: '' }
+  await setupWorktree({
+    checkout, laneDir,
+    steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],
+    deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },
+  })
+  assert.deepEqual(appended, ['\n/node_modules\n', '\n/vendor/\\[deps\\]\n'])
+
+  mkdirSync(join(laneDir, 'collision'), { recursive: true })
+  writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')
+  await assert.rejects(setupWorktree({
+    checkout, laneDir, steps: [{ kind: 'symlink', path: 'collision' }], deps: { spawn },
+  }), (error) => error.reason === 'worktree-setup-failed' && /destination collision/.test(error.message))
+  assert.equal(lstatSync(join(laneDir, 'collision')).isDirectory(), true)
+  assert.equal(lstatSync(join(laneDir, 'collision')).isSymbolicLink(), false)
+  assert.equal(readFileSync(join(laneDir, 'collision', 'sentinel'), 'utf8'), 'keep')
+  const outside = scratchDir('worktree-setup-outside-')
+  mkdirSync(join(checkout, 'vendor', 'escape'), { recursive: true })
+  writeFileSync(join(checkout, 'vendor', 'escape', 'new-link'), 'source')
+  symlinkSync(outside, join(laneDir, 'vendor', 'escape'))
+  await assert.rejects(setupWorktree({
+    checkout, laneDir, steps: [{ kind: 'symlink', path: 'vendor/escape/new-link' }], deps: { spawn },
+  }), (error) => error.reason === 'worktree-setup-failed' && /ancestor escapes lane/.test(error.message))
+  await assert.rejects(setupWorktree({
+    checkout, laneDir, steps: [{ kind: 'command', run: 'true' }],
+    deps: { spawn: () => ({ status: null, signal: 'SIGTERM' }) },
+  }), (error) => error.reason === 'worktree-setup-failed' && /command/.test(error.message))
+})
+
+test('setupWorktree executes submodules and commands in declaration order before clean readiness', async () => {
+  const checkout = scratchDir('worktree-setup-order-checkout-')
+  const laneDir = scratchDir('worktree-setup-order-lane-')
+  const calls = []
+  await setupWorktree({
+    checkout, laneDir,
+    steps: [{ kind: 'submodules' }, { kind: 'command', run: 'printf setup' }],
+    deps: { spawn: (call) => { calls.push(call); return { status: 0, stdout: '' } } },
+  })
+  assert.deepEqual(calls.map(({ file, args, cwd }) => ({ file, args, cwd })), [
+    { file: 'git', args: ['-C', laneDir, 'submodule', 'update', '--init'], cwd: laneDir },
+    { file: '/bin/sh', args: ['-c', 'printf setup'], cwd: laneDir },
+    { file: 'git', args: ['-C', laneDir, 'status', '--porcelain'], cwd: laneDir },
+  ])
+  await assert.rejects(setupWorktree({
+    checkout, laneDir, steps: [{ kind: 'command', run: 'touch dirty' }],
+    deps: { spawn: () => ({ status: 0, stdout: ' M dirty\\n' }) },
+  }), (error) => error.reason === 'worktree-setup-failed' && /readiness: dirty porcelain/.test(error.message))
+})
+
+test('setupWorktree validates every step before effects and treats zero steps as no-op', async () => {
+  const effects = []
+  await setupWorktree({ checkout: root, laneDir: root, steps: [], deps: { spawn: () => effects.push('spawn') } })
+  assert.deepEqual(effects, [])
+  await assert.rejects(setupWorktree({ checkout: root, laneDir: root, steps: [{ kind: 'command', run: 'echo ok' }, { kind: 'command', run: '' }], deps: { spawn: () => effects.push('spawn') } }), (error) => error.reason === 'worktree-setup-invalid')
+  assert.deepEqual(effects, [])
+})
+
+
+test('RV1-1 setupWorktree refuses declared symlinks removed or replaced by a later command', async () => {
+  for (const replace of [false, true]) {
+    const checkout = scratchDir('worktree-setup-late-checkout-')
+    const laneDir = scratchDir('worktree-setup-late-lane-')
+    mkdirSync(join(checkout, 'node_modules'))
+    const spawn = ({ file, args }) => {
+      if (args.includes('rev-parse')) return { status: 0, stdout: 'info/exclude\\n' }
+      if (file === '/bin/sh') {
+        rmSync(join(laneDir, 'node_modules'), { force: true })
+        if (replace) mkdirSync(join(laneDir, 'node_modules'))
+      }
+      return { status: 0, stdout: '' }
+    }
+    await assert.rejects(setupWorktree({
+      checkout, laneDir,
+      steps: [{ kind: 'symlink', path: 'node_modules' }, { kind: 'command', run: 'rm node_modules' }],
+      deps: { spawn, appendFileSync: () => {} },
+    }), /readiness: declared symlink is dangling or changed/)
+  }
+})
+
+test('setupWorktree refuses a source symlink that resolves outside the checkout', async () => {
+  const checkout = scratchDir('worktree-setup-source-root-')
+  const laneDir = scratchDir('worktree-setup-source-lane-')
+  const outside = scratchDir('worktree-setup-source-outside-')
+  writeFileSync(join(outside, 'payload'), 'outside')
+  mkdirSync(join(checkout, 'vendor'), { recursive: true })
+  symlinkSync(outside, join(checkout, 'vendor', 'external'))
+  await assert.rejects(setupWorktree({
+    checkout, laneDir, steps: [{ kind: 'symlink', path: 'vendor/external' }],
+    deps: { spawn: () => ({ status: 0, stdout: '' }) },
+  }), (error) => error.reason === 'worktree-setup-failed' && /source escapes checkout/.test(error.message))
+  assert.equal(fsExistsSync(join(laneDir, 'vendor', 'external')), false)
 })

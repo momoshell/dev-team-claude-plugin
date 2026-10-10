@@ -143,6 +143,7 @@ export const FIELD_KINDS = Object.freeze({
   // LOAD_BEARING is intentionally unchanged: repositories that never use
   // intake must not become unrunnable merely because no board is ratified.
   intake_board: 'stable',
+  worktree_setup: 'authored_superset',
 })
 
 export const INTAKE_BOARD_FIELD = 'intake_board'
@@ -1675,6 +1676,7 @@ export function probeRepo({ checkout, baseline = false, gh = false, now = () => 
       default_branch: gatherDefaultBranch(root, isGit, gh === true),
       pr_conventions: gatherPrConventions(root, gh === true),
       intake_board: gatherIntakeBoard(root, gh === true),
+      worktree_setup: cell('unknown', null, null, { reason: 'not_measured' }),
     },
     meta: {
       probed_at: probedAt,
@@ -1836,6 +1838,49 @@ export function isPlainBranchName(value) {
     const result = spawnSync('git', ['check-ref-format', '--branch', value], { encoding: 'utf8', timeout: 3000 })
     return !result.error && result.status === 0
   } catch { return false }
+}
+
+export function validateWorktreeSetup(steps) {
+  const invalid = () => { throw new ProfileRefusal('probe-repo: invalid worktree_setup value', 'worktree-setup-invalid') }
+  if (!Array.isArray(steps)) invalid()
+  for (const step of steps) {
+    if (!plainObject(step) || !['symlink', 'submodules', 'command'].includes(step.kind)) invalid()
+    if (step.kind === 'symlink') {
+      if (!nonEmptyString(step.path) || step.path.includes(String.fromCharCode(0)) || isAbsolute(step.path) || step.path.split(/[\\/]/).includes('..')) invalid()
+      const target = resolve('/', step.path)
+      if (target === '/') invalid()
+    } else if (step.kind === 'command' && (!nonEmptyString(step.run) || step.run !== step.run.trim() || step.run.includes(String.fromCharCode(0)))) invalid()
+  }
+  return steps
+}
+
+export function profileWorktreeSetup(profile) {
+  if (profile === null || profile === undefined) return { steps: [], basis: 'profile-absent' }
+  if (!plainObject(profile)) throw new ProfileRefusal('probe-repo: malformed profile', 'worktree-setup-invalid')
+  if (!plainObject(profile.fields)) throw new ProfileRefusal('probe-repo: malformed profile fields', 'worktree-setup-invalid')
+  if (!Object.hasOwn(profile.fields, 'worktree_setup')) return { steps: [], basis: 'field-absent' }
+  const cell = profile.fields.worktree_setup
+  if (!plainObject(cell) || !STATUSES.includes(cell.status)) throw new ProfileRefusal('probe-repo: malformed worktree_setup cell', 'worktree-setup-invalid')
+  if (cell.status === 'unknown') {
+    if (cell.value !== null || !UNKNOWN_REASONS.includes(cell.reason)) throw new ProfileRefusal('probe-repo: malformed unknown worktree_setup cell', 'worktree-setup-invalid')
+    return { steps: [], basis: 'unknown' }
+  }
+  if (cell.status === 'ratified' && (cell.value === null || cell.value === undefined)) validateWorktreeSetup(cell.value)
+  const steps = requireField(profile, 'worktree_setup')
+  validateWorktreeSetup(steps)
+  return { steps, basis: 'ratified' }
+}
+
+export function checkoutWorktreeSetup({ checkout, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  let profile
+  try { lstatSync(path); profile = JSON.parse(readFileSync(path, 'utf8')) }
+  catch (error) {
+    if (error?.code === 'ENOENT') return { steps: [], basis: 'profile-absent' }
+    throw new ProfileRefusal(`probe-repo: worktree setup profile is unreadable: ${error.message}`, 'profile-unreadable')
+  }
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) throw new ProfileRefusal('probe-repo: worktree setup profile is unreadable', 'profile-unreadable')
+  return profileWorktreeSetup(profile)
 }
 
 export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot } = {}) {

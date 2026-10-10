@@ -7438,3 +7438,16 @@ test('CT5 reshape review refuses counted should-fix passes and keeps clean zero 
     assert.ok(run.io.calls.logs.some((row) => row.reshape_delta))
   }
 })
+
+// MUTATION: narrow the reshapeScopeDefect call site to JavaScript test names; a TypeScript test edit is kept.
+test('reshape that edits a TypeScript test is reverted', () => {
+  for (const name of ['test.ts', 'a_test.mts']) {
+    const path = CTX.checkout + '/' + name
+    const { files, why } = reshapeRun({
+      onReshape: (files) => { files[path] = "test('weakened', () => {})\n" },
+      nameOnly: (cmd) => cmd.includes('base-head') ? `a.mjs\0${name}\0` : `${name}\0`,
+    })
+    assert.equal(why, 'test-edited', name)
+    assert.equal(files[path], undefined, name)
+  }
+})

@@ -3447,3 +3447,11 @@ test('closing prose is neutralised in every grammar form and in the unmeasured g
   assert.ok(message.includes('reason: fixes issue 900013'), message)
   assert.deepEqual(issueTrailers(message).closes, [])
 })
+
+// MUTATION: let issueTrailers accept a keyword glued to the number (drop the colon-or-whitespace gap).
+test('a closing keyword glued to an issue number binds no close', () => {
+  for (const glued of ['close#900014', 'Fixes#900015', 'resolved#900016, #900017']) assert.deepEqual(issueTrailers(glued).closes, [], glued)
+  const message = composeCommitMessage({ task: 'glued', planEnv: planEnv({ details: { commit_subject: 'subject' } }), builderEnv: { summary: 'built', details: { commit_message: 'close#900014' } } })
+  assert.deepEqual(issueTrailers(message).closes, [])
+  assert.deepEqual(issueTrailers('Closes:#900018\nfixes #900019').closes, ['#900018', '#900019'])
+})

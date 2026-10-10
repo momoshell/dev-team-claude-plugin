@@ -4851,7 +4851,7 @@ export function issueTrailers(message) {
   const closes = []
   const add = (ref) => { if (!closes.includes(ref)) closes.push(ref) }
   for (const line of text.split('\n')) {
-    if (!/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#\d+(?:\s*,\s*#\d+)*\s*$/i.test(line)) continue
+    if (!/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:\s*|\s+)#\d+(?:\s*,\s*#\d+)*\s*$/i.test(line)) continue
     for (const match of line.matchAll(/#(\d+)/g)) add(`#${match[1]}`)
   }
 

@@ -6797,6 +6797,147 @@ test('a test call the scan cannot parse with certainty leaves the file unmeasure
   assert.doesNotMatch(brief, /No pre-existing assertion or test changed/)
 })
 
+test('owned for-of test families attribute deleted array rows and interpolated titles', () => {
+  // MUTATION: removing the generated-family title fallback leaves these accepted test calls uncertain.
+  const base = "  for (const [name] of [['first'], ['second']]) {\n    test(`${name} works`, () => {\n      work()\n    })\n  }\n"
+  const current = base.replace("['second']", '')
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1 +1 @@\n-  for (const [name] of [['first'], ['second']]) {\n+  for (const [name] of [['first']]) {\n", current })
+  assert.equal(record.measured, true)
+  assert.equal(record.body_lines_changed, 1)
+  assert.deepEqual(record.entries.map(({ test, class: kind, line, text }) => [test, kind, line, text]), [['`${name} works`', 'body', 1, "  for (const [name] of [['first'], ['second']]) {"]])
+})
+
+test('an owned identifier iterable resolves only to a direct local array initializer', () => {
+  // MUTATION: bypassing ownedIterable makes an out-of-scope or computed binding look owned.
+  const base = "test('outer', () => {\n  const rows = [['a'], ['b']]\n  for (const [name] of rows) {\n    t.test(name, () => {\n      work()\n    })\n  }\n})\n"
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base })
+  assert.equal(record.measured, true)
+  const moduleBinding = "const rows = [['a']]\ntest('outer', () => {\n  for (const [name] of rows) t.test(name, () => {})\n})\n"
+  assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base: moduleBinding, diff: '', current: moduleBinding }), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('owned generated families accept only directly owned arrays and interpolated or identifier titles', () => {
+  const scan = (base, current = base, diff = '') => heldAssertionChanges({ path: 'a.test.mjs', base, current, diff })
+  const uncertain = { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' }
+  const array = (title = '\`\${name} works\`', tail = '') => `for (const [name] of [
+  ['first'],
+  ['second'],
+]) {
+  test(${title}, () => {
+    assert.ok(true)
+  })
+${tail}}
+`
+  const nested = `test('outer', async (t) => {
+  const rows = [
+    ['first'],
+    ['second'],
+  ]
+  for (const [name] of rows) await t.test(name, () => {
+    assert.ok(true)
+  })
+})
+`
+  const exact = [
+    `for (const [why, inner] of [['a tilde marker inside a backtick fence', '~~~~'], ['an info-bearing marker inside a backtick fence', '\`'.repeat(3) + 'js']]) {
+  test(\`\${why} does not close it, so the real acceptance id stays owed\`, () => {
+    assert.ok(true)
+  })
+}
+`,
+    `for (const [label, member, transcript, expected] of [['a refusal', 'rejected', false, 3], ['silence', null, true, 2]]) {
+test(\`pane \${label} after an unusable-envelope re-ask: \${expected === 2 ? 'a silence re-send is a re-ask and is refused' : 'a provider-rejection reprompt is delivery and still sends'}\`, () => {
+  assert.ok(true)
+})
+}
+`,
+    nested,
+  ]
+  for (const source of exact) assert.deepEqual(scan(source), { path: 'a.test.mjs', measured: true, lane_added: false, assertions_changed: 0, body_lines_changed: 0, tests_removed: 0, entries: [] })
+  for (const source of [
+    "for (const [name] of [['a']]) await test(name, () => {})\n",
+    "for (const [name] of [['a']]) /* before */ await test(name, () => {}); // after\\n",
+    "for (const [name] of [['a']]) { /* before */ test(name, () => {}); }\\n",
+  ]) assert.equal(scan(source).measured, true)
+  assert.equal(scan(array('\`pane \${name}: \${name === \'first\' ? \'yes\' : \'no\'}\`')).measured, true)
+  const deletion = (source, row) => {
+    const line = source.split('\n').indexOf(row) + 1
+    return scan(source, source.replace(row + '\n', ''), `@@ -${line} +${line - 1},0 @@\n-${row}\n`)
+  }
+  assert.deepEqual(deletion(array(), "  ['second'],").entries.map(e => [e.test, e.class, e.line, e.text]), [['\`${name} works\`', 'body', 3, "  ['second'],"]])
+  assert.deepEqual(deletion(nested, "    ['second'],").entries.map(e => [e.test, e.class, e.line, e.text]), [['outer', 'body', 4, "    ['second'],"]])
+  for (const source of [array('name + \' works\''), array('makeTitle(name)')]) assert.deepEqual(scan(source), uncertain)
+  const moduleRows = "const rows = [['first']]\n" + array().replace("[\n  ['first'],\n  ['second'],\n]", 'rows')
+  assert.deepEqual(scan(moduleRows), uncertain)
+  const badBindings = [
+    nested.replace('  const rows = [', '  { const rows = [').replace('  ]\n', '  ];\n  }\n'),
+    nested.replace(/  const rows = \[[\s\S]*?  \]\n/, '  const rows = ROWS\n'),
+    nested.replace(/  const rows = \[[\s\S]*?  \]\n/, '  const rows = makeRows()\n'),
+    array().replace("of [\n  ['first'],\n  ['second'],\n]", "of [...ROWS, ['second']]"),
+    array().replace("of [\n  ['first'],\n  ['second'],\n]", 'of makeRows()'),
+  ]
+  for (const source of badBindings) assert.deepEqual(scan(source), uncertain)
+  const nestedSpread = nested.replace("    ['second'],", "    ['second', [{ ...base, check: 'X1' }]],")
+  assert.equal(scan(nestedSpread).measured, true)
+  for (const source of ['if (enabled) {\n' + array() + '}\n', 'function helper() {\n' + array() + '}\n', 'if (enabled)\n' + array(), "for (const [group] of [['g']])\n" + array()]) assert.deepEqual(scan(source), uncertain)
+  for (const source of [array(undefined, '  setup()'), array(undefined, "  test('another', () => {})"), array().replace('  test(', '  if (enabled) test(')]) assert.deepEqual(scan(source), uncertain)
+})
+
+test('a loop body with setup, multiple calls, or a conditional is not a single generated call', () => {
+  // MUTATION: if (!singleCall) return null → if (false) return null
+  const scan = (base) => heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base })
+  const cases = [
+    "for (const [name] of [['a']]) {\n  setup()\n  test(name, () => {})\n}\n",
+    "for (const [name] of [['a']]) {\n  test(name, () => {})\n  test(name, () => {})\n}\n",
+    "for (const [name] of [['a']]) {\n  if (enabled) test(name, () => {})\n}\n",
+  ]
+  for (const base of cases) assert.deepEqual(scan(base), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('generated families outside owned module or callback statement context stay uncertain', () => {
+  // MUTATION: if (!ownedContext) return null → if (false) return null
+  const scan = (base) => heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base })
+  const cases = [
+    'if (enabled) {\nfor (const [name] of [[\'a\']]) test(name, () => {})\n}\n',
+    'function helper() {\nfor (const [name] of [[\'a\']]) test(name, () => {})\n}\n',
+    "if (enabled) for (const [name] of [['a']]) test(name, () => {})\n",
+  ]
+  for (const base of cases) assert.deepEqual(scan(base), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('an indented generated-family evidence span starts at the for line', () => {
+  // MUTATION: replace code.lastIndexOf('\n', forIndex) + 1 with forIndex
+  const base = "  for (const [name] of [['first'], ['second']]) {\n    test(\`${name} works\`, () => {\n      work()\n    })\n  }\n"
+  const current = base.replace("['second']", '')
+  const record = heldAssertionChanges({ path: 'a.test.mjs', base, diff: "@@ -1 +1 @@\n-  for (const [name] of [['first'], ['second']]) {\n+  for (const [name] of [['first']]) {\n", current })
+  assert.deepEqual(record.entries.map(({ test, class: kind, line, text }) => [test, kind, line, text]), [['\`${name} works\`', 'body', 1, "  for (const [name] of [['first'], ['second']]) {"]])
+})
+
+test('for-await braceless parents keep generated families uncertain', () => {
+  // MUTATION: bypassing await in the braceless-control word set admits a family whose controlling line is outside its span.
+  const base = "for await (const g of gen())\nfor (const [name] of [['a']]) test(`${name} works`, () => {})\n"
+  assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('a braceless loop body that continues past its test call keeps the family uncertain', () => {
+  // MUTATION: delete the `if (next < code.length && continues) continue` guard; the comma body reports measured with zero changes.
+  const uncertain = { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' }
+  const comma = "for (const [name] of [['a']]) test(name, () => {}),\naudit(name)\n"
+  const operator = "for (const [name] of [['a']]) test(name, () => {}) || audit(name)\n"
+  for (const base of [comma, operator]) assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), uncertain)
+  const semicolon = "for (const [name] of [['a']]) test(name, () => {});\naudit()\n"
+  const asi = "for (const [name] of [['a']]) await test(name, () => {})\naudit()\n"
+  for (const base of [semicolon, asi]) assert.equal(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }).measured, true)
+})
+
+test('owned for-of arrays reject filter calls after their closing bracket', () => {
+  // MUTATION: replace return after === forIndex || code[after] === ';' with return true.
+  const uncertain = { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' }
+  const head = "for (const [name] of [['a'], ['b']].filter(keep)) test(`${name} works`, () => {})\n"
+  const local = "test('outer', () => {\n  const rows = [['a'], ['b']].filter(keep)\n  for (const [name] of rows) test(name, () => {})\n})\n"
+  for (const base of [head, local]) assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), uncertain)
+})
+
 test('a comment ending in function before a held test does not hide the test, so a deleted setup line is reported', () => {
   // MUTATION: scanning raw source instead of the masked code reads the comment's "function" as a declaration and skips the test.
   const base = "// shared setup lives in this helper function\ntest('x', () => {\n  setup()\n  assert.ok(run())\n})\n"

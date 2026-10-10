@@ -7407,3 +7407,34 @@ test('reshape that edits a root test.mjs is reverted', () => {
   assert.equal(why, 'test-edited')
   assert.equal(files[root], undefined)
 })
+
+// MUTATION CT4: narrow RESHAPE_TEST_PATH back to JavaScript-only test names.
+test('CT4 reshape classifier recognises TypeScript tests and rejects nearby non-tests', () => {
+  for (const path of ['test.ts', 'pkg/test.mts', 'a_test.ts', 'test-a.ts', 'a-test.cts', 'a.test.ts', 'test.mjs', 'pkg/test.cjs', 'test-a.js', 'a_test.mjs', 'a-test.mjs', 'a.test.mjs', 'test/x.mjs', 'pkg/test/x.js']) assert.equal(RESHAPE_TEST_PATH.test(path), true, path)
+  for (const path of ['a.mjs', 'contest.mjs', 'latest.mjs', 'tests.md', 'testing/x.mjs', 'a.ts', 'contest.ts', 'latest.mts']) assert.equal(RESHAPE_TEST_PATH.test(path), false, path)
+})
+
+// MUTATION CT5: omit should_fix from the reshape-review pass decision.
+test('CT5 reshape review refuses counted should-fix passes and keeps clean zero or absent counts', () => {
+  for (const should_fix of [1, '1']) {
+    let original
+    const run = reshapeRun({
+      onReshape: (files) => { original = files[RESHAPE_SOURCE]; files[RESHAPE_SOURCE] += '// should-fix probe\n' },
+      nameOnly: () => 'a.mjs\0',
+      reshapeEnv: () => ({ status: 'done', role: 'reviewer', details: { verdict: 'pass', must_fix: 0, should_fix } }),
+    })
+    assert.equal(run.why, 'review-refused')
+    assert.equal(run.files[RESHAPE_SOURCE], original)
+    assert.equal(run.io.calls.assign.filter(({ note }) => note === 'reshape-review').length, 1)
+  }
+  for (const details of [{ should_fix: 0 }, {}, { should_fix: 0, findings: [] }, { findings: [] }]) {
+    const run = reshapeRun({
+      onReshape: (files) => { files[RESHAPE_SOURCE] += '// clean sentinel\n' },
+      nameOnly: () => 'a.mjs\0',
+      reshapeEnv: () => ({ status: 'done', role: 'reviewer', details: { verdict: 'pass', must_fix: 0, ...details } }),
+    })
+    assert.equal(run.why, undefined)
+    assert.ok(run.files[RESHAPE_SOURCE].includes('// clean sentinel'))
+    assert.ok(run.io.calls.logs.some((row) => row.reshape_delta))
+  }
+})

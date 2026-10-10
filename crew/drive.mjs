@@ -3645,13 +3645,13 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, 
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
   const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
   const planLine = firstNonEmptyLine(planEnv?.summary)
-  const subject = subjectLine || `crew(${task}): ${planLine || 'task change'}`
-  const builderBody = stripPromptClaims(builderEnv?.details?.commit_message || builderEnv?.summary || '')
+  const subject = neutralizeClosingProse(subjectLine || `crew(${task}): ${planLine || 'task change'}`)
+  const builderBody = neutralizeClosingProse(stripPromptClaims(builderEnv?.details?.commit_message || builderEnv?.summary || ''))
   const builderText = builderBody.trim()
   // A builder body that merely repeats the subject is suppressed; the plan claim is appended
   // after that suppression so it never rides along into the drop.
   const builderPart = builderText && builderText.split('\n')[0] === subject ? '' : builderText
-  const bodyPart = [builderPart, validPlanPromptClaim(planEnv?.details?.prompt_claim) ? planEnv.details.prompt_claim : ''].filter(Boolean).join('\n\n')
+  const bodyPart = [builderPart, validPlanPromptClaim(planEnv?.details?.prompt_claim) ? neutralizeClosingProse(planEnv.details.prompt_claim) : ''].filter(Boolean).join('\n\n')
   const normalizeIssues = (values) => {
     const out = []
     for (const issue of Array.isArray(values) ? values : []) {
@@ -4841,7 +4841,7 @@ export function refsFromCommitMessage(message) {
   }
   return refs
 }
-
+export function neutralizeClosingProse(text) { return String(text ?? '').replace(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(\s*:\s*|\s+)(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/gi, (_, keyword, gap, repo, number) => `${keyword}${gap}${repo ? `${repo} ` : ''}issue ${number}` ) }
 // #806 — the commit message stays the single source of the issue distinction, parsed
 // once: a closing keyword (GitHub's own set) names an issue the merge closes, the
 // `Refs:` trailer names one the lane only touches, and a closed issue is never also
@@ -4851,10 +4851,10 @@ export function issueTrailers(message) {
   const closes = []
   const add = (ref) => { if (!closes.includes(ref)) closes.push(ref) }
   for (const line of text.split('\n')) {
-    if (!/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:/i.test(line)) continue
+    if (!/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#\d+(?:\s*,\s*#\d+)*\s*$/i.test(line)) continue
     for (const match of line.matchAll(/#(\d+)/g)) add(`#${match[1]}`)
   }
-  for (const match of text.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)) add(`#${match[1]}`)
+
   const refs = refsFromCommitMessage(text).filter((ref) => !closes.includes(ref))
   return { closes, refs }
 }
@@ -4869,7 +4869,7 @@ export function carriedPrLines(carried) {
 const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Hardening blind spots', '## Changed', '## Run', '## Prompt measurement']
 
 export function composePrBody(record) {
-  const rawIntent = String(record?.intent || '').trim()
+  const rawIntent = neutralizeClosingProse(record?.intent || '').trim()
   const intent = record?.prompt_claim === PROMPT_NOT_APPLICABLE ? stripPromptClaims(rawIntent).trim() : rawIntent
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
@@ -4883,13 +4883,13 @@ export function composePrBody(record) {
   const gateLines = (() => {
     if (!gate) return ['No acceptance gate ran.']
     if (!summary) {
-      const where = gate.cmd ? ` (${gate.cmd})` : ''
+      const where = gate.cmd ? ` (${neutralizeClosingProse(gate.cmd)})` : ''
       return [`The acceptance gate${where} ran; its summary could not be measured.`]
     }
     const generation = Number.isSafeInteger(gate.generation) ? gate.generation : null
     const discrimination = generation === null ? 'unproven' : (gate.discrimination || 'unproven')
     const gen = generation === null ? '' : ` on generation ${generation}`
-    const cmd = gate.cmd ? ` (\`${gate.cmd}\`)` : ''
+    const cmd = gate.cmd ? ` (\`${neutralizeClosingProse(gate.cmd)}\`)` : ''
     const lines = [`- Gate: ${summary.total} checks, ${summary.failed} failed, ${summary.errored} errored — discrimination ${discrimination}${gen}${cmd}`]
     const chunkLine = chunkRecord ? `Chunk ${chunkRecord.id}: ${chunkRecord.owned} owned, ${chunkRecord.deferred} deferred` : null
     if (chunkLine) lines.push(`- ${chunkLine}`)
@@ -4914,11 +4914,11 @@ export function composePrBody(record) {
   const carriedCount = carried.length ? ` · ${carried.length} carried plan-check finding${carried.length === 1 ? '' : 's'} unresolved` : ''
   const reviewLines = [
     `- Review: ${review.verdict || 'not recorded'} · ${reviewCount}${carriedCount}`,
-    ...residuals.map((row) => `  - ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`),
-    ...carried.map((row) => `  - ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`),
+    ...residuals.map((row) => neutralizeClosingProse(`  - ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`)),
+    ...carried.map((row) => neutralizeClosingProse(`  - ${row?.id ?? ''} (${row?.severity ?? ''}) carried-to-review: ${row?.correction ?? ''}`)),
   ]
   const hardeningRows = Array.isArray(record?.hardening?.unmeasured) ? record.hardening.unmeasured : []
-  const hardeningLines = hardeningRows.map((row) => `- ${row?.finding ?? '(unknown finding)'}: unmeasured — ${row?.outcome ?? ''}: ${row?.why ?? ''}`)
+  const hardeningLines = hardeningRows.map((row) => neutralizeClosingProse(`- ${row?.finding ?? '(unknown finding)'}: unmeasured — ${row?.outcome ?? ''}: ${row?.why ?? ''}`))
   const files = Array.isArray(record?.files) ? [...record.files].sort() : []
   const stages = Array.isArray(record?.stages) ? record.stages : []
   const shape = stageShape(stages)
@@ -4927,7 +4927,7 @@ export function composePrBody(record) {
   const runLines = [
     ...(shape ? [shape] : []),
     ...(repeated.length ? [`- Repeated: ${repeated.join(', ')}`] : []),
-    ...anomalies.map((row) => `- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`),
+    ...anomalies.map((row) => neutralizeClosingProse(`- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`)),
   ]
   const claims = record && Object.hasOwn(record, 'prompt_claim') ? (validPlanPromptClaim(record.prompt_claim) ? [record.prompt_claim] : []) : promptClaimLines(intent)
   const prSections = [
@@ -4935,11 +4935,11 @@ export function composePrBody(record) {
     ['## Why', why],
     ['## Proof', [...gateLines, ...suiteLines, ...reviewLines].join('\n')],
     ...(hardeningLines.length > 0 ? [['## Hardening blind spots', hardeningLines.join('\n')]] : []),
-    ...(files.length ? [['## Changed', files.map((f) => `- ${f}`).join('\n')]] : []),
+    ...(files.length ? [['## Changed', files.map((f) => neutralizeClosingProse(`- ${f}`)).join('\n')]] : []),
     ['## Run', runLines.join('\n')],
-    ...(claims.length > 0 ? [['## Prompt measurement', claims.join('\n')]] : []),
+    ...(claims.length > 0 ? [['## Prompt measurement', claims.map(neutralizeClosingProse).join('\n')]] : []),
   ]
-  const narrative = String(record?.narrative ?? '').trim()
+  const narrative = neutralizeClosingProse(record?.narrative ?? '').trim()
   const body = SECTION_ORDER.filter((h) => prSections.some(([hh]) => hh === h))
     .map((h) => `${h}\n${prSections.find(([hh]) => hh === h)[1]}`.trimEnd())
     .join('\n\n')
@@ -5139,8 +5139,8 @@ export function narrationDefect(text, record) {
   // A line-initial trailer token reaches the post-merge parsers as MACHINE INPUT:
   // scripts/factory/closeout.mjs:59-60 (REFS_PATTERN / CLOSES_PATTERN, harvested
   // per line by trailerIssues at :240-251) and :62-63 (PROMPT_MEASURE_LINE /
-  // PROMPT_UNMEASURED_LINE). Mid-sentence prose ('the lane closes #1424') is not
-  // the hazard and stays accepted — only a line-initial token is refused here.
+  // PROMPT_UNMEASURED_LINE). That line-initial machine-input refusal is distinct
+  // from GitHub's mid-prose closing hazard, neutralised by composePrBody.
   if (/^[ \t]*(?:Closes|Refs|Measure|unmeasured)\b/im.test(narration)) return NARRATION_REFUSALS.trailer
   const facts = recordFacts(record)
   const knownPath = (token) => facts.paths.has(token) || [...facts.paths].some((known) => known.endsWith(`/${token}`))
@@ -12344,7 +12344,7 @@ function runTask(ctx, io, crash) {
             'This diff was applied after your review passed. Return status done with details.verdict "pass" only if it preserves the reviewed behaviour exactly; any other verdict reverts it.'].join('\n'))
           const env = assignAndWait('reviewer', art('reshape-review.md'), 'reshape-review', { reviewSemantics: false })
           const findings = env?.details?.findings
-          const clean = env?.status === 'done' && env.details?.verdict === 'pass' && Number(env.details?.must_fix ?? 0) === 0
+          const clean = env?.status === 'done' && env.details?.verdict === 'pass' && Number(env.details?.must_fix ?? 0) === 0 && Number(env.details?.should_fix ?? 0) === 0
             && (findings === undefined || (Array.isArray(findings) && findings.length === 0))
           return clean ? null : 'review-refused'
         }
@@ -16527,7 +16527,7 @@ export function acceptanceCoverageBounceLines(round, coverage, briefFile) {
   ]
 }
 // Every file node --test discovers by default, plus any path under a test/ directory.
-export const RESHAPE_TEST_PATH = /(^|\/)(test\/|test\.[cm]?js$|test-[^/]*\.[cm]?js$|[^/]*[._-]test\.[cm]?js$)|\.test\./
+export const RESHAPE_TEST_PATH = /(^|\/)(test\/|test\.[cm]?[jt]s$|test-[^/]*\.[cm]?[jt]s$|[^/]*[._-]test\.[cm]?[jt]s$)|\.test\./
 
 export const BUILDER_PLAN_INLINE_BYTE_LIMIT = 32 * 1024
 

@@ -22,7 +22,7 @@ import {
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS, parseProposalBrief } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo, profileProtectedPaths } from '../scripts/factory/probe-repo.mjs'
-import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, acceptanceIds, createsFromBrief, issueStatementDefect, parseDirectedBrief } from '../crew/drive.mjs'
+import { CHECK_FAIL_PREFIX, CREATES_MARK as DRIVE_CREATES_MARK, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, GATE_REAP_OUTCOMES, MUTATIONS_MAX, acceptanceIds, createsFromBrief, issueStatementDefect, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { CTX, buildEnv, driveTask, fakeIo, leadEnv, planEnv, RED, reviewEnv } from '../crew/drive-fixtures.mjs'
 
@@ -1541,9 +1541,14 @@ test('--measure-baseline writes commit-scoped counts and clears sha for a dirty 
     '--profile', join(fixtureRoot, 'missing-profile.json'),
   ])
   assert.equal(clean.status, 0, `${clean.stderr}\n${clean.stdout}`)
-  assert.deepEqual(JSON.parse(readFileSync(cleanPath, 'utf8')), {
-    sha: fx.sha, command: fx.command, pass: 7, fail: 0, status: 'green',
-  })
+  const cleanValue = JSON.parse(readFileSync(cleanPath, 'utf8'))
+  const { reap: cleanReap, reap_absent_reason: cleanAbsent, ...cleanRecord } = cleanValue
+  assert.deepEqual(cleanRecord, { sha: fx.sha, command: fx.command, pass: 7, fail: 0, status: 'green' })
+  assert.equal(cleanAbsent, undefined)
+  assert.ok(['already-dead', 'proven', 'failed', 'unproven'].includes(cleanReap.outcome))
+  assert.equal(cleanReap.reason, 'probe-dead')
+  assert.ok(Number.isSafeInteger(cleanReap.pgid) && cleanReap.pgid > 1)
+  assert.equal(cleanReap.signals, 0)
   assert.equal(existsSync(fx.marker), true)
 
   put(fx.root, 'uncommitted.txt', 'edit\n')
@@ -1558,6 +1563,13 @@ test('--measure-baseline writes commit-scoped counts and clears sha for a dirty 
   assert.equal(dirtyValue.command, fx.command)
   assert.equal(dirtyValue.pass, 7)
   assert.equal(dirtyValue.fail, 0)
+  const { reap: dirtyReap, reap_absent_reason: dirtyAbsent, ...dirtyRecord } = dirtyValue
+  assert.deepEqual(dirtyRecord, { sha: null, command: fx.command, pass: 7, fail: 0, status: 'green' })
+  assert.equal(dirtyAbsent, undefined)
+  assert.ok(['already-dead', 'proven', 'failed', 'unproven'].includes(dirtyReap.outcome))
+  assert.equal(dirtyReap.reason, 'probe-dead')
+  assert.ok(Number.isSafeInteger(dirtyReap.pgid) && dirtyReap.pgid > 1)
+  assert.equal(dirtyReap.signals, 0)
 })
 
 test('a ratified profile test_command becomes the measured lane and states its basis', () => {
@@ -4101,4 +4113,179 @@ test('gatherBaseline names output past its buffer as output-overflow, not timeou
   const baseline = gatherBaseline({ checkout: ROOT, lane })
   assert.equal(baseline.status, 'unknown')
   assert.equal(baseline.reason, 'output-overflow')
+  assert.ok(['already-dead', 'proven', 'failed', 'unproven'].includes(baseline.reap.outcome))
+  assert.equal(baseline.reap.reason, 'probe-dead')
+})
+
+function reapChildLane(root, failing = false) {
+  const pidFile = join(root, 'child.pid')
+  const summary = failing ? 'pass 2\\nfail 1\\n' : 'pass 2\\nfail 0\\n'
+  const lane = `nohup sleep 30 >/dev/null 2>&1 & echo $! > "${pidFile}"; printf "${summary}"`
+  return { lane, pidFile }
+}
+
+function assertReapGroupGone(baseline, pidFile) {
+  assert.ok(GATE_REAP_OUTCOMES.includes(baseline.reap.outcome))
+  assert.ok(Number.isSafeInteger(baseline.reap.pgid) && baseline.reap.pgid > 1)
+  assert.ok(baseline.reap.signals > 0)
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  const probe = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' })
+  assert.equal(probe.status, 1, probe.stdout)
+}
+
+function stopReapChild(pidFile) {
+  if (!existsSync(pidFile)) return
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  try { process.kill(pid, 'SIGKILL') } catch {}
+}
+
+// MUTATION: removing the group wrapper leaves a suite child in the caller group.
+test('BR1 pass suite is isolated, counted, and reaped', () => {
+  const root = scratchDir('baseline-br1-')
+  const { lane, pidFile } = reapChildLane(root)
+  try {
+    const caller = spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' })
+    const baseline = gatherBaseline({ checkout: ROOT, lane })
+    assert.equal(baseline.status, 'green')
+    assert.equal(baseline.pass, 2)
+    assert.equal(baseline.fail, 0)
+    assert.notEqual(baseline.reap.pgid, Number(caller.stdout.trim()))
+    assert.equal(baseline.reap.outcome, 'proven')
+    assertReapGroupGone(baseline, pidFile)
+  } finally { stopReapChild(pidFile) }
+})
+
+// MUTATION: pass/fail output counts must survive group cleanup.
+test('BR2 failing suite retains counts while its child is reaped', () => {
+  const root = scratchDir('baseline-br2-')
+  const { lane, pidFile } = reapChildLane(root, true)
+  try {
+    const baseline = gatherBaseline({ checkout: ROOT, lane })
+    assert.equal(baseline.status, 'red')
+    assert.equal(baseline.pass, 2)
+    assert.equal(baseline.fail, 1)
+    assert.equal(baseline.reap.outcome, 'proven')
+    assertReapGroupGone(baseline, pidFile)
+  } finally { stopReapChild(pidFile) }
+})
+
+// MUTATION: timeout cleanup runs after spawn timeout and preserves its measured report.
+test('BR3 timeout sweeps and proves the suite child is gone', () => {
+  const root = scratchDir('baseline-br3-')
+  const pidFile = join(root, 'child.pid')
+  const lane = `nohup sleep 30 >/dev/null 2>&1 & echo $! > "${pidFile}"; sleep 4`
+  try {
+    const baseline = gatherBaseline({ checkout: ROOT, lane, timeoutMs: 700 })
+    assert.equal(baseline.status, 'unknown')
+    assert.equal(baseline.reason, 'timeout')
+    assert.equal(baseline.reap.outcome, 'proven')
+    assertReapGroupGone(baseline, pidFile)
+  } finally { stopReapChild(pidFile) }
+})
+
+// MUTATION: package refusals happen before a reap group exists.
+test('BR4 package refusals identify the absent reap measurement', () => {
+  const root = scratchDir('baseline-br4-')
+  writeFileSync(join(root, 'package.json'), '{')
+  const malformed = gatherBaseline({ checkout: root })
+  assert.equal(malformed.reason, 'bad-package-json')
+  assert.equal(malformed.reap, null)
+  assert.equal(malformed.reap_absent_reason, 'not-spawned')
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: {} }))
+  const absent = gatherBaseline({ checkout: root })
+  assert.equal(absent.reason, 'no-test-script')
+  assert.equal(absent.reap, null)
+  assert.equal(absent.reap_absent_reason, 'not-spawned')
+  const oldTmp = process.env.TMPDIR
+  try {
+    process.env.TMPDIR = '/dev/null'
+    const setupFailure = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"' })
+    assert.equal(setupFailure.reason, 'spawn-error')
+    assert.equal(setupFailure.reap, null)
+    assert.equal(setupFailure.reap_absent_reason, 'not-spawned')
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = oldTmp
+  }
+})
+
+// MUTATION: the injected process-table command must reach both wrapper and final sweep.
+test('BR5 injected process table is used on ordinary and timeout paths', () => {
+  const root = scratchDir('baseline-br5-')
+  const psScript = join(root, 'ps-probe')
+  const calls = join(root, 'calls')
+  writeFileSync(psScript, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\n/bin/ps "$@"\nprintf '0 999999 S\\n'\n`)
+  spawnSync('chmod', ['+x', psScript])
+  const ordinary = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"', psCmd: psScript })
+  assert.equal(ordinary.status, 'green')
+  assert.equal(ordinary.reap.outcome, 'already-dead')
+  writeFileSync(calls, '')
+  const { lane, pidFile } = reapChildLane(root)
+  try {
+    const timeout = gatherBaseline({ checkout: ROOT, lane: `${lane}; sleep 4`, timeoutMs: 700, psCmd: psScript })
+    assert.equal(timeout.reason, 'timeout')
+    assert.equal(timeout.reap.outcome, 'proven')
+    assertReapGroupGone(timeout, pidFile)
+    assert.ok(readFileSync(calls, 'utf8').trim().split('\n').length >= 2)
+  } finally { stopReapChild(pidFile) }
+})
+
+// MUTATION: an empty group is measured as already dead, not fabricated as signalled.
+test('BR6 empty group is reported as already dead with zero signals', () => {
+  const tempRoot = scratchDir('baseline-br6-tmp-')
+  const oldTmp = process.env.TMPDIR
+  try {
+    process.env.TMPDIR = tempRoot
+    for (let i = 0; i < 2; i += 1) {
+      const baseline = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"' })
+      assert.equal(baseline.reap.outcome, 'already-dead')
+      assert.equal(baseline.reap.reason, 'probe-dead')
+      assert.equal(baseline.reap.signals, 0)
+    }
+    assert.deepEqual(readdirSync(tempRoot), [])
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = oldTmp
+  }
+})
+
+// MUTATION: reused records are not fresh measurements and must not emit a reap log.
+test('BR7 compile logs exactly one measured reap and none for reuse', () => {
+  const fx = committedFixture('reap-log')
+  const measured = compileCommitted(fx)
+  const lines = measured.result.stderr.split('\n').filter((line) => line.startsWith('brief: baseline reap:'))
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /^brief: baseline reap: outcome=(already-dead|proven|failed|unproven) reason=\S+ signals=\d+$/)
+  const path = suppliedBaseline('reap-log-reuse', { sha: fx.sha, command: fx.command, pass: 7, fail: 0, status: 'green' })
+  const reused = compileCommitted(fx, ['--baseline', path])
+  assert.doesNotMatch(reused.result.stderr, /brief: baseline reap:/)
+})
+
+// MUTATION: unknown process-table output cannot prove cleanup.
+test('BR8 unreadable ps and missing summary retain honest reap verdicts', () => {
+  const root = scratchDir('baseline-br8-')
+  const psScript = join(root, 'ps-fail')
+  writeFileSync(psScript, '#!/bin/sh\nexit 1\n')
+  spawnSync('chmod', ['+x', psScript])
+  const probeUnknown = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"', psCmd: psScript })
+  assert.equal(probeUnknown.reap.outcome, 'unproven')
+  assert.equal(probeUnknown.reap.reason, 'probe-unknown')
+  const psEmpty = join(root, 'ps-empty')
+  writeFileSync(psEmpty, '#!/bin/sh\nexit 0\n')
+  spawnSync('chmod', ['+x', psEmpty])
+  const emptyProbe = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"', psCmd: psEmpty })
+  assert.equal(emptyProbe.reap.outcome, 'unproven')
+  assert.equal(emptyProbe.reap.reason, 'probe-unknown')
+  const psDenied = join(root, 'ps-denied')
+  writeFileSync(psDenied, '#!/bin/sh\nexit 0\n')
+  const deniedProbe = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 1\\nfail 0\\n"', psCmd: psDenied })
+  assert.equal(deniedProbe.reap.outcome, 'unproven')
+  assert.equal(deniedProbe.reap.reason, 'probe-unknown')
+  const missing = gatherBaseline({ checkout: ROOT, lane: 'printf "no summary\\n"' })
+  assert.equal(missing.reason, 'missing-summary')
+  assert.equal(missing.reap.outcome, 'already-dead')
+  const badCwd = gatherBaseline({ checkout: join(root, 'missing'), lane: 'true' })
+  assert.equal(badCwd.reason, 'spawn-error')
+  assert.equal(badCwd.reap.outcome, 'unproven')
+  assert.equal(badCwd.reap.reason, 'no-report')
 })

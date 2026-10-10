@@ -11,7 +11,7 @@ ADR-045 makes a fence and request scope **context**, not write enforcement. They
 5. Use **`validateScopeEntries`** and **`scopeMatcher`** to classify scope safely, not to enforce own-file coverage. Worktrees isolate writes, and overlap is reconciled after merge.
 6. Check the protected floor with **`protectedHitsIn`** over **`resolveProtectedPaths`** (`crew/protected-paths.mjs:27`); the floor evidence is in `references/tier.md`.
 
-The compiler's contextual coupling and stale-read labels remain cited at `scripts/factory/make-brief.mjs:135` and `scripts/factory/make-brief.mjs:136`; the present-created-leaf guard remains `scripts/factory/make-brief.mjs:142`.
+The compiler's contextual coupling and stale-read labels remain cited at `scripts/factory/make-brief.mjs:137` and `scripts/factory/make-brief.mjs:138`; the present-created-leaf guard remains `scripts/factory/make-brief.mjs:144`.
 7. Attach each branch after compilation and every pre-boot check, then boot each lane with its generated effective entry. Runtime `lane_fence` is empty and the unchanged `lane-fence` journal event reports `lanes: 0, files: 0`; then background `run`.
 8. A missing, unreadable, unparsable, or non-object `crew.json` is **`boot-failed`**. A `lane_name` or `lane_fence` mismatch is a durable `fence-observation` journal row, not a dispatch refusal. **`fence=NONE`** in a write lane still means a boot-only flag went to the wrong verb.
 9. Run the `document` stage after `commit` and before `publish`.

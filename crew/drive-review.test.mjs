@@ -8,7 +8,7 @@ import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace, RESHAPE_TEST_PATH } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, plannedTestEvidence, plannedTestLines, stepGapLines, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace, RESHAPE_TEST_PATH } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -7533,6 +7533,34 @@ test('reshape keeps binary line totals unknown instead of zero', () => {
 })
 
 // MUTATION: drop the findings/must_fix check; a pass verdict carrying a must-fix finding keeps the reshape.
+test('PT3 builder gap evidence renders every original self-report record', () => {
+  const envelopes = [
+    { details: { step_gap: { step: 'c1', status: 'insufficient', summary: 'first gap' } } },
+    { details: { step_gap: { step: 'c2', status: 'blocked', summary: 'second gap' } } },
+  ]
+  const lines = stepGapLines(envelopes).join('\\n')
+  assert.ok(lines.includes('{"step":"c1","status":"insufficient","summary":"first gap"}'))
+  assert.ok(lines.includes('{"step":"c2","status":"blocked","summary":"second gap"}'))
+  assert.deepEqual(stepGapLines([]), [])
+})
+
+test('PT4 planned-test review evidence lists all unique literal untouched paths', () => {
+  const files = [...Array.from({ length: 91 }, (_, index) => `pkg/test-${String(index).padStart(2, '0')}.test.mjs`), 'pkg/*.test.mjs', '../bad.test.mjs', 'pkg/test-00.test.mjs']
+  const changed = files.slice(0, 90)
+  const evidence = plannedTestEvidence({ files, changed })
+  assert.equal(evidence.planned.length, 91)
+  assert.equal(evidence.untouched.length, 1)
+  assert.ok(plannedTestLines({ files, changed }).includes('- pkg/test-90.test.mjs'))
+  assert.deepEqual(plannedTestLines({ files: ['x.test.mjs'], changed: ['x.test.mjs'] }), [])
+})
+
+test('PT5 unknown changed inventory is explicit and never reported as zero', () => {
+  const lines = plannedTestLines({ files: ['x.test.mjs'], changed: null }).join('\\n')
+  assert.match(lines, /unmeasured/)
+  assert.match(lines, /no-changed-inventory/)
+  assert.doesNotMatch(lines, /0 of 1/)
+})
+
 test('reshape review that passes with a finding still reverts', () => {
   let io
   const run = reshapeRun({

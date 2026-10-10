@@ -1598,6 +1598,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "event='execution-default'", "at requested source executor reason"],
   ["recordRow", "", "at assertion_guard"],
   ["recordRow", "", "at acceptance_coverage_reask"],
+  ["recordRow", "", "at acceptance_coverage_reask_result"],
 ])
 
 // ---------------------------------------------------------------------------

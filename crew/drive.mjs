@@ -16565,6 +16565,13 @@ export function plannerCoverageReask({ env, dispatch, briefText, round, briefFil
   ].join('\n'))
   try {
     const corrected = dispatchOnce('planner', reaskBrief, 'acceptance-coverage-reask', { reask: { id: dispatch.id, returnPath: retryPath } })
+    const retryRefused = handledEnvelopeRefusalOf(corrected)
+    const retryDeclared = corrected.status === 'done' || (Array.isArray(corrected.details?.mutations) && corrected.details.mutations.length > 0)
+    const retryCoverage = !retryRefused && retryDeclared ? acceptanceCoverage(briefText, corrected.details?.mutations ?? []) : null
+    const retryResult = retryCoverage?.status === 'measured'
+      ? { round, repaired: retryCoverage.uncovered.length === 0, uncovered_after: retryCoverage.uncovered }
+      : { round, repaired: null, uncovered_after: null, reason: retryRefused ? 'envelope-refusal' : retryCoverage?.reason ?? 'no-declared-checks' }
+    try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask_result: retryResult })) } catch { /* coverage re-ask result journal is never load-bearing */ }
     return { env: corrected, returnPath: retryPath }
   } finally {
     // The coverage retry buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.

@@ -15852,6 +15852,7 @@ function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, d
     if (S.state !== 'read') return row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`)
     const repairedFile = io.readFile(fileAbs)
     if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
+    if (repairedFile === S.bytes && hardeningClassOf(entry) !== 'coverage') return row('unproven', `invocation-unchanged-unprovable:the declared ${entry.file} is byte-identical to the review-time witness, so an opaque runner cannot witness guard novelty`)
     if (hardeningClassOf(entry) === 'coverage') {
       if (repairedFile !== S.bytes) return row('source-regressed', `source-regressed: the built ${entry.file} is not byte-identical to the review-time witness, so this is not a coverage repair: a coverage repair certifies that the implementation was already correct at review time, and regressing it to buy a red pre-repair is refused`)
       return row('unproven', `invocation-coverage-unprovable:the coverage class cannot be adjudicated through an opaque runner because novelty cannot be witnessed`)

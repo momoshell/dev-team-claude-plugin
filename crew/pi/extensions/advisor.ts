@@ -20,7 +20,7 @@
 // No oh-my-pi source is copied here and no holder-specific licence notice is
 // invented: that checkout is not present in the build environment.
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -708,9 +708,11 @@ function noteTextForTier0(kind, target, signature, role) {
 }
 
 export const REPLY_EXCERPT_CAP_BYTES = 512
+export const REPLY_REASONS = Object.freeze(['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
 
 export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const role = roleOf(env)
+  const digest = deps.digest || ((text) => createHash('sha256').update(text).digest('hex'))
   const taskDir = deps.taskDir || env?.CREW_TASK_DIR || ''
   const cwd = deps.cwd || process.cwd()
   const now = deps.now || DEFAULT_NOW
@@ -730,6 +732,20 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
   const journalPath = journalPathFrom(taskDir)
+
+  function replyRecord(replyText, codes) {
+    const reason = codes.find((code) => REPLY_REASONS.includes(code)) || 'reply-unrecorded'
+    if (typeof replyText !== 'string' || !replyText) return { reply: null, reply_reason: reason }
+    try {
+      const redacted = redactDelta(replyText).text
+      return { reply: { sha256: digest(redacted), bytes: byteLength(redacted), excerpt: boundText(redacted, REPLY_EXCERPT_CAP_BYTES) } }
+    } catch { return { reply: null, reply_reason: 'reply-unrecorded' } }
+  }
+
+  function contentIdentity(text) {
+    const content_excerpt = boundText(text, REPLY_EXCERPT_CAP_BYTES)
+    try { return { content_sha256: digest(text), content_excerpt } } catch { return { content_excerpt } }
+  }
 
   let context = null
   let contextEpoch = null
@@ -839,10 +855,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       role, outcome: 'injected',
       ...(signature ? { signature: boundText(signature, SIGNATURE_CAP_BYTES) } : {}),
     }
+    const tier0Text = noteTextForTier0(kind, cleanTarget, payload.signature, role)
+    Object.assign(payload, contentIdentity(tier0Text))
     const ok = appendAdvisorRow('advisor_note', payload)
     if (!ok) return false
     notes.push(payload)
-    const tier0Text = noteTextForTier0(kind, cleanTarget, payload.signature, role)
     rememberInjected(normalizeNote(tier0Text))
     try {
       const delivered = send?.({ customType: ADVISOR_MESSAGE_TYPE, content: tier0Text, display: true, details: payload }, { deliverAs: 'steer' })
@@ -1025,7 +1042,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const payload = {
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
       kind: TIER1_FINDING, target: boundTarget(String(evidence[0]).split(':')[0]),
-      target_kind: 'file', role, outcome: 'injected',
+      target_kind: 'file', role, outcome: 'injected', ...contentIdentity(text),
       judgment_class: judgment.class, severity: judgment.severity,
       claim: text, evidence, ...captured.tier1Stamp,
     }
@@ -1066,13 +1083,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       anchors: new Set(snapshot.flatMap((e) => e.anchors)), controller: new AbortController(),
     }
     const cell = captured.cell
-    const tier1Stamp = { ...cellIdentity(cell), call_ordinal: captured.call_ordinal }
+    const consultId = randomUUID()
+    const tier1Stamp = { ...cellIdentity(cell), call_ordinal: captured.call_ordinal, consult_id: consultId }
     captured.tier1Stamp = tier1Stamp
     controllers.add(captured.controller)
     // The scrub is a fact, not a silence: one row per consult, always, carrying
     // the per-kind count of what this consult's delta had removed from it.
-    const consultId = randomUUID()
-    const consultPayload = {
+    const consultPayload = { consult_id: consultId,
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
       redacted: redactionTally(delta),
@@ -1232,6 +1249,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const transportFailure = timedOut || consultFailed || parseFault || uncleanExit
       const failurePayload = { consult_id: consultId, run_started_at: consultPayload.run_started_at, role, provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model, kind: timedOut ? 'timeout' : 'transport-error', detail: timedOut ? 'consult timed out' : 'pi child transport failed' }
       if (transportFailure) appendAdvisorRow('advisor_cell_failure', failurePayload)
+      Object.assign(consultPayload, replyRecord(replyText, codes))
       appendAdvisorRow('advisor_consult', consultPayload)
       {
         const usagePayload = {
@@ -1292,6 +1310,7 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   const appendFile = deps.appendFile || DEFAULT_APPEND
   const taskDir = deps.taskDir || env?.CREW_TASK_DIR || ''
   const journalPath = journalPathFrom(taskDir)
+
   const now = deps.now || DEFAULT_NOW
   if (env?.[ADVISOR_GRANT_ENV] !== '1') return
   const unavailable = (reason) => {

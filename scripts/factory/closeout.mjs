@@ -32,7 +32,7 @@ import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-pat
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
-import { checkoutBaseBranch } from './probe-repo.mjs'
+import { checkoutBaseBranch, removeWorktreeExcludes } from './probe-repo.mjs'
 import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
 
 const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
@@ -1349,7 +1349,10 @@ export function reap({ lanes, checkout, deps } = {}) {
         laneReport.prompt_measures = promptMeasures
         return { closed: laneReport.closed, referenced: laneReport.referenced, summary: reapIssueSummary(laneReport), prompt_measures: promptMeasures }
       },
-      worktree: () => gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` }),
+      worktree: () => {
+        const detail = gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` })
+        return { ...detail, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
+      },
       branch: () => gitStep({ args: ['branch', '-d', lane], cwd: root, reason: CLOSEOUT_REFUSALS.BRANCH_FAILED, step: 'branch', deps: d, message: `branch deletion failed for ${lane}` }),
       prune: () => gitStep({ args: ['worktree', 'prune'], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'prune', deps: d, message: `worktree prune failed for ${lane}` }),
       archive: () => {

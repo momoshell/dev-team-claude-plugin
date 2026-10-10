@@ -19,6 +19,7 @@ import {
   checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, profileWorktreeSetup, validateWorktreeSetup, readProfile,
   requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, isPlainBranchName, BASE_BRANCH_REFUSALS,
+  runWorktreeSetup, removeWorktreeExcludes,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -1832,4 +1833,20 @@ test('worktree setup profile requires ratification and preserves ordered declare
   for (const invalid of [null, {}, [{ kind: 'command', run: '  ' }], [{ kind: 'symlink', path: '../outside' }], [{ kind: 'symlink', path: './' }], [{ kind: 'unknown' }]]) {
     assert.throws(() => validateWorktreeSetup(invalid), (error) => error.reason === 'worktree-setup-invalid')
   }
+})
+
+test('L2A probe runner installs only when the lockfile is fenced and cleanup removes exact owner pairs', async () => {
+  const checkout = nextRoot('l2a-checkout'), laneDir = nextRoot('l2a-lane')
+  put(checkout, 'node_modules/pkg/index.js', 'export default 1')
+  mkdirSync(laneDir, { recursive: true })
+  const exclude = put(checkout, 'info/exclude', 'stock\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n/node_modules\n')
+  const calls = []
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: 'info/exclude\n' } : { status: 0, stdout: '' } }
+  const step = { kind: 'symlink', path: './node_modules/', lockfile: 'package-lock.json', install: 'printf l2a-install' }
+  await runWorktreeSetup({ checkout, laneDir, steps: [step], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'printf l2a-install'], cwd: laneDir }])
+  assert.equal(existsSync(join(laneDir, 'node_modules')), false)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 1, reason: null })
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n/node_modules\n')
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 0, reason: null })
 })

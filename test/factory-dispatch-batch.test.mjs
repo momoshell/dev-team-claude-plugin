@@ -3105,6 +3105,7 @@ test('REFUSAL_REASONS is frozen, unique, and names every reason argument in the 
     if (match) names.push(match[1])
   }
   const thrown = new Set(names.map((name) => constants.get(name)).filter(Boolean))
+  for (const match of source.matchAll(/refuse\([^,]+,\s*'([^']+)'\)/g)) thrown.add(match[1])
   assert.deepEqual(new Set(REFUSAL_REASONS), thrown)
 })
 
@@ -5018,7 +5019,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'realpathSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -7460,7 +7461,7 @@ test('RV1-1 setupWorktree guards collisions, escaping ancestors, child signals a
     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],
     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },
   })
-  assert.deepEqual(appended, ['\n/node_modules\n', '\n/vendor/\\[deps\\]\n'])
+  assert.deepEqual(appended, ['\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n', '\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/vendor/\\[deps\\]\n'])
 
   mkdirSync(join(laneDir, 'collision'), { recursive: true })
   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')

@@ -27,10 +27,10 @@
 // brief compiler through the shared rule below; probing itself remains read-only.
 
 import {
-  createHash,
+  createHash, randomUUID,
 } from 'node:crypto'
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync,
+  appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import {
@@ -40,6 +40,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { slug } from '../../crew/slug.mjs'
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
+import { parseFenceScope } from '../../crew/fence-scope.mjs'
 
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
@@ -1840,18 +1841,144 @@ export function isPlainBranchName(value) {
   } catch { return false }
 }
 
+function validSetupPath(value) {
+  if (typeof value !== 'string' || !value || value.includes(String.fromCharCode(0)) || isAbsolute(value) || value.split(/[\\/]/).includes('..')) return false
+  return resolve('/', value) !== '/'
+}
+
 export function validateWorktreeSetup(steps) {
   const invalid = () => { throw new ProfileRefusal('probe-repo: invalid worktree_setup value', 'worktree-setup-invalid') }
   if (!Array.isArray(steps)) invalid()
   for (const step of steps) {
     if (!plainObject(step) || !['symlink', 'submodules', 'command'].includes(step.kind)) invalid()
     if (step.kind === 'symlink') {
-      if (!nonEmptyString(step.path) || step.path.includes(String.fromCharCode(0)) || isAbsolute(step.path) || step.path.split(/[\\/]/).includes('..')) invalid()
-      const target = resolve('/', step.path)
-      if (target === '/') invalid()
+      const hasLockfile = Object.hasOwn(step, 'lockfile'), hasInstall = Object.hasOwn(step, 'install')
+      if (hasLockfile !== hasInstall) invalid()
+      if (hasLockfile && (!validSetupPath(step.lockfile) || !nonEmptyString(step.install) || step.install !== step.install.trim() || step.install.includes(String.fromCharCode(0)))) invalid()
+      if (!validSetupPath(step.path)) invalid()
     } else if (step.kind === 'command' && (!nonEmptyString(step.run) || step.run !== step.run.trim() || step.run.includes(String.fromCharCode(0)))) invalid()
   }
   return steps
+}
+
+function setupChildFailure(result) { return result?.error?.message || result?.stderr || result?.stdout || (result?.signal ? `signal=${result.signal}` : `git exited ${result?.status}`) }
+
+export async function runWorktreeSetup({ checkout, laneDir, lane = laneDir, steps, fenceFiles = [], deps } = {}) {
+  const refuse = (message, reason) => { throw new ProfileRefusal(message, reason) }
+  const source = deps && typeof deps === 'object' ? deps : {}
+  const d = { appendFileSync: source.appendFileSync || appendFileSync, mkdirSync: source.mkdirSync || mkdirSync, lstatSync: source.lstatSync || lstatSync, realpathSync: source.realpathSync || realpathSync, symlinkSync: source.symlinkSync || symlinkSync, spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })) }
+  validateWorktreeSetup(steps)
+  if (steps.length === 0) return
+  const within = (root, path) => {
+    const rel = relative(root, path)
+    return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
+  }
+  let activeIndex = -1, activeKind = 'profile'
+  const failIo = (error) => refuse(`worktree setup lane=${lane} step=${activeIndex} kind=${activeKind}: ${error?.message || String(error)}`, 'worktree-setup-failed')
+  const lstatExists = (path) => {
+    try { d.lstatSync(path); return true } catch (error) { if (error?.code === 'ENOENT') return false; return failIo(error) }
+  }
+  let realRoot, laneRoot
+  try { realRoot = d.realpathSync(checkout); laneRoot = d.realpathSync(laneDir) } catch (error) { failIo(error) }
+  const links = []
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]
+    activeIndex = index
+    activeKind = step.kind
+    let result
+    if (step.kind === 'symlink') {
+      if (step.lockfile && fenceFiles.some((entry) => parseFenceScope(entry).path === step.lockfile)) {
+        try { result = d.spawn({ file: '/bin/sh', args: ['-c', step.install], cwd: laneDir }) } catch (error) { failIo(error) }
+      } else {
+      const source = resolve(checkout, step.path)
+      const destination = resolve(laneDir, step.path)
+      if (!within(checkout, source) || !within(laneDir, destination) || !lstatExists(source)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: readiness: missing source ' + step.path, 'worktree-setup-failed')
+      let realSource
+      try { realSource = d.realpathSync(source) } catch (error) { failIo(error) }
+      if (!within(realRoot, realSource)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: source escapes checkout', 'worktree-setup-failed')
+      let parent = dirname(destination)
+      const missing = []
+      while (!lstatExists(parent)) {
+        missing.unshift(parent)
+        const next = dirname(parent)
+        if (next === parent) break
+        parent = next
+      }
+      let realParent
+      try { realParent = d.realpathSync(parent) } catch (error) { failIo(error) }
+      if (!within(laneRoot, realParent)) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: destination ancestor escapes lane', 'worktree-setup-failed')
+      for (const dir of missing) { try { d.mkdirSync(dir) } catch (error) { failIo(error) } }
+      const collision = lstatExists(destination)
+      if (collision) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: destination collision ' + destination, 'worktree-setup-failed')
+      try { d.symlinkSync(source, destination) } catch (error) { failIo(error) }
+      links.push({ source, destination })
+      try { result = d.spawn({ file: 'git', args: ['-C', laneDir, 'rev-parse', '--git-path', 'info/exclude'], cwd: laneDir }) } catch (error) { failIo(error) }
+      if (!result || result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string' || !result.stdout.trim()) refuse('worktree setup lane=' + lane + ' step=' + index + ' kind=symlink: unable to resolve git info/exclude', 'worktree-setup-failed')
+      const excludePath = resolve(laneDir, result.stdout.trim())
+      const excludePathLiteral = relative(laneDir, destination).split(sep).join('/').replace(/[\\ #!*?\[\]]/g, (ch) => '\\' + ch)
+      const excludePattern = '/' + excludePathLiteral
+      try {
+        d.mkdirSync(dirname(excludePath), { recursive: true })
+        const ownerLine = '# worktree-setup-owner: ' + JSON.stringify(laneDir)
+        d.appendFileSync(excludePath, '\n' + ownerLine + '\n' + excludePattern + '\n')
+      } catch (error) { failIo(error) }
+      }
+    } else if (step.kind === 'submodules') {
+      try { result = d.spawn({ file: 'git', args: ['-C', laneDir, 'submodule', 'update', '--init'], cwd: laneDir }) } catch (error) { failIo(error) }
+    } else {
+      try { result = d.spawn({ file: '/bin/sh', args: ['-c', step.run], cwd: laneDir }) } catch (error) { failIo(error) }
+    }
+    if (!result || result.error || result.signal || result.status !== 0) refuse(`worktree setup lane=${lane} step=${index} kind=${step.kind}: ${JSON.stringify(setupChildFailure(result))}`, 'worktree-setup-failed')
+  }
+  for (const { source, destination } of links) {
+    try {
+      if (!d.lstatSync(destination).isSymbolicLink() || d.realpathSync(destination) !== d.realpathSync(source)) throw new Error('link mismatch')
+    } catch { refuse('worktree setup lane=' + lane + ': readiness: declared symlink is dangling or changed', 'worktree-setup-failed') }
+  }
+  activeKind = 'readiness'
+  let readiness
+  try { readiness = d.spawn({ file: 'git', args: ['-C', laneDir, 'status', '--porcelain'], cwd: laneDir }) } catch (error) { failIo(error) }
+  if (!readiness || readiness.error || readiness.signal || readiness.status !== 0 || typeof readiness.stdout !== 'string') refuse('worktree setup lane=' + lane + ': readiness: git status unavailable', 'worktree-setup-failed')
+  if (String(readiness.stdout ?? '').trim()) refuse(`worktree setup lane=${lane}: readiness: dirty porcelain ${readiness.stdout}`, 'worktree-setup-failed')
+}
+
+
+
+// lean: serialized exclude lifecycle writes; shared wx lock if multiple processes edit excludes concurrently
+export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
+  const source = deps && typeof deps === 'object' ? deps : {}
+  const d = { spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })), readFileSync: source.readFileSync || readFileSync, writeFileSync: source.writeFileSync || writeFileSync, renameSync: source.renameSync || renameSync, rmSync: source.rmSync || rmSync }
+  let temporary = null
+  try {
+    const result = d.spawn({ file: 'git', args: ['-C', checkout, 'rev-parse', '--git-path', 'info/exclude'], cwd: checkout })
+    if (!result || result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string' || !result.stdout.trim()) throw new Error('exclude path unresolved')
+    const excludePath = resolve(checkout, result.stdout.trim())
+    let original
+    try { original = d.readFileSync(excludePath) } catch (error) { if (error?.code === 'ENOENT') return { removed: 0, reason: null }; throw error }
+    const bytes = Buffer.isBuffer(original) ? original : Buffer.from(original)
+    const text = bytes.toString('latin1')
+    const records = text.match(/[^\n]*\n|[^\n]+$/g) || []
+    const kept = []
+    let removed = 0
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i]
+      const content = record.replace(/\r?\n$/, '')
+      if (content.startsWith('# worktree-setup-owner: ') && i + 1 < records.length) {
+        let decodedOwner
+        try { decodedOwner = JSON.parse(content.slice('# worktree-setup-owner: '.length)) } catch {}
+        const nextLine = records[i + 1].replace(/\r?\n$/, '')
+        if (decodedOwner === laneDir && nextLine.startsWith('/')) { removed++; i++; continue }
+      }
+      kept.push(record)
+    }
+    if (!removed) return { removed: 0, reason: null }
+    const output = Buffer.from(kept.join(''), 'latin1')
+    temporary = join(dirname(excludePath), `.info-exclude-${randomUUID()}.tmp`)
+    d.writeFileSync(temporary, output, { flag: 'wx' })
+    d.renameSync(temporary, excludePath)
+    temporary = null
+    return { removed, reason: null }
+  } catch { if (temporary) { try { d.rmSync(temporary, { force: true }) } catch {} } return { removed: null, reason: 'worktree-exclude-cleanup-failed' } }
 }
 
 export function profileWorktreeSetup(profile) {

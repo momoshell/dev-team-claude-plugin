@@ -2382,3 +2382,49 @@ DIRECT && test('RV1-1 arbitrates duplicate automatic admissions in batch order',
   const warning = report.warnings.find((row) => row.kind === 'fence-admission-arbitrated' && row.file === shared)
   assert.equal(warning.holder.lane, 'lane-x')
 })
+
+async function lockfileDispatch(label, steps, failLaneB = false) {
+  const base = scratchDir('l2a-dispatch-' + label), checkout = join(base, 'main'), exclude = join(base, 'exclude')
+  mkdirSync(join(checkout, 'node_modules'), { recursive: true })
+  writeFileSync(join(checkout, 'package-lock.json'), 'one\ntwo\nthree\nfour\nfive\n')
+  writeFileSync(exclude, '# stock\n/operator\n')
+  const calls = []
+  let refusal = null
+  try {
+    await dispatchFixture({
+      label: 'l2a-' + label, names: ['lane-a', 'lane-b'], checkout,
+      requests: { 'lane-a': requestFor('lane-a', { where: ['package-lock.json'] }), 'lane-b': requestFor('lane-b') },
+      fences: [entry('lane-a', ['package-lock.json:1-5']), entry('lane-b', ['crew/owned-lane-b.mjs'])],
+      spawnedOut: calls, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }),
+      writeFile: (path, text) => writeFileSync(path, text), appendFile: (path, text) => fsAppendFileSync(path, text),
+      worktreeSetup: () => ({ basis: 'ratified', steps }),
+      spawnHook: (call) => {
+        if (call.args.includes('worktree') && call.args.includes('add')) mkdirSync(call.args.at(-2), { recursive: true })
+        if (call.args.includes('rev-parse') && call.args.includes('info/exclude')) return { status: 0, stdout: exclude + '\n' }
+        if (call.args.includes('status')) return { status: 0, stdout: '' }
+        if (call.file === '/bin/sh') return { status: failLaneB && call.cwd.includes('lane-b') ? 17 : 0, stdout: '' }
+        return undefined
+      },
+    })
+  } catch (error) { refusal = error }
+  const lanes = Object.fromEntries(calls.filter((call) => call.args.includes('switch') && call.args.includes('-c')).map((call) => [call.args.at(-1), call.cwd]))
+  return { refusal, exclude, lanes, calls, body: readFileSync(exclude, 'utf8') }
+}
+
+// MUTATION: pass `fenceFiles: []` to setupWorktree in compileDispatchWave; lane-a links instead of installing.
+test('L2A dispatch lockfile fence selects install', async () => {
+  const { refusal, lanes, calls, body } = await lockfileDispatch('install', [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'l2a ratified real install' }])
+  assert.equal(refusal, null)
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'l2a ratified real install'], cwd: lanes['lane-a'] }])
+  assert.equal(fsExistsSync(join(lanes['lane-a'], 'node_modules')), false)
+  assert.equal(fsExistsSync(join(lanes['lane-b'], 'node_modules')), true)
+  assert.equal(body, '# stock\n/operator\n\n# worktree-setup-owner: ' + JSON.stringify(lanes['lane-b']) + '\n/node_modules\n')
+})
+
+// MUTATION: delete the `removeWorktreeExcludes` call in removeWorktrees; the refused dispatch leaves both owner pairs.
+test('L2A dispatch second-lane setup failure cleans both owners', async () => {
+  const { refusal, calls, body } = await lockfileDispatch('rollback', [{ kind: 'symlink', path: 'node_modules' }, { kind: 'command', run: 'l2a lane setup' }], true)
+  assert.equal(refusal?.reason, 'worktree-setup-failed')
+  assert.equal(calls.filter((call) => call.args.includes('worktree') && call.args.includes('remove')).length, 2)
+  assert.equal(body, '# stock\n/operator\n\n\n')
+})

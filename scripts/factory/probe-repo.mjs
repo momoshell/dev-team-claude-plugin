@@ -1965,7 +1965,8 @@ export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
       const content = record.replace(/\r?\n$/, '')
       if (content.startsWith('# worktree-setup-owner: ') && i + 1 < records.length) {
         let decodedOwner
-        try { decodedOwner = JSON.parse(content.slice('# worktree-setup-owner: '.length)) } catch {}
+        // Records are split as latin1 to keep every byte; the owner was appended as UTF-8, so decode it as UTF-8.
+        try { decodedOwner = JSON.parse(Buffer.from(content.slice('# worktree-setup-owner: '.length), 'latin1').toString('utf8')) } catch {}
         const nextLine = records[i + 1].replace(/\r?\n$/, '')
         if (decodedOwner === laneDir && nextLine.startsWith('/')) { removed++; i++; continue }
       }

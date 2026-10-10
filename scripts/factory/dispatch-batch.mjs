@@ -2643,7 +2643,8 @@ export function removeWorktrees({ plans, branches = [], checkout, deps } = {}) {
     try { result = d.spawn({ file: 'git', args: ['-C', root, 'worktree', 'remove', '--force', plan.dir], cwd: root }) }
     catch (err) { reason = err?.message || String(err) }
     if (!reason && (!result || result.status !== 0)) reason = result ? textOf(result.stderr) || `git exited ${result.status}` : 'git returned no result'
-    if (reason) logFailure(`dispatch-batch: rollback lane=${plan.lane} dir=${plan.dir} removed=false reason=${reason}`)
+    if (reason) { logFailure(`dispatch-batch: rollback lane=${plan.lane} dir=${plan.dir} removed=false reason=${reason}`); continue }
+    // A worktree that survived removal still uses its exclude pair; only a removed lane gives it up.
     const excludes = removeWorktreeExcludes({ checkout: root, laneDir: plan.dir, deps: d })
     if (excludes.reason) logFailure(`dispatch-batch: rollback lane=${plan.lane} dir=${plan.dir} exclude-cleanup=false reason=${excludes.reason}`)
   }

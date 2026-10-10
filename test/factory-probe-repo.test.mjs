@@ -1888,6 +1888,15 @@ test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one ins
   assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), false)
 })
 
+// MUTATION: compare the raw spellings again; a `./package-lock.json` profile links even though its lockfile is fenced.
+test('L2A a dot-slash lockfile spelling still matches its fenced lockfile and installs', async () => {
+  const checkout = nextRoot('l2a-dotslash'), laneDir = nextRoot('l2a-dotslash-lane'), calls = []
+  const spawn = (call) => { calls.push(call); return { status: 0, stdout: '' } }
+  await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules', lockfile: './package-lock.json', install: 'printf l2a-dotslash' }], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args }) => args), [['-c', 'printf l2a-dotslash']])
+  assert.equal(existsSync(join(laneDir, 'node_modules')), false)
+})
+
 // MUTATION: delete the child-failure refusal after the step loop body; a failed install passes.
 test('L2A a fenced install that exits nonzero, is signalled or errors refuses worktree-setup-failed', async () => {
   for (const [label, failure] of [['status', { status: 2, stdout: '', stderr: 'install broke' }], ['signal', { status: 0, signal: 'SIGKILL', stdout: '' }], ['error', { status: 0, error: new Error('spawn ENOENT'), stdout: '' }]]) {

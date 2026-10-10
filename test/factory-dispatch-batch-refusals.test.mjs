@@ -899,8 +899,9 @@ test('directed-brief and seat refusals do not boot lanes', async () => {
   assert.equal(seats.some(c=>c.args.includes('boot')),false)
 })
 
-// MUTATION: delete the `removeWorktreeExcludes` call in removeWorktrees; rollback leaves both lanes' pairs behind.
-test('L2A rollback removes each lane owner pair even when its worktree removal failed, and keeps other owners', () => {
+// MUTATION: delete the `removeWorktreeExcludes` call in removeWorktrees; rollback leaves the removed lane's pair behind.
+// MUTATION: delete the `continue` after a failed removal; the surviving lane loses the pair it still uses.
+test('L2A rollback removes the owner pair of each removed lane, keeps a surviving lane and other owners', () => {
   const root = scratchDir('l2a-rollback'), exclude = join(root, 'exclude')
   const plans = ['a', 'b'].map((lane) => ({ lane, dir: join(root, `dt-${lane}`), branch: `branch-${lane}` }))
   const owned = (dir) => '# worktree-setup-owner: ' + JSON.stringify(dir) + '\n/node_modules\n'
@@ -909,7 +910,7 @@ test('L2A rollback removes each lane owner pair even when its worktree removal f
   const logs = []
   const spawn = (call) => call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n', stderr: '' } : call.args.includes('remove') && call.args.includes(plans[0].dir) ? { status: 1, stdout: '', stderr: 'remove denied' } : { status: 0, stdout: '', stderr: '' }
   removeWorktrees({ plans, branches: [], checkout: root, deps: { log: (line) => logs.push(line), spawn } })
-  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n' + other)
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n' + owned(plans[0].dir) + other)
   assert.equal(logs.some((line) => line.includes('exclude-cleanup=false')), false)
   assert.equal(logs.filter((line) => line.includes('removed=false')).length, 1)
 })

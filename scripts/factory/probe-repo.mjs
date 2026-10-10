@@ -34,7 +34,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import {
-  basename, dirname, isAbsolute, join, relative, resolve, sep,
+  basename, dirname, isAbsolute, join, posix, relative, resolve, sep,
 } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -1887,7 +1887,8 @@ export async function runWorktreeSetup({ checkout, laneDir, lane = laneDir, step
     activeKind = step.kind
     let result
     if (step.kind === 'symlink') {
-      if (step.lockfile && fenceFiles.some((entry) => parseFenceScope(entry).path === step.lockfile)) {
+      // Compare normalised spellings: a profile's `./package-lock.json` names the same file as a fence's `package-lock.json`.
+      if (step.lockfile && fenceFiles.some((entry) => posix.normalize(String(parseFenceScope(entry).path ?? '')) === posix.normalize(step.lockfile))) {
         try { result = d.spawn({ file: '/bin/sh', args: ['-c', step.install], cwd: laneDir }) } catch (error) { failIo(error) }
       } else {
       const source = resolve(checkout, step.path)

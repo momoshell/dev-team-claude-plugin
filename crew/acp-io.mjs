@@ -8,6 +8,7 @@ import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
 
 export const ACP_CENSUS_TURNS_ABSENT = 'ACP has no model-turn boundary; deriving turns from prompts or tool activity would be a guess.'
+export const ACP_CONTEXT_BASIS = "Agent-reported context occupancy of the latest model message, including that message's output tokens; first and peak are not headless input-only context; mean and calls are null because usage_update carries no model-call boundary."
 
 export const ACP_CLOSE_SETTLE_MS = 3000
 export const ACP_CANCEL_SETTLE_MS = 1000
@@ -97,10 +98,16 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       if (!a) return
       a.sawUpdate = true
       const frame = update.update ?? update
-      if (frame?.sessionUpdate === 'usage_update' && frame._meta?.['_claude/rateLimit']?.status === PROVIDER_RESET_STATUS) {
+      if (frame?.sessionUpdate === 'usage_update') {
+        if (!Object.hasOwn(frame._meta ?? {}, '_claude/rateLimit') && !Object.hasOwn(frame, 'cost') && Number.isSafeInteger(frame.used) && frame.used > 0) {
+          a.contextFirst ??= frame.used
+          a.contextPeak = Math.max(a.contextPeak ?? frame.used, frame.used)
+        }
+        if (frame._meta?.['_claude/rateLimit']?.status === PROVIDER_RESET_STATUS) {
         const meta = frame._meta?.['_claude/rateLimit'] ?? {}
         const resetAt = providerResetInstant(meta.resetsAt)
         a.providerReset = { at_ms: resetAt, absent_reason: resetAt === null ? PROVIDER_RESET_ABSENT.NO_RESET_FIELD : null }
+        }
       }
       if (frame?.sessionUpdate === 'tool_call' || frame?.sessionUpdate === 'tool_call_update') {
         const data = frame.toolCall ?? frame
@@ -138,7 +145,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const { client, profile } = getClient(role)
     if (prior) settlePriorBeforePrompt(prior, id, client)
     const promptId = client.beginPrompt([{ type: 'text', text }])
-    assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
+    assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, contextFirst: null, contextPeak: null, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
     current.set(role, returnPath)
     return { id, returnPath }
   }
@@ -219,7 +226,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     log({ at: now(), acp_turn: { role: assignment.role, assignment_id: assignment.id, returnPath: assignment.returnPath, stopReason: refusal || !turn ? null : turn.stopReason ?? null, stop_reason_absent: refusal ? 'refused' : !turn ? 'response-unread' : null, usage: billed, usage_reason: finalUsageReason } })
     try {
       const tool_calls = assignment.sawUpdate ? assignment.tools.size : null
-      log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', model: crew.members[assignment.role]?.model ?? null, session_id: client?.sessionId ?? null, turns: null, tool_calls, skill_reads: null, context_first_tokens: null, context_peak_tokens: null, context_mean_tokens: null, context_calls: null, context_absent_reason: 'aggregate-usage-only', absent_reason: ACP_CENSUS_TURNS_ABSENT } })
+      log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', model: crew.members[assignment.role]?.model ?? null, session_id: client?.sessionId ?? null, turns: null, tool_calls, skill_reads: null, context_first_tokens: assignment.contextFirst, context_peak_tokens: assignment.contextPeak, context_mean_tokens: null, context_calls: null, context_absent_reason: assignment.contextFirst === null ? 'aggregate-usage-only' : null, ...(assignment.contextFirst === null ? {} : { context_basis: ACP_CONTEXT_BASIS }), absent_reason: ACP_CENSUS_TURNS_ABSENT } })
     } catch { /* census is best-effort */ }
     return turn
   }

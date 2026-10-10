@@ -1,17 +1,17 @@
 # Refuse flags a verb does not read
 
 Give every CLI verb an explicit entry in `VERB_FLAGS`.
-Exhibit: `scripts/factory/ledger.mjs:8078`.
+Exhibit: `scripts/factory/ledger.mjs:8097`.
 
 Use `refuseUnknownFlags` as the one vocabulary check.
-Exhibit: `scripts/factory/ledger.mjs:8117`.
+Exhibit: `scripts/factory/ledger.mjs:8136`.
 
 A misspelling must produce a usage refusal instead of a default.
-Exhibit: `scripts/factory/ledger.mjs:8125` and `test/factory-ledger-cli.test.mjs:334`.
+Exhibit: `scripts/factory/ledger.mjs:8144` and `test/factory-ledger-cli.test.mjs:334`.
 
 The measured failure was `run-set --since X --untill Y` returning an unbounded
 window at exit 0 (#443).
-Exhibit: `scripts/factory/ledger.mjs:8125`.
+Exhibit: `scripts/factory/ledger.mjs:8144`.
 
 Pin the refusal direction in the ledger test.
 Exhibit: `test/factory-ledger-cli.test.mjs:332`.
@@ -22,17 +22,17 @@ Exhibit: `test/factory-ledger-cli.test.mjs:339`.
 Pin the process-level status as `exit 2` for the emit CLI.
 Exhibit: `test/factory-emit.test.mjs:1743`.
 
-The same refusal shape is mirrored in `scripts/factory/emit.mjs:1614`.
-Exhibit: `scripts/factory/emit.mjs:1614`.
+The same refusal shape is mirrored in `scripts/factory/emit.mjs:1629`.
+Exhibit: `scripts/factory/emit.mjs:1629`.
 
 Do not let an unknown option become an omitted bound or a null filter.
-Exhibit: `scripts/factory/ledger.mjs:8125` and `test/factory-ledger-cli.test.mjs:332`.
+Exhibit: `scripts/factory/ledger.mjs:8144` and `test/factory-ledger-cli.test.mjs:332`.
 
 An empty vocabulary means a verb accepts no flags; it is not an open parser.
-Exhibit: `scripts/factory/ledger.mjs:8078`.
+Exhibit: `scripts/factory/ledger.mjs:8097`.
 
 An unknown verb must refuse before a flag can acquire accidental meaning.
-Exhibit: `scripts/factory/ledger.mjs:9937`.
+Exhibit: `scripts/factory/ledger.mjs:9960`.
 
 If parsing is interrupted, do not resume with the default window.
 Status: this interrupted-parser edge is unbacked in this checkout; see
@@ -51,10 +51,10 @@ A green happy-path test alone cannot catch the one-letter window regression.
 Exhibit: `test/factory-ledger-cli.test.mjs:332`.
 
 Keep the exhibit and the accepted vocabulary updated in one change.
-Exhibit: `scripts/factory/ledger.mjs:8078` and `:3406`.
+Exhibit: `scripts/factory/ledger.mjs:8097` and `:3406`.
 
 The cost of ignoring one flag was an apparently successful, unbounded report.
-Exhibit: `scripts/factory/ledger.mjs:8125`.
+Exhibit: `scripts/factory/ledger.mjs:8144`.
 
 Use this rule for each verb even when several verbs share a parser helper.
-Exhibit: `scripts/factory/ledger.mjs:8078`.
+Exhibit: `scripts/factory/ledger.mjs:8097`.

@@ -92,6 +92,7 @@ import { randomUUID } from 'node:crypto'
 import {
   openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES,
 } from './ledger.mjs'
+import { REPO_KEY_ABSENT_REASONS } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
 // Module-scoped state — the closed set of stderr once-guards this module
@@ -887,6 +888,19 @@ function openRunInner({
     }
   }
 
+  function bootRepoKeyRecord() {
+    try {
+      const crew = JSON.parse(readFileSync(join(stateDir, 'crew.json'), 'utf8'))
+      if (!crew || typeof crew !== 'object' || Array.isArray(crew)) return { repo_key: null, repo_key_absent_reason: 'boot_invalid' }
+      if (!Object.hasOwn(crew, 'repo_key') || !Object.hasOwn(crew, 'repo_key_absent_reason')) return { repo_key: null, repo_key_absent_reason: 'legacy_boot' }
+      const key = crew.repo_key
+      const reason = crew.repo_key_absent_reason
+      if (key !== null && (typeof key !== 'string' || !/^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/.test(key))) return { repo_key: null, repo_key_absent_reason: 'boot_invalid' }
+      if ((key === null && !REPO_KEY_ABSENT_REASONS.includes(reason)) || (key !== null && reason !== null)) return { repo_key: null, repo_key_absent_reason: 'boot_invalid' }
+      return { repo_key: key, repo_key_absent_reason: reason }
+    } catch { return { repo_key: null, repo_key_absent_reason: 'boot_unreadable' } }
+  }
+
   // #291 step 3, recording half: the COMPILER's shape and strength proposals
   // travel in the brief as a fenced ```proposal block
   // (scripts/factory/make-brief.mjs renderProposalBlock). This READS that block
@@ -1275,6 +1289,7 @@ function openRunInner({
           tier,
           proposed_shape: proposal.shape,
           proposed_strength: proposal.strength,
+        ...bootRepoKeyRecord(),
         })
         if (configuration) handle.recordRunConfiguration({ adw_id: adwId, ...configuration })
       })

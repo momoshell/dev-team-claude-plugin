@@ -3185,3 +3185,80 @@ test('NP9 the boot journal records pi_codemode on/default when unset, on/env whe
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// Plugin provenance and repo key: real temp git repositories plus injected runners. Unknown is null with a closed reason.
+const provenanceRepo = (withOrigin) => {
+  const dir = scratchDir('crew-provenance-')
+  execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir })
+  if (withOrigin) execSync('git remote add origin git@github.com:acme/widget.git', { cwd: dir })
+  return dir
+}
+const fakeGit = (answers) => (args) => {
+  const key = args.join(' ')
+  for (const [prefix, result] of answers) if (key.startsWith(prefix)) return result
+  return { status: 0, stdout: '' }
+}
+
+// MUTATION: report plugin_dirty from status output when git status failed.
+test('plugin provenance records null dirtiness when git status is unreadable', async () => {
+  const { pluginProvenance, PLUGIN_ABSENT_REASONS } = await import('./provenance.mjs')
+  const dir = provenanceRepo(false)
+  try {
+    const sha = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim()
+    const real = (args, options) => execGit(args, options)
+    const denied = (args, options) => args[0] === 'status' ? { status: 128, stdout: ' M partial\n' } : real(args, options)
+    const record = pluginProvenance({ root: dir, git: denied })
+    assert.deepEqual(record, { plugin_root: dir, plugin_sha: sha, plugin_dirty: null, absent_reason: 'dirty_unreadable' })
+    assert.ok(PLUGIN_ABSENT_REASONS.includes(record.absent_reason))
+    assert.equal(pluginProvenance({ root: dir, git: real }).plugin_dirty, false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// MUTATION: drop the toplevel check; a plugin dir nested in another checkout reports the host HEAD.
+test('a plugin dir inside another checkout records no plugin sha', async () => {
+  const { pluginProvenance } = await import('./provenance.mjs')
+  const host = provenanceRepo(false)
+  try {
+    const nested = join(host, 'vendor', 'plugin')
+    mkdirSync(nested, { recursive: true })
+    const record = pluginProvenance({ root: nested, git: (args, options) => execGit(args, options) })
+    assert.deepEqual(record, { plugin_root: nested, plugin_sha: null, plugin_dirty: null, absent_reason: 'not_git_checkout' })
+    assert.match(pluginProvenance({ root: host, git: (args, options) => execGit(args, options) }).plugin_sha, /^[a-f0-9]{40}$/)
+  } finally { rmSync(host, { recursive: true, force: true }) }
+})
+
+// MUTATION: record origin_missing whenever `git remote get-url origin` exits nonzero.
+test('a failed origin probe is git_failed; only a readable remote list without origin is origin_missing', async () => {
+  const { repoKeyRecord, REPO_KEY_ABSENT_REASONS } = await import('./provenance.mjs')
+  const inside = ['rev-parse --is-inside-work-tree', { status: 0, stdout: 'true\n' }]
+  const getUrlDenied = ['remote get-url origin', { status: 128, stdout: 'fatal: unable to access config: Permission denied\n' }]
+  assert.deepEqual(repoKeyRecord({ checkout: '/x', git: fakeGit([inside, getUrlDenied, ['remote', { status: 128, stdout: '' }]]) }), { repo_key: null, repo_key_absent_reason: 'git_failed' })
+  assert.deepEqual(repoKeyRecord({ checkout: '/x', git: fakeGit([inside, getUrlDenied, ['remote', { status: 0, stdout: 'origin\n' }]]) }), { repo_key: null, repo_key_absent_reason: 'git_failed' })
+  assert.deepEqual(repoKeyRecord({ checkout: '/x', git: fakeGit([inside, getUrlDenied, ['remote', { status: 0, stdout: 'upstream\n' }]]) }), { repo_key: null, repo_key_absent_reason: 'origin_missing' })
+  const noOrigin = provenanceRepo(false)
+  const withOrigin = provenanceRepo(true)
+  try {
+    assert.deepEqual(repoKeyRecord({ checkout: noOrigin }), { repo_key: null, repo_key_absent_reason: 'origin_missing' })
+    assert.deepEqual(repoKeyRecord({ checkout: withOrigin }), { repo_key: 'acme__widget', repo_key_absent_reason: null })
+    for (const reason of ['git_failed', 'origin_missing']) assert.ok(REPO_KEY_ABSENT_REASONS.includes(reason))
+  } finally { rmSync(noOrigin, { recursive: true, force: true }); rmSync(withOrigin, { recursive: true, force: true }) }
+})
+
+function execGit(args, options = {}) {
+  try {
+    const stdout = execSync(['git', ...args.map((a) => `'${a}'`)].join(' '), { cwd: options.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(options.env || {}) } })
+    return { status: 0, stdout }
+  } catch (error) { return { status: error.status ?? 1, stdout: error.stdout || '' } }
+}
+
+// MUTATION: trim the whole git toplevel output; a checkout whose path ends in a space is misread as not_git_checkout.
+test('plugin provenance measures a checkout whose path ends in a space', async () => {
+  const { pluginProvenance } = await import('./provenance.mjs')
+  const parent = scratchDir('crew-provenance-space-')
+  const dir = join(parent, 'plugin ')
+  mkdirSync(dir)
+  execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir })
+  const record = pluginProvenance({ root: dir, git: (args, options) => execGit(args, options) })
+  assert.match(record.plugin_sha, /^[a-f0-9]{40}$/)
+  assert.equal(record.absent_reason, null)
+})

@@ -782,6 +782,8 @@ export const TABLES = Object.freeze({
       // rows are never backfilled; an old row without this column is likewise
       // unmeasured, not a measured synthetic session.
       { name: 'synthetic_reason', decl: 'TEXT' },
+      { name: 'repo_key', decl: 'TEXT' },
+      { name: 'repo_key_absent_reason', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -1922,6 +1924,19 @@ const TIER_MAX_CHARS = 64
 // advisor_consult journal row alone, which is never backfilled, and the HTTP channel writes none.
 export const ADVISOR_SPEND_COVERAGE = 'advisor_spend counts only pi-child consults that wrote an advisor_usage row (#1547 onward); an earlier consult keeps its usage on its advisor_consult journal row only and is never backfilled, and the HTTP advisor channel writes none — a missing row is uncounted spend, never zero spend'
 const ADVISOR_MODEL_MAX_CHARS = 128
+
+export const REPO_KEY_ABSENT_REASONS = Object.freeze(['not_git_checkout', 'origin_missing', 'origin_unparseable', 'git_failed', 'legacy_boot', 'boot_unreadable', 'boot_invalid'])
+const REPO_KEY_PATTERN = /^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/
+function normaliseRepoKey(value, reason) {
+  if (value == null) return null
+  if (typeof value !== 'string' || !REPO_KEY_PATTERN.test(value) || reason != null) refuse('startSession: invalid repo_key or conflicting absence reason')
+  return value
+}
+function normaliseRepoKeyReason(value, reason) {
+  if (reason == null) return null
+  if (value != null || !REPO_KEY_ABSENT_REASONS.includes(reason)) refuse('startSession: invalid repo_key_absent_reason or conflicting key')
+  return reason
+}
 
 function normaliseShortName(value, ctx, field) {
   if (value === undefined || value === null) return null
@@ -3105,6 +3120,8 @@ export function openLedger({
       proposed_shape: normaliseShortName(input.proposed_shape, 'startSession', 'proposed_shape'),
       proposed_strength: normaliseShortName(input.proposed_strength, 'startSession', 'proposed_strength'),
       synthetic_reason: null,
+      repo_key: normaliseRepoKey(input.repo_key, input.repo_key_absent_reason),
+      repo_key_absent_reason: normaliseRepoKeyReason(input.repo_key, input.repo_key_absent_reason),
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)
@@ -5590,7 +5607,7 @@ export function openLedger({
     `, [since, since, until, until, since, since, until, until])
   }
 
-  function cellReviews({ since = null, until = null } = {}) {
+  function cellReviews({ since = null, until = null, repoKey = null } = {}) {
     // run_first_at is deliberately computed over the whole table rather than
     // the requested window: clipping earlier reviews must not promote a later
     // review to the run's first round.
@@ -5612,9 +5629,10 @@ export function openLedger({
         MIN(scoped.created_at) AS first_at, MAX(scoped.created_at) AS last_at,
         GROUP_CONCAT(DISTINCT scoped.transport) AS transports
       FROM scoped LEFT JOIN sessions s ON s.adw_id = scoped.adw_id
+      WHERE (? IS NULL OR s.repo_key = ?)
       GROUP BY scoped.provider, scoped.model_id, model_key, scoped.agent, scoped.effort, scoped.role, s.tier
       ORDER BY scoped.provider, scoped.model_id, model_key, scoped.agent, scoped.effort, scoped.role, s.tier
-    `, [since, since, until, until])
+    `, [since, since, until, until, repoKey, repoKey])
   }
 
   function screenerAdoptions({ since = null, until = null } = {}) {
@@ -5668,7 +5686,7 @@ export function openLedger({
     return queryRows(`SELECT * FROM routing_choices${where} ORDER BY created_at, id`, params)
   }
 
-  function cellUsage({ since = null, until = null } = {}) {
+  function cellUsage({ since = null, until = null, repoKey = null } = {}) {
     return queryRows(`
       SELECT r.provider, r.model_id,
         CASE WHEN r.provider IS NULL AND r.model_id IS NULL THEN r.model ELSE NULL END AS model_key,
@@ -5683,8 +5701,9 @@ export function openLedger({
         JOIN agent_sessions a ON a.adw_id = r.adw_id AND a.dispatch_id = r.dispatch_id
         LEFT JOIN sessions sx ON sx.adw_id = r.adw_id
       WHERE (? IS NULL OR r.created_at >= ?) AND (? IS NULL OR r.created_at < ?)
+        AND (? IS NULL OR sx.repo_key = ?)
       GROUP BY r.provider, r.model_id, model_key, r.agent, r.effort, r.role, sx.tier
-    `, [since, since, until, until])
+    `, [since, since, until, until, repoKey, repoKey])
   }
 
   function modifierAttempts({ since = null, until = null } = {}) {
@@ -8089,7 +8108,7 @@ const VERB_FLAGS = Object.freeze({
   'cell-failures': new Set(['since', 'until']),
   'suite-refusals': new Set(['since', 'until']),
   'shadow-picks': new Set(['tier']),
-  cells: new Set(['since', 'until', 'prices']),
+  cells: new Set(['since', 'until', 'prices', 'repo']),
   evals: new Set(['bench', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
   'seat-teardowns': new Set(['since', 'until']),
@@ -8814,7 +8833,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | advisor-source-backfill [--dry-run] <dispatch-record.json>… | doctor | kill | settle <adw-id> --reason <text>')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | chunk-progress <parent_lane> [--chunk <id>] | eligible-tasks | phantom-sessions | run-set --since <iso> [--until <iso>] | configurations [--since <iso>] [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] [--repo <owner>__<repo>] | evals --bench <sha> [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | journal-facts [--since <iso>] [--until <iso>] | screener-adoptions [--since <iso>] [--until <iso>] | turns [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | advisor-source-backfill [--dry-run] <dispatch-record.json>… | doctor | kill | settle <adw-id> --reason <text>')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -9103,6 +9122,8 @@ export function main(argv) {
       if (positional.length > 0) refuse('configurations: takes no positional arguments')
       const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const hasRepo = Object.prototype.hasOwnProperty.call(flags, 'repo')
+      if (hasRepo && !/^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/.test(flags.repo)) refuse('cells: --repo must be an owner__repo key')
       const since = hasSince ? windowBound(flags.since, 'since', 'configurations') : null
       const until = hasUntil ? windowBound(flags.until, 'until', 'configurations') : null
       if (until != null && since != null && until <= since) refuse('configurations: --until must be later than --since')
@@ -9160,6 +9181,8 @@ export function main(argv) {
 
     if (verb === 'cells') {
       if (positional.length > 0) refuse('cells: takes no positional arguments')
+      const hasRepo = Object.prototype.hasOwnProperty.call(flags, 'repo')
+      if (hasRepo && !/^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/.test(flags.repo)) refuse('cells: --repo must be an owner__repo key')
       const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
       const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
       const since = hasSince ? windowBound(flags.since, 'since', 'cells') : null
@@ -9186,8 +9209,8 @@ export function main(argv) {
         }
       }
 
-      const rows = ledger.cellReviews({ since, until })
-      const usage = ledger.cellUsage({ since, until })
+      const rows = ledger.cellReviews({ since, until, repoKey: hasRepo ? flags.repo : null })
+      const usage = ledger.cellUsage({ since, until, repoKey: hasRepo ? flags.repo : null })
       if (ledger.stats().degraded) refuse('cells: the ledger mirror is degraded — this window is unanswerable, not empty')
       const usageByCell = new Map()
       for (const usageRow of usage) {

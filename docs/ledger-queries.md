@@ -824,3 +824,6 @@ the process's whole life. A NULL `last_heartbeat_at` is **not measured**, never
 a dead run — a headless lane that never entered a pane wait carries NULL by
 construction. And `processes.last_heartbeat_at` is unreachable: that table is
 retired and has never held a row (see **Retired tables** above).
+
+
+Repository provenance: `sessions.repo_key` is a nullable target-repository identity, distinct from `repo_slug` (the run's task/checkout label); `repo_key_absent_reason` names why identity was unavailable. Historical sessions remain NULL with no backfill. Unfiltered cells output is unchanged; filtered output excludes sessions with NULL repo keys. cells --repo <owner>__<repo> filters both review and usage rows by sessions.repo_key.

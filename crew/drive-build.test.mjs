@@ -3863,6 +3863,79 @@ const b376SetBuiltImplementation = (io, content, testContent = null) => {
   return io
 }
 
+// Builder's fixture oracle observes both proof states.
+function hrByteSensitiveIo(entry, built = B376_FILES[`${CTX.checkout}/${B376_IMPL_FILE}`]) {
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [entry], files: { ...B376_FILES } }), built)
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === hardenCommand(entry.test, entry.name)) {
+      const implementation = this.calls.files[`${CTX.checkout}/${entry.file}`]
+      return implementation?.includes('const guard = true')
+        ? { ok: false, output: `not ok 1 - ${entry.name}\n# pass 0\n# fail 1` }
+        : { ok: true, output: `ok 1 - ${entry.name}\n# pass 1\n# fail 0` }
+    }
+    return run.call(this, cmd)
+  }
+  return io
+}
+
+test('HR1', () => {
+  const io = hrByteSensitiveIo({ ...B376_HARDENED })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+  assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'killed')
+  assert.notEqual(result.details.escalation?.where, 'harden')
+})
+
+test('HR2', () => {
+  const entry = { ...B376_HARDENED }
+  const outcomes = []
+  for (const built of [`// repaired elsewhere\n${B376_FILES[`${CTX.checkout}/${B376_IMPL_FILE}`]}`, B376_FILES[`${CTX.checkout}/${B376_IMPL_FILE}`]]) {
+    const io = hrByteSensitiveIo(entry, built)
+    driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    outcomes.push(io.calls.logs.find((row) => row.finding_hardened)?.finding_hardened.outcome)
+  }
+  assert.deepEqual(outcomes, ['pre-repair-green', 'killed'])
+})
+
+test('HR3', () => {
+  const ownLine = 'export const ownTestGuard = true'
+  const implLine = 'const implGuard = true'
+  const originalTest = B376_FILES[`${CTX.checkout}/${B376_TEST_FILE}`]
+  const cases = [
+    { file: B376_TEST_FILE, find: ownLine, replace: ownLine.replace('true', 'false'), built: originalTest + ownLine + '\n' },
+    { file: B376_IMPL_FILE, find: implLine, replace: implLine.replace('true', 'false'), built: B376_FILES[`${CTX.checkout}/${B376_IMPL_FILE}`] + implLine + '\n' },
+  ]
+  const observed = []
+  for (const [index, item] of cases.entries()) {
+    const entry = { finding: 'F1', test: B376_TEST_FILE, name: 'F1 guard', file: item.file, find: item.find, replace: item.replace, class: 'coverage' }
+    let io = b376ProofIo({ hardened: [entry], files: { ...B376_FILES } })
+    const run = io.run
+    io.run = function (cmd) {
+      if (cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')) return B376_GREEN
+      return run.call(this, cmd)
+    }
+    if (index === 0) {
+      const baseWait = io.wait
+      io.wait = function (path, timeout) {
+        const env = baseWait.call(this, path, timeout)
+        if (path === 'builder:2') this.calls.files[`${CTX.checkout}/${B376_TEST_FILE}`] = item.built
+        return env
+      }
+    } else io = b376SetBuiltImplementation(io, item.built)
+    const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
+    const row = io.calls.logs.find((logged) => logged.finding_hardened)?.finding_hardened
+    const bounce = result.details.escalation?.why ?? ''
+    const guidance = bounce.includes("a coverage declaration's file must name the implementation the guard pins, not the guard's own test file.")
+    if (index === 0) observed.push(row?.outcome, guidance)
+    else {
+      const refusal = bounce.includes('F1: source-regressed')
+      assert.match(bounce, /F1: source-regressed/)
+      observed.push(row?.outcome, refusal, guidance)
+    }
+  }
+  assert.deepEqual(observed, ['source-regressed', true, 'source-regressed', true, false])
+})
+
 const B376_APPEAL_REASON = 'the defect class is a human judgement call and cannot become a mechanical guard'
 const B376_APPEAL_REQUEST = { finding: 'F1', hardening: 'ungateable', hardening_why: B376_APPEAL_REASON }
 const B376_APPEAL_MARK = { ...B376_FINDING, hardening: 'ungateable', hardening_why: 'the reviewer approved the exception' }
@@ -3887,7 +3960,7 @@ test('#910 a coverage repair still needs its mutation to kill', () => {
 })
 
 test('#910 an undeclared hardening class remains behavioural', () => {
-  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] }), '// repaired elsewhere\nconst guard = false\n')
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened.outcome, 'pre-repair-green')
@@ -4239,7 +4312,7 @@ test('b376 B5c an existing named test is not gate growth', () => {
 })
 
 test('b376 B5d hardening must fail on the witnessed pre-repair surface', () => {
-  const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const io = b376SetBuiltImplementation(b376ProofIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] }), '// repaired elsewhere\nconst guard = false\n')
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'harden')
@@ -4489,12 +4562,12 @@ test('b376 B8 the hardening proof adds no gate result', () => {
   const markedReviewer2 = b376Review('changes-needed', [B376_FINDING])
   const io = b376ProofIo({
     reviewer2: markedReviewer2, reviewer3: b376Review('pass', []), limits: { build_rounds: 3 },
-    proofOutputs: [B376_GREEN, B376_PRE_RED, B376_MUT_RED, B376_GREEN, B376_PRE_RED, B376_MUT_RED],
+    proofOutputs: [B376_GREEN, B376_MUT_RED, B376_GREEN, B376_MUT_RED],
   })
   const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
   assert.equal(result.status, 'done')
   assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenWitnessCommand(B376_TEST_FILE)).length, 2)
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 6)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 4)
   const hardeningCommands = new Set([hardenWitnessCommand(B376_TEST_FILE), hardenCommand(B376_TEST_FILE, 'F1 guard')])
   assert.equal(io.calls.emits.some(({ kind, cmd }) => kind === 'gate' && hardeningCommands.has(cmd)), false)
 })
@@ -4504,7 +4577,7 @@ test('b376 B9 a surviving hardening mutation is refused', () => {
     { ok: false, output: 'not ok 1 - unrelated\n# pass 0\n# fail 1' },
     { ok: true, output: 'ok 1 - unrelated\n# pass 1\n# fail 0' },
   ]) {
-    const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_PRE_RED, mutant] })
+    const io = b376ProofIo({ proofOutputs: [B376_GREEN, mutant] })
     const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
     assert.equal(result.status, 'escalation')
     assert.equal(result.details.escalation.where, 'harden')
@@ -7375,7 +7448,7 @@ test('G1 named-test hardening remains exact-name adjudicated', () => {
   const { round: _round, ...stable } = row
   assert.deepEqual(stable, { finding: 'F1', test: 'a.test.mjs', check: 'F1 guard', outcome: 'killed', why: null })
   assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenWitnessCommand(B376_TEST_FILE)).length, 1)
-  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 3)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === hardenCommand(B376_TEST_FILE, 'F1 guard')).length, 2)
   const hardeningCmds = new Set([hardenWitnessCommand(B376_TEST_FILE), hardenCommand(B376_TEST_FILE, 'F1 guard')])
   for (const record of io.calls.wrapped.filter((record) => hardeningCmds.has(record.cmd))) {
     assert.equal(record.wrapped, record.cmd)
@@ -8561,6 +8634,12 @@ test('P2 two independently unproven guards complete with two blind spots', () =>
 
 test('P3 a refuted F2 guard escalates the lane despite unproven F1', () => {
   const io = pTwoFindingIo({ f2Witness: P_F2_PROVING_WITNESS, f2Proof: [pGreenFor('F2 guard'), pGreenFor('F2 guard'), pRedFor('F2 guard')] })
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:3') this.calls.files[`${CTX.checkout}/${B376_IMPL_FILE}`] += '// repaired after witness\n'
+    return env
+  }
   const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
   const f1 = pRowsFor(io, 'F1').filter((row) => row.round === 2)
   assert.ok(f1.length >= 1, JSON.stringify(f1))
@@ -8574,7 +8653,7 @@ test('P3 a refuted F2 guard escalates the lane despite unproven F1', () => {
 
 test('b851 RV1-1 a passing pre-repair verdict with an introduced region stays pre-repair-green', () => {
   const introduced = { finding: 'F1', test: B376_TEST_FILE, name: 'F1 guard', file: B376_IMPL_FILE, find: 'if (x == null) return null', replace: 'if (x == null) return guard' }
-  const io = b376ProofIo({ hardened: [introduced], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const io = b376SetBuiltImplementation(b376ProofIo({ hardened: [introduced], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' }, proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] }), 'const guard = false\nif (x == null) return null\n')
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'harden')
@@ -8602,11 +8681,13 @@ test('only a pre-repair run that ran the check and passed refutes a guard', () =
 // anchor again (it is absent pre-repair by construction, so the row reads unmeasured and the
 // stage clears).
 test('a guard that passed on the review-time bytes is refuted even when its mutated region is new', () => {
-  const io = b376ProofIo({
-    hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES },
-    // green on the repaired tree, GREEN on the pre-repair witness (it passed there), then red under the mutation
+  const entry = { ...B376_HARDENED, find: 'const introduced = true', replace: 'const introduced = false' }
+  const original = B376_FILES[`${CTX.checkout}/${B376_IMPL_FILE}`]
+  const io = b376SetBuiltImplementation(b376ProofIo({
+    hardened: [entry], files: { ...B376_FILES },
+    // Control and pre-repair pass; the named mutant fails on the newly introduced region.
     proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED],
-  })
+  }), `${original}const introduced = true\n`)
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'harden')

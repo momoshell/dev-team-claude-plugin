@@ -5801,10 +5801,16 @@ test('C1 unpinned review prescriptions remain unaffected', () => {
 
 test('D1 pinned test edits cannot substitute for implementation repair', () => {
   const io = b376ProofIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_MUT_RED] })
+  const wait = io.wait
+  io.wait = function (path, timeout) {
+    const env = wait.call(this, path, timeout)
+    if (path === 'builder:2') this.calls.files[`${CTX.checkout}/a.mjs`] = '// repaired elsewhere\nconst guard = false\n'
+    return env
+  }
   const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
   const row = io.calls.logs.find((entry) => entry.finding_hardened)?.finding_hardened
   assert.equal(result.status, 'escalation')
-  assert.equal(result.details.escalation.where, 'harden')
+  assert.equal(result.details.escalation.where, 'harden', JSON.stringify(result.details.escalation))
   assert.equal(row.outcome, 'pre-repair-green')
 })
 
@@ -6852,13 +6858,20 @@ function b1145PreservationLane({ restore = false, prepare = null } = {}) {
 
 // MUTATION HB4: omit the in-process full-file preservation diff.
 test('HB4 preservation bounce supplies byte evidence and permits restoration', () => {
-  const { io, result, bounces } = b1145PreservationLane({ restore: true })
+  const { io, result, bounces } = b1145PreservationLane({ restore: true, prepare(io) {
+    const run = io.run
+    let n = 0
+    io.run = function (cmd) {
+      if (cmd === hardenCommand(PIN_GUARD_FILE, 'F1 guard')) return [B376_GREEN, B376_MUT_RED][n++ % 2]
+      return run.call(this, cmd)
+    }
+  } })
   assert.equal(bounces.length, 1)
   const brief = io.calls.writes[bounces[0].briefFile] ?? ''
   assert.match(brief, /Restore a\.test\.mjs byte-identically/)
   assert.equal(brief.split('\n').some((line) => line.startsWith('-') && line.includes('assert.equal(1, 1)')), true)
   assert.equal(brief.split('\n').some((line) => line.startsWith('+') && line.includes('assert.ok(true)')), true)
-  assert.equal(result.status, 'done')
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
 })
 
 // MUTATION HB5: remove spending of the preservation counter after the brief persists.
@@ -6970,7 +6983,7 @@ test('RV2-1 a suiteCycle re-entry does not refill the final hardening bounce', (
   const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
   // Round 2 is final: its first proof survives, so the lane spends its one final bounce;
   // round 3's proof kills the mutant and review passes.
-  const io = pinIo({ proofOutputs: [B376_GREEN, B376_PRE_RED, B376_GREEN, B376_GREEN, B376_PRE_RED, B376_MUT_RED] })
+  const io = pinIo({ proofOutputs: [B376_GREEN, B376_GREEN, B376_GREEN, B376_MUT_RED] })
   const testPath = CTX.checkout + '/' + B376_TEST_FILE
   const log = io.log
   let repinned = false
@@ -7006,7 +7019,7 @@ test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a 
   const testPath = CTX.checkout + '/' + B376_TEST_FILE
   const guardPath = CTX.checkout + '/' + PIN_GUARD_FILE
   const second = { ...B376_HARDENED, test: PIN_GUARD_FILE, name: 'F1 guard two', find: 'const guard = false', replace: 'const guard = 2' }
-  const io = pinIo({})
+  const io = pinIo({ proofOutputs: [B376_GREEN, B376_MUT_RED] })
   const twoCmd = hardenCommand(PIN_GUARD_FILE, 'F1 guard two')
   const run = io.run
   io.run = function (cmd) {
@@ -7017,7 +7030,7 @@ test('RV3-3 re-proof pairs each guard with its own witness when reviews reuse a 
       const n = this.calls.run.filter(({ cmd: seen }) => seen === cmd).length
       const green = { ok: true, output: 'ok 1 - F1 guard two\n# pass 1\n# fail 0' }
       const red = { ok: false, output: 'not ok 1 - F1 guard two\n# pass 0\n# fail 1' }
-      return [green, red, red][(n - 1) % 3]
+      return [green, red][(n - 1) % 2]
     }
     return result
   }

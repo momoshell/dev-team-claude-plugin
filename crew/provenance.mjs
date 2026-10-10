@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
@@ -13,6 +14,10 @@ function defaultGit(args, options = {}) {
   } catch (error) {
     return { status: null, stdout: '', stderr: '', error }
   }
+}
+
+function samePath(a, b) {
+  try { return realpathSync(a) === realpathSync(b) } catch { return null }
 }
 
 function run(git, root, args) {
@@ -31,13 +36,17 @@ export function pluginProvenance({ root = PLUGIN_ROOT, git = defaultGit } = {}) 
     const inside = run(git, root, ['rev-parse', '--is-inside-work-tree'])
     if (inside.failed || (inside.status !== 0 && inside.stdout.trim())) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'git_failed' }
     if (inside.status !== 0 || inside.stdout.trim() !== 'true') return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'not_git_checkout' }
+    // A plugin copied inside another checkout is not its own checkout: never report the host repository's HEAD.
+    const top = run(git, root, ['rev-parse', '--show-toplevel'])
+    if (top.failed || top.status !== 0) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'git_failed' }
+    if (samePath(top.stdout.trim(), root) !== true) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'not_git_checkout' }
     const head = run(git, root, ['rev-parse', 'HEAD'])
     const sha = head.stdout.trim()
     if (head.failed || head.status !== 0 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(sha)) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: head.failed ? 'git_failed' : 'head_unreadable' }
     const status = run(git, root, ['status', '--porcelain', '--untracked-files=no'])
-    const measuredSha = sha
-    const dirtyOutput = status.stdout
-    return { plugin_root: root, plugin_sha: measuredSha, plugin_dirty: dirtyOutput.length > 0, absent_reason: status.failed || status.status !== 0 ? 'dirty_unreadable' : null }
+    // An unreadable status is unmeasured dirtiness: null, never a guess from partial output.
+    if (status.failed || status.status !== 0) return { plugin_root: root, plugin_sha: sha, plugin_dirty: null, absent_reason: 'dirty_unreadable' }
+    return { plugin_root: root, plugin_sha: sha, plugin_dirty: status.stdout.length > 0, absent_reason: null }
   } catch {
     return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'git_failed' }
   }
@@ -50,10 +59,13 @@ export function repoKeyRecord({ checkout, git = defaultGit } = {}) {
     if (inside.status !== 0 || inside.stdout.trim() !== 'true') return { repo_key: null, repo_key_absent_reason: 'not_git_checkout' }
     const remote = run(git, checkout, ['remote', 'get-url', 'origin'])
     if (remote.failed) return { repo_key: null, repo_key_absent_reason: 'git_failed' }
-    if (remote.status !== 0 || !remote.stdout.trim()) {
-      const absent_reason = 'origin_missing'
-      return { repo_key: null, repo_key_absent_reason: absent_reason }
+    if (remote.status !== 0) {
+      // origin_missing only when the remote list is readable and has no origin; a failed probe is git_failed.
+      const list = run(git, checkout, ['remote'])
+      if (list.failed || list.status !== 0) return { repo_key: null, repo_key_absent_reason: 'git_failed' }
+      return { repo_key: null, repo_key_absent_reason: list.stdout.split('\n').map((name) => name.trim()).includes('origin') ? 'git_failed' : 'origin_missing' }
     }
+    if (!remote.stdout.trim()) return { repo_key: null, repo_key_absent_reason: 'origin_unparseable' }
     const key = repoKeyFor({ checkout, git: (root, args) => {
       // repoKeyFor's injected runner follows gitOutput's root-first convention.
       const result = git(args, { cwd: root, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, timeout: 5000, encoding: 'utf8' })

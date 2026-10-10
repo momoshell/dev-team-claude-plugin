@@ -38,9 +38,10 @@
 // filename.
 
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { stripVTControlCharacters } from 'node:util'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -49,6 +50,7 @@ import {
 } from './probe-repo.mjs'
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { parseFenceScope, validateFenceScope } from '../../crew/fence-scope.mjs'
+import { gateReapCommand, gateReapSweepCommand, gateReapVerdict } from '../../crew/drive.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
 export const PACK_OMISSIONS = Object.freeze(['symbols', 'tripwires'])
@@ -1090,7 +1092,7 @@ export function profileField(profileResult, name) {
   }
 }
 
-function unknownBaseline(lane, reason, laneBasis = 'package.json scripts.test') {
+function unknownBaseline(lane, reason, laneBasis = 'package.json scripts.test', reap = null) {
   return {
     lane: lane || null,
     pass: null,
@@ -1098,10 +1100,12 @@ function unknownBaseline(lane, reason, laneBasis = 'package.json scripts.test') 
     status: 'unknown',
     reason,
     laneBasis,
+    reap,
+    ...(reap === null ? { reap_absent_reason: 'not-spawned' } : {}),
   }
 }
 
-export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {}) {
+export function gatherBaseline({ checkout, lane = null, laneBasis = null, timeoutMs = BASELINE_TIMEOUT_MS, psCmd = 'ps' } = {}) {
   const root = resolve(checkout || process.cwd())
   const basis = nonEmptyString(laneBasis) ? laneBasis : 'package.json scripts.test'
   let selectedLane = nonEmptyString(lane) ? lane : null
@@ -1118,37 +1122,52 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
     }
   }
 
+  let dir = null
   let result
+  let reap = null
   try {
-    result = spawnSync('/bin/sh', ['-c', selectedLane], {
-      cwd: root,
-      encoding: 'utf8',
-      env: colourNeutralEnv(),
-      timeout: BASELINE_TIMEOUT_MS,
-      // The suite's spec output passed Node's 1 MiB default on 2026-10-06; ENOBUFS made every
-      // baseline unknown and every dispatch run the suite twice.
-      maxBuffer: 64 * 1024 * 1024,
-    })
+    dir = mkdtempSync(join(tmpdir(), 'baseline-reap-'))
+    const reapPaths = { cmdFile: join(dir, 'cmd'), launchFile: join(dir, 'launch'), pgidFile: join(dir, 'pgid'), report: join(dir, 'report') }
+    writeFileSync(reapPaths.report, '')
+    const reapOptions = { ...reapPaths, psCmd }
+    const wrapped = gateReapCommand({ cmd: selectedLane, ...reapOptions })
+    try {
+      result = spawnSync('/bin/sh', ['-c', wrapped], {
+        cwd: root, encoding: 'utf8', env: colourNeutralEnv(), timeout: timeoutMs,
+        // The suite's spec output passed Node's 1 MiB default on 2026-10-06; ENOBUFS made every
+        // baseline unknown and every dispatch run the suite twice.
+        maxBuffer: 64 * 1024 * 1024,
+      })
+    } catch {
+      result = null
+    } finally {
+      try { spawnSync('/bin/sh', ['-c', gateReapSweepCommand(reapOptions)], { cwd: root, encoding: 'utf8', timeout: 10_000, maxBuffer: 64 * 1024 * 1024 }) } catch {}
+    }
+    let reportText = null
+    try { reportText = readFileSync(reapPaths.report, 'utf8') || null } catch {}
+    reap = gateReapVerdict(reportText)
   } catch {
     return unknownBaseline(selectedLane, 'spawn-error', basis)
+  } finally {
+    if (dir) { try { rmSync(dir, { recursive: true, force: true }) } catch {} }
   }
   if (!result || result.error) {
     // ENOBUFS also kills the child with SIGTERM, so it is classified before the signal.
-    if (result?.error?.code === 'ENOBUFS') return unknownBaseline(selectedLane, 'output-overflow', basis)
+    if (result?.error?.code === 'ENOBUFS') return unknownBaseline(selectedLane, 'output-overflow', basis, reap)
     const timeout = result && (result.signal === 'SIGTERM' || result.error?.code === 'ETIMEDOUT')
-    return unknownBaseline(selectedLane, timeout ? 'timeout' : 'spawn-error', basis)
+    return unknownBaseline(selectedLane, timeout ? 'timeout' : 'spawn-error', basis, reap)
   }
-  if (result.signal) return unknownBaseline(selectedLane, 'timeout', basis)
+  if (result.signal) return unknownBaseline(selectedLane, 'timeout', basis, reap)
 
   const output = stripVTControlCharacters(`${result.stdout || ''}\n${result.stderr || ''}`)
   const passMatch = output.match(/^\s*(?:ℹ\s*)?pass\s+(\d+)\s*$/m)
   const failMatch = output.match(/^\s*(?:ℹ\s*)?fail\s+(\d+)\s*$/m)
-  if (!passMatch || !failMatch) return unknownBaseline(selectedLane, 'missing-summary', basis)
+  if (!passMatch || !failMatch) return unknownBaseline(selectedLane, 'missing-summary', basis, reap)
   const pass = Number(passMatch[1])
   const fail = Number(failMatch[1])
-  if (fail > 0) return { lane: selectedLane, pass, fail, status: 'red', reason: null, laneBasis: basis }
-  if (result.status !== 0) return { lane: selectedLane, pass, fail, status: 'unknown', reason: 'nonzero-exit', laneBasis: basis }
-  return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis }
+  if (fail > 0) return { lane: selectedLane, pass, fail, status: 'red', reason: null, laneBasis: basis, reap }
+  if (result.status !== 0) return { lane: selectedLane, pass, fail, status: 'unknown', reason: 'nonzero-exit', laneBasis: basis, reap }
+  return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis, reap }
 }
 
 function fenceLineCount(text) {
@@ -3746,6 +3765,8 @@ function measureOnly(flags) {
   const state = gitState({ checkout })
   const status = baseline.status === 'green' || baseline.status === 'red' ? baseline.status : 'unknown'
   const output = {
+    reap: baseline.reap,
+    ...(baseline.reap === null ? { reap_absent_reason: baseline.reap_absent_reason } : {}),
     sha: state.clean === true ? state.sha : null,
     command: baseline.lane,
     pass: baseline.pass,
@@ -3806,6 +3827,7 @@ function compile(flags) {
   const command = resolveBaselineCommand({ checkout, lane })
   const reuse = reuseBaseline({ checkout, command, laneBasis, path: flags.baseline ?? null })
   const baseline = reuse.baseline || gatherBaseline({ checkout, lane, laneBasis })
+  if (!reuse.baseline) process.stderr.write(`brief: baseline reap: outcome=${baseline.reap?.outcome ?? 'not-spawned'} reason=${baseline.reap?.reason ?? baseline.reap_absent_reason} signals=${baseline.reap?.signals ?? 'not-spawned'}\n`)
   let fromProfile
   try {
     fromProfile = profileProtectedPaths(profileResult.profile, { path: profileResult.path })

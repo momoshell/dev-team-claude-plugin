@@ -1,8 +1,5 @@
 {
   "crew/protected-paths.mjs:27": "export function resolveProtectedPaths(extra)",
-  "scripts/factory/make-brief.mjs:135": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
-  "scripts/factory/make-brief.mjs:142": "CREATES_EXISTS = 'creates-exists'",
-  "scripts/factory/make-brief.mjs:136": "STALE_READ_ACK = 'stale-read-ack'",
   "scripts/factory/dispatch-batch.mjs:41": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
   "scripts/factory/dispatch-batch.mjs:28": "TRANSPORT_CONFLICT = 'transport-conflict'",
   "scripts/factory/dispatch-batch.mjs:46": "DEPENDENT_BASE_STALE = 'dependent-base-stale'",
@@ -14,5 +11,8 @@
   "crew/drive.mjs:59": "builder: 2400, reviewer: 1800",
   "crew/drive.mjs:801": "export const GATE_REAP_SHELL = '/bin/bash'",
   "crew/drive.test.mjs:1838": "'/path/that/does/not/exist'",
-  "scripts/factory/make-brief.mjs:1697": "a recorded baseline is a fact about a commit and is never consumed"
+  "scripts/factory/make-brief.mjs:137": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
+  "scripts/factory/make-brief.mjs:138": "STALE_READ_ACK = 'stale-read-ack'",
+  "scripts/factory/make-brief.mjs:144": "CREATES_EXISTS = 'creates-exists'",
+  "scripts/factory/make-brief.mjs:1716": "a recorded baseline is a fact about a commit and is never consumed"
 }

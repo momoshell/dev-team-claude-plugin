@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-30",
+  "updated_at": "2026-10-10",
   "tiers": {
     "mechanical": {
       "advisor": null,
@@ -47,7 +47,7 @@
         "provider": "openai",
         "id": "gpt-6-luna",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "high"
       },
       "reviewer": {
         "provider": "anthropic",
@@ -57,7 +57,12 @@
       }
     },
     "judge": {
-      "advisor": null,
+      "advisor": {
+        "provider": "openai",
+        "id": "gpt-5.6-terra",
+        "agent": "pi",
+        "effort": "medium"
+      },
       "lead": {
         "provider": "anthropic",
         "id": "claude-opus-5-5",
@@ -84,15 +89,15 @@
       },
       "tech-lead": {
         "provider": "anthropic",
-        "id": "claude-fable-5-1",
+        "id": "claude-opus-5-5",
         "agent": "claude",
-        "effort": "medium",
+        "effort": "xhigh",
         "fallback": [
           {
             "provider": "anthropic",
-            "id": "claude-opus-5-5",
+            "id": "claude-fable-5-1",
             "agent": "claude",
-            "effort": "high"
+            "effort": "medium"
           }
         ]
       }

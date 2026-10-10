@@ -18,7 +18,7 @@
       "agent": "pi",
       "provider": "openai",
       "id": "gpt-6-luna",
-      "effort": "medium",
+      "effort": "high",
       "skills": [],
       "extensions": [
         "crew/pi/extensions/builderloop.ts",

@@ -6087,7 +6087,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   let fatal = null
   const proveEntry = (entry) => {
     let active = null
-    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
+    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, file: entry.file, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
     // MUTATION P6: let a prescribed finding close through an invocation and it is closed by
     // a runner that is not the new top-level test(...) its brief required.
     // MUTATION P18: skip the placement rule and a prescribed guard may live in the pinned
@@ -6153,9 +6153,9 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
       if (control === 'skipped') return row('control-skipped', `the repaired control skipped ${entry.name}`)
       const repairedFile = io.readFile(fileAbs)
       if (repairedFile === null) return row('unapplied', `${entry.file} does not exist in the built tree`)
-      // #910/#900 — the witnessed pre-repair conjunct belongs to exactly ONE repair
-      // class, and demanding it of the other is what makes an honest coverage repair
-      // unprovable. The arms are exclusive and the class chooses between them.
+      // #910/#900/#1794 — the witnessed pre-repair conjunct belongs to a behavioural repair
+      // whose declared file changed since review; on byte-identical bytes it would only repeat
+      // the control, so that entry, like coverage, is decided by the mutation proof alone.
       // MUTATION A1: mis-spell the coverage arm and a coverage repair is adjudicated by
       // the behavioural proof again — the deadlock three finished lanes paid for.
       if (hardeningClassOf(entry) === 'coverage') {
@@ -6176,7 +6176,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
           const reviewVerdict = nameVerdict(reviewResult?.output, entry.name)
           if (reviewVerdict !== 'passed') return row('source-regressed', `source-regressed: the review-time ${entry.file} check ${entry.name} was ${reviewVerdict}`)
         }
-      } else {
+      } else if (repairedFile !== S.bytes) {
         let pre = null
         active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
         let preResult
@@ -15520,6 +15520,7 @@ export function hardeningBounceLines(round, refusals, rows, testRunner) {
     if (hardeningRowBucket(row) !== 'refuted') continue
     lines.push(`- ${row.finding}: ${row.outcome} — ${row.why}`)
     if (row.outcome === 'name-not-new') lines.push(`- ${row.finding}: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse ${row.name}.`)
+    if (row.outcome === 'source-regressed' && typeof row.file === 'string' && row.file === row.test) lines.push(`- ${row.finding}: a coverage declaration's file must name the implementation the guard pins, not the guard's own test file.`)
   }
   // RV1-2 (b851 review): a bounce that lists only the refuted rows tells a builder its other
   // findings are settled. A finding with NO row at all is the commonest bounce of all — the

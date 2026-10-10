@@ -4,7 +4,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+  appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
   statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1973,4 +1973,19 @@ test('L2A a stale exclude lock left by a crashed holder is reclaimed', () => {
   assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 0, stdout: exclude + '\n' }) } }), { removed: 1, reason: null })
   assert.equal(readFileSync(exclude, 'utf8'), '')
   assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: rename the rewrite onto the exclude path instead of its realpath; the operator's symlink becomes a regular file.
+// MUTATION: drop the chmod of the rewrite; a 0600 exclude file becomes 0644.
+test('L2A exclude cleanup keeps a symlinked exclude a symlink and keeps the file mode', () => {
+  const checkout = nextRoot('l2a-symlinked-exclude'), laneDir = join(checkout, 'dt-a')
+  const target = put(checkout, 'operator/exclude', 'operator\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n')
+  chmodSync(target, 0o600)
+  mkdirSync(join(checkout, 'info'), { recursive: true })
+  const exclude = join(checkout, 'info', 'exclude')
+  symlinkSync(target, exclude)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 0, stdout: exclude + '\n' }) } }), { removed: 1, reason: null })
+  assert.equal(lstatSync(exclude).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), 'operator\n')
+  assert.equal(statSync(target).mode & 0o777, 0o600)
 })

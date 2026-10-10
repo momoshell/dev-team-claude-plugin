@@ -30,7 +30,7 @@ import {
   createHash, randomUUID,
 } from 'node:crypto'
 import {
-  appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import {
@@ -1963,7 +1963,7 @@ function withExcludeLock(excludePath, d, fn) {
 
 export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
   const source = deps && typeof deps === 'object' ? deps : {}
-  const d = { spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })), readFileSync: source.readFileSync || readFileSync, writeFileSync: source.writeFileSync || writeFileSync, renameSync: source.renameSync || renameSync, rmSync: source.rmSync || rmSync, statSync: source.statSync || statSync }
+  const d = { spawn: source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' })), readFileSync: source.readFileSync || readFileSync, writeFileSync: source.writeFileSync || writeFileSync, renameSync: source.renameSync || renameSync, rmSync: source.rmSync || rmSync, statSync: source.statSync || statSync, realpathSync: source.realpathSync || realpathSync, chmodSync: source.chmodSync || chmodSync }
   let temporary = null
   try {
     const result = d.spawn({ file: 'git', args: ['-C', checkout, 'rev-parse', '--git-path', 'info/exclude'], cwd: checkout })
@@ -1992,9 +1992,12 @@ export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
       }
       if (!removed) return { removed: 0, reason: null }
       const output = Buffer.from(kept.join(''), 'latin1')
-      temporary = join(dirname(excludePath), `.info-exclude-${randomUUID()}.tmp`)
+      // Replace the file the path resolves to, never a symlink in front of it, and keep its permission bits.
+      const target = d.realpathSync(excludePath)
+      temporary = join(dirname(target), `.info-exclude-${randomUUID()}.tmp`)
       d.writeFileSync(temporary, output, { flag: 'wx' })
-      d.renameSync(temporary, excludePath)
+      d.chmodSync(temporary, d.statSync(target).mode & 0o7777)
+      d.renameSync(temporary, target)
       temporary = null
       return { removed, reason: null }
     })

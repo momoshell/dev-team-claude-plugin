@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   symlinkSync,
@@ -2475,7 +2476,7 @@ test('L2A reap removes the lane exclude pairs after its worktree removal and rep
   assert.deepEqual(worktree.detail.excludes, { removed: 1, reason: null })
   const temp = calls.write.find(([path]) => basename(path).startsWith('.info-exclude-'))
   assert.equal(String(temp[1]), 'stock\n/kept\n')
-  assert.deepEqual(calls.rename.find(([from]) => from === temp[0]), [temp[0], exclude])
+  assert.deepEqual(calls.rename.find(([from]) => from === temp[0]), [temp[0], realpathSync(exclude)])
   assert.deepEqual(rows(result).map((row) => row.step).slice(-3), ['branch', 'prune', 'archive'])
 })
 
@@ -2490,7 +2491,7 @@ test('L2A a failed reap exclude cleanup is reported in the worktree detail and r
       ['info/exclude', { status: 0, stdout: exclude + '\n', stderr: '' }],
     ],
   })
-  const failing = { ...deps, renameSync: (from, to) => { if (to === exclude) throw new Error('EXDEV'); return deps.renameSync(from, to) } }
+  const failing = { ...deps, renameSync: (from, to) => { if (to === realpathSync(exclude)) throw new Error('EXDEV'); return deps.renameSync(from, to) } }
   const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps: failing })
   const worktree = rows(result).find((row) => row.step === 'worktree')
   assert.deepEqual(worktree.detail.excludes, { removed: null, reason: 'worktree-exclude-cleanup-failed' })

@@ -9319,7 +9319,7 @@ test('SB7 bounce journal rows and inventory stay aligned', () => {
   assert.deepEqual(io.calls.logs.filter(({ event }) => event === 'step:bounce').map(({ channel, step, round, status }) => ({ channel, step, round, status })), [
     { channel: 'record', step: 'c1', round: 1, status: 'insufficient' }, { channel: 'record', step: 'c1', round: 2, status: 'blocked' },
   ])
-  assert.deepEqual(DRIVE_JOURNAL_EXPECTED.find(([method, event]) => method === 'recordRow' && event === "event='step:bounce'"), ['recordRow', "event='step:bounce'", 'at step round status'])
+  assert.deepEqual(DRIVE_JOURNAL_EXPECTED.find(([method, event]) => method === 'recordRow' && event === "event='step:bounce'"), ['recordRow', "event='step:bounce'", 'at step round status untouched'])
 })
 
 test('R1 stepped-resume acceptance', () => {

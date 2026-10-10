@@ -1526,6 +1526,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at plan_lineage"],
   ["recordRow", "", "at member_questions"],
   ["recordRow", "", "at question_answers"],
+  ["recordRow", "event='acceptance-coverage-bounce'", "at round uncovered extra"],
   ["recordRow", "", "at plan_scope"],
   ["recordRow", "", "at event validation_lane_resolved"],
   ["recordRow", "event='acceptance-coverage'", "at ...roundCoverage"],

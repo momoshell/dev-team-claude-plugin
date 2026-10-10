@@ -4109,3 +4109,93 @@ test('seat handoff ancillary bounds and branches', () => {
   assert.equal(denied.calls.assign.some((x) => x.briefFile === TD + '/check-brief-r2.md'), false)
   assert.equal(Object.values(denied.calls.writes).some((body) => String(body).includes('tech-lead-handoff-r2.md')), false)
 })
+
+function coverageFirstIo(options = {}) {
+  const mutations = Object.hasOwn(options, 'mutations') ? options.mutations : [{ ...CHECK_MUTATION, check: 'X1' }]
+  const { brief = '# T\n\n## Acceptance\n(CB1) required\n', leadDecision = 'bounce', leadReason = 'because', questionless = false, status = 'insufficient' } = options
+  const first = planEnv({ status, summary: 'draft needs work', details: {
+    questions: questionless ? [] : [{ id: 'q1', question: 'What should change?' }], mutations,
+  } })
+  const final = planEnv({ details: { ...planEnv().details, mutations: [{ ...CHECK_MUTATION, check: 'CB1' }], needs_adversary: true } })
+  const io = fakeIo({ files: { [CTX_TL.briefFile]: brief }, envelopes: {
+    'planner:1': first,
+    'lead:1': leadEnv(leadDecision, 'fix the loader only', { reason: leadReason, answers: [{ id: 'q1', answer: 'keep the loader fix' }] }),
+    'planner:2': final,
+    'tech-lead:1': checkEnv('approve'),
+  } })
+  return { io, result: driveTask(CTX_TL, io) }
+}
+
+// Mutation killed: removing coverage from the written bounce loses the acceptance ids.
+test('CF1 includes draft-plan misses in the planner bounce', async (t) => {
+  const { io } = coverageFirstIo()
+  const bounce = io.calls.writes[TD + '/plan-bounce-r1.md']
+  assert.match(bounce, /fix the loader only/)
+  assert.match(bounce, /Uncovered ids: CB1/)
+  assert.match(bounce, /Extra checks: X1/)
+  const artifacts = (io) => ({
+    bounce: io.calls.writes[TD + '/plan-bounce-r1.md'],
+    consult: Object.entries(io.calls.writes).find(([path]) => path.endsWith('/decision-1.md'))?.[1],
+    rows: io.calls.logs.filter(row => row.event === 'acceptance-coverage-bounce'),
+  })
+  const preservation = [
+    ['absent mutations', undefined, '# T\n\n## Acceptance\n(CB1) required\n'],
+    ['empty mutations', [], '# T\n\n## Acceptance\n(CB1) required\n'],
+    ['non-array mutations', null, '# T\n\n## Acceptance\n(CB1) required\n'],
+    ['unreadable brief', [{ ...CHECK_MUTATION, check: 'X1' }], null],
+    ['brief without ids', [{ ...CHECK_MUTATION, check: 'X1' }], '# T\nno acceptance labels\n'],
+    ['fully covered mutation', [{ ...CHECK_MUTATION, check: 'CB1' }], '# T\n\n## Acceptance\n(CB1) required\n'],
+  ]
+  for (const [name, mutations, brief] of preservation) await t.test(name, () => {
+    const control = artifacts(coverageFirstIo({ mutations: undefined, brief }).io)
+    const caseA = artifacts(coverageFirstIo({ mutations, brief }).io)
+    assert.equal(typeof caseA.bounce, 'string')
+    assert.equal(typeof caseA.consult, 'string')
+    assert.equal(caseA.consult, control.consult)
+    assert.equal(caseA.bounce, control.bounce)
+    assert.deepEqual(caseA.rows, [])
+  })
+  await t.test('questionless mismatched draft preserves coverage on both artifacts', () => {
+    const result = coverageFirstIo({ questionless: true })
+    const output = artifacts(result.io)
+    assert.equal(typeof output.consult, 'string')
+    assert.match(output.bounce, /Uncovered ids: CB1/)
+    assert.match(output.consult, /Uncovered ids: CB1/)
+    assert.equal(output.rows.length, 1)
+  })
+  await t.test('blocked draft preserves coverage on both artifacts', () => {
+    const result = coverageFirstIo({ status: 'blocked' })
+    const output = artifacts(result.io)
+    assert.equal(typeof output.consult, 'string')
+    assert.match(output.bounce, /Uncovered ids: CB1/)
+    assert.match(output.consult, /Uncovered ids: CB1/)
+    assert.equal(output.rows.length, 1)
+  })
+  await t.test('lead escalation does not write a planner bounce', () => {
+    const control = coverageFirstIo({ leadDecision: 'escalate', leadReason: 'fix the loader only', mutations: undefined })
+    const result = coverageFirstIo({ leadDecision: 'escalate', leadReason: 'fix the loader only' })
+    const output = artifacts(result.io)
+    assert.equal(result.result.status, 'escalation')
+    assert.equal(result.result.details.escalation?.why, control.result.details.escalation?.why)
+    assert.equal(result.result.details.escalation?.why, 'fix the loader only')
+    assert.equal(result.io.calls.writes[TD + '/plan-bounce-r1.md'], undefined)
+    assert.match(output.consult, /Uncovered ids: CB1/)
+    assert.deepEqual(output.rows, [])
+  })
+})
+
+// Mutation killed: suppressing the journal decision drops the single measured bounce row.
+test('CF2 journals the draft-plan coverage bounce once', () => {
+  const { io } = coverageFirstIo()
+  assert.deepEqual(io.calls.logs.filter(row => row.event === 'acceptance-coverage-bounce').map(({ round, uncovered, extra }) => ({ round, uncovered, extra })), [
+    { round: 1, uncovered: ['CB1'], extra: ['X1'] },
+  ])
+})
+
+// Mutation killed: removing coverage from the lead consult hides the draft-plan acceptance miss.
+test('CF3 includes draft-plan misses in the lead consult without another consult', () => {
+  const { io } = coverageFirstIo()
+  const decision = Object.entries(io.calls.writes).find(([path]) => /\/decision-1\.md$/.test(path))?.[1] || ''
+  assert.match(decision, /Uncovered ids: CB1/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+})

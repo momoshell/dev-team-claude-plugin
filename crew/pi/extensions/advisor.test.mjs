@@ -424,7 +424,7 @@ test('AD1 AD2 AD3 reply validation accepts first valid member and unions invalid
   assert.equal(advisor.validateReply([{ ...valid, class: 'bad' }, valid], options).judgment.claim, 'grounded')
   const invalid = advisor.validateReply([{ ...valid, class: 'bad' }, { ...valid, severity: 'bad' }], options)
   assert.deepEqual(invalid.codes, ['class-invalid', 'severity-invalid'])
-  assert.equal(advisor.validateReply([], options).codes[0], 'payload-not-an-object')
+  assert.deepEqual(advisor.validateReply([], options), { codes: ['no-finding'] })
   assert.equal(advisor.validateReply([valid, valid, valid, valid], options).judgment.claim, 'grounded')
   assert.equal(advisor.validateReply([valid, valid, valid, valid, valid], options).codes[0], 'payload-not-an-object')
 })
@@ -978,8 +978,8 @@ test('I1 extension and boot role gates agree', async () => {
 })
 
 test('K1 planner edge-path gloss fits plan and gate', () => {
-  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}')
-  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}')
+  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.')
+  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.')
   assert.match(advisor.PLANNER_SYSTEM_PROMPT, /plan or gate omits or mishandles a required boundary, failure case, or acceptance path/)
   assert.match(advisor.PLANNER_SYSTEM_PROMPT, /Ground truth citation that does not hold at the ref where the plan was written/)
   assert.doesNotMatch(advisor.PLANNER_SYSTEM_PROMPT, /EPERM, unknown, interrupted, and empty paths/)
@@ -1447,7 +1447,7 @@ test('AS3 both prompt examples validate as objects and one-element arrays', () =
     const marker = 'Example reply: '
     const index = prompt.lastIndexOf(marker)
     assert.notEqual(index, -1)
-    const example = JSON.parse(prompt.slice(index + marker.length))
+    const example = JSON.parse(prompt.slice(index + marker.length).split(' If neither class applies,')[0])
     assert.equal(Array.isArray(example), false)
     const anchors = new Set([example.evidence?.[0]])
     assert.deepEqual(advisor.validateReply(example, { anchors }), { codes: [], judgment: example })
@@ -1589,4 +1589,51 @@ test('RJ6 digest failure preserves consult and both note-tier deliveries', async
     const note = injected.find(n => n.tier === sent.message.details.tier)
     assert.equal(note.content_excerpt, advisor.boundText(sent.message.content, 512))
   }
+})
+
+
+// MUTATION TS1: revert the empty-array verdict to payload-not-an-object.
+test('TS1 empty reply is a closed no-finding verdict without a judgment', () => {
+  const verdict = advisor.validateReply([])
+  assert.deepEqual(verdict, { codes: ['no-finding'] })
+  assert.equal(verdict.judgment, undefined)
+  assert.equal(advisor.JUDGMENT_ERROR_CODES.includes('no-finding'), true)
+})
+
+// MUTATION TS2: restore the unconditional rejected outcome in the non-judgment branch.
+test('TS2 empty reply is journaled as skipped without a tier-one steer', async () => {
+  const r = await adDrive('[]')
+  assert.deepEqual(adTier1(r).map((note) => ({ outcome: note.outcome, codes: note.codes })),
+    [{ outcome: 'skipped', codes: ['no-finding'] }])
+  assert.equal(adSent1(r).length, 0)
+  const consults = r.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+  assert.equal(consults.length, 1)
+  assert.equal(consults[0].reply.excerpt, '[]')
+  const note = adTier1(r)[0]
+  assert.equal(Number.isSafeInteger(note.call_ordinal) && note.call_ordinal > 0, true)
+  for (const key of ['consult_id', 'provider', 'model_id', 'model', 'agent', 'effort']) {
+    assert.deepEqual(note[key], consults[0][key], 'tier1Stamp ' + key)
+  }
+})
+
+// MUTATION TS3: short-circuit any trimmed reply containing [] as no-finding, including fenced text.
+test('TS3 only a literal empty JSON array is treated as no-finding', async () => {
+  const inputs = ['"[]"', 'null', JSON.stringify(Array(5).fill(adGood('x'))), '\`\`\`json\\n[]\\n\`\`\`']
+  const actual = []
+  for (const input of inputs) {
+    const r = await adDrive(input)
+    actual.push({ input, notes: adTier1(r).map((note) => ({ outcome: note.outcome, codes: note.codes })), sends: adSent1(r).length })
+  }
+  assert.deepEqual(actual, inputs.map((input, i) => ({
+    input,
+    notes: [{ outcome: 'rejected', codes: [i === 3 ? 'body-not-json' : 'payload-not-an-object'] }],
+    sends: 0,
+  })))
+})
+
+// MUTATION TS4: remove the new no-finding instruction from the emitted prompt contract.
+test('TS4 both advisor prompts instruct the no-finding reply', () => {
+  const sentence = 'If neither class applies, return [] alone.'
+  assert.equal(advisor.BUILDER_SYSTEM_PROMPT.includes(sentence), true)
+  assert.equal(advisor.PLANNER_SYSTEM_PROMPT.includes(sentence), true)
 })

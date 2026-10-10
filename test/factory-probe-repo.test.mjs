@@ -17,8 +17,8 @@ import {
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
   checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
-  probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, readProfile,
-  requireField, writeProfile, checkoutBaseBranch, isPlainBranchName, BASE_BRANCH_REFUSALS,
+  probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, profileWorktreeSetup, validateWorktreeSetup, readProfile,
+  requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, isPlainBranchName, BASE_BRANCH_REFUSALS,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -200,7 +200,7 @@ function captureMain(args) {
 function everyCell(profile) {
   assert.deepEqual(Object.keys(profile.fields).sort(), [
     'baseline', 'ci', 'conventions', 'default_branch', 'intake_board', 'pr_conventions',
-    'protected_paths_candidates', 'test_command', 'toolchain',
+    'protected_paths_candidates', 'test_command', 'toolchain', 'worktree_setup',
   ].sort())
   for (const cell of Object.values(profile.fields)) {
     assert.ok(['proposed', 'unknown'].includes(cell.status))
@@ -1785,3 +1785,51 @@ test('idiom typescript annotations keep function spans', () => {
   }
 })
 
+
+test('RV1-1 checkoutWorktreeSetup reports a missing profile as profile-absent', () => {
+  const checkout = scratchDir('worktree-setup-absent-checkout-')
+  const factoryRoot = scratchDir('worktree-setup-absent-factory-')
+  assert.deepEqual(checkoutWorktreeSetup({ checkout, factoryRoot }), { steps: [], basis: 'profile-absent' })
+})
+
+// Kills a worktree_setup field kind that a fresh probe's unknown cell overwrites.
+test('worktree setup re-probe preserves ratified order and operator metadata', () => {
+  const root = nodeFixture('worktree-setup-reprobe')
+  const out = join(fixtureRoot, 'profiles', 'worktree-setup-reprobe.json')
+  const steps = [{ kind: 'command', run: 'echo first' }, { kind: 'symlink', path: 'node_modules' }, { kind: 'submodules' }]
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const handEdited = readProfile(out)
+  handEdited.fields.worktree_setup = { status: 'ratified', value: steps, source: 'human', ratified_by: 'operator', ratified_at: '2026-10-10T00:00:00.000Z' }
+  writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const cell = readProfile(out).fields.worktree_setup
+  assert.equal(cell.status, 'ratified')
+  assert.deepEqual(cell.value, steps)
+  assert.equal(cell.ratified_by, 'operator')
+  assert.equal(cell.ratified_at, '2026-10-10T00:00:00.000Z')
+  assert.deepEqual(checkoutWorktreeSetup({ checkout: root, profilePath: out }), { steps, basis: 'ratified' })
+})
+
+test('worktree setup lookup refuses an empty or truncated profile as unreadable', () => {
+  const checkout = scratchDir('worktree-setup-unreadable-checkout-')
+  const profilePath = join(scratchDir('worktree-setup-unreadable-'), 'profile.json')
+  for (const body of ['', '{']) {
+    writeFileSync(profilePath, body)
+    assert.throws(() => checkoutWorktreeSetup({ checkout, profilePath }), (error) => error.reason === 'profile-unreadable')
+  }
+})
+
+test('worktree setup profile requires ratification and preserves ordered declared steps', () => {
+  const steps = [{ kind: 'command', run: 'echo first' }, { kind: 'submodules' }]
+  assert.deepEqual(profileWorktreeSetup(null), { steps: [], basis: 'profile-absent' })
+  assert.deepEqual(profileWorktreeSetup({ fields: {} }), { steps: [], basis: 'field-absent' })
+  assert.deepEqual(profileWorktreeSetup({ fields: { worktree_setup: { status: 'unknown', value: null, reason: 'not_measured' } } }), { steps: [], basis: 'unknown' })
+  const profile = { repo_key: 'owner/repo', fields: { worktree_setup: {
+    status: 'ratified', value: steps, source: 'human', ratified_by: 'operator', ratified_at: 'today',
+  } } }
+  assert.deepEqual(profileWorktreeSetup(profile), { steps, basis: 'ratified' })
+  assert.throws(() => profileWorktreeSetup({ fields: { worktree_setup: { status: 'proposed', value: steps } } }), (error) => error.reason === 'profile-unratified')
+  for (const invalid of [null, {}, [{ kind: 'command', run: '  ' }], [{ kind: 'symlink', path: '../outside' }], [{ kind: 'symlink', path: './' }], [{ kind: 'unknown' }]]) {
+    assert.throws(() => validateWorktreeSetup(invalid), (error) => error.reason === 'worktree-setup-invalid')
+  }
+})

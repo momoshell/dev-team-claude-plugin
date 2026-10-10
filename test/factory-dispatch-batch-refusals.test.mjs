@@ -124,6 +124,7 @@ import {
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
+import { ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 
 function censusFixture(name, fenceFiles, { withReport = false } = {}) {
   const checkout = namedReachFixture(`census-${name}`, {
@@ -801,6 +802,93 @@ test('cleanup errors do not mask the original compile refusal or delete unowned 
   assert.equal(calls.some(c=>c.args.includes('-D')),false)
   assert.equal(calls.filter(c=>c.args.includes('remove')).length,2)
 })
+
+
+
+// Kills removal of the dispatch setup loop and zero-step basis logging.
+test('RV1-1 dispatch logs zero-step setup per lane without setup commands', async () => {
+  const calls = [], logs = []
+  const fixture = await dispatchFixture({ label: 'setup-empty', names: ['lane-a', 'lane-b'], spawnedOut: calls, timeline: logs, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) })
+  for (const lane of ['lane-a', 'lane-b']) assert.equal(fixture.logs.filter(line => line === `dispatch-batch: worktree setup lane=${lane} steps=0 basis=field-absent`).length, 1)
+  assert.equal(calls.some(call => call.file === '/bin/sh' || call.args.includes('submodule')), false)
+})
+
+// Kills removal of the dispatch setup loop or moving setup outside attachment/boot boundaries.
+test('RV1-1 dispatch runs ratified setup for every attached lane before any boot', async () => {
+  const calls = []
+  await dispatchFixture({
+    label: 'setup-ratified', names: ['lane-a', 'lane-b'], spawnedOut: calls,
+    worktreeSetup: () => ({ steps: [{ kind: 'submodules' }, { kind: 'command', run: 'echo a' }], basis: 'ratified' }),
+    realpathSync: path => path, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }),
+    spawnHook: call => call.file === 'git' && call.args.includes('submodule')
+      ? { status: 0, stdout: '' }
+      : call.file === '/bin/sh' || call.args.includes('status') ? { status: 0, stdout: '' } : undefined,
+  })
+  for (const laneDir of calls.filter(call => call.args.includes('switch') && call.args.includes('-c')).map(call => call.cwd)) assert.ok(laneDir)
+  const setup = calls.map((call, index) => ({ call, index })).filter(({ call }) => call.args.includes('submodule') || call.file === '/bin/sh')
+  assert.equal(setup.length, 4)
+  for (const { call } of setup.filter(({ call }) => call.args.includes('submodule'))) assert.deepEqual(call.args, ['-C', call.cwd, 'submodule', 'update', '--init'])
+  for (const { call } of setup.filter(({ call }) => call.file === '/bin/sh')) {
+    assert.deepEqual(call.args, ['-c', 'echo a'])
+    assert.ok(call.cwd)
+  }
+  const addIndices = calls.map((call, index) => call.args.includes('worktree') && call.args.includes('add') ? index : -1).filter(index => index >= 0)
+  const attachIndices = calls.map((call, index) => call.args.includes('switch') && call.args.includes('-c') ? index : -1).filter(index => index >= 0)
+  const bootIndices = calls.map((call, index) => call.args.includes('boot') ? index : -1).filter(index => index >= 0)
+  assert.equal(addIndices.length, 2); assert.equal(attachIndices.length, 2); assert.ok(bootIndices.length > 0)
+  assert.ok(Math.max(...addIndices, ...attachIndices) < Math.min(...setup.map(row => row.index)))
+  assert.ok(Math.max(...setup.map(row => row.index)) < Math.min(...bootIndices))
+})
+
+// Kills removal of ProfileRefusal mapping and rollback on setup-profile refusal.
+test('RV1-1 dispatch maps profile refusal and rolls back both attached lanes', async () => {
+  const calls = [], timeline = []
+  await assert.rejects(dispatchFixture({
+    label: 'setup-profile-refusal', names: ['lane-a', 'lane-b'], spawnedOut: calls, timeline,
+    worktreeSetup: () => { throw new ProfileRefusal('seam profile boom', 'profile-unratified') },
+    assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }),
+  }), error => error instanceof BatchRefusal && error.reason === 'worktree-setup-invalid' && error.message.includes('seam profile boom'))
+  assert.ok(timeline.some(row => row.kind === 'log' && row.line.includes('worktree setup refusal reason=profile-unratified')))
+  assert.equal(calls.some(call => call.file === '/bin/sh' || call.args.includes('boot')), false)
+  assertRollbackSetup(calls)
+})
+
+// Kills removal of setup failure refusal handling and its rollback boundary.
+test('RV1-1 dispatch stops failed setup before later steps or boot and rolls back both lanes', async () => {
+  const calls = [], timeline = []
+  await assert.rejects(dispatchFixture({
+    label: 'setup-step-failure', names: ['lane-a', 'lane-b'], spawnedOut: calls, timeline,
+    worktreeSetup: () => ({ steps: [{ kind: 'command', run: 'first' }, { kind: 'command', run: 'later' }], basis: 'ratified' }),
+    realpathSync: path => path, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }),
+    spawnHook: call => call.file === '/bin/sh' ? { status: 17, stdout: '' } : undefined,
+  }), error => error instanceof BatchRefusal && error.reason === 'worktree-setup-failed' && /lane=lane-a/.test(error.message) && /step=0/.test(error.message) && /kind=command/.test(error.message))
+  assert.equal(calls.filter(call => call.file === '/bin/sh').length, 1)
+  assert.equal(calls.some(call => call.args.includes('boot')), false)
+  assert.ok(timeline.some(row => row.kind === 'log' && row.line.includes('worktree setup refusal') && row.line.includes('worktree-setup-failed')))
+  assertRollbackSetup(calls)
+})
+
+// Kills bypassing dispatch-level validation of injected setup before per-lane effects.
+test('dispatch refuses malformed injected setup before setup effects and rolls back attachments', async () => {
+  const calls = [], timeline = []
+  await assert.rejects(dispatchFixture({
+    label: 'setup-invalid-injected', names: ['lane-a', 'lane-b'], spawnedOut: calls, timeline,
+    worktreeSetup: () => ({ steps: [{ kind: 'symlink', path: '../outside' }], basis: 'ratified' }),
+    assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }),
+  }), error => error instanceof BatchRefusal && error.reason === 'worktree-setup-invalid')
+  assert.ok(timeline.some(row => row.kind === 'log' && row.line.includes('worktree setup refusal reason=worktree-setup-invalid')))
+  assert.equal(calls.some(call => call.file === '/bin/sh' || call.args.includes('submodule') || call.args.includes('boot')), false)
+  assertRollbackSetup(calls)
+})
+
+function assertRollbackSetup(calls) {
+  const removals = calls.filter(call => call.args.includes('worktree') && call.args.includes('remove'))
+  const deletions = calls.filter(call => call.args.includes('branch') && call.args.includes('-D'))
+  assert.equal(removals.length, 2); assert.equal(deletions.length, 2)
+  const checkout = removals[0].args[1]
+  for (const call of removals) assert.deepEqual(call.args, ['-C', checkout, 'worktree', 'remove', '--force', call.args[5]])
+  for (const call of deletions) assert.deepEqual(call.args, ['-C', checkout, 'branch', '-D', call.args[4]])
+}
 
 test('directed-brief and seat refusals do not boot lanes', async () => {
   const directed=[]

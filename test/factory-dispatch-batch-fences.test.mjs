@@ -791,6 +791,7 @@ async function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   const deps = {
     home: root,
     env: { DEVTEAM_LEDGER_DIR: root },
+    worktreeSetup: () => ({ steps: [], basis: 'field-absent' }),
     existsSync: () => false,
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {
@@ -875,6 +876,9 @@ async function dispatchFixture({
   rotationDeps = {},
   baseBranch = undefined,
   factoryRoot = scratchDir('dispatch-factory-root-'),
+  worktreeSetup = () => ({ steps: [], basis: 'field-absent' }),
+  realpathSync = null,
+  spawnHook = null,
   env = {},
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
@@ -902,6 +906,7 @@ async function dispatchFixture({
   const deps = {
     home,
     factoryRoot,
+    worktreeSetup,
     ...(baseBranch ? { baseBranch } : {}),
     env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state'), ...env },
     existsSync: (path) => existsProbe ? existsProbe(path) : defaultOutcomeExists(path),
@@ -948,8 +953,13 @@ async function dispatchFixture({
       if (text.endsWith('advisor-reservations.json')) rotationFiles.set(text, String(content))
     },
     appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }); if (appendFile) appendFile(path, content) },
+    ...(realpathSync ? { realpathSync } : {}),
     spawn: (call) => {
       recordSpawn(call)
+      if (spawnHook) {
+        const result = spawnHook(call)
+        if (result !== undefined) return result
+      }
       const args = (call.args || []).map(String)
       if (args.includes('merge-base')) return { status: ancestor(args), stdout: '', stderr: '' }
       if (args.includes('rev-parse') && args.includes('HEAD')) {

@@ -8063,7 +8063,9 @@ for (const [why, inner] of [['a tilde marker inside a backtick fence', '~~~~'], 
       files: { [CTX.briefFile]: brief },
       envelopes: {
         'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
-        'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
+        'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
+        'planner:3':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
+        'planner3.coverage-reask.planner.json':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'F9' }] } }),
       },
       runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     })
@@ -8079,7 +8081,9 @@ for (const [form, line] of [['an indented dash bullet', '  - (A1) the asked-for 
       files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', line].join('\n') },
       envelopes: {
         'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
-        'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
+        'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
+        'planner:3':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
+        'planner3.coverage-reask.planner.json':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'other' }] } }),
       },
       runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     })
@@ -8095,7 +8099,9 @@ test('an acceptance id answered only by an exemption escalates, and the refusal 
     files: { [CTX.briefFile]: ['# Task', '', '## Acceptance', '(A1) proven; (B1) only exempted'].join('\n') },
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
-      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
+      'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
+      'planner:3':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
+      'planner3.coverage-reask.planner.json':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }, { check: 'B1', exempt: 'not applicable here' }] } }),
     },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
@@ -8120,7 +8126,9 @@ test('a plan whose gate checks leave an acceptance id unanswered escalates at pl
     files: { [CTX.briefFile]: brief },
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
-      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
+      'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
+      'planner:3':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
+      'planner3.coverage-reask.planner.json':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [{ ...CHECK_MUTATION, check: 'A1' }] } }),
     },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
@@ -8140,7 +8148,9 @@ test('a plan that declares no mutations at all still answers for every acceptanc
     files: { [CTX.briefFile]: brief },
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'planner:3':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'planner3.coverage-reask.planner.json':planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
     },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
   })
@@ -8175,7 +8185,8 @@ test('RV1-1 coverage bounce preserves real line boundaries', () => {
     files: { [CTX.briefFile]: brief },
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [miss] } }),
-      'planner:2': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [repaired] } }),
+      'planner1.coverage-reask.planner.json': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [miss] } }),
+      'planner:3': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations: [repaired] } }),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },

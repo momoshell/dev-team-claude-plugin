@@ -7479,8 +7479,24 @@ test('RV1-1 setupWorktree guards collisions, escaping ancestors, child signals a
   }), (error) => error.reason === 'worktree-setup-failed' && /ancestor escapes lane/.test(error.message))
   await assert.rejects(setupWorktree({
     checkout, laneDir, steps: [{ kind: 'command', run: 'true' }],
-    deps: { spawn: () => ({ status: null, signal: 'SIGTERM' }) },
-  }), (error) => error.reason === 'worktree-setup-failed' && /command/.test(error.message))
+    deps: { spawn: () => ({ status: 0, signal: 'SIGTERM' }) },
+  }), (error) => error.reason === 'worktree-setup-failed' && /kind=command/.test(error.message) && /SIGTERM/.test(error.message))
+})
+
+// Kills an exclude literal built from the declared spelling: './node_modules/' must still ignore the real link.
+test('setupWorktree links a directory-ignored path into a real worktree and leaves it clean', async () => {
+  const checkout = scratchDir('worktree-setup-real-checkout-')
+  const laneDir = join(scratchDir('worktree-setup-real-parent-'), 'lane')
+  assert.equal(spawnSync('git', ['init', '-q', '-b', 'main', checkout], { encoding: 'utf8' }).status, 0)
+  writeFileSync(join(checkout, '.gitignore'), 'node_modules/\n')
+  git(checkout, 'add', '-A')
+  git(checkout, 'commit', '-q', '-m', 'base')
+  mkdirSync(join(checkout, 'node_modules', 'pkg'), { recursive: true })
+  git(checkout, 'worktree', 'add', '-q', '--detach', laneDir)
+  await setupWorktree({ checkout, laneDir, lane: 'lane', steps: [{ kind: 'symlink', path: './node_modules/' }] })
+  assert.equal(lstatSync(join(laneDir, 'node_modules')).isSymbolicLink(), true)
+  assert.equal(fsExistsSync(join(laneDir, 'node_modules', 'pkg')), true)
+  assert.equal(git(laneDir, 'status', '--porcelain'), '')
 })
 
 test('setupWorktree executes submodules and commands in declaration order before clean readiness', async () => {

@@ -791,6 +791,7 @@ async function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   const deps = {
     home: root,
     env: { DEVTEAM_LEDGER_DIR: root },
+    worktreeSetup: () => ({ steps: [], basis: 'field-absent' }),
     existsSync: () => false,
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {

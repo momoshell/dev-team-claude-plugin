@@ -293,14 +293,14 @@ function gitOutput(root, args, options = {}) {
   return runProcess('git', ['-C', root, ...args], { ...options, cwd: root })
 }
 
-function gitRoot(root) {
-  const output = gitOutput(root, ['rev-parse', '--show-toplevel'])
+function gitRoot(root, git = gitOutput) {
+  const output = git(root, ['rev-parse', '--show-toplevel'])
   return nonEmptyString(output) ? realpathOr(resolve(output)) : null
 }
 
-function remoteRepoKey(root, isGit) {
+function remoteRepoKey(root, isGit, git = gitOutput) {
   if (!isGit) return `local__${slug(basename(root))}`
-  const remote = gitOutput(root, ['remote', 'get-url', 'origin'])
+  const remote = git(root, ['remote', 'get-url', 'origin'])
   if (!nonEmptyString(remote)) return `local__${slug(basename(root))}`
   let value = remote.trim().replace(/\.git$/, '')
   if (/^[^/\s]+@[^:\s]+:/.test(value)) value = value.slice(value.indexOf(':') + 1)
@@ -1824,10 +1824,10 @@ export function profileProtectedPaths(profile, { path = null } = {}) {
 
 // Run entry points need the profile key but not the expensive whole-tree probe.
 // Keep this read-only identity lookup separate so a run never pays for probing.
-export function repoKeyFor({ checkout } = {}) {
+export function repoKeyFor({ checkout, git = gitOutput } = {}) {
   const root = checkoutDirectory(checkout)
-  const gitRootPath = gitRoot(root)
-  return remoteRepoKey(root, gitRootPath !== null)
+  const gitRootPath = gitRoot(root, git)
+  return remoteRepoKey(root, gitRootPath !== null, git)
 }
 
 export function isPlainBranchName(value) {

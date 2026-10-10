@@ -1899,10 +1899,10 @@ test('startProcess has no production caller; future wiring must update the retir
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.processes and docs/ledger-queries.md when wiring startProcess')
 })
 test('sessions ends with typed outcomes and starts each row with all seven appended fields NULL', { skip: SKIP }, () => {
-  assert.deepEqual(TABLES.sessions.columns.slice(-4).map(({ name }) => name), [
-    'outcome', 'terminal_reason', 'terminal_actor', 'synthetic_reason',
+  assert.deepEqual(TABLES.sessions.columns.slice(-6).map(({ name }) => name), [
+    'outcome', 'terminal_reason', 'terminal_actor', 'synthetic_reason', 'repo_key', 'repo_key_absent_reason',
   ])
-  assert.equal(TABLES.sessions.columns.at(-5).name, 'proposed_strength')
+  assert.equal(TABLES.sessions.columns.at(-7).name, 'proposed_strength')
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
   const row = ledger.getSession('heartbeat-null')
@@ -1914,6 +1914,8 @@ test('sessions ends with typed outcomes and starts each row with all seven appen
   assert.equal(row.terminal_reason, null)
   assert.equal(row.terminal_actor, null)
   assert.equal(row.synthetic_reason, null)
+  assert.equal(row.repo_key, null)
+  assert.equal(row.repo_key_absent_reason, null)
 })
 test('agent sessions opened without a usage frame name the explicit no_usage_frame absence', { skip: SKIP }, () => {
   assert.deepEqual(AGENT_SESSION_ABSENT_REASON_KEYS, [AGENT_SESSION_ABSENT_REASONS.no_usage_frame])

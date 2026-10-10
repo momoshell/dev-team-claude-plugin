@@ -32,6 +32,8 @@ import {
   ENVELOPE_REFUSED,
   MERGE_CHECK_STEPS,
   REAP_STEPS,
+  PLUGIN_COMPARISON_ABSENT_REASONS,
+  reapPluginProvenance,
   RECOVER_STEPS,
   REFS_PATTERN,
   ROT_MARK,
@@ -1660,6 +1662,33 @@ test('merge-check emits one JSON line per step with step, ms and outcome', () =>
     assert.equal(row.ms >= 0, true)
     assert.equal(Object.values(STEP_OUTCOMES).includes(row.outcome), true)
   }
+})
+
+test('CP1 reap records measured plugin provenance and honest absence', () => {
+  const home = scratch('cp1-home-')
+  const laneDir = join(home, 'cp1')
+  put(join(home, '.crew', 'cp1', 'cp1', 'crew.json'), JSON.stringify({ plugin: { plugin_sha: 'a'.repeat(40) } }))
+  const changed = reapPluginProvenance({ lane: 'cp1', laneDir, deps: { home }, closeout: { plugin_sha: 'b'.repeat(40) } })
+  assert.equal(changed.plugin_sha_changed, true)
+  assert.equal(changed.absent_reason, null)
+  assert.deepEqual(reapPluginProvenance({ lane: 'cp1', laneDir, deps: { home }, closeout: { plugin_sha: 'a'.repeat(40) } }).plugin_sha_changed, false)
+  assert.deepEqual(PLUGIN_COMPARISON_ABSENT_REASONS, ['boot_missing', 'boot_unreadable', 'boot_invalid', 'closeout_unmeasured'])
+  put(join(home, '.crew', 'cp1', 'cp1', 'crew.json'), JSON.stringify({}))
+  assert.equal(reapPluginProvenance({ lane: 'cp1', laneDir, deps: { home }, closeout: null }).absent_reason, 'boot_missing')
+})
+
+test('CP2 unreadable provenance never changes reap steps or outcome', () => {
+  const home = scratch('cp2-home-')
+  const { deps } = harness({ home, answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1, state: 'MERGED', body: '' }) }]] })
+  const injected = normalDeps({ ...deps, pluginProvenance: () => ({ plugin_sha: 'a'.repeat(40) }), readFileSync: (path, ...args) => {
+    if (path.endsWith('crew.json')) throw new Error('unreadable')
+    return deps.readFileSync(path, ...args)
+  } })
+  const result = reap({ lanes: ['cp2'], checkout: ROOT, deps: injected })
+  assert.deepEqual(result.lines.map((row) => row.step), [...REAP_STEPS])
+  assert.equal(result.code, 0)
+  assert.equal(result.report.lanes[0].plugin_provenance.plugin_sha_changed, null)
+  assert.equal(result.report.lanes[0].plugin_provenance.absent_reason, 'boot_unreadable')
 })
 
 test('reap emits one JSON line per step with step, ms and outcome', () => {

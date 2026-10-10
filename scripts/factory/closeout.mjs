@@ -33,6 +33,7 @@ import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 import { checkoutBaseBranch } from './probe-repo.mjs'
+import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
 
 const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
 
@@ -47,6 +48,7 @@ export const STEP_EVENT = 'closeout-step'
 export const STEP_OUTCOMES = Object.freeze({ OK: 'ok', REFUSED: 'refused' })
 export const MERGE_CHECK_STEPS = Object.freeze(['pr-open', 'scratch-worktree', 'merge', 'suite', 'anchor-repair', 'report'])
 export const REAP_STEPS = Object.freeze(['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
+export const PLUGIN_COMPARISON_ABSENT_REASONS = Object.freeze(['boot_missing', 'boot_unreadable', 'boot_invalid', 'closeout_unmeasured'])
 export const RECOVER_STEPS = Object.freeze(['quiet', 'preserve', 'teardown', 'verify', 'closeout'])
 export const RECONCILE_TERMINAL_STATUS = 'aborted'
 export const RECONCILE_TERMINAL_OUTCOME = 'aborted'
@@ -191,6 +193,7 @@ export function normalDeps(deps = {}) {
     openLedger: deps.openLedger || defaultOpenLedger,
     defaultDbPath: deps.defaultDbPath || defaultLedgerDbPath,
     probeDriverIdentity: deps.probeDriverIdentity || defaultProbeDriverIdentity,
+    pluginProvenance: deps.pluginProvenance || (() => pluginProvenance({ git: (args, options) => d.spawn({ file: 'git', args, ...options }) })),
     resolveTaskReturn: deps.resolveTaskReturn || defaultResolveTaskReturn,
     ingestJournal: deps.ingestJournal || defaultIngestJournal,
     home: deps.home || homedir(),
@@ -1279,6 +1282,36 @@ export function ingestAll({ root, dryRun = false, deps } = {}) {
   return { verb: 'ingest-all', root: crewRoot, report: summary, refusal, code: refusal ? EXIT_REFUSED : EXIT_OK }
 }
 
+export function reapPluginProvenance({ lane, laneDir, deps, closeout }) {
+  const d = normalDeps(deps)
+  let boot
+  let absent_reason
+  try {
+    const value = JSON.parse(d.readFileSync(crewJsonPath({ checkout: laneDir, lane, deps: d }), 'utf8'))
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      boot = null
+      absent_reason = 'boot_invalid'
+    } else if (!Object.hasOwn(value, 'plugin')) {
+      boot = null
+      absent_reason = 'boot_missing'
+    } else if (value.plugin !== null && (!value.plugin || typeof value.plugin !== 'object' || Array.isArray(value.plugin))) {
+      boot = null
+      absent_reason = 'boot_invalid'
+    } else {
+      boot = value.plugin
+      if (boot === null) absent_reason = 'boot_missing'
+    }
+  } catch {
+    boot = null
+    absent_reason = 'boot_unreadable'
+  }
+  const sha = (value) => typeof value?.plugin_sha === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value.plugin_sha) ? value.plugin_sha : null
+  const closeoutSha = sha(closeout)
+  if (absent_reason === undefined && sha(boot) === null) absent_reason = 'boot_invalid'
+  if (absent_reason === undefined && closeoutSha === null) absent_reason = 'closeout_unmeasured'
+  return { boot, closeout, plugin_sha_changed: absent_reason === undefined ? boot.plugin_sha !== closeout.plugin_sha : null, absent_reason: absent_reason ?? null }
+}
+
 export function reap({ lanes, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const batch = Array.isArray(lanes) ? lanes : []
@@ -1291,6 +1324,9 @@ export function reap({ lanes, checkout, deps } = {}) {
     const laneDir = join(dirname(root), `dt-${lane}`)
     const laneReport = { lane, closed: [], referenced: [], archived: [] }
     let pr = null
+    let closeout = null
+    try { closeout = d.pluginProvenance(); laneReport.plugin_provenance = reapPluginProvenance({ lane, laneDir, deps: d, closeout }) }
+    catch { laneReport.plugin_provenance = { boot: null, closeout, plugin_sha_changed: null, absent_reason: 'boot_unreadable' } }
     const runners = {
       'pr-merged': () => {
         pr = prView({ lane, checkout: root, deps: d, step: 'pr-merged' })

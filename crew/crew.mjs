@@ -53,6 +53,7 @@ import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRost
 import * as piAdapter from './adapters/adapter-pi.mjs'
 export { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies }
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
+import { pluginProvenance, repoKeyRecord } from './provenance.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -3573,6 +3574,8 @@ export async function bootCmd(args, deps = {}) {
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     run_configuration: bootConfigRecord,
+plugin: pluginProvenance(),
+...repoKeyRecord({ checkout }),
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
@@ -3596,6 +3599,7 @@ export async function bootCmd(args, deps = {}) {
     at: new Date().toISOString(), event: 'boot', roles, charter_arm: charterArm, base_branch: baseBranch,
     pi_codemode: { value: bootEnv.CREW_PI_CODEMODE === 'off' ? 'off' : 'on', source: bootEnv.CREW_PI_CODEMODE === undefined ? 'default' : 'env' },
     run_configuration: { ...bootConfigRecord, advisor },
+plugin: crew.plugin, repo_key: crew.repo_key, repo_key_absent_reason: crew.repo_key_absent_reason,
     ...turnCeilingsJournalPatch(turnCeilingRecord),
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),

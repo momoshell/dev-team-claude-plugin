@@ -1559,7 +1559,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "event='step:degrade'", "at step reason remaining budget"],
   ["recordRow", "event='step:start'", "at step round files owned builder_attempt"],
   ["recordRow", "event='step:accepted-by-gate'", "at step round status reason passed"],
-  ["recordRow", "event='step:bounce'", "at step round status"],
+  ["recordRow", "event='step:bounce'", "at step round status untouched"],
   ["recordRow", "event='step:done'", "at step round passed"],
   ["recordRow", "event='step:red'", "at step round failed regressed"],
   ["recordRow", "", "at census_exhibits"],

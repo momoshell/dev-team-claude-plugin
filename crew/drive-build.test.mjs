@@ -9319,7 +9319,7 @@ test('SB7 bounce journal rows and inventory stay aligned', () => {
   assert.deepEqual(io.calls.logs.filter(({ event }) => event === 'step:bounce').map(({ channel, step, round, status }) => ({ channel, step, round, status })), [
     { channel: 'record', step: 'c1', round: 1, status: 'insufficient' }, { channel: 'record', step: 'c1', round: 2, status: 'blocked' },
   ])
-  assert.deepEqual(DRIVE_JOURNAL_EXPECTED.find(([method, event]) => method === 'recordRow' && event === "event='step:bounce'"), ['recordRow', "event='step:bounce'", 'at step round status'])
+  assert.deepEqual(DRIVE_JOURNAL_EXPECTED.find(([method, event]) => method === 'recordRow' && event === "event='step:bounce'"), ['recordRow', "event='step:bounce'", 'at step round status untouched'])
 })
 
 test('R1 stepped-resume acceptance', () => {
@@ -11125,6 +11125,29 @@ test('BR2 exemplar wrapper identifies its inlined plan and does not reread it', 
 })
 
 // MUTATION BR3: change the oversize comparison from > to >=.
+test('PT1 owned-green insufficient builder retries while its planned test is untouched', () => {
+  const chunks = [
+    { id: 'c1', files_in_scope: ['a.mjs', 'a.test.mjs'], checks_owned: ['A1'] },
+    { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] },
+  ]
+  const { io } = steppedAcceptanceIo({ chunks, planFilesInScope: ['a.mjs', 'a.test.mjs', 'b.mjs'], builder1: buildEnv({ status: 'insufficient', summary: 'waiting on witness' }), builders: [buildEnv({ status: 'insufficient', summary: 'waiting on witness' }), buildEnv(), buildEnv()], outputs: [steppedGreen(), steppedGreen(), steppedGreen()] })
+  io.changedFiles = () => ['a.mjs', 'b.mjs']
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
+  const retry = io.calls.writes[`${TD}/step-c1-r2.md`]
+  assert.ok(retry.includes('planned test untouched: a.test.mjs'))
+  assert.ok(io.calls.assign.some(({ role, briefFile }) => role === 'builder' && briefFile.endsWith('/step-c2-r1.md')))
+  assert.ok(io.calls.logs.some(({ event, step, round }) => event === 'step:bounce' && step === 'c1' && round === 1))
+})
+
+test('PT2 accepted self-reported step gaps survive into later builder briefs', () => {
+  const original = buildEnv({ status: 'insufficient', summary: 'fixture gap', details: { marker: 'kept' } })
+  const { io } = steppedAcceptanceIo({ builder1: original, outputs: [steppedGreen(), steppedGreen()] })
+  driveTask({ ...CTX, variant: 'stepped', limits: { build_rounds: 3 } }, io)
+  const later = io.calls.writes[`${TD}/step-c2-r1.md`]
+  assert.ok(later.includes('## Builder self-reported gaps'))
+  assert.ok(later.includes('{"step":"c1","status":"insufficient","summary":"fixture gap"}'))
+})
+
 test('BR3 builder plan formatter measures exact UTF-8 byte boundaries', async () => {
   const { builderPlanLines, BUILDER_PLAN_INLINE_BYTE_LIMIT } = await import('./drive.mjs')
   const path = '/tmp/plan.md'

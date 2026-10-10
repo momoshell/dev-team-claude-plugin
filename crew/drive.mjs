@@ -2331,6 +2331,23 @@ export function validateScopeEntries(entries) {
   return errors
 }
 
+export const PLANNED_TEST_UNMEASURED_REASONS = Object.freeze(['no-changed-inventory'])
+
+export function plannedTestEvidence({ files, changed }) {
+  const planned = [...new Set((Array.isArray(files) ? files : []).filter((path) => typeof path === 'string' && path.endsWith('.test.mjs') && validateScopeEntries([path]).length === 0))].sort()
+  if (!Array.isArray(changed)) return { measured: false, planned, untouched: null, reason: PLANNED_TEST_UNMEASURED_REASONS[0] }
+  const changedSet = new Set(changed)
+  return { measured: true, planned, untouched: planned.filter((path) => !changedSet.has(path)), reason: null }
+}
+
+export function plannedTestLines({ files, changed }) {
+  const evidence = plannedTestEvidence({ files, changed })
+  if (!evidence.measured) return ['', '## Planned test files untouched', 'Changed-file inventory: unmeasured.', `Unmeasured (${evidence.reason}): untouched count unmeasured; denominator ${evidence.planned.length}.`, 'Evidence, not a refusal.']
+  const untouched = evidence.untouched ?? []
+  if (untouched.length === 0) return []
+  return ['', '## Planned test files untouched', `${untouched.length} of ${evidence.planned.length} planned test files untouched.`, ...untouched.map((path) => `- ${path}`), 'Evidence, not a refusal.']
+}
+
 function validatePlanExemplars(details, read) {
   const source = details && typeof details === 'object' && !Array.isArray(details) ? details : {}
   const required = Array.isArray(source.mutations) && source.mutations.some((entry) => typeof entry?.file === 'string' && /\.(?:mjs|js|cjs|ts|tsx|svelte)$/.test(entry.file) && !/\.test\./.test(entry.file))
@@ -10594,16 +10611,16 @@ function runTask(ctx, io, crash) {
       stepRound += 1
       io.log(recordRow({ at: io.now(), event: 'step:start', step: step.id, round: stepRound, files: [...step.files_in_scope], owned: [...step.checks_owned], builder_attempt: builderAttempts + 1 }))
       const stepBrief = art(`step-${step.id}-r${stepRound}.md`)
-      io.writeFile(stepBrief, stepBriefText({ step, round: stepRound, done, planPath, planText: readOrNull(planPath), priorFailure: priorStepFailure }))
+      io.writeFile(stepBrief, stepBriefText({ step, round: stepRound, done, planPath, planText: readOrNull(planPath), priorFailure: priorStepFailure, envelopes: doneEnvelopes }))
       stage(`build:${step.id}:r${stepRound}`)
       builderAttempts = builderAttempts + 1
       const preparedStepBrief = prepareBuilderAssignment(stepBrief, 'step-build')
       if (builderBriefError) { stageComplete(); return escalate('build', builderBriefError) }
       const env = assignAndWait('builder', preparedStepBrief, 'step-build')
       if (!handledEnvelopeRefusalWhy(env) && (env?.status === 'insufficient' || env?.status === 'blocked')) {
-        stageComplete(); const acceptGate = runGate(`gate:${step.id}:r${stepRound}`, gateCmd); const acceptVerdict = steppedGateVerdict(acceptGate.output, step, done, steppedChunks, validatedExemptLabels, acceptGate.ok === true); if (acceptVerdict.ok) { io.log(recordRow({ at: io.now(), event: 'step:accepted-by-gate', step: step.id, round: stepRound, status: env.status, reason: STEP_ACCEPT_REASONS[0], passed: step.checks_owned })); const acceptedEnv = { ...env, status: 'done' }; S.returns.builder = acceptedEnv; stepEnvelopes.push(acceptedEnv); stepEnv = acceptedEnv; done.push(step); doneEnvelopes.push(acceptedEnv); break }
-        priorStepFailure = [`${env.status}: ${env.summary || '(no summary)'}`, ...(parseQuestions(env.details)?.questions || []).map(({ id, question }) => `${id}: ${question}`)].join('\n')
-        io.log(recordRow({ at: io.now(), event: 'step:bounce', step: step.id, round: stepRound, status: env.status }))
+        stageComplete(); const acceptGate = runGate(`gate:${step.id}:r${stepRound}`, gateCmd); const acceptVerdict = steppedGateVerdict(acceptGate.output, step, done, steppedChunks, validatedExemptLabels, acceptGate.ok === true); let untouchedTests = []; if (acceptVerdict.ok) { let changed; try { changed = io.changedFiles() } catch { changed = null } untouchedTests = plannedTestEvidence({ files: step.files_in_scope, changed }).untouched ?? []; if (untouchedTests.length === 0) { io.log(recordRow({ at: io.now(), event: 'step:accepted-by-gate', step: step.id, round: stepRound, status: env.status, reason: STEP_ACCEPT_REASONS[0], passed: step.checks_owned })); const acceptedEnv = { ...env, status: 'done', details: { ...env.details, step_gap: { step: step.id, status: env.status, summary: env.summary } } }; S.returns.builder = acceptedEnv; stepEnvelopes.push(acceptedEnv); stepEnv = acceptedEnv; done.push(step); doneEnvelopes.push(acceptedEnv); break } }
+        priorStepFailure = [`${env.status}: ${env.summary || '(no summary)'}`, ...(parseQuestions(env.details)?.questions || []).map(({ id, question }) => `${id}: ${question}`), ...untouchedTests.map((path) => `planned test untouched: ${path}`)].join('\n')
+        io.log(recordRow({ at: io.now(), event: 'step:bounce', step: step.id, round: stepRound, status: env.status, untouched: untouchedTests }))
         if (builderRemaining() <= 0) return escalate('build', `stepped build budget exhausted after ${env.status} for ${step.id}: ${env.summary || '(no summary)'}`, env.artifacts || [])
         continue
       }
@@ -11875,7 +11892,10 @@ function runTask(ctx, io, crash) {
         // Before the diff-mutant findings: that section ends the brief with a JSON array,
         // and a reader (and a test) takes everything after its heading as that array.
         ...falsificationLines(io, PLUGIN_ROOT),
-        ...heldAssertionLines({ io, ctx, changed: S.scopeChanged, round: roundNo }), ...diffFindingLines(report),
+        ...heldAssertionLines({ io, ctx, changed: S.scopeChanged, round: roundNo }),
+        ...stepGapLines(doneEnvelopes),
+        ...plannedTestLines({ files: planEnv.details.files_in_scope, changed: S.scopeChanged }),
+        ...diffFindingLines(report),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       let review
@@ -16041,11 +16061,16 @@ export function planStepSection(planText, id) {
   return { section: lines.slice(start, end).join('\n').trim(), reason: null }
 }
 
-export function stepBriefText({ step, round, done, planPath, planText, priorFailure }) {
+export function stepGapLines(envelopes) {
+  const gaps = (Array.isArray(envelopes) ? envelopes : []).map((env) => env?.details?.step_gap).filter((gap) => gap && typeof gap === 'object')
+  return gaps.length ? ['', '## Builder self-reported gaps', ...gaps.map(({ step, status, summary }) => JSON.stringify({ step, status, summary }))] : []
+}
+
+export function stepBriefText({ step, round, done, planPath, planText, priorFailure, envelopes = [] }) {
   const selected = planStepSection(planText, step.id)
   const body = selected.section ?? `PLAN SECTION UNAVAILABLE (${selected.reason})`
   const tail = `Plan of record, for reference only: ${planPath}. Work only on this step's files and owned checks. Done means this step's checks_owned pass and the plan's validation is green for its files_in_scope. Checks owned by later steps may stay red and are never a reason to return insufficient.`
-  return `# Stepped build ${step.id} (round ${round})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\n## This step\n\n${body}\n\n${tail}${priorFailure ? `\n\nGate failure from prior attempt:\n${priorFailure}` : ''}\n`
+  return `# Stepped build ${step.id} (round ${round})\n\nfiles_in_scope: ${JSON.stringify(step.files_in_scope)}\nchecks_owned: ${JSON.stringify(step.checks_owned)}\nsteps done: ${JSON.stringify(done.map(({ id }) => id))}\n\n## This step\n\n${body}\n\n${tail}${stepGapLines(envelopes).join('\n') ? `\n${stepGapLines(envelopes).join('\n')}` : ''}${priorFailure ? `\n\nGate failure from prior attempt:\n${priorFailure}` : ''}\n`
 }
 
 export const HELD_ASSERTION_UNMEASURED_REASONS = Object.freeze(['no-changed-inventory', 'base-commit-blank', 'base-unreadable', 'diff-unreadable', 'current-unreadable', 'test-call-uncertain'])

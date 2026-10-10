@@ -8576,8 +8576,8 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return escalate('plan', `planner assignment wrapper could not be written: ${err?.message || String(err)}`)
     }
-    let plannerReturnPath = null
-    const env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'), { onDispatch: ({ returnPath }) => { plannerReturnPath = returnPath } })
+    let plannerReturnPath = null, plannerDispatch = null
+    let env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'), { onDispatch: (dispatch) => { plannerDispatch = dispatch; plannerReturnPath = dispatch.returnPath } }); ({ env, returnPath: plannerReturnPath } = plannerCoverageReask({ env, dispatch: plannerDispatch, briefText, round, briefFile: ctx.briefFile, wrapperPath: plannerBrief, io, art, dispatchOnce, pendingEnforcement }))
     acceptedPlannerReturn = { path: plannerReturnPath, text: readOrNull(plannerReturnPath) }
     planNote = null
     const refusalWhy = handledEnvelopeRefusalWhy(env)
@@ -16546,4 +16546,28 @@ export function plannerConsultCoverage(briefText, mutations, round, briefFile) {
   if (coverage.status !== 'measured') return { coverage: null, lines: [] }
   if (coverage.uncovered.length === 0) return { coverage: null, lines: [] }
   return { coverage, lines: ['', ...acceptanceCoverageBounceLines(round, coverage, briefFile)] }
+}
+
+export function plannerCoverageReask({ env, dispatch, briefText, round, briefFile, wrapperPath, io, art, dispatchOnce, pendingEnforcement }) {
+  const unchanged = { env, returnPath: dispatch.returnPath }
+  if (handledEnvelopeRefusalOf(env)) return unchanged
+  const coverage = env.status === 'done' ? acceptanceCoverage(briefText, env.details?.mutations ?? []) : plannerConsultCoverage(briefText, env.details?.mutations, round, briefFile).coverage
+  if (!coverage || coverage.status !== 'measured' || coverage.uncovered.length === 0) return unchanged
+  const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(dispatch.returnPath) : null
+  try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask: { round, uncovered: coverage.uncovered, extra: coverage.extra, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* coverage re-ask journal is never load-bearing */ }
+  if (graceSpentBy) return unchanged
+  const retryPath = join(dirname(dispatch.returnPath), `${dispatch.id}.coverage-reask.planner.json`)
+  const reaskBrief = art(`planner-coverage-reask-r${round}.md`)
+  io.writeFile(reaskBrief, [
+    ...acceptanceCoverageBounceLines(round, coverage, briefFile),
+    'This costs no plan round; every acceptance id must appear as a top-level check label.',
+    `Original assignment wrapper: ${wrapperPath}`,
+  ].join('\n'))
+  try {
+    const corrected = dispatchOnce('planner', reaskBrief, 'acceptance-coverage-reask', { reask: { id: dispatch.id, returnPath: retryPath } })
+    return { env: corrected, returnPath: retryPath }
+  } finally {
+    // The coverage retry buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.
+    if ([ZERO_TURN_NON_START, 'planner-no-envelope'].includes(pendingEnforcement?.get('planner')?.kind)) pendingEnforcement.delete('planner')
+  }
 }

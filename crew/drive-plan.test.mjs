@@ -3850,37 +3850,110 @@ test('R5 envelopefreeze rewrite capture never overwrites an earlier capture', ()
 })
 
 // Mutation killed: unmeasured preflight coverage would dispatch plan-check.
-test('CB1 bounces a mislabelled plan before plan-check', () => {
+test('CB1 retries a mislabelled plan before plan-check', () => {
  const brief='# T\n\n## Acceptance\n(CB1) required\n', m={...CHECK_MUTATION,check:'X1'}
- const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[m]}}),'planner:2':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[{...m,check:'CB1'}]}}),'tech-lead:1':checkEnv('approve')},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[m]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[{...m,check:'CB1'}]}}),'tech-lead:1':checkEnv('approve')},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
  const result=driveTask(CTX_TL,io)
  assert.equal(io.calls.assign.filter(x=>x.role==='planner').length,2)
- assert.deepEqual(io.calls.logs.filter(x=>x.event==='acceptance-coverage-bounce').map(({round,uncovered,extra})=>({round,uncovered,extra})),[{round:1,uncovered:['CB1'],extra:['X1']}])
- const bounce=io.calls.writes[`${TD}/plan-bounce-r1.md`]
- assert.match(bounce,/CB1/); assert.match(bounce,/X1/); assert.match(bounce,new RegExp(CTX.briefFile.replaceAll('/','\\/')))
+ assert.deepEqual(io.calls.logs.map(x=>x.acceptance_coverage_reask).filter(Boolean).map(({round,uncovered,extra})=>({round,uncovered,extra})),[{round:1,uncovered:['CB1'],extra:['X1']}])
+ const bounce=io.calls.writes[`${TD}/planner-coverage-reask-r1.md`]
+ assert.match(bounce,/Uncovered ids: CB1/); assert.match(bounce,/Extra checks: X1/); assert.match(bounce,/Original assignment wrapper/)
  const check=io.calls.assign.find(x=>x.role==='tech-lead')
- assert.equal(check.briefFile,`${TD}/check-brief-r2.md`)
- assert.equal(io.calls.assign.filter(x=>x.role==='planner')[1].note,'plan-revision')
+ assert.equal(check.briefFile,`${TD}/check-brief-r1.md`)
+ assert.equal(io.calls.assign.filter(x=>x.role==='planner')[1].note,'acceptance-coverage-reask')
  assert.notEqual(result.details.escalation?.where,'plan')
+ assert.equal(io.calls.logs.filter(x=>x.event==='acceptance-coverage-bounce').length,0)
 })
 // Mutation killed: changing the final-round refusal text breaks this exact assertion.
 test('CB2 preserves final-round refusal and emits one coverage row',()=>{
  const brief='# T\n\n## Acceptance\n(CB1) required\n',m={...CHECK_MUTATION,check:'X1'}
- const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner:2':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner:3':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner3.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
  const result=driveTask(CTX_TL,io)
  assert.equal(result.details.escalation.where,'plan')
  assert.equal(result.details.escalation.why,"the plan's gate checks answer 0 of 1 acceptance ids; CB1 has no check — fix the plan, not the build")
  const rows=io.calls.logs.filter(x=>x.event==='acceptance-coverage')
  assert.equal(rows.length,1); assert.deepEqual([rows[0].uncovered,rows[0].extra],[['CB1'],['X1']])
 })
+// Mutation: retry id must remain the original planner assignment id.
+test('CR1', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[fixed]}})}})
+ driveTask(CTX,io)
+ const retry=io.calls.assign.find(x=>x.note==='acceptance-coverage-reask')
+ assert.ok(retry); assert.equal(retry.id,'planner1'); assert.deepEqual(retry.reask,{id:'planner1',returnPath:'planner1.coverage-reask.planner.json'})
+ const prompt=io.calls.writes[TD+'/planner-coverage-reask-r1.md']
+ assert.match(prompt,/Uncovered ids: CB1/); assert.match(prompt,/Extra checks: X1/); assert.match(prompt,/Original assignment wrapper/); assert.match(prompt,/no plan round/); assert.match(prompt,/top-level check label/)
+ assert.deepEqual(io.calls.logs.map(x=>x.acceptance_coverage_reask).filter(Boolean).map(({round,uncovered,extra,outcome})=>({round,uncovered,extra,outcome})),[{round:1,uncovered:['CB1'],extra:['X1'],outcome:'asked'}])
+})
+// Mutation: returning the stale first envelope after a covered retry takes the bounce path.
+test('CR2', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[fixed]}}),'tech-lead:1':checkEnv('approve')}})
+ driveTask(CTX_TL,io)
+ assert.ok(io.calls.writes[TD+'/check-brief-r1.md'])
+ assert.equal(io.calls.writes[TD+'/plan-bounce-r1.md'],undefined)
+ assert.equal(io.calls.assign.some(x=>x.note==='plan-bounce-r1'),false)
+})
+// Mutation: bypassing the early helper ignores a corrected final-round plan.
+// MUTATION: in plannerCoverageReask return `{ env: corrected, returnPath: dispatch.returnPath }`; plan.accepted.envelope.json then misses the retry's bytes.
+test('CR3', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const retry=planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[fixed]}}), retryBytes=JSON.stringify(retry)
+ const io=fakeIo({files:{[CTX.briefFile]:brief,'planner1.coverage-reask.planner.json':retryBytes},writeThrough:true,envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner1.coverage-reask.planner.json':retry}})
+ const result=driveTask({...CTX_TL,limits:{plan_rounds:1}},io)
+ assert.notEqual(result.details.escalation?.where,'plan')
+ assert.equal(io.calls.files[TD+'/plan.accepted.envelope.json'],retryBytes)
+ assert.equal(io.calls.assign.filter(x=>x.note==='acceptance-coverage-reask').length,1)
+})
+// Mutation: suppressing non-done coverage allows the lead consult before retry.
+test('CR4', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const draft=(mutations)=>planEnv({status:'insufficient',details:{questions:[{id:'q1',question:'What?'}],mutations}})
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':draft([miss]),'planner1.coverage-reask.planner.json':draft([fixed]),'lead:1':leadEnv('bounce','revise',{answers:[{id:'q1',answer:'ok'}]}),'planner:3':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[fixed]}})}})
+ driveTask(CTX_TL,io)
+ const sequence=io.calls.sequence.filter(x=>['planner','lead'].includes(x.role))
+ const ri=sequence.findIndex(x=>x.reask), li=sequence.findIndex(x=>x.role==='lead'); assert.ok(ri>=0&&li>ri)
+ assert.doesNotMatch(io.calls.writes[TD+'/decision-1.md']??'',/Uncovered ids:/)
+})
+// Mutation: disabling the late roundCoverage branch loses the ordinary below-final bounce.
+test('CR5', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner:3':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[fixed]}})}})
+ driveTask({...CTX_TL,limits:{plan_rounds:2}},io)
+ const bounceRows=io.calls.logs.filter(x=>x.event==='acceptance-coverage-bounce')
+ assert.equal(bounceRows.length,1); assert.equal(bounceRows[0].round,1)
+ assert.ok(io.calls.writes[TD+'/plan-bounce-r1.md'])
+ const next=io.calls.assign.filter(x=>x.role==='planner').at(-1)
+ assert.equal(next.note,'plan-revision'); assert.equal(next.reask,undefined)
+})
+// Mutation: changing the final escalation reason breaks the original coverage wording.
+test('CR6', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}})}})
+ const result=driveTask({...CTX_TL,limits:{plan_rounds:1}},io)
+ assert.equal(result.details.escalation?.where,'plan')
+ assert.equal(result.details.escalation?.why,"the plan's gate checks answer 0 of 1 acceptance ids; CB1 has no check — fix the plan, not the build")
+})
+// Mutation: disabling the spent-grace early return causes a second assignment.
+test('CR7', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner:2':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}})}})
+ io.reaskGraceSpent=()=> 'planner'
+ const result=driveTask({...CTX_TL,limits:{plan_rounds:1}},io)
+ assert.equal(io.calls.assign.filter(x=>x.role==='planner'&&x.reask).length,0)
+ assert.equal(io.calls.assign.filter(x=>x.role==='planner').length,1)
+ assert.equal(result.details.escalation?.where,'plan')
+ assert.deepEqual(io.calls.logs.map(x=>x.acceptance_coverage_reask).filter(Boolean).map(x=>x.outcome),['grace-spent'])
+})
+
 // Mutation killed: empty preflight mutations bounce even a fully covered plan.
 test('CB3 covered plans proceed and relabelled plans bounce',()=>{
  const brief='# T\n\n## Acceptance\n(CB1) required\n',m={...CHECK_MUTATION,check:'CB1'}
  const covered=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[m]}}),'tech-lead:1':checkEnv('approve')},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
  driveTask(CTX_TL,covered)
- const relabel=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[{...m,check:'X1'}]}}),'planner:2':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[{...m,check:'X1'}]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+ const relabel=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[{...m,check:'X1'}]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[{...m,check:'X1'}]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
  driveTask(CTX_TL,relabel)
- assert.deepEqual([covered,relabel].map(x=>x.calls.assign.filter(a=>a.role==='planner').length),[1,2])
+ assert.deepEqual([covered,relabel].map(x=>x.calls.assign.filter(a=>a.role==='planner').length),[1,3])
  assert.deepEqual([covered,relabel].map(x=>x.calls.logs.filter(a=>a.event==='acceptance-coverage-bounce').length),[0,1])
 })
 test('coverage helpers preserve wording, waiver, cap, and unmeasured behavior',()=>{
@@ -3905,7 +3978,7 @@ test('omitted and exempt mutations bounce without covering acceptance ids',()=>{
   const details={...planEnv().details,gate_cmd:'gate-cmd'}
   if(mutations!==undefined) details.mutations=mutations
   const plan=planEnv({details})
-  const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':plan,'planner:2':plan},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+  const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':plan,'planner1.coverage-reask.planner.json':plan},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
   driveTask(CTX_TL,io)
   const bounce=io.calls.logs.find(x=>x.event==='acceptance-coverage-bounce')
   assert.deepEqual([bounce.uncovered,bounce.extra],[['A1'],[]])
@@ -3915,10 +3988,22 @@ test('omitted and exempt mutations bounce without covering acceptance ids',()=>{
 // Mutation killed: deleting final-round row emit makes this assertion fail.
 test('final-round acceptance coverage row is emitted exactly once',()=>{
  const brief='# T\n\n## Acceptance\n(CB1) required\n',m={...CHECK_MUTATION,check:'X1'}
- const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner:2':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner:3':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}}),'planner3.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[m]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
  driveTask(CTX_TL,io)
  const rows=io.calls.logs.filter(x=>x.event==='acceptance-coverage')
  assert.equal(rows.length,1); assert.deepEqual([rows[0].uncovered,rows[0].extra],[['CB1'],['X1']])
+})
+
+// MUTATION: move the `io.log(... event: 'acceptance-coverage' ...)` in runTask above `if (round >= planRounds())`;
+// the below-final round 1 then also emits a final coverage row.
+test('RV1-2 below-final rounds emit only bounce coverage rows', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner:3':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}}),'planner3.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',mutations:[miss]}})},runs:{'gate-cmd':{ok:true,output:''},'lane-cmd':{ok:true,output:''},'suite-cmd':{ok:true,output:''}}})
+ driveTask({...CTX_TL,limits:{plan_rounds:2}},io)
+ const bounce=io.calls.logs.filter(x=>x.event==='acceptance-coverage-bounce')
+ const final=io.calls.logs.filter(x=>x.event==='acceptance-coverage')
+ assert.equal(bounce.length,1); assert.equal(bounce[0].round,1)
+ assert.equal(final.length,1)
 })
 
 // Kills: labelling the acceptance restore from planAdversary, which names `plan-check` in a run with no check stage.
@@ -4110,6 +4195,67 @@ test('seat handoff ancillary bounds and branches', () => {
   assert.equal(Object.values(denied.calls.writes).some((body) => String(body).includes('tech-lead-handoff-r2.md')), false)
 })
 
+// MUTATION: delete the `try { … } catch {}` around the acceptance_coverage_reask journal write in
+// plannerCoverageReask; the injected journal failure then crashes the plan stage before check-brief-r1.md.
+test('RV1-3 coverage retry journal failure still reaches check-brief-r1', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[miss]}}),'planner1.coverage-reask.planner.json':planEnv({details:{...planEnv().details,gate_cmd:'gate-cmd',needs_adversary:true,mutations:[fixed]}}),'tech-lead:1':checkEnv('approve')}})
+ const log=io.log.bind(io); io.log=(row)=>{if(row.acceptance_coverage_reask) throw new Error('journal unavailable'); return log(row)}
+ driveTask(CTX_TL,io)
+ assert.equal(io.calls.assign.filter(x=>x.role==='planner'&&x.note==='acceptance-coverage-reask').length,1)
+ assert.equal(io.calls.assign.find(x=>x.role==='tech-lead')?.briefFile,`${TD}/check-brief-r1.md`)
+})
+
+// MUTATION: in plannerCoverageReask return `{ env: handledEnvelopeRefusalOf(corrected) ? env : corrected, returnPath: retryPath }`;
+// the refused retry then falls back to the stale draft and the plan never escalates on the envelope refusal.
+test('RV1-3 refused coverage retry escalates naming envelope-refusal with no lead assignment', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}
+ const refusal=planEnv({assignment_id:'stale-planner',details:{...planEnv().details,mutations:[miss]}})
+ const io=fakeIo({files:{[CTX_TL.briefFile]:brief},envelopes:{'planner:1':planEnv({details:{...planEnv().details,mutations:[miss]}}),'planner1.coverage-reask.planner.json':refusal}})
+ const result=driveTask(CTX_TL,io)
+ assert.equal(io.calls.assign.filter(x=>x.role==='planner'&&x.note==='acceptance-coverage-reask').length,1)
+ assert.equal(result.details.escalation?.where,'plan')
+ assert.match(result.details.escalation?.why??'',/envelope-refusal/)
+ assert.equal(io.calls.assign.some(x=>x.role==='lead'),false)
+})
+
+// MUTATION: at the planner consult in runTask, replace `...consultCoverage.lines,` with
+// `...(env.status === 'blocked' ? [] : consultCoverage.lines),` (or `questions.length === 0 ? [] : …`);
+// a blocked or questionless draft whose retry is unrepaired then loses its coverage in the lead consult.
+test('RV1-1 blocked and questionless drafts keep coverage after an unrepaired retry', () => {
+ for (const options of [{status:'blocked'},{questionless:true}]) {
+  const {io}=coverageFirstIo(options)
+  const label=JSON.stringify(options)
+  assert.equal(io.calls.assign.filter(x=>x.role==='planner'&&x.note==='acceptance-coverage-reask').length,1,label)
+  assert.match(io.calls.writes[TD+'/decision-1.md']??'',/Uncovered ids: CB1/,label)
+  assert.match(io.calls.writes[TD+'/plan-bounce-r1.md']??'',/Uncovered ids: CB1/,label)
+  assert.equal(io.calls.assign.filter(x=>x.role==='planner').at(-1).note,'plan-revision',label)
+  assert.equal(io.calls.assign.find(x=>x.role==='tech-lead')?.briefFile,`${TD}/check-brief-r2.md`,label)
+ }
+ const {io}=coverageFirstIo({mutations:undefined})
+ assert.equal(io.calls.assign.some(x=>x.reask),false)
+ assert.equal(io.calls.assign.find(x=>x.role==='tech-lead')?.briefFile,`${TD}/check-brief-r2.md`)
+})
+
+// MUTATION: delete the `finally` cleanup in plannerCoverageReask; the retry's zero-turn non-start
+// preamble then wraps the round-2 planner brief in an enforcement-planner wrapper.
+test('RV1-4 coverage retry non-start enforcement does not leak into the next plan round', () => {
+ const brief='# T\n\n## Acceptance\n(CB1) required\n', miss={...CHECK_MUTATION,check:'X1'}, fixed={...CHECK_MUTATION,check:'CB1'}
+ const io=fakeIo({files:{[CTX.briefFile]:brief},envelopes:{
+  'planner:1':planEnv({details:{...planEnv().details,mutations:[miss]}}),
+  'planner1.coverage-reask.planner.json':zeroTurnEnvelope('planner1'),
+  'lead:1':leadEnv('bounce','retry the planner from lead guidance'),
+  'planner:3':planEnv({details:{...planEnv().details,mutations:[fixed]}}),
+ }})
+ driveTask(CTX,io)
+ const planners=io.calls.assign.filter(x=>x.role==='planner')
+ assert.equal(planners.length,3)
+ assert.equal(planners[1].note,'acceptance-coverage-reask')
+ assert.equal(io.calls.logs.some(x=>x.seat_enforcement?.applied===false&&x.seat_enforcement.dispatch==='planner1'),true)
+ assert.equal(planners[2].briefFile,`${TD}/planner-assignment-r2.md`)
+ assert.equal(io.calls.logs.some(x=>x.seat_enforcement?.applied),false)
+})
+
 function coverageFirstIo(options = {}) {
   const mutations = Object.hasOwn(options, 'mutations') ? options.mutations : [{ ...CHECK_MUTATION, check: 'X1' }]
   const { brief = '# T\n\n## Acceptance\n(CB1) required\n', leadDecision = 'bounce', leadReason = 'because', questionless = false, status = 'insufficient' } = options
@@ -4120,7 +4266,9 @@ function coverageFirstIo(options = {}) {
   const io = fakeIo({ files: { [CTX_TL.briefFile]: brief }, envelopes: {
     'planner:1': first,
     'lead:1': leadEnv(leadDecision, 'fix the loader only', { reason: leadReason, answers: [{ id: 'q1', answer: 'keep the loader fix' }] }),
+    'planner1.coverage-reask.planner.json': first,
     'planner:2': final,
+    'planner:3': final,
     'tech-lead:1': checkEnv('approve'),
   } })
   return { io, result: driveTask(CTX_TL, io) }

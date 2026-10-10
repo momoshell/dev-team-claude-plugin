@@ -39,7 +39,7 @@ export function pluginProvenance({ root = PLUGIN_ROOT, git = defaultGit } = {}) 
     // A plugin copied inside another checkout is not its own checkout: never report the host repository's HEAD.
     const top = run(git, root, ['rev-parse', '--show-toplevel'])
     if (top.failed || top.status !== 0) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'git_failed' }
-    if (samePath(top.stdout.trim(), root) !== true) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'not_git_checkout' }
+    if (samePath(top.stdout.replace(/\r?\n$/, ''), root) !== true) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: 'not_git_checkout' }
     const head = run(git, root, ['rev-parse', 'HEAD'])
     const sha = head.stdout.trim()
     if (head.failed || head.status !== 0 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(sha)) return { plugin_root: root, plugin_sha: null, plugin_dirty: null, absent_reason: head.failed ? 'git_failed' : 'head_unreadable' }

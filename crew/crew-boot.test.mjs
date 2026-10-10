@@ -3188,7 +3188,7 @@ test('NP9 the boot journal records pi_codemode on/default when unset, on/env whe
 
 // Plugin provenance and repo key: real temp git repositories plus injected runners. Unknown is null with a closed reason.
 const provenanceRepo = (withOrigin) => {
-  const dir = mkdtempSync(join(tmpdir(), 'crew-provenance-'))
+  const dir = scratchDir('crew-provenance-')
   execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir })
   if (withOrigin) execSync('git remote add origin git@github.com:acme/widget.git', { cwd: dir })
   return dir
@@ -3250,3 +3250,15 @@ function execGit(args, options = {}) {
     return { status: 0, stdout }
   } catch (error) { return { status: error.status ?? 1, stdout: error.stdout || '' } }
 }
+
+// MUTATION: trim the whole git toplevel output; a checkout whose path ends in a space is misread as not_git_checkout.
+test('plugin provenance measures a checkout whose path ends in a space', async () => {
+  const { pluginProvenance } = await import('./provenance.mjs')
+  const parent = scratchDir('crew-provenance-space-')
+  const dir = join(parent, 'plugin ')
+  mkdirSync(dir)
+  execSync('git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init', { cwd: dir })
+  const record = pluginProvenance({ root: dir, git: (args, options) => execGit(args, options) })
+  assert.match(record.plugin_sha, /^[a-f0-9]{40}$/)
+  assert.equal(record.absent_reason, null)
+})

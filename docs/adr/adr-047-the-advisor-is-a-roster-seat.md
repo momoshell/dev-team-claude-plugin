@@ -204,7 +204,7 @@ local cells, which stays ADR-037's.
 
 1. **Breaker:** a consult's provider failure counts toward opening the advisor cell, exactly as a seat's does.
    The consequence stays advisory: a failed consult ends that consult, never the lane.
-2. **Default cell:** the build tier ships `anthropic/claude-sonnet-5`; mechanical and judge ship `null`.
+2. **Default cell:** the build tier ships `anthropic/claude-sonnet-5`; mechanical and judge ship `null`. Amendment 1 (2026-10-10) supersedes the judge default; see below.
 3. **Advised seats:** the builder only. The planner is not advised yet; revisit with builder data. Reviewer, lead,
    tech-lead and scouts are never advised.
 4. **Retired variables:** a boot that sets `CREW_ADVISOR_ENDPOINT` or `CREW_ADVISOR_MODEL` refuses with
@@ -239,3 +239,11 @@ local cells, which stays ADR-037's.
 The tier-1 channel, run on the roster path over a complete `advisor-ab` readout at the floor, shows no overlap and no
 saved rounds, with a real cost. Then the model channel is deleted and tier 0 stays. That is the ratify-or-delete call
 the protocol already reserves for the operator.
+
+## Amendment 1 (2026-10-10, operator decision) — judge ships the terra advisor
+
+This amendment supersedes operator decision 2 only for the judge tier. Judge now ships `openai/gpt-5.6-terra` at `medium`, the same cell as build; mechanical stays `null`.
+
+**Grounds, supplied by the operator.** Advisor delivery became real at PR #1773: 20/21, then 46/74 tier-1 notes delivered. Judge builders pass first review only 14/30. The advisor costs about $0.02 per lane and gives the passive advisor measurement a judge arm. These are supplied pre-change measurements, not a measured benefit from this amendment.
+
+**What does not change.** The advisor remains passive, advisory and builder-only; grants, overrides, the roster/adapter path and the existing ratify-or-delete protocol are unchanged.

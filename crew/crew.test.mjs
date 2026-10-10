@@ -34,8 +34,12 @@ test('ADR047 A1 build roster resolves its canonical nullable advisor cell withou
   assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: null })
   assert.equal(resolved.roles.includes('advisor'), false)
 })
-test('ADR047 A2 judge roster keeps advisor explicitly null', () => {
-  assert.equal(resolveTier(shippedRoster(), 'judge').advisor, null)
+test('ADR047 build advisor roster literal remains pinned to terra', () => {
+  assert.deepEqual(shippedRoster().tiers.build.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
+})
+test('ADR047 A2 judge resolves terra and mechanical keeps advisor explicitly null', () => {
+  assert.deepEqual(resolveTier(shippedRoster(), 'judge').advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: null })
+  assert.equal(resolveTier(shippedRoster(), 'mechanical').advisor, null)
 })
 test('ADR047 A3 advisor is not a process role and canonical override is honored', () => {
   const resolved = resolveTier(shippedRoster(), 'build', { 'model-advisor': 'openai/gpt-6-sol' })
@@ -50,7 +54,8 @@ test('ADR047 B1 none clears advisor and noncanonical values refuse', () => {
 test('ADR047 Q1 none refuses an agent or effort flag it would silently discard', () => {
   for (const extra of [{ 'agent-advisor': 'claude' }, { 'effort-advisor': 'high' }]) {
     assert.throws(() => resolveTier(shippedRoster(), 'build', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
-    assert.throws(() => resolveTier(shippedRoster(), 'judge', { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
+    assert.throws(() => resolveTier(shippedRoster(), 'judge', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
+    assert.throws(() => resolveTier(shippedRoster(), 'mechanical', { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
   }
   assert.equal(resolveTier(shippedRoster(), 'build', { 'effort-advisor': 'high' }).advisor.effort, 'high')
 })
@@ -2393,9 +2398,12 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
 
 test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Sonnet successors', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-09-30')
+  assert.equal(shipped.updated_at, '2026-10-10')
   // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
   assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
+  assert.equal(shipped.tiers.build.builder.effort, 'high')
+  assert.deepEqual(shipped.tiers.judge.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
+  assert.equal(shipped.tiers.mechanical.advisor, null)
   for (const tier of ['mechanical', 'build', 'judge']) {
     assert.equal(shipped.tiers[tier].planner.id, 'gpt-6.1-sol')
     assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')
@@ -2403,8 +2411,7 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Son
   for (const tier of ['build', 'judge']) {
     assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')
   }
-  assert.deepEqual(shipped.tiers.judge['tech-lead'].fallback.map((entry) => entry.id), ['claude-opus-5-5'])
-  assert.equal(shipped.tiers.judge['tech-lead'].id, 'claude-fable-5-1')
+  assert.deepEqual(shipped.tiers.judge['tech-lead'], { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh', fallback: [{ provider: 'anthropic', id: 'claude-fable-5-1', agent: 'claude', effort: 'medium' }] })
   // Fable is reached by explicit seating only: its override-only tag keeps the failure-upgrade
   // reseat from climbing onto it from a cheaper anthropic seat.
   assert.ok(shipped.models['anthropic/claude-fable-5-1'].tags.includes('override-only'))

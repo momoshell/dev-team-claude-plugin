@@ -670,9 +670,14 @@ function writeDescendantRecord(taskDir, overrides = {}) {
 }
 
 
+function buildBreakerCell() {
+  const { provider, id, agent, effort } = shippedRoster().tiers.build.builder
+  return { provider, model_id: id, agent, effort }
+}
+
 function breakerRow(over = {}) {
   return {
-    provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', role: 'builder', kind: 'timeout',
+    ...buildBreakerCell(), role: 'builder', kind: 'timeout',
     failures: 1, first_at: '2026-08-16T00:00:00.000Z', last_at: '2026-08-16T01:00:00.000Z', run_less: 0, ...over,
   }
 }
@@ -680,7 +685,7 @@ function breakerRow(over = {}) {
 
 function breakerAttempt(over = {}) {
   return {
-    provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', role: 'builder',
+    ...buildBreakerCell(), role: 'builder',
     attempts: 12, first_at: '2026-08-16T00:00:00.000Z', last_at: '2026-08-16T01:00:00.000Z', ...over,
   }
 }
@@ -1761,17 +1766,18 @@ test('B1 boot crew record remains profile and assurance only', async () => {
         assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
       })
       const bootConfiguration = bootRecord(dir).run_configuration
-      // ADR-047 (TL7): the boot JOURNAL's record carries the resolved advisor cell (null on
-      // judge); crew.json keeps profile and assurance only, because seats.advisor records it there.
+      // ADR-047 (TL7): the boot JOURNAL's record carries the resolved advisor cell;
+      // crew.json keeps profile and assurance only, because seats.advisor records it there.
+      const judgeAdvisor = { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: 'openai-codex/gpt-5.6-terra' }
       assert.deepEqual(bootConfiguration, {
         profile: crew.run_configuration.profile,
         assurance: crew.run_configuration.assurance,
-        advisor: null,
+        advisor: judgeAdvisor,
       })
       assert.equal(Object.hasOwn(bootConfiguration, 'execution'), false)
-      assert.deepEqual(bootConfiguration, { ...crew.run_configuration, advisor: null })
+      assert.deepEqual(bootConfiguration, { ...crew.run_configuration, advisor: judgeAdvisor })
       assert.equal(Object.hasOwn(crew.run_configuration, 'advisor'), false)
-      assert.equal(crew.seats.advisor, null)
+      assert.deepEqual(crew.seats.advisor, judgeAdvisor)
       runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
         drive: (ctx) => { seen = ctx; return done }, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
       })
@@ -2495,7 +2501,7 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
     assert.equal(breaker.verdict, 'closed')
     assert.equal(breaker.threshold_rate, 0.2)
     assert.equal(breaker.window_ms, 3600000)
-    const breakerCell = breaker.cells.find((cell) => cell.provider === 'openai' && cell.model_id === 'gpt-6-luna' && cell.agent === 'pi' && cell.effort === 'medium')
+    const breakerCell = breaker.cells.find((cell) => cell.provider === 'openai' && cell.model_id === 'gpt-6-luna' && cell.agent === 'pi' && cell.effort === buildBreakerCell().effort)
     assert.ok(breakerCell)
     assert.equal(breakerCell.numerator, 1)
     assert.equal(breakerCell.denominator, 12)
@@ -4915,7 +4921,7 @@ test('E1-mismatch named workflow seat drift refuses before side effects', async 
       (error) => error?.reason === 'workflow-seat-mismatch'
         && error.role === 'builder'
         && error.expected?.agent === 'pi'
-        && error.expected?.effort === 'medium'
+        && error.expected?.effort === shippedRoster().tiers.build.builder.effort
         && error.actual?.agent === 'pi'
         && error.actual?.effort === 'max'
         && error.message.includes('builder')

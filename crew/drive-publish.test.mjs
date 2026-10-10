@@ -3378,3 +3378,80 @@ test('D1 unrecognised suite output remains unmeasured and refuses publication', 
   assert.equal(result.details.escalation.where, 'suite')
   assert.equal(result.details.escalation.why, 'full suite was green, but its pass/fail summary could not be measured for publication')
 })
+
+// MUTATION CT1: loosen issueTrailers to collect closing keywords from prose or malformed trailers.
+test('CT1 issue trailers accept only complete close rows and retain independent refs', () => {
+  const keywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved']
+  for (const keyword of keywords) {
+    for (const malformed of [`text ${keyword} #900001`, `${keyword}: #900001 trailing`, `${keyword}: #900001 #900002`, `${keyword}: #900001, prose`]) {
+      assert.deepEqual(issueTrailers(malformed).closes, [], malformed)
+    }
+    assert.deepEqual(issueTrailers(` ${keyword.toUpperCase()} #900001, #900002\n${keyword}: #900001\nRefs: #900002, #900003`), { closes: ['#900001', '#900002'], refs: ['#900003'] })
+  }
+})
+
+// MUTATION CT2: bypass neutralisation at driver-composed commit prose slots.
+test('CT2 commit prose neutralises closes while preserving declared trailers', () => {
+  const dangerous = 'does not close #900004'
+  const safe = 'does not close issue 900004'
+  const subject = composeCommitMessage({ task: 'ct2', planEnv: planEnv({ details: { commit_subject: dangerous } }), builderEnv: buildEnv() })
+  assert.equal(subject.split('\n')[0], safe)
+  const fallback = composeCommitMessage({ task: 'ct2', planEnv: planEnv({ summary: dangerous }), builderEnv: buildEnv() })
+  assert.equal(fallback.split('\n')[0], `crew(ct2): ${safe}`)
+  for (const builderEnv of [{ summary: 'built', details: { commit_message: dangerous } }, { summary: dangerous, details: {} }]) {
+    const message = composeCommitMessage({ task: 'ct2', planEnv: planEnv({ details: { commit_subject: 'subject', closes: [900005], issues: [900006] } }), builderEnv })
+    assert.match(message, new RegExp(safe))
+    assert.deepEqual(issueTrailers(message), { closes: ['#900005'], refs: ['#900006'] })
+  }
+})
+
+// MUTATION CT3: publish seat prose unneutralised in any composed PR text slot.
+test('CT3 PR body neutralises every seat prose slot but preserves driver Why', () => {
+  const unsafe = 'does not close #900007'
+  const safe = 'does not close issue 900007'
+  const body = composePrBody({
+    intent: unsafe,
+    review: { residuals: [{ id: 'R', type: 'cosmetic', summary: unsafe }], carried: [{ id: 'C', severity: 'major', correction: unsafe }] },
+    hardening: { unmeasured: [{ finding: 'H', outcome: 'unknown', why: unsafe }] },
+    anomalies: [{ kind: 'bounce', detail: unsafe }],
+    narrative: unsafe,
+    prompt_claim: `unmeasured — n insufficient; reason: ${unsafe}; re-measure after 2 seats.`,
+    gate: { cmd: unsafe, summary: { total: 1, failed: 0, errored: 0 } },
+    files: [`${unsafe}.mjs`], closes: ['#900008'], issues: ['#900009'],
+  })
+  assert.equal(body.includes(unsafe), false)
+  assert.ok(body.includes(safe))
+  assert.ok(body.includes('Closes #900008 · Refs #900009'))
+  assert.ok(body.includes(`- ${safe}.mjs`))
+})
+
+// MUTATION: drop the owner/repo group or the colon gap from neutralizeClosingProse; drop the call on the unmeasured gate `where` or on the plan prompt_claim.
+test('closing prose is neutralised in every grammar form and in the unmeasured gate and prompt-claim slots', async () => {
+  const { neutralizeClosingProse } = await import('./drive.mjs')
+  const closing = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#\d+/i
+  for (const [unsafe, safe] of [
+    ['Not FIXES owner/repo#900010.', 'Not FIXES owner/repo issue 900010.'],
+    ['Not Resolved:#900011.', 'Not Resolved:issue 900011.'],
+    ['Not closed : #900012.', 'Not closed : issue 900012.'],
+  ]) {
+    assert.equal(neutralizeClosingProse(unsafe), safe, unsafe)
+    assert.doesNotMatch(neutralizeClosingProse(unsafe), closing, unsafe)
+  }
+  const unsafe = 'fixes #900013'
+  const unmeasured = composePrBody({ gate: { cmd: `gate ${unsafe}` } })
+  assert.match(unmeasured, /its summary could not be measured/)
+  assert.equal(unmeasured.includes(unsafe), false)
+  assert.ok(unmeasured.includes('fixes issue 900013'))
+  const claim = `unmeasured — n insufficient; reason: ${unsafe}; re-measure after 2 seats.`
+  const message = composeCommitMessage({ task: 'np', planEnv: planEnv({ details: { commit_subject: 'subject', prompt_claim: claim } }), builderEnv: buildEnv() })
+  assert.ok(message.includes('reason: fixes issue 900013'), message)
+  assert.deepEqual(issueTrailers(message).closes, [])
+})
+
+// MUTATION: let issueTrailers accept a keyword glued to the number (drop the colon-or-whitespace gap).
+test('a closing keyword glued to an issue number binds no close', () => {
+  for (const glued of ['close#900014', 'Fixes#900015', 'resolved#900016, #900017']) assert.deepEqual(issueTrailers(glued).closes, [], glued)
+  const message = composeCommitMessage({ task: 'glued', planEnv: planEnv({ details: { commit_subject: 'subject' } }), builderEnv: { summary: 'built', details: { commit_message: 'close#900014' } } })
+  assert.deepEqual(issueTrailers(message).closes, [])
+  assert.deepEqual(issueTrailers('Closes:#900018\nfixes #900019').closes, ['#900018', '#900019'])
+})

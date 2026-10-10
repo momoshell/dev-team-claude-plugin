@@ -16281,6 +16281,13 @@ function heldLexical(source, path, reason) {
         let nakedStart = trivia(bodyStart, code.length)
         while (code.startsWith('await', nakedStart) && !/[\w$]/.test(code[nakedStart + 5] || '')) nakedStart = trivia(nakedStart + 5, code.length)
         if (nakedStart !== callStart) continue
+        if (code[callEnd] !== ';') {
+          // A braceless body ends at the call only when ASI ends it there: the next token starts a new
+          // line and cannot continue the expression (a comma, operator, call or member access would).
+          const next = trivia(callEnd, code.length)
+          const continues = !code.slice(callEnd, next).includes('\n') || !/[A-Za-z_$}'"]/.test(code[next]) || /^(?:in|instanceof)(?![\w$])/.test(code.slice(next, next + 11))
+          if (next < code.length && continues) continue
+        }
         bodyEnd = callEnd + (code[callEnd] === ';' ? 1 : 0)
       }
       if (callStart >= bodyStart && callEnd <= bodyEnd) loop = { forIndex, open, headEnd, iterableStart, bodyStart, bodyEnd }

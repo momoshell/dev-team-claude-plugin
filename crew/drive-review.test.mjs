@@ -6855,7 +6855,7 @@ test(\`pane \${label} after an unusable-envelope re-ask: \${expected === 2 ? 'a 
   ]
   for (const source of exact) assert.deepEqual(scan(source), { path: 'a.test.mjs', measured: true, lane_added: false, assertions_changed: 0, body_lines_changed: 0, tests_removed: 0, entries: [] })
   for (const source of [
-    "for (const [name] of [['a']]) await test(name, () => {})\\n",
+    "for (const [name] of [['a']]) await test(name, () => {})\n",
     "for (const [name] of [['a']]) /* before */ await test(name, () => {}); // after\\n",
     "for (const [name] of [['a']]) { /* before */ test(name, () => {}); }\\n",
   ]) assert.equal(scan(source).measured, true)
@@ -6917,6 +6917,17 @@ test('for-await braceless parents keep generated families uncertain', () => {
   // MUTATION: bypassing await in the braceless-control word set admits a family whose controlling line is outside its span.
   const base = "for await (const g of gen())\nfor (const [name] of [['a']]) test(`${name} works`, () => {})\n"
   assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' })
+})
+
+test('a braceless loop body that continues past its test call keeps the family uncertain', () => {
+  // MUTATION: delete the `if (next < code.length && continues) continue` guard; the comma body reports measured with zero changes.
+  const uncertain = { path: 'a.test.mjs', measured: false, reason: 'test-call-uncertain' }
+  const comma = "for (const [name] of [['a']]) test(name, () => {}),\naudit(name)\n"
+  const operator = "for (const [name] of [['a']]) test(name, () => {}) || audit(name)\n"
+  for (const base of [comma, operator]) assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }), uncertain)
+  const semicolon = "for (const [name] of [['a']]) test(name, () => {});\naudit()\n"
+  const asi = "for (const [name] of [['a']]) await test(name, () => {})\naudit()\n"
+  for (const base of [semicolon, asi]) assert.equal(heldAssertionChanges({ path: 'a.test.mjs', base, diff: '', current: base }).measured, true)
 })
 
 test('owned for-of arrays reject filter calls after their closing bracket', () => {

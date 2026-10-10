@@ -107,7 +107,7 @@ export const JUDGMENT_ERROR_CODES = Object.freeze([
   'transport-failed', 'timeout', 'status-not-ok', 'body-too-large', 'body-unreadable',
   'body-not-json', 'content-missing', 'payload-not-an-object', 'unknown-key',
   'class-invalid', 'severity-invalid', 'claim-invalid', 'evidence-invalid',
-  'evidence-unanchored', 'no-grounded-delta',
+  'evidence-unanchored', 'no-grounded-delta', 'no-finding',
 ])
 export const SUPPRESSION_CODES = Object.freeze(['duplicate', 'content-free', 'one-per-update'])
 
@@ -650,7 +650,8 @@ export const JUDGMENT_REPLY_MAX = 4
 
 export function validateReply(value, options = {}) {
   if (!Array.isArray(value)) return validateJudgment(value, options)
-  if (!value.length || value.length > JUDGMENT_REPLY_MAX) return { codes: ['payload-not-an-object'] }
+  if (!value.length) return { codes: ['no-finding'] }
+  if (value.length > JUDGMENT_REPLY_MAX) return { codes: ['payload-not-an-object'] }
   const codes = []
   for (const element of value) {
     const verdict = validateJudgment(element, options)
@@ -691,7 +692,7 @@ function requestUrl(endpoint) {
   return `${String(endpoint).replace(/\/+$/, '')}/chat/completions`
 }
 
-const REPLY_CONTRACT = `Return JSON alone: one object or an array of 1 to ${JUDGMENT_REPLY_MAX} objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of ${JUDGMENT_CLASSES.join(', ')}. severity must be one of ${SEVERITIES.join(', ')}. claim must be a non-empty string of at most ${CLAIM_CAP_BYTES} UTF-8 bytes. evidence must be an array of 1 to ${EVIDENCE_MAX} strings, each at most ${EVIDENCE_ITEM_CAP_BYTES} UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example's evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]}`
+const REPLY_CONTRACT = `Return JSON alone: one object or an array of 1 to ${JUDGMENT_REPLY_MAX} objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of ${JUDGMENT_CLASSES.join(', ')}. severity must be one of ${SEVERITIES.join(', ')}. claim must be a non-empty string of at most ${CLAIM_CAP_BYTES} UTF-8 bytes. evidence must be an array of 1 to ${EVIDENCE_MAX} strings, each at most ${EVIDENCE_ITEM_CAP_BYTES} UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example's evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.`
 
 export const BUILDER_SYSTEM_PROMPT = `Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). ${REPLY_CONTRACT}`
 export const PLANNER_SYSTEM_PROMPT = `Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). ${REPLY_CONTRACT}`
@@ -1263,7 +1264,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         const payload = {
           run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
           kind: TIER1_FINDING, target: '', target_kind: 'assertion', role,
-          outcome: 'rejected', codes: errorCodeSet(codes), ...captured.tier1Stamp,
+          outcome: codes.length === 1 && codes[0] === 'no-finding' ? 'skipped' : 'rejected', codes: errorCodeSet(codes), ...captured.tier1Stamp,
           ...(typeof replyText === 'string' && !codes.some((code) => ['timeout', 'transport-failed', 'body-too-large'].includes(code))
             ? { reply_excerpt: boundText(redactDelta(replyText).text, REPLY_EXCERPT_CAP_BYTES) } : {}),
         }

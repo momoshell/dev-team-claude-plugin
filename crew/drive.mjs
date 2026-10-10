@@ -8589,7 +8589,7 @@ function runTask(ctx, io, crash) {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
       if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
-      const questionCap = planRounds()
+      const questionCap = planRounds(), consultCoverage = plannerConsultCoverage(briefText, env.details?.mutations, round, ctx.briefFile)
       const finalRound = round >= questionCap
       const answeredFinal = questions.length > 0 && finalRound
       // #959 — the case #930 did not cover: NO keyed questions on the last round
@@ -8603,7 +8603,7 @@ function runTask(ctx, io, crash) {
         : `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. No bounce can be funded; escalate and name what a human must decide.`
       const c = consultLead(
         [questionAsk,
-          ...(questionFundable ? questionConsultLines('planner', questions) : []),
+          ...(questionFundable ? questionConsultLines('planner', questions) : []), ...consultCoverage.lines,
           ...(questionlessFinal ? planBounceUnfundedLines({ round, cap: questionCap }) : []),
           ...questionRoundLines({ round, cap: questionCap, questions: questions.length, final: answeredFinal, fundable: questionFundable })].join('\n'),
         bounceOffered ? ['bounce', 'escalate'] : ['escalate'], [planBrief, ...(env.artifacts || [])],
@@ -8631,9 +8631,9 @@ function runTask(ctx, io, crash) {
         `# Plan bounce (round ${round})`, '', c.guidance, '',
         `Original brief: ${ctx.briefFile}`,
         `Planner said: ${env.summary || env.status}`,
-        ...answerBounceLines(questions, matched),
+        ...answerBounceLines(questions, matched), ...consultCoverage.lines,
       ].join('\n'))
-      planBrief = b
+      planBrief = b; if (consultCoverage.coverage) io.log(recordRow({ at: io.now(), event: 'acceptance-coverage-bounce', round, uncovered: consultCoverage.coverage.uncovered, extra: consultCoverage.coverage.extra }))
       stageComplete()
       continue
     }
@@ -16538,4 +16538,12 @@ export function builderPlanLines(planPath, planText) {
   if (bytes === 0) return [`${prefix} — not included (empty); read it.`]
   if (bytes > BUILDER_PLAN_INLINE_BYTE_LIMIT) return [`${prefix} — not included (${bytes - BUILDER_PLAN_INLINE_BYTE_LIMIT} bytes over the ${BUILDER_PLAN_INLINE_BYTE_LIMIT}-byte cap); read it.`]
   return [`${prefix} — included in full below; do not read it.`, '--- PLAN BEGINS ---', planText, '--- PLAN ENDS ---']
+}
+
+export function plannerConsultCoverage(briefText, mutations, round, briefFile) {
+  if (!Array.isArray(mutations) || mutations.length === 0) return { coverage: null, lines: [] }
+  const coverage = acceptanceCoverage(briefText, mutations)
+  if (coverage.status !== 'measured') return { coverage: null, lines: [] }
+  if (coverage.uncovered.length === 0) return { coverage: null, lines: [] }
+  return { coverage, lines: ['', ...acceptanceCoverageBounceLines(round, coverage, briefFile)] }
 }

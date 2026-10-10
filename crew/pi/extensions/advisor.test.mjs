@@ -1454,3 +1454,139 @@ test('AS3 both prompt examples validate as objects and one-element arrays', () =
     assert.deepEqual(advisor.validateReply([example], { anchors }), { codes: [], judgment: example })
   }
 })
+
+// MUTATION RJ1: increment recorded UTF-8 byte count; accepted reply provenance must measure exact bytes.
+test('RJ1 accepted consult records reply hash, UTF-8 bytes, excerpt and identity', async () => {
+  const reply = JSON.stringify(adGood('auditable accepted claim'))
+  const r = await adDrive(reply)
+  const consult = r.rows.find((row) => row.advisor_consult).advisor_consult
+  const { createHash } = await import('node:crypto')
+  assert.equal(consult.reply.sha256, createHash('sha256').update(reply).digest('hex'))
+  assert.equal(consult.reply.bytes, Buffer.byteLength(reply))
+  assert.equal(consult.reply.excerpt, reply)
+  assert.ok(consult.consult_id)
+  assert.equal('reply_reason' in consult, false)
+})
+
+// MUTATION RJ2: bypass redaction before hashing a rejected credential-bearing reply.
+test('RJ2 rejected consult records redacted bounded reply and joined note', async () => {
+  const reply = 'Bearer abcdefghijklmnopqrstuvwxyz ' + '🙂'.repeat(300)
+  const r = await adDrive(reply)
+  const consult = r.rows.find((row) => row.advisor_consult).advisor_consult
+  const { createHash } = await import('node:crypto')
+  assert.equal(consult.reply.sha256, createHash('sha256').update(advisor.redactDelta(reply).text).digest('hex'))
+  assert.equal(consult.reply.bytes, Buffer.byteLength(advisor.redactDelta(reply).text))
+  assert.equal(consult.reply.excerpt, advisor.boundText(advisor.redactDelta(reply).text, 512))
+  assert.equal(JSON.stringify(consult).includes('abcdefghijklmnopqrstuvwxyz'), false)
+  const note = r.rows.find((row) => row.advisor_note?.outcome === 'rejected').advisor_note
+  assert.equal(note.consult_id, consult.consult_id)
+  assert.equal(note.reply_excerpt, advisor.boundText(advisor.redactDelta(reply).text, 512))
+})
+
+// Shared consult harness follows gate.mjs's fake child and never resolves a real pi.
+async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {}) {
+  const root = scratchDir('advisor-rj-')
+  const taskDir = join(root, 'task'), tree = join(root, 'tree'), rows = [], sends = []
+  mkdirSync(taskDir); mkdirSync(join(root, 'returns')); mkdirSync(join(tree, 'lib'), { recursive: true })
+  writeFileSync(join(tree, 'lib/widget.mjs'), 'const widget = null\\n')
+  writeFileSync(join(taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({
+    schema_version: 1, run_started_at: 1, tripwires: [],
+    cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' },
+  }))
+  writeFileSync(join(root, 'returns/d1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  let timeoutFn, childIndex = 0
+  const deps = {
+    taskDir, cwd: tree, fileMtime: () => 2, readFile: p => readFileSync(p, 'utf8'), diffSize: () => null,
+    resolveBinary: () => ({ command: '/fake/pi', args: [] }),
+    appendFile: (_p, text) => rows.push(...String(text).trim().split('\n').map(JSON.parse)),
+    send: (message, options) => sends.push({ message, options }),
+    consultTimeoutMs: 12345, childKillGraceMs: 1,
+    ...(digest ? { digest } : {}),
+    setTimeout: (fn, ms) => { if (ms === 12345) { timeoutFn = fn; return { timeout: true } } return setImmediate(fn) },
+    clearTimeout: timer => { if (!timer?.timeout) clearImmediate(timer) },
+    spawn: () => {
+      const child = new EventEmitter()
+      child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+      child.stdin = { end() {
+        if (mode === 'timeout') { setImmediate(() => timeoutFn()); return }
+        setImmediate(() => {
+          const current = childIndex++
+          if (mode === 'bad-frame') child.stdout.write('not-json\n')
+          else if (mode === 'oversize') child.stdout.write('x'.repeat(66000))
+          else child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: Array.isArray(reply) ? reply[current] : reply, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
+          if (mode !== 'oversize') child.emit('close', mode === 'exit' ? 1 : 0)
+        })
+      } }
+      return child
+    },
+  }
+  const seat = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, deps })
+  try {
+    seat.onToolResult({ toolCallId: 'read', toolName: 'read', input: { path: join(tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'const widget = null' }] }, {})
+    const count = repeated ? 2 : 1
+    for (let i = 0; i < count; i++) {
+      const input = { path: join(tree, `outside-${i}.mjs`), content: 'const outside = null\n' }
+      const id = 'write-' + i
+      seat.onToolCall({ toolCallId: id, toolName: 'write', input }, {})
+      seat.onToolResult({ toolCallId: id, toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+      if (repeated && i === 0) await seat.settled()
+    }
+    await seat.settled()
+    return { rows, sends, consults: rows.filter(r => r.advisor_consult).map(r => r.advisor_consult) }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}
+
+// MUTATION RJ3: omit timeout from reason selection; timeout consult must retain its reason.
+test('RJ3 timeout consult records strict absence and settles', async () => {
+  const r = await rjDrive('', { mode: 'timeout' })
+  assert.deepEqual({ reply: r.consults[0]?.reply, reason: r.consults[0]?.reply_reason }, { reply: null, reason: 'timeout' })
+  assert.deepEqual(advisor.REPLY_REASONS, ['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
+  assert.equal(Object.isFrozen(advisor.REPLY_REASONS), true)
+})
+
+// MUTATION RJ4: omit transport-failed from reason selection; each absence cause stays explicit.
+test('RJ4 transport and malformed replies record their closed absence reasons', async () => {
+  for (const [mode, content, reason] of [['exit', '', 'transport-failed'], ['bad-frame', '', 'body-not-json'], ['oversize', '', 'body-too-large'], ['reply', '', 'content-missing']]) {
+    const r = await rjDrive(content, { mode })
+    assert.deepEqual({ reply: r.consults[0]?.reply, reason: r.consults[0]?.reply_reason }, { reply: null, reason })
+  }
+  assert.deepEqual(advisor.REPLY_REASONS, ['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
+  assert.equal(Object.isFrozen(advisor.REPLY_REASONS), true)
+})
+
+// MUTATION RJ5: hash altered delivered content; journal identity must match each steer.
+test('RJ5 delivered notes match exact content and each consult, including suppression', async () => {
+  const { createHash } = await import('node:crypto')
+  const r = await rjDrive(JSON.stringify(adGood('auditable delivered claim')))
+  assert.deepEqual(r.sends.map(s => s.message.details.tier), [0, 1])
+  for (const sent of r.sends) {
+    const note = r.rows.find(row => row.advisor_note?.tier === sent.message.details.tier)?.advisor_note
+    assert.equal(note.content_sha256, createHash('sha256').update(sent.message.content).digest('hex'))
+    assert.equal(note.content_excerpt, advisor.boundText(sent.message.content, 512))
+    if (note.tier === 1) assert.equal(note.consult_id, r.consults[0].consult_id)
+  }
+  const suppressed = await rjDrive(JSON.stringify(adGood('ok')))
+  const suppressedNote = suppressed.rows.find(row => row.advisor_note?.outcome === 'suppressed')?.advisor_note
+  assert.equal(typeof suppressedNote?.consult_id, 'string')
+  assert.equal(suppressedNote.consult_id, suppressed.consults[0].consult_id)
+  const twice = await rjDrive([JSON.stringify(adGood('same claim')), JSON.stringify(adGood('same claim'))], { repeated: true })
+  assert.equal(twice.consults.length, 2)
+  assert.notEqual(twice.consults[0].consult_id, twice.consults[1].consult_id)
+  for (const row of twice.rows.filter(item => item.advisor_note?.tier === 1)) {
+    const consult = twice.consults.find(item => item.consult_id === row.advisor_note.consult_id)
+    assert.ok(consult)
+  }
+})
+
+// MUTATION RJ6: ignore the injected throwing digest; delivery and settlement remain independent.
+test('RJ6 digest failure preserves consult and both note-tier deliveries', async () => {
+  const r = await rjDrive(JSON.stringify(adGood('digest failure claim')), { digest: () => { throw new Error('digest failed') } })
+  assert.deepEqual({ reply: r.consults[0]?.reply, reason: r.consults[0]?.reply_reason }, { reply: null, reason: 'reply-unrecorded' })
+  assert.deepEqual(r.sends.map(s => s.message.details.tier), [0, 1])
+  const injected = r.rows.filter(row => row.advisor_note?.outcome === 'injected').map(row => row.advisor_note)
+  assert.deepEqual(injected.map(n => n.tier), [0, 1])
+  for (const sent of r.sends) {
+    const note = injected.find(n => n.tier === sent.message.details.tier)
+    assert.equal(note.content_excerpt, advisor.boundText(sent.message.content, 512))
+  }
+})

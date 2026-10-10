@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync, chmodSync, existsSync as fsExistsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
-import { acpIo, ACP_CENSUS_TURNS_ABSENT } from './acp-io.mjs'
+import { acpIo, ACP_CENSUS_TURNS_ABSENT, ACP_CONTEXT_BASIS } from './acp-io.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 import { ACP_BINARY, acpLaunch as claudeAcpLaunch, capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { cellFailureKind, ACP_TRANSPORT, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, seatIo } from './seat-io.mjs'
@@ -152,6 +152,44 @@ test('A1 skill-read ACP row is explicitly unmeasured', () => {
   } finally { cleanup(f) }
 })
 
+
+const acpCaptureUpdates = readFileSync(new URL('../test/fixtures/acp/claude-turn.ndjson', import.meta.url), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line).frame?.params?.update).filter((frame) => frame?.sessionUpdate === 'usage_update')
+const acpFresh = acpCaptureUpdates.find((frame) => !Object.hasOwn(frame, '_meta') && !Object.hasOwn(frame, 'cost'))
+const acpRateLimit = acpCaptureUpdates.find((frame) => Object.hasOwn(frame._meta ?? {}, '_claude/rateLimit'))
+const acpCost = acpCaptureUpdates.find((frame) => Object.hasOwn(frame, 'cost'))
+function contextCensus(values) {
+  const f = fixture()
+  try { const out = assign(f); for (const value of values) f.update('usage_update', { update: value }); f.io.teardown(); return f.logs.find((row) => row.seat_turn_census).seat_turn_census }
+  finally { cleanup(f) }
+}
+
+test('AC1', () => {
+  const row = contextCensus([{ ...acpCost, used: 999999 }, { ...acpFresh, used: 50578 }, { ...acpFresh, used: 50966 }, { ...acpFresh, used: 60869 }, { ...acpFresh, used: 112053 }, { ...acpCost, used: 112053 }])
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [50578, 112053, null, null, null])
+})
+test('AC2', () => {
+  const row = contextCensus([{ ...acpRateLimit, used: 200000 }, { ...acpFresh, used: 43308 }, { ...acpFresh, used: 135847 }, { ...acpFresh, used: 999999, _meta: { '_claude/rateLimit': null } }])
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens], [43308, 135847])
+})
+test('AC3', () => {
+  const invalid = [0, undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, '42']
+  const row = contextCensus([...invalid.map((used) => ({ sessionUpdate: 'usage_update', ...(used === undefined ? {} : { used }) })), { ...acpFresh, used: 50222 }, { ...acpFresh, used: 92987 }])
+  assert.deepEqual([row.context_first_tokens, row.context_peak_tokens], [50222, 92987])
+  const absent = contextCensus(invalid.map((used) => ({ sessionUpdate: 'usage_update', used })))
+  assert.equal(absent.context_first_tokens, null); assert.equal(absent.context_absent_reason, 'aggregate-usage-only')
+})
+test('AC4', () => {
+  const f = fixture()
+  try { const first = assign(f); f.update('usage_update', { update: { ...acpFresh, used: 90000 } }); const second = assign(f, { id: 'next' }); f.update('usage_update', { update: { ...acpFresh, used: 50000 } }); f.update('usage_update', { update: { ...acpFresh, used: 60000 } }); f.io.teardown(); assert.deepEqual(f.logs.filter((r) => r.seat_turn_census).map((r) => [r.seat_turn_census.dispatch_id, r.seat_turn_census.context_first_tokens, r.seat_turn_census.context_peak_tokens]), [[first.id, 90000, 90000], [second.id, 50000, 60000]]) }
+  finally { cleanup(f) }
+})
+test('AC5', () => {
+  const row = contextCensus([{ ...acpFresh, used: 50578 }])
+  assert.equal(row.context_basis, "Agent-reported context occupancy of the latest model message, including that message's output tokens; first and peak are not headless input-only context; mean and calls are null because usage_update carries no model-call boundary.")
+  assert.equal(row.context_basis, ACP_CONTEXT_BASIS)
+  const real = contextCensus(acpCaptureUpdates)
+  assert.deepEqual([real.context_first_tokens, real.context_peak_tokens], [24725, 25474])
+})
 test('CC1', () => {
   const f = fixture(); try {
     const out = assign(f); f.io.teardown()

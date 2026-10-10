@@ -176,11 +176,11 @@ test('context CLI refuses unknown, valueless, and positional arguments', { skip:
 test('context text carries metric denominators, unmeasured counts, and blind spots', { skip: SKIP }, () => {
   const result = contextReadout((l) => contextCensus(l, { dispatch: 'd1', at: 1, session: null, first: null }), ['context'])
   assert.equal(result.status, 0, result.stderr)
-  for (const text of ['n=', 'unmeasured=', 'rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']) assert.ok(result.stdout.includes(text), text)
+  for (const text of ['n=', 'unmeasured=', 'rows journalled before context capture read not-captured', "claude ACP rows with figures measure context first and peak on the ACP context_basis, latest-message occupancy including output tokens, not comparable 1:1 with headless input-only context, and their mean_per_call and calls are null", 'pi ACP rows read aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']) assert.ok(result.stdout.includes(text), text)
 })
 
 test('CC6', { skip: SKIP }, () => {
-  const expected = ['rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
+  const expected = ['rows journalled before context capture read not-captured', "claude ACP rows with figures measure context first and peak on the ACP context_basis, latest-message occupancy including output tokens, not comparable 1:1 with headless input-only context, and their mean_per_call and calls are null", "pi ACP rows read aggregate-usage-only", 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
   const json = contextReadout(() => {}, ['context', '--json'])
   assert.equal(json.status, 0, json.stderr)
   assert.deepEqual(JSON.parse(json.stdout).blind_spots, expected)
@@ -188,6 +188,17 @@ test('CC6', { skip: SKIP }, () => {
   assert.equal(text.status, 0, text.stderr)
   for (const item of expected) assert.ok(text.stdout.includes(item), item)
   assert.match(text.stdout, /n=/)
+})
+
+test('AC6', { skip: SKIP }, () => {
+  const expected = ['rows journalled before context capture read not-captured', "claude ACP rows with figures measure context first and peak on the ACP context_basis, latest-message occupancy including output tokens, not comparable 1:1 with headless input-only context, and their mean_per_call and calls are null", "pi ACP rows read aggregate-usage-only", 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
+  const json = contextReadout(() => {}, ['context', '--json'])
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).blind_spots, expected)
+  const text = contextReadout(() => {}, ['context'])
+  assert.equal(text.status, 0, text.stderr)
+  for (const item of expected) assert.ok(text.stdout.includes(item), item)
+  assert.equal(text.stdout.split('\n').find((line) => line.startsWith('blind_spots: ')), `blind_spots: ${expected.join('; ')}`)
 })
 
 test('context bounces report absent and last-attempt gate results', { skip: SKIP }, () => {

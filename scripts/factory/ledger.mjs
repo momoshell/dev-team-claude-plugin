@@ -9649,7 +9649,7 @@ export function main(argv) {
           bucket.n += 1; bucket.next_gate[outcome] += 1
         }
       }
-      const blind_spots = ['rows journalled before context capture read not-captured', 'ACP context reads aggregate-usage-only', 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
+      const blind_spots = ['rows journalled before context capture read not-captured', "claude ACP rows with figures measure context first and peak on the ACP context_basis, latest-message occupancy including output tokens, not comparable 1:1 with headless input-only context, and their mean_per_call and calls are null", "pi ACP rows read aggregate-usage-only", 'pane seats of an agent with no transcript reader read census-absent', 'only bounces cover history']
       if (flags.json) stdout.write(`${JSON.stringify({ since, by_role_model, bounces, blind_spots })}\n`)
       else {
         for (const row of by_role_model) stdout.write(`${row.role}/${row.model ?? 'null'} assignments=${row.assignments} measured=${row.measured} first=${row.first.mean} n=${row.first.n} mean_per_call=${row.mean_per_call.mean} n=${row.mean_per_call.n} peak=${row.peak.mean} max=${row.peak.max} n=${row.peak.n} calls=${row.calls.mean} n=${row.calls.n} carry_over=${row.carry_over.mean} n=${row.carry_over.n} excluded_no_session=${row.carry_over.excluded_no_session} unmeasured=${JSON.stringify(row.unmeasured)}\n`)

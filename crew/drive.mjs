@@ -16067,7 +16067,7 @@ function heldMask(source) {
   const templateText = (j, start) => {
     for (let k = j; k < source.length; k += 1) {
       if (source[k] === '\\') { k += 1; continue }
-      if (source[k] === '`') { code += `${blank(j, k)}\``; const entry = literals.get(start); if (!entry.interpolated) entry.end = k + 1; return { next: k + 1, closed: true } }
+      if (source[k] === '`') { code += `${blank(j, k)}\``; const entry = literals.get(start); entry.end = k + 1; return { next: k + 1, closed: true } }
       if (source[k] === '$' && source[k + 1] === '{') { code += `${blank(j, k)}\${`; literals.get(start).interpolated = true; stack.push({ open: '${', start }); return { next: k + 2, closed: false } }
     }
     return null
@@ -16255,6 +16255,113 @@ function heldLexical(source, path, reason) {
     if (code[p] === '{') return braceBody(p)
     return { start: p, end }
   }
+  const generatedFamily = ([titleStart, titleEnd], callStart, callEnd) => {
+    const titleShape = masked.literals.get(titleStart)?.interpolated === true
+      ? masked.literals.get(titleStart).end === titleEnd
+      : /^[A-Za-z_$][\w$]*$/.test(code.slice(titleStart, titleEnd))
+    let loop = null
+    for (let forIndex = code.indexOf('for'); forIndex >= 0 && forIndex < callStart; forIndex = code.indexOf('for', forIndex + 1)) {
+      if ((forIndex > 0 && /[\w$.]/.test(code[forIndex - 1])) || /[\w$]/.test(code[forIndex + 3] || '')) continue
+      const open = trivia(forIndex + 3, code.length)
+      if (code[open] !== '(') continue
+      const headEnd = balanced(open)
+      if (headEnd < 0 || headEnd > callStart) continue
+      let of = -1, depth = 0
+      for (let k = open + 1; k < headEnd - 1; k += 1) {
+        if (PAIRS[code[k]]) depth += 1
+        else if (code[k] === ')' || code[k] === ']' || code[k] === '}') depth -= 1
+        else if (depth === 0 && code.startsWith('of', k) && !/[\w$]/.test(code[k - 1] || '') && !/[\w$]/.test(code[k + 2] || '')) { of = k; break }
+      }
+      if (of < 0) continue
+      const iterableStart = trivia(of + 2, headEnd - 1)
+      const bodyStart = trivia(headEnd, code.length)
+      let bodyEnd
+      if (code[bodyStart] === '{') { bodyEnd = balanced(bodyStart); if (bodyEnd < 0) continue }
+      else {
+        let nakedStart = trivia(bodyStart, code.length)
+        while (code.startsWith('await', nakedStart) && !/[\w$]/.test(code[nakedStart + 5] || '')) nakedStart = trivia(nakedStart + 5, code.length)
+        if (nakedStart !== callStart) continue
+        bodyEnd = callEnd + (code[callEnd] === ';' ? 1 : 0)
+      }
+      if (callStart >= bodyStart && callEnd <= bodyEnd) loop = { forIndex, open, headEnd, iterableStart, bodyStart, bodyEnd }
+    }
+    if (!loop) return null
+    const { forIndex, open, headEnd, iterableStart, bodyStart, bodyEnd } = loop
+    let elemEnd = headEnd - 1
+    while (elemEnd > iterableStart && /\s/.test(code[elemEnd - 1])) elemEnd -= 1
+    const identifierHead = /^[A-Za-z_$][\w$]*$/.test(code.slice(iterableStart, elemEnd))
+    const noDirectSpread = (a, b) => {
+      if (code[a] !== '[') return false
+      const close = balanced(a)
+      if (close !== b) return false
+      let depth = 0
+      for (let k = a + 1; k < b - 1; k += 1) {
+        if (PAIRS[code[k]]) depth += 1
+        else if (code[k] === ')' || code[k] === ']' || code[k] === '}') depth -= 1
+        else if (depth === 0 && code.startsWith('...', k)) return false
+      }
+      return true
+    }
+    const bodyContentStart = code[bodyStart] === '{' ? bodyStart + 1 : bodyStart
+    const bodyContentEnd = code[bodyStart] === '{' ? bodyEnd - 1 : bodyEnd
+    let statementStart = trivia(bodyContentStart, bodyContentEnd)
+    while (code.startsWith('await', statementStart) && !/[\w$]/.test(code[statementStart + 5] || '')) statementStart = trivia(statementStart + 5, bodyContentEnd)
+    let statementEnd = callEnd
+    if (code[statementEnd] === ';') statementEnd += 1
+    const singleCall = statementStart === callStart && trivia(statementEnd, bodyContentEnd) === bodyContentEnd
+    let ownedContext = false
+    const parentBody = bodies.filter((body) => forIndex >= body.start && forIndex <= body.end).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]
+    if (parentBody) ownedContext = true
+    else {
+      let nesting = 0
+      for (let k = 0; k < forIndex; k += 1) if (PAIRS[code[k]]) nesting += 1; else if (')]}'.includes(code[k])) nesting -= 1
+      let previous = forIndex - 1
+      while (previous >= 0 && /\s/.test(code[previous])) previous -= 1
+      let bracelessControl = code[previous] === ':' || Boolean(code.slice(0, previous + 1).match(/(?:^|\W)(?:else|do)\s*$/))
+      if (code[previous] === ')') {
+        let depth = 0, open = -1
+        for (let k = previous; k >= 0; k -= 1) {
+          if (code[k] === ')') depth += 1
+          else if (code[k] === '(' && --depth === 0) { open = k; break }
+        }
+        const control = open >= 0 && code.slice(0, open).match(/(?:^|\W)(if|while|for|with|await)\s*$/)
+        bracelessControl = bracelessControl || Boolean(control)
+      }
+      ownedContext = nesting === 0 && !bracelessControl
+    }
+    const ownedIterable = noDirectSpread(iterableStart, elemEnd) || (identifierHead && (() => {
+      if (!parentBody) return false
+      let directDepth = 0
+      for (let k = parentBody.start; k < forIndex; k += 1) {
+        if (PAIRS[code[k]]) directDepth += 1
+        else if (')]}'.includes(code[k])) directDepth -= 1
+      }
+      if (directDepth !== 0) return false
+      const name = code.slice(iterableStart, elemEnd)
+      const prefix = code.slice(parentBody.start, forIndex)
+      const re = new RegExp('\\bconst\\s+' + name.replace(/[$]/g, '\\$') + '\\s*=\\s*', 'g')
+      const match = [...prefix.matchAll(re)].at(-1)
+      if (!match) return false
+      const declaration = parentBody.start + match.index
+      let declarationDepth = 0
+      for (let k = parentBody.start; k < declaration; k += 1) {
+        if (PAIRS[code[k]]) declarationDepth += 1
+        else if (')]}'.includes(code[k])) declarationDepth -= 1
+      }
+      if (declarationDepth !== 0) return false
+      const init = declaration + match[0].length
+      if (code[init] !== '[') return false
+      const close = balanced(init)
+      if (close < 0 || !noDirectSpread(init, close)) return false
+      const after = trivia(close, forIndex)
+      return after === forIndex || code[after] === ';'
+    })())
+    if (!titleShape) return null
+    if (!singleCall) return null
+    if (!ownedContext) return null
+    if (!ownedIterable) return null
+    return { title: source.slice(titleStart, titleEnd), start: code.lastIndexOf('\n', forIndex) + 1, end: bodyEnd }
+  }
   for (let index = 0; index < code.length;) {
     const character = code[index]
     if (character === '(' || character === '[' || character === '{') delimiters.push(character)
@@ -16283,12 +16390,14 @@ function heldLexical(source, path, reason) {
         if (close < 0) return fail()
         const args = argumentsOf(open, close)
         if (!args || args.length < 2 || args.length > 3 || args.some(([a, b]) => a === b || code.startsWith('...', a))) return uncertain()
-        const title = literalTitle(args[0])
-        const body = title === null ? null : callbackBody(args.at(-1))
-        if (!body) return uncertain()
+        const family = literalTitle(args[0]) === null ? generatedFamily(args[0], index, close) : null
+        const title = literalTitle(args[0]) ?? family?.title ?? null
+        const body = callbackBody(args.at(-1))
+        if (title === null || !body) return uncertain()
         const test = { test: title, start: index, end: close, line: lineAt(index), headEndLine: lineAt(args[0][1]), text: lines[lineAt(index) - 1] || '', bodyStart: body.start, bodyEnd: body.end }
         tests.push(test)
         bodies.push({ start: test.bodyStart, end: test.bodyEnd, test })
+        if (family) bodies.push({ start: family.start, end: family.end, test })
         index = endName; continue
       }
     }
@@ -16298,7 +16407,7 @@ function heldLexical(source, path, reason) {
   return { tests, assertions, bodies, lineAt, lines }
 }
 
-// lean: lexical direct-call test and assertion scan; use a JS parser if alias resolution or runtime-generated tests become required
+// lean: lexical direct-call scan plus two owned for-of test families, and a title or row value read from a binding outside the family span renames instances unattributed; use a JS parser if alias resolution or other generated-test shapes become required
 export function heldAssertionChanges({ path, base, diff, current }) {
   if (typeof base !== 'string') return { path, measured: false, reason: 'base-unreadable' }
   if (typeof diff !== 'string') return { path, measured: false, reason: 'diff-unreadable' }

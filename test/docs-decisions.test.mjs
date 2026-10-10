@@ -105,6 +105,106 @@ function visualizerGateErrors(markdown) {
   return errors
 }
 
+const roster = JSON.parse(read('crew/roster.json'))
+
+function seatTableDisagreements(markdown, roster) {
+  const disagreements = []
+  const headers = markdown.split('\n').filter((line) => /^\|\s*tier\s*\|/.test(line))
+  if (headers.length !== 1) return [`expected one tier table, found ${headers.length}`]
+  const lines = markdown.split('\n')
+  const start = lines.indexOf(headers[0])
+  const split = (line) => line.startsWith('|') && line.endsWith('|')
+    ? line.slice(1, -1).split('|').map((cell) => cell.trim().replace(/^\x60(.*)\x60$/, '$1'))
+    : null
+  const columns = split(headers[0])
+  const roles = [...new Set(Object.values(roster.tiers).flatMap((tier) => Object.keys(tier)))]
+  if (columns.length !== roles.length + 1 || columns[0] !== 'tier' ||
+      new Set(columns).size !== columns.length || roles.some((role) => !columns.includes(role)) ||
+      columns.slice(1).some((role) => !roles.includes(role))) {
+    disagreements.push(`columns: expected tier plus ${JSON.stringify(roles)}, found ${JSON.stringify(columns)}`)
+  }
+  const rows = []
+  for (let i = start + 2; i < lines.length && lines[i].startsWith('|'); i++) {
+    const cells = split(lines[i])
+    if (!cells) disagreements.push(`malformed row: ${lines[i]}`)
+    else rows.push(cells)
+  }
+  const tiers = Object.keys(roster.tiers)
+  if (rows.length !== tiers.length) disagreements.push(`rows: expected ${tiers.length}, found ${rows.length}`)
+  for (const tier of tiers) {
+    const found = rows.filter((row) => row[0] === tier)
+    if (found.length !== 1) {
+      disagreements.push(`tier ${tier}: expected one row, found ${found.length}`)
+      continue
+    }
+    const row = found[0]
+    if (row.length !== columns.length) disagreements.push(`tier ${tier}: expected width ${columns.length}, found ${row.length}`)
+    for (const role of roles) {
+      const cell = roster.tiers[tier][role]
+      const expected = cell ? `${cell.agent}/${cell.id}, ${cell.effort}` : '—'
+      const actual = row[columns.indexOf(role)]
+      if (actual !== expected) disagreements.push(`${tier}/${role}: expected ${expected}, found ${JSON.stringify(actual)}`)
+    }
+  }
+  for (const row of rows) if (!tiers.includes(row[0])) disagreements.push(`unexpected tier ${row[0]}`)
+  return disagreements
+}
+
+function modelTokenDisagreements(markdown, roster) {
+  const allowed = new Set()
+  const collect = (cell) => {
+    if (!cell) return
+    allowed.add(`${cell.agent}/${cell.id}`)
+    for (const fallback of cell.fallback ?? []) collect(fallback)
+  }
+  for (const tier of Object.values(roster.tiers)) for (const cell of Object.values(tier)) collect(cell)
+  const tokens = [...markdown.matchAll(/(?<![\w/.])(?:pi|claude)\/[A-Za-z0-9][A-Za-z0-9._-]*/g)].map((match) => match[0])
+  return [...new Set(tokens.filter((token) => !allowed.has(token)))]
+}
+
+test('RS1', () => {
+  // MUTATION RS1: alter the mechanical builder cell; the roster comparison must catch it.
+  assert.deepEqual(seatTableDisagreements(crewReadme, roster), [])
+})
+
+test('RS2', () => {
+  // MUTATION RS2: returning [] from the comparison helper must fail both perturbed inputs.
+  const changedRoster = structuredClone(roster)
+  changedRoster.tiers.mechanical.builder.effort = 'xhigh'
+  const changedMarkdown = crewReadme.replace('pi/gpt-6-luna, medium', 'pi/unseated-sentinel, medium')
+  for (const errors of [seatTableDisagreements(crewReadme, changedRoster), seatTableDisagreements(changedMarkdown, roster)]) {
+    assert.ok(errors.some((error) => error.includes('mechanical') && error.includes('builder')), JSON.stringify(errors))
+  }
+  const table = crewReadme
+  const absentCellRoster = structuredClone(roster)
+  delete absentCellRoster.tiers.mechanical.advisor
+  assert.deepEqual(seatTableDisagreements(table, absentCellRoster), [])
+  const duplicateRow = table.replace('| `build` |', '| `mechanical` |')
+  assert.ok(seatTableDisagreements(duplicateRow, roster).some((error) => error.includes('mechanical')))
+  const missingRow = table.replace(/^\| `judge` .*\n/m, '')
+  assert.ok(seatTableDisagreements(missingRow, roster).length > 0)
+  const extraRow = table.replace('| `judge` |', '| `extra` |')
+  assert.ok(seatTableDisagreements(extraRow, roster).some((error) => error.includes('extra')))
+  const extraColumn = table.replace('| tier | advisor |', '| tier | extra | advisor |')
+  assert.ok(seatTableDisagreements(extraColumn, roster).length > 0)
+  const missingColumn = table.replace('| tier | advisor |', '| tier |')
+  assert.ok(seatTableDisagreements(missingColumn, roster).length > 0)
+  const duplicateColumn = table.replace('| tier | advisor | lead |', '| tier | advisor | advisor |')
+  assert.ok(seatTableDisagreements(duplicateColumn, roster).length > 0)
+  const malformedWidth = table.replace('claude/claude-opus-5-5, medium | — |', 'claude/claude-opus-5-5, medium |')
+  assert.ok(seatTableDisagreements(malformedWidth, roster).some((error) => error.includes('width')))
+  const nullCellMarkdown = table.replace('| `mechanical` | — | — |', '| `mechanical` | pi/gpt-5.6-terra, medium | — |')
+  assert.ok(seatTableDisagreements(nullCellMarkdown, roster).some((error) => error.includes('mechanical/advisor')))
+})
+
+test('RS3', () => {
+  // MUTATION RS3: inject an unseated pi model pair into the README; membership must reject it.
+  assert.deepEqual(modelTokenDisagreements(crewReadme, roster), [])
+  assert.deepEqual(modelTokenDisagreements('pi/gpt-6.1-sol claude/claude-fable-5-1', roster), [])
+  assert.deepEqual(modelTokenDisagreements('pi/unseated-sentinel', roster), ['pi/unseated-sentinel'])
+  assert.deepEqual(modelTokenDisagreements('xpi/unseated-sentinel /pi/unseated-sentinel .claude/unseated-sentinel', roster), [])
+})
+
 test('the register has seven ordered entries with pinned questions and measurements', () => {
   const entries = parseEntries(register)
   assert.equal(entries.length, expected.length)

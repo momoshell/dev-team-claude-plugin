@@ -1871,7 +1871,7 @@ test('L2A an empty install or an escaping lockfile refuses worktree-setup-invali
 
 // MUTATION: replace the fence match with `false`; a fenced lockfile links instead of installing.
 // MUTATION: replace the fence match with `true`; an unfenced lockfile installs instead of linking.
-test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one installs and writes no pair', async () => {
+test('L2A an unfenced lockfile links and a fenced one installs; both own exclude pairs', async () => {
   const checkout = nextRoot('l2a-link-checkout'), linked = nextRoot('l2a-link-lane'), installed = nextRoot('l2a-install-lane')
   put(checkout, 'node_modules/pkg/index.js', 'export default 1')
   const exclude = put(checkout, 'info/exclude', 'stock\n')
@@ -1881,17 +1881,18 @@ test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one ins
   await runWorktreeSetup({ checkout, laneDir: linked, steps: [step], fenceFiles: ['scripts/other.mjs'], deps: { spawn } })
   assert.equal(calls.some((call) => call.file === '/bin/sh'), false)
   assert.equal(readFileSync(join(linked, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'export default 1')
-  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n\n# worktree-setup-owner: ' + JSON.stringify(linked) + '\n/node_modules\n')
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n# worktree-setup-owner: ' + JSON.stringify(linked) + '\n/node_modules\n')
   await runWorktreeSetup({ checkout, laneDir: installed, steps: [step], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
   assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'printf l2a-unfenced'], cwd: installed }])
   assert.equal(existsSync(join(installed, 'node_modules')), false)
-  assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), false)
+  assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), true)
 })
 
 // MUTATION: compare the raw spellings again; a `./package-lock.json` profile links even though its lockfile is fenced.
 test('L2A a dot-slash lockfile spelling still matches its fenced lockfile and installs', async () => {
   const checkout = nextRoot('l2a-dotslash'), laneDir = nextRoot('l2a-dotslash-lane'), calls = []
-  const spawn = (call) => { calls.push(call); return { status: 0, stdout: '' } }
+  const exclude = put(checkout, 'info/exclude', 'stock\n')
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n' } : { status: 0, stdout: '' } }
   await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules', lockfile: './package-lock.json', install: 'printf l2a-dotslash' }], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
   assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args }) => args), [['-c', 'printf l2a-dotslash']])
   assert.equal(existsSync(join(laneDir, 'node_modules')), false)

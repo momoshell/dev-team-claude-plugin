@@ -32,7 +32,7 @@ import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-pat
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
-import { checkoutBaseBranch, removeWorktreeExcludes } from './probe-repo.mjs'
+import { checkoutBaseBranch, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
 
 const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
@@ -187,6 +187,7 @@ export function normalDeps(deps = {}) {
     // 5,618 tests), and a child that overruns it is killed with ENOBUFS — which merge-check
     // read as a RED SUITE. A cap this measurement can outgrow is a cap that lies about it.
     spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER })),
+    worktreeSetup: deps.worktreeSetup || ((options) => checkoutWorktreeSetup({ ...options, factoryRoot: deps.factoryRoot })),
     newest: deps.newest || newestMtime,
     now: deps.now || (() => Date.now()),
     sleep: deps.sleep || sleepSync,
@@ -961,7 +962,13 @@ function runSuite({ cwd, deps, env, reason = CLOSEOUT_REFUSALS.SUITE_RED, step =
   return suite
 }
 
-const removeScratch = ({ scratch, checkout, deps: d }) => d.spawn({ file: 'git', args: ['worktree', 'remove', '--force', scratch], cwd: checkout })
+const removeScratch = ({ scratch, checkout, deps: d }) => {
+  const result = d.spawn({ file: 'git', args: ['worktree', 'remove', '--force', scratch], cwd: checkout })
+  if (!commandOk(result)) throw new Error(`scratch worktree removal failed: ${childFailure(result)}`)
+  const cleanup = removeWorktreeExcludes({ checkout, laneDir: scratch, deps: d })
+  if (cleanup.reason || cleanup.removed === null) throw new Error(`scratch exclude cleanup failed: ${cleanup.reason || 'removed count unmeasured'}`)
+  return result
+}
 
 export function mergeCheck({ lanes, checkout, deps } = {}) {
   const d = normalDeps(deps)
@@ -992,6 +999,10 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
     merge: () => {
       // Keep the complete batch: a scratch merge that omits a lane is not a merge-check.
       for (const lane of batch) mergeOne({ lane, scratch, deps: d })
+      try { runColdWorktreeSetup({ checkout: root, laneDir: scratch, lookup: d.worktreeSetup, deps: d }) } catch (error) {
+        if (error?.reason === 'worktree-setup-failed' || error?.code === 'worktree-setup-failed') refuse(`worktree-setup-failed: ${error.message}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'merge')
+        throw error
+      }
       report.merged = batch.length
       return { merged: batch.length }
     },
@@ -1033,7 +1044,10 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
     run = { lines: [], refusal: error instanceof CloseoutRefusal ? error : new CloseoutRefusal(error?.message || String(error), CLOSEOUT_REFUSALS.INTERNAL, 'merge-check') }
   } finally {
     if (scratch) {
-      try { removeScratch({ scratch, checkout: root, deps: d }) } catch { /* cleanup is best effort; the refusal remains the measured result */ }
+      try { removeScratch({ scratch, checkout: root, deps: d }); report.cleanup = { ok: true } } catch (error) {
+        report.cleanup = { ok: false, error: error?.message || String(error) }
+        if (!run?.refusal) run = { ...(run || { lines: [] }), refusal: new CloseoutRefusal(`scratch cleanup failed: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'merge') }
+      }
     }
   }
   const refusal = refusalObject(run.refusal)
@@ -1592,17 +1606,35 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
     },
     'cold-verify': () => {
       let cold = null
+      let priorError = null
       try { cold = d.mkdtempSync(join(tmpdir(), 'closeout-cold-')) } catch (error) {
         refuse(`cannot create cold verification worktree: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
       }
       try {
         const added = runCommand({ file: 'git', args: ['worktree', 'add', '--detach', cold, 'HEAD'], cwd: checkout }, d)
         if (!commandOk(added)) refuse(`cold verification worktree failed: ${childFailure(added)}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
+        try { runColdWorktreeSetup({ checkout, laneDir: cold, lookup: d.worktreeSetup, deps: d }) } catch (error) {
+          refuse(`worktree-setup-failed: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
+        }
         const suite = runSuite({ cwd: cold, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(cold, '.dev-team', 'factory') }, reason: CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, step: 'cold-verify' })
         report.cold_suite = suite
         return { suite }
+      } catch (error) {
+        priorError = error
+        throw error
       } finally {
-        try { d.spawn({ file: 'git', args: ['worktree', 'remove', '--force', cold], cwd: checkout }) } catch { /* cleanup is best effort */ }
+        let cleanupError = null
+        try {
+          const removed = d.spawn({ file: 'git', args: ['worktree', 'remove', '--force', cold], cwd: checkout })
+          if (!commandOk(removed)) throw new Error(`cold worktree removal failed: ${childFailure(removed)}`)
+          const excludes = removeWorktreeExcludes({ checkout, laneDir: cold, deps: d })
+          if (excludes.reason || excludes.removed === null) throw new Error(`cold exclude cleanup failed: ${excludes.reason || 'removed count unmeasured'}`)
+          report.cleanup = { ok: true, removed: excludes.removed }
+        } catch (error) {
+          cleanupError = error
+          report.cleanup = { ok: false, error: error?.message || String(error) }
+        }
+        if (cleanupError && !priorError) refuse(`cold cleanup failed: ${cleanupError.message}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
       }
     },
   }

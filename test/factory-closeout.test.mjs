@@ -89,6 +89,10 @@ function answerFor(argv, answers, options = {}) {
 function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, realCopy = false, copyError = null, filterProbe = null } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
+  const HARNESS_DEFAULTS = [
+    ['worktree', (argv, options) => argv.includes('list') ? ({ status: 0, stdout: 'worktree ' + options.cwd + '\0', stderr: '' }) : ({ status: 0, stdout: '', stderr: '' })],
+    ['--git-path info/exclude', { status: 0, stdout: join(scratch('closeout-exclude-default-'), 'exclude') + '\n', stderr: '' }],
+  ]
   let clock = 0
   const deps = normalDeps({
     home,
@@ -116,7 +120,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     spawn: (options) => {
       const argv = [options.file, ...(options.args || [])].join(' ')
       calls.spawn.push({ argv, cwd: options.cwd, file: options.file, args: options.args || [], env: options.env })
-      return answerFor(argv, answers, options)
+      return answerFor(argv, [...answers, ...HARNESS_DEFAULTS], options)
     },
   })
   return { deps, calls }

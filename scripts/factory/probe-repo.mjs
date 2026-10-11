@@ -1872,16 +1872,6 @@ function lockfilesDiffer(checkout, laneDir, lockfile, d) {
   return !Buffer.from(mainBytes).equals(Buffer.from(coldBytes))
 }
 
-export function mainWorktreeCheckout({ checkout, spawn = (call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' }) } = {}) {
-const result = spawn({ file: 'git', args: ['-C', checkout, 'worktree', 'list', '--porcelain', '-z'], cwd: checkout })
-if (!result || result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string') throw new ProfileRefusal('worktree setup MAIN inventory failed', 'worktree-setup-failed')
-const records = result.stdout.split('\0')
-const first = records.find((record) => record.startsWith('worktree '))
-const main = first?.slice('worktree '.length)
-if (records[1] === 'bare' || !main || !isAbsolute(main)) throw new ProfileRefusal('worktree setup MAIN inventory has no absolute non-bare worktree', 'worktree-setup-failed')
-return main
-}
-
 export function runColdWorktreeSetup({ checkout, laneDir, lookup = checkoutWorktreeSetup, deps } = {}) {
   const source = deps && typeof deps === 'object' ? deps : {}
   const spawn = source.spawn || ((call) => spawnSync(call.file, call.args, { cwd: call.cwd, encoding: 'utf8' }))
@@ -1966,7 +1956,9 @@ export function runWorktreeSetupSync({ checkout, laneDir, lane = laneDir, steps,
           try { original = d.readFileSync(excludePath) } catch (error) { if (error?.code === 'ENOENT') original = Buffer.alloc(0); else throw error }
           const bytes = Buffer.isBuffer(original) ? original : Buffer.from(original)
           const prefix = bytes.length && bytes[bytes.length - 1] !== 10 ? '\n' : ''
-          d.appendFileSync(excludePath, prefix + ownerLine + '\n' + excludePattern + '\n')
+          // A newline this append had to add is recorded in the owner line, so cleanup can give it back.
+          const ownerRecord = prefix ? EXCLUDE_OWNER_EOL + ownerLine.slice(EXCLUDE_OWNER.length) : ownerLine
+          d.appendFileSync(excludePath, prefix + ownerRecord + '\n' + excludePattern + '\n')
         })
       } catch (error) { failIo(error) }
     } else if (step.kind === 'submodules') {
@@ -1992,6 +1984,9 @@ export function runWorktreeSetupSync({ checkout, laneDir, lane = laneDir, steps,
 
 // Every append to and rewrite of the shared exclude file holds this lock, so a cleanup's read-then-rename can
 // never drop a pair another lane appended in between. A lock older than 30s is a crashed holder and is reclaimed.
+const EXCLUDE_OWNER = '# worktree-setup-owner: '
+const EXCLUDE_OWNER_EOL = '# worktree-setup-owner-eol: '
+
 function withExcludeLock(excludePath, d, fn) {
   const lock = excludePath + '.worktree-setup.lock'
   const deadline = Date.now() + 10000
@@ -2026,12 +2021,17 @@ export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
       for (let i = 0; i < records.length; i++) {
         const record = records[i]
         const content = record.replace(/\r?\n$/, '')
-        if (content.startsWith('# worktree-setup-owner: ') && i + 1 < records.length) {
+        const marker = content.startsWith(EXCLUDE_OWNER) ? EXCLUDE_OWNER : content.startsWith(EXCLUDE_OWNER_EOL) ? EXCLUDE_OWNER_EOL : null
+        if (marker && i + 1 < records.length) {
           let decodedOwner
           // Records are split as latin1 to keep every byte; the owner was appended as UTF-8, so decode it as UTF-8.
-          try { decodedOwner = JSON.parse(Buffer.from(content.slice('# worktree-setup-owner: '.length), 'latin1').toString('utf8')) } catch {}
+          try { decodedOwner = JSON.parse(Buffer.from(content.slice(marker.length), 'latin1').toString('utf8')) } catch {}
           const nextLine = records[i + 1].replace(/\r?\n$/, '')
-          if (decodedOwner === laneDir && nextLine.startsWith('/')) { removed++; i++; continue }
+          if (decodedOwner === laneDir && nextLine.startsWith('/')) {
+            // Give back the newline the append added after an unterminated operator line.
+            if (marker === EXCLUDE_OWNER_EOL && kept.length && kept[kept.length - 1].endsWith('\n')) kept[kept.length - 1] = kept[kept.length - 1].slice(0, -1)
+            removed++; i++; continue
+          }
         }
         kept.push(record)
       }

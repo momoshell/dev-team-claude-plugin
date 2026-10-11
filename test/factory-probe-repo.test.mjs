@@ -2054,3 +2054,15 @@ test('CW11', () => cwFixture(async (f) => {
   assert.equal(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }).removed, 1)
   assert.equal(readFileSync(f.exclude, 'utf8'), original, 'the operator blank line before an owned pair survives')
 }))
+
+// MUTATION: drop the cleanup-side newline give-back; an unterminated operator line comes back terminated.
+test('an install after an unterminated operator exclude line round-trips the original bytes', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\noperator-entry')
+  await runWorktreeSetup({
+    checkout: f.checkout, laneDir: f.laneDir, fenceFiles: ['package-lock.json:1-2'],
+    steps: [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'mkdir node_modules; printf installed > node_modules/marker' }],
+  })
+  assert.ok(readFileSync(f.exclude, 'utf8').startsWith('stock\noperator-entry\n# worktree-setup-owner-eol: '), 'the added newline is recorded')
+  assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }), { removed: 1, reason: null })
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
+}, { ignored: false }))

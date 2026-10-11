@@ -18,8 +18,10 @@ import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
+import { TRANSCRIPT_STALE_MS } from './seat-io.mjs'
 
 export const WAIT_POLL_MS = 5000
+export const BUILDER_WAIT_GRACE_S = 2400
 export const RPC_PROMPT_DELIVERY_WINDOW_MS = 30_000
 export const PRE_FIRST_TURN_TOLERANCE_MS = WAIT_POLL_MS
 export const PRE_FIRST_TURN_ABSENT_REASONS = Object.freeze({
@@ -1097,18 +1099,19 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       // b360 corpse's real last frame is lost again.
       obs.lastType = typeof frame.type === 'string' ? frame.type : null
       obs.lastAt = at
-      const folded = telemetryFold(obs.census, frame, at)
-      if (folded === null) obs.census = null
-      else if (folded && folded !== obs.census) obs.census = folded
       // MUTATION A2: count agent_start rather than turn_start and the turn
       // index collapses to 1 — "turn 13 of a 10-minute turn" stops being said.
       if (frame.type === 'turn_start') obs.turns += 1
+      if (frame.type === 'tool_execution_start') obs.lastToolStartAt = at
       if (frame.type === 'tool_execution_end') {
         // MUTATION A3: record the call id instead of the tool NAME and the row
         // no longer says which tool last completed.
         obs.lastTool = typeof frame.toolName === 'string' ? frame.toolName : null
         obs.lastToolAt = at
       }
+      const folded = telemetryFold(obs.census, frame, at)
+      if (folded === null) obs.census = null
+      else if (folded && folded !== obs.census) obs.census = folded
       observePreFirstTurn(seat.turn, frame, at)
     }
   }
@@ -1420,7 +1423,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const briefCandidates = briefReadCandidates(briefFile, delivery.briefText)
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, brief_read_candidates: briefCandidates, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_seen: false, brief_read_turns: 0, brief_read_ms: null, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, lastToolStartAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, brief_read_candidates: briefCandidates, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_seen: false, brief_read_turns: 0, brief_read_ms: null, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
     if (turn.priorUnsettled && seat !== existing) {
       turn.priorUnsettled = false
       turn.priorTurnId = null
@@ -1738,6 +1741,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (!seat) throw staged('rpc-no-envelope', `no rpc turn for ${returnPath}`)
     const turn = seat.turn
     let deadline = now() + Number(timeoutS) * 1000
+    let graceMs = 0
+    let timeoutReason = 'no recent tool call'
     const monotonic = deps.monotonic || (() => Number(process.hrtime.bigint()) / 1e6)
     let priorWall = now(), priorMono
     try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
@@ -1752,7 +1757,6 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         if (slept > 0) { try { log(operationalRow({ at: now(), event: 'host_suspended', role: turn.role, transport: 'headless-rpc', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta })) } catch { /* diagnostics only */ } }
         priorWall = wall; priorMono = mono
       }
-      if (wall >= deadline) break
       const { frames, enforced } = pollAndEnforce(seat, turn, returnPath)
       if (enforced) return enforced
       const acknowledged = session(turn.role).lastAssignmentId === turn.runId
@@ -1780,6 +1784,21 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
             continue waitLoop
           }
           emitUsage(turn, seat, turn.usage); journalTurnCensus(turn, seat); finishTurn(seat); throw responseError(turn.role, frame)
+        }
+      }
+      const judgedAt = now()
+      if (judgedAt >= deadline) {
+        const toolTimes = [turn.observed.lastToolStartAt, turn.observed.lastToolAt].filter(Number.isFinite)
+        const lastToolAt = toolTimes.length ? Math.max(...toolTimes) : null
+        const recentTool = lastToolAt !== null && judgedAt >= lastToolAt && judgedAt - lastToolAt < TRANSCRIPT_STALE_MS
+        const extensionMs = Math.min(TRANSCRIPT_STALE_MS, BUILDER_WAIT_GRACE_S * 1000 - graceMs)
+        if (recentTool && extensionMs > 0) {
+          deadline += extensionMs
+          graceMs += extensionMs
+          try { log(operationalRow({ at: judgedAt, event: 'wait-extended', transport: 'headless-rpc', role: turn.role, id: turn.id, last_tool_age_s: (judgedAt - lastToolAt) / 1000, extension_s: extensionMs / 1000, grace_cap_s: BUILDER_WAIT_GRACE_S })) } catch { /* diagnostics only */ }
+        } else {
+          timeoutReason = graceMs >= BUILDER_WAIT_GRACE_S * 1000 ? 'grace cap' : 'no recent tool call'
+          break waitLoop
         }
       }
       // An UNREADABLE envelope is TERMINAL and an ABSENT one is not: the one
@@ -1827,18 +1846,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         finishTurn(seat)
         return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath, census })
       }
-      sleep(!acknowledged ? Math.min(WAIT_POLL_MS, Math.max(1, promptDeliveryWindowMs - elapsed)) : WAIT_POLL_MS)
+      sleep(Math.min(!acknowledged ? Math.min(WAIT_POLL_MS, Math.max(1, promptDeliveryWindowMs - elapsed)) : WAIT_POLL_MS, Math.max(1, deadline - now())))
     }
-    // An expired deadline skips the loop entirely, so this may be the FIRST read
-    // of the turn's frames. Deciding here is what keeps a command observed in the
-    // last interval — or never read at all — from ending as an rpc-timeout with a
-    // false measured zero.
-    const late = pollAndEnforce(seat, turn, returnPath)
-    if (late.enforced) return late.enforced
-    const acknowledged = session(turn.role).lastAssignmentId === turn.runId
-    const elapsed = promptDeliveryElapsed(turn)
-    if (turn.deliveryFailure) return failPromptDelivery(seat, turn, elapsed)
-    if (!acknowledged && elapsed >= promptDeliveryWindowMs) return failPromptDelivery(seat, turn, elapsed)
     const groupBefore = probeGroup(seat)
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
     const proof = turn.state.settled ? null : proveGroupDead(seat)
@@ -1855,7 +1864,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
       try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }
       seats.delete(seat.role)
     }
-    throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath}`, turn.role)
+    throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath} (${timeoutReason})`, turn.role)
   }
   function entries(role, { since } = {}) {
     const seat = ensureProcess(role, 'd0')

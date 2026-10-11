@@ -491,6 +491,7 @@ export function createReadGate(options = {}) {
   const snapshotFile = input.snapshotFile || deps.snapshotFile || defaultSnapshotFile
   const readRanges = new Map()
   const pendingReads = new Map()
+  const provisionalDeliveries = new Map()
   const softRefusals = new Map()
 
   function isHandedFile(path, cwd = cwdDefault) {
@@ -579,6 +580,15 @@ export function createReadGate(options = {}) {
       readRanges.set(resolved, byFingerprint)
     }
     byFingerprint.set(fingerprint, mergeCoverage(byFingerprint.get(fingerprint) || [], delivery))
+  }
+
+  function recordReadDelivery(event, resolved, fingerprint, delivery) {
+    if (event?.parentToolCallId) {
+      const parent = event.parentToolCallId
+      const deliveries = provisionalDeliveries.get(parent) || []
+      deliveries.push({ resolved, fingerprint, delivery })
+      provisionalDeliveries.set(parent, deliveries)
+    } else rememberDelivery(resolved, fingerprint, delivery)
   }
 
   function recordRefusal(path, requested, overlap) {
@@ -672,13 +682,17 @@ export function createReadGate(options = {}) {
             if (refusalIds.has(call.id)) failures.push({ name: call.name, status: 'refused by read gate' })
             else if (failed.includes(call)) failures.push({ name: call.name, status: call.status })
           }
+          if (event.isError !== true) for (const { resolved, fingerprint, delivery } of provisionalDeliveries.get(event.toolCallId) || []) rememberDelivery(resolved, fingerprint, delivery)
           const preview = rewriteCodemodeSpill(event, ctx)
           const parts = preview?.content ?? event.content
           if (failures.length === 0) return preview ? { content: parts, ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) } : undefined
           const names = failures.map(({ name, status }) => `${name} (${status})`).join(', ')
           return { content: [{ type: 'text', text: `[crew] ${failures.length} of ${calls.length} inner calls did not succeed: ${names}` }, ...parts], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
         } catch (error) { return recordTrackerFailure(error, event) }
-        finally { for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) softRefusals.delete(id) }
+        finally {
+          provisionalDeliveries.delete(event.toolCallId)
+          for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) softRefusals.delete(id)
+        }
       }
       if (event?.toolName !== 'read') return undefined
       if (softRefusals.has(event?.toolCallId)) { pendingReads.delete(event.toolCallId); return { content: [{ type: 'text', text: softRefusals.get(event.toolCallId).reason }], isError: false } }
@@ -701,7 +715,7 @@ export function createReadGate(options = {}) {
         if (pending && capped.wholeLines > 0) {
           try {
             const snapshot = validSnapshot(snapshotFile(pending.resolved))
-            rememberDelivery(pending.resolved, snapshot.fingerprint, {
+            recordReadDelivery(event, pending.resolved, snapshot.fingerprint, {
               start: pending.requested.start,
               end: Math.min(pending.requested.end, start + capped.wholeLines - 1),
               turn: pending.turn,
@@ -723,7 +737,7 @@ export function createReadGate(options = {}) {
         end,
         turn: pending.turn,
       }
-      rememberDelivery(resolved, snapshot.fingerprint, delivered)
+      recordReadDelivery(event, resolved, snapshot.fingerprint, delivered)
       return undefined
     } catch (error) { return recordTrackerFailure(error, event) }
   }

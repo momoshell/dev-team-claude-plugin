@@ -15131,9 +15131,9 @@ export function cargoNameVerdict(output, name) {
     if (full !== String(name) && full.split('::').at(-1) !== String(name)) continue
     hits.push(match[2])
   }
+  if (hits.length > 1) return 'ambiguous'
   if (summarized !== null && reported > summarized) return null
   if (hits.length === 0) return 'absent'
-  if (hits.length > 1) return 'ambiguous'
   return hits[0] === 'ignored' ? 'skipped' : hits[0] === 'ok' ? 'passed' : 'failed'
 }
 

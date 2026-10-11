@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -18,6 +18,32 @@ import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
 import { writeFileSync as writeText } from 'node:fs'
 import { askClosingIssues, citationOnlyDiff } from './prompt-claim.mjs'
+
+test('RG4 cargo libtest parser uses the declared exact name and summary', () => {
+  const summary = 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+  const output = `test a::guard_fn ... ok\r\ntest b::other ... FAILED\r\n${summary}`
+  assert.equal(cargoNameVerdict(output, 'guard_fn'), 'passed')
+  assert.equal(cargoNameVerdict(output, 'guard'), 'absent')
+  assert.equal(cargoNameVerdict(`test a::guard_fn ... ok\n${summary}\ntest b::guard_fn ... FAILED\n${summary}`, 'guard_fn'), 'ambiguous')
+  assert.equal(cargoNameVerdict(`test a::guard_fn ... ignored\n${summary}`, 'guard_fn'), 'skipped')
+  assert.equal(cargoNameVerdict('test a::guard_fn ... ok', 'guard_fn'), null)
+  assert.equal(cargoNameVerdict('test result: FAILED. 0 passed; 1 failed', 'guard_fn'), 'absent')
+})
+
+test('RG8 Rust non-test region removes attributed test items and rejects malformed lexing', () => {
+  const implementation = `pub fn f<'a>(x: &'a str) {\n let s = r#"{"#;\n /* outer /* nested } */ { */\n}\n`
+  const testItem = `/// guard docs\n#[allow(dead_code)]\n#[test]\nfn guard() { assert!(true); }\n`
+  assert.equal(rustNonTestRegion(implementation + testItem), implementation)
+  assert.equal(rustNonTestRegion('"unterminated'), null)
+  assert.equal(rustNonTestRegion('{'), null)
+})
+
+test('RG9 cargo runner sentence states inline implementation and name constraints', () => {
+  const sentence = hardeningRunnerSentence({ runner: 'cargo', basis: 'fixture cargo runner' })
+  assert.ok(sentence.includes('file is the implementation the mutation edits'))
+  assert.ok(sentence.includes('name is the test fn cargo reports'))
+  assert.ok(sentence.includes('accepted only while the non-test code of file is unchanged since review'))
+})
 
 const A1_DIRECTED_TRACE = Object.freeze(['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'commit', 'document', 'suite'])
 const A1_GATE_REPAIR_TRACE = Object.freeze(['gate', 'gate-repair', 'gate-reverify', 'gate-proof'])
@@ -7146,10 +7172,10 @@ const b863InvocationEntry = (over = {}) => ({
 const B863_FILES = { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' }
 const INVOCATION_LIMIT_TEXT = 'based only on process exit status'
 const b863Green = (status = 0) => ({ ok: status === 0, status, output: '', stderr: '' })
-const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], flipTo = undefined } = {}) => {
+const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], scopeFiles = ['a.mjs', 'a.test.mjs'], flipTo = undefined } = {}) => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(),
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scopeFiles } }),
       'builder:1': buildEnv(), 'builder:2': b376Build([entry]), 'builder:3': b376Build([entry]),
       'reviewer:1': b376Review('changes-needed', [B376_FINDING]),
       'reviewer:2': b376Review('pass', []), 'reviewer:3': b376Review('pass', []),
@@ -7176,6 +7202,18 @@ const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) =>
 }
 const invocationRows = (io) => io.calls.logs.filter((logged) => logged.finding_hardened?.finding === 'F1').map((logged) => logged.finding_hardened)
 const invocationExecutions = (io, invocation = B863_INVOCATION) => io.calls.run.filter(({ cmd }) => cmd === invocation)
+
+const CARGO_RUNNER = { runner: 'cargo', basis: 'fixture cargo runner' }
+const cargoSource = 'pub const GUARD: bool = false;\n'
+const cargoRepair = 'pub const GUARD: bool = true;\n'
+const cargoSummary = 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+const cargoOutput = (name, verdict = 'ok', summary = cargoSummary) => `test suite::${name} ... ${verdict}\n${summary}`
+const cargoEntry = (over = {}) => b863InvocationEntry({ name: 'guard_fn', file: 'src/lib.rs', find: 'GUARD: bool = false', replace: 'GUARD: bool = true', ...over })
+const cargoInvocationCase = ({ entry = cargoEntry(), runFn, source = cargoSource, companion = 'pub fn unrelated() {}\n', flipTo } = {}) => {
+  const files = { [`${CTX.checkout}/${entry.file}`]: source, [`${CTX.checkout}/src/other.rs`]: companion }
+  const io = invocationProofIo({ entry, files, changed: [entry.file], scopeFiles: [entry.file, 'src/other.rs'], runFn, flipTo: flipTo === undefined ? { set: { [`${CTX.checkout}/${entry.file}`]: `${source}// built repair\n` } } : flipTo })
+  return { io, ctx: { ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, files }
+}
 // RV2-2 (b1145 review): a lane total hides a run that moves between rounds. Mark
 // where each builder assignment falls in the run log so a count can be pinned to
 // the window between builder assignment n and the next one.
@@ -7188,6 +7226,211 @@ function roundTimeline(io) {
   }
   return (round, invocation = B863_INVOCATION) => io.calls.run.slice(marks[round - 1], marks[round]).filter(({ cmd }) => cmd === invocation).length
 }
+
+test('RG1 cargo coverage accepts inline tests without changing the non-test region and refuses test homes', () => {
+  const source = 'pub const GUARD: bool = false;\n#[cfg(test)]\nmod tests {\n #[test] fn old_check() {}\n}\n'
+  const inline = source.replace('fn old_check()', 'fn old_check()') + '#[cfg(test)]\nmod added { #[test] fn guard_fn() {} }\n'
+  const runFn = (_text, n) => ({ ...b863Green(0), output: cargoOutput('guard_fn', n === 1 ? 'ok' : 'FAILED') })
+  const { io, ctx, files } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), source, runFn, flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: inline } } })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'killed')
+  assert.equal(files[`${CTX.checkout}/src/lib.rs`], inline)
+  for (const file of ['tests.rs', 'src/foo_tests.rs', 'src/foo_test.rs', 'tests/unit.rs', 'benches/bench.rs']) {
+    const { io: homeIo, ctx: homeCtx } = cargoInvocationCase({ entry: cargoEntry({ file: `src/${file}` }), runFn: () => { throw new Error('test home must not run') } })
+    driveTask(homeCtx, homeIo)
+    assert.equal(invocationRows(homeIo).find((candidate) => candidate.round === 2)?.outcome, 'guard-misplaced')
+    assert.equal(invocationExecutions(homeIo).length, 0)
+  }
+})
+
+test('RG2 cargo changed implementation requires review-time named passed evidence', () => {
+  const built = cargoSource + '/* non-test edit */\n'
+  let n = 0
+  const { io, ctx, files } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => ({ ...b863Green(101), output: cargoOutput('guard_fn', ++n < 3 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+  assert.equal(n, 3)
+  assert.equal(files[`${CTX.checkout}/src/lib.rs`], built)
+})
+
+test('RG3 byte-identical cargo coverage uses named control and mutant results', () => {
+  let runs = 0
+  const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), flipTo: null, runFn: () => ({ ...b863Green(0), output: cargoOutput('guard_fn', ++runs < 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed', JSON.stringify({ executions: invocationExecutions(io), rows: invocationRows(io) }))
+  assert.equal(invocationExecutions(io).length, 2)
+})
+
+test('RG4 cargo named test results, not exit status, determine control and mutation', () => {
+  const cases = [
+    { outputs: [cargoOutput('guard_fn', 'FAILED'), cargoOutput('guard_fn', 'ok')], expected: 'control-red' },
+    { outputs: [cargoOutput('guard_fn', 'ok'), cargoOutput('guard_fn', 'FAILED')], expected: 'killed' },
+    { outputs: ['test result: FAILED. 0 passed; 1 failed', cargoOutput('guard_fn', 'ok')], expected: 'name-absent' },
+    { outputs: [cargoOutput('guard_fn', 'ignored'), cargoOutput('guard_fn', 'ok')], expected: 'control-skipped' },
+    { outputs: ['no result', cargoOutput('guard_fn', 'ok')], expected: 'unproven' },
+  ]
+  for (const item of cases) {
+    let n = 0
+    const { io, ctx } = cargoInvocationCase({ entry: cargoEntry(), runFn: () => { const index = n++; return { ...b863Green(101), output: index === 0 ? cargoSummary : item.outputs[index - 1] } } })
+    driveTask(ctx, io)
+    assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, item.expected)
+  }
+  assert.equal(cargoNameVerdict(`${cargoSummary}\ntest tests::ui_uf3_an_asset_is_served_with_its_type ... ok`, 'ui_uf3_an_asset_is_served_with_its_type'), 'passed')
+  assert.equal(cargoNameVerdict('cargo-suite: UNMEASURED - cargo produced no "test result:" summary line', 'guard_fn'), null)
+})
+
+test('RG5 cargo behavioral pre-repair only refutes when the declared name passed', () => {
+  for (const pre of ['absent', 'ambiguous', 'ignored', 'FAILED', null]) {
+    let n = 0
+    const { io, ctx } = cargoInvocationCase({ runFn: () => {
+      n++
+      const output = n === 1 ? (pre === null ? 'compile output' : pre === 'absent' ? cargoSummary : pre === 'ambiguous' ? `${cargoOutput('guard_fn')}\\n${cargoOutput('other::guard_fn')}` : cargoOutput('guard_fn', pre)) : cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED')
+      return { ...b863Green(n === 1 ? 101 : 0), output }
+    } })
+    driveTask(ctx, io)
+    assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+    assert.equal(n, 3)
+  }
+})
+
+test('RG6 absent review-time inline cargo name refuses changed implementation with actionable guidance', () => {
+  const built = cargoSource + '/* non-test implementation edit */\n#[cfg(test)]\nmod tests { #[test] fn guard_fn() {} }\n'
+  const { io, ctx, files } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => ({ ...b863Green(0), output: cargoSummary }) })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'source-regressed')
+  assert.match(row?.why ?? '', /separate test file/i)
+  assert.match(row?.why ?? '', /non-test code/i)
+  assert.equal(invocationExecutions(io).length, 2)
+  assert.equal(files[`${CTX.checkout}/src/lib.rs`], built)
+})
+
+test('RG7 cargo novelty scans every witnessed Rust file as raw bytes and refuses existing names', () => {
+  for (const source of ['// fn guard_fn() {}\n', 'const S: &str = "fn guard_fn() {}";\n', 'fn guard_fn() {}\n']) {
+    const { io, ctx } = cargoInvocationCase({ companion: source, runFn: () => { throw new Error('existing raw-byte name must refuse') } })
+    driveTask(ctx, io)
+    assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'name-not-new')
+    assert.equal(invocationExecutions(io).length, 0)
+  }
+})
+
+test('RG8 Rust non-test-region parser preserves grammar and rejects malformed input', () => {
+  const source = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\n#[cfg(test)] mod tests { #[test] fn check() {} }\n`
+  const expected = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\n`
+  assert.equal(rustNonTestRegion(source), expected)
+  for (const bad of ['"unterminated', '/* unterminated', '{']) assert.equal(rustNonTestRegion(bad), null)
+})
+
+test('RG11 code after an inline test module on the same line stays in the Rust non-test region', () => {
+  // MUTATION: extend each removal to the next newline again; the live() edit vanishes from both regions and compares equal.
+  const before = '#[cfg(test)] mod t { #[test] fn c() {} } pub fn live() { panic!("old") }\n'
+  const after = before.replace('"old"', '"new"')
+  assert.equal(rustNonTestRegion(before), ' pub fn live() { panic!("old") }\n')
+  assert.notEqual(rustNonTestRegion(before), rustNonTestRegion(after))
+  assert.equal(rustNonTestRegion('pub fn a() {}\n#[cfg(test)] mod t { #[test] fn c() {} }   \npub fn b() {}\n'), 'pub fn a() {}\npub fn b() {}\n')
+})
+
+test('RG12 cargo novelty sees an existing test name behind a comment or raw identifier', () => {
+  // MUTATION: restore the whitespace-only fn-name pattern; the commented and raw forms read as new names.
+  for (const companion of ['#[test]\nfn /* kept */ guard_fn() {}\n', '#[test]\nfn // kept\nguard_fn() {}\n', '#[test]\nfn r#guard_fn() {}\n']) {
+    const { io, ctx } = cargoInvocationCase({ companion, runFn: () => { throw new Error('existing commented name must refuse') } })
+    driveTask(ctx, io)
+    assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'name-not-new', companion)
+    assert.equal(invocationExecutions(io).length, 0)
+  }
+})
+
+test('RG13 result lines beyond the cargo summary counts are unmeasured, not a verdict', () => {
+  // MUTATION: drop the reported > summarized refusal; a spoofed stdout line reads as the guard passing and then failing.
+  const spoof = (verdict) => `test suite::guard_fn ... ${verdict}\ntest suite::real_check ... ok\n${cargoSummary}`
+  assert.equal(cargoNameVerdict(spoof('ok'), 'guard_fn'), null)
+  assert.equal(cargoNameVerdict(cargoOutput('guard_fn'), 'guard_fn'), 'passed')
+  const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: spoof(n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+})
+
+test('RG14 a snapshot failure in a cargo proof is an unproven hardening row, not a driver crash', () => {
+  // MUTATION: call proveCargoInvocationEntry without the InvocationSnapshotError catch; the fingerprint failure escapes the proof.
+  const { io, ctx } = cargoInvocationCase({ runFn: () => { throw new Error('the guard must not run without a snapshot') } })
+  let hardening = false
+  const wait = io.wait.bind(io)
+  io.wait = (returnPath, timeoutS) => { if (returnPath === 'builder:2') hardening = true; return wait(returnPath, timeoutS) }
+  const run = io.run.bind(io)
+  io.run = (cmd, opts) => (hardening && /rev-parse HEAD$/.test(cmd) ? { ok: false, status: 128, output: '' } : run(cmd, opts))
+  const result = driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'unproven')
+  assert.match(row?.why ?? '', /rev-parse HEAD exited 128/)
+  assert.notEqual(result.details?.escalation?.where, 'driver')
+})
+
+test('RG15 a cargo summary without counts is unmeasured, never a pass or fail verdict', () => {
+  // MUTATION: drop the countless-summary refusal; test result: ok. plus one named line reads as passed (FAILED as failed).
+  for (const verdict of ['ok', 'FAILED']) assert.equal(cargoNameVerdict(`test suite::guard_fn ... ${verdict}\ntest result: ${verdict === 'ok' ? 'ok' : 'FAILED'}.`, 'guard_fn'), null)
+  assert.equal(cargoNameVerdict(`${cargoOutput('guard_fn')}\ntest result: ok.`, 'guard_fn'), null)
+  const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: `test suite::guard_fn ... ${n === 2 ? 'ok' : 'FAILED'}\ntest result: ok.` }) })
+  driveTask(ctx, io)
+  assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+})
+
+test('RG16 the cargo mutation never rewrites an inline guard that shares the find text', () => {
+  // MUTATION: bind the mutation on the whole file again; the guard's own literal is rewritten and a guard that never reads GUARD reads killed.
+  const source = 'pub const GUARD: bool = false;\n'
+  const built = `${source}#[cfg(test)]\nmod guard_tests { #[test] fn guard_fn() { assert_eq!("GUARD: bool = false".len(), 19); } }\n`
+  const mutants = []
+  const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), source, flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => {
+    const current = io.readFile(`${CTX.checkout}/src/lib.rs`)
+    mutants.push(current)
+    return { ...b863Green(0), output: cargoOutput('guard_fn', current.includes('"GUARD: bool = false"') ? 'ok' : 'FAILED') }
+  } })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.notEqual(row?.outcome, 'killed')
+  assert.ok(mutants.every((text) => text.includes('"GUARD: bool = false"')), 'the guard bytes were rewritten')
+  for (const [cls, expected] of [['coverage', 'source-regressed'], [undefined, 'guard-misplaced']]) {
+    const onlyInGuard = cargoInvocationCase({ entry: cargoEntry({ ...(cls ? { class: cls } : {}), find: '19); }', replace: '20); }' }), source, flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => { throw new Error('a guard-only find must not run') } })
+    driveTask(onlyInGuard.ctx, onlyInGuard.io)
+    const guardRow = invocationRows(onlyInGuard.io).find((candidate) => candidate.round === 2)
+    assert.equal(guardRow?.outcome, expected)
+    assert.match(guardRow?.why ?? '', /only inside the test code/)
+  }
+})
+
+test('RG17 a cargo guard invocation that turns off capture or the pretty format is refused before it runs', () => {
+  // MUTATION: drop the cargo-output-uncaptured refusal; a terse --nocapture run forges guard_fn ... ok then FAILED and reads killed.
+  const spoof = (verdict) => `test suite::guard_fn ... ${verdict}\n.\n${cargoSummary}`
+  for (const tail of ['-- --format terse --nocapture', '-- --nocapture', '-- --show-output', '-- --format=json -Z unstable-options', '-q', '-- --quiet']) {
+    const invocation = `cargo test -p power-domain guard_fn ${tail}`
+    const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ invocation }), runFn: (_text, n) => ({ ...b863Green(0), output: spoof(n === 2 ? 'ok' : 'FAILED') }) })
+    driveTask(ctx, io)
+    assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed', tail)
+    assert.equal(invocationExecutions(io, invocation).length, 0, tail)
+    assert.ok(JSON.stringify(io.calls).includes('cargo-output-uncaptured'), tail)
+  }
+})
+
+test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {
+  // MUTATION: drop the unmeasured non-test-region refusal; the unterminated build is adjudicated by the runs instead.
+  const built = `${cargoSource}/* unfinished`
+  const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: (_text, n) => ({ ...b863Green(0), output: cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'unproven')
+  assert.match(row?.why ?? '', /non-test region was unmeasured/)
+  assert.equal(invocationExecutions(io).length, 0)
+})
+
+test('RG9 cargo rows explain named-test and scope basis while node invocations remain opaque', () => {
+  const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.match(row?.why ?? '', /cargo named-test result.*scope files/)
+  const node = invocationProofIo({ runFn: () => b863Green(0) })
+  driveTask({ ...CTX, limits: { build_rounds: 2 } }, node)
+  assert.match(invocationRows(node).find((candidate) => candidate.round === 2)?.why ?? '', /based only on process exit status/)
+})
 
 test('IV1 an unchanged behavioural invocation file is unproven and never executed', () => {
   // MUTATION IV1: delete the early unchanged-byte return.
@@ -10627,14 +10870,14 @@ const validate = (testRunner, guard = entry) => validateHardened({ hardened: [gu
 
 test('HN1 cargo runner permanent-guard brief', () => {
   const text = hardeningBriefLines(owed, [], cargo).join('\n')
-  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused'], 'hardeningBriefLines output')
+  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused', 'file is the implementation the mutation edits', 'name is the test fn cargo reports', 'non-test code'], 'hardeningBriefLines output')
   assert.equal(text.includes(nodeSentence), false, `hardeningBriefLines output=${inspect(text)}`)
   assert.deepEqual(hardeningBriefLines([], [], cargo), [], 'empty owed findings stay empty')
 })
 // MUTATION HN2: erase the trailing runner input of hardeningBounceLines; the bounce gets legacy node prose.
 test('HN2 cargo runner hardening bounce', () => {
   const text = hardeningBounceLines(2, [], [], cargo).join('\n')
-  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused'], 'hardeningBounceLines output')
+  assertText(text, ['cargo', cargo.basis, '#[test]', 'invocation', '.test.mjs', 'refused', 'file is the implementation the mutation edits', 'name is the test fn cargo reports', 'non-test code'], 'hardeningBounceLines output')
   assert.equal(text.includes(nodeSentence), false, `hardeningBounceLines output=${inspect(text)}`)
 })
 // MUTATION HN3: neutralise the classified cargo refusal branch; the node declaration is accepted.

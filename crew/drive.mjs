@@ -6104,7 +6104,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   let fatal = null
   const proveEntry = (entry) => {
     let active = null
-    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, file: entry.file, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why) : why })
+    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, file: entry.file, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why, ctx.testRunner) : why })
     // MUTATION P6: let a prescribed finding close through an invocation and it is closed by
     // a runner that is not the new top-level test(...) its brief required.
     // MUTATION P18: skip the placement rule and a prescribed guard may live in the pinned
@@ -15017,7 +15017,7 @@ export function normalizeTestRunner(testRunner) {
 }
 export function hardeningRunnerSentence(testRunner) {
   const runner = normalizeTestRunner(testRunner)
-  if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] in the module's test file declared through invocation with the exact command that runs it; a .test.mjs path is refused.`
+  if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] fn declared through invocation with the exact command that runs it; file is the implementation the mutation edits, never the guard home; name is the test fn cargo reports; an inline guard in the #[cfg(test)] module of file is accepted only while the non-test code of file is unchanged since review, otherwise put the guard in a separate test file; a .test.mjs path is refused.`
   if (runner.runner === 'unparsed') return `blind spot: the runner could not be classified (${runner.basis}), so a .test.mjs guard's presence in the repo suite is unverified; invocation is the form whose run is proven.`
   return 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
 }
@@ -15114,6 +15114,200 @@ export function nameVerdict(output, name) {
 // The same adjudication over the run's TOP-LEVEL lines only. Node's TAP reporter indents
 // every subtest line (measured on node v26.10.0: `    ok 1 - inner guard` under
 // `ok 2 - outer`), so an unindented exact name is a top-level test(...) and nothing else.
+export function cargoNameVerdict(output, name) {
+  const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
+  if (!/^test result:/m.test(text)) return null
+  // Under --nocapture or --show-output a test's own stdout can print a line shaped like a result.
+  // Result lines beyond what the harness summaries count cannot all be harness lines: unmeasured.
+  // A summary line without its counts cannot bound the result lines, so nothing is adjudicated.
+  const summaries = text.match(/^test result:.*$/gm) ?? []
+  let summarized = 0
+  for (const line of summaries) {
+    const counts = /^test result: \w+\. (\d+) passed; (\d+) failed(?:; (\d+) ignored)?/.exec(line)
+    if (!counts) return null
+    summarized += Number(counts[1]) + Number(counts[2]) + Number(counts[3] ?? 0)
+  }
+  let reported = 0
+  const hits = []
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^test (.+) \.\.\. (ok|FAILED|ignored)$/.exec(line)
+    if (!match) continue
+    reported++
+    const full = match[1]
+    if (full !== String(name) && full.split('::').at(-1) !== String(name)) continue
+    hits.push(match[2])
+  }
+  if (hits.length > 1) return 'ambiguous'
+  if (reported > summarized) return null
+  if (hits.length === 0) return 'absent'
+  return hits[0] === 'ignored' ? 'skipped' : hits[0] === 'ok' ? 'passed' : 'failed'
+}
+
+// lean: conservative lexical Rust items; use a Rust parser if unsupported cfg or macro-generated test shapes must certify.
+function tokenizeRust(source) {
+  const tokens = []
+  let i = 0
+  const identStart = (c) => /[A-Za-z_]/.test(c ?? '')
+  const identPart = (c) => /[A-Za-z0-9_]/.test(c ?? '')
+  while (i < source.length) {
+    const start = i
+    const c = source[i]
+    if (/\s/.test(c)) { i++; continue }
+    if (source.startsWith('//', i)) {
+      const end = source.indexOf('\n', i + 2)
+      i = end < 0 ? source.length : end
+      tokens.push({ kind: 'comment', start, end: i }); continue
+    }
+    if (source.startsWith('/*', i)) {
+      let depth = 1; i += 2
+      while (i < source.length && depth) {
+        if (source.startsWith('/*', i)) { depth++; i += 2; continue }
+        if (source.startsWith('*/', i)) { depth--; i += 2; continue }
+        i++
+      }
+      if (depth) return null
+      tokens.push({ kind: 'comment', start, end: i }); continue
+    }
+    let rawPrefix = i
+    if (source.startsWith('br', i) || source.startsWith('r', i)) {
+      if (source.startsWith('br', i)) rawPrefix = i + 1
+      if (source[rawPrefix] === 'r') {
+        let j = rawPrefix + 1
+        while (source[j] === '#') j++
+        if (source[j] === '"') {
+          const hashes = j - rawPrefix - 1
+          const close = '"' + '#'.repeat(hashes)
+          const end = source.indexOf(close, j + 1)
+          if (end < 0) return null
+          i = end + close.length
+          tokens.push({ kind: 'literal', start, end: i }); continue
+        }
+      }
+    }
+    const quoteAt = source.startsWith('b"', i) ? i + 1 : c === '"' ? i : -1
+    if (quoteAt >= 0) {
+      i = quoteAt + 1
+      let literalClosed = false
+      while (i < source.length) {
+        if (source[i] === '\\') { i += 2; continue }
+        if (source[i] === '"') { i++; literalClosed = true; break }
+        i++
+      }
+      if (!literalClosed) return null
+      tokens.push({ kind: 'literal', start, end: i }); continue
+    }
+    const charStart = c === "'" || source.startsWith("b'", i)
+    if (charStart) {
+      const q = c === "'" ? i : i + 1
+      let j = q + 1
+      if (source[j] === '\\') j += 2
+      else if (j < source.length && source[j] !== "'" && source[j] !== '\n') j++
+      if (source[j] === "'") {
+        i = j + 1
+        tokens.push({ kind: 'literal', start, end: i }); continue
+      }
+      if (c === "'") {
+        const m = /^'[A-Za-z_][A-Za-z0-9_]*/.exec(source.slice(i))
+        if (m) { i += m[0].length; tokens.push({ kind: 'other', start, end: i }); continue }
+      }
+      return null
+    }
+    if (source.startsWith('r#', i) && identStart(source[i + 2])) {
+      i += 3
+      while (identPart(source[i])) i++
+      tokens.push({ kind: 'ident', text: source.slice(start + 2, i), start, end: i }); continue
+    }
+    if (identStart(c)) {
+      i++
+      while (identPart(source[i])) i++
+      tokens.push({ kind: 'ident', text: source.slice(start, i), start, end: i }); continue
+    }
+    if ('([{'.includes(c)) tokens.push({ kind: 'open', text: c, start, end: ++i })
+    else if (')]}'.includes(c)) tokens.push({ kind: 'close', text: c, start, end: ++i })
+    else tokens.push({ kind: 'punct', text: c, start, end: ++i })
+  }
+  const stack = []
+  for (const token of tokens) {
+    if (token.kind === 'open') stack.push(token.text)
+    if (token.kind === 'close') {
+      const expected = { ')': '(', ']': '[', '}': '{' }[token.text]
+      if (stack.pop() !== expected) return null
+    }
+  }
+  return stack.length ? null : tokens
+}
+
+export function rustNonTestRegion(source) {
+  const removals = rustTestSpans(source)
+  if (removals === null) return null
+  if (!removals.length) return source
+  let result = ''
+  let at = 0
+  for (const [from, to] of removals) { result += source.slice(at, from); at = to }
+  return result + source.slice(at)
+}
+
+// The [from, to) spans of every Rust test item (with its doc comments, attributes and line end), or null when unlexable.
+export function rustTestSpans(source) {
+  if (typeof source !== 'string') return null
+  const tokens = tokenizeRust(source)
+  if (tokens === null) return null
+  const significant = tokens.filter((token) => token.kind !== 'comment')
+  const matching = new Map()
+  const stack = []
+  for (let i = 0; i < significant.length; i++) {
+    const t = significant[i]
+    if (t.kind === 'open') stack.push(i)
+    else if (t.kind === 'close') matching.set(stack.pop(), i)
+  }
+  const removals = []
+  let i = 0
+  while (i < significant.length) {
+    const t = significant[i]
+    if (t.text !== '#' || significant[i + 1]?.text !== '[') { i++; continue }
+    const attrEnd = matching.get(i + 1)
+    if (attrEnd === undefined) return null
+    const attrText = source.slice(significant[i + 1].end, significant[attrEnd].start).trim()
+    if (/^(cfg_attr|cfg\s*\(\s*(?!test\s*\)))/.test(attrText)) return null
+    let isTest = false
+    if (attrText === 'test' || attrText === 'cfg(test)') isTest = true
+    let itemStart = i
+    let j = attrEnd + 1
+    while (significant[j]?.text === '#' && significant[j + 1]?.text === '[') {
+      const nextEnd = matching.get(j + 1)
+      if (nextEnd === undefined) return null
+      const nextText = source.slice(significant[j + 1].end, significant[nextEnd].start).trim()
+      if (nextText === 'test') isTest = true
+      j = nextEnd + 1
+    }
+    const keyword = significant[j]
+    if (isTest) {
+      if (!keyword || !['fn', 'mod', 'async', 'pub', 'unsafe', 'const', 'extern'].includes(keyword.text)) return null
+      let endIndex = j
+      while (endIndex < significant.length && significant[endIndex].text !== '{' && significant[endIndex].text !== ';') endIndex++
+      if (endIndex >= significant.length) return null
+      if (significant[endIndex].text === '{') {
+        const bodyEnd = matching.get(endIndex)
+        if (bodyEnd === undefined) return null
+        endIndex = bodyEnd
+      }
+      let from = significant[itemStart].start
+      while (from > 0 && source[from - 1] === ' ') from--
+      const docPrefix = /(?:^|\n)[ \t]*\/\/\/[^\n]*(?:\n[ \t]*\/\/\/[^\n]*)*\n[ \t]*$/.exec(source.slice(0, from))
+      if (docPrefix) from -= docPrefix[0].length - 1
+      // Only trailing blanks and the newline go with the test item; code after it on the same line stays.
+      let to = significant[endIndex].end
+      let tail = to
+      while (tail < source.length && (source[tail] === ' ' || source[tail] === '\t')) tail++
+      if (tail >= source.length) to = tail
+      else if (source[tail] === '\n') to = tail + 1
+      removals.push([from, to])
+      i = endIndex + 1
+    } else i = attrEnd + 1
+  }
+  return removals
+}
+
 export function topLevelNameVerdict(output, name) {
   return nameVerdict(String(output || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').filter((line) => !/^\s/.test(line)).join('\n'), name)
 }
@@ -15470,6 +15664,12 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'invocation-invalid', `the hardened invocation ${JSON.stringify(entry.invocation)} for finding ${id} must be a single non-blank line naming a runnable command`)
         continue
       }
+      // A cargo guard is adjudicated on libtest's own per-test lines; once capture or the pretty format is off, test stdout can forge them.
+      const uncaptured = runner.runner === 'cargo' ? /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/.exec(entry.invocation) : null
+      if (uncaptured) {
+        refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
+        continue
+      }
     } else {
       if (!hardeningTestPath(entry.test)) {
         refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs${namesTest ? '; for a guard run by any runner other than node --test, declare invocation with the exact command that runs it' : ''}`)
@@ -15698,8 +15898,9 @@ export function gateCheckIds(output) {
 // (status 126/127, missing status, signal/timeout kill, thrown runner, truncated
 // output) is `unproven`, never refuted and never killed.
 const INVOCATION_LIMIT = 'the result is based only on process exit status and cannot prove the named guard ran'
-const invocationWhy = (entry, why) => {
+const invocationWhy = (entry, why, testRunner = null) => {
   const base = why ?? `the invocation ${entry.invocation} left no measured reason`
+  if (normalizeTestRunner(testRunner).runner === 'cargo') return `${base}; cargo named-test result; novelty checked only in review-time lane scope files`
   return `${base}; ${INVOCATION_LIMIT}`
 }
 
@@ -15856,11 +16057,124 @@ function invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes
   return { result, thrown, outside: diffInvocationSnapshots({ ctx, io, snapshot, after, entryFile: entry.file }), fatal: null }
 }
 
+function proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row }) {
+  const fileAbs = `${ctx.checkout}/${entry.file}`
+  const witness = hardenWitness?.get(entry.finding)
+  const S = witness?.get(entry.file)
+  if (S === undefined) return { row: row('witness-missing', `the review-time witness has no cell for ${entry.file}`), fatal: null }
+  if (S.state === 'unreadable') return { row: row('witness-unreadable', `the review-time witness could not read ${entry.file}: ${S.why}`), fatal: null }
+  if (S.state !== 'read') return { row: row('witness-absent', `the declared implementation ${entry.file} did not exist on the review-time tree`), fatal: null }
+  const repairedFile = io.readFile(fileAbs)
+  if (repairedFile === null) return { row: row('unapplied', `${entry.file} does not exist in the built tree`), fatal: null }
+  const segments = entry.file.replaceAll('\\', '/').split('/')
+  const basename = segments.at(-1)
+  const cargoGuardHome = basename === 'tests.rs' || /_(?:tests|test)\.rs$/.test(basename) || segments.some((part) => part === 'tests' || part === 'benches')
+  if (cargoGuardHome) return { row: row('guard-misplaced', 'file is the implementation the mutation edits, not the guard home; declare the implementation file the guard pins'), fatal: null }
+  const leaf = String(entry.name).split('::').at(-1)
+  const escapedLeaf = leaf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const cargoHits = []
+  for (const [path, cell] of witness ?? []) {
+    if (!path.endsWith('.rs')) continue
+    if (cell?.state === 'unreadable') return { row: row('unproven', `cargo novelty in review-time lane scope file ${path} was unmeasured`), fatal: null }
+    if (cell?.state === 'read' && new RegExp(`\\bfn(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)+(?:r#)?${escapedLeaf}\\b`).test(cell.bytes)) cargoHits.push(path)
+  }
+  const cargoNameExisted = cargoHits.length > 0
+  if (cargoNameExisted) return { row: row('name-not-new', `cargo name ${entry.name} already existed in the review-time lane scope files`), fatal: null }
+  const coverage = hardeningClassOf(entry) === 'coverage'
+  const reviewRegion = rustNonTestRegion(S.bytes)
+  const repairedRegion = rustNonTestRegion(repairedFile)
+  if (reviewRegion === null || repairedRegion === null) return { row: row('unproven', 'cargo non-test region was unmeasured'), fatal: null }
+  const guardOnlyWhy = `the declared find binds only inside the test code of ${entry.file}; the mutation must edit the implementation, never the guard`
+  if (coverage) {
+    const cargoReviewBound = applyMutationAnchor(reviewRegion, entry.find, entry.replace)
+    if (cargoReviewBound.text === null) {
+      const guardOnly = applyMutationAnchor(repairedRegion, entry.find, entry.replace).text === null && applyMutationAnchor(repairedFile, entry.find, entry.replace).text !== null
+      return { row: row('source-regressed', guardOnly ? guardOnlyWhy : bindingWhy(cargoReviewBound.mode, entry.file)), fatal: null }
+    }
+  }
+  // The mutation edits the implementation only: every test item, an inline guard included, is masked out before binding.
+  const testSpans = rustTestSpans(repairedFile)
+  const marks = testSpans.map((_, k) => `\u0000cargo-test-span-${k}\u0000`)
+  let masked = ''
+  let maskedAt = 0
+  testSpans.forEach(([from, to], k) => { masked += repairedFile.slice(maskedAt, from) + marks[k]; maskedAt = to })
+  masked += repairedFile.slice(maskedAt)
+  const maskedBound = applyMutationAnchor(masked, entry.find, entry.replace)
+  if (maskedBound.text === null) {
+    if (applyMutationAnchor(repairedFile, entry.find, entry.replace).text !== null) return { row: row('guard-misplaced', guardOnlyWhy), fatal: null }
+    return { row: row(BINDING_OUTCOME[maskedBound.mode], bindingWhy(maskedBound.mode, entry.file)), fatal: null }
+  }
+  let mutatedText = maskedBound.text
+  for (const [k, mark] of marks.entries()) {
+    if (mutatedText.split(mark).length !== 2) return { row: row('anchor-unsafe', `the declared mutation of ${entry.file} would rewrite test code`), fatal: null }
+    mutatedText = mutatedText.replace(mark, () => repairedFile.slice(testSpans[k][0], testSpans[k][1]))
+  }
+  const bound = { mode: maskedBound.mode, text: mutatedText }
+  const cargoSourceUnchanged = repairedFile === S.bytes || reviewRegion === repairedRegion
+  const invoke = () => hardenRun(entry.invocation, { reap: true })
+  let fatal = null
+  const check = (phase, measured) => {
+    if (measured.fatal !== null) { fatal = measured.fatal; return row('unproven', measured.fatal) }
+    if (measured.outside.length) return row('unproven', `invocation-${phase}-side-effects:${measured.outside.join(', ')}`)
+    if (measured.thrown !== null) return row('unproven', `invocation-${phase}-unrunnable:threw-${measured.thrown?.message ?? String(measured.thrown)}`)
+    const classified = classifyInvocationResult(measured.result)
+    return classified.runnable ? null : row('unproven', `invocation-${phase}-unrunnable:${classified.reason}`)
+  }
+  const snapshot = captureInvocationSnapshot({ ctx, io })
+  const reviewRun = (phase) => {
+    let measured
+    try { io.writeFile(fileAbs, S.bytes); measured = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile }) }
+    finally { io.writeFile(fileAbs, repairedFile) }
+    const failed = check(phase, measured)
+    return failed ? { failed } : { verdict: cargoNameVerdict(measured.result.output, entry.name) }
+  }
+  let cargoPre = null
+  let cargoPreWhy = null
+  if (coverage ? !cargoSourceUnchanged : repairedFile !== S.bytes) {
+    const pre = reviewRun('pre-repair')
+    if (pre.failed) return { row: pre.failed, fatal }
+    cargoPre = pre.verdict
+    if (cargoPre === 'passed' && !coverage) return { row: row('pre-repair-green', 'the cargo guard passed on the witnessed pre-repair implementation'), fatal }
+    if (coverage && cargoPre !== 'passed') {
+      if (cargoPre === null) return { row: row('unproven', 'cargo review-time named test was unmeasured'), fatal }
+      const cargoReviewAbsentWhy = 'keep the non-test code byte-identical or move the guard to a separate test file and declare file as the implementation it pins'
+      return { row: row('source-regressed', `${cargoReviewAbsentWhy}; review-time named test was ${cargoPre}`), fatal }
+    }
+  }
+  const cargoPreRefutes = cargoPre === 'passed'
+  if (cargoPre === null) cargoPreWhy = 'cargo pre-repair name unmeasured; control and mutant decide'
+  const controlRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
+  const controlFailure = check('control', controlRun)
+  if (controlFailure) return { row: controlFailure, fatal }
+  const cargoControl = cargoNameVerdict(controlRun.result.output, entry.name)
+  if (cargoControl === 'absent' || cargoControl === 'ambiguous') return { row: row(`name-${cargoControl}`, 'the invocation must print libtest per-test test <path> ... ok lines and must not pass -q/--quiet or --format terse|json'), fatal }
+  if (cargoControl === 'failed') return { row: row('control-red', `cargo named test failed on control${cargoPreWhy ? `; ${cargoPreWhy}` : ''}`), fatal }
+  if (cargoControl === 'skipped') return { row: row('control-skipped', 'cargo named test was ignored on control'), fatal }
+  if (cargoControl === null) return { row: row('unproven', 'cargo named test result was unmeasured'), fatal }
+  let mutantRun
+  try { io.writeFile(fileAbs, bound.text); mutantRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile }) }
+  finally { io.writeFile(fileAbs, repairedFile) }
+  const mutantFailure = check('mutant', mutantRun)
+  if (mutantFailure) return { row: mutantFailure, fatal }
+  const cargoMutant = cargoNameVerdict(mutantRun.result.output, entry.name)
+  if (cargoMutant === null) return { row: row('unproven', 'cargo mutant named test result was unmeasured'), fatal }
+  if (cargoMutant === 'failed') return { row: row('killed', `cargo named test failed under mutation${cargoPreWhy ? `; ${cargoPreWhy}` : ''}`), fatal }
+  return { row: row('survived', `cargo named test ${cargoMutant} under mutation${cargoPreWhy ? `; ${cargoPreWhy}` : ''}`), fatal }
+}
+
 // Never throws: capture/restore failures are returned as `fatal` so the existing
 // hardening fatal path stops the run instead of crashing mid-restore (the dispatch
 // sits before the named-test try/catch and cannot see it).
 function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) {
-  const invoke = () => hardenRun(entry.invocation, { reap: true })
+  const cargoRunner = normalizeTestRunner(ctx.testRunner).runner === 'cargo'
+  if (cargoRunner) {
+    try { return proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) }
+    catch (err) {
+      if (err instanceof InvocationSnapshotError) return { row: row('unproven', err.message), fatal: err.message }
+      return { row: row('unproven', `the hardening proof was interrupted: ${err?.message || String(err)}`), fatal: dirtyAfterFailure(null, err) }
+    }
+  }
+const invoke = () => hardenRun(entry.invocation, { reap: true })
   let fatal = null
   let active = null
   const run = () => {

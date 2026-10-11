@@ -61,6 +61,8 @@ function fixture({
   toplevel = null,
   branch = 'main',
   baseBranch = undefined,
+  diffText = 'diff --git a/src/a.mjs b/src/a.mjs\nindex 1111111..2222222 100644\n--- a/src/a.mjs\n+++ b/src/a.mjs\n@@ -1,1 +1,1 @@\n-old\n+new\n',
+  changedText = 'src/a.mjs\0src/b.mjs\0',
   factoryRoot = scratchDir('pr-review-factory-root-'),
   escalateRun = false,
 } = {}) {
@@ -92,7 +94,7 @@ function fixture({
         const response = queuedGhViews.shift() || { headRefOid: HEAD40, reviews: [] }
         return typeof response === 'function' ? response(args, options) : ghResult(response)
       }
-      if (args[0] === 'pr' && args[1] === 'review') {
+      if (args[0] === 'api' && args.some((arg) => arg.endsWith('/reviews'))) {
         calls.review.push({ args: [...args], options })
         return typeof postResult === 'function' ? postResult(args, options) : ghResult(postResult)
       }
@@ -123,8 +125,8 @@ function fixture({
       if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { status: 0, stdout: `${branch}\n` }
       if (args[0] === 'merge-base') return { status: 0, stdout: `${mergeBase}\n` }
       if (args[0] === 'log') return { status: 0, stdout: logSubjects.length === 0 ? '' : `${logSubjects.join('\n')}\n` }
-      if (args[0] === 'diff' && args[1] === '--name-only') return { status: 0, stdout: 'src/a.mjs\0src/b.mjs\0' }
-      if (args[0] === 'diff') return { status: 0, stdout: 'diff --git a/src/a.mjs b/src/a.mjs\n' }
+      if (args[0] === 'diff' && args[1] === '--name-only') return { status: 0, stdout: changedText }
+      if (args[0] === 'diff') return { status: 0, stdout: diffText }
       if (args[0] === 'worktree' && args[1] === 'add') {
         worktree = args[3]
         mkdirSync(worktree, { recursive: true })
@@ -650,22 +652,56 @@ test('POST-D1', async () => {
   assertCleaned(current)
 })
 
+test('TL1 reviewer guidance distinguishes literal replacements', async () => {
+  // MUTATION: delete the replacement sentence from buildBrief and this test reddens.
+  const current = fixture()
+  await runPrReview({ pr: 44, noPost: true, deps: current.deps })
+  const brief = current.calls.writes.map((row) => row.data).join('\n')
+  const location = 'Write `location` as `<path>:<N>` or `<path>:<N>-<M>` — the path exactly as the diff names it and line numbers of the HEAD file, read from the checkout, never counted from the diff and never prefixed with `L`. Only such a location on an added or context line of one hunk is posted inline; any other location stays in the summary.'
+  const replacement = '`replacement` is optional: the literal source text that replaces lines N..M of that file at HEAD, verbatim, without a trailing newline. It is posted as a GitHub suggestion the author can commit in one click. Never put prose, advice, a diff, or the complexity-finding `<replacement>` sentence in it; when you have no literal line-for-line replacement, omit the field. A pure deletion cannot be expressed.'
+  assert.ok(brief.includes('## Finding locations and replacements'))
+  assert.ok(brief.includes(location))
+  assert.ok(brief.includes(replacement))
+  assert.ok(brief.indexOf('## Finding locations and replacements') > brief.indexOf('## Falsification and adjudication'))
+  assertCleaned(current)
+})
+
+test('TL2 PR content diff uses canonical coordinates', async () => {
+  // MUTATION: drop --unified=3 from the PR content-diff argv and this test reddens.
+  const current = fixture()
+  await runPrReview({ pr: 44, noPost: true, deps: current.deps })
+  const content = current.calls.git.find(({ args }) => args[0] === 'diff' && args[1] !== '--name-only')
+  assert.deepEqual(content.args, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--unified=3', '--inter-hunk-context=0', '--diff-algorithm=default', '--src-prefix=a/', '--dst-prefix=b/', `${BASE40}...${HEAD40}`])
+  assert.deepEqual(current.calls.git.find(({ args }) => args[0] === 'diff' && args[1] === '--name-only').args, ['diff', '--name-only', '-z', `${BASE40}...${HEAD40}`])
+  assertCleaned(current)
+})
+
+test('TL5 whitespace-only replacement is refused', async () => {
+  // MUTATION: drop .trim() from acceptedFinding's replacement clause and the '  ' case reddens
+  const current = fixture({ values: { ...DEFAULT_VALUES, findings: [{ ...DEFAULT_VALUES.findings[0], replacement: '  ' }] } })
+  await rejectedReason(runPrReview({ pr: 44, deps: current.deps }), 'task-return-invalid')
+  assert.equal(current.calls.review.length, 0)
+  assertCleaned(current)
+})
+
 test('POST-E1', async () => {
   const defaultRun = fixture()
   const defaultReport = await runPrReview({ pr: 45, deps: defaultRun.deps })
   assert.equal(defaultReport.verdict, 'COMMENT')
-  assert.deepEqual(defaultRun.calls.review.map(({ args }) => args), [[
-    'pr', 'review', '45', '--comment', '--body', defaultReport.review_body,
-  ]])
+  assert.deepEqual(defaultRun.calls.review.map(({ args, options }) => ({ args, input: JSON.parse(options.input) })), [{
+    args: ['api', '--method', 'POST', 'repos/{owner}/{repo}/pulls/45/reviews', '--input', '-'],
+    input: { commit_id: HEAD40, event: 'COMMENT', body: defaultReport.review_body, comments: [] },
+  }])
   assert.doesNotMatch(defaultReport.review_body, /APPROVE/)
   assertCleaned(defaultRun)
 
   const requested = fixture()
   const requestedReport = await runPrReview({ pr: 46, requestChanges: true, deps: requested.deps })
   assert.equal(requestedReport.verdict, 'REQUEST_CHANGES')
-  assert.deepEqual(requested.calls.review.map(({ args }) => args), [[
-    'pr', 'review', '46', '--request-changes', '--body', requestedReport.review_body,
-  ]])
+  assert.deepEqual(requested.calls.review.map(({ args, options }) => ({ args, input: JSON.parse(options.input) })), [{
+    args: ['api', '--method', 'POST', 'repos/{owner}/{repo}/pulls/46/reviews', '--input', '-'],
+    input: { commit_id: HEAD40, event: 'REQUEST_CHANGES', body: requestedReport.review_body, comments: [] },
+  }])
   assert.doesNotMatch(requestedReport.review_body, /APPROVE/)
   assertCleaned(requested)
 

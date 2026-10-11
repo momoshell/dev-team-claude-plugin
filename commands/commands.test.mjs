@@ -88,6 +88,7 @@ test('review command pins its invocation, safety guarantees, and closed refusals
   assert.ok(body.includes('npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]'))
   assert.match(body, /`--no-post`[^.\n]*without touching GitHub/)
   assert.match(body, /never posts APPROVE/)
+  for (const phrase of ['atomic review', 'inline comments on RIGHT-side added or context lines', 'suggestion blocks', 'Every finding remains in the summary', 'exact inline comments array', 'location-unparsed', 'file-not-in-diff', 'line-outside-diff']) assert.ok(body.includes(phrase), phrase)
 
   const refusalSection = body.split(/^## Refusals\s*$/m)[1] ?? ''
   const rows = [...refusalSection.matchAll(/^- `([^`]+)` — ([^\r\n]+)$/gm)]

@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { checkoutBaseBranch, isPlainBranchName } from './probe-repo.mjs'
+import { parseDiff } from './shape-scan.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECKOUT = resolve(HERE, '../..')
@@ -314,6 +315,10 @@ function buildBrief({ title, body, diff, skill, rubric, falsification, base, hea
     '## Falsification and adjudication',
     falsification,
     '',
+    '## Finding locations and replacements',
+    'Write `location` as `<path>:<N>` or `<path>:<N>-<M>` — the path exactly as the diff names it and line numbers of the HEAD file, read from the checkout, never counted from the diff and never prefixed with `L`. Only such a location on an added or context line of one hunk is posted inline; any other location stays in the summary.',
+    ...(!panel ? ['', '`replacement` is optional: the literal source text that replaces lines N..M of that file at HEAD, verbatim, without a trailing newline. It is posted as a GitHub suggestion the author can commit in one click. Never put prose, advice, a diff, or the complexity-finding `<replacement>` sentence in it; when you have no literal line-for-line replacement, omit the field. A pure deletion cannot be expressed.'] : []),
+    '',
   ].join('\n')
 }
 
@@ -330,13 +335,54 @@ export function reportCounts(values, changedFiles) {
   }
 }
 
+export function mapDiffRightLines(diff) {
+  return parseDiff(diff).map((file) => {
+    const hunks = file.hunks.map((h) => {
+      const rightLines = h.after.map(([line]) => line)
+      return { right_lines: rightLines }
+    })
+    return { path: file.path, right_lines: hunks.flatMap((hunk) => hunk.right_lines), hunks }
+  })
+}
+
+function placeFinding(finding, changedFiles, diffFiles) {
+  const match = /^([\s\S]+):([1-9]\d*)(?:-([1-9]\d*))?$/.exec(finding.location)
+  const start = match ? Number(match[2]) : NaN
+  const end = match ? Number(match[3] || match[2]) : NaN
+  if (!match || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) return { kind: 'summary', reason: 'location-unparsed' }
+  const path = match[1]
+  if (!changedFiles.includes(path)) return { kind: 'summary', reason: 'file-not-in-diff' }
+  const file = diffFiles.find((row) => row.path === path)
+  const hunk = file?.hunks.find((row) => row.right_lines.includes(start) && row.right_lines.includes(end) && end - start + 1 <= row.right_lines.length)
+  if (!hunk) return { kind: 'summary', reason: 'line-outside-diff' }
+  return { kind: 'inline', path, line: end, side: 'RIGHT', ...(end > start ? { start_line: start, start_side: 'RIGHT' } : {}) }
+}
+
+function prepareInlineReview(report, diff) {
+  const files = mapDiffRightLines(diff)
+  const placements = report.findings.map((finding) => placeFinding(finding, report.changed_files, files))
+  const inline_comments = report.findings.flatMap((finding, index) => placements[index].kind === 'inline' ? [{ ...placements[index], body: renderInlineComment(finding) }] : [])
+  return { ...report, placements, inline_comments }
+}
+
+function renderInlineComment(finding) {
+  let body = `${finding.id} [${finding.severity}]\n\n${finding.summary}\n\n${finding.evidence}`
+  if (finding.replacement !== undefined) {
+    let longestRun = 0
+    for (const run of finding.replacement.matchAll(/`+/g)) longestRun = Math.max(longestRun, run[0].length)
+    const fenceLength = Math.max(3, longestRun + 1)
+    const fence = '`'.repeat(fenceLength)
+    body += `\n\n${fence}suggestion\n${finding.replacement}\n${fence}`
+  }
+  return body
+}
 export function renderReviewBody(report, verdict) {
   const panelSection = report.panel == null ? {} : { panel: report.panel };
   const payload = {
     schema: 'review_only',
     head: report.head,
     verdict,
-    findings: report.findings.map((finding) => ({
+    findings: report.findings.map((finding, index) => ({
       id: finding.id,
       severity: finding.severity,
       location: finding.location,
@@ -344,6 +390,8 @@ export function renderReviewBody(report, verdict) {
       evidence: finding.evidence,
       disposition: finding.disposition,
       ...(finding.vacuity_claim !== undefined ? { vacuity_claim: finding.vacuity_claim } : {}),
+      ...(finding.replacement !== undefined ? { replacement: finding.replacement } : {}),
+      ...(report.placements ? { publication: report.placements[index] } : {}),
     })),
     counts: {
       findings: { count: report.counts.findings.count, reason: report.counts.findings.reason },
@@ -391,7 +439,7 @@ function readJsonValue(raw) {
 }
 
 const REVIEW_FINDING_FIELDS = Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition'])
-const REVIEW_FINDING_OPTIONAL_FIELDS = Object.freeze(['vacuity_claim'])
+const REVIEW_FINDING_OPTIONAL_FIELDS = Object.freeze(['vacuity_claim', 'replacement'])
 const REVIEW_VACUITY_CLAIMS = new Set(['mutation-survived', 'source-text-only'])
 const REVIEW_SEVERITIES = new Set(['must-fix', 'should-fix', 'consider'])
 const REVIEW_DISPOSITIONS = new Set(['auto-fix', 'ask-user', 'no-op'])
@@ -413,6 +461,7 @@ function acceptedFinding(value) {
     && typeof value.summary === 'string'
     && typeof value.evidence === 'string'
     && typeof value.disposition === 'string' && REVIEW_DISPOSITIONS.has(value.disposition)
+    && (!Object.prototype.hasOwnProperty.call(value, 'replacement') || (typeof value.replacement === 'string' && value.replacement.trim().length > 0))
     && (!Object.prototype.hasOwnProperty.call(value, 'vacuity_claim')
       || (REVIEW_VACUITY_CLAIMS.has(value.vacuity_claim)
         && value.severity === 'must-fix'
@@ -680,17 +729,17 @@ async function postReview(pr, report, config, d) {
   const existingReviews = current.reviews
   if (existingReviews.some((review) => textOf(review?.body).includes(marker))) return { ...report, posted: false, reason: 'already-posted', review_body: body }
 
-  const reviewFlag = verdict === 'REQUEST_CHANGES' ? '--request-changes' : '--comment'
-  let result
+   let result
   try {
-    result = await invoke(d.gh, ['pr', 'review', pr, reviewFlag, '--body', body], {
+    result = await invoke(d.gh, ['api', '--method', 'POST', `repos/{owner}/{repo}/pulls/${pr}/reviews`, '--input', '-'], {
       cwd: d.checkout, encoding: 'utf8', maxBuffer: MAX_BUFFER,
+      input: JSON.stringify({ commit_id: report.head, event: verdict, body, comments: report.inline_comments }),
     })
   } catch (error) {
-    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh pr review failed: ${errorText(error)}`)
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh api review failed: ${errorText(error)}`)
   }
   if (!postCommandSucceeded(result)) {
-    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh pr review failed: ${commandFailure(result, 'review command did not complete successfully')}`)
+    refuse(PR_REVIEW_REFUSALS.POST_FAILED, `gh api review failed: ${commandFailure(result, 'review command did not complete successfully')}`)
   }
   return { ...report, posted: true, review_body: body }
 }
@@ -947,7 +996,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   let changedFiles = null
   try {
     base = await resolveBase(head, d, prBaseRef)
-    diff = await gitText(d, ['diff', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the PR')
+    diff = await gitText(d, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--unified=3', '--inter-hunk-context=0', '--diff-algorithm=default', '--src-prefix=a/', '--dst-prefix=b/', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not read the PR')
     const changedText = await gitText(d, ['diff', '--name-only', '-z', `${base}...${head}`], PR_REVIEW_REFUSALS.GIT_DIFF_FAILED, 'git diff could not list changed files')
     changedFiles = parseChangedFiles(changedText)
   } catch (stageError) {
@@ -969,6 +1018,7 @@ export async function runPrReview(input = {}, maybeDeps = {}) {
   }
   let posted
   try {
+    report = prepareInlineReview(report, diff)
     posted = await postReview(pr, report, config, d)
   } catch (postError) {
     const failure = postError instanceof PrReviewError ? postError : new PrReviewError(PR_REVIEW_REFUSALS.POST_FAILED, errorText(postError))
@@ -1041,8 +1091,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     const result = await runner({ ...config, deps })
     if (config.noPost) {
       if (typeof result?.review_body !== 'string') refuse(PR_REVIEW_REFUSALS.POST_FAILED, 'render-only review body is unavailable')
-      if (typeof deps.stdout === 'function') deps.stdout(`${result.review_body}\n`)
-      else process.stdout.write(`${result.review_body}\n`)
+      const preview = config.local ? result.review_body : `${result.review_body}\n${JSON.stringify(result.inline_comments)}`
+      if (typeof deps.stdout === 'function') deps.stdout(`${preview}\n`)
+      else process.stdout.write(`${preview}\n`)
     } else if (typeof deps.stdout === 'function') deps.stdout(`${JSON.stringify(result)}\n`)
     else process.stdout.write(`${JSON.stringify(result)}\n`)
     return 0

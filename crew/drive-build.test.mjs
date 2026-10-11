@@ -3,6 +3,7 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { tokenizeJs } from './js-tokens.mjs'
 import {
   staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
@@ -8213,10 +8214,76 @@ test('E1 unchanged settle-time inventory settles and advances its baseline', () 
   assert.deepEqual(fixture.io.calls.diffConfigs.map((command) => Number(/diff-mutation-(\d+)\.json/.exec(command)?.[1])), [1, 2])
 })
 
+// BLIND SPOT: dynamic import(...) is excluded; this helper inventories static declarations only.
+const staticImportSpecifiers = (text) => {
+  const tokens = tokenizeJs(String(text)).filter((token) => token.kind !== 'whitespace' && token.kind !== 'comment')
+  const specifiers = []
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i], next = tokens[i + 1]
+    if (token.kind !== 'name' || !['import', 'export'].includes(token.text)) continue
+    if (token.text === 'import' && (next?.text === '.' || next?.text === '(')) continue
+    if (token.text === 'import' && next?.kind === 'string') { specifiers.push(next.text.slice(1, -1)); continue }
+    if (token.text === 'export' && !['{', '*'].includes(next?.text)) continue
+    for (let j = i + 1; j < tokens.length; j++) {
+      const candidate = tokens[j]
+      if (candidate.text === ';') break
+      if (candidate.kind === 'name' && candidate.text === 'from' && tokens[j + 1]?.kind === 'string') {
+        specifiers.push(tokens[j + 1].text.slice(1, -1))
+        break
+      }
+    }
+  }
+  return specifiers
+}
+const hasScriptsImport = (text) => staticImportSpecifiers(text).some((specifier) => specifier.includes('scripts/'))
+
+test('IF1 static import inventory catches chained declarations', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  const inserted = source.replace(
+    "import { panelPermission } from './acp-permission.mjs';",
+    "import { panelPermission } from './acp-permission.mjs'; import { forbidden } from '../scripts/panel.mjs';",
+  )
+  assert.deepEqual(staticImportSpecifiers(inserted).filter((specifier) => specifier.includes('scripts/')), ['../scripts/panel.mjs'])
+  const chained = `${source}\n; import '../scripts/chained.mjs';`
+  assert.deepEqual(staticImportSpecifiers(chained).filter((specifier) => specifier.includes('scripts/')), ['../scripts/chained.mjs'])
+})
+
+test('IF2 static import inventory recognizes named and star re-exports', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  assert.deepEqual(staticImportSpecifiers(`${source}\nexport { item } from '../scripts/named.mjs';`).filter((specifier) => specifier.includes('scripts/')), ['../scripts/named.mjs'])
+  assert.deepEqual(staticImportSpecifiers(`${source}\nexport * from '../scripts/star.mjs';`).filter((specifier) => specifier.includes('scripts/')), ['../scripts/star.mjs'])
+})
+
+test('IF3 static import inventory tokenizes declarations and ignores non-code lookalikes', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  const fixtures = [
+    { source: `import { item }\n  from '../scripts/multiline.mjs';`, specifier: '../scripts/multiline.mjs' },
+    { source: `import '../scripts/same-line.mjs';`, specifier: '../scripts/same-line.mjs' },
+    { source: `  import '../scripts/indented.mjs';`, specifier: '../scripts/indented.mjs' },
+  ]
+  for (const fixture of fixtures) {
+    assert.deepEqual(staticImportSpecifiers(`${source}\n${fixture.source}`).filter((specifier) => specifier.includes('scripts/')), [fixture.specifier])
+  }
+  const decoys = [
+    `// import "../scripts/line-comment.mjs";`,
+    `/* import "../scripts/block-comment.mjs"; team's */`,
+    `const quoted = "import '../scripts/string.mjs';";`,
+    `const templated = \`import '../scripts/template.mjs';\`;`,
+    `const patterned = /import ['"]..\\/scripts\\/regex\\.mjs/;`,
+  ]
+  for (const decoy of decoys) assert.deepEqual(staticImportSpecifiers(`${source}\n${decoy}`).filter((specifier) => specifier.includes('scripts/')), [])
+  assert.deepEqual(staticImportSpecifiers(`${source}\nimport.meta.url; import('../scripts/dynamic.mjs');`).filter((specifier) => specifier.includes('scripts/')), [])
+})
+
+test('IF4 untouched driver inventory includes chained imports and re-exports', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  const specifiers = staticImportSpecifiers(source)
+  for (const specifier of ['./acp-permission.mjs', 'node:module', './prompt-claim.mjs']) assert.ok(specifiers.includes(specifier))
+  assert.deepEqual(specifiers.filter((specifier) => specifier.includes('scripts/')), [])
+})
+
 test('F1 driver keeps the mutation runner behind the scripts import firewall', () => {
   const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
-  const staticImportSpecifiers = (text) => [...String(text).matchAll(/^import\s+(?:[^'"\n]*?\s+from\s+)?['"]([^'"]+)['"]/gm)].map((match) => match[1])
-  const hasScriptsImport = (text) => staticImportSpecifiers(text).some((specifier) => specifier.includes('scripts/'))
   assert.deepEqual(staticImportSpecifiers(source).filter((specifier) => specifier.includes('scripts/')), [])
   assert.equal(hasScriptsImport(`${source}\nimport { forbidden } from '../scripts/forbidden.mjs'\n`), true)
   assert.equal(hasScriptsImport(`${source}\nimport '../scripts/forbidden.mjs'\n`), true)

@@ -15117,14 +15117,21 @@ export function nameVerdict(output, name) {
 export function cargoNameVerdict(output, name) {
   const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
   if (!/^test result:/m.test(text)) return null
+  // Under --nocapture or --show-output a test's own stdout can print a line shaped like a result.
+  // Result lines beyond what the harness summaries count cannot all be harness lines: unmeasured.
+  let summarized = null
+  for (const m of text.matchAll(/^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored/gm)) summarized = (summarized ?? 0) + Number(m[1]) + Number(m[2]) + Number(m[3])
+  let reported = 0
   const hits = []
   for (const line of text.split(/\r?\n/)) {
     const match = /^test (.+) \.\.\. (ok|FAILED|ignored)$/.exec(line)
     if (!match) continue
+    reported++
     const full = match[1]
     if (full !== String(name) && full.split('::').at(-1) !== String(name)) continue
     hits.push(match[2])
   }
+  if (summarized !== null && reported > summarized) return null
   if (hits.length === 0) return 'absent'
   if (hits.length > 1) return 'ambiguous'
   return hits[0] === 'ignored' ? 'skipped' : hits[0] === 'ok' ? 'passed' : 'failed'
@@ -16121,7 +16128,13 @@ function proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, r
 // sits before the named-test try/catch and cannot see it).
 function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) {
   const cargoRunner = normalizeTestRunner(ctx.testRunner).runner === 'cargo'
-if (cargoRunner) return proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure })
+  if (cargoRunner) {
+    try { return proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) }
+    catch (err) {
+      if (err instanceof InvocationSnapshotError) return { row: row('unproven', err.message), fatal: err.message }
+      return { row: row('unproven', `the hardening proof was interrupted: ${err?.message || String(err)}`), fatal: dirtyAfterFailure(null, err) }
+    }
+  }
 const invoke = () => hardenRun(entry.invocation, { reap: true })
   let fatal = null
   let active = null

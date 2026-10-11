@@ -7341,6 +7341,31 @@ test('RG12 cargo novelty sees an existing test name behind a comment or raw iden
   }
 })
 
+test('RG13 result lines beyond the cargo summary counts are unmeasured, not a verdict', () => {
+  // MUTATION: drop the reported > summarized refusal; a spoofed stdout line reads as the guard passing and then failing.
+  const spoof = (verdict) => `test suite::guard_fn ... ${verdict}\ntest suite::real_check ... ok\n${cargoSummary}`
+  assert.equal(cargoNameVerdict(spoof('ok'), 'guard_fn'), null)
+  assert.equal(cargoNameVerdict(cargoOutput('guard_fn'), 'guard_fn'), 'passed')
+  const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: spoof(n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+})
+
+test('RG14 a snapshot failure in a cargo proof is an unproven hardening row, not a driver crash', () => {
+  // MUTATION: call proveCargoInvocationEntry without the InvocationSnapshotError catch; the fingerprint failure escapes the proof.
+  const { io, ctx } = cargoInvocationCase({ runFn: () => { throw new Error('the guard must not run without a snapshot') } })
+  let hardening = false
+  const wait = io.wait.bind(io)
+  io.wait = (returnPath, timeoutS) => { if (returnPath === 'builder:2') hardening = true; return wait(returnPath, timeoutS) }
+  const run = io.run.bind(io)
+  io.run = (cmd, opts) => (hardening && /rev-parse HEAD$/.test(cmd) ? { ok: false, status: 128, output: '' } : run(cmd, opts))
+  const result = driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'unproven')
+  assert.match(row?.why ?? '', /rev-parse HEAD exited 128/)
+  assert.notEqual(result.details?.escalation?.where, 'driver')
+})
+
 test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {
   // MUTATION: drop the unmeasured non-test-region refusal; the unterminated build is adjudicated by the runs instead.
   const built = `${cargoSource}/* unfinished`

@@ -23,6 +23,11 @@ import { emitAdapter, SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS } from '../crew/seat-i
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
 
 import { _resetNoticeGuardsForTest, openRun, parseProposalBrief } from '../scripts/factory/emit.mjs'
+import { newCensus, foldCensusFrame, finaliseCensus } from '../crew/headless-rpc.mjs'
+
+// Recorded b1196 wrapper/edit frames; the child carries the vendor parent id.
+const CN2_RECORDED_FRAMES = [{"type":"tool_execution_start","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75","toolName":"codemode","args":{"code":"const r=await tools.edit({path:\"test/factory-dispatch-batch.test.mjs\",edits:[{oldText:\"  assert.deepEqual(appended, ['\\\\n/node_modules\\\\n', '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\",newText:\"  assert.deepEqual(appended, ['\\\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\\\n/node_modules\\\\n', '\\\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\"}]});text(r);\n"}},{"type":"tool_execution_end","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75","toolName":"codemode","result":{"content":[{"type":"text","text":"Script completed\nWall time 30.4 seconds\nOutput:\n"},{"type":"text","text":"Successfully replaced 1 block(s) in test/factory-dispatch-batch.test.mjs."}],"details":{"calls":[{"id":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","name":"edit","args":"{\"path\":\"test/factory-dispatch-batch.test.mjs\",\"edits\":[{\"oldText\":\"  assert.deepEqual(appended, ['\\\\n/node_modules\\\\n', '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\",\"newText\":\"  assert.deepEqual(appended, ['...","status":"ok","durationMs":30393.749542000005}]}},"isError":false,"durationMs":30410},{"type":"tool_execution_start","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","toolName":"edit","args":{"path":"test/factory-dispatch-batch.test.mjs","edits":[{"oldText":"  assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])","newText":"  assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])"}]},"parentToolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75"},{"type":"tool_execution_end","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","toolName":"edit","result":{"content":[{"type":"text","text":"Successfully replaced 1 block(s) in test/factory-dispatch-batch.test.mjs."}],"details":{"diff":"      ...\n 7459     checkout, laneDir,\n 7460     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],\n 7461     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },\n 7462   })\n-7463   assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])\n+7463   assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])\n 7464 \n 7465   mkdirSync(join(laneDir, 'collision'), { recursive: true })\n 7466   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')\n 7467   await assert.rejects(setupWorktree({\n      ...","patch":"--- test/factory-dispatch-batch.test.mjs\n+++ test/factory-dispatch-batch.test.mjs\n@@ -7459,9 +7459,9 @@\n     checkout, laneDir,\n     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],\n     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },\n   })\n-  assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])\n+  assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])\n \n   mkdirSync(join(laneDir, 'collision'), { recursive: true })\n   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')\n   await assert.rejects(setupWorktree({\n","firstChangedLine":7463}},"isError":false,"durationMs":14,"parentToolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75"}]
+
 
 import { loadDurableEscalationRecord, proposalFromResponse, proposalPrompt, triageEscalation } from '../scripts/factory/escalation-triage.mjs'
 
@@ -3156,4 +3161,69 @@ test('a seed read that errors (tables missing from the real ledger) makes the in
     assert.equal(result.complete, false)
     assert.deepEqual(result.first_failure, { line: null, reason: 'seed-read-error' })
   } finally { ledger.close() }
+})
+
+// MUTATION CN3: removing the null fallback makes ledger ingestion reject the census row.
+test('CN3 inconsistent clock retains census through journal ingestion', { skip: SKIP }, () => {
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'tool_execution_start', toolCallId: 'e', toolName: 'edit', args: { path: 'x' } }, 0)
+  foldCensusFrame(census, { type: 'tool_execution_end', toolCallId: 'e', toolName: 'edit' }, 100)
+  foldCensusFrame(census, { type: 'turn_end' }, 50)
+  const final = finaliseCensus(census)
+  const line = JSON.stringify({ at: 1704067200000, seat_turn_census: {
+    ...final, skill_reads: [...final.skill_reads], role: 'builder',
+    dispatch_id: 'd1', transport: 'headless-rpc', absent_reason: final.clock_absent,
+  } })
+  const { ledger, result } = ingestJournalLine(line, 'census-overlap-cn3')
+  try {
+    assert.equal(result.applied, 1)
+    assert.equal(result.failed, 0)
+    const rows = ledger.dumpTable('seat_turn_census')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].in_tool_edit_ms, 100)
+    assert.equal(rows[0].out_of_tool_ms, null)
+    assert.equal(rows[0].absent_reason, 'the matched tool-span union exceeds the observed census span, so the injected wrapper clock does not measure out-of-tool time')
+  } finally {
+    ledger.close()
+  }
+})
+
+test('CN2 normal overlap emitter ingestion drops no census rows', { skip: SKIP }, () => {
+  const stateDir = scratchDir('turns-census-overlap-')
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  const lines = []
+  const at = new Date().toISOString()
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'turn_start' }, 0)
+  foldCensusFrame(census, CN2_RECORDED_FRAMES[0], 1000)
+  foldCensusFrame(census, CN2_RECORDED_FRAMES[2], 1000)
+  foldCensusFrame(census, CN2_RECORDED_FRAMES[3], 31261)
+  foldCensusFrame(census, CN2_RECORDED_FRAMES[1], 31261)
+  foldCensusFrame(census, { type: 'turn_end' }, 45362)
+  const final = finaliseCensus(census)
+  writeFileSync(join(stateDir, 'journal.jsonl'), [
+    JSON.stringify({ event: 'run-start', at }),
+    JSON.stringify({ at, seat_turn_census: {
+      ...final, skill_reads: [...final.skill_reads], role: 'builder',
+      dispatch_id: 'd-overlap', transport: 'headless-rpc', absent_reason: final.clock_absent,
+    } }),
+  ].join('\n') + '\n')
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'census-overlap', dbPath, stderr: { write: (line) => lines.push(line) } })
+  let ledger
+  try {
+    emitter.startRun()
+    emitter.endRun({ status: 'ok' })
+    assert.equal(emitter.stats().dropped, 0)
+    assert.equal(lines.some((line) => /emission dropped|journal ingest dropped/.test(line)), false)
+    ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    const rows = ledger.dumpTable('seat_turn_census')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].in_tool_edit_ms, 30261)
+    assert.equal(rows[0].in_tool_other_ms, 0)
+    assert.equal(rows[0].out_of_tool_ms, 15101)
+  } finally {
+    ledger?.close()
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
 })

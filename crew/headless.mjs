@@ -532,6 +532,7 @@ export const CENSUS_ABSENT_CAUSES = Object.freeze({
   replay_no_frame_clock: 'the frames carry no timestamp of their own, so a REPLAY has no clock; only a live wrapper can stamp one',
   same_poll_boundary: "the call's start and end were observed in the SAME wrapper poll, so the wrapper clock bounds the call's duration by the poll interval but does not measure it",
   bash_reader_unparsed: 'a Bash reader was observed but its literal file operands could not be safely bounded',
+  clock_union_exceeds_span: 'the matched tool-span union exceeds the observed census span, so the injected wrapper clock does not measure out-of-tool time',
 })
 
 const HEADLESS_JSON_COMPACTION_FIELDS = Object.freeze({

@@ -359,6 +359,7 @@ export function newCensus() {
     _context_peak: null,
     _context_sum: 0,
     _open: Object.create(null),
+    _spans: [],
     _files: new Set(),
     _first_at: null,
     _last_at: null,
@@ -395,7 +396,7 @@ export function foldCensusFrame(census, frame, at) {
     }
     if (census.bash_reads_absent_reason === null && observed.bash_absent_reason !== null) census.bash_reads_absent_reason = observed.bash_absent_reason
     if (Number.isFinite(at) && frame.toolCallId != null) {
-      census._open[frame.toolCallId] = { at, class: klass }
+      census._open[frame.toolCallId] = { at, class: klass, parentToolCallId: frame.parentToolCallId ?? null }
     } else if (frame.toolCallId == null) {
       census.tool_spans_unmatched += 1
     }
@@ -407,7 +408,7 @@ export function foldCensusFrame(census, frame, at) {
       census.tool_spans_unmatched += 1
       if (start) delete census._open[frame.toolCallId]
     } else {
-      census.in_tool_ms[start.class] += at - start.at
+      census._spans.push({ id: frame.toolCallId, start: start.at, end: at, class: start.class, parentToolCallId: start.parentToolCallId })
       census.tool_spans_matched += 1
       delete census._open[frame.toolCallId]
     }
@@ -422,6 +423,7 @@ export function finaliseCensus(census) {
   for (const id of Object.keys(census._open || {})) census.tool_spans_unmatched += 1
   const firstAt = census._first_at
   const lastAt = census._last_at
+  const spans = census._spans || []
   census.context_first_tokens = census._context_calls > 0 ? census._context_first : null
   census.context_peak_tokens = census._context_calls > 0 ? census._context_peak : null
   census.context_mean_tokens = census._context_calls > 0 ? Math.round(census._context_sum / census._context_calls) : null
@@ -432,6 +434,7 @@ export function finaliseCensus(census) {
   delete census._context_peak
   delete census._context_sum
   delete census._open
+  delete census._spans
   delete census._calls_this_turn
   delete census._files
   delete census._first_at
@@ -450,9 +453,38 @@ export function finaliseCensus(census) {
     census.clock_absent = CENSUS_ABSENT_CAUSES.same_poll_boundary
     return census
   }
+  const buckets = Object.fromEntries(TOOL_CLASSES.map((name) => [name, 0]))
+  const spanById = new Map(spans.map((span) => [span.id, span]))
+  const points = [...new Set(spans.flatMap((span) => [span.start, span.end]))].sort((a, b) => a - b)
+  // lean: quadratic endpoint scan; sweep-line active set if census span counts make finalisation material
+  for (let index = 1; index < points.length; index++) {
+    const start = points[index - 1]
+    const end = points[index]
+    const active = spans.filter((span) => span.start <= start && span.end >= end)
+    if (active.length === 0) continue
+    const activeIds = new Set(active.map((span) => span.id))
+    const activeAncestors = new Set()
+    for (const span of active) {
+      const visited = new Set([span.id])
+      let parentId = span.parentToolCallId
+      while (parentId != null && !visited.has(parentId)) {
+        visited.add(parentId)
+        const ancestor = spanById.get(parentId)
+        if (!ancestor) break
+        if (activeIds.has(parentId)) activeAncestors.add(parentId)
+        parentId = ancestor.parentToolCallId
+      }
+    }
+    const eligible = active.filter((span) => !activeAncestors.has(span.id))
+    const candidates = eligible.length > 0 ? eligible : active
+    const precedence = ['test', 'edit', 'read', 'other']
+    const winner = candidates.reduce((best, span) => precedence.indexOf(span.class) < precedence.indexOf(best.class) ? span : best)
+    buckets[winner.class] += end - start
+  }
+  census.in_tool_ms = buckets
   const inToolTotal = Object.values(census.in_tool_ms).reduce((total, value) => total + value, 0)
-  census.out_of_tool_ms = census.span_ms - inToolTotal
-  census.clock_absent = null
+  census.out_of_tool_ms = inToolTotal > census.span_ms ? null : census.span_ms - inToolTotal
+  census.clock_absent = inToolTotal > census.span_ms ? CENSUS_ABSENT_CAUSES.clock_union_exceeds_span : null
   return census
 }
 

@@ -4041,3 +4041,165 @@ test('RPC context ignores an assistant message_end whose usage carries no token 
   const row = finaliseCensus(foldCensusFrame(newCensus(), { type: 'message_end', message: { role: 'assistant', usage: {} } }, null))
   assert.deepEqual([row.context_first_tokens, row.context_peak_tokens, row.context_mean_tokens, row.context_calls, row.context_absent_reason], [null, null, null, null, 'no-usage-frame'])
 })
+
+const CN2_FRAMES = [{"type":"tool_execution_start","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75","toolName":"codemode","args":{"code":"const r=await tools.edit({path:\"test/factory-dispatch-batch.test.mjs\",edits:[{oldText:\"  assert.deepEqual(appended, ['\\\\n/node_modules\\\\n', '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\",newText:\"  assert.deepEqual(appended, ['\\\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\\\n/node_modules\\\\n', '\\\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\"}]});text(r);\n"}},{"type":"tool_execution_end","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75","toolName":"codemode","result":{"content":[{"type":"text","text":"Script completed\nWall time 30.4 seconds\nOutput:\n"},{"type":"text","text":"Successfully replaced 1 block(s) in test/factory-dispatch-batch.test.mjs."}],"details":{"calls":[{"id":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","name":"edit","args":"{\"path\":\"test/factory-dispatch-batch.test.mjs\",\"edits\":[{\"oldText\":\"  assert.deepEqual(appended, ['\\\\n/node_modules\\\\n', '\\\\n/vendor/\\\\\\\\[deps\\\\\\\\]\\\\n'])\",\"newText\":\"  assert.deepEqual(appended, ['...","status":"ok","durationMs":30393.749542000005}]}},"isError":false,"durationMs":30410},{"type":"tool_execution_start","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","toolName":"edit","args":{"path":"test/factory-dispatch-batch.test.mjs","edits":[{"oldText":"  assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])","newText":"  assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])"}]},"parentToolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75"},{"type":"tool_execution_end","toolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75/1","toolName":"edit","result":{"content":[{"type":"text","text":"Successfully replaced 1 block(s) in test/factory-dispatch-batch.test.mjs."}],"details":{"diff":"      ...\n 7459     checkout, laneDir,\n 7460     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],\n 7461     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },\n 7462   })\n-7463   assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])\n+7463   assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])\n 7464 \n 7465   mkdirSync(join(laneDir, 'collision'), { recursive: true })\n 7466   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')\n 7467   await assert.rejects(setupWorktree({\n      ...","patch":"--- test/factory-dispatch-batch.test.mjs\n+++ test/factory-dispatch-batch.test.mjs\n@@ -7459,9 +7459,9 @@\n     checkout, laneDir,\n     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],\n     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },\n   })\n-  assert.deepEqual(appended, ['\\n/node_modules\\n', '\\n/vendor/\\\\[deps\\\\]\\n'])\n+  assert.deepEqual(appended, ['\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/node_modules\\n', '\\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\\n/vendor/\\\\[deps\\\\]\\n'])\n \n   mkdirSync(join(laneDir, 'collision'), { recursive: true })\n   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')\n   await assert.rejects(setupWorktree({\n","firstChangedLine":7463}},"isError":false,"durationMs":14,"parentToolCallId":"call_d5ddadc227c54ff38f15475d1318196e|ctc_083ba2731cf1eae8016aca9a3e7b3081918f0f879bf1611f75"}]
+
+// MUTATION CN1: restoring full-span credit double-counts parallel reads.
+test('CN1 parallel top-level spans partition wall time', () => {
+  const census = newCensus()
+  const frame = (type, id, name) => ({ type, toolCallId: id, toolName: name, args: name === 'bash' ? { command: 'node --test x.test.mjs' } : { path: id } })
+  foldCensusFrame(census, { type: 'turn_start' }, 0)
+  foldCensusFrame(census, frame('tool_execution_start', 'r1', 'read'), 1000)
+  foldCensusFrame(census, frame('tool_execution_start', 'r2', 'read'), 1000)
+  foldCensusFrame(census, frame('tool_execution_start', 't1', 'bash'), 2000)
+  foldCensusFrame(census, frame('tool_execution_end', 'r1', 'read'), 3000)
+  foldCensusFrame(census, frame('tool_execution_end', 'r2', 'read'), 3000)
+  foldCensusFrame(census, frame('tool_execution_end', 't1', 'bash'), 4000)
+  foldCensusFrame(census, { type: 'turn_end' }, 5000)
+  const result = finaliseCensus(census)
+  assert.deepEqual(result.in_tool_ms, { edit: 0, read: 1000, test: 2000, other: 0 })
+  assert.equal(result.out_of_tool_ms, 2000)
+  assert.equal(result.tool_spans_matched, 3)
+  assert.equal(Object.hasOwn(result, '_spans'), false)
+})
+
+// MUTATION CN2: re-crediting active ancestors gives the wrapper's time to other.
+test('CN2 b1196 wrapper coverage belongs to its edit child', () => {
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'turn_start' }, 0)
+  foldCensusFrame(census, CN2_FRAMES[0], 1000)
+  foldCensusFrame(census, CN2_FRAMES[2], 1000)
+  foldCensusFrame(census, CN2_FRAMES[3], 31261)
+  foldCensusFrame(census, CN2_FRAMES[1], 31261)
+  foldCensusFrame(census, { type: 'turn_end' }, 45362)
+  const result = finaliseCensus(census)
+  assert.equal(result.in_tool_ms.edit, 30261)
+  assert.equal(result.in_tool_ms.other, 0)
+  assert.equal(result.out_of_tool_ms, 15101)
+})
+
+
+// MUTATION CN1: full-span attribution double-counts overlapping spans in the precedence witness.
+test('census partitions precedence, disjoint spans, and malformed intervals', () => {
+  const precedence = newCensus()
+  const tools = [
+    ['read', 'r'], ['edit', 'e'], ['bash', 't'], ['codemode', 'o'],
+  ]
+  for (const [name, id] of tools) foldCensusFrame(precedence, { type: 'tool_execution_start', toolCallId: id, toolName: name, args: name === 'bash' ? { command: 'node --test x.test.mjs' } : name === 'codemode' ? { code: '' } : { path: id } }, 0)
+  for (const [, id] of tools) foldCensusFrame(precedence, { type: 'tool_execution_end', toolCallId: id }, 100)
+  const ordered = finaliseCensus(precedence)
+  assert.equal(ordered.in_tool_ms.test, 100)
+  assert.equal(ordered.in_tool_ms.edit + ordered.in_tool_ms.read + ordered.in_tool_ms.other, 0)
+
+  const disjoint = newCensus()
+  for (const [id, start, end] of [['a', 0, 10], ['b', 10, 20], ['c', 30, 40]]) {
+    foldCensusFrame(disjoint, { type: 'tool_execution_start', toolCallId: id, toolName: 'read', args: { path: id } }, start)
+    foldCensusFrame(disjoint, { type: 'tool_execution_end', toolCallId: id }, end)
+  }
+  foldCensusFrame(disjoint, { type: 'turn_end' }, 50)
+  const gaps = finaliseCensus(disjoint)
+  assert.equal(gaps.in_tool_ms.read, 30)
+  assert.equal(gaps.out_of_tool_ms, 20)
+
+  const invalid = newCensus()
+  foldCensusFrame(invalid, { type: 'turn_start' }, 0)
+  foldCensusFrame(invalid, { type: 'tool_execution_start', toolCallId: 'bad', toolName: 'read', args: { path: 'bad' } }, 10)
+  foldCensusFrame(invalid, { type: 'tool_execution_end', toolCallId: 'bad' }, 5)
+  foldCensusFrame(invalid, { type: 'tool_execution_start', toolCallId: 'missing-end', toolName: 'edit', args: { path: 'missing' } }, 11)
+  foldCensusFrame(invalid, { type: 'message_end', message: { role: 'assistant', usage: { input: 7 } } }, 19)
+  foldCensusFrame(invalid, { type: 'turn_end' }, 20)
+  const bad = finaliseCensus(invalid)
+  assert.equal(bad.tool_spans_unmatched, 2)
+  assert.equal(bad.in_tool_ms.read, 0)
+  assert.equal(bad.in_tool_ms.edit, 0)
+  assert.equal(bad.turns, 1)
+  assert.equal(bad.tool_calls, 2)
+  assert.equal(bad.context_first_tokens, 7)
+  assert.equal(bad.context_calls, 1)
+  assert.equal(Object.hasOwn(bad, '_spans'), false)
+  assert.equal(Object.hasOwn(bad, '_open'), false)
+})
+
+// MUTATION CN2: ancestor re-credit must not override a nested leaf, including chains and cycles.
+test('census ancestry chains and malformed cycles conserve the matched union', () => {
+  const chain = newCensus()
+  const start = (id, parentToolCallId, at) => foldCensusFrame(chain, { type: 'tool_execution_start', toolCallId: id, parentToolCallId, toolName: 'read', args: { path: id } }, at)
+  const end = (id, at) => foldCensusFrame(chain, { type: 'tool_execution_end', toolCallId: id }, at)
+  start('root', null, 0); start('middle', 'root', 0); start('leaf', 'middle', 0)
+  end('leaf', 100); end('middle', 100); end('root', 100)
+  const result = finaliseCensus(chain)
+  assert.equal(result.in_tool_ms.read, 100)
+  assert.equal(result.tool_spans_matched, 3)
+
+  const cycle = newCensus()
+  foldCensusFrame(cycle, { type: 'tool_execution_start', toolCallId: 'a', parentToolCallId: 'b', toolName: 'read', args: { path: 'a' } }, 0)
+  foldCensusFrame(cycle, { type: 'tool_execution_start', toolCallId: 'b', parentToolCallId: 'a', toolName: 'edit', args: { path: 'b' } }, 0)
+  foldCensusFrame(cycle, { type: 'tool_execution_end', toolCallId: 'a' }, 100)
+  foldCensusFrame(cycle, { type: 'tool_execution_end', toolCallId: 'b' }, 100)
+  const cycled = finaliseCensus(cycle)
+  assert.equal(cycled.in_tool_ms.edit + cycled.in_tool_ms.read, 100)
+  assert.equal(cycled.out_of_tool_ms, 0)
+})
+
+// MUTATION: omitting private-state cleanup leaks _spans into the finalized public object.
+test('census finalisation keeps the public field set closed', () => {
+  const result = finaliseCensus(newCensus())
+  assert.deepEqual(Object.keys(result).sort(), [
+    'bash_reads_absent_reason', 'by_class', 'clock_absent', 'compactions', 'context_absent_reason',
+    'context_calls', 'context_first_tokens', 'context_mean_tokens', 'context_peak_tokens',
+    'distinct_files_read', 'in_tool_ms', 'out_of_tool_ms', 're_reads', 'skill_reads', 'span_ms',
+    'suite_runs', 'tool_calls', 'tool_spans_matched', 'tool_spans_same_poll', 'tool_spans_unmatched', 'turns',
+  ].sort())
+})
+
+test('census early finalisation removes private span state', () => {
+  const replay = finaliseCensus(newCensus())
+  assert.equal(replay.clock_absent, CENSUS_ABSENT_CAUSES.replay_no_frame_clock)
+  assert.equal(Object.hasOwn(replay, '_spans'), false)
+  assert.equal(Object.hasOwn(replay, '_open'), false)
+  const same = newCensus()
+  foldCensusFrame(same, { type: 'tool_execution_start', toolCallId: 'same', toolName: 'read', args: { path: 'x' } }, 1)
+  foldCensusFrame(same, { type: 'tool_execution_end', toolCallId: 'same' }, 1)
+  const finalized = finaliseCensus(same)
+  assert.equal(finalized.clock_absent, CENSUS_ABSENT_CAUSES.same_poll_boundary)
+  assert.equal(Object.hasOwn(finalized, '_spans'), false)
+  assert.equal(Object.hasOwn(finalized, '_open'), false)
+})
+
+test('CN1 same-class overlap is credited once', () => {
+  const census = newCensus()
+  for (const [type, id, at] of [['tool_execution_start', 'a', 0], ['tool_execution_start', 'b', 20], ['tool_execution_end', 'a', 80], ['tool_execution_end', 'b', 100]]) {
+    foldCensusFrame(census, { type, toolCallId: id, toolName: 'read', args: { path: id } }, at)
+  }
+  const result = finaliseCensus(census)
+  assert.equal(result.in_tool_ms.read, 100)
+  assert.equal(result.out_of_tool_ms, 0)
+})
+
+// MUTATION CN2: removing active-ancestor exclusion lets a test wrapper steal child time.
+test('CN2 descendant outranks a higher-precedence wrapper', () => {
+  const census = newCensus()
+  foldCensusFrame(census, CN2_FRAMES[0], 0)
+  foldCensusFrame(census, CN2_FRAMES[2], 0)
+  foldCensusFrame(census, CN2_FRAMES[3], 100)
+  foldCensusFrame(census, CN2_FRAMES[1], 100)
+  census._spans.find((span) => span.id === CN2_FRAMES[0].toolCallId).class = 'test'
+  census._spans.find((span) => span.id === CN2_FRAMES[2].toolCallId).class = 'read'
+  const result = finaliseCensus(census)
+  assert.equal(result.in_tool_ms.test, 0)
+  assert.equal(result.in_tool_ms.read, 100)
+  assert.equal(result.in_tool_ms.other, 0)
+})
+
+// MUTATION CN3: dropping the null fallback leaves a negative measured residual.
+test('CN3 inconsistent clock keeps measured buckets', () => {
+  const census = newCensus()
+  foldCensusFrame(census, { type: 'tool_execution_start', toolCallId: 'e', toolName: 'edit', args: { path: 'x' } }, 0)
+  foldCensusFrame(census, { type: 'tool_execution_end', toolCallId: 'e', toolName: 'edit' }, 100)
+  foldCensusFrame(census, { type: 'turn_end' }, 50)
+  const result = finaliseCensus(census)
+  assert.equal(result.in_tool_ms.edit, 100)
+  assert.equal(result.span_ms, 50)
+  assert.equal(result.out_of_tool_ms, null)
+  assert.equal(result.clock_absent, CENSUS_ABSENT_CAUSES.clock_union_exceeds_span)
+})

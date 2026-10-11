@@ -4158,3 +4158,94 @@ test('PERSIST renewal persistence errors prevent transport delivery', () => {
     assert.equal(f.logs.some((row) => row.event === 'seat-session' && row.outcome === 'fresh'), false)
   } finally { f.cleanup() }
 })
+
+// Issue 1761 lane 2b: runCold runs the ratified worktree setup from MAIN in its
+// cold tree, and its cleanup removes only the exclude pair the cold path owns.
+// Real git throughout; the profile lookup is injected so no operator profile is read.
+const CW_LINK = [{ kind: 'symlink', path: 'node_modules' }]
+function cwOwner(path) { return '# worktree-setup-owner: ' + JSON.stringify(path) + '\n/node_modules\n' }
+function cwGit(cwd, ...args) {
+  const r = realSpawnSync('git', ['-c', 'user.name=CW', '-c', 'user.email=cw@example.invalid', ...args], { cwd, encoding: 'utf8' })
+  if (r.error || r.signal || r.status !== 0) throw new Error(JSON.stringify({ args, status: r.status, stderr: r.stderr }))
+  return r.stdout.trim()
+}
+function cwPut(path, value) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value) }
+function cwAttempt(fn) { try { return { value: fn(), error: null } } catch (error) { return { value: null, error: { message: error.message } } } }
+function cwFixture(fn) {
+  const base = scratchDir('cw-runcold-')
+  const checkout = join(base, 'primary'), laneDir = join(base, 'linked')
+  mkdirSync(checkout)
+  cwGit(checkout, 'init', '-q')
+  cwPut(join(checkout, 'package-lock.json'), 'lock-v1\n')
+  cwPut(join(checkout, '.gitignore'), 'node_modules/\nsetup-cwd\n')
+  cwGit(checkout, 'add', '-A')
+  cwGit(checkout, 'commit', '-qm', 'fixture')
+  cwPut(join(checkout, 'node_modules/marker'), 'main')
+  cwGit(checkout, 'worktree', 'add', '--detach', laneDir, 'HEAD')
+  cwPut(join(laneDir, 'node_modules/marker'), 'lane')
+  const exclude = join(checkout, '.git/info/exclude')
+  const original = 'stock\n' + cwOwner(join(base, 'other-owner'))
+  cwPut(exclude, original)
+  const f = { base, checkout, laneDir, exclude, original }
+  try { return fn(f) } finally {
+    for (const line of cwGit(checkout, 'worktree', 'list', '--porcelain').split('\n')) {
+      if (line.startsWith('worktree ') && line.slice(9) !== checkout) realSpawnSync('git', ['worktree', 'remove', '--force', line.slice(9)], { cwd: checkout })
+    }
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+function cwSeat(f, steps) {
+  const paths = { dir: f.base, taskDir: f.base, returnsDir: f.base }
+  return seatIo({ members: {} }, paths, f.laneDir, null, null, {}, {
+    worktreeSetup: ({ checkout }) => {
+      assert.equal(realpathSync(checkout), realpathSync(f.checkout), 'the profile lookup must use MAIN')
+      return { steps, basis: 'ratified' }
+    },
+  })
+}
+
+// MUTATION CW1: skip runCold's setup call; the cold suite cannot read MAIN's marker.
+test('CW1', () => cwFixture((f) => {
+  const r = cwAttempt(() => cwSeat(f, CW_LINK).runCold('cat node_modules/marker'))
+  assert.equal(r.error, null)
+  assert.equal(r.value.ok, true)
+  assert.equal(r.value.output, 'main')
+  assert.equal(readFileSync(f.exclude, 'utf8'), f.original, 'the cold pair is removed and the other owner survives byte-for-byte')
+}))
+
+// MUTATION CW2: skip removeCold's exact-owner cleanup; the retained pair survives removal.
+test('CW2', () => cwFixture((f) => {
+  const seat = cwSeat(f, CW_LINK)
+  const r = seat.runCold('exit 3')
+  assert.equal(r.ok, false)
+  assert.equal(r.kept, r.path)
+  assert.ok(readFileSync(f.exclude, 'utf8').includes(cwOwner(r.kept)), 'a red cold run keeps its owned pair')
+  seat.removeCold(r.kept)
+  assert.equal(existsSync(r.kept), false)
+  assert.equal(readFileSync(f.exclude, 'utf8'), f.original)
+}))
+
+// MUTATION CW3: skip runCold's setup call; exit 17 no longer prevents the suite sentinel.
+test('CW3', () => cwFixture((f) => {
+  const sentinel = join(f.base, 'suite-sentinel')
+  const before = cwGit(f.checkout, 'worktree', 'list', '--porcelain')
+  const r = cwAttempt(() => cwSeat(f, [...CW_LINK, { kind: 'command', run: 'exit 17' }]).runCold('touch ' + JSON.stringify(sentinel)))
+  assert.match(r.error?.message ?? '', /worktree-setup-failed/)
+  assert.equal(existsSync(sentinel), false, 'the suite never ran')
+  assert.equal(cwGit(f.checkout, 'worktree', 'list', '--porcelain'), before)
+  assert.equal(readFileSync(f.exclude, 'utf8'), f.original)
+}))
+
+// MUTATION CW4: disable cold byte-difference install selection; differing lockfiles link instead.
+test('CW4', () => cwFixture((f) => {
+  const steps = [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'mkdir node_modules; printf installed > node_modules/marker; pwd > setup-cwd' }]
+  const cmd = 'cat node_modules/marker; if test -L node_modules; then printf ":link"; else printf ":dir:"; cat setup-cwd; fi'
+  cwPut(join(f.checkout, 'package-lock.json'), 'changed-main\n')
+  const different = cwSeat(f, steps).runCold(cmd)
+  assert.equal(different.ok, true)
+  assert.equal(different.output, 'installed:dir:' + different.path + '\n')
+  cwPut(join(f.checkout, 'package-lock.json'), 'lock-v1\n')
+  const equal = cwSeat(f, steps).runCold(cmd)
+  assert.equal(equal.ok, true)
+  assert.equal(equal.output, 'main:link')
+}))

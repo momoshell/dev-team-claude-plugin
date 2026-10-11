@@ -2418,7 +2418,7 @@ test('L2A dispatch lockfile fence selects install', async () => {
   assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'l2a ratified real install'], cwd: lanes['lane-a'] }])
   assert.equal(fsExistsSync(join(lanes['lane-a'], 'node_modules')), false)
   assert.equal(fsExistsSync(join(lanes['lane-b'], 'node_modules')), true)
-  assert.equal(body, '# stock\n/operator\n\n# worktree-setup-owner: ' + JSON.stringify(lanes['lane-b']) + '\n/node_modules\n')
+  assert.equal(body, '# stock\n/operator\n# worktree-setup-owner: ' + JSON.stringify(lanes['lane-a']) + '\n/node_modules\n# worktree-setup-owner: ' + JSON.stringify(lanes['lane-b']) + '\n/node_modules\n')
 })
 
 // MUTATION: delete the `removeWorktreeExcludes` call in removeWorktrees; the refused dispatch leaves both owner pairs.
@@ -2426,5 +2426,5 @@ test('L2A dispatch second-lane setup failure cleans both owners', async () => {
   const { refusal, calls, body } = await lockfileDispatch('rollback', [{ kind: 'symlink', path: 'node_modules' }, { kind: 'command', run: 'l2a lane setup' }], true)
   assert.equal(refusal?.reason, 'worktree-setup-failed')
   assert.equal(calls.filter((call) => call.args.includes('worktree') && call.args.includes('remove')).length, 2)
-  assert.equal(body, '# stock\n/operator\n\n\n')
+  assert.equal(body, '# stock\n/operator\n')
 })

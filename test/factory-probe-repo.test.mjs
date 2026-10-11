@@ -1871,7 +1871,7 @@ test('L2A an empty install or an escaping lockfile refuses worktree-setup-invali
 
 // MUTATION: replace the fence match with `false`; a fenced lockfile links instead of installing.
 // MUTATION: replace the fence match with `true`; an unfenced lockfile installs instead of linking.
-test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one installs and writes no pair', async () => {
+test('L2A an unfenced lockfile links and a fenced one installs; both own exclude pairs', async () => {
   const checkout = nextRoot('l2a-link-checkout'), linked = nextRoot('l2a-link-lane'), installed = nextRoot('l2a-install-lane')
   put(checkout, 'node_modules/pkg/index.js', 'export default 1')
   const exclude = put(checkout, 'info/exclude', 'stock\n')
@@ -1881,17 +1881,18 @@ test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one ins
   await runWorktreeSetup({ checkout, laneDir: linked, steps: [step], fenceFiles: ['scripts/other.mjs'], deps: { spawn } })
   assert.equal(calls.some((call) => call.file === '/bin/sh'), false)
   assert.equal(readFileSync(join(linked, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'export default 1')
-  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n\n# worktree-setup-owner: ' + JSON.stringify(linked) + '\n/node_modules\n')
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n# worktree-setup-owner: ' + JSON.stringify(linked) + '\n/node_modules\n')
   await runWorktreeSetup({ checkout, laneDir: installed, steps: [step], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
   assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'printf l2a-unfenced'], cwd: installed }])
   assert.equal(existsSync(join(installed, 'node_modules')), false)
-  assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), false)
+  assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), true)
 })
 
 // MUTATION: compare the raw spellings again; a `./package-lock.json` profile links even though its lockfile is fenced.
 test('L2A a dot-slash lockfile spelling still matches its fenced lockfile and installs', async () => {
   const checkout = nextRoot('l2a-dotslash'), laneDir = nextRoot('l2a-dotslash-lane'), calls = []
-  const spawn = (call) => { calls.push(call); return { status: 0, stdout: '' } }
+  const exclude = put(checkout, 'info/exclude', 'stock\n')
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n' } : { status: 0, stdout: '' } }
   await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules', lockfile: './package-lock.json', install: 'printf l2a-dotslash' }], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
   assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args }) => args), [['-c', 'printf l2a-dotslash']])
   assert.equal(existsSync(join(laneDir, 'node_modules')), false)
@@ -1989,3 +1990,96 @@ test('L2A exclude cleanup keeps a symlinked exclude a symlink and keeps the file
   assert.equal(readFileSync(target, 'utf8'), 'operator\n')
   assert.equal(statSync(target).mode & 0o777, 0o600)
 })
+
+// Issue 1761 lane 2b: an install owns an exclude pair, and a setup-then-cleanup
+// round trip leaves the shared exclude byte-identical. REAL git, no mocked spawn or status.
+function cwOwner(path) { return '# worktree-setup-owner: ' + JSON.stringify(path) + '\n/node_modules\n' }
+function cwGit(cwd, ...args) {
+  const r = spawnSync('git', ['-c', 'user.name=CW', '-c', 'user.email=cw@example.invalid', ...args], { cwd, encoding: 'utf8' })
+  if (r.error || r.signal || r.status !== 0) throw new Error(JSON.stringify({ args, status: r.status, stderr: r.stderr }))
+  return r.stdout.trim()
+}
+function cwPut(path, value) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value) }
+async function cwFixture(fn, { ignored = true } = {}) {
+  const base = scratchDir('cw-probe-')
+  const checkout = join(base, 'primary'), laneDir = join(base, 'linked')
+  mkdirSync(checkout)
+  cwGit(checkout, 'init', '-q')
+  cwPut(join(checkout, 'package-lock.json'), 'lock-v1\n')
+  if (ignored) cwPut(join(checkout, '.gitignore'), 'node_modules/\n')
+  cwGit(checkout, 'add', '-A')
+  cwGit(checkout, 'commit', '-qm', 'fixture')
+  cwPut(join(checkout, 'node_modules/marker'), 'main')
+  cwGit(checkout, 'worktree', 'add', '--detach', laneDir, 'HEAD')
+  const exclude = join(checkout, '.git/info/exclude')
+  try { return await fn({ base, checkout, laneDir, exclude }) } finally {
+    for (const line of cwGit(checkout, 'worktree', 'list', '--porcelain').split('\n')) {
+      if (line.startsWith('worktree ') && line.slice(9) !== checkout) spawnSync('git', ['worktree', 'remove', '--force', line.slice(9)], { cwd: checkout })
+    }
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+
+// MUTATION CW9: write install pairs for checkout instead of laneDir; the exact-owner proof fails.
+test('CW9', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\n')
+  await runWorktreeSetup({
+    checkout: f.checkout, laneDir: f.laneDir, fenceFiles: ['package-lock.json:1-2'],
+    steps: [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'mkdir node_modules; printf installed > node_modules/marker' }],
+  })
+  assert.equal(readFileSync(join(f.laneDir, 'node_modules/marker'), 'utf8'), 'installed')
+  assert.ok(readFileSync(f.exclude, 'utf8').includes(cwOwner(f.laneDir)), 'the install owns a pair for its lane')
+  assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }), { removed: 1, reason: null })
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\n')
+}, { ignored: false }))
+
+// MUTATION CW10: force the append prefix to a newline; cleanup leaves one extra byte.
+test('CW10', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\n')
+  await runWorktreeSetup({ checkout: f.checkout, laneDir: f.laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+  const cleanup = removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir })
+  assert.equal(cleanup.removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\n')
+}))
+
+// MUTATION CW11: force the append prefix to a newline; the operator-blank round trip grows.
+// The seeded second witness also kills any cleanup-side removal of an operator blank line.
+test('CW11', () => cwFixture(async (f) => {
+  const original = 'stock\n\n'
+  cwPut(f.exclude, original)
+  await runWorktreeSetup({ checkout: f.checkout, laneDir: f.laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+  assert.equal(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }).removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), original)
+  cwPut(f.exclude, original + cwOwner(f.laneDir))
+  assert.equal(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }).removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), original, 'the operator blank line before an owned pair survives')
+}))
+
+// MUTATION: drop the cleanup-side newline give-back; an unterminated operator line comes back terminated.
+test('an install after an unterminated operator exclude line round-trips the original bytes', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\noperator-entry')
+  await runWorktreeSetup({
+    checkout: f.checkout, laneDir: f.laneDir, fenceFiles: ['package-lock.json:1-2'],
+    steps: [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'mkdir node_modules; printf installed > node_modules/marker' }],
+  })
+  assert.ok(readFileSync(f.exclude, 'utf8').startsWith('stock\noperator-entry\n# worktree-setup-owner-eol: '), 'the added newline is recorded')
+  assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }), { removed: 1, reason: null })
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
+}, { ignored: false }))
+
+// MUTATION: always give the newline back on an -eol removal; the later pair's marker joins the operator line and is never removed.
+test('two pairs after an unterminated operator exclude line clean up in either order and restore the original bytes', () => cwFixture(async (f) => {
+  const second = join(f.base, 'second')
+  cwGit(f.checkout, 'worktree', 'add', '--detach', second, 'HEAD')
+  for (const firstOut of [f.laneDir, second]) {
+    cwPut(f.exclude, 'stock\noperator-entry')
+    for (const laneDir of [f.laneDir, second]) {
+      rmSync(join(laneDir, 'node_modules'), { recursive: true, force: true })
+      await runWorktreeSetup({ checkout: f.checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+    }
+    const lastOut = firstOut === f.laneDir ? second : f.laneDir
+    assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: firstOut }), { removed: 1, reason: null })
+    assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: lastOut }), { removed: 1, reason: null })
+    assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
+  }
+}))

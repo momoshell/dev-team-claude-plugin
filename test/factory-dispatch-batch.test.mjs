@@ -7461,7 +7461,7 @@ test('RV1-1 setupWorktree guards collisions, escaping ancestors, child signals a
     steps: [{ kind: 'symlink', path: 'node_modules/' }, { kind: 'symlink', path: 'vendor/[deps]' }],
     deps: { spawn, appendFileSync: (_path, body) => appended.push(body) },
   })
-  assert.deepEqual(appended, ['\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n', '\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/vendor/\\[deps\\]\n'])
+  assert.deepEqual(appended, ['# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n', '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/vendor/\\[deps\\]\n'])
 
   mkdirSync(join(laneDir, 'collision'), { recursive: true })
   writeFileSync(join(laneDir, 'collision', 'sentinel'), 'keep')

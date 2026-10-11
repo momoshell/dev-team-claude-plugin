@@ -300,6 +300,28 @@ export function providerResetInstant(seconds) {
   return Number.isFinite(new Date(ms).getTime()) ? ms : null
 }
 
+export function acpTextReset(text, at) {
+  const absent_reason = PROVIDER_RESET_ABSENT.ACP_TEXT_UNPARSEABLE
+  const no = () => ({ at_ms: null, absent_reason })
+  if (typeof text !== 'string' || typeof at !== 'number' || !Number.isFinite(at) || !Number.isFinite(new Date(at).getTime())) return no()
+  const match = /(?<![A-Za-z])resets\s+(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)\s+\(([^()]+)\)(?![A-Za-z0-9:])/i.exec(text)
+  if (!match) return no()
+  const hour = Number(match[1]) % 12 + (match[3].toLowerCase() === 'pm' ? 12 : 0)
+  const minute = Number(match[2] ?? 0)
+  let formatter
+  try { formatter = new Intl.DateTimeFormat('en-GB', { timeZone: match[4], hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) } catch { return no() }
+  // lean: 72-hour minute scan for rare ACP refusals; offset-based zone resolution if measured refusal volume makes this costly
+  const first = Math.floor(at / 60000) * 60000 + 60000
+  for (let i = 0; i < 72 * 60; i += 1) {
+    const instant = first + i * 60000
+    if (!Number.isFinite(new Date(instant).getTime())) return no()
+    const parts = formatter.formatToParts(instant)
+    const values = Object.fromEntries(parts.filter((part) => part.type === 'hour' || part.type === 'minute').map((part) => [part.type, Number(part.value)]))
+    if (values.hour === hour && values.minute === minute) return { at_ms: instant, absent_reason: null }
+  }
+  return no()
+}
+
 // What the driver does about each kind, as DATA for the same reason
 // SEAT_REFUSAL_ACTIONS (crew/headless.mjs) is data: a policy change is a data edit, not a new
 // branch. `none` is TODAY'S behaviour, byte for byte — no row, no wait, no
@@ -319,6 +341,7 @@ export const PROVIDER_RETRY_ACTIONS = Object.freeze({
 export const PROVIDER_RESET_ABSENT = Object.freeze({
   NO_FRAME: 'the stream carries no rejected rate_limit_event frame, so the provider stated no reset time',
   NO_RESET_FIELD: 'the rejected rate_limit_event carries no reset time this driver can read as unix seconds',
+  ACP_TEXT_UNPARSEABLE: 'ACP rate-limit text not parseable: no valid reset wall-clock time and IANA zone',
   BEYOND_BOUND: 'the stated reset is further out than the total wait this driver will spend',
 })
 

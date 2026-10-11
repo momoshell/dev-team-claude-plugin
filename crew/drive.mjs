@@ -6615,7 +6615,7 @@ function runTask(ctx, io, crash) {
   // value crew/crew.mjs:1848 wrote is preserved — the summary keeps its `the driver
   // crashed (...)` wrapper, `where` stays `err.stage || 'driver'`, and `why` stays
   // the RAW message — so no downstream reader changes; only `details` grows.
-  // `terminal: false` records no stage row: the journal is out of #583's scope.
+  // Only provider-annotated crash exits are terminal stages; ordinary crashes remain unjournalled.
   crash.envelope = (err) => {
     // ONE derivation, with a NULLISH fallback. `||` would substitute 'Error' for a
     // deliberately empty message, where crew/crew.mjs:1848 records '' and its
@@ -6632,7 +6632,7 @@ function runTask(ctx, io, crash) {
       // SETS, and a resume reader must never have to branch on which exit wrote
       // the record — so this stays empty rather than becoming a place to grow one.
       extraDetails: {},
-      terminal: false,
+      terminal: Boolean(err?.providerFailure),
     })
   }
   let lastGateOutput = null
@@ -7381,7 +7381,7 @@ function runTask(ctx, io, crash) {
   // The ONE composer for an escalation's 14-key `details`. The two exits differ
   // only in their explicit inputs. `terminal` decides whether a DELIBERATE
   // terminal stage is recorded: escalate() records `escalate:<where>` and completes
-  // it exactly as it always has; the crash exit records nothing. `commit` is an
+  // it exactly as it always has; provider-annotated crash exits are terminal too. `commit` is an
   // input because ORDINARY deliberate escalations are all pre-commit (io.commit is
   // crew/drive.mjs:3465, the last ordinary deliberate escalation is :3457) while a
   // CRASH can land after it — and a hard-coded `commit: null` beside a real commit

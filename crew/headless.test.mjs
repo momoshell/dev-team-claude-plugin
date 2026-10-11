@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync, spawn as realSpawn } from 'node:child_process'
 import {
   attributeExit, censusFileOperands, skillReadsOf, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
-  CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, providerRetryDecision,
+  CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, acpTextReset, providerRetryDecision,
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
@@ -2322,6 +2322,36 @@ test('#887 reads a rejected reset in unix seconds and rejects unreadable values'
   assert.ok(allowedFrame)
   const allowedOnly = parseStream('/fixture/allowed.jsonl', () => `${allowedFrame}\n${base}`, () => true)
   assert.deepEqual(allowedOnly.providerReset, { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME })
+})
+
+test('ACP text reset resolves strict wall-clock rollover and DST instants', () => {
+  const rows = [
+    ['resets 11pm (Europe/Belgrade)', '2026-10-10T20:28:54Z', '2026-10-10T21:00:00Z'],
+    ['resets 11:40pm (Europe/Belgrade)', '2026-10-05T21:39:00Z', '2026-10-05T21:40:00Z'],
+    ['resets 11pm (Europe/Belgrade)', '2026-10-10T21:00:00Z', '2026-10-11T21:00:00Z'],
+    ['resets 12am (Europe/Belgrade)', '2026-10-10T20:00:00Z', '2026-10-10T22:00:00Z'],
+    ['resets 12pm (Europe/Belgrade)', '2026-10-10T08:00:00Z', '2026-10-10T10:00:00Z'],
+    ['resets 3am (Europe/Belgrade)', '2026-10-25T00:00:00Z', '2026-10-25T02:00:00Z'],
+    ['resets 2:30am (Europe/Belgrade)', '2026-10-25T01:00:00Z', '2026-10-25T01:30:00Z'],
+    ['resets 2:30am (Europe/Belgrade)', '2026-03-28T23:00:00Z', '2026-03-30T00:30:00Z'],
+    ['resets 11pm (America/New_York)', '2026-10-10T20:00:00Z', '2026-10-11T03:00:00Z'],
+    ['resets 11:40pm (Asia/Kolkata)', '2026-10-10T12:00:00Z', '2026-10-10T18:10:00Z'],
+  ]
+  for (const [text, at, expected] of rows) assert.deepEqual(acpTextReset(text, Date.parse(at)), { at_ms: Date.parse(expected), absent_reason: null })
+  const reason = PROVIDER_RESET_ABSENT.ACP_TEXT_UNPARSEABLE
+  for (const text of [null, '', 'resets 13pm (UTC)', 'resets 11:99pm (UTC)', 'resets 11pmx (UTC)', 'resets 11pm (Not/AZone)']) assert.deepEqual(acpTextReset(text, Date.parse('2026-01-01T00:00:00Z')), { at_ms: null, absent_reason: reason })
+  for (const at of [NaN, Infinity, 8.64e15 + 1]) assert.deepEqual(acpTextReset('resets 11pm (UTC)', at), { at_ms: null, absent_reason: reason })
+})
+
+test('ACP text reset generated UTC clock productions map to carried instants', () => {
+  forAll((random) => {
+    const hour = 1 + Math.floor(random() * 12), minute = Math.floor(random() * 60), pm = random() < 0.5
+    const at = Date.UTC(2026, 0, 1, Math.floor(random() * 24), Math.floor(random() * 60))
+    const hour24 = hour % 12 + (pm ? 12 : 0)
+    let expected = Date.UTC(2026, 0, 1, hour24, minute)
+    if (expected <= at) expected += 86400000
+    return { text: `resets ${hour}${minute ? `:${String(minute).padStart(2, '0')}` : ''}${pm ? 'pm' : 'am'} (UTC)`, at, expected }
+  }, ({ text, at, expected }) => assert.equal(acpTextReset(text, at).at_ms, expected), { runs: 100, seed: 1802 })
 })
 
 test('#887 provider retry decisions consume kind, attempt, and total-wait bounds', () => {

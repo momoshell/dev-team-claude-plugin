@@ -666,7 +666,7 @@ const AR_CAPTURE_USAGE = '{"jsonrpc":"2.0","method":"session/update","params":{"
 const AR_CAPTURE_REFUSAL = '{"jsonrpc":"2.0","id":5,"error":{"code":-32603,"message":"Internal error: You\'ve hit your session limit · resets 11:40pm (Europe/Belgrade)","data":{"errorKind":"rate_limit"}}}'
 const AR_RESET_AT = 1791236400000
 function arReadDisk(paths) { return JSON.parse(readFileSync(join(paths.dir, 'crew.json'), 'utf8')) }
-function arHarness({ updates = true, errorKind = 'rate_limit', integrated = false } = {}) {
+function arHarness({ updates = true, errorKind = 'rate_limit', integrated = false, message = null, at = AR_RESET_AT - 10000 } = {}) {
   const root = scratchDir('acp-provider-ar-')
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
@@ -674,7 +674,7 @@ function arHarness({ updates = true, errorKind = 'rate_limit', integrated = fals
   const crew = { claude_bin: '/bin/true', members: { reviewer: { agent: 'pi', model: 'test', transport: 'acp' } } }
   writeFileSync(join(root, 'crew.json'), JSON.stringify(crew))
   const logs = [], prompts = [], parks = []
-  let clock = AR_RESET_AT - 10000, sinks, count = 0, refused = false, workStarted = null, activeId = integrated ? 'd1' : 'd2'
+  let clock = at, sinks, count = 0, refused = false, workStarted = null, activeId = integrated ? 'd1' : 'd2'
   const rejectionPrompt = integrated ? 2 : 1
   const pathFor = (id) => join(paths.returnsDir, id + '.reviewer.json')
   const envelope = (id) => ({ assignment_id: id, role: 'reviewer', status: 'done', summary: 'replayed', artifacts: [], details: {} })
@@ -700,6 +700,7 @@ function arHarness({ updates = true, errorKind = 'rate_limit', integrated = fals
         const update = JSON.parse(AR_CAPTURE_USAGE)
         if (updates) sinks.usage_update({ sessionId: update.params.sessionId, kind: 'usage_update', update: update.params.update, at: clock })
         const frame = JSON.parse(AR_CAPTURE_REFUSAL)
+        if (message !== null) frame.error.message = message
         frame.error.data.errorKind = errorKind
         const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null }
         return { stopReason: null, usage: null, refusal }
@@ -780,29 +781,57 @@ test('AR3', () => {
   })
 })
 
-// MUTATION AR4: report NO_RESET_FIELD instead of NO_FRAME for an assignment without usage_update.
+// MUTATION AR4: skip the ACP text fallback when the frame-derived reset is null (crew/acp-io.mjs), so the no-usage replay declines instead of parking at AR_RESET_AT.
 test('AR4', () => {
-  arWithHarness({ updates: false }, (f) => {
-    const { error } = f.observe()
-    assert.ok(typeof error?.providerRetry?.declined === 'string' && error.providerRetry.declined.includes(PROVIDER_RESET_ABSENT.NO_FRAME),
-      JSON.stringify(arErrorView(error)))
-    assert.equal(f.parks.length, 0)
-    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
+  for (const configure of [
+    (f) => {},
+    (f) => f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'allowed', resetsAt: 1791236400 } } }),
+    (f) => { f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 'tomorrow' } } }) },
+  ]) arWithHarness({ updates: false }, (f) => {
+    configure(f)
+    const out = f.observe()
+    assert.deepEqual(out.envelope, f.envelope('d2'))
+    assert.equal(f.logs.find((x) => x.event === 'provider-retry')?.reset_at, AR_RESET_AT)
+    assert.equal(f.prompts.length, 2)
   })
-  arWithHarness({ updates: false }, (f) => {
-    f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'allowed', resetsAt: 1791236400 } } })
-    const { error } = f.observe()
-    assert.ok(String(error?.providerRetry?.declined ?? '').includes(PROVIDER_RESET_ABSENT.NO_FRAME), JSON.stringify(arErrorView(error)))
-    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
-  })
-  arWithHarness({ updates: false }, (f) => {
+})
+
+test('ACP text reset yields to a contradictory structured reset frame', () => {
+  arWithHarness({ updates: false, message: 'resets 3am (UTC)' }, (f) => {
     f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 1791236400 } } })
-    f.sendUsage({ sessionUpdate: 'usage_update', _meta: { '_claude/rateLimit': { status: 'rejected', resetsAt: 'tomorrow' } } })
-    const { error } = f.observe()
-    assert.ok(String(error?.providerRetry?.declined ?? '').includes(PROVIDER_RESET_ABSENT.NO_RESET_FIELD), JSON.stringify(arErrorView(error)))
-    assert.equal(f.logs.filter((x) => x.event === 'provider-retry').length, 0)
+    const out = f.observe()
+    assert.deepEqual(out.envelope, f.envelope('d2'))
+    assert.equal(f.logs.find((row) => row.event === 'provider-retry')?.reset_at, 1791236400000)
   })
-  const sf = (() => {
+})
+
+test('ACP text reset parses hour-only refusal text through transport', () => {
+  arWithHarness({ updates: false, at: Date.parse('2026-10-10T20:28:54Z'), message: "Internal error: You've hit your session limit · resets 11pm (Europe/Belgrade)" }, (f) => {
+    const out = f.observe()
+    assert.deepEqual(out.envelope, f.envelope('d2'))
+    const retry = f.logs.find((row) => row.event === 'provider-retry')
+    assert.equal(retry?.reset_at, 1791666000000)
+    assert.equal(retry?.wait_ms, 1926000)
+    assert.equal(f.logs.find((row) => row.event === 'provider-retry-resumed')?.waited_ms, 1926000)
+    assert.equal(f.prompts.length, 2)
+  })
+})
+
+test('ACP text reset refuses unparseable refusals and next-day resets beyond the existing bound', () => {
+  arWithHarness({ updates: false, message: 'stale-limit' }, (f) => {
+    const { error } = f.observe()
+    assert.match(error.providerRetry.declined, /ACP rate-limit text not parseable/)
+    assert.equal(f.prompts.length, 1)
+  })
+  arWithHarness({ updates: false, at: AR_RESET_AT, message: 'resets 11:40pm (Europe/Belgrade)' }, (f) => {
+    const { error } = f.observe()
+    assert.match(error.providerRetry.declined, /further out than the total wait/)
+    assert.equal(f.logs.find((row) => row.event === 'provider-retry-declined')?.reset_at, AR_RESET_AT + 86400000)
+  })
+})
+
+test('ACP reset remains assignment-scoped when a later refusal has stale text', () => {
+const sf = (() => {
     const root = scratchDir('acp-provider-ar-stale-');
     const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') };
     mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir);
@@ -837,7 +866,7 @@ test('AR4', () => {
     const d2 = sf.io.assign({ role: 'reviewer', briefFile: sf.briefFile, id: 'd2', returnPath: sf.pathFor('d2') });
     let error = null;
     try { sf.io.wait(d2.returnPath, 1) } catch (e) { error = e }
-    assert.ok(String(error && error.providerRetry && error.providerRetry.declined || '').includes(PROVIDER_RESET_ABSENT.NO_FRAME), JSON.stringify(arErrorView(error)));
+    assert.ok(String(error && error.providerRetry && error.providerRetry.declined || '').includes(PROVIDER_RESET_ABSENT.ACP_TEXT_UNPARSEABLE), JSON.stringify(arErrorView(error)));
   } finally { sf.cleanup() }
 });
 

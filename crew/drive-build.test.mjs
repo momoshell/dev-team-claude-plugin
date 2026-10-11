@@ -7316,10 +7316,29 @@ test('RG7 cargo novelty scans every witnessed Rust file as raw bytes and refuses
 })
 
 test('RG8 Rust non-test-region parser preserves grammar and rejects malformed input', () => {
-  const source = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\\n#[cfg(test)] mod tests { #[test] fn check() {} }\\n`
-  const expected = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\\n`
+  const source = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\n#[cfg(test)] mod tests { #[test] fn check() {} }\n`
+  const expected = `pub fn f<'a>() { let s = "}" ; let r = r#"{"#; let c = '{'; /* outer /* inner } */ { */ }\n`
   assert.equal(rustNonTestRegion(source), expected)
   for (const bad of ['"unterminated', '/* unterminated', '{']) assert.equal(rustNonTestRegion(bad), null)
+})
+
+test('RG11 code after an inline test module on the same line stays in the Rust non-test region', () => {
+  // MUTATION: extend each removal to the next newline again; the live() edit vanishes from both regions and compares equal.
+  const before = '#[cfg(test)] mod t { #[test] fn c() {} } pub fn live() { panic!("old") }\n'
+  const after = before.replace('"old"', '"new"')
+  assert.equal(rustNonTestRegion(before), ' pub fn live() { panic!("old") }\n')
+  assert.notEqual(rustNonTestRegion(before), rustNonTestRegion(after))
+  assert.equal(rustNonTestRegion('pub fn a() {}\n#[cfg(test)] mod t { #[test] fn c() {} }   \npub fn b() {}\n'), 'pub fn a() {}\npub fn b() {}\n')
+})
+
+test('RG12 cargo novelty sees an existing test name behind a comment or raw identifier', () => {
+  // MUTATION: restore the whitespace-only fn-name pattern; the commented and raw forms read as new names.
+  for (const companion of ['#[test]\nfn /* kept */ guard_fn() {}\n', '#[test]\nfn // kept\nguard_fn() {}\n', '#[test]\nfn r#guard_fn() {}\n']) {
+    const { io, ctx } = cargoInvocationCase({ companion, runFn: () => { throw new Error('existing commented name must refuse') } })
+    driveTask(ctx, io)
+    assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'name-not-new', companion)
+    assert.equal(invocationExecutions(io).length, 0)
+  }
 })
 
 test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {

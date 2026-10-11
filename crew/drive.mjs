@@ -15271,9 +15271,12 @@ export function rustNonTestRegion(source) {
       while (from > 0 && source[from - 1] === ' ') from--
       const docPrefix = /(?:^|\n)[ \t]*\/\/\/[^\n]*(?:\n[ \t]*\/\/\/[^\n]*)*\n[ \t]*$/.exec(source.slice(0, from))
       if (docPrefix) from -= docPrefix[0].length - 1
+      // Only trailing blanks and the newline go with the test item; code after it on the same line stays.
       let to = significant[endIndex].end
-      while (to < source.length && source[to] !== '\n') to++
-      if (to < source.length) to++
+      let tail = to
+      while (tail < source.length && (source[tail] === ' ' || source[tail] === '\t')) tail++
+      if (tail >= source.length) to = tail
+      else if (source[tail] === '\n') to = tail + 1
       removals.push([from, to])
       i = endIndex + 1
     } else i = attrEnd + 1
@@ -16047,7 +16050,7 @@ function proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, r
   for (const [path, cell] of witness ?? []) {
     if (!path.endsWith('.rs')) continue
     if (cell?.state === 'unreadable') return { row: row('unproven', `cargo novelty in review-time lane scope file ${path} was unmeasured`), fatal: null }
-    if (cell?.state === 'read' && new RegExp(`\\bfn\\s+${escapedLeaf}\\b`).test(cell.bytes)) cargoHits.push(path)
+    if (cell?.state === 'read' && new RegExp(`\\bfn(?:\\s|/\\*[\\s\\S]*?\\*/|//[^\\n]*\\n)+(?:r#)?${escapedLeaf}\\b`).test(cell.bytes)) cargoHits.push(path)
   }
   const cargoNameExisted = cargoHits.length > 0
   if (cargoNameExisted) return { row: row('name-not-new', `cargo name ${entry.name} already existed in the review-time lane scope files`), fatal: null }

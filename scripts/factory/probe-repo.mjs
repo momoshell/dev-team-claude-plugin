@@ -1883,9 +1883,7 @@ export function runColdWorktreeSetup({ checkout, laneDir, lookup = checkoutWorkt
   const first = records.find((record) => record.startsWith('worktree '))
   const main = first?.slice('worktree '.length)
   if (records[1] === 'bare' || !main || !isAbsolute(main)) refuse('worktree setup MAIN inventory has no absolute non-bare worktree')
-  let profile
-  try { profile = lookup({ checkout: main }) } catch (error) { throw error }
-  const { steps } = profile
+  const { steps } = lookup({ checkout: main })
   return runWorktreeSetupSync({ checkout: main, laneDir, steps, cold: true, deps })
 }
 
@@ -1982,11 +1980,11 @@ export function runWorktreeSetupSync({ checkout, laneDir, lane = laneDir, steps,
 
 
 
-// Every append to and rewrite of the shared exclude file holds this lock, so a cleanup's read-then-rename can
-// never drop a pair another lane appended in between. A lock older than 30s is a crashed holder and is reclaimed.
 const EXCLUDE_OWNER = '# worktree-setup-owner: '
 const EXCLUDE_OWNER_EOL = '# worktree-setup-owner-eol: '
 
+// Every append to and rewrite of the shared exclude file holds this lock, so a cleanup's read-then-rename can
+// never drop a pair another lane appended in between. A lock older than 30s is a crashed holder and is reclaimed.
 function withExcludeLock(excludePath, d, fn) {
   const lock = excludePath + '.worktree-setup.lock'
   const deadline = Date.now() + 10000
@@ -2030,13 +2028,9 @@ export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
           if (decodedOwner === laneDir && nextLine.startsWith('/')) {
             // Give back the newline the append added after an unterminated operator line, but only
             // when nothing follows; a following pair inherits the record so its own cleanup gives it back.
-            if (marker === EXCLUDE_OWNER_EOL) {
-              if (i + 2 >= records.length) {
-                if (kept.length && kept[kept.length - 1].endsWith('\n')) kept[kept.length - 1] = kept[kept.length - 1].slice(0, -1)
-              } else if (records[i + 2].startsWith(EXCLUDE_OWNER)) {
-                records[i + 2] = EXCLUDE_OWNER_EOL + records[i + 2].slice(EXCLUDE_OWNER.length)
-              }
-            }
+            const last = kept.length - 1
+            if (marker === EXCLUDE_OWNER_EOL && i + 2 >= records.length && last >= 0 && kept[last].endsWith('\n')) kept[last] = kept[last].slice(0, -1)
+            else if (marker === EXCLUDE_OWNER_EOL && records[i + 2]?.startsWith(EXCLUDE_OWNER)) records[i + 2] = EXCLUDE_OWNER_EOL + records[i + 2].slice(EXCLUDE_OWNER.length)
             removed++; i++; continue
           }
         }

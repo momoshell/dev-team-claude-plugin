@@ -2169,6 +2169,15 @@ export function awaitSeatsReadyChild(single, mode, journal = null) {
   if (child.error || child.status !== 0) throw new Error(String(child.stderr || child.error?.message || 'readiness child did not exit successfully'))
 }
 
+// A cold tree is removed from git first and only then has its owned exclude pair removed,
+// so a tree that cannot be removed keeps the pair that ignores its links.
+function removeColdTree(spawnSync, checkout, path) {
+  const removal = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
+  if (removal.error || removal.signal || removal.status !== 0) throw new Error(`checkout could not be removed and is still registered at ${path}:\n${removal.stderr || removal.stdout || removal.error?.message || removal.signal || ''}`)
+  const cleanup = removeWorktreeExcludes({ checkout, laneDir: path })
+  if (cleanup.reason || cleanup.removed === null) throw new Error(`exclude cleanup failed for removed checkout ${path}: ${cleanup.reason || 'removed count unmeasured'}`)
+}
+
 export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
   const env = deps.env || process.env
   const hostLoadDeps = {}
@@ -3518,12 +3527,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (add.status !== 0) throw new Error(`runCold: git worktree add failed at ${path}, refusing to report a cold verdict from the checkout this lane built in:\n${add.stderr || add.stdout || ''}`)
       const worktreeSetup = deps.worktreeSetup || checkoutWorktreeSetup
       try { runColdWorktreeSetup({ checkout, laneDir: path, lookup: worktreeSetup }) } catch (error) {
-        try {
-          const removal = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
-          if (removal.error || removal.signal || removal.status !== 0) throw new Error(`checkout could not be removed and is still registered at ${path}: ${removal.stderr || removal.stdout || removal.error?.message || removal.signal || ''}`)
-          const cleanup = removeWorktreeExcludes({ checkout, laneDir: path })
-          if (cleanup.reason || cleanup.removed === null) throw new Error(`exclude cleanup failed: ${cleanup.reason || 'removed count unmeasured'}`)
-        } catch (cleanupError) { throw new Error(`runCold: worktree-setup-failed: ${error.message}; cleanup failed: ${cleanupError.message}`) }
+        try { removeColdTree(spawnSync, checkout, path) } catch (cleanupError) { throw new Error(`runCold: worktree-setup-failed: ${error.message}; cleanup failed: ${cleanupError.message}`) }
         throw new Error(`runCold: worktree-setup-failed: ${error?.message || String(error)}`)
       }
       const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
@@ -3532,18 +3536,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)
       const ok = res.status === 0
       if (ok) {
-        const removed = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
-        if (removed.error || removed.signal || removed.status !== 0) throw new Error(`runCold: the cold suite was GREEN but its checkout could not be removed and is still registered at ${path}:\n${removed.stderr || removed.stdout || ''}`)
-        const cleanup = removeWorktreeExcludes({ checkout, laneDir: path })
-        if (cleanup.reason || cleanup.removed === null) throw new Error(`runCold: the cold suite was GREEN but exclude cleanup failed at ${path}: ${cleanup.reason || 'removed count unmeasured'}`)
+        try { removeColdTree(spawnSync, checkout, path) } catch (error) { throw new Error(`runCold: the cold suite was GREEN but ${error.message}`) }
       }
       return { ok, output, path, kept: ok ? null : path }
     },
     removeCold(path) {
-      const removal = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
-      if (removal.error || removal.signal || removal.status !== 0) throw new Error(`removeCold: checkout could not be removed and is still registered at ${path}:\n${removal.stderr || removal.stdout || removal.error?.message || removal.signal || ''}`)
-      const cleanup = removeWorktreeExcludes({ checkout, laneDir: path })
-      if (cleanup.reason || cleanup.removed === null) throw new Error(`removeCold: exclude cleanup failed for removed checkout ${path}: ${cleanup.reason || 'removed count unmeasured'}`)
+      try { removeColdTree(spawnSync, checkout, path) } catch (error) { throw new Error(`removeCold: ${error.message}`) }
     },
     // Reusable headless-rpc and ACP clients are swept here. headless-json is
     // deliberately not covered: it spawns one process per assignment which exits

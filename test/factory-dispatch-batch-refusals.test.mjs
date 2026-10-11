@@ -898,3 +898,33 @@ test('directed-brief and seat refusals do not boot lanes', async () => {
   await assert.rejects(()=>dispatchFixture({label:'no-boot-seat',names:['lane-a'],spawnedOut:seats,requests:{'lane-a':requestFor('lane-a',{seats:{'tech-lead':{agent:'pi'}}})},assertQuiet:()=>{},baseBranch:()=>({branch:'main'})}))
   assert.equal(seats.some(c=>c.args.includes('boot')),false)
 })
+
+// MUTATION: delete the `removeWorktreeExcludes` call in removeWorktrees; rollback leaves the removed lane's pair behind.
+// MUTATION: delete the `continue` after a failed removal; the surviving lane loses the pair it still uses.
+test('L2A rollback removes the owner pair of each removed lane, keeps a surviving lane and other owners', () => {
+  const root = scratchDir('l2a-rollback'), exclude = join(root, 'exclude')
+  const plans = ['a', 'b'].map((lane) => ({ lane, dir: join(root, `dt-${lane}`), branch: `branch-${lane}` }))
+  const owned = (dir) => '# worktree-setup-owner: ' + JSON.stringify(dir) + '\n/node_modules\n'
+  const other = owned(join(root, 'dt-other'))
+  writeFileSync(exclude, 'stock\n' + owned(plans[0].dir) + other + owned(plans[1].dir))
+  const logs = []
+  const spawn = (call) => call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n', stderr: '' } : call.args.includes('remove') && call.args.includes(plans[0].dir) ? { status: 1, stdout: '', stderr: 'remove denied' } : { status: 0, stdout: '', stderr: '' }
+  removeWorktrees({ plans, branches: [], checkout: root, deps: { log: (line) => logs.push(line), spawn } })
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n' + owned(plans[0].dir) + other)
+  assert.equal(logs.some((line) => line.includes('exclude-cleanup=false')), false)
+  assert.equal(logs.filter((line) => line.includes('removed=false')).length, 1)
+})
+
+// MUTATION: delete the `exclude-cleanup=false` logFailure; a failed cleanup is silent.
+test('L2A a failed rollback exclude cleanup is logged by name and later branch deletions still run', () => {
+  const root = scratchDir('l2a-rollback-fault'), exclude = join(root, 'exclude')
+  const plans = [{ lane: 'a', dir: join(root, 'dt-a'), branch: 'branch-a' }]
+  const before = '# worktree-setup-owner: ' + JSON.stringify(plans[0].dir) + '\n/node_modules\n'
+  writeFileSync(exclude, before)
+  const logs = [], calls = []
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n', stderr: '' } : { status: 0, stdout: '', stderr: '' } }
+  removeWorktrees({ plans, branches: plans, checkout: root, deps: { log: (line) => logs.push(line), spawn, renameSync: () => { throw new Error('EXDEV') } } })
+  assert.equal(logs.filter((line) => line === `dispatch-batch: rollback lane=a dir=${plans[0].dir} exclude-cleanup=false reason=worktree-exclude-cleanup-failed`).length, 1)
+  assert.equal(calls.some((call) => call.args.includes('-D')), true)
+  assert.equal(readFileSync(exclude, 'utf8'), before)
+})

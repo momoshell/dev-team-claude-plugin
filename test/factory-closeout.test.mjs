@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   symlinkSync,
@@ -2456,4 +2457,44 @@ test('P4 foreign checkout prompt metrics use the plugin ledger CLI', () => {
   assert.ok(calls.length > 0)
   assert.ok(metric)
   assertPluginLedgerCall(metric, checkout)
+})
+
+// MUTATION: return the bare gitStep detail from reap's worktree step; no cleanup runs and no count is reported.
+test('L2A reap removes the lane exclude pairs after its worktree removal and reports the count', () => {
+  const dir = scratch('closeout-reap-excludes-'), exclude = join(dir, 'exclude'), seen = {}
+  const { deps, calls } = harness({
+    home: scratch('closeout-reap-excludes-home-'),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['worktree remove', (argv, options) => { seen.laneDir = options.args.at(-1); writeFileSync(exclude, 'stock\n# worktree-setup-owner: ' + JSON.stringify(seen.laneDir) + '\n/node_modules\n/kept\n'); return { status: 0, stdout: '', stderr: '' } }],
+      ['info/exclude', () => ({ status: 0, stdout: seen.laneDir ? exclude + '\n' : '', stderr: '' })],
+    ],
+  })
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
+  const worktree = rows(result).find((row) => row.step === 'worktree')
+  assert.equal(worktree.outcome, 'ok')
+  assert.deepEqual(worktree.detail.excludes, { removed: 1, reason: null })
+  const temp = calls.write.find(([path]) => basename(path).startsWith('.info-exclude-'))
+  assert.equal(String(temp[1]), 'stock\n/kept\n')
+  assert.deepEqual(calls.rename.find(([from]) => from === temp[0]), [temp[0], realpathSync(exclude)])
+  assert.deepEqual(rows(result).map((row) => row.step).slice(-3), ['branch', 'prune', 'archive'])
+})
+
+// MUTATION: let removeWorktreeExcludes throw on a rename failure; reap stops before branch, prune and archive.
+test('L2A a failed reap exclude cleanup is reported in the worktree detail and reap continues', () => {
+  const dir = scratch('closeout-reap-excludes-fault-'), exclude = join(dir, 'exclude')
+  const { deps } = harness({
+    home: scratch('closeout-reap-excludes-fault-home-'),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['worktree remove', (argv, options) => { writeFileSync(exclude, '# worktree-setup-owner: ' + JSON.stringify(options.args.at(-1)) + '\n/node_modules\n'); return { status: 0, stdout: '', stderr: '' } }],
+      ['info/exclude', { status: 0, stdout: exclude + '\n', stderr: '' }],
+    ],
+  })
+  const failing = { ...deps, renameSync: (from, to) => { if (to === realpathSync(exclude)) throw new Error('EXDEV'); return deps.renameSync(from, to) } }
+  const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps: failing })
+  const worktree = rows(result).find((row) => row.step === 'worktree')
+  assert.deepEqual(worktree.detail.excludes, { removed: null, reason: 'worktree-exclude-cleanup-failed' })
+  assert.deepEqual(rows(result).map((row) => row.step).slice(-3), ['branch', 'prune', 'archive'])
+  assert.match(readFileSync(exclude, 'utf8'), /^# worktree-setup-owner: /)
 })

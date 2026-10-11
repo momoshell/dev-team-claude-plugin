@@ -4,8 +4,8 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
-  statSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync,
+  statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
@@ -19,6 +19,7 @@ import {
   checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, profileWorktreeSetup, validateWorktreeSetup, readProfile,
   requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, isPlainBranchName, BASE_BRANCH_REFUSALS,
+  runWorktreeSetup, removeWorktreeExcludes,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -1832,4 +1833,159 @@ test('worktree setup profile requires ratification and preserves ordered declare
   for (const invalid of [null, {}, [{ kind: 'command', run: '  ' }], [{ kind: 'symlink', path: '../outside' }], [{ kind: 'symlink', path: './' }], [{ kind: 'unknown' }]]) {
     assert.throws(() => validateWorktreeSetup(invalid), (error) => error.reason === 'worktree-setup-invalid')
   }
+})
+
+test('L2A probe runner installs only when the lockfile is fenced and cleanup removes exact owner pairs', async () => {
+  const checkout = nextRoot('l2a-checkout'), laneDir = nextRoot('l2a-lane')
+  put(checkout, 'node_modules/pkg/index.js', 'export default 1')
+  mkdirSync(laneDir, { recursive: true })
+  const exclude = put(checkout, 'info/exclude', 'stock\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n/node_modules\n')
+  const calls = []
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: 'info/exclude\n' } : { status: 0, stdout: '' } }
+  const step = { kind: 'symlink', path: './node_modules/', lockfile: 'package-lock.json', install: 'printf l2a-install' }
+  await runWorktreeSetup({ checkout, laneDir, steps: [step], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'printf l2a-install'], cwd: laneDir }])
+  assert.equal(existsSync(join(laneDir, 'node_modules')), false)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 1, reason: null })
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n/node_modules\n')
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 0, reason: null })
+})
+
+const setupInvalid = (error) => error instanceof ProfileRefusal && error.reason === 'worktree-setup-invalid'
+const setupFailed = (error) => error instanceof ProfileRefusal && error.reason === 'worktree-setup-failed'
+
+// MUTATION: delete `if (hasLockfile !== hasInstall) invalid()`; a half pair validates.
+test('L2A a lockfile without an install, or an install without a lockfile, refuses worktree-setup-invalid', () => {
+  for (const half of [{ lockfile: 'package-lock.json' }, { install: 'npm ci' }]) {
+    assert.throws(() => validateWorktreeSetup([{ kind: 'symlink', path: 'node_modules', ...half }]), setupInvalid)
+  }
+  assert.doesNotThrow(() => validateWorktreeSetup([{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'npm ci' }]))
+})
+
+// MUTATION: delete the `if (hasLockfile && (...)) invalid()` line; an empty or traversing pair validates.
+test('L2A an empty install or an escaping lockfile refuses worktree-setup-invalid', () => {
+  for (const pair of [{ lockfile: 'package-lock.json', install: '' }, { lockfile: 'package-lock.json', install: ' npm ci' }, { lockfile: '../package-lock.json', install: 'npm ci' }, { lockfile: '/abs/package-lock.json', install: 'npm ci' }]) {
+    assert.throws(() => validateWorktreeSetup([{ kind: 'symlink', path: 'node_modules', ...pair }]), setupInvalid, JSON.stringify(pair))
+  }
+})
+
+// MUTATION: replace the fence match with `false`; a fenced lockfile links instead of installing.
+// MUTATION: replace the fence match with `true`; an unfenced lockfile installs instead of linking.
+test('L2A an unfenced lockfile links and owns its exclude pair; a fenced one installs and writes no pair', async () => {
+  const checkout = nextRoot('l2a-link-checkout'), linked = nextRoot('l2a-link-lane'), installed = nextRoot('l2a-install-lane')
+  put(checkout, 'node_modules/pkg/index.js', 'export default 1')
+  const exclude = put(checkout, 'info/exclude', 'stock\n')
+  const calls = []
+  const spawn = (call) => { calls.push(call); return call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n' } : { status: 0, stdout: '' } }
+  const step = { kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'printf l2a-unfenced' }
+  await runWorktreeSetup({ checkout, laneDir: linked, steps: [step], fenceFiles: ['scripts/other.mjs'], deps: { spawn } })
+  assert.equal(calls.some((call) => call.file === '/bin/sh'), false)
+  assert.equal(readFileSync(join(linked, 'node_modules', 'pkg', 'index.js'), 'utf8'), 'export default 1')
+  assert.equal(readFileSync(exclude, 'utf8'), 'stock\n\n# worktree-setup-owner: ' + JSON.stringify(linked) + '\n/node_modules\n')
+  await runWorktreeSetup({ checkout, laneDir: installed, steps: [step], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args, cwd }) => ({ args, cwd })), [{ args: ['-c', 'printf l2a-unfenced'], cwd: installed }])
+  assert.equal(existsSync(join(installed, 'node_modules')), false)
+  assert.equal(readFileSync(exclude, 'utf8').includes(JSON.stringify(installed)), false)
+})
+
+// MUTATION: compare the raw spellings again; a `./package-lock.json` profile links even though its lockfile is fenced.
+test('L2A a dot-slash lockfile spelling still matches its fenced lockfile and installs', async () => {
+  const checkout = nextRoot('l2a-dotslash'), laneDir = nextRoot('l2a-dotslash-lane'), calls = []
+  const spawn = (call) => { calls.push(call); return { status: 0, stdout: '' } }
+  await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules', lockfile: './package-lock.json', install: 'printf l2a-dotslash' }], fenceFiles: ['package-lock.json:1-5'], deps: { spawn } })
+  assert.deepEqual(calls.filter((call) => call.file === '/bin/sh').map(({ args }) => args), [['-c', 'printf l2a-dotslash']])
+  assert.equal(existsSync(join(laneDir, 'node_modules')), false)
+})
+
+// MUTATION: delete the child-failure refusal after the step loop body; a failed install passes.
+test('L2A a fenced install that exits nonzero, is signalled or errors refuses worktree-setup-failed', async () => {
+  for (const [label, failure] of [['status', { status: 2, stdout: '', stderr: 'install broke' }], ['signal', { status: 0, signal: 'SIGKILL', stdout: '' }], ['error', { status: 0, error: new Error('spawn ENOENT'), stdout: '' }]]) {
+    const checkout = nextRoot(`l2a-fail-${label}`), laneDir = nextRoot(`l2a-fail-lane-${label}`)
+    const spawn = (call) => call.file === '/bin/sh' ? failure : { status: 0, stdout: '' }
+    await assert.rejects(() => runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'npm ci' }], fenceFiles: ['package-lock.json'], deps: { spawn } }), setupFailed, label)
+  }
+})
+
+// MUTATION: compare the owner without `decodedOwner === laneDir` (e.g. `true`); another owner's identical pair is removed.
+// MUTATION: decode the owner as latin1 again; a non-ASCII lane directory never matches its own pair.
+test('L2A exclude cleanup removes only the exact owner pairs and keeps every other byte', () => {
+  const checkout = nextRoot('l2a-clean'), laneDir = join(checkout, 'dt-lané a'), other = join(checkout, 'dt-other')
+  const owned = (dir, pattern, eol = '\n') => '# worktree-setup-owner: ' + JSON.stringify(dir) + eol + pattern + eol
+  const before = '# stock git exclude template comment\r\n*.swp\n/node_modules\n' + owned(laneDir, '/node_modules') + owned(other, '/node_modules') + owned(laneDir, '/vendor\\ dir', '\r\n') + '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n!negated\n/tail-without-newline'
+  const exclude = put(checkout, 'info/exclude', before)
+  const spawn = () => ({ status: 0, stdout: exclude + '\n' })
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 2, reason: null })
+  assert.equal(readFileSync(exclude, 'utf8'), before.replace(owned(laneDir, '/node_modules'), '').replace(owned(laneDir, '/vendor\\ dir', '\r\n'), ''))
+  const settled = readFileSync(exclude)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn } }), { removed: 0, reason: null })
+  assert.deepEqual(readFileSync(exclude), settled)
+})
+
+// MUTATION: let the rename failure escape the catch, or return a count; cleanup throws or reports success.
+test('L2A exclude cleanup that cannot resolve, read or rename reports null with its reason and leaves the file intact', () => {
+  const checkout = nextRoot('l2a-clean-fault'), laneDir = join(checkout, 'dt-a')
+  const before = '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n'
+  const exclude = put(checkout, 'info/exclude', before)
+  const failed = { removed: null, reason: 'worktree-exclude-cleanup-failed' }
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 128, stdout: '' }) } }), failed)
+  const spawn = () => ({ status: 0, stdout: exclude + '\n' })
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn, readFileSync: () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }) } } }), failed)
+  const removedTemps = []
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn, renameSync: () => { throw new Error('EXDEV') }, rmSync: (path) => { removedTemps.push(path); rmSync(path, { force: true }) } } }), failed)
+  assert.equal(readFileSync(exclude, 'utf8'), before)
+  const temps = removedTemps.filter((path) => basename(path).startsWith('.info-exclude-'))
+  assert.equal(temps.length, 1)
+  assert.equal(existsSync(temps[0]), false)
+  assert.equal(existsSync(exclude + '.worktree-setup.lock'), false)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir: join(checkout, 'dt-missing'), deps: { spawn: () => ({ status: 0, stdout: join(checkout, 'absent', 'exclude') + '\n' }) } }), { removed: 0, reason: null })
+})
+
+// MUTATION: call the cleanup body without withExcludeLock; it reads and replaces the shared file unlocked.
+test('L2A exclude cleanup holds the shared lock from its read until its rename, then releases it', () => {
+  const checkout = nextRoot('l2a-lock-clean'), laneDir = join(checkout, 'dt-a')
+  const exclude = put(checkout, 'info/exclude', '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n'), lock = exclude + '.worktree-setup.lock'
+  const held = []
+  const spawn = () => ({ status: 0, stdout: exclude + '\n' })
+  const deps = { spawn, readFileSync: (path) => { held.push(['read', existsSync(lock)]); return readFileSync(path) }, renameSync: (from, to) => { held.push(['rename', existsSync(lock)]); return renameSync(from, to) } }
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps }), { removed: 1, reason: null })
+  assert.deepEqual(held, [['read', true], ['rename', true]])
+  assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: append the owner pair without withExcludeLock; a concurrent cleanup can overwrite it.
+test('L2A setup appends its owner pair while holding the shared exclude lock', async () => {
+  const checkout = nextRoot('l2a-lock-append'), laneDir = nextRoot('l2a-lock-append-lane')
+  put(checkout, 'node_modules/pkg/index.js', 'export default 1')
+  const exclude = put(checkout, 'info/exclude', ''), lock = exclude + '.worktree-setup.lock', held = []
+  const spawn = (call) => call.args.includes('rev-parse') ? { status: 0, stdout: exclude + '\n' } : { status: 0, stdout: '' }
+  await runWorktreeSetup({ checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }], deps: { spawn, appendFileSync: (path, text) => { held.push(existsSync(lock)); return appendFileSync(path, text) } } })
+  assert.deepEqual(held, [true])
+  assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: never reclaim a stale lock; a crashed holder blocks every later cleanup.
+test('L2A a stale exclude lock left by a crashed holder is reclaimed', () => {
+  const checkout = nextRoot('l2a-lock-stale'), laneDir = join(checkout, 'dt-a')
+  const exclude = put(checkout, 'info/exclude', '# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n'), lock = exclude + '.worktree-setup.lock'
+  writeFileSync(lock, '1')
+  const old = new Date(Date.now() - 60000)
+  utimesSync(lock, old, old)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 0, stdout: exclude + '\n' }) } }), { removed: 1, reason: null })
+  assert.equal(readFileSync(exclude, 'utf8'), '')
+  assert.equal(existsSync(lock), false)
+})
+
+// MUTATION: rename the rewrite onto the exclude path instead of its realpath; the operator's symlink becomes a regular file.
+// MUTATION: drop the chmod of the rewrite; a 0600 exclude file becomes 0644.
+test('L2A exclude cleanup keeps a symlinked exclude a symlink and keeps the file mode', () => {
+  const checkout = nextRoot('l2a-symlinked-exclude'), laneDir = join(checkout, 'dt-a')
+  const target = put(checkout, 'operator/exclude', 'operator\n# worktree-setup-owner: ' + JSON.stringify(laneDir) + '\n/node_modules\n')
+  chmodSync(target, 0o600)
+  mkdirSync(join(checkout, 'info'), { recursive: true })
+  const exclude = join(checkout, 'info', 'exclude')
+  symlinkSync(target, exclude)
+  assert.deepEqual(removeWorktreeExcludes({ checkout, laneDir, deps: { spawn: () => ({ status: 0, stdout: exclude + '\n' }) } }), { removed: 1, reason: null })
+  assert.equal(lstatSync(exclude).isSymbolicLink(), true)
+  assert.equal(readFileSync(target, 'utf8'), 'operator\n')
+  assert.equal(statSync(target).mode & 0o777, 0o600)
 })

@@ -6050,3 +6050,30 @@ test('SH5', () => {
     assert.ok(x.body.includes('Original brief: '), 'id re-ask ' + kind + ' regenerates the original brief')
   }
 })
+
+import { failingTestFiles as warmFailingTestFiles, isolatedTestCommand as warmIsolatedTestCommand } from './lane-red.mjs'
+import { validationProbeRun } from './drive-fixtures.mjs'
+test('Cargo warm rerun helper preserves exact suite test identity', () => {
+  const name = 'app::runs::tests::dispatch'
+  const output = 'test ' + name + ' ... FAILED\nfailures:\n---- ' + name + ' stdout ----\nthread panicked at crates/demo/src/app/runs.rs:8:2:\n'
+  const [entry] = warmFailingTestFiles(output, 'cargo', '/checkout')
+  assert.deepEqual(entry, { test: name, file: 'crates/demo/src/app/runs.rs' })
+  assert.equal(warmIsolatedTestCommand('cargo test --workspace', 'cargo', entry.test, entry.file, JSON.stringify), 'cargo test --workspace -- --exact "app::runs::tests::dispatch"')
+})
+test('FL6 warm Cargo suite failure retries before suite-red recovery', () => {
+  const name = 'app::runs::tests::dispatch'
+  const file = 'crates/demo/src/app/runs.rs'
+  const red = { ok: false, output: 'failures:\n\n---- ' + name + ' stdout ----\n\nthread panicked at ' + file + ':8:2:\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' }
+  const isolated = 'suite-cmd -- --exact ' + shellArg(name)
+  const plan = planEnv({ details: { ...planEnv().details, validation_lane: 'lane-cmd' } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { ...validationProbeRun('lane-cmd', {}), 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': red, [isolated]: { ok: true, output: 'test ' + name + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, testRunner: { runner: 'cargo', basis: 'fixture Cargo suite' } }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.run.map(row => typeof row === 'string' ? row : row.cmd).filter(command => command.includes('-- --exact')), [isolated])
+  assert.deepEqual(io.calls.logs.filter(row => row.flake).map(row => row.flake), [{ stage: 'suite', round: 1, outcome: 'green', reason: null, tests: [{ test: name, file, rerun: 'passed' }] }])
+  assert.equal(io.calls.logs.filter(row => row.suite_red).length, 0)
+})

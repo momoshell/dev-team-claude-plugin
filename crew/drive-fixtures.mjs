@@ -1539,6 +1539,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at adversary_unavailable"],
   ["recordRow", "", "at plan_converged"],
   ["recordRow", "event='plan-exemplars'", "at plan_exemplars"],
+  ["recordRow", "", "at flake"],
   ["recordRow", "event='waits'", "at ...waits source requested"],
   ["recordRow", "event='acceptance-coverage'", "at ...coverage"],
   ["recordRow", "", "at carried_correction"],

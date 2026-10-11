@@ -10029,7 +10029,7 @@ test('R4 envelopefreeze restore plan before gate', () => {
   assert.equal(row.action, 'restored')
 })
 
-import { failingTestsSection, dropPassingLines, labelledFailures, stepFailureDiagnostics } from './lane-red.mjs'
+import { failingTestsSection, dropPassingLines, labelledFailures, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, FLAKE_RERUN_REASONS } from './lane-red.mjs'
 
 const laneRedCapture = (() => {
   const dir = scratchDir('lane-red-capture-')
@@ -11593,4 +11593,251 @@ test('RV1-1 python lane governs the failed hardening bounce write escalation und
   assert.match(result.details.evidence_unavailable, /hardening bounce brief write failed: .*EACCES/)
   assert.ok(result.details.escalation.why.includes('test-runner-mismatch — the declared python runner (' + pyBasis + ')'))
   assert.doesNotMatch(result.details.escalation.why, /#\[test\]/)
+})
+
+test('LRF1 Cargo failure attribution retains exact full test names and own module source', () => {
+  const output = 'test app::runs::dispatch::waker::tests::t ... FAILED\nfailures:\n---- app::runs::dispatch::waker::tests::t stdout ----\nthread panicked at crates/demo/src/app/runs/dispatch/waker.rs:8:2:\n'
+  assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test: 'app::runs::dispatch::waker::tests::t', file: 'crates/demo/src/app/runs/dispatch/waker.rs' }])
+})
+test('LRF2 failure path attribution rejects malformed and escaping locations', () => {
+  const output = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nthread panicked at /checkout/../outside/src/app.rs:1:2:\n'
+  assert.equal(failingTestFiles(output, 'cargo', '/checkout')[0].file, null)
+})
+test('LRF3 Cargo isolated command refuses compound shell commands and capture-off flags', () => {
+  const arg = (value) => JSON.stringify(value)
+  assert.equal(isolatedTestCommand('cargo test --workspace && cargo test --doc', 'cargo', 'a::t', 'a.rs', arg), null)
+  assert.equal(isolatedTestCommand('cargo test -- --nocapture', 'cargo', 'a::t', 'a.rs', arg), null)
+})
+test('LRF4 cargo unmapped panic modules remain unattributed', () => {
+  const output = 'test app::runs::dispatch::waker::tests::t ... FAILED\nfailures:\n---- app::runs::dispatch::waker::tests::t stdout ----\nthread panicked at crates/demo/src/app/runs/mod.rs:8:2:\n'
+  assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test: 'app::runs::dispatch::waker::tests::t', file: null }])
+})
+test('LRF5 spec failure section maps test-at locations without reporter duration', () => {
+  const output = '✖ failing tests:\n  test at outside.test.mjs:4:2\n  ✖ flaky-one (12ms)\n'
+  assert.deepEqual(failingTestFiles(output, 'node', '/checkout'), [{ test: 'flaky-one', file: 'outside.test.mjs' }])
+})
+test('LRF7 PR proof discloses every field of a recorded flake while empty records stay silent', () => {
+  const flake = { stage: 'lane', test: 'app::t', file: 'crates/demo/src/app.rs', rerun: 'passed' }
+  const body = composePrBody({ intent: 'change', flakes: [flake] })
+  for (const value of Object.values(flake)) assert.ok(body.includes(value), value)
+  assert.equal(composePrBody({ intent: 'change' }).includes('Flake:'), false)
+})
+test('LRF8 Cargo attribution retains root src files and permanent conflicts stay unmapped', () => {
+  const root = 'test runs::tests::t ... FAILED\nfailures:\n---- runs::tests::t stdout ----\nthread panicked at src/runs.rs:8:2:\n'
+  assert.deepEqual(failingTestFiles(root, 'cargo', '/checkout'), [{ test: 'runs::tests::t', file: 'src/runs.rs' }])
+  const mixed = 'test a::tests::t ... FAILED\nfailures:\n---- a::tests::t stdout ----\nthread panicked at crates/x/src/a.rs:1:1:\nthread panicked at crates/x/src/a/tests.rs:2:1:\nthread panicked at crates/x/src/a.rs:3:1:\n'
+  assert.deepEqual(failingTestFiles(mixed, 'cargo', '/checkout'), [{ test: 'a::tests::t', file: null }])
+  assert.deepEqual(FLAKE_RERUN_REASONS, ['runner-unparsed', 'test-unmapped', 'in-fence', 'command-unshaped'])
+  assert.equal(Object.isFrozen(FLAKE_RERUN_REASONS), true)
+  assert.equal(isolatedTestCommand('cargo test -- --exact', 'cargo', 'a::t', 'a.rs', JSON.stringify), null)
+  assert.equal(isolatedTestCommand('cargo test -- --format=json', 'cargo', 'a::t', 'a.rs', JSON.stringify), null)
+})
+
+const flakeTestName = 'app::runs::dispatch::waker::tests::R5_12_a_supervised_wait_heartbeats_before_its_wake_time'
+const flakeTestFile = 'crates/power-api/src/app/runs/dispatch/waker.rs'
+function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --workspace', rerun, fence = [], publish = false, throwRerun = false } = {}) {
+  const temp = scratchDir('flake-driver-')
+  writeFileSync(join(temp, 'outside.test.mjs'), '')
+  const red = output ?? { ok: false, output: 'failures:\n\n---- ' + flakeTestName + ' stdout ----\n\nthread \'' + flakeTestName + '\' panicked at ' + flakeTestFile + ':2084:10:\nfixture red\n\nfailures:\n    ' + flakeTestName + '\n\ntest result: FAILED. 931 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.29s\n' }
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [...planEnv().details.files_in_scope, ...fence], validation_lane: runner === 'node' ? 'node --test outside.test.mjs' : command } })
+  const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }
+  const isolated = runner === 'node' ? 'node --test --test-reporter=tap ' + shellArg('outside.test.mjs') : command + ' -- --exact ' + shellArg(flakeTestName)
+  const runs = { ...validationProbeRun(plan.details.validation_lane, { 'outside.test.mjs': 'file' }), [runner === 'node' ? 'node --test outside.test.mjs' : command]: red, [isolated]: rerun ?? { ok: true, output: 'test ' + flakeTestName + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } }
+  const io = publish ? publicationIo({ envelopes, commands: runs }) : fakeIo({ envelopes, runs, changed: ['a.mjs', 'a.test.mjs'], onRun: (cmd) => { if (throwRerun && cmd === isolated) throw new Error('injected rerun failure') } })
+  const result = driveTask({ ...CTX, checkout: temp, testRunner: { runner, basis: 'brief fixture' }, ...(publish ? { publish: { branch: 'feature/ship', base: 'main' } } : {}) }, io)
+  return { result, calls: io.calls.run.map(row => typeof row === 'string' ? row : row.cmd), logs: io.calls.logs, writes: io.calls.writes }
+}
+const flakeRow = (outcome = 'green', reason = null, file = flakeTestFile, rerun = 'passed') => ({ stage: 'lane', round: 1, outcome, reason, tests: [{ test: flakeTestName, file, rerun }] })
+test('FL1', (t) => {
+  // Mutation: remove ordinary lane retry; the mapped out-of-fence Cargo failure must recover.
+  const x = flakeDriverRun(t)
+  assert.equal(x.result.status, 'done')
+  assert.deepEqual(x.calls.filter(c => c.includes('-- --exact')), ['cargo test --workspace -- --exact ' + shellArg(flakeTestName)])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [flakeRow()])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.channel), ['record'])
+  assert.equal(x.writes[CTX.taskDir + '/lane-red-r1.md'], undefined)
+  assert.equal(x.writes[CTX.taskDir + '/build-bounce-r1.md'], undefined)
+})
+test('FL2', (t) => {
+  // Mutation: disable inScope; a fenced failure would otherwise be incorrectly green.
+  const x = flakeDriverRun(t, { fence: [flakeTestFile] })
+  assert.deepEqual(x.calls.filter(c => c.includes('-- --exact')), [])
+  assert.ok(x.writes[CTX.taskDir + '/lane-red-r1.md'])
+  assert.ok(x.writes[CTX.taskDir + '/build-bounce-r1.md'])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [flakeRow('red', 'in-fence', flakeTestFile, null)])
+})
+test('FL3', (t) => {
+  // Mutation: treat failed isolated verdict as green; the ordinary red lane must survive.
+  const x = flakeDriverRun(t, { rerun: { ok: false, output: 'test ' + flakeTestName + ' ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } })
+  assert.equal(x.calls.filter(c => c.includes('-- --exact')).length, 1)
+  assert.ok(x.writes[CTX.taskDir + '/lane-red-r1.md'])
+  assert.ok(x.writes[CTX.taskDir + '/build-bounce-r1.md'])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [flakeRow('red', null, flakeTestFile, 'failed')])
+})
+test('FL4', (t) => {
+  // Mutation: remove the module-prefix attribution condition; mismatched and incomplete failures must not rerun.
+  const base = 'failures:\n\n---- ' + flakeTestName + ' stdout ----\n\nthread panicked at ' + flakeTestFile + ':8:2:\n'
+  const cases = [
+    [base.replace(flakeTestFile, 'crates/power-api/src/app/runs/dispatch/heartbeat.rs') + 'test result: FAILED. 931 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n', null],
+    [base + 'test result: FAILED. 931 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n', flakeTestFile],
+    [base.replace(/^thread .*panicked at .*\n/m, '') + 'test result: FAILED. 931 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n', null],
+    [base, flakeTestFile],
+    [base + 'test result: FAILED. 931 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n', flakeTestFile],
+  ]
+  for (const [output, expectedFile] of cases) {
+    const x = flakeDriverRun(t, { output: { ok: false, output } })
+    assert.deepEqual(x.calls.filter(c => c.includes('-- --exact')), [])
+    assert.ok(x.writes[CTX.taskDir + '/lane-red-r1.md'])
+    assert.ok(x.writes[CTX.taskDir + '/build-bounce-r1.md'])
+    assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [flakeRow('red', 'test-unmapped', expectedFile, null)])
+  }
+})
+test('FL5', (t) => {
+  // Mutation: remove spec-tail location mapping; the file-only Node rerun must recover.
+  const nodeRed = { ok: false, output: '✖ flaky-one (0.6ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1\nℹ skipped 0\n\n✖ failing tests:\n\ntest at outside.test.mjs:3:1\n✖ flaky-one (0.6ms)\n  fixture red\n' }
+  const x = flakeDriverRun(t, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: { ok: true, output: 'TAP version 13\nok 1 - flaky-one\n1..1\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' } })
+  assert.equal(x.result.status, 'done')
+  assert.deepEqual(x.calls.filter(c => c.includes('--test-reporter=tap')), ['node --test --test-reporter=tap ' + shellArg('outside.test.mjs')])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [{ stage: 'lane', round: 1, outcome: 'green', reason: null, tests: [{ test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed' }] }])
+})
+test('FL7', (t) => {
+  // Mutation: omit flakes from done/publication evidence; proof must retain all fields and no-flake bytes.
+  const x = flakeDriverRun(t)
+  assert.deepEqual(x.result.details?.flakes, [{ stage: 'lane', test: flakeTestName, file: flakeTestFile, rerun: 'passed' }])
+  const flakes = [{ stage: 'lane', test: flakeTestName, file: flakeTestFile, rerun: 'passed' }]
+  const proof = composePrBody({ intent: 'Fixture intent', review: { verdict: 'pass' }, flakes }).split('## Proof')[1]?.split('## Run')[0]
+  assert.ok(proof.includes('- Flake: lane · ' + flakeTestName + ' · ' + flakeTestFile + ' · passed'))
+  assert.equal(composePrBody({ intent: 'Fixture intent', review: { verdict: 'pass' } }), '## What\nFixture intent\n\n## Why\nNo issue named.\n\n## Proof\nNo acceptance gate ran.\nSuite counts: not measured.\n- Review: pass · no residuals\n\n## Run')
+  const published = flakeDriverRun(t, { publish: true })
+  assert.ok(published.writes[CTX.taskDir + '/pr-body.md']?.includes('- Flake: lane · ' + flakeTestName + ' · ' + flakeTestFile + ' · passed'))
+})
+test('LRF9 same-file failures share one run and mixed fences veto the whole event', (t) => {
+  const red = { ok: false, output: 'ℹ tests 2\nℹ pass 0\nℹ fail 2\nℹ skipped 0\n\n✖ failing tests:\n\ntest at outside.test.mjs:3:1\n✖ flaky-one (1ms)\n\ntest at outside.test.mjs:8:1\n✖ flaky-two (2ms)\n' }
+  const pass = { ok: true, output: 'TAP version 13\nok 1 - flaky-one\nok 2 - flaky-two\n1..2\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n' }
+  const x = flakeDriverRun(t, { output: red, runner: 'node', command: 'node --test outside.test.mjs', rerun: pass })
+  assert.equal(x.calls.filter(c => c.includes('--test-reporter=tap')).length, 1)
+  assert.deepEqual(x.logs.filter(r => r.flake)[0].flake.tests, [
+    { test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed' },
+    { test: 'flaky-two', file: 'outside.test.mjs', rerun: 'passed' },
+  ])
+  const mixedRed = { ...red, output: red.output.replace('test at outside.test.mjs:8:1', 'test at fenced.test.mjs:8:1') }
+  const fenced = flakeDriverRun(t, { output: mixedRed, runner: 'node', command: 'node --test outside.test.mjs', fence: ['fenced.test.mjs'], rerun: pass })
+  assert.equal(fenced.calls.filter(c => c.includes('--test-reporter=tap')).length, 0)
+  assert.equal(fenced.logs.filter(r => r.flake)[0].flake.reason, 'in-fence')
+})
+test('RV2-1 TAP and location grammar keep retry attribution fail-closed', (t) => {
+  const nestedUrl = ['file:', '', '', 'checkout', 'nested.test.mjs:3:2'].join('/')
+  const localUrl = ['file:', '', 'localhost', 'checkout', 'outside.test.mjs:3:1'].join('/')
+  const foreignUrl = ['file:', '', 'host', 'checkout', 'outside.test.mjs:3:1'].join('/')
+  const tap = 'TAP version 13\nnot ok 1 - outer\n  location: \'/checkout/outer.test.mjs:1:1\'\n  ---\n  not ok 1 - nested\n    location: ' + nestedUrl + '\n  ...\n1..1\n# tests 2\n# pass 0\n# fail 2\n# skipped 0\n'
+  assert.deepEqual(failingTestFiles(tap, 'node', '/checkout'), [
+    { test: 'outer', file: 'outer.test.mjs' },
+    { test: 'nested', file: 'nested.test.mjs' },
+  ])
+
+  const spec = (location) => failingTestFiles('✖ failing tests:\n\ntest at ' + location + '\n✖ bad\n', 'node', '/checkout')[0].file
+  assert.equal(spec('../outside.test.mjs:3:1'), null)
+  assert.equal(spec('./outside.test.mjs:3:1'), 'outside.test.mjs')
+  assert.equal(spec(localUrl), 'outside.test.mjs')
+  assert.equal(spec(foreignUrl), null)
+  assert.equal(spec('outside*.test.mjs:3:1'), null)
+  assert.equal(spec('outside\\\\.test.mjs:3:1'), null)
+  assert.equal(spec('outside\0.test.mjs:3:1'), null)
+
+  forAll((random) => {
+    const pick = (items) => items[Math.floor(random() * items.length)]
+    const moduleParts = Array.from({ length: 1 + Math.floor(random() * 4) }, (_, i) => `m${i}${Math.floor(random() * 9)}`)
+    const root = pick(['mod', 'lib', 'main', 'leaf', 'handler'])
+    const rootFile = root === 'lib' || root === 'main'
+    const fileModules = rootFile ? [] : random() < 0.7 ? [...moduleParts] : [...moduleParts.slice(0, -1), `other${Math.floor(random() * 9)}`]
+    const sourceModules = rootFile ? [] : root === 'mod' ? fileModules : [...fileModules, root]
+    const matches = random() < 0.7
+    const testModules = matches
+      ? [...sourceModules, ...(sourceModules.length === 0 || random() < 0.5 ? ['tests'] : [])]
+      : [...moduleParts, `other${Math.floor(random() * 9)}`]
+    const file = `crates/generated/src/${[...fileModules, `${root}.rs`].join('/')}`
+    const test = [...testModules, 'case'].join('::')
+    const expectedModules = testModules.at(-1) === 'tests' ? testModules.slice(0, -1) : testModules
+    const eligible = sourceModules.length === expectedModules.length && sourceModules.every((part, index) => expectedModules[index] === part)
+    return { file, test, expected: eligible ? file : null }
+  }, ({ file, test, expected }) => {
+    const output = `test ${test} ... FAILED\nfailures:\n---- ${test} stdout ----\nthread panicked at ${file}:1:1:\n`
+    assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test, file: expected }])
+  }, { runs: 100, seed: 1805 })
+
+  for (const [file, name] of [['crates/x/src/lib.rs', 'tests::root'], ['src/main.rs', 'tests::root']]) {
+    const test = name
+    const output = `test ${test} ... FAILED\nfailures:\n---- ${test} stdout ----\nthread panicked at ${file}:1:1:\n`
+    assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test, file }])
+  }
+  const unknown = flakeDriverRun(t, { runner: 'python', command: 'python -m tests', output: { ok: false, output: 'opaque red output' } })
+  assert.equal(unknown.calls.some((command) => command.includes('--exact') || command.includes('--test-reporter=tap')), false)
+  assert.equal(unknown.logs.find((row) => row.flake)?.flake.reason, 'runner-unparsed')
+  const compound = flakeDriverRun(t, { command: 'cargo test --workspace && cargo test --doc' })
+  assert.equal(compound.calls.filter((command) => command.includes('-- --exact')).length, 0)
+  assert.equal(compound.logs.find((row) => row.flake)?.flake.reason, 'command-unshaped')
+})
+
+test('LRF10 isolated rerun records only measured verdicts and contains denied or thrown runs', (t) => {
+  const red = { ok: false, output: 'ℹ tests 1\nℹ pass 0\nℹ fail 1\nℹ skipped 0\n\n✖ failing tests:\n\ntest at outside.test.mjs:3:1\n✖ flaky-one\n' }
+  const cases = [
+    [{ denied: true }, false, 'unmeasured'],
+    [{ ok: true, output: 'TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 0\n' }, false, 'unmeasured'],
+    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one\nok 2 - flaky-one\n1..2\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n' }, false, 'unmeasured'],
+    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one # SKIP\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 1\n' }, false, 'skipped'],
+    [undefined, true, 'unmeasured'],
+  ]
+  for (const [rerun, throwRerun, verdict] of cases) {
+    const x = flakeDriverRun(t, { output: red, runner: 'node', command: 'node --test outside.test.mjs', rerun, throwRerun })
+    assert.equal(x.logs.filter(r => r.flake)[0].flake.tests[0].rerun, verdict)
+    assert.equal(x.result.status, 'escalation')
+  }
+})
+
+test('RV1-1 lane retry uses implementation-level runner classification', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  assert.match(source, /classifyTestRunner\(lane\)/)
+})
+
+test('RV1-1 driver-level flake acceptance regressions stay executable', () => {
+  const buildSource = readFileSync(new URL('./drive-build.test.mjs', import.meta.url), 'utf8')
+  const suiteSource = readFileSync(new URL('./drive.test.mjs', import.meta.url), 'utf8')
+  const buildLabels = [...buildSource.matchAll(/^test\('(FL[1-7])'/gm)].map((match) => match[1])
+  const suiteLabels = [...suiteSource.matchAll(/^test\('(FL[1-7])(?:'|\s)/gm)].map((match) => match[1])
+  assert.deepEqual(buildLabels, ['FL1', 'FL2', 'FL3', 'FL4', 'FL5', 'FL7'])
+  assert.deepEqual(suiteLabels, ['FL6'])
+  assert.match(buildSource, /test\('FL1',[\s\S]*?flakeDriverRun\(/)
+  assert.match(suiteSource, /FL6 warm Cargo suite failure retries before suite-red recovery/)
+})
+
+// Mutation: dropping the plain-word shape check lets a trailing shell comment swallow the appended --exact arguments.
+test('LRF8 Cargo isolated command refuses shell syntax that keeps the exact-test arguments from reaching cargo', () => {
+  const arg = (value) => "'" + value + "'"
+  for (const command of ['cargo test --workspace # all', 'cargo test --workspace `true`', 'cargo test $(echo -p x)', 'cargo test "--workspace"', "cargo test '-p' x", 'cargo test --workspace\ncargo test', 'cargo test --workspace \\']) {
+    assert.equal(isolatedTestCommand(command, 'cargo', 'a::t', 'a.rs', arg), null, command)
+  }
+  assert.equal(isolatedTestCommand('cargo test --workspace', 'cargo', 'a::t', 'a.rs', arg), "cargo test --workspace -- --exact 'a::t'")
+  assert.equal(isolatedTestCommand('RUST_BACKTRACE=1 cargo +nightly test -p power-api', 'cargo', 'a::t', 'a.rs', arg), "RUST_BACKTRACE=1 cargo +nightly test -p power-api -- --exact 'a::t'")
+})
+
+// Mutation: deleting the as-written dot-segment refusal lets relative()/URL normalisation launder a .. path into a checkout file.
+test('LRF9 failure locations with dot segments are refused as written, before normalisation', () => {
+  for (const location of ['/checkout/../checkout/other.test.mjs', '/checkout/./other.test.mjs', 'file:///checkout/../checkout/other.test.mjs', 'file:///checkout/%2e%2e/checkout/other.test.mjs', 'a/../other.test.mjs']) {
+    const output = '✖ failing tests:\n  test at ' + location + ':4:2\n  ✖ flaky-one (12ms)\n'
+    assert.equal(failingTestFiles(output, 'node', '/checkout')[0].file, null, location)
+  }
+  for (const [location, file] of [['/checkout/other.test.mjs', 'other.test.mjs'], ['./other.test.mjs', 'other.test.mjs'], ['file:///checkout/x/other.test.mjs', 'x/other.test.mjs']]) {
+    const output = '✖ failing tests:\n  test at ' + location + ':4:2\n  ✖ flaky-one (12ms)\n'
+    assert.equal(failingTestFiles(output, 'node', '/checkout')[0].file, file, location)
+  }
+})
+
+// Mutation: deleting the block-boundary reset lets a later binary's panic line supply an earlier failure's file.
+test('LRF10 Cargo failure ownership ends at the test-result and Running boundaries', () => {
+  for (const boundary of ['test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s', '     Running unittests src/lib.rs (target/debug/deps/x-1)', '   Doc-tests x']) {
+    const output = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nno location here\n' + boundary + '\nthread panicked at crates/x/src/app.rs:1:2:\n'
+    assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test: 'app::t', file: null }], boundary)
+  }
+  const owned = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nthread panicked at crates/x/src/app.rs:1:2:\n'
+  assert.deepEqual(failingTestFiles(owned, 'cargo', '/checkout'), [{ test: 'app::t', file: 'crates/x/src/app.rs' }])
 })

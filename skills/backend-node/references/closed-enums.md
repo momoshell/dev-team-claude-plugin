@@ -4,7 +4,7 @@ Declare a finite vocabulary as data that callers actually consult.
 Exhibit: `scripts/factory/ledger.mjs:529` (`CI_DECISIONS`).
 
 `DECISIONS` is frozen with `Object.freeze` at the export boundary.
-Exhibit: `crew/drive.mjs:563`.
+Exhibit: `crew/drive.mjs:564`.
 
 Production code reads `CI_DECISIONS` when it validates a decision.
 Exhibit: `scripts/factory/ledger.mjs:4321`.

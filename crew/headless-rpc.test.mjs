@@ -162,6 +162,126 @@ function ordinaryRpcEnvelope(id, role = 'builder') {
   return { assignment_id: id, role, status: 'done', summary: 'recorded ordinary completion', artifacts: [], details: {} }
 }
 
+// MUTATION BW1: invert recent-tool eligibility; recent work must extend and unknown time must not.
+test('BW1 builder waits extend only for a recent observed tool and reset on reuse', () => {
+  const recent = builderWaitScenario({ envelopeAt: 610 })
+  const deadlineCompletion = builderWaitScenario({ envelopeAt: 600 })
+  const unknown = builderWaitScenario({ unknown: true })
+  const unavailableLog = builderWaitScenario({ envelopeAt: 610, loggingThrows: true })
+  let censusClock = 0, censusRun
+  const censusFixture = fixture({ now: () => censusClock, monotonic: () => censusClock, telemetry: () => { throw new Error('census unavailable') }, onSleep: ({ ms, appendStream }) => {
+    censusClock += ms
+    appendStream(builderWaitCapture('tool_execution_start'))
+    if (censusClock >= 610000) writeFileSync(censusRun.returnPath, JSON.stringify(ordinaryRpcEnvelope(censusRun.id)))
+  } })
+  try {
+    censusRun = censusFixture.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    censusFixture.writeStream(builderWaitCapture('message_update'))
+    assert.equal(censusFixture.io.wait(censusRun.returnPath, 600).status, 'done')
+  } finally { censusFixture.cleanup() }
+  assert.deepEqual(
+    { outcome: recent.outcome, elapsed_s: recent.elapsed_s, extensions: recent.extensions,
+      deadlineCompletion: { outcome: deadlineCompletion.outcome, elapsed_s: deadlineCompletion.elapsed_s, extensions: deadlineCompletion.extensions },
+      unknown: { outcome: unknown.outcome, abort_s: unknown.abort_s, extensions: unknown.extensions },
+      unavailableLog: unavailableLog.outcome },
+    { outcome: 'done', elapsed_s: 610, extensions: [{ role: 'builder', id: 'd1', channel: 'operational', last_tool_age_s: 0, extension_s: 900, grace_cap_s: 2400 }],
+      deadlineCompletion: { outcome: 'done', elapsed_s: 600, extensions: [{ role: 'builder', id: 'd1', channel: 'operational', last_tool_age_s: 0, extension_s: 900, grace_cap_s: 2400 }] },
+      unknown: { outcome: 'rpc-timeout', abort_s: 600, extensions: [] }, unavailableLog: 'done' },
+  )
+  let clock = 0
+  const update = builderWaitCapture('message_update')
+  const end = builderWaitCapture('tool_execution_end')
+  const f = fixture({ now: () => clock, monotonic: () => clock, promptDeliveryWindowMs: 10000000, onSleep: ({ ms, appendStream }) => { clock += ms; appendStream(update) } })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(end)
+    writeFileSync(first.returnPath, JSON.stringify(ordinaryRpcEnvelope(first.id)))
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    clock = 0
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), update, { flag: 'a' })
+    assert.throws(() => f.io.wait(second.returnPath, 600), (error) => error.stage === 'rpc-timeout' && /no recent tool call/.test(error.message))
+    assert.ok(clock >= 600000 && clock <= 605000)
+  } finally { f.cleanup() }
+})
+
+// MUTATION BW2: discard lastToolStartAt; long in-flight tool work ceases to count.
+test('BW2 builder wait counts a recorded start without an end', () => {
+  const actual = builderWaitScenario({ base: 10800, kind: 'start', envelopeAt: 10810 })
+  assert.deepEqual({ outcome: actual.outcome, elapsed_s: actual.elapsed_s, extensions: actual.extensions },
+    { outcome: 'done', elapsed_s: 10810, extensions: [{ role: 'builder', id: 'd1', channel: 'operational', last_tool_age_s: 0, extension_s: 900, grace_cap_s: 2400 }] })
+})
+
+// MUTATION BW3: use lastAt instead of tool timestamps; messages must not keep a stale seat alive.
+test('BW3 builder wait expires at the exact stale boundary despite message updates', () => {
+  const actual = builderWaitScenario({})
+  assert.deepEqual({ outcome: actual.outcome, abort_s: actual.abort_s, extensions: actual.extensions.map((row) => row.extension_s) },
+    { outcome: 'rpc-timeout', abort_s: 1500, extensions: [900] })
+  assert.match(actual.reason, /no recent tool call/)
+})
+
+// MUTATION BW4: uncap extensionMs; endless tools must stop at exactly 2400 additive seconds.
+test('BW4 builder wait caps repeated extensions for short and long bases', () => {
+  for (const base of [600, 10800]) {
+    const actual = builderWaitScenario({ base, forever: true })
+    assert.deepEqual({ outcome: actual.outcome, elapsed_s: actual.elapsed_s, abort_s: actual.abort_s, extensions: actual.extensions.map((row) => row.extension_s) },
+      { outcome: 'rpc-timeout', elapsed_s: base + 2400, abort_s: base + 2400, extensions: [900, 900, 600] })
+    assert.match(actual.reason, /grace cap/)
+  }
+})
+
+// Recorded raw RPC frames are repeated unchanged so the wait tests exercise vendor-shaped input.
+function builderWaitCapture(type) {
+  const line = recordedRpcBoundaryCapture().split('\n').find((entry) => {
+    try { return JSON.parse(entry)?.type === type } catch { return false }
+  })
+  return line ? line + '\n' : null
+}
+
+function builderWaitScenario({ base = 600, kind = 'end', envelopeAt = null, forever = false, loggingThrows = false, unknown = false }) {
+  let clock = 0, run, abortAt = null
+  const logs = []
+  const update = builderWaitCapture('message_update')
+  const tool = builderWaitCapture(kind === 'start' ? 'tool_execution_start' : 'tool_execution_end')
+  assert.ok(update, 'recorded capture includes a message update')
+  assert.ok(tool, 'recorded capture includes the requested tool frame')
+  const f = fixture({
+    now: () => clock, monotonic: () => clock,
+    log: (row) => { logs.push(row); if (loggingThrows && row.event === 'wait-extended') throw new Error('journal unavailable') },
+    writeSync: (_fd, raw) => {
+      const command = JSON.parse(raw)
+      if (command.type === 'abort') {
+        abortAt = clock
+        f.writeStream(builderWaitCapture('agent_settled'))
+      }
+    },
+    onSleep: ({ ms, appendStream }) => {
+      clock += ms
+      appendStream(unknown || (!forever && clock > base * 1000) ? update : tool)
+      if ((envelopeAt !== null && clock >= envelopeAt * 1000) || clock > (base + 2400) * 1000) {
+        writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
+      }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    clock = 0
+    f.writeStream(update)
+    let value, error
+    try { value = f.io.wait(run.returnPath, base) } catch (caught) { error = caught }
+    if (error && error.stage !== 'rpc-timeout') throw error
+    return {
+      outcome: error?.stage ?? value?.status ?? 'unknown',
+      elapsed_s: clock / 1000, abort_s: abortAt === null ? null : abortAt / 1000,
+      reason: error?.message ?? null,
+      extensions: logs.filter((row) => row.event === 'wait-extended').map((row) => ({
+        role: row.role, id: row.id, channel: row.channel,
+        last_tool_age_s: row.last_tool_age_s, extension_s: row.extension_s, grace_cap_s: row.grace_cap_s,
+      })),
+    }
+  } finally { f.cleanup() }
+}
+
 test('A1/B1/E1 empty RPC synthesis names measured and unavailable no-envelope turns', () => {
   const base = { id: 'd1', role: 'planner', returnPath: '/returns/d1.planner.json' }
   const zero = emptyTurnEnvelope({ ...base, census: { turns: 0, tool_calls: 0 } })

@@ -7322,6 +7322,17 @@ test('RG8 Rust non-test-region parser preserves grammar and rejects malformed in
   for (const bad of ['"unterminated', '/* unterminated', '{']) assert.equal(rustNonTestRegion(bad), null)
 })
 
+test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {
+  // MUTATION: drop the unmeasured non-test-region refusal; the unterminated build is adjudicated by the runs instead.
+  const built = `${cargoSource}/* unfinished`
+  const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: (_text, n) => ({ ...b863Green(0), output: cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'unproven')
+  assert.match(row?.why ?? '', /non-test region was unmeasured/)
+  assert.equal(invocationExecutions(io).length, 0)
+})
+
 test('RG9 cargo rows explain named-test and scope basis while node invocations remain opaque', () => {
   const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED') }) })
   driveTask(ctx, io)

@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -7172,16 +7172,16 @@ const b863InvocationEntry = (over = {}) => ({
 const B863_FILES = { [`${CTX.checkout}/a.mjs`]: 'const guard = false\n' }
 const INVOCATION_LIMIT_TEXT = 'based only on process exit status'
 const b863Green = (status = 0) => ({ ok: status === 0, status, output: '', stderr: '' })
-const invocationProofIo = ({ entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], scopeFiles = ['a.mjs', 'a.test.mjs'], flipTo = undefined } = {}) => {
+const invocationProofIo = ({ lane = 'lane-cmd', entry = b863InvocationEntry(), runFn = (text, n) => (n === 2 ? b863Green(0) : b863Green(1)), files = { ...B863_FILES }, fingerprints = null, extraRuns = {}, changed = ['a.mjs'], scopeFiles = ['a.mjs', 'a.test.mjs'], flipTo = undefined } = {}) => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scopeFiles } }),
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scopeFiles, validation_lane: lane } }),
       'builder:1': buildEnv(), 'builder:2': b376Build([entry]), 'builder:3': b376Build([entry]),
       'reviewer:1': b376Review('changes-needed', [B376_FINDING]),
       'reviewer:2': b376Review('pass', []), 'reviewer:3': b376Review('pass', []),
     },
     files, writeThrough: true,
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, [entry.invocation]: runFn, ...extraRuns },
+    runs: { [lane]: { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, [entry.invocation]: runFn, ...extraRuns },
     changed, fingerprints,
   })
   if (flipTo === undefined) {
@@ -11406,4 +11406,186 @@ test('BR3 builder plan formatter measures exact UTF-8 byte boundaries', async ()
   ]
   assert.deepEqual({ limit: BUILDER_PLAN_INLINE_BYTE_LIMIT, outputs: cases.map(([value]) => builderPlanLines(path, value)) },
     { limit: 32768, outputs: cases.map(([, expected]) => expected) })
+})
+
+test('HL1 accepted validation lane governs hardening runner', () => {
+  const lane = 'python3.12 -m pytest -q tests'
+  const py = laneHardeningRunner(lane, { runner: 'cargo', basis: 'suite' })
+  assert.deepEqual(py, { runner: 'python', basis: `lane validation_lane: ${lane}` })
+  const guard = { ...entry, test: 'a.test.mjs' }
+  const io = invocationProofIo({ lane, entry: guard })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  const emitted = [...io.calls.writeLog.map(({ content }) => content), ...Object.values(io.calls.writes)].filter((value) => typeof value === 'string').join('\n')
+  assert.match(emitted, /python.*lane validation_lane/)
+  assert.match(emitted, /exact lint command/)
+  const wrong = validateHardened({ hardened: [guard] }, owed, scope, py)
+  assert.equal(wrong.refusals[0]?.reason, 'test-runner-mismatch')
+  const pyBasis = 'lane validation_lane: ' + lane
+  const plan = { validation_lane: lane }
+  const runs = { [lane]: { ok: true, output: '' } }
+  const ask = dispositionIo({ ...D_ASK, hardening: undefined, hardening_why: undefined }, { leadDecision: 'bounce', plan, runs })
+  const askResult = driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, ask)
+  const askText = Object.values(ask.calls.writes).join('\n')
+  assert.match(askText, /the declared runner is python \(lane validation_lane:/)
+  assert.doesNotMatch(askText, /#\[test\]/)
+  assert.equal(askResult.status, 'escalation')
+  // The auto-fix revalidation brief (crew/drive.mjs revalidateAfterAutoFix) is not pinned here:
+  // it is reached only when hardenOwed.owed is empty, and hardeningBriefLines returns [] for an
+  // empty owed list, so its runner argument cannot reach any output (an equivalent mutant).
+  const reviewBounce = Object.values(io.calls.writes).find((content) => typeof content === 'string' && content.startsWith('# Review bounce (round 1)'))
+  assert.ok(reviewBounce?.includes('For each guard, the declared runner is python (' + pyBasis + ')'), reviewBounce)
+  assert.doesNotMatch(reviewBounce, /#\[test\]/)
+  const bounce = io.calls.writes[join(TD, 'build-bounce-r2.md')] ?? ''
+  assert.ok(bounce.includes('test-runner-mismatch — the declared python runner (' + py.basis + ')'))
+  const exhaustedIo = invocationProofIo({ lane, entry: guard })
+  const exhausted = driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, exhaustedIo)
+  assert.equal(exhausted.status, 'escalation')
+  assert.equal(exhausted.details.escalation?.where, 'harden')
+  assert.ok(exhausted.details.escalation?.why.includes('test-runner-mismatch — the declared python runner (' + pyBasis + ')'))
+  assert.ok(exhausted.details.escalation?.why.includes('the declared runner is python (' + pyBasis + ')'))
+  assert.doesNotMatch(exhausted.details.escalation?.why ?? '', /#\[test\]/)
+})
+
+test('HL2 lane command classification is conservative and preserves opaque suite identity', () => {
+  const suite = { runner: 'cargo', basis: 'suite-basis' }
+  const expected = [
+    ['cargo test -p x', 'cargo'], ['/opt/bin/cargo fmt', 'cargo'], ['node --test a.test.mjs', 'node'],
+    ['pytest -q tests', 'python'], ['python -m unittest', 'python'], ['python3 -m pytest tests', 'python'],
+    ['python3.12 -B -q -m unittest', 'python'],
+  ]
+  for (const [lane, runner] of expected) assert.equal(laneHardeningRunner(lane, suite).runner, runner, lane)
+  for (const lane of ['node scripts/gate.mjs', 'sh -c "cargo test"', 'python tests/run.py -m pytest', 'lane-cmd', '', "python -m 'unterminated", 'cargo test | cat']) assert.equal(laneHardeningRunner(lane, suite), suite, lane)
+  const unparsedSuite = { runner: 'unparsed', basis: 'u' }
+  assert.equal(laneHardeningRunner('node --test a.test.mjs', unparsedSuite) === unparsedSuite, true)
+  forAll((random) => {
+    const forms = [
+      ['cargo test -p crate', 'cargo'], ['/path/to/cargo fmt', 'cargo'],
+      ['node --test X.test.mjs', 'node'], ['pytest -q tests', 'python'],
+      ['python -m unittest', 'python'], ['python3 -m pytest', 'python'], ['python3.12 -m pytest', 'python'],
+    ]
+    const [base, runner] = forms[Math.floor(random() * forms.length)]
+    const flags = random() < 0.5 ? ' -B -q -u' : ''
+    const quoted = random() < 0.5 ? " 'tests/a b'" : ''
+    const cmd = base.startsWith('python') ? base.replace(' -m', flags + ' -m') + quoted : base + quoted
+    return { cmd, runner, opaque: ['node script.mjs', 'sh -c "cargo test"', 'python script.py -m pytest', 'cargo test && cat', 'cargo test | cat'][Math.floor(random() * 5)] }
+  }, ({ cmd, runner, opaque }) => {
+    assert.equal(laneHardeningRunner(cmd, suite).runner, runner, JSON.stringify({ cmd, runner }))
+    assert.equal(laneHardeningRunner(opaque, suite), suite, opaque)
+  }, { runs: 100, seed: 1202 })
+})
+
+test('HL3 Python runner boundary and invocation declaration', () => {
+  const runner = { runner: 'python', basis: 'python lane' }
+  assert.deepEqual(normalizeTestRunner(runner), runner)
+  const wrong = validateHardened({ hardened: [{ ...entry }] }, owed, scope, runner)
+  assert.equal(wrong.refusals[0]?.reason, 'test-runner-mismatch')
+  assert.match(wrong.refusals[0]?.why ?? '', /python lane/)
+  const { test: _test, ...invocation } = entry
+  invocation.invocation = 'python -m pytest tests/test_guard.py'
+  const accepted = validateHardened({ hardened: [invocation] }, owed, scope, runner)
+  assert.deepEqual(accepted.entries, [invocation])
+  assert.deepEqual(accepted.observations, [])
+})
+
+test('HL4 whitespace invocation exception does not weaken named-test mutations', () => {
+  const { test: _test, ...invocation } = entry
+  invocation.invocation = 'pytest -k guard'
+  invocation.replace = 'const  guard = false'
+  assert.equal(validateHardened({ hardened: [invocation] }, owed, scope).entries.length, 1)
+  assert.equal(validateHardened({ hardened: [{ ...invocation, replace: invocation.find }] }, owed, scope).refusals[0]?.reason, 'replace-identical')
+  assert.equal(validateHardened({ hardened: [{ ...entry, replace: 'const  guard = false' }] }, owed, scope).refusals[0]?.reason, 'replace-identical')
+})
+
+test('HL5 cargo lint invocation is isolated from named-test evidence', () => {
+  assert.equal(cargoLintInvocation('cargo clippy -p crate -- -D warnings'), true)
+  assert.equal(cargoLintInvocation('cargo fmt --check --manifest-path Cargo.toml'), true)
+  for (const command of ['cargo test -p crate', 'cargo clippy -p crate && cargo test', 'cargo clippy | cat', 'cargo clippy\ncargo test', 'cargo clippy >out']) assert.equal(cargoLintInvocation(command), false, command)
+  const entry = b863InvocationEntry({ invocation: 'cargo clippy -p crate -- -D warnings' })
+  const files = { ...B863_FILES }
+  const io = invocationProofIo({ lane: 'cargo test -p crate', entry, files, runFn: (_text, n) => b863Green(n === 2 ? 0 : 1) })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.equal(row?.outcome, 'killed')
+  assert.match(row?.why ?? '', /based only on process exit status/)
+  assert.equal(files[`${CTX.checkout}/a.mjs`].includes('invocation repair'), true)
+  const outcomes = [
+    { name: 'survived', runFn: (_text, n) => b863Green(n === 2 || n === 3 ? 0 : 1) },
+    { name: 'pre-green', runFn: (_text, n) => b863Green(n === 1 || n === 2 ? 0 : 1) },
+    { name: 'control-red', runFn: (_text, n) => b863Green(n === 2 ? 1 : 0) },
+    { name: '126', runFn: (_text, n) => b863Green(n === 2 ? 0 : n === 3 ? 126 : 1) },
+    { name: '127', runFn: (_text, n) => b863Green(n === 2 ? 0 : n === 3 ? 127 : 1) },
+    { name: 'thrown', runFn: (_text, n) => { if (n === 3) throw new Error('probe failed'); return b863Green(n === 2 ? 0 : 1) } },
+  ]
+  for (const item of outcomes) {
+    const changedFiles = { ...B863_FILES }
+    const proof = invocationProofIo({ lane: 'cargo test -p crate', entry, files: changedFiles, runFn: item.runFn })
+    driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, proof)
+    assert.notEqual(invocationRows(proof).find((candidate) => candidate.round === 2)?.outcome, 'killed', item.name)
+    assert.equal(changedFiles[`${CTX.checkout}/a.mjs`], `${B863_FILES[`${CTX.checkout}/a.mjs`]}// invocation repair\n`, item.name)
+  }
+})
+
+test('HL6 lint guidance appears on non-node hardening surfaces only', () => {
+  const clause = 'A finding that names a lint or formatter rule (clippy, rustfmt, ruff)'
+  const node = 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
+  for (const runner of [{ runner: 'cargo', basis: 'cargo lane' }, { runner: 'python', basis: 'python lane' }, { runner: 'unparsed', basis: 'unknown' }]) {
+    assert.equal(hardeningRunnerSentence(runner).includes(clause), true)
+    assert.equal(hardeningBounceLines(2, [], [], runner).join('\n').includes(clause), true)
+  }
+  assert.equal(hardeningRunnerSentence({ runner: 'node' }), node)
+})
+
+test('HL7 lint predicate rejects operators and cargo test', () => {
+  assert.equal(cargoLintInvocation('cargo clippy -p crate'), true)
+  assert.equal(cargoLintInvocation('cargo fmt --check'), true)
+  assert.equal(cargoLintInvocation('cargo test -p crate'), false)
+  assert.equal(cargoLintInvocation('cargo clippy -p crate; cargo test'), false)
+  assert.equal(cargoLintInvocation("cargo clippy 'unterminated"), false)
+  for (const command of ['cargo test -p crate', 'cargo clippy -p crate && cargo test']) {
+    const entry = b863InvocationEntry({ invocation: command })
+    const io = invocationProofIo({ entry, runFn: (_text, n) => ({ ...b863Green(n === 2 ? 0 : 1), output: 'compile complete' }) })
+    driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+    assert.equal(invocationRows(io).find((row) => row.round === 2)?.outcome, 'unproven', command)
+  }
+})
+
+test('HL8 driven Python lane invocation proof is exit-status adjudicated', () => {
+  const lane = 'python -m pytest tests'
+  const entry = b863InvocationEntry({ invocation: 'python -m pytest tests/test_guard.py' })
+  const io = invocationProofIo({ lane, entry, runFn: (_text, n) => b863Green(n === 2 ? 0 : 1) })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  assert.equal(invocationRows(io).find((row) => row.round === 2)?.outcome, 'killed')
+  assert.match(invocationRows(io).find((row) => row.round === 2)?.why ?? '', /based only on process exit status/)
+  const nodeLane = 'node --test a.test.mjs'
+  const { invocation: _nodeInvocation, ...nodeEntry } = { ...entry, test: 'a.test.mjs' }
+  const nodeIo = invocationProofIo({ lane: nodeLane, entry: nodeEntry })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, nodeIo)
+  assert.doesNotMatch(Object.values(nodeIo.calls.writes).join('\n'), /test-runner-mismatch/)
+  const opaqueLane = 'node scripts/gate.mjs'
+  const { invocation: _opaqueInvocation, ...opaqueEntry } = { ...entry, test: 'a.test.mjs' }
+  const opaqueIo = invocationProofIo({ lane: opaqueLane, entry: opaqueEntry })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, opaqueIo)
+  assert.match(Object.values(opaqueIo.calls.writes).join('\n'), /test-runner-mismatch/)
+})
+
+// MUTATION RV1-1: pass ctx.testRunner to the failed-bounce-write escalation instead of the lane runner
+test('RV1-1 python lane governs the failed hardening bounce write escalation under a cargo suite', () => {
+  const lane = 'python3.12 -m pytest -q tests'
+  const pyBasis = 'lane validation_lane: ' + lane
+  const io = invocationProofIo({ lane, entry: { ...entry, test: 'a.test.mjs' } })
+  const write = io.writeFile.bind(io)
+  let threw = false
+  io.writeFile = (path, content) => {
+    if (path.includes('build-bounce-r2')) {
+      threw = true
+      throw new Error('EACCES: bounce brief write denied')
+    }
+    return write(path, content)
+  }
+  const result = driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  assert.equal(threw, true)
+  assert.equal(result.details.escalation.where, 'harden')
+  assert.match(result.details.evidence_unavailable, /hardening bounce brief write failed: .*EACCES/)
+  assert.ok(result.details.escalation.why.includes('test-runner-mismatch — the declared python runner (' + pyBasis + ')'))
+  assert.doesNotMatch(result.details.escalation.why, /#\[test\]/)
 })

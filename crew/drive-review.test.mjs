@@ -6978,9 +6978,9 @@ test('an unterminated block comment leaves the held file unmeasured', () => {
   assert.deepEqual(heldAssertionChanges({ path: 'a.test.mjs', base: good, diff: '', current: `${good}/* never closed\n` }), { path: 'a.test.mjs', measured: false, reason: 'current-unreadable' })
 })
 
-function b1145PreservationLane({ restore = false, prepare = null } = {}) {
+function b1145PreservationLane({ restore = false, prepare = null, pin = {}, ctx = {} } = {}) {
   const edited = PIN_WITNESSED.replace('assert.equal(1, 1)', 'assert.ok(true)')
-  const io = pinIo({ built: restore ? PIN_WITNESSED : edited })
+  const io = pinIo({ built: restore ? PIN_WITNESSED : edited, ...pin })
   const testPath = CTX.checkout + '/' + B376_TEST_FILE
   const wait = io.wait
   io.wait = function (path, timeout) {
@@ -6997,7 +6997,7 @@ function b1145PreservationLane({ restore = false, prepare = null } = {}) {
     if (!restore && (round >= 2 || this.calls.assign.some(({ note }) => note === 'harden-preservation-fix'))) this.calls.files[testPath] += '// b1145 post-repin edit r' + (round ?? 'preservation') + '\n'
   }
   if (typeof prepare === 'function') prepare(io, testPath)
-  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 } }, io)
+  const result = driveTask({ ...PIN_CTX, limits: { build_rounds: 4, review_rounds: 8 }, ...ctx }, io)
   return { io, result, bounces: io.calls.assign.filter((row) => row.role === 'builder' && row.note === 'harden-preservation-fix') }
 }
 
@@ -7120,6 +7120,72 @@ test('RV3-1 a guard deleted during the preservation bounce is re-proved and refu
   const reproved = pinRows(io).filter((row) => row.finding === 'F1')
   assert.equal(reproved.length, 2)
   assert.notEqual(reproved.at(-1).outcome, 'killed')
+})
+
+// A node --test lane under a cargo suite. F1 is the pinned-test prescription that forces the
+// preservation bounce; F2 is repaired in c.mjs and guarded by an exit-status invocation, so it is
+// re-proved after the bounce through whichever runner the re-proof is handed. The invocation is
+// green exactly on the repaired, unmutated c.mjs; `reproofGreen` keeps it green once the bounce is spent.
+function nodeLanePreservation({ reproofGreen = false } = {}) {
+  const lane = 'node --test a.test.mjs'
+  const invocation = 'sh tools/f2-guard.sh'
+  const implAbs = CTX.checkout + '/c.mjs'
+  const f1 = { ...B376_FINDING, location: 'a.mjs:1', disposition: 'auto-fix', patch: prescriptionPatch(B376_TEST_FILE) }
+  const f2 = { id: 'F2', severity: 'must-fix', location: 'c.mjs:1', summary: 'the second defect has no durable guard' }
+  const hardened = [{ ...B376_HARDENED, test: PIN_GUARD_FILE }, { finding: 'F2', invocation, name: 'F2 guard', file: 'c.mjs', find: 'const other = false', replace: 'const other = true' }]
+  const scope = [...PIN_SCOPE, 'c.mjs']
+  let reproving = false
+  const guard = (_text, _n, calls) => {
+    const green = (reproofGreen && reproving) || /^const other = false\n\/\/ F2 repair\n$/.test(calls.files[implAbs] ?? '')
+    return { ok: green, status: green ? 0 : 1, output: '', stderr: '' }
+  }
+  return b1145PreservationLane({
+    restore: true,
+    pin: { hardened, extra: { reviewer1: reviewEnv('changes-needed', [f1, f2]), plan: { files_in_scope: scope, validation_lane: lane }, changed: scope, runs: { ...validationProbeRun(lane, { 'a.test.mjs': 'file' }), [lane]: { ok: true, output: '' }, [invocation]: guard } } },
+    ctx: { testRunner: { runner: 'cargo', basis: 'fixture cargo suite' } },
+    prepare(io) {
+      io.calls.files[implAbs] = 'const other = false\n'
+      const wait = io.wait
+      io.wait = function (path, timeout) {
+        const env = wait.call(this, path, timeout)
+        if (path === 'builder:2') this.calls.files[implAbs] += '// F2 repair\n'
+        return env
+      }
+      const run = io.run
+      let guardRuns = 0
+      const log = io.log
+      io.log = function (row) {
+        log.call(this, row)
+        if (row.hardening_preservation_bounce) reproving = true
+      }
+      io.run = function (cmd) {
+        if (cmd === hardenCommand(PIN_GUARD_FILE, 'F1 guard')) return [B376_GREEN, B376_MUT_RED][guardRuns++ % 2]
+        return run.call(this, cmd)
+      }
+    },
+  })
+}
+
+// MUTATION HL9: pass ctx unchanged to the preservation re-proof's proveHardeningEntries — the
+// invocation guard goes through the cargo named-test arm, is not killed, and harden escalates.
+test('HL9 the lane runner governs the preservation re-proof under a cargo suite', () => {
+  const { io, result, bounces } = nodeLanePreservation()
+  assert.equal(bounces.length, 1)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation))
+  const reproved = pinRows(io).filter((row) => row.finding === 'F2')
+  assert.deepEqual(reproved.map((row) => [row.round, row.outcome]), [[2, 'killed'], [3, 'killed']])
+})
+
+// MUTATION HL10: pass ctx.testRunner to the re-proof escalation's hardeningBounceLines — the
+// escalation then tells a node --test lane to write a cargo #[test].
+test('HL10 the lane runner governs the preservation re-proof escalation under a cargo suite', () => {
+  const { io, result, bounces } = nodeLanePreservation({ reproofGreen: true })
+  assert.equal(bounces.length, 1)
+  assert.equal(result.details.escalation?.where, 'harden')
+  const why = result.details.escalation?.why ?? ''
+  assert.match(why, /^a guard proven before the preservation bounce no longer holds on the tree about to be committed: /)
+  assert.ok(why.includes('In this bounce, test is a repo-relative .test.mjs path run by node --test;'), why)
+  assert.doesNotMatch(why, /declared runner is cargo|#\[test\]/)
 })
 
 // MUTATION RV2-1: declare hardenFinalBounces at the suiteCycle head instead of beside

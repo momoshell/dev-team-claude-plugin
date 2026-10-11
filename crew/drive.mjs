@@ -11078,7 +11078,7 @@ function runTask(ctx, io, crash) {
       `# Review bounce (round ${round})`, '',
       `Close every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`,
       ...applyPrescriptionLines('the review'),
-      ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
+      ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, laneHardeningRunner(lane, ctx.testRunner)), // lane review-bounce runner
     ].join('\n')
   }
   // #800 — a finding the reviewer marked `auto-fix` and shipped a patch for is applied
@@ -11127,7 +11127,7 @@ function runTask(ctx, io, crash) {
         `# Auto-fix revalidation bounce (round ${roundNo})`, '',
         `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
         '', detail,
-        ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
+        ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, laneHardeningRunner(lane, ctx.testRunner)),
         '', `Plan: ${planPath}`,
       ].join('\n') }
     }
@@ -11699,7 +11699,7 @@ function runTask(ctx, io, crash) {
     // ADR-038: proof on the changed surface beats argument about it.
     if (hardenOwed.owed.length > 0) {
       stage(`lane:harden:r${round}`)
-      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope, ctx.testRunner)
+      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope, laneHardeningRunner(lane, ctx.testRunner))
       for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
       const prescribed = new Set(hardenOwed.owed.filter((finding) => finding.prescription).map(({ id }) => id))
       // A prescribed guard goes in a DIFFERENT test file that the lane may write: in scope, or
@@ -11709,7 +11709,7 @@ function runTask(ctx, io, crash) {
         if (!inScope(entry.test) && !declaredCreates.includes(entry.test)) return `the guard for ${entry.finding} is in ${entry.test}, which is outside the lane scope and not declared in creates; put it in a test file that is in scope (${scopeFiles.filter((file) => hardeningTestPath(file) && !prescriptionPins.has(file)).join(', ') || 'none listed'}) or declared in creates`
         return null
       }
-      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dirtyAfterFailure, prescribed, placement })
+      const { rows, fatal } = proveHardeningEntries({ entries, hardenWitness, ctx: { ...ctx, testRunner: laneHardeningRunner(lane, ctx.testRunner) }, io, hardenRun, dirtyAfterFailure, prescribed, placement })
       for (const row of rows) logHardened(round, row)
       // #839 — a failed RESTORE is not a repair bounce. `settleFailedProof`
       // (crew/drive.mjs:3490-3492) already refuses to continue when `gateProofFatal` is
@@ -11779,13 +11779,13 @@ function runTask(ctx, io, crash) {
         stageComplete()
       } else if (!plans || (finalRound() && !finalHardenBounce)) {
         stageComplete()
-        return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '))
+        return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, laneHardeningRunner(lane, ctx.testRunner)).join(' '))
       } else {
         const b = art(`build-bounce-r${round}.md`)
-        const writeError = guardedWrite(io, b, hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join('\n'))
+        const writeError = guardedWrite(io, b, hardeningBounceLines(round, liveRefusals, liveRows, laneHardeningRunner(lane, ctx.testRunner)).join('\n'))
         if (writeError) {
           stageComplete()
-          return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, ctx.testRunner).join(' '), [], { evidence_unavailable: `hardening bounce brief write failed: ${writeError}` })
+          return escalate('harden', hardeningBounceLines(round, liveRefusals, liveRows, laneHardeningRunner(lane, ctx.testRunner)).join(' '), [], { evidence_unavailable: `hardening bounce brief write failed: ${writeError}` })
         }
         if (finalRound()) { hardenFinalBounces += 1; grantBuilderAllowance() }
         failureUpgrade('harden', 'builder')
@@ -12046,7 +12046,7 @@ function runTask(ctx, io, crash) {
         failureUpgrade('review', 'builder')
         io.writeFile(b, [`# Ask-user bounce (round ${round})`, '', c.guidance, '',
           ...askUserLines(disposed.askUser),
-          ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, ctx.testRunner),
+          ...hardeningBriefLines(hardenOwed.owed, hardenOwed.exempt, laneHardeningRunner(lane, ctx.testRunner)),
           '', `Review: ${lastReviewPath}`, `Plan: ${planPath}`].join('\n'))
         buildBrief = b; buildNote = 'review-fix'
         stageComplete()
@@ -12249,14 +12249,14 @@ function runTask(ctx, io, crash) {
     const rows = []
     let fatal = null
     for (const { entry, witness: w, prescribed: p } of reproof) {
-      const proved = proveHardeningEntries({ entries: [entry], hardenWitness: new Map(w ? [[entry.finding, w]] : []), ctx, io, hardenRun, dirtyAfterFailure, prescribed: new Set(p ? [entry.finding] : []), placement: () => null })
+      const proved = proveHardeningEntries({ entries: [entry], hardenWitness: new Map(w ? [[entry.finding, w]] : []), ctx: { ...ctx, testRunner: laneHardeningRunner(lane, ctx.testRunner) }, io, hardenRun, dirtyAfterFailure, prescribed: new Set(p ? [entry.finding] : []), placement: () => null })
       rows.push(...proved.rows)
       if (proved.fatal) { fatal = proved.fatal; break }
     }
     for (const row of rows) logHardened(carriedRound, row)
     if (fatal) return escalate('harden', `the hardening re-proof after the preservation bounce could not restore the built tree: ${fatal} — the run stops rather than continue with the driver's own mutation`)
     if (rows.length !== reproof.length || rows.some((row) => row.outcome !== 'killed')) {
-      return escalate('harden', `a guard proven before the preservation bounce no longer holds on the tree about to be committed: ${hardeningBounceLines(carriedRound, [], rows, ctx.testRunner).join(' ')}`)
+      return escalate('harden', `a guard proven before the preservation bounce no longer holds on the tree about to be committed: ${hardeningBounceLines(carriedRound, [], rows, laneHardeningRunner(lane, ctx.testRunner)).join(' ')}`)
     }
   }
 
@@ -15009,16 +15009,35 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
+// lean: lexical lane classification (cargo, node --test, pytest, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
+export function laneHardeningRunner(lane, suiteRunner) {
+  const { shape, words } = laneCommandShape(lane)
+  if (shape === 'unparsable' || words.some((word) => /[&|;<>\x60$]/.test(word))) return suiteRunner
+  const executable = words[0]?.slice(words[0].lastIndexOf('/') + 1)
+  const basis = `lane validation_lane: ${lane}`
+  if (executable === 'cargo') return { runner: 'cargo', basis }
+  if (shape === 'node-test') return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
+  const moduleAt = words.indexOf('-m')
+  if (executable === 'pytest' || (/^python(?:\d+(?:\.\d+)?)?$/.test(executable ?? '') && moduleAt > 0 && words.slice(1, moduleAt).every((word) => /^-[BEIOsSuvqbdP]+$/.test(word)) && ['unittest', 'pytest'].includes(words[moduleAt + 1]))) return { runner: 'python', basis }
+  return suiteRunner
+}
+export function cargoLintInvocation(invocation) {
+  if (typeof invocation !== 'string' || /[\r\n\0]/.test(invocation)) return false
+  const { words, defect } = shellWords(invocation)
+  return !defect && words[0]?.slice(words[0].lastIndexOf('/') + 1) === 'cargo' && ['clippy', 'fmt'].includes(words[1]) && words.every((word) => !/[&|;<>\x60$]/.test(word))
+}
 export function normalizeTestRunner(testRunner) {
   const rawRunner = testRunner?.runner
   if (rawRunner === undefined) return { runner: 'node', basis: 'legacy node runner · no runner context' }
-  if (['node', 'cargo', 'unparsed'].includes(rawRunner)) return { runner: rawRunner, basis: typeof testRunner?.basis === 'string' ? testRunner.basis : 'runner context' }
+  if (['node', 'cargo', 'python', 'unparsed'].includes(rawRunner)) return { runner: rawRunner, basis: typeof testRunner?.basis === 'string' ? testRunner.basis : 'runner context' }
   return { runner: 'unparsed', basis: 'unexpected runner value' }
 }
 export function hardeningRunnerSentence(testRunner) {
   const runner = normalizeTestRunner(testRunner)
-  if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] fn declared through invocation with the exact command that runs it; file is the implementation the mutation edits, never the guard home; name is the test fn cargo reports; an inline guard in the #[cfg(test)] module of file is accepted only while the non-test code of file is unchanged since review, otherwise put the guard in a separate test file; a .test.mjs path is refused.`
-  if (runner.runner === 'unparsed') return `blind spot: the runner could not be classified (${runner.basis}), so a .test.mjs guard's presence in the repo suite is unverified; invocation is the form whose run is proven.`
+  const lintClause = 'A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.'
+  if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] fn declared through invocation with the exact command that runs it; file is the implementation the mutation edits, never the guard home; name is the test fn cargo reports; an inline guard in the #[cfg(test)] module of file is accepted only while the non-test code of file is unchanged since review, otherwise put the guard in a separate test file; a .test.mjs path is refused. ${lintClause}`
+  if (runner.runner === 'python') return `the declared runner is python (${runner.basis}); a guard is a named test the lane's runner loads, declared through invocation with the exact command that runs only it; a .test.mjs path is refused. ${lintClause}`
+  if (runner.runner === 'unparsed') return `blind spot: the runner could not be classified (${runner.basis}), so a .test.mjs guard's presence in the repo suite is unverified; invocation is the form whose run is proven. ${lintClause}`
   return 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
 }
 
@@ -15679,8 +15698,8 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
         continue
       }
-      if (runner.runner === 'cargo') {
-        refuse(id, 'test-runner-mismatch', `the declared cargo runner (${runner.basis}) cannot run a .test.mjs guard; declare invocation with the exact command that runs it`)
+      if (runner.runner === 'cargo' || runner.runner === 'python') {
+        refuse(id, 'test-runner-mismatch', `the declared ${runner.runner} runner (${runner.basis}) cannot run a .test.mjs guard; declare invocation with the exact command that runs it`)
         continue
       }
     }
@@ -15709,17 +15728,14 @@ export function validateHardened(details, owed, inScope, testRunner) {
       refuse(id, 'name-file-wrapper', `the declared name ${entry.name} is the test FILE: node reports the test-file argument as a passing or failing wrapper subtest when no exact subtest ran, so a file path cannot identify a named guard`)
       continue
     }
-    // #839 — the whitespace rule is the SAME rule the plan-mutation contract already
-    // enforces (crew/drive.mjs:1505-1511), through the SAME predicate: a pair whose
-    // normalized forms are equal binds the same token sequence and rewrites the same
-    // tokens, so it mutates nothing (#742). `replace-identical` is the existing token and
-    // its `why` says so in the contract's own words.
+    // Named tests need a token-changing mutation; an invocation is validated by measured
+    // process exit status, so it may intentionally re-space the finding's linted shape.
     if (typeof entry.find !== 'string' || entry.find.length === 0) {
       refuse(id, 'find-missing', `the hardened entry for finding ${id} must carry a non-empty literal find`)
       continue
     }
-    if (typeof entry.replace !== 'string' || entry.replace === entry.find || !mutationChangesTokens(entry.find, entry.replace)) {
-      refuse(id, 'replace-identical', 'find and replace differ only in whitespace — that mutates no token')
+    if (typeof entry.replace !== 'string' || entry.replace === entry.find || (namesTest && !mutationChangesTokens(entry.find, entry.replace))) {
+      refuse(id, 'replace-identical', namesTest ? 'find and replace differ only in whitespace — that mutates no token' : 'find and replace are identical')
       continue
     }
     if (namesTest && runner.runner === 'unparsed') {
@@ -15900,7 +15916,7 @@ export function gateCheckIds(output) {
 const INVOCATION_LIMIT = 'the result is based only on process exit status and cannot prove the named guard ran'
 const invocationWhy = (entry, why, testRunner = null) => {
   const base = why ?? `the invocation ${entry.invocation} left no measured reason`
-  if (normalizeTestRunner(testRunner).runner === 'cargo') return `${base}; cargo named-test result; novelty checked only in review-time lane scope files`
+  if (normalizeTestRunner(testRunner).runner === 'cargo' && !cargoLintInvocation(entry.invocation)) return `${base}; cargo named-test result; novelty checked only in review-time lane scope files`
   return `${base}; ${INVOCATION_LIMIT}`
 }
 
@@ -16166,7 +16182,7 @@ function proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, r
 // hardening fatal path stops the run instead of crashing mid-restore (the dispatch
 // sits before the named-test try/catch and cannot see it).
 function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) {
-  const cargoRunner = normalizeTestRunner(ctx.testRunner).runner === 'cargo'
+  const cargoRunner = normalizeTestRunner(ctx.testRunner).runner === 'cargo' && !cargoLintInvocation(entry.invocation)
   if (cargoRunner) {
     try { return proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }) }
     catch (err) {

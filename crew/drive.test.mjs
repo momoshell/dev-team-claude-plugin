@@ -3543,6 +3543,18 @@ test('T8 — journal stage rows', () => {
   assert.deepEqual(escalationStageRows(deliberate.io), ['stage:escalate:plan', 'stage_done:escalate:plan'])
 })
 
+test('provider-annotated review crashes journal terminal escalation stages', () => {
+  for (const kind of ['rate_limit', 'server_error']) {
+    const failure = Object.assign(new Error(`provider ${kind}`), { stage: 'acp-no-envelope', providerFailure: { kind, status: null } })
+    const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': () => { throw failure } } })
+    const result = driveTask(CTX, io)
+    assert.deepEqual(escalationStageRows(io), ['stage:escalate:acp-no-envelope', 'stage_done:escalate:acp-no-envelope'])
+    assert.equal(result.details.escalation.where, 'acp-no-envelope')
+    assert.equal(result.details.escalation.why, `provider ${kind}`)
+    assert.equal(result.details.stages.at(-1), 'escalate:acp-no-envelope')
+  }
+})
+
 test('T9 — the deliberate exit is unchanged', () => {
   const { envelope, io } = deliberateRun()
   assert.deepEqual(envelope.details.escalation, {

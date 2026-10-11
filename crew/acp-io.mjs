@@ -2,7 +2,7 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync 
 import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
-import { acpProviderFailureKind, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
+import { acpProviderFailureKind, acpTextReset, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
@@ -251,6 +251,9 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       if (lastTurn?.refusal) {
         const kind = acpProviderFailureKind(lastTurn.refusal?.errorKind)
         if (!kind) throw noEnvelope(lastTurn.refusal, returnPath, assignment)
+        if (kind === 'rate_limit' && assignment.providerReset.at_ms === null) {
+          assignment.providerReset = acpTextReset(lastTurn.refusal.message, now())
+        }
         const stream = { providerFailure: { kind, status: null }, providerReset: assignment.providerReset }
         const routed = providerRetryOnFailure({ role: assignment.role, id: assignment.id, briefFile: assignment.briefFile, returnPath: assignment.returnPath }, returnPath, deadline, stream)
         if (routed.act === 'retry') return routed.resume()

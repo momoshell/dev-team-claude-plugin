@@ -6,13 +6,17 @@ import { relative, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const CARGO_CAPTURE_OFF = /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/
+const PLAIN_WORDS_COMMAND = /^[A-Za-z0-9_.\/:,@%+=-]+(?:[ \t]+[A-Za-z0-9_.\/:,@%+=-]+)*[ \t]*$/
 export const FLAKE_RERUN_REASONS = Object.freeze(['runner-unparsed', 'test-unmapped', 'in-fence', 'command-unshaped'])
 
 function safeTestFile(token, checkout) {
   if (typeof token !== 'string' || typeof checkout !== 'string' || !token || /[\0\r\n\\]/.test(token)) return null
   let value = token.replace(/[),;\]}]+$/g, '').replace(/^[([{]+/, '').replace(/:(?:\d+)(?::\d+)?$/, '')
   if (!value) return null
+  // Dot segments are refused as written: relative() and URL parsing would normalise them away before the segment check below.
+  if (value.replace(/^\.\//, '').split('/').some((part) => part === '.' || part === '..')) return null
   if (/^file:/i.test(value)) {
+    if (/%2e/i.test(value)) return null
     try { const url = new URL(value); if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) return null; value = fileURLToPath(url) } catch { return null }
   }
   if (isAbsolute(value)) {
@@ -66,6 +70,7 @@ export function failingTestFiles(output, runner, checkout) {
       else current.stdoutSeen = true
       continue
     }
+    if (/^test result: /.test(line) || /^\s*(?:Running|Doc-tests)\s/.test(line)) { current = null; continue }
     if (!current) continue
     const panic = /panicked at (.+?):\d+(?::\d+)?:/.exec(line)
     if (!panic) continue
@@ -91,7 +96,8 @@ export function isolatedTestCommand(command, runner, test, file, shellArg) {
   if (typeof command !== 'string' || typeof shellArg !== 'function' || typeof file !== 'string' || !file.trim()) return null
   if (runner === 'node') return 'node --test --test-reporter=tap ' + shellArg(file)
   if (runner !== 'cargo' || typeof test !== 'string' || !test) return null
-  if (/(?:^|\s)--(?=\s|$)/.test(command) || /[&|;<>]/.test(command) || CARGO_CAPTURE_OFF.test(command)) return null
+  // The appended "-- --exact <test>" must reach the command as argv: only plain words, no shell syntax (a comment, quote, substitution or operator can swallow or reroute it).
+  if (!PLAIN_WORDS_COMMAND.test(command) || /(?:^|\s)--(?=\s|$)/.test(command) || CARGO_CAPTURE_OFF.test(command)) return null
   return command + ' -- --exact ' + shellArg(test)
 }
 

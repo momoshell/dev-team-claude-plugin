@@ -11809,3 +11809,35 @@ test('RV1-1 driver-level flake acceptance regressions stay executable', () => {
   assert.match(buildSource, /test\('FL1',[\s\S]*?flakeDriverRun\(/)
   assert.match(suiteSource, /FL6 warm Cargo suite failure retries before suite-red recovery/)
 })
+
+// Mutation: dropping the plain-word shape check lets a trailing shell comment swallow the appended --exact arguments.
+test('LRF8 Cargo isolated command refuses shell syntax that keeps the exact-test arguments from reaching cargo', () => {
+  const arg = (value) => "'" + value + "'"
+  for (const command of ['cargo test --workspace # all', 'cargo test --workspace `true`', 'cargo test $(echo -p x)', 'cargo test "--workspace"', "cargo test '-p' x", 'cargo test --workspace\ncargo test', 'cargo test --workspace \\']) {
+    assert.equal(isolatedTestCommand(command, 'cargo', 'a::t', 'a.rs', arg), null, command)
+  }
+  assert.equal(isolatedTestCommand('cargo test --workspace', 'cargo', 'a::t', 'a.rs', arg), "cargo test --workspace -- --exact 'a::t'")
+  assert.equal(isolatedTestCommand('RUST_BACKTRACE=1 cargo +nightly test -p power-api', 'cargo', 'a::t', 'a.rs', arg), "RUST_BACKTRACE=1 cargo +nightly test -p power-api -- --exact 'a::t'")
+})
+
+// Mutation: deleting the as-written dot-segment refusal lets relative()/URL normalisation launder a .. path into a checkout file.
+test('LRF9 failure locations with dot segments are refused as written, before normalisation', () => {
+  for (const location of ['/checkout/../checkout/other.test.mjs', '/checkout/./other.test.mjs', 'file:///checkout/../checkout/other.test.mjs', 'file:///checkout/%2e%2e/checkout/other.test.mjs', 'a/../other.test.mjs']) {
+    const output = '✖ failing tests:\n  test at ' + location + ':4:2\n  ✖ flaky-one (12ms)\n'
+    assert.equal(failingTestFiles(output, 'node', '/checkout')[0].file, null, location)
+  }
+  for (const [location, file] of [['/checkout/other.test.mjs', 'other.test.mjs'], ['./other.test.mjs', 'other.test.mjs'], ['file:///checkout/x/other.test.mjs', 'x/other.test.mjs']]) {
+    const output = '✖ failing tests:\n  test at ' + location + ':4:2\n  ✖ flaky-one (12ms)\n'
+    assert.equal(failingTestFiles(output, 'node', '/checkout')[0].file, file, location)
+  }
+})
+
+// Mutation: deleting the block-boundary reset lets a later binary's panic line supply an earlier failure's file.
+test('LRF10 Cargo failure ownership ends at the test-result and Running boundaries', () => {
+  for (const boundary of ['test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s', '     Running unittests src/lib.rs (target/debug/deps/x-1)', '   Doc-tests x']) {
+    const output = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nno location here\n' + boundary + '\nthread panicked at crates/x/src/app.rs:1:2:\n'
+    assert.deepEqual(failingTestFiles(output, 'cargo', '/checkout'), [{ test: 'app::t', file: null }], boundary)
+  }
+  const owned = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nthread panicked at crates/x/src/app.rs:1:2:\n'
+  assert.deepEqual(failingTestFiles(owned, 'cargo', '/checkout'), [{ test: 'app::t', file: 'crates/x/src/app.rs' }])
+})

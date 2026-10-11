@@ -1990,3 +1990,67 @@ test('L2A exclude cleanup keeps a symlinked exclude a symlink and keeps the file
   assert.equal(readFileSync(target, 'utf8'), 'operator\n')
   assert.equal(statSync(target).mode & 0o777, 0o600)
 })
+
+// Issue 1761 lane 2b: an install owns an exclude pair, and a setup-then-cleanup
+// round trip leaves the shared exclude byte-identical. REAL git, no mocked spawn or status.
+function cwOwner(path) { return '# worktree-setup-owner: ' + JSON.stringify(path) + '\n/node_modules\n' }
+function cwGit(cwd, ...args) {
+  const r = spawnSync('git', ['-c', 'user.name=CW', '-c', 'user.email=cw@example.invalid', ...args], { cwd, encoding: 'utf8' })
+  if (r.error || r.signal || r.status !== 0) throw new Error(JSON.stringify({ args, status: r.status, stderr: r.stderr }))
+  return r.stdout.trim()
+}
+function cwPut(path, value) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value) }
+async function cwFixture(fn, { ignored = true } = {}) {
+  const base = scratchDir('cw-probe-')
+  const checkout = join(base, 'primary'), laneDir = join(base, 'linked')
+  mkdirSync(checkout)
+  cwGit(checkout, 'init', '-q')
+  cwPut(join(checkout, 'package-lock.json'), 'lock-v1\n')
+  if (ignored) cwPut(join(checkout, '.gitignore'), 'node_modules/\n')
+  cwGit(checkout, 'add', '-A')
+  cwGit(checkout, 'commit', '-qm', 'fixture')
+  cwPut(join(checkout, 'node_modules/marker'), 'main')
+  cwGit(checkout, 'worktree', 'add', '--detach', laneDir, 'HEAD')
+  const exclude = join(checkout, '.git/info/exclude')
+  try { return await fn({ base, checkout, laneDir, exclude }) } finally {
+    for (const line of cwGit(checkout, 'worktree', 'list', '--porcelain').split('\n')) {
+      if (line.startsWith('worktree ') && line.slice(9) !== checkout) spawnSync('git', ['worktree', 'remove', '--force', line.slice(9)], { cwd: checkout })
+    }
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+
+// MUTATION CW9: write install pairs for checkout instead of laneDir; the exact-owner proof fails.
+test('CW9', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\n')
+  await runWorktreeSetup({
+    checkout: f.checkout, laneDir: f.laneDir, fenceFiles: ['package-lock.json:1-2'],
+    steps: [{ kind: 'symlink', path: 'node_modules', lockfile: 'package-lock.json', install: 'mkdir node_modules; printf installed > node_modules/marker' }],
+  })
+  assert.equal(readFileSync(join(f.laneDir, 'node_modules/marker'), 'utf8'), 'installed')
+  assert.ok(readFileSync(f.exclude, 'utf8').includes(cwOwner(f.laneDir)), 'the install owns a pair for its lane')
+  assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }), { removed: 1, reason: null })
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\n')
+}, { ignored: false }))
+
+// MUTATION CW10: force the append prefix to a newline; cleanup leaves one extra byte.
+test('CW10', () => cwFixture(async (f) => {
+  cwPut(f.exclude, 'stock\n')
+  await runWorktreeSetup({ checkout: f.checkout, laneDir: f.laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+  const cleanup = removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir })
+  assert.equal(cleanup.removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\n')
+}))
+
+// MUTATION CW11: force the append prefix to a newline; the operator-blank round trip grows.
+// The seeded second witness also kills any cleanup-side removal of an operator blank line.
+test('CW11', () => cwFixture(async (f) => {
+  const original = 'stock\n\n'
+  cwPut(f.exclude, original)
+  await runWorktreeSetup({ checkout: f.checkout, laneDir: f.laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+  assert.equal(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }).removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), original)
+  cwPut(f.exclude, original + cwOwner(f.laneDir))
+  assert.equal(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }).removed, 1)
+  assert.equal(readFileSync(f.exclude, 'utf8'), original, 'the operator blank line before an owned pair survives')
+}))

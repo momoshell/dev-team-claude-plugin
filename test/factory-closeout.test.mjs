@@ -10,6 +10,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
@@ -2502,3 +2503,153 @@ test('L2A a failed reap exclude cleanup is reported in the worktree detail and r
   assert.deepEqual(rows(result).map((row) => row.step).slice(-3), ['branch', 'prune', 'archive'])
   assert.match(readFileSync(exclude, 'utf8'), /^# worktree-setup-owner: /)
 })
+
+// Issue 1761 lane 2b: closeout's cold-verify and merge-check scratch worktrees run
+// the ratified setup from MAIN and remove only the exclude pair their path owns.
+// Real git and real filesystem effects; the profile lookup is injected.
+const CW_LINK = [{ kind: 'symlink', path: 'node_modules' }]
+function cwOwner(path) { return '# worktree-setup-owner: ' + JSON.stringify(path) + '\n/node_modules\n' }
+function cwSpawn(file, args, cwd) { return spawnSync(file, args, { cwd, encoding: 'utf8' }) }
+function cwGit(cwd, ...args) {
+  const r = cwSpawn('git', ['-c', 'user.name=CW', '-c', 'user.email=cw@example.invalid', ...args], cwd)
+  if (r.error || r.signal || r.status !== 0) throw new Error(JSON.stringify({ args, status: r.status, stderr: r.stderr }))
+  return r.stdout.trim()
+}
+function cwPut(path, value) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, value) }
+function cwFixture(fn) {
+  const base = scratchDir('cw-closeout-')
+  const checkout = join(base, 'primary'), laneDir = join(base, 'linked')
+  mkdirSync(checkout)
+  cwGit(checkout, 'init', '-q')
+  cwPut(join(checkout, 'package-lock.json'), 'lock-v1\n')
+  cwPut(join(checkout, '.gitignore'), 'node_modules/\nsetup-cwd\n')
+  cwGit(checkout, 'add', '-A')
+  cwGit(checkout, 'commit', '-qm', 'fixture')
+  cwPut(join(checkout, 'node_modules/marker'), 'main')
+  cwGit(checkout, 'worktree', 'add', '--detach', laneDir, 'HEAD')
+  cwPut(join(laneDir, 'node_modules/marker'), 'lane')
+  const exclude = join(checkout, '.git/info/exclude')
+  const original = 'stock\n' + cwOwner(join(base, 'other-owner'))
+  cwPut(exclude, original)
+  const f = { base, checkout, laneDir, exclude, original }
+  try { return fn(f) } finally {
+    for (const line of cwGit(checkout, 'worktree', 'list', '--porcelain').split('\n')) {
+      if (line.startsWith('worktree ') && line.slice(9) !== checkout) cwSpawn('git', ['worktree', 'remove', '--force', line.slice(9)], checkout)
+    }
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+function cwCloseout(f, steps, merge = false, checkout = f.checkout) {
+  const calls = [], observations = [], made = []
+  const lane = 'probe-lane'
+  const crewDir = join(f.base, '.crew', basename(checkout), lane)
+  cwPut(join(crewDir, 'crew.json'), JSON.stringify({ task: lane, checkout, lane_name: lane, lane_fence: [{ lane, files: ['package-lock.json'] }] }))
+  cwPut(join(crewDir, 'returns/task.json'), JSON.stringify({ status: 'escalation', details: { commit: 'abc123', stages: [], head: 'abc123' } }))
+  cwPut(join(crewDir, 'task/gate.mjs'), '// fixture gate\n')
+  cwPut(join(crewDir, 'journal.jsonl'), '')
+  const ok = { status: 0, stdout: '', stderr: '' }
+  const deps = {
+    home: f.base, factoryRoot: join(f.base, 'factory'), defaultDbPath: () => join(f.base, 'ledger.db'),
+    resolveTaskReturn: () => join(crewDir, 'returns/task.json'),
+    newest: () => 1000, sleep: () => {}, log: () => {}, baseBranch: () => ({ branch: 'main' }),
+    cpSync: () => {},
+    mkdtempSync: () => { const p = scratchDir('scratch-', { parent: f.base }); made.push(p); return p },
+    worktreeSetup: ({ checkout: asked }) => { calls.push(['lookup', asked]); return { steps, basis: 'ratified' } },
+    spawn: ({ file, args = [], cwd }) => {
+      calls.push([file, ...args])
+      if (file === 'gh') return { ...ok, stdout: JSON.stringify({ number: 1, state: 'OPEN', body: '' }) }
+      if (file === 'pgrep') return { ...ok, status: 1 }
+      if (file === 'node') {
+        if (args.includes('teardown')) return { ...ok, stdout: JSON.stringify({ seats: null }) + '\n' }
+        if (args.includes('--test')) {
+          if (made.includes(cwd)) {
+            const marker = join(cwd, 'node_modules/marker')
+            observations.push({
+              cwd,
+              marker: existsSync(marker) ? readFileSync(marker, 'utf8') : null,
+              linked: existsSync(join(cwd, 'node_modules')) && lstatSync(join(cwd, 'node_modules')).isSymbolicLink(),
+              exclude: readFileSync(f.exclude, 'utf8'),
+            })
+          }
+          return { ...ok, stdout: '# pass 1\n# fail 0\n# skipped 0\n' }
+        }
+        return ok
+      }
+      if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') return cwSpawn(file, [...args.slice(0, -1), 'HEAD'], cwd)
+      if (file === 'git' && (args[0] === 'merge' || args[0] === 'rebase')) return ok
+      return cwSpawn(file, args, cwd)
+    },
+  }
+  const result = merge ? mergeCheck({ lanes: ['one', 'two'], checkout, deps }) : recover({ lane, checkout, deps })
+  return { result, observations, calls, made, exclude: readFileSync(f.exclude, 'utf8') }
+}
+
+// MUTATION CW5: inside runColdWorktreeSetup, hand runWorktreeSetupSync the caller checkout instead of MAIN; the cold suite reads the linked tree's lane marker.
+test('CW5', () => cwFixture((f) => {
+  const r = cwCloseout(f, CW_LINK, false, f.laneDir)
+  const lookups = r.calls.filter((call) => call[0] === 'lookup')
+  assert.ok(lookups.length > 0)
+  for (const [, asked] of lookups) assert.equal(realpathSync(asked), realpathSync(f.checkout), 'every lookup uses MAIN')
+  assert.equal(r.result.code, 0, JSON.stringify(r.result.refusal))
+  assert.equal(r.observations.length, 1)
+  assert.equal(r.observations[0].marker, 'main')
+  assert.equal(r.observations[0].linked, true)
+  assert.ok(r.observations[0].exclude.includes(cwOwner(r.observations[0].cwd)), 'the cold pair exists before the suite')
+  assert.equal(r.exclude, f.original)
+  assert.ok(r.made.every((path) => !existsSync(path)))
+}))
+
+// MUTATION CW6: skip cold-verify setup; the exit-17 command cannot refuse the cold suite.
+test('CW6', () => cwFixture((f) => {
+  const r = cwCloseout(f, [...CW_LINK, { kind: 'command', run: 'exit 17' }])
+  const refusal = r.result.refusal
+  assert.equal(refusal?.step, 'cold-verify')
+  assert.equal(refusal.reason, 'cold-verify-failed')
+  assert.match(refusal.message, /worktree-setup-failed/)
+  assert.equal(r.observations.length, 0, 'the cold suite never spawned')
+  assert.equal(r.made.length, 1)
+  assert.equal(existsSync(r.made[0]), false)
+  assert.equal(r.exclude, f.original)
+}))
+
+// MUTATION CW7: skip the scratch setup call; no post-merge setup appears before the suite.
+test('CW7', () => cwFixture((f) => {
+  const r = cwCloseout(f, [{ kind: 'command', run: 'printf setup > node_modules-proof; rm node_modules-proof' }], true)
+  const merges = r.calls.flatMap((call, index) => (call[0] === 'git' && call[1] === 'merge' ? [index] : []))
+  const setups = r.calls.flatMap((call, index) => (call[0] === '/bin/sh' ? [index] : []))
+  const suite = r.calls.findIndex((call) => call[0] === 'node' && call.includes('--test'))
+  assert.equal(r.result.code, 0, JSON.stringify(r.result.refusal))
+  assert.equal(merges.length, 2)
+  assert.equal(setups.length, 1)
+  assert.ok(setups[0] > merges[1] && setups[0] < suite, 'merge, merge, setup, suite')
+  assert.deepEqual(r.result.lines.map((line) => line.step), ['pr-open', 'scratch-worktree', 'merge', 'suite', 'anchor-repair', 'report'])
+}))
+
+// MUTATION CW8: skip the scratch setup call; exit 17 no longer refuses or suppresses the suite.
+test('CW8', () => cwFixture((f) => {
+  const r = cwCloseout(f, [{ kind: 'command', run: 'exit 17' }], true)
+  const refusal = r.result.refusal
+  assert.equal(refusal?.reason, 'worktree-failed')
+  assert.match(refusal.message, /worktree-setup-failed/)
+  assert.equal(r.observations.length, 0, 'the scratch suite never spawned')
+  assert.ok(r.made.length > 0)
+  assert.ok(r.made.every((path) => !existsSync(path)), 'the scratch worktree is removed')
+}))
+
+// MUTATION C13: drop removeWorktreeExcludes from removeScratch
+test('merge-check removes scratch-owned exclude pairs byte-for-byte', () => cwFixture((f) => {
+  const r = cwCloseout(f, CW_LINK, true)
+  assert.equal(r.result.code, 0, JSON.stringify(r.result.refusal))
+  assert.equal(r.observations.length, 1)
+  assert.ok(r.observations[0].exclude.includes(cwOwner(r.observations[0].cwd)), 'the scratch pair exists during the suite')
+  assert.equal(r.exclude, f.original)
+}))
+
+// MUTATION C14: drop cold-verify's exact-owner removeWorktreeExcludes
+test('recover cold-verify removes cold-owned exclude pairs byte-for-byte', () => cwFixture((f) => {
+  const r = cwCloseout(f, CW_LINK)
+  assert.equal(r.result.code, 0, JSON.stringify(r.result.refusal))
+  assert.equal(r.observations.length, 1)
+  assert.ok(r.observations[0].exclude.includes(cwOwner(r.observations[0].cwd)), 'the cold pair exists during the suite')
+  assert.equal(r.exclude, f.original)
+}))

@@ -7276,7 +7276,7 @@ test('RG4 cargo named test results, not exit status, determine control and mutat
     driveTask(ctx, io)
     assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, item.expected)
   }
-  assert.equal(cargoNameVerdict('test result: ok\ntest tests::ui_uf3_an_asset_is_served_with_its_type ... ok', 'ui_uf3_an_asset_is_served_with_its_type'), 'passed')
+  assert.equal(cargoNameVerdict(`${cargoSummary}\ntest tests::ui_uf3_an_asset_is_served_with_its_type ... ok`, 'ui_uf3_an_asset_is_served_with_its_type'), 'passed')
   assert.equal(cargoNameVerdict('cargo-suite: UNMEASURED - cargo produced no "test result:" summary line', 'guard_fn'), null)
 })
 
@@ -7364,6 +7364,38 @@ test('RG14 a snapshot failure in a cargo proof is an unproven hardening row, not
   assert.equal(row?.outcome, 'unproven')
   assert.match(row?.why ?? '', /rev-parse HEAD exited 128/)
   assert.notEqual(result.details?.escalation?.where, 'driver')
+})
+
+test('RG15 a cargo summary without counts is unmeasured, never a pass or fail verdict', () => {
+  // MUTATION: drop the countless-summary refusal; test result: ok. plus one named line reads as passed (FAILED as failed).
+  for (const verdict of ['ok', 'FAILED']) assert.equal(cargoNameVerdict(`test suite::guard_fn ... ${verdict}\ntest result: ${verdict === 'ok' ? 'ok' : 'FAILED'}.`, 'guard_fn'), null)
+  assert.equal(cargoNameVerdict(`${cargoOutput('guard_fn')}\ntest result: ok.`, 'guard_fn'), null)
+  const { io, ctx } = cargoInvocationCase({ runFn: (_text, n) => ({ ...b863Green(0), output: `test suite::guard_fn ... ${n === 2 ? 'ok' : 'FAILED'}\ntest result: ok.` }) })
+  driveTask(ctx, io)
+  assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
+})
+
+test('RG16 the cargo mutation never rewrites an inline guard that shares the find text', () => {
+  // MUTATION: bind the mutation on the whole file again; the guard's own literal is rewritten and a guard that never reads GUARD reads killed.
+  const source = 'pub const GUARD: bool = false;\n'
+  const built = `${source}#[cfg(test)]\nmod guard_tests { #[test] fn guard_fn() { assert_eq!("GUARD: bool = false".len(), 19); } }\n`
+  const mutants = []
+  const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ class: 'coverage' }), source, flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => {
+    const current = io.readFile(`${CTX.checkout}/src/lib.rs`)
+    mutants.push(current)
+    return { ...b863Green(0), output: cargoOutput('guard_fn', current.includes('"GUARD: bool = false"') ? 'ok' : 'FAILED') }
+  } })
+  driveTask(ctx, io)
+  const row = invocationRows(io).find((candidate) => candidate.round === 2)
+  assert.notEqual(row?.outcome, 'killed')
+  assert.ok(mutants.every((text) => text.includes('"GUARD: bool = false"')), 'the guard bytes were rewritten')
+  for (const [cls, expected] of [['coverage', 'source-regressed'], [undefined, 'guard-misplaced']]) {
+    const onlyInGuard = cargoInvocationCase({ entry: cargoEntry({ ...(cls ? { class: cls } : {}), find: '19); }', replace: '20); }' }), source, flipTo: { set: { [`${CTX.checkout}/src/lib.rs`]: built } }, runFn: () => { throw new Error('a guard-only find must not run') } })
+    driveTask(onlyInGuard.ctx, onlyInGuard.io)
+    const guardRow = invocationRows(onlyInGuard.io).find((candidate) => candidate.round === 2)
+    assert.equal(guardRow?.outcome, expected)
+    assert.match(guardRow?.why ?? '', /only inside the test code/)
+  }
 })
 
 test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {

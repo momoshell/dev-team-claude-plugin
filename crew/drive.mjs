@@ -15119,8 +15119,14 @@ export function cargoNameVerdict(output, name) {
   if (!/^test result:/m.test(text)) return null
   // Under --nocapture or --show-output a test's own stdout can print a line shaped like a result.
   // Result lines beyond what the harness summaries count cannot all be harness lines: unmeasured.
-  let summarized = null
-  for (const m of text.matchAll(/^test result: \w+\. (\d+) passed; (\d+) failed; (\d+) ignored/gm)) summarized = (summarized ?? 0) + Number(m[1]) + Number(m[2]) + Number(m[3])
+  // A summary line without its counts cannot bound the result lines, so nothing is adjudicated.
+  const summaries = text.match(/^test result:.*$/gm) ?? []
+  let summarized = 0
+  for (const line of summaries) {
+    const counts = /^test result: \w+\. (\d+) passed; (\d+) failed(?:; (\d+) ignored)?/.exec(line)
+    if (!counts) return null
+    summarized += Number(counts[1]) + Number(counts[2]) + Number(counts[3] ?? 0)
+  }
   let reported = 0
   const hits = []
   for (const line of text.split(/\r?\n/)) {
@@ -15132,7 +15138,7 @@ export function cargoNameVerdict(output, name) {
     hits.push(match[2])
   }
   if (hits.length > 1) return 'ambiguous'
-  if (summarized !== null && reported > summarized) return null
+  if (reported > summarized) return null
   if (hits.length === 0) return 'absent'
   return hits[0] === 'ignored' ? 'skipped' : hits[0] === 'ok' ? 'passed' : 'failed'
 }
@@ -15232,6 +15238,17 @@ function tokenizeRust(source) {
 }
 
 export function rustNonTestRegion(source) {
+  const removals = rustTestSpans(source)
+  if (removals === null) return null
+  if (!removals.length) return source
+  let result = ''
+  let at = 0
+  for (const [from, to] of removals) { result += source.slice(at, from); at = to }
+  return result + source.slice(at)
+}
+
+// The [from, to) spans of every Rust test item (with its doc comments, attributes and line end), or null when unlexable.
+export function rustTestSpans(source) {
   if (typeof source !== 'string') return null
   const tokens = tokenizeRust(source)
   if (tokens === null) return null
@@ -15288,11 +15305,7 @@ export function rustNonTestRegion(source) {
       i = endIndex + 1
     } else i = attrEnd + 1
   }
-  if (!removals.length) return source
-  let result = ''
-  let at = 0
-  for (const [from, to] of removals) { result += source.slice(at, from); at = to }
-  return result + source.slice(at)
+  return removals
 }
 
 export function topLevelNameVerdict(output, name) {
@@ -16065,12 +16078,32 @@ function proveCargoInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, r
   const reviewRegion = rustNonTestRegion(S.bytes)
   const repairedRegion = rustNonTestRegion(repairedFile)
   if (reviewRegion === null || repairedRegion === null) return { row: row('unproven', 'cargo non-test region was unmeasured'), fatal: null }
+  const guardOnlyWhy = `the declared find binds only inside the test code of ${entry.file}; the mutation must edit the implementation, never the guard`
   if (coverage) {
     const cargoReviewBound = applyMutationAnchor(reviewRegion, entry.find, entry.replace)
-    if (cargoReviewBound.text === null) return { row: row('source-regressed', bindingWhy(cargoReviewBound.mode, entry.file)), fatal: null }
+    if (cargoReviewBound.text === null) {
+      const guardOnly = applyMutationAnchor(repairedRegion, entry.find, entry.replace).text === null && applyMutationAnchor(repairedFile, entry.find, entry.replace).text !== null
+      return { row: row('source-regressed', guardOnly ? guardOnlyWhy : bindingWhy(cargoReviewBound.mode, entry.file)), fatal: null }
+    }
   }
-  const bound = applyMutationAnchor(repairedFile, entry.find, entry.replace)
-  if (bound.text === null) return { row: row(BINDING_OUTCOME[bound.mode], bindingWhy(bound.mode, entry.file)), fatal: null }
+  // The mutation edits the implementation only: every test item, an inline guard included, is masked out before binding.
+  const testSpans = rustTestSpans(repairedFile)
+  const marks = testSpans.map((_, k) => `\u0000cargo-test-span-${k}\u0000`)
+  let masked = ''
+  let maskedAt = 0
+  testSpans.forEach(([from, to], k) => { masked += repairedFile.slice(maskedAt, from) + marks[k]; maskedAt = to })
+  masked += repairedFile.slice(maskedAt)
+  const maskedBound = applyMutationAnchor(masked, entry.find, entry.replace)
+  if (maskedBound.text === null) {
+    if (applyMutationAnchor(repairedFile, entry.find, entry.replace).text !== null) return { row: row('guard-misplaced', guardOnlyWhy), fatal: null }
+    return { row: row(BINDING_OUTCOME[maskedBound.mode], bindingWhy(maskedBound.mode, entry.file)), fatal: null }
+  }
+  let mutatedText = maskedBound.text
+  for (const [k, mark] of marks.entries()) {
+    if (mutatedText.split(mark).length !== 2) return { row: row('anchor-unsafe', `the declared mutation of ${entry.file} would rewrite test code`), fatal: null }
+    mutatedText = mutatedText.replace(mark, () => repairedFile.slice(testSpans[k][0], testSpans[k][1]))
+  }
+  const bound = { mode: maskedBound.mode, text: mutatedText }
   const cargoSourceUnchanged = repairedFile === S.bytes || reviewRegion === repairedRegion
   const invoke = () => hardenRun(entry.invocation, { reap: true })
   let fatal = null

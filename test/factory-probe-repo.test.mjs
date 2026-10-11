@@ -2066,3 +2066,20 @@ test('an install after an unterminated operator exclude line round-trips the ori
   assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: f.laneDir }), { removed: 1, reason: null })
   assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
 }, { ignored: false }))
+
+// MUTATION: always give the newline back on an -eol removal; the later pair's marker joins the operator line and is never removed.
+test('two pairs after an unterminated operator exclude line clean up in either order and restore the original bytes', () => cwFixture(async (f) => {
+  const second = join(f.base, 'second')
+  cwGit(f.checkout, 'worktree', 'add', '--detach', second, 'HEAD')
+  for (const firstOut of [f.laneDir, second]) {
+    cwPut(f.exclude, 'stock\noperator-entry')
+    for (const laneDir of [f.laneDir, second]) {
+      rmSync(join(laneDir, 'node_modules'), { recursive: true, force: true })
+      await runWorktreeSetup({ checkout: f.checkout, laneDir, steps: [{ kind: 'symlink', path: 'node_modules' }] })
+    }
+    const lastOut = firstOut === f.laneDir ? second : f.laneDir
+    assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: firstOut }), { removed: 1, reason: null })
+    assert.deepEqual(removeWorktreeExcludes({ checkout: f.checkout, laneDir: lastOut }), { removed: 1, reason: null })
+    assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
+  }
+}))

@@ -2028,8 +2028,15 @@ export function removeWorktreeExcludes({ checkout, laneDir, deps } = {}) {
           try { decodedOwner = JSON.parse(Buffer.from(content.slice(marker.length), 'latin1').toString('utf8')) } catch {}
           const nextLine = records[i + 1].replace(/\r?\n$/, '')
           if (decodedOwner === laneDir && nextLine.startsWith('/')) {
-            // Give back the newline the append added after an unterminated operator line.
-            if (marker === EXCLUDE_OWNER_EOL && kept.length && kept[kept.length - 1].endsWith('\n')) kept[kept.length - 1] = kept[kept.length - 1].slice(0, -1)
+            // Give back the newline the append added after an unterminated operator line, but only
+            // when nothing follows; a following pair inherits the record so its own cleanup gives it back.
+            if (marker === EXCLUDE_OWNER_EOL) {
+              if (i + 2 >= records.length) {
+                if (kept.length && kept[kept.length - 1].endsWith('\n')) kept[kept.length - 1] = kept[kept.length - 1].slice(0, -1)
+              } else if (records[i + 2].startsWith(EXCLUDE_OWNER)) {
+                records[i + 2] = EXCLUDE_OWNER_EOL + records[i + 2].slice(EXCLUDE_OWNER.length)
+              }
+            }
             removed++; i++; continue
           }
         }

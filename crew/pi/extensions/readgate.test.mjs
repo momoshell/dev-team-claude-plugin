@@ -1109,3 +1109,88 @@ test('missing cat operand fails open and records failure', () => {
   assert.equal(entries.length, 1)
   assert.equal(entries[0].read_gate_failure.tool, 'bash')
 })
+
+test('RG1 codemode commits child reads only after a successful parent', () => {
+  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
+  const input = { path: f.ranged, offset: 1, limit: 20 }
+  const child = (parent, id = parent + '/read', readInput = input) => {
+    call(gate, 'read', readInput, f.root, id)
+    gate.onToolResult({ toolName: 'read', toolCallId: id, parentToolCallId: parent, input: readInput, isError: false, content: [{ type: 'text', text: 'child output' }] }, { cwd: f.root })
+  }
+  child('failed')
+  gate.onToolResult({ toolName: 'codemode', toolCallId: 'failed', isError: true, content: [], details: { calls: [{ id: 'failed/read', name: 'read', status: 'ok' }, { id: 'failed/other', name: 'bash', status: 'error' }] } })
+  assert.equal(call(gate, 'read', input, f.root, 'failed-retry'), undefined)
+  assert.equal(rows.some(row => row.read_gate_refusal), false)
+
+  child('successful', 'successful/read')
+  gate.onToolResult({ toolName: 'codemode', toolCallId: 'successful', content: [], details: { calls: [{ id: 'successful/read', name: 'read', status: 'ok' }] } })
+  assert.match(call(gate, 'read', input, f.root, 'successful-retry')?.reason ?? '', /delivered at turn/)
+  assert.equal(rows.filter(row => row.read_gate_refusal).length, 1)
+
+  const capped = join(f.root, 'capped-child.txt')
+  writeFileSync(capped, 'line\n'.repeat(351))
+  const cappedGate = gateFor(f, { env: { CREW_READGATE_MAX_BYTES: '12' } })
+  const cappedInput = { path: capped, offset: 1, limit: 351 }
+  call(cappedGate, 'read', cappedInput, f.root, 'capped/read')
+  cappedGate.onToolResult({ toolName: 'read', toolCallId: 'capped/read', parentToolCallId: 'capped', input: cappedInput, isError: false, content: [{ type: 'text', text: 'line\n'.repeat(351) }] }, { cwd: f.root })
+  cappedGate.onToolResult({ toolName: 'codemode', toolCallId: 'capped', content: [], details: { calls: [{ id: 'capped/read', name: 'read', status: 'ok' }] } })
+  assert.equal(call(cappedGate, 'read', { path: capped, offset: 1, limit: 1 }, f.root, 'capped-covered')?.block, true)
+  assert.equal(call(cappedGate, 'read', { path: capped, offset: 3, limit: 1 }, f.root, 'capped-suffix'), undefined)
+
+  const direct = { path: f.edge, offset: 1, limit: 20 }
+  call(gate, 'read', direct, f.root, 'direct')
+  deliver(gate, 'direct')
+  assert.equal(call(gate, 'read', direct, f.root, 'direct-repeat')?.block, true)
+})
+
+test('RG2 malformed and failed codemode parents discard provisional child reads', () => {
+  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
+  const cases = [
+    { id: 'is-error', parent: { isError: true, details: { calls: [{ id: 'is-error/read', name: 'read', status: 'ok' }] } } },
+    { id: 'bad-calls', parent: { details: { calls: {} } } },
+    { id: 'bad-entry', parent: { details: { calls: [null] } } },
+  ]
+  for (const { id, parent } of cases) {
+    const path = join(f.root, id + '.txt')
+    writeFileSync(path, 'x\n'.repeat(50))
+    const input = { path, offset: 1, limit: 20 }
+    call(gate, 'read', input, f.root, id + '/read')
+    gate.onToolResult({ toolName: 'read', toolCallId: id + '/read', parentToolCallId: id, input, content: [{ type: 'text', text: 'x\n'.repeat(20) }] }, { cwd: f.root })
+    gate.onToolResult({ toolName: 'codemode', toolCallId: id, content: [], ...parent })
+    assert.equal(call(gate, 'read', input, f.root, id + '/retry'), undefined, id)
+    gate.onToolResult({ toolName: 'codemode', toolCallId: id, content: [], details: { calls: [{ id: id + '/read', name: 'read', status: 'ok' }] } })
+    assert.equal(call(gate, 'read', input, f.root, id + '/replay-retry'), undefined, id)
+  }
+
+  const pendingPath = join(f.root, 'pending-child.txt')
+  writeFileSync(pendingPath, 'p\n'.repeat(50))
+  const pendingInput = { path: pendingPath, offset: 1, limit: 20 }
+  call(gate, 'read', pendingInput, f.root, 'pending/first')
+  gate.onToolResult({ toolName: 'read', toolCallId: 'pending/first', parentToolCallId: 'pending', input: pendingInput, content: [{ type: 'text', text: 'p\\n'.repeat(20) }] }, { cwd: f.root })
+  assert.equal(gate.onToolCall({ toolName: 'read', toolCallId: 'pending/second', parentToolCallId: 'pending', input: pendingInput }, { cwd: f.root }), undefined)
+  assert.equal(rows.some(row => row.read_gate_refusal), false)
+})
+
+test('RG3 provisional codemode deliveries are isolated by parent', () => {
+  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
+  const inputs = Object.fromEntries(['X', 'Y', 'Z'].map(name => {
+    const path = join(f.root, name + '.txt')
+    writeFileSync(path, name.repeat(2) + '\n'.repeat(30))
+    return [name, { path, offset: 1, limit: 20 }]
+  }))
+  const stage = (parent, name) => {
+    const id = parent + '/read'
+    call(gate, 'read', inputs[name], f.root, id)
+    gate.onToolResult({ toolName: 'read', toolCallId: id, parentToolCallId: parent, input: inputs[name], content: [{ type: 'text', text: 'child output' }] }, { cwd: f.root })
+  }
+  stage('pa', 'X')
+  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pa', isError: true, content: [], details: { calls: [{ id: 'pa/read', name: 'read', status: 'ok' }] } })
+  stage('pb', 'Y')
+  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pb', content: [], details: { calls: [{ id: 'pb/read', name: 'read', status: 'ok' }] } })
+  stage('pc', 'Z')
+  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pc', content: [], details: { calls: [{ id: 'pc/read', name: 'read', status: 'ok' }] } })
+  assert.equal(call(gate, 'read', inputs.X, f.root, 'X-retry')?.block, undefined)
+  assert.match(call(gate, 'read', inputs.Y, f.root, 'Y-retry')?.reason ?? '', /delivered at turn/)
+  assert.match(call(gate, 'read', inputs.Z, f.root, 'Z-retry')?.reason ?? '', /delivered at turn/)
+  assert.equal(rows.filter(row => row.read_gate_refusal).length, 2)
+})

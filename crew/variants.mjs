@@ -50,6 +50,7 @@ const EXECUTABLE_SHAPES = Object.freeze({
       Object.freeze({
         name: 'findings', kind: 'records', allow_empty: true,
         item_fields: Object.freeze(['id', 'severity', 'location', 'summary', 'evidence', 'disposition']),
+      optional_item_fields: Object.freeze(['replacement']),
         item_values: Object.freeze({
           severity: Object.freeze(['must-fix', 'should-fix', 'consider']),
           disposition: Object.freeze(['auto-fix', 'ask-user', 'no-op']),

@@ -2,6 +2,99 @@ export const FAILURE_BLOCK_LINES = 40
 export const FAILURE_BLOCK_BYTES = 2048
 export const FAILURES_SECTION_BYTES = 12288
 
+import { relative, isAbsolute, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export const CARGO_CAPTURE_OFF = /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/
+export const FLAKE_RERUN_REASONS = Object.freeze(['runner-unparsed', 'test-unmapped', 'in-fence', 'command-unshaped'])
+
+function safeTestFile(token, checkout) {
+  if (typeof token !== 'string' || typeof checkout !== 'string' || !token || /[\0\r\n\\]/.test(token)) return null
+  let value = token.replace(/[),;\]}]+$/g, '').replace(/^[([{]+/, '').replace(/:(?:\d+)(?::\d+)?$/, '')
+  if (!value) return null
+  if (/^file:/i.test(value)) {
+    try { const url = new URL(value); if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) return null; value = fileURLToPath(url) } catch { return null }
+  }
+  if (isAbsolute(value)) {
+    const rel = relative(checkout, value)
+    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return null
+    value = rel.split(sep).join('/')
+  } else if (value.startsWith('./')) value = value.slice(2)
+  if (!value || /^(?:[A-Za-z]:|\/)/.test(value) || /[\\*?{}\[\]]/.test(value)) return null
+  const parts = value.split('/')
+  if (parts.some((part) => part === '.' || part === '..')) return null
+  return value
+}
+
+export function failingTestFiles(output, runner, checkout) {
+  if (typeof output !== 'string') return []
+  const text = output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r\n/g, '\n')
+  const results = []
+  const add = (test, location) => results.push({ test, file: typeof location === 'string' ? safeTestFile(location, checkout) : null })
+  if (runner === 'node' && text.includes('✖ failing tests:')) {
+    const specTail = text.split('✖ failing tests:').slice(1).join('✖ failing tests:')
+    const lines = specTail.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      const at = /^\s*test at (.+?)\s*$/.exec(lines[i])
+      const title = /^\s*✖\s+(.+?)(?:\s+\(\d+(?:\.\d+)?\s*ms\))?\s*$/.exec(lines[i + 1] || '')
+      if (at && title) add(title[1], at[1])
+    }
+    return results
+  }
+  if (runner === 'node') {
+    const lines = text.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^\s*not ok \d+ - (.*)$/.exec(lines[i])
+      if (!m || /# (?:SKIP|TODO)\b/.test(lines[i])) continue
+      let location = null
+      for (let j = i + 1; j < lines.length && (!lines[j].trim() || /^\s+/.test(lines[j])); j++) {
+        const loc = /(?:file:\/\/[^\s)]+|(?:\.\.?\/|[A-Za-z]:[\\/]|\/)[^\s:]+\.(?:mjs|js|cjs|ts))(?::\d+(?::\d+)?)?/.exec(lines[j])
+        if (loc) { location = loc[0]; break }
+      }
+      add(m[1], location)
+    }
+    return results
+  }
+  if (runner !== 'cargo') return []
+  const failures = [...text.matchAll(/^test (.+) \.\.\. FAILED$/gm)].map((match) => ({ test: match[1], file: null, stdoutSeen: false }))
+  let current = null
+  for (const line of text.split('\n')) {
+    const stdout = /^---- (.+) stdout ----$/.exec(line)
+    if (stdout) {
+      current = failures.find((entry) => entry.test === stdout[1] && !entry.stdoutSeen)
+      if (!current) { current = { test: stdout[1], file: null, stdoutSeen: true }; failures.push(current) }
+      else current.stdoutSeen = true
+      continue
+    }
+    if (!current) continue
+    const panic = /panicked at (.+?):\d+(?::\d+)?:/.exec(line)
+    if (!panic) continue
+    const file = safeTestFile(panic[1], checkout)
+    const srcMatch = /(?:^|\/)src\//.exec(file || '')
+    if (!srcMatch) continue
+    const modulePrefix = file.slice(srcMatch.index + srcMatch[0].length).replace(/\.rs$/, '').split('/')
+    if (['mod', 'lib', 'main'].includes(modulePrefix.at(-1))) modulePrefix.pop()
+    const testModules = current.test.split('::').slice(0, -1)
+    const attributable = modulePrefix.length + 1 >= testModules.length && modulePrefix.every((part, index) => testModules[index] === part)
+    if (!attributable) continue
+    const inlineParent = modulePrefix.length === testModules.length - 1 && testModules.at(-1) === 'tests'
+    if (modulePrefix.length !== testModules.length && !inlineParent) continue
+    if (current.conflict) continue
+    if (current.file && current.file !== file) { current.file = null; current.conflict = true }
+    else current.file = file
+  }
+  // lean: module-prefix Cargo attribution; use explicit binary/source metadata if legitimate failures remain unmappable
+  return failures.map(({ test, file }) => ({ test, file }))
+}
+
+export function isolatedTestCommand(command, runner, test, file, shellArg) {
+  if (typeof command !== 'string' || typeof shellArg !== 'function' || typeof file !== 'string' || !file.trim()) return null
+  if (runner === 'node') return 'node --test --test-reporter=tap ' + shellArg(file)
+  if (runner !== 'cargo' || typeof test !== 'string' || !test) return null
+  if (/(?:^|\s)--(?=\s|$)/.test(command) || /[&|;<>]/.test(command) || CARGO_CAPTURE_OFF.test(command)) return null
+  return command + ' -- --exact ' + shellArg(test)
+}
+
 export function dropPassingLines(text) {
   const raw = typeof text === 'string' ? text : ''
   // lean: retain one reporter output; stream segments if test-output volume becomes material

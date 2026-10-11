@@ -12,7 +12,8 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics } from './lane-red.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS } from './lane-red.mjs'
+import { classifyTestRunner } from '../scripts/factory/probe-repo.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -4940,6 +4941,7 @@ export function composePrBody(record) {
   const stages = Array.isArray(record?.stages) ? record.stages : []
   const shape = stageShape(stages)
   const anomalies = Array.isArray(record?.anomalies) ? record.anomalies : []
+  const flakes = Array.isArray(record?.flakes) ? record.flakes : []
   const repeated = collapseStages(stages).filter(({ count }) => count > 1).map(({ token, count }) => `${token} ×${count}`)
   const runLines = [
     ...(shape ? [shape] : []),
@@ -4950,7 +4952,7 @@ export function composePrBody(record) {
   const prSections = [
     ['## What', intent],
     ['## Why', why],
-    ['## Proof', [...gateLines, ...suiteLines, ...reviewLines].join('\n')],
+    ['## Proof', [...gateLines, ...suiteLines, ...flakes.map((row) => neutralizeClosingProse(`- Flake: ${row.stage} · ${row.test} · ${row.file} · ${row.rerun}`)), ...reviewLines].join('\n')],
     ...(hardeningLines.length > 0 ? [['## Hardening blind spots', hardeningLines.join('\n')]] : []),
     ...(files.length ? [['## Changed', files.map((f) => neutralizeClosingProse(`- ${f}`)).join('\n')]] : []),
     ['## Run', runLines.join('\n')],
@@ -6273,7 +6275,7 @@ function runTask(ctx, io, crash) {
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
-  const S = { consults: 0, stages: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  const S = { consults: 0, stages: [], flakes: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
@@ -9088,6 +9090,50 @@ function runTask(ctx, io, crash) {
   // Lane fences remain recorded context for operators, not placement admission.
   acceptedScope = scopeFiles
   let inScope = scopeMatcher(scopeFiles)
+  const flakeRerun = (result, command, runner, stageName, roundNumber) => {
+    const tests = failingTestFiles(result?.output, runner, ctx.checkout).map((entry) => ({ ...entry, rerun: null }))
+    const counts = parseSuiteCounts(result?.output)
+    let reason = null
+    if (runner !== 'node' && runner !== 'cargo') reason = FLAKE_RERUN_REASONS[0]
+    else if (counts === null) reason = FLAKE_RERUN_REASONS[1]
+    else if (counts.fail <= 0) reason = FLAKE_RERUN_REASONS[1]
+    else if (tests.length !== counts.fail) reason = FLAKE_RERUN_REASONS[1]
+    else if (tests.some(({ file }) => file === null)) reason = FLAKE_RERUN_REASONS[1]
+    else if (tests.some(({ file }) => inScope(file))) reason = FLAKE_RERUN_REASONS[2]
+    const commands = new Map()
+    if (reason === null) {
+      for (const entry of tests) {
+        const isolated = isolatedTestCommand(command, runner, entry.test, entry.file, shellArg)
+        if (isolated === null) { reason = FLAKE_RERUN_REASONS[3]; break }
+        commands.set(entry, isolated)
+      }
+    }
+    const outputs = new Map()
+    if (reason === null) {
+      for (const entry of tests) {
+        const isolated = commands.get(entry)
+        if (!outputs.has(isolated)) {
+          try {
+            const run = io.run(isolated)
+            outputs.set(isolated, run && typeof run.output === 'string' ? { output: run.output, denied: run.denied === true || run.interrupted === true } : { output: '', denied: true })
+          } catch { outputs.set(isolated, { output: '', denied: true }) }
+        }
+      }
+      for (const entry of tests) {
+        const measured = outputs.get(commands.get(entry))
+        if (measured.denied) { entry.rerun = 'unmeasured'; continue }
+        const verdict = runner === 'cargo' ? cargoNameVerdict(measured.output, entry.test) : nameVerdict(measured.output, entry.test)
+        entry.rerun = ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured'
+      }
+    }
+    const green = reason === null && tests.length > 0 && tests.every(({ rerun }) => rerun === 'passed')
+    io.log(recordRow({ at: io.now(), flake: { stage: stageName, round: roundNumber, outcome: green ? 'green' : 'red', reason, tests } }))
+    if (green) {
+      for (const { test, file, rerun } of tests) S.flakes.push({ stage: stageName, test, file, rerun })
+      return { ...result, ok: true }
+    }
+    return result
+  }
   admitScope = ({ source, files, evidence, role = null, stage: requestedStage = null, recordFiles = null } = {}) => {
     // Census context is driver-derived, while the public request-source enum remains closed.
     const decisionSource = source === 'census-bounce' ? 'suite-red' : source
@@ -11502,7 +11548,8 @@ function runTask(ctx, io, crash) {
       stageComplete()
       continue
     }
-    const laneRes = io.run(lane)
+    let laneRes = io.run(lane)
+    if (!laneRes.ok) laneRes = flakeRerun(laneRes, lane, classifyTestRunner(lane), 'lane', round)
     if (!laneRes.ok) {
       const laneOutput = typeof laneRes.output === 'string' ? laneRes.output : ''
       const laneTail = dropPassingLines(laneOutput).slice(-LANE_RED_TAIL_CHARS); const laneFailures = failingTestsSection(laneOutput)
@@ -12949,6 +12996,7 @@ function runTask(ctx, io, crash) {
   if (pinnedAfterRebase) return escalate('harden', preservationWhy(pinnedAfterRebase), [], { hardening_preservation: pinnedAfterRebase })
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
+  if (!suiteRes?.ok) suiteRes = flakeRerun(suiteRes, ctx.suite, normalizeTestRunner(ctx.testRunner).runner, 'suite', S.buildRound)
   if (!suiteRes?.ok && suiteRedNoop) {
     const output = String(suiteRes?.output || '')
     stageComplete()
@@ -13310,6 +13358,7 @@ function runTask(ctx, io, crash) {
         repairs: gateNow.repairs ?? 0,
       } : null,
       ...(activeChunkState?.summary ? { chunk: { ...activeChunkState.summary } } : {}),
+      ...(S.flakes.length > 0 ? { flakes: [...S.flakes] } : {}),
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
@@ -13360,6 +13409,7 @@ function runTask(ctx, io, crash) {
       commit: S.commit, stages: S.stages, files_committed: publishing ? publishFiles : committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       ...(published ? { pr: published } : {}),
+      ...(S.flakes.length > 0 ? { flakes: S.flakes } : {}),
       ...(S.documentation ? { documentation: S.documentation } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
@@ -15684,7 +15734,7 @@ export function validateHardened(details, owed, inScope, testRunner) {
         continue
       }
       // A cargo guard is adjudicated on libtest's own per-test lines; once capture or the pretty format is off, test stdout can forge them.
-      const uncaptured = runner.runner === 'cargo' && !cargoLintInvocation(entry.invocation) ? /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/.exec(entry.invocation) : null
+      const uncaptured = runner.runner === 'cargo' && !cargoLintInvocation(entry.invocation) ? CARGO_CAPTURE_OFF.exec(entry.invocation) : null
       if (uncaptured) {
         refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
         continue

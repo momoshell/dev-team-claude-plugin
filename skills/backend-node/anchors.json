@@ -35,11 +35,11 @@
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
   "test/factory-emit.test.mjs:1743": "CLI: emit-cli-unknown-flag-refusal",
-  "crew/drive.mjs:563": "export const DECISIONS = Object.freeze",
   "scripts/factory/ledger.mjs:8136": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8097": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:8144": "unknown flag --${name}",
   "scripts/factory/emit.mjs:1629": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:9960": "unknown verb: ${verb}",
-  "scripts/factory/ledger.mjs:4321": "requireEnum(input.decision, CI_DECISIONS"
+  "scripts/factory/ledger.mjs:4321": "requireEnum(input.decision, CI_DECISIONS",
+  "crew/drive.mjs:564": "export const DECISIONS = Object.freeze"
 }

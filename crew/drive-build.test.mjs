@@ -11500,6 +11500,11 @@ test('HL5 cargo lint invocation is isolated from named-test evidence', () => {
   assert.equal(cargoLintInvocation('cargo clippy -p crate -- -D warnings'), true)
   assert.equal(cargoLintInvocation('cargo fmt --check --manifest-path Cargo.toml'), true)
   for (const command of ['cargo test -p crate', 'cargo clippy -p crate && cargo test', 'cargo clippy | cat', 'cargo clippy\ncargo test', 'cargo clippy >out']) assert.equal(cargoLintInvocation(command), false, command)
+  // MUTATION: drop the cargoLintInvocation exemption from the cargo-output-uncaptured refusal; a quiet lint guard is refused.
+  const cargoSuite = { runner: 'cargo', basis: 'cargo lane' }
+  const lintBase = { finding: 'F1', name: 'F1 guard', file: 'a.mjs', find: 'const guard = false', replace: 'const guard = true' }
+  for (const invocation of ['cargo fmt --check -q', 'cargo clippy -p crate --quiet -- -D warnings']) assert.deepEqual(validateHardened({ hardened: [{ ...lintBase, invocation }] }, owed, scope, cargoSuite).refusals, [], invocation)
+  assert.match(validateHardened({ hardened: [{ ...lintBase, invocation: 'cargo test -p crate -q' }] }, owed, scope, cargoSuite).refusals[0]?.why ?? '', /cargo-output-uncaptured/)
   const entry = b863InvocationEntry({ invocation: 'cargo clippy -p crate -- -D warnings' })
   const files = { ...B863_FILES }
   const io = invocationProofIo({ lane: 'cargo test -p crate', entry, files, runFn: (_text, n) => b863Green(n === 2 ? 0 : 1) })

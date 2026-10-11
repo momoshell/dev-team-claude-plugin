@@ -15684,7 +15684,7 @@ export function validateHardened(details, owed, inScope, testRunner) {
         continue
       }
       // A cargo guard is adjudicated on libtest's own per-test lines; once capture or the pretty format is off, test stdout can forge them.
-      const uncaptured = runner.runner === 'cargo' ? /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/.exec(entry.invocation) : null
+      const uncaptured = runner.runner === 'cargo' && !cargoLintInvocation(entry.invocation) ? /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/.exec(entry.invocation) : null
       if (uncaptured) {
         refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
         continue

@@ -15664,6 +15664,12 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'invocation-invalid', `the hardened invocation ${JSON.stringify(entry.invocation)} for finding ${id} must be a single non-blank line naming a runnable command`)
         continue
       }
+      // A cargo guard is adjudicated on libtest's own per-test lines; once capture or the pretty format is off, test stdout can forge them.
+      const uncaptured = runner.runner === 'cargo' ? /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/.exec(entry.invocation) : null
+      if (uncaptured) {
+        refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
+        continue
+      }
     } else {
       if (!hardeningTestPath(entry.test)) {
         refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs${namesTest ? '; for a guard run by any runner other than node --test, declare invocation with the exact command that runs it' : ''}`)

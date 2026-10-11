@@ -7398,6 +7398,19 @@ test('RG16 the cargo mutation never rewrites an inline guard that shares the fin
   }
 })
 
+test('RG17 a cargo guard invocation that turns off capture or the pretty format is refused before it runs', () => {
+  // MUTATION: drop the cargo-output-uncaptured refusal; a terse --nocapture run forges guard_fn ... ok then FAILED and reads killed.
+  const spoof = (verdict) => `test suite::guard_fn ... ${verdict}\n.\n${cargoSummary}`
+  for (const tail of ['-- --format terse --nocapture', '-- --nocapture', '-- --show-output', '-- --format=json -Z unstable-options', '-q', '-- --quiet']) {
+    const invocation = `cargo test -p power-domain guard_fn ${tail}`
+    const { io, ctx } = cargoInvocationCase({ entry: cargoEntry({ invocation }), runFn: (_text, n) => ({ ...b863Green(0), output: spoof(n === 2 ? 'ok' : 'FAILED') }) })
+    driveTask(ctx, io)
+    assert.notEqual(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed', tail)
+    assert.equal(invocationExecutions(io, invocation).length, 0, tail)
+    assert.ok(JSON.stringify(io.calls).includes('cargo-output-uncaptured'), tail)
+  }
+})
+
 test('RG10 an unlexable Rust implementation leaves the cargo guard unproven without running it', () => {
   // MUTATION: drop the unmeasured non-test-region refusal; the unterminated build is adjudicated by the runs instead.
   const built = `${cargoSource}/* unfinished`

@@ -8217,7 +8217,7 @@ test('F1 driver keeps the mutation runner behind the scripts import firewall', (
   const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   const staticImportSpecifiers = (text) => [...String(text).matchAll(/^import\s+(?:[^'"\n]*?\s+from\s+)?['"]([^'"]+)['"]/gm)].map((match) => match[1])
   const hasScriptsImport = (text) => staticImportSpecifiers(text).some((specifier) => specifier.includes('scripts/'))
-  assert.deepEqual(staticImportSpecifiers(source).filter((specifier) => specifier.includes('scripts/')), ['../scripts/factory/probe-repo.mjs'])
+  assert.deepEqual(staticImportSpecifiers(source).filter((specifier) => specifier.includes('scripts/')), [])
   assert.equal(hasScriptsImport(`${source}\nimport { forbidden } from '../scripts/forbidden.mjs'\n`), true)
   assert.equal(hasScriptsImport(`${source}\nimport '../scripts/forbidden.mjs'\n`), true)
   assert.match(source, /runner = phaseSlot\(SUITE_SLOT_PHASES\.gate, \(\) => io\.run\(/)

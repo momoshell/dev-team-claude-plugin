@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 import { slug } from '../../crew/slug.mjs'
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { parseFenceScope } from '../../crew/fence-scope.mjs'
+import { classifyTestRunner } from '../../crew/runner-classify.mjs'
 
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
@@ -2108,15 +2109,7 @@ export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRo
   return profileProtectedPaths(profile, { path })
 }
 
-export function classifyTestRunner(command) {
-  if (typeof command !== 'string') return 'unparsed'
-  const trimmed = command.trim()
-  if (!trimmed) return 'unparsed'
-  const executable = basename(trimmed.split(/\s+/u, 1)[0])
-  if (executable === 'cargo') return 'cargo'
-  if (['node', 'npm', 'npx', 'yarn', 'pnpm'].includes(executable)) return 'node'
-  return 'unparsed'
-}
+export { classifyTestRunner }
 
 // `suite` is the run's explicit --suite command. When it differs from the ratified
 // test_command it is the command that actually runs, so it is the one classified.

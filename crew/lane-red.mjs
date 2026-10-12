@@ -6,7 +6,14 @@ import { relative, isAbsolute, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const CARGO_CAPTURE_OFF = /(?:^|\s)(--nocapture|--show-output|--format(?:=\S*)?|-q|--quiet|RUST_TEST_NOCAPTURE=\S*|RUST_TEST_FORMAT=\S*)(?=\s|$)/
-const PLAIN_WORDS_COMMAND = /^[A-Za-z0-9_.\/:,@%+=-]+(?:[ \t]+[A-Za-z0-9_.\/:,@%+=-]+)*[ \t]*$/
+export const PLAIN_WORDS_COMMAND = /^[A-Za-z0-9_.\/:,@%+=-]+(?:[ \t]+[A-Za-z0-9_.\/:,@%+=-]+)*[ \t]*$/
+export function validTestRerunCommand(value) {
+  if (typeof value !== 'string') return false
+  const words = value.split(/[ \t]+/)
+  if (words.filter((word) => word === '{test}').length !== 1) return false
+  if (!PLAIN_WORDS_COMMAND.test(value.replace('{test}', 'test'))) return false
+  return true
+}
 export const FLAKE_RERUN_REASONS = Object.freeze(['runner-unparsed', 'test-unmapped', 'in-fence', 'command-unshaped'])
 
 function safeTestFile(token, checkout) {
@@ -92,13 +99,14 @@ export function failingTestFiles(output, runner, checkout) {
   return failures.map(({ test, file }) => ({ test, file }))
 }
 
-export function isolatedTestCommand(command, runner, test, file, shellArg) {
+export function isolatedTestCommand(command, runner, test, file, shellArg, rerunCommand = null) {
   if (typeof command !== 'string' || typeof shellArg !== 'function' || typeof file !== 'string' || !file.trim()) return null
   if (runner === 'node') return 'node --test --test-reporter=tap ' + shellArg(file)
   if (runner !== 'cargo' || typeof test !== 'string' || !test) return null
   // The appended "-- --exact <test>" must reach the command as argv: only plain words, no shell syntax (a comment, quote, substitution or operator can swallow or reroute it).
-  if (!PLAIN_WORDS_COMMAND.test(command) || /(?:^|\s)--(?=\s|$)/.test(command) || CARGO_CAPTURE_OFF.test(command)) return null
-  return command + ' -- --exact ' + shellArg(test)
+  if (PLAIN_WORDS_COMMAND.test(command) && !/(?:^|\s)--(?=\s|$)/.test(command) && !CARGO_CAPTURE_OFF.test(command)) return command + ' -- --exact ' + shellArg(test)
+  if (typeof rerunCommand !== 'string' || !validTestRerunCommand(rerunCommand)) return null
+  return rerunCommand.replace('{test}', () => shellArg(test))
 }
 
 export function dropPassingLines(text) {

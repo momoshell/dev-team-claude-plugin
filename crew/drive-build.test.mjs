@@ -1,5 +1,4 @@
-// Split from crew/drive.test.mjs (#918 follow-up): one subject per file so a
-// lane fencing one driver concern no longer locks every driver test.
+// Split from crew/drive.test.mjs (#918 follow-up): one driver-test subject per file.
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,7 +12,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
@@ -11702,16 +11701,16 @@ test('LRF8 Cargo attribution retains root src files and permanent conflicts stay
 
 const flakeTestName = 'app::runs::dispatch::waker::tests::R5_12_a_supervised_wait_heartbeats_before_its_wake_time'
 const flakeTestFile = 'crates/power-api/src/app/runs/dispatch/waker.rs'
-function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --workspace', rerun, fence = [], publish = false, throwRerun = false } = {}) {
+function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --workspace', rerun, rerunCommand = null, isolated, fence = [], publish = false, throwRerun = false } = {}) {
   const temp = scratchDir('flake-driver-')
   writeFileSync(join(temp, 'outside.test.mjs'), '')
   const red = output ?? { ok: false, output: 'failures:\n\n---- ' + flakeTestName + ' stdout ----\n\nthread \'' + flakeTestName + '\' panicked at ' + flakeTestFile + ':2084:10:\nfixture red\n\nfailures:\n    ' + flakeTestName + '\n\ntest result: FAILED. 931 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.29s\n' }
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [...planEnv().details.files_in_scope, ...fence], validation_lane: runner === 'node' ? 'node --test outside.test.mjs' : command } })
   const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }
-  const isolated = runner === 'node' ? 'node --test --test-reporter=tap ' + shellArg('outside.test.mjs') : command + ' -- --exact ' + shellArg(flakeTestName)
-  const runs = { ...validationProbeRun(plan.details.validation_lane, { 'outside.test.mjs': 'file' }), [runner === 'node' ? 'node --test outside.test.mjs' : command]: red, [isolated]: rerun ?? { ok: true, output: 'test ' + flakeTestName + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } }
-  const io = publish ? publicationIo({ envelopes, commands: runs }) : fakeIo({ envelopes, runs, changed: ['a.mjs', 'a.test.mjs'], onRun: (cmd) => { if (throwRerun && cmd === isolated) throw new Error('injected rerun failure') } })
-  const result = driveTask({ ...CTX, checkout: temp, testRunner: { runner, basis: 'brief fixture' }, ...(publish ? { publish: { branch: 'feature/ship', base: 'main' } } : {}) }, io)
+  const isolatedCommand = isolated ?? (runner === 'node' ? 'node --test --test-reporter=tap ' + shellArg('outside.test.mjs') : command + ' -- --exact ' + shellArg(flakeTestName))
+  const runs = { ...validationProbeRun(plan.details.validation_lane, { 'outside.test.mjs': 'file' }), [runner === 'node' ? 'node --test outside.test.mjs' : command]: red, [isolatedCommand]: rerun ?? { ok: true, output: 'test ' + flakeTestName + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } }
+  const io = publish ? publicationIo({ envelopes, commands: runs }) : fakeIo({ envelopes, runs, changed: ['a.mjs', 'a.test.mjs'], onRun: (cmd) => { if (throwRerun && cmd === isolatedCommand) throw new Error('injected rerun failure') } })
+  const result = driveTask({ ...CTX, checkout: temp, testRunner: { runner, basis: 'brief fixture', rerun: rerunCommand }, ...(publish ? { publish: { branch: 'feature/ship', base: 'main' } } : {}) }, io)
   return { result, calls: io.calls.run.map(row => typeof row === 'string' ? row : row.cmd), logs: io.calls.logs, writes: io.calls.writes }
 }
 const flakeRow = (outcome = 'green', reason = null, file = flakeTestFile, rerun = 'passed') => ({ stage: 'lane', round: 1, outcome, reason, tests: [{ test: flakeTestName, file, rerun }] })
@@ -11908,3 +11907,139 @@ test('LRF10 Cargo failure ownership ends at the test-result and Running boundari
   const owned = 'test app::t ... FAILED\nfailures:\n---- app::t stdout ----\nthread panicked at crates/x/src/app.rs:1:2:\n'
   assert.deepEqual(failingTestFiles(owned, 'cargo', '/checkout'), [{ test: 'app::t', file: 'crates/x/src/app.rs' }])
 })
+
+test('RC4', () => {
+  const template = 'cargo test --workspace -- --exact {test}'
+  const shell = (value) => `'${String(value).replaceAll("'", "'\\''")}'`
+  assert.equal(isolatedTestCommand('cargo test --workspace', 'cargo', 'app::t', 'crates/a/src/lib.rs', shell, template), 'cargo test --workspace -- --exact ' + shell('app::t'))
+  assert.equal(isolatedTestCommand('cargo test --workspace && cargo test --doc', 'cargo', 'app::t', 'crates/a/src/lib.rs', shell, template), "cargo test --workspace -- --exact 'app::t'")
+  assert.equal(isolatedTestCommand('cargo test --workspace --nocapture', 'cargo', 'a$&b', 'crates/a/src/lib.rs', shell, template), "cargo test --workspace -- --exact 'a$&b'")
+  const bin = scratchDir('rv1-cargo-bin-')
+  writeFileSync(join(bin, 'cargo'), '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)))\n', { mode: 0o755 })
+  const hostile = "a'b $(printf injected); echo escaped"
+  const command = isolatedTestCommand('cargo clippy --workspace && cargo test --workspace', 'cargo', hostile, 'crates/a/src/lib.rs', shell, template)
+  const run = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env: { ...process.env, PATH: bin + ':' + process.env.PATH }, timeout: 5000 })
+  assert.deepEqual(JSON.parse(run.stdout.trim()), ['test', '--workspace', '--', '--exact', hostile])
+  assert.equal(isolatedTestCommand('cargo test --workspace && cargo test --doc', 'cargo', 'app::t', 'crates/a/src/lib.rs', shell), null)
+})
+
+const rv1Root = scratchDir('rv1-rerun-')
+writeFileSync(join(rv1Root, 'package.json'), '{"scripts":{"test":"node --test"}}')
+const RV1_TEMPLATE = 'cargo test --workspace -- --exact {test}'
+const RV1_COMPOUND = 'cargo clippy --workspace --all-targets -- -D warnings && sh ~/.dev-team/bin/cargo-suite.sh'
+const RV1_NAME = 'app::tests::flaky', RV1_FILE = 'src/app.rs'
+const RV1_ISOLATED = "cargo test --workspace -- --exact 'app::tests::flaky'"
+const RV1_RED = { ok: false, output: 'test ' + RV1_NAME + ' ... FAILED\nfailures:\n---- ' + RV1_NAME + ' stdout ----\nthread panicked at ' + RV1_FILE + ':8:2:\nfixture red\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' }
+const RV1_GREEN = { ok: true, output: 'test ' + RV1_NAME + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' }
+function rv1Driven(which, { rerun = RV1_GREEN, rerunCommand = RV1_TEMPLATE } = {}) {
+  const base = planEnv()
+  const plan = planEnv({ details: { ...base.details, validation_lane: which === 'lane' ? RV1_COMPOUND : 'lane-cmd' } })
+  const cmd = which === 'lane' ? plan.details.validation_lane : RV1_COMPOUND
+  const io = fakeIo({ envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, [cmd]: which === 'cold' ? { ok: true, output: '' } : RV1_RED, [RV1_ISOLATED]: rerun }, changed: ['a.mjs', 'a.test.mjs'] })
+  if (which === 'cold') io.runCold = (command, names) => {
+    const path = command === RV1_ISOLATED ? '/cold/isolated' : io.calls.runCold.length === 0 ? '/cold/first' : '/cold/second'
+    io.calls.runCold.push({ cmd: command, names })
+    if (command === RV1_ISOLATED && rerun instanceof Error) throw rerun
+    const value = command === RV1_ISOLATED ? rerun : RV1_RED
+    return { ...value, path, kept: value.ok ? null : path }
+  }
+  const result = driveTask({ ...CTX, checkout: rv1Root, suite: which === 'lane' ? 'suite-cmd' : RV1_COMPOUND, testRunner: { runner: 'cargo', basis: 'fixture', rerun: rerunCommand } }, io)
+  return { io, result }
+}
+function rv1Checkpoint() {
+  const files = [{ path: 'a.mjs', state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }]
+  return { version: 2, kind: 'rebase', frozen_where: 'rebase', head_oid: 'pre1111', chunk: null, tree: { index_oid: 'tree1111', files, worktree_sha256: resumeWorktreeSha256(files) }, accepted_scope: ['a.mjs'], returns: { planner: { status: 'done', role: 'planner', artifacts: [], details: {} }, builder: { status: 'done', role: 'builder', artifacts: [], details: {} }, reviewer: { status: 'done', role: 'reviewer', artifacts: [], details: {} } }, decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] }, commit: { oid: 'pre1111', pending: false, files: ['a.mjs'], message: 'feat: resume', subject: 'feat: resume' }, proof: { gate_cmd: 'gate-cmd', gate_path: '/tmp/gate.mjs', summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 }, suite: { cmd: RV1_COMPOUND, runner: 'cargo', rerun: RV1_TEMPLATE, warm: null, cold: null }, publish: { branch: null, base: 'main', base_sha: 'base1111' }, prior_stages: ['review:r1', 'commit', 'rebase'] }
+}
+function rv1Resumed(which, fence = [], rerun = RV1_GREEN) {
+  const files = ['a.mjs', ...fence].map((path) => ({ path, state: 'present', bytes: 'file:-:' + 'a'.repeat(64) }))
+  const cp = { ...rv1Checkpoint(), tree: { index_oid: 'tree1111', files, worktree_sha256: resumeWorktreeSha256(files) }, accepted_scope: files.map((file) => file.path) }
+  const io = fakeIo({ runs: { ["git fetch origin 'main'"]: { ok: true, output: '' }, ["git rev-parse 'origin/main'"]: { ok: true, output: 'base1111\n' }, ["git merge-base HEAD 'origin/main'"]: { ok: true, output: 'base1111\n' }, 'git rev-parse HEAD': { ok: true, output: 'pre1111\n' }, [RV1_COMPOUND]: which === 'cold' ? { ok: true, output: '' } : RV1_RED, [RV1_ISOLATED]: rerun } })
+  if (which === 'cold') io.runCold = (command, names) => { const path = command === RV1_ISOLATED ? '/cold/isolated' : io.calls.runCold.length === 0 ? '/cold/first' : '/cold/second'; io.calls.runCold.push({ cmd: command, names }); const value = command === RV1_ISOLATED ? rerun : RV1_RED; return { ...value, path, kept: value.ok ? null : path } }
+  const result = resumeTask({ ...CTX, checkout: rv1Root, testRunner: { runner: 'node', rerun: null }, publish: { branch: null }, files_in_scope: ['src/app.rs'] }, io, cp)
+  return { io, result }
+}
+const rv1Flakes = (x) => x.io.calls.logs.filter((row) => row.flake).map((row) => row.flake)
+test('RV1-1 compound lane and warm suite isolate through the ratified template', (t) => {
+  const lane = flakeDriverRun(t, { command: RV1_COMPOUND, rerunCommand: RV1_TEMPLATE, isolated: "cargo test --workspace -- --exact 'app::runs::dispatch::waker::tests::R5_12_a_supervised_wait_heartbeats_before_its_wake_time'" })
+  assert.equal(lane.result.status, 'done')
+  assert.deepEqual(lane.calls.filter((cmd) => cmd.includes('-- --exact')), ["cargo test --workspace -- --exact 'app::runs::dispatch::waker::tests::R5_12_a_supervised_wait_heartbeats_before_its_wake_time'"])
+  assert.deepEqual(lane.logs.filter((row) => row.flake).map(({ flake }) => [flake.stage, flake.outcome]), [['lane', 'green']])
+  const noTemplate = flakeDriverRun(t, { command: RV1_COMPOUND })
+  assert.deepEqual(noTemplate.logs.filter((row) => row.flake).map(({ flake }) => [flake.reason, flake.outcome]), [['command-unshaped', 'red']])
+  const warm = rv1Driven('warm')
+  assert.equal(warm.result.status, 'done')
+  assert.deepEqual(rv1Flakes(warm).map(({ stage, outcome }) => [stage, outcome]), [['suite', 'green']])
+})
+test('a named pass inside a red isolated run is not a flake', () => {
+  const partial = { ok: false, output: 'test ' + RV1_NAME + ' ... ok\ntest ' + RV1_NAME + '_extra ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' }
+  const warm = rv1Driven('warm', { rerun: partial })
+  assert.deepEqual(rv1Flakes(warm).map(({ stage, outcome, tests }) => [stage, outcome, tests.map(({ rerun }) => rerun)]), [['suite', 'red', ['unmeasured']]])
+  assert.equal(warm.result.status, 'escalation')
+  assert.equal(warm.result.details.flakes, undefined)
+})
+test('RV1-1 ordinary cold rerun runs isolated through io.runCold after two red full runs', () => {
+  const x = rv1Driven('cold')
+  assert.deepEqual(x.io.calls.runCold.map(({ cmd }) => cmd), [RV1_COMPOUND, RV1_COMPOUND, RV1_ISOLATED])
+  assert.equal(x.io.calls.run.some(({ cmd }) => cmd === RV1_ISOLATED), false)
+  assert.equal(x.result.details.cold_suite.path, '/cold/second')
+  assert.equal(x.result.details.cold_suite.flaked.path, '/cold/second')
+  assert.equal(x.result.details.cold_suite.retried.path, '/cold/first')
+  assert.equal(x.result.status, 'done')
+  assert.deepEqual([...x.io.calls.removeCold].sort(), ['/cold/first', '/cold/second'])
+  assert.equal(x.result.details.cold_suite.flaked.output, RV1_RED.output.slice(-2000))
+  assert.equal(x.result.details.cold_suite.flaked.removed, true)
+  const failed = rv1Driven('cold', { rerun: { ok: false, output: 'red' } })
+  assert.deepEqual(rv1Flakes(failed)[0].kept, ['/cold/isolated'])
+  const thrown = rv1Driven('cold', { rerun: new Error('EPERM') })
+  assert.deepEqual(rv1Flakes(thrown)[0].errors, ['EPERM'])
+})
+test('RV1-1 resumed warm and cold reruns use the frozen checkpoint', () => {
+  const warm = rv1Resumed('warm')
+  assert.equal(warm.result.status, 'done')
+  assert.ok(rv1Flakes(warm).some(({ stage }) => stage === 'suite'))
+  const cold = rv1Resumed('cold')
+  assert.equal(cold.io.calls.runCold.at(-1).cmd, RV1_ISOLATED)
+  assert.equal(cold.io.calls.run.some(({ cmd }) => cmd === RV1_ISOLATED), false)
+  assert.ok(rv1Flakes(cold).some(({ stage }) => stage === 'cold-suite'))
+  const fenced = rv1Resumed('warm', [RV1_FILE])
+  assert.deepEqual(rv1Flakes(fenced).map(({ reason }) => reason), ['in-fence'])
+  assert.equal(fenced.io.calls.run.some(({ cmd }) => cmd === RV1_ISOLATED), false)
+  assert.equal(fenced.result.status, 'escalation')
+  const failedCold = rv1Resumed('cold', [], RV1_RED)
+  assert.equal(failedCold.result.status, 'escalation')
+  assert.deepEqual(rv1Flakes(failedCold)[0].kept, ['/cold/isolated'])
+  assert.ok(rv1Flakes(rv1Resumed('warm')).length > 0)
+})
+function rv1Frozen() {
+  const gateRed = { ok: false, output: GATE_SUMMARY_PREFIX + ' {"total":1,"failed":1,"errored":0}' }
+  const gateGreen = { ok: true, output: GATE_SUMMARY_PREFIX + ' {"total":1,"failed":0,"errored":0}' }
+  const base = planEnv()
+  const plan = planEnv({ details: { ...base.details, gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd' } })
+  const io = fakeIo({
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, [RV1_COMPOUND]: RV1_GREEN, 'gate-cmd:1': gateRed, 'gate-cmd:2': gateGreen, 'gate-cmd': gateGreen, 'git write-tree': { ok: true, output: 'tree1234\\n' } },
+    cleanRuns: { 'gate-cmd': gateRed },
+    fingerprints: { measured: true, entries: { 'a.mjs': 'file:-:' + 'a'.repeat(64), 'a.test.mjs': 'file:-:' + 'b'.repeat(64) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  io.runCold = () => { throw new Error('fixture cold unavailable') }
+  return { io, result: driveTask({ ...CTX, checkout: rv1Root, suite: RV1_COMPOUND, testRunner: { runner: 'cargo', basis: 'fixture', rerun: RV1_TEMPLATE } }, io) }
+}
+test('RV1-1 checkpoint freezes runner and rerun, and refuses bad frozen values', () => {
+  const x = rv1Frozen()
+  assert.equal(x.result.details.resume_checkpoint?.suite?.cmd, RV1_COMPOUND)
+  assert.equal(x.result.details.resume_checkpoint?.suite?.rerun, RV1_TEMPLATE)
+  assert.equal(x.result.details.resume_checkpoint?.suite?.runner, 'cargo')
+  const cp = rv1Checkpoint()
+  cp.suite.rerun = 'cargo test {test} {test}'
+  assert.equal(resumeCheckpointDefect(cp), 'checkpoint test rerun command is invalid')
+  cp.suite.rerun = RV1_TEMPLATE; cp.suite.runner = 'ruby'
+  assert.equal(resumeCheckpointDefect(cp), 'checkpoint test runner is invalid')
+  delete cp.suite.rerun; delete cp.suite.runner
+  assert.equal(resumeCheckpointDefect(cp), null)
+  for (const value of ['cargo test {test} && true', 'cargo test', 12]) {
+    const invalid = rv1Checkpoint(); invalid.suite.rerun = value
+    assert.equal(resumeCheckpointDefect(invalid), 'checkpoint test rerun command is invalid')
+  }
+})
+

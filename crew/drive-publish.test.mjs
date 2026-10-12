@@ -216,6 +216,25 @@ test('RV1-1 resumes a suite checkpoint with a publish branch through to publicat
   assert.equal(io.calls.run.some((command) => command.startsWith('git push -u origin ')), true)
 })
 
+test('a resumed suite flake reaches details.flakes and the published PR body', () => {
+  const compound = 'cargo clippy --workspace -- -D warnings && cargo test --workspace'
+  const name = 'app::tests::flaky'
+  const red = { ok: false, output: `test ${name} ... FAILED\nfailures:\n---- ${name} stdout ----\nthread panicked at src/app.rs:8:2:\nfixture red\ntest result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n` }
+  const green = { ok: true, output: `test ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n` }
+  const isolated = `cargo test --workspace -- --exact ${shellArg(name)}`
+  const checkpoint = resumeCheckpointFixture({
+    kind: 'suite', frozen_where: 'suite',
+    suite: { cmd: compound, runner: 'cargo', rerun: 'cargo test --workspace -- --exact {test}' },
+    publish: { branch: 'feature/ship', base: 'main', base_sha: 'base1111' },
+    prior_stages: ['review:r1', 'commit', 'rebase', 'suite'],
+  })
+  const io = withPublicationDiff(publicationIo({ commands: { [compound]: red, [isolated]: green }, coldResult: { ok: true, output: '' } }), { finalDiff: ['a.mjs'] })
+  const result = resumeTask({ ...CTX, task: 'resume-suite-flake', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: ['a.mjs'] }, io, checkpoint)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.flakes.map(({ stage, test, rerun }) => [stage, test, rerun]), [['suite', name, 'passed']])
+  assert.match(io.calls.writes[`${TD}/pr-body.md`], /- Flake: suite · app::tests::flaky · src\/app\.rs · passed/)
+})
+
 function installParentProbe(io, parent = { ok: true, output: 'base1111\n' }) {
   const baseRun = io.run
   io.run = function (command) {

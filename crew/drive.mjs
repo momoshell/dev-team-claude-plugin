@@ -9135,7 +9135,7 @@ function runTask(ctx, io, crash) {
           try {
             const measuredRun = run(isolated)
             if (typeof measuredRun?.kept === 'string' && measuredRun.kept) kept.push(measuredRun.kept)
-            outputs.set(isolated, measuredRun && typeof measuredRun.output === 'string' ? { output: measuredRun.output, denied: measuredRun.denied === true || measuredRun.interrupted === true } : { output: '', denied: true })
+            outputs.set(isolated, measuredRun && typeof measuredRun.output === 'string' ? { output: measuredRun.output, ok: measuredRun.ok === true, denied: measuredRun.denied === true || measuredRun.interrupted === true } : { output: '', ok: false, denied: true })
           } catch (error) { runErrors.push(String(error?.message ?? error)); outputs.set(isolated, { output: '', denied: true }) }
         }
       }
@@ -9143,7 +9143,8 @@ function runTask(ctx, io, crash) {
         const measured = outputs.get(commands.get(entry))
         if (measured.denied) { entry.rerun = 'unmeasured'; continue }
         const verdict = runner === 'cargo' ? cargoNameVerdict(measured.output, entry.test) : nameVerdict(measured.output, entry.test)
-        entry.rerun = ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured'
+        // A named pass inside a red isolated run is not isolation: a template without --exact can match other tests, and their failure must not read as a flake.
+        entry.rerun = verdict === 'passed' && !measured.ok ? 'unmeasured' : ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured'
       }
     }
     const green = reason === null && tests.length > 0 && tests.every(({ rerun }) => rerun === 'passed')

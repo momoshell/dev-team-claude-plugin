@@ -11970,6 +11970,13 @@ test('RV1-1 compound lane and warm suite isolate through the ratified template',
   assert.equal(warm.result.status, 'done')
   assert.deepEqual(rv1Flakes(warm).map(({ stage, outcome }) => [stage, outcome]), [['suite', 'green']])
 })
+test('a named pass inside a red isolated run is not a flake', () => {
+  const partial = { ok: false, output: 'test ' + RV1_NAME + ' ... ok\ntest ' + RV1_NAME + '_extra ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' }
+  const warm = rv1Driven('warm', { rerun: partial })
+  assert.deepEqual(rv1Flakes(warm).map(({ stage, outcome, tests }) => [stage, outcome, tests.map(({ rerun }) => rerun)]), [['suite', 'red', ['unmeasured']]])
+  assert.equal(warm.result.status, 'escalation')
+  assert.equal(warm.result.details.flakes, undefined)
+})
 test('RV1-1 ordinary cold rerun runs isolated through io.runCold after two red full runs', () => {
   const x = rv1Driven('cold')
   assert.deepEqual(x.io.calls.runCold.map(({ cmd }) => cmd), [RV1_COMPOUND, RV1_COMPOUND, RV1_ISOLATED])

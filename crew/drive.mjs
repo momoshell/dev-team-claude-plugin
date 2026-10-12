@@ -9143,8 +9143,7 @@ function runTask(ctx, io, crash) {
         const measured = outputs.get(commands.get(entry))
         if (measured.denied) { entry.rerun = 'unmeasured'; continue }
         const verdict = runner === 'cargo' ? cargoNameVerdict(measured.output, entry.test) : nameVerdict(measured.output, entry.test)
-        // A named pass inside a red isolated run is not isolation: a template without --exact can match other tests, and their failure must not read as a flake.
-        entry.rerun = verdict === 'passed' && !measured.ok ? 'unmeasured' : ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured'
+        entry.rerun = verdict === 'passed' && !measured.ok ? 'unmeasured' : ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured' // a named pass inside a red isolated run is not isolation: a template without --exact can match other tests
       }
     }
     const green = reason === null && tests.length > 0 && tests.every(({ rerun }) => rerun === 'passed')

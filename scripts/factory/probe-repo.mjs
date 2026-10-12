@@ -42,6 +42,7 @@ import { slug } from '../../crew/slug.mjs'
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { parseFenceScope } from '../../crew/fence-scope.mjs'
 import { classifyTestRunner } from '../../crew/runner-classify.mjs'
+import { validTestRerunCommand } from '../../crew/lane-red.mjs'
 
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
@@ -146,6 +147,7 @@ export const FIELD_KINDS = Object.freeze({
   // intake must not become unrunnable merely because no board is ratified.
   intake_board: 'stable',
   worktree_setup: 'authored_superset',
+  test_rerun_command: 'authored_superset',
 })
 
 export const INTAKE_BOARD_FIELD = 'intake_board'
@@ -1679,6 +1681,7 @@ export function probeRepo({ checkout, baseline = false, gh = false, now = () => 
       pr_conventions: gatherPrConventions(root, gh === true),
       intake_board: gatherIntakeBoard(root, gh === true),
       worktree_setup: cell('unknown', null, null, { reason: 'not_measured' }),
+      test_rerun_command: cell('unknown', null, null, { reason: 'not_measured' }),
     },
     meta: {
       probed_at: probedAt,
@@ -2117,7 +2120,24 @@ export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot, 
   const profiled = profiledTestRunner({ checkout, profilePath, factoryRoot })
   const explicit = typeof suite === 'string' ? suite.trim() : ''
   if (!explicit || explicit === profiled.command) return profiled.answer
-  return { runner: classifyTestRunner(explicit), basis: `run --suite ${JSON.stringify(explicit)} · overrides ${profiled.answer.basis}` }
+  return { runner: classifyTestRunner(explicit), basis: `run --suite ${JSON.stringify(explicit)} · overrides ${profiled.answer.basis}`, rerun: profiled.answer.rerun, }
+}
+
+function profileTestRerunCommand(profile) {
+  if (profile == null) return null
+  const invalid = () => { throw new ProfileRefusal('probe-repo: invalid test_rerun_command field', 'test-rerun-command-invalid') }
+  if (!plainObject(profile) || !plainObject(profile.fields)) return invalid()
+  if (!Object.hasOwn(profile.fields, 'test_rerun_command')) return null
+  const cell = profile.fields.test_rerun_command
+  if (!plainObject(cell) || !STATUSES.includes(cell.status)) return invalid()
+  if (cell.status === 'unknown') {
+    if (cell.value !== null || !UNKNOWN_REASONS.includes(cell.reason)) return invalid()
+    return null
+  }
+  if (cell.status === 'proposed') return null
+  if (!validRatifiedCell(cell)) return invalid()
+  if (!validTestRerunCommand(cell.value)) return invalid()
+  return cell.value
 }
 
 function profiledTestRunner({ checkout, profilePath, factoryRoot }) {
@@ -2129,15 +2149,16 @@ function profiledTestRunner({ checkout, profilePath, factoryRoot }) {
     profile = readProfile(path)
   } catch (err) {
     if (!(err instanceof ProbeUsageError)) throw err
-    return { command: null, answer: { runner: 'node', basis: `legacy node runner · no readable profile at ${path}` } }
+    return { command: null, answer: { runner: 'node', basis: `legacy node runner · no readable profile at ${path}`, rerun: null } }
   }
+  const rerunCommand = profileTestRerunCommand(profile)
   const field = profile?.fields && typeof profile.fields === 'object' ? profile.fields.test_command : undefined
   if (!field || field.status !== 'ratified') {
     const status = field && nonEmptyString(field.status) ? field.status : 'unknown'
-    return { command: null, answer: { runner: 'node', basis: `legacy node runner · profile field test_command is ${status} · ${path}` } }
+    return { command: null, answer: { runner: 'node', basis: `legacy node runner · profile field test_command is ${status} · ${path}`, rerun: rerunCommand } }
   }
   const value = requireField(profile, 'test_command')
-  return { command: typeof value === 'string' ? value.trim() : null, answer: { runner: classifyTestRunner(value), basis: `ratified profile field test_command · ${path}` } }
+  return { command: typeof value === 'string' ? value.trim() : null, answer: { runner: classifyTestRunner(value), basis: `ratified profile field test_command · ${path}`, rerun: rerunCommand } }
 }
 
 export const INTAKE_BOARD_REFUSALS = Object.freeze([
@@ -2302,9 +2323,9 @@ function mergeRatifications(profile, existing) {
     }
     // A malformed ratified authored-superset value is not a set; let it fall
     // through to the stable merge behaviour instead of treating it as one.
-    if (kind === 'authored_superset' && Array.isArray(oldCell.value)) {
-      const known = new Set(oldCell.value.map(canonicalJson))
-      const additions = Array.isArray(fresh.value)
+    if (kind === 'authored_superset' && (Array.isArray(oldCell.value) || name === 'test_rerun_command')) {
+      const known = new Set(Array.isArray(oldCell.value) ? oldCell.value.map(canonicalJson) : [])
+      const additions = Array.isArray(oldCell.value) && Array.isArray(fresh.value)
         ? fresh.value.filter((entry) => !known.has(canonicalJson(entry)))
         : []
       const out = mergedRatified(fresh, oldCell, oldCell.value)

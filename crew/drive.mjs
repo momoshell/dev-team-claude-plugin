@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS } from './lane-red.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS, validTestRerunCommand } from './lane-red.mjs'
 import { classifyTestRunner } from './runner-classify.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
@@ -5339,6 +5339,8 @@ export function resumeCheckpointDefect(checkpoint) {
   if (!proof || typeof proof !== 'object' || Array.isArray(proof) || typeof proof.gate_cmd !== 'string' || !proof.gate_cmd.trim() || typeof proof.gate_path !== 'string' || !proof.gate_path.trim() || proof.summary === undefined || typeof proof.discrimination !== 'string' || !Number.isInteger(proof.generation) || !Number.isInteger(proof.repairs)) return 'checkpoint gate proof is incomplete'
   const suite = checkpoint.suite
   if (!suite || typeof suite !== 'object' || Array.isArray(suite) || typeof suite.cmd !== 'string' || !suite.cmd.trim()) return 'checkpoint suite command is absent'
+  if (suite.rerun != null && !validTestRerunCommand(suite.rerun)) return 'checkpoint test rerun command is invalid'
+  if (Object.hasOwn(suite, 'runner') && !TEST_RUNNERS.includes(suite.runner)) return 'checkpoint test runner is invalid'
   const publish = checkpoint.publish
   if (!publish || typeof publish !== 'object' || Array.isArray(publish) || (publish.branch !== null && typeof publish.branch !== 'string') || (publish.base != null && typeof publish.base !== 'string')) return 'checkpoint publication state is incomplete'
   if (!Array.isArray(checkpoint.prior_stages)) return 'checkpoint prior stages are absent'
@@ -7344,7 +7346,7 @@ function runTask(ctx, io, crash) {
         generation: Number.isInteger(details.gate?.generation) ? details.gate.generation : gateGeneration,
         repairs: Number.isInteger(details.gate?.repairs) ? details.gate.repairs : gateRepairs,
       },
-      suite: { cmd: ctx.suite, warm: resumeWarmCounts, cold: resumeColdSuite?.counts ?? details.cold_suite?.counts ?? null },
+      suite: { cmd: ctx.suite, runner: normalizeTestRunner(ctx.testRunner).runner, rerun: ctx.testRunner?.rerun ?? null, warm: resumeWarmCounts, cold: resumeColdSuite?.counts ?? details.cold_suite?.counts ?? null },
       publish: {
         branch: ctx.publish?.branch ?? null,
         base: typeof ctx.publish?.branch === 'string' && ctx.publish.branch.trim() ? (ctx.publish?.base ?? null) : null,
@@ -8153,9 +8155,12 @@ function runTask(ctx, io, crash) {
         } }))
       } catch { /* evidence is never load-bearing */ }
     }
+    const resumeRunner = checkpoint.suite.runner ?? classifyTestRunner(checkpoint.suite.cmd)
+    const resumeRerunOptions = { run: (cmd) => resumeIo.run(cmd), fence: scopeMatcher(checkpoint.accepted_scope), rerunCommand: checkpoint.suite.rerun ?? null }
     const runWarmSuite = () => {
       stage('suite')
-      const result = phaseSlot(SUITE_SLOT_PHASES.warm, () => resumeIo.run(checkpoint.suite.cmd))
+      let result = phaseSlot(SUITE_SLOT_PHASES.warm, () => resumeIo.run(checkpoint.suite.cmd))
+      if (!result?.ok) result = flakeRerun(result, checkpoint.suite.cmd, resumeRunner, 'suite', S.buildRound, resumeRerunOptions)
       warmCounts = parseSuiteCounts(result?.output)
       if (!result?.ok) {
         stageComplete()
@@ -8260,8 +8265,17 @@ function runTask(ctx, io, crash) {
         let cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
         const retriedResumeCold = cold?.ok ? null : { path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
         if (!cold?.ok) cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(checkpoint.suite.cmd, names))
+        const flakedResumeCold = cold?.ok ? null : { path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
+        if (!cold?.ok) {
+          // lean: one fresh cold checkout per distinct isolated command, issued even after one is red, and every red one kept; stop issuing cold re-runs at the first non-passing verdict if multi-failure cold re-runs prove costly
+          cold = flakeRerun(cold, checkpoint.suite.cmd, resumeRunner, 'cold-suite', S.buildRound, {
+            ...resumeRerunOptions,
+            checkout: cold?.path,
+            run: (cmd) => phaseSlot(SUITE_SLOT_PHASES.cold, () => resumeIo.runCold(cmd, names)),
+          })
+        }
         coldSuite = cold?.ok
-          ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
+          ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output), ...(flakedResumeCold ? { flaked: settleRetriedCold(resumeIo, flakedResumeCold) } : {}) }
           : { verdict: 'red', path: cold?.path, kept: cold?.kept, output: String(cold?.output || '').slice(-2000) }
         if (retriedResumeCold) coldSuite.retried = cold?.ok ? settleRetriedCold(resumeIo, retriedResumeCold) : retriedResumeCold
       } catch (error) { coldSuite = { verdict: 'unproven', why: error?.message ?? String(error) } }
@@ -8323,6 +8337,7 @@ function runTask(ctx, io, crash) {
           gate: { cmd: relativizeCommand(gateCmd, { checkout: resumeCtx.checkout, taskDir: resumeCtx.taskDir }), summary: resumeGateResult ? parseGateSummary(resumeGateResult.output) : checkpoint.proof.summary, discrimination: resumeGateResult ? (parseGateSummary(resumeGateResult.output) ? 'proven' : 'unproven') : checkpoint.proof.discrimination, generation: gateGeneration, repairs: gateRepairs },
           ...(activeChunkState?.summary ? { chunk: { ...activeChunkState.summary } } : {}),
           review: { verdict: checkpoint.decision.verdict, residuals: checkpoint.decision.residuals, carried: checkpoint.decision.carried_findings },
+          ...(S.flakes.length > 0 ? { flakes: [...S.flakes] } : {}),
           suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
         }
         const bodyPath = art('pr-body.md')
@@ -8360,7 +8375,9 @@ function runTask(ctx, io, crash) {
       details: {
         commit: commitOid, stages: S.stages, files_committed: shouldPublish ? publishFiles : checkpoint.commit.files, consults: 0,
         dissents: S.dissents, accepted_via: checkpoint.decision.accepted_via, escalation: null,
-        ...(published ? { pr: published } : {}), cold_suite: coldSuite, gate: gateBlock(),
+        ...(published ? { pr: published } : {}),
+        ...(S.flakes.length > 0 ? { flakes: [...S.flakes] } : {}),
+        cold_suite: coldSuite, gate: gateBlock(),
         accept_findings: checkpoint.decision.accept_findings, accept_decision: checkpoint.decision.accept_decision,
         resume_checkpoint: checkpoint,
       },
@@ -9090,8 +9107,8 @@ function runTask(ctx, io, crash) {
   // Lane fences remain recorded context for operators, not placement admission.
   acceptedScope = scopeFiles
   let inScope = scopeMatcher(scopeFiles)
-  const flakeRerun = (result, command, runner, stageName, roundNumber) => {
-    const tests = failingTestFiles(result?.output, runner, ctx.checkout).map((entry) => ({ ...entry, rerun: null }))
+  function flakeRerun(result, command, runner, stageName, roundNumber, { run = (cmd) => io.run(cmd), fence = (file) => inScope(file), rerunCommand = ctx.testRunner?.rerun ?? null, checkout = ctx.checkout } = {}) {
+    const tests = failingTestFiles(result?.output, runner, checkout).map((entry) => ({ ...entry, rerun: null }))
     const counts = parseSuiteCounts(result?.output)
     let reason = null
     if (runner !== 'node' && runner !== 'cargo') reason = FLAKE_RERUN_REASONS[0]
@@ -9099,24 +9116,27 @@ function runTask(ctx, io, crash) {
     else if (counts.fail <= 0) reason = FLAKE_RERUN_REASONS[1]
     else if (tests.length !== counts.fail) reason = FLAKE_RERUN_REASONS[1]
     else if (tests.some(({ file }) => file === null)) reason = FLAKE_RERUN_REASONS[1]
-    else if (tests.some(({ file }) => inScope(file))) reason = FLAKE_RERUN_REASONS[2]
+    else if (tests.some(({ file }) => fence(file))) reason = FLAKE_RERUN_REASONS[2]
     const commands = new Map()
     if (reason === null) {
       for (const entry of tests) {
-        const isolated = isolatedTestCommand(command, runner, entry.test, entry.file, shellArg)
+        const isolated = isolatedTestCommand(command, runner, entry.test, entry.file, shellArg, rerunCommand)
         if (isolated === null) { reason = FLAKE_RERUN_REASONS[3]; break }
         commands.set(entry, isolated)
       }
     }
     const outputs = new Map()
+    const kept = []
+    const runErrors = []
     if (reason === null) {
       for (const entry of tests) {
         const isolated = commands.get(entry)
         if (!outputs.has(isolated)) {
           try {
-            const run = io.run(isolated)
-            outputs.set(isolated, run && typeof run.output === 'string' ? { output: run.output, denied: run.denied === true || run.interrupted === true } : { output: '', denied: true })
-          } catch { outputs.set(isolated, { output: '', denied: true }) }
+            const measuredRun = run(isolated)
+            if (typeof measuredRun?.kept === 'string' && measuredRun.kept) kept.push(measuredRun.kept)
+            outputs.set(isolated, measuredRun && typeof measuredRun.output === 'string' ? { output: measuredRun.output, denied: measuredRun.denied === true || measuredRun.interrupted === true } : { output: '', denied: true })
+          } catch (error) { runErrors.push(String(error?.message ?? error)); outputs.set(isolated, { output: '', denied: true }) }
         }
       }
       for (const entry of tests) {
@@ -9127,7 +9147,7 @@ function runTask(ctx, io, crash) {
       }
     }
     const green = reason === null && tests.length > 0 && tests.every(({ rerun }) => rerun === 'passed')
-    io.log(recordRow({ at: io.now(), flake: { stage: stageName, round: roundNumber, outcome: green ? 'green' : 'red', reason, tests } }))
+    io.log(recordRow({ at: io.now(), flake: { stage: stageName, round: roundNumber, outcome: green ? 'green' : 'red', reason, tests, ...(kept.length ? { kept } : {}), ...(runErrors.length ? { errors: runErrors } : {}) } }))
     if (green) {
       for (const { test, file, rerun } of tests) S.flakes.push({ stage: stageName, test, file, rerun })
       return { ...result, ok: true }
@@ -13270,8 +13290,16 @@ function runTask(ctx, io, crash) {
       let cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
       const retriedCold = cold.ok ? null : { path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
       if (!cold.ok) cold = phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(ctx.suite, coldGuards))
+      const flakedCold = cold.ok ? null : { path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
+      if (!cold.ok) {
+        // lean: one fresh cold checkout per distinct isolated command, issued even after one is red, and every red one kept; stop issuing cold re-runs at the first non-passing verdict if multi-failure cold re-runs prove costly
+        cold = flakeRerun(cold, ctx.suite, normalizeTestRunner(ctx.testRunner).runner, 'cold-suite', S.buildRound, {
+          checkout: cold.path,
+          run: (cmd) => phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(cmd, coldGuards)),
+        })
+      }
       coldSuite = cold.ok
-        ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
+        ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output), ...(flakedCold ? { flaked: settleRetriedCold(io, flakedCold) } : {}) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
       if (retriedCold) coldSuite.retried = cold.ok ? settleRetriedCold(io, retriedCold) : retriedCold
       resumeColdSuite = coldSuite
@@ -15076,10 +15104,11 @@ export function cargoLintInvocation(invocation) {
   const { words, defect } = shellWords(invocation)
   return !defect && words[0]?.slice(words[0].lastIndexOf('/') + 1) === 'cargo' && ['clippy', 'fmt'].includes(words[1]) && words.every((word) => !/[&|;<>\x60$]/.test(word))
 }
+export const TEST_RUNNERS = Object.freeze(['node', 'cargo', 'python', 'unparsed'])
 export function normalizeTestRunner(testRunner) {
   const rawRunner = testRunner?.runner
   if (rawRunner === undefined) return { runner: 'node', basis: 'legacy node runner · no runner context' }
-  if (['node', 'cargo', 'python', 'unparsed'].includes(rawRunner)) return { runner: rawRunner, basis: typeof testRunner?.basis === 'string' ? testRunner.basis : 'runner context' }
+  if (TEST_RUNNERS.includes(rawRunner)) return { runner: rawRunner, basis: typeof testRunner?.basis === 'string' ? testRunner.basis : 'runner context' }
   return { runner: 'unparsed', basis: 'unexpected runner value' }
 }
 export function hardeningRunnerSentence(testRunner) {

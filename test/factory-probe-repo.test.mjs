@@ -201,7 +201,7 @@ function captureMain(args) {
 function everyCell(profile) {
   assert.deepEqual(Object.keys(profile.fields).sort(), [
     'baseline', 'ci', 'conventions', 'default_branch', 'intake_board', 'pr_conventions',
-    'protected_paths_candidates', 'test_command', 'toolchain', 'worktree_setup',
+    'protected_paths_candidates', 'test_command', 'test_rerun_command', 'toolchain', 'worktree_setup',
   ].sort())
   for (const cell of Object.values(profile.fields)) {
     assert.ok(['proposed', 'unknown'].includes(cell.status))
@@ -2083,3 +2083,50 @@ test('two pairs after an unterminated operator exclude line clean up in either o
     assert.equal(readFileSync(f.exclude, 'utf8'), 'stock\noperator-entry')
   }
 }))
+
+test('RC1', () => {
+  const root = scratchDir('probe-rerun-command-')
+  const profilePath = join(root, 'profile.json')
+  const ratified = (value) => ({ status: 'ratified', value, source: 'human', ratified_by: 'operator', ratified_at: 'today' })
+  const write = (cell) => writeFileSync(profilePath, JSON.stringify({ fields: { test_command: ratified('cargo test --workspace && cargo test --doc'), test_rerun_command: cell } }))
+  write(ratified('cargo test --workspace -- --exact {test}'))
+  assert.equal(checkoutTestRunner({ checkout: root, profilePath }).rerun, 'cargo test --workspace -- --exact {test}')
+  for (const value of [null, '{test} {test}', 'x{test}', '--other', "cargo test '{test}'"]) {
+    write(ratified(value))
+    assert.throws(() => checkoutTestRunner({ checkout: root, profilePath }), (error) => error instanceof ProfileRefusal && error.reason === 'test-rerun-command-invalid')
+  }
+})
+
+test('RC2', () => {
+  const root = scratchDir('probe-rerun-override-')
+  const profilePath = join(root, 'profile.json')
+  const cell = (status, value, extra = {}) => ({ status, value, source: 'human', ratified_by: 'operator', ratified_at: 'today', ...extra })
+  const testCommand = cell('ratified', 'cargo test --workspace && cargo test --doc')
+  writeFileSync(profilePath, JSON.stringify({ fields: { test_command: testCommand, test_rerun_command: cell('ratified', 'cargo test --workspace -- --exact {test}') } }))
+  assert.equal(checkoutTestRunner({ checkout: root, profilePath, suite: 'cargo test --all' }).rerun, 'cargo test --workspace -- --exact {test}')
+  writeFileSync(profilePath, JSON.stringify({ fields: { test_command: testCommand, test_rerun_command: cell('unknown', null, { reason: 'not_measured' }) } }))
+  assert.equal(checkoutTestRunner({ checkout: root, profilePath }).rerun, null)
+})
+
+test('RC3', () => {
+  assert.equal(FIELD_KINDS.test_rerun_command, 'authored_superset')
+  const profile = probeRepo({ checkout: ROOT })
+  assert.deepEqual(profile.fields.test_rerun_command, { status: 'unknown', value: null, reason: 'not_measured' })
+})
+
+test('test rerun command re-probe keeps the ratified template and operator metadata', () => {
+  const root = nodeFixture('test-rerun-command-reprobe')
+  const out = join(fixtureRoot, 'profiles', 'test-rerun-command-reprobe.json')
+  const template = 'cargo test --workspace -- --exact {test}'
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const handEdited = readProfile(out)
+  handEdited.fields.test_rerun_command = { status: 'ratified', value: template, source: 'human', ratified_by: 'operator', ratified_at: '2026-10-12T00:00:00.000Z' }
+  writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const cell = readProfile(out).fields.test_rerun_command
+  assert.equal(cell.status, 'ratified')
+  assert.equal(cell.value, template)
+  assert.equal(cell.ratified_by, 'operator')
+  assert.equal(cell.ratified_at, '2026-10-12T00:00:00.000Z')
+  assert.equal(checkoutTestRunner({ checkout: root, profilePath: out, suite: 'cargo clippy --workspace -- -D warnings && cargo test --workspace' }).rerun, template)
+})

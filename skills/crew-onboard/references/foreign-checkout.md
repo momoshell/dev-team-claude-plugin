@@ -32,7 +32,7 @@ The profile carries `repo_key`, `repo_slug` and these fields:
 
 `toolchain` · `test_command` · `baseline` · `ci` ·
 `protected_paths_candidates` · `conventions` · `default_branch` ·
-`pr_conventions` · `intake_board`
+`pr_conventions` · `intake_board` · `test_rerun_command`
 
 `conventions` also carries `conventions.value.idioms`: five fixed classes — dependency_injection, boolean_helpers, logging_placement, error_retry_shape and comment_density — each reporting a one-sentence rule, the sample_size behind it and up to three function exemplars with file spans, alongside an idiom_scan count of scanned versus extension-skipped tracked files (unsupported extensions never open, so markup outside Svelte script bodies cannot count as code). An unmeasured idiom has rule: null and a closed reason, never a guessed rule or numeric zero. A human ratifies idioms by promoting the conventions cell as a whole; the probe never ratifies them.
 
@@ -56,6 +56,16 @@ The two worth the most attention:
 - **`protected_paths_candidates`** — these set the tier floor. Under-ratifying
   lets a lane edit a protected surface at build tier; over-ratifying drags
   every lane through judge.
+- **`test_rerun_command`** — optionally ratify a single-test template such as
+  `cargo test --workspace -- --exact {test}`. It must contain exactly one
+  own-word `{test}` placeholder and no shell syntax. Compound cargo suites use
+  this fallback when append isolation is unsafe; a safe append remains preferred.
+  The same template is frozen for cold and resumed reruns. An absent or
+  unratified field means no template; malformed or invalid ratification is
+  refused specifically as `test-rerun-command-invalid`.
+  Real `cargo test -- --exact` isolation is unmeasured: the rerun argv was
+  proven against a fake executable only, so treat a cargo flake verdict as
+  unverified on a foreign checkout until it has been measured there.
 
 ## 4. Only then, dispatch
 

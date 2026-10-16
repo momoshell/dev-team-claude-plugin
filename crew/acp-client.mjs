@@ -1,4 +1,4 @@
-import { spawn as cpSpawn } from 'node:child_process'
+import { spawn as cpSpawn, spawnSync as cpSpawnSync } from 'node:child_process'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   mkdirSync as fsMkdirSync, openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
@@ -25,6 +25,8 @@ export const ACP_REFUSALS = Object.freeze([
 export const ACP_REQUEST_TIMEOUT_MS = 600000
 export const ACP_WRITE_DEADLINE_MS = 30000
 export const ACP_POLL_MS = 25
+export const ACP_PS_TIMEOUT_MS = 1000
+export const ACP_KILL_PROOF_MS = 5000
 const METHOD_NOT_FOUND = -32601
 
 export function acpRefuse(reason, message) {
@@ -59,6 +61,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   const mkdir = deps.mkdirSync || fsMkdirSync
   const unlink = deps.unlinkSync || fsUnlinkSync
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
+  const spawnSyncFn = deps.spawnSync || cpSpawnSync
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
   const pid = deps.pid ?? process.pid
@@ -312,6 +315,39 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     }
   }
 
+  function groupAllZombie(pgid) {
+    // Same notion of death as statIsZombie (crew/seat-io.mjs:240): a Z state means the kernel
+    // holds the exit status for an unreaped parent. Importing it would close the cycle
+    // acp-client -> seat-io (crew/seat-io.mjs:23) -> acp-io -> acp-client, so it is inlined here.
+    let result = null
+    try {
+      result = spawnSyncFn('ps', ['-A', '-o', 'pgid=,stat='], { encoding: 'utf8', timeout: ACP_PS_TIMEOUT_MS })
+    } catch { return false }
+    if (!result || result.status !== 0) return false
+    const stats = []
+    for (const line of String(result.stdout || '').split('\n')) {
+      const parts = line.trim().split(/\s+/)
+      if (parts.length < 2 || Number(parts[0]) !== pgid) continue
+      stats.push(parts.slice(1).join(''))
+    }
+    return stats.length > 0 && stats.every((stat) => stat.startsWith('Z'))
+  }
+
+  function probeBounded(windowMs, pgid) {
+    const deadline = now() + windowMs
+    const maxPolls = Math.ceil(windowMs / ACP_POLL_MS) + 1
+    let last = { liveness: LIVENESS.UNKNOWN, reason: 'probe' }
+    for (let poll = 0; poll < maxPolls && now() < deadline; poll += 1) {
+      if (exists(paths.exit)) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
+      const liveness = store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid })
+      if (liveness === LIVENESS.DEAD) return { liveness, reason: 'probe' }
+      if (groupAllZombie(pgid)) return { liveness: LIVENESS.DEAD, reason: 'zombie-group' }
+      last = { liveness, reason: 'probe' }
+      sleep(ACP_POLL_MS)
+    }
+    return last
+  }
+
   function proveDead() {
     const exitProof = () => exists(paths.exit)
     if (exitProof()) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
@@ -324,8 +360,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
       sleep(ACP_POLL_MS)
     }
     try { kill(-pgid, 'SIGKILL') } catch (err) { if (err?.code === 'ESRCH') return { liveness: LIVENESS.DEAD, reason: 'signal-esrch' } }
-    if (exitProof()) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
-    return { liveness: store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid }), reason: 'probe' }
+    return probeBounded(ACP_KILL_PROOF_MS, pgid)
   }
 
   function close() {
@@ -341,5 +376,20 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return result
   }
 
-  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, get sessionId() { return session.id } }
+  function reprove(windowMs = ACP_KILL_PROOF_MS) {
+    if (!closed) return close()
+    if (closeResult?.outcome === 'proven') return closeResult
+    const pgid = Number(child?.pid)
+    if (!Number.isSafeInteger(pgid) || pgid <= 1) return closeResult
+    const proof = probeBounded(windowMs, pgid)
+    if (proof.liveness === LIVENESS.DEAD) {
+      if (handle) { try { store.clear(handle) } catch {} }
+      try { if (exists(paths.fifo)) unlink(paths.fifo) } catch {}
+    }
+    closeResult = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
+    log({ at: now(), acp_teardown: { role, ...closeResult } })
+    return closeResult
+  }
+
+  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, reprove, get sessionId() { return session.id } }
 }

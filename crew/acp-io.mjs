@@ -1,6 +1,6 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync as fsUnlinkSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
-import { ACP_UPDATE_KINDS, acpClient as defaultClient } from './acp-client.mjs'
+import { ACP_UPDATE_KINDS, acpClient as defaultClient, acpRefuse } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
@@ -27,6 +27,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   const log = deps.log || (() => {})
   const emit = deps.emit || (() => {})
   const clients = new Map()
+  const retired = new Map()
   const assignments = new Map()
   const current = new Map()
   const parseLogged = new Set()
@@ -43,6 +44,12 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
   })
   function getClient(role) {
     if (clients.has(role)) return clients.get(role)
+    const retained = retired.get(role)
+    if (retained) {
+      const reproof = retained.client.reprove(cancelWindowMs)
+      if (reproof?.outcome !== 'proven') throw Object.assign(acpRefuse('acp-session-busy', `acp seat ${role} is busy`), { stage: 'acp-session-busy', role })
+      retired.delete(role)
+    }
     const member = crew?.members?.[role]
     const adapter = adapters?.[role] || {}
     const adapterName = adapter.name ?? member?.agent
@@ -274,14 +281,15 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     }
   }
   function closeRole(role, windowMs = closeWindowMs) {
-    const state = clients.get(role)
+    const state = clients.get(role) || retired.get(role)
     if (!state) return { role, transport: 'acp', outcome: 'unproven', reason: 'client-not-created' }
     const activePath = current.get(role)
     const assignment = activePath ? assignments.get(activePath) : null
     if (assignment) settle(assignment, { closing: true, windowMs })
-    clients.delete(role)
-    current.delete(role)
-    return { role, transport: 'acp', ...state.client.close() }
+    const result = { role, transport: 'acp', ...state.client.close() }
+    if (result.outcome === 'proven') { clients.delete(role); current.delete(role); retired.delete(role) }
+    else { clients.delete(role); current.delete(role); retired.set(role, state) }
+    return result
   }
   function abort(role) {
     const state = clients.get(role)

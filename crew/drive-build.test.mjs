@@ -3751,9 +3751,11 @@ test('T13 — entered vs journal-recorded: a failed stage entry row is never com
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.match(res.details.escalation.why, /journal write failed/)
-  assert.equal(res.details.stages.at(-1), 'gate-proof:1')
+  assert.deepEqual(res.details.stages.slice(-2), ['gate-proof:1', 'escalate:driver'])
   assert.equal(io.calls.logs.some((row) => row.stage === 'gate-proof:1'), false)
   assert.equal(io.calls.logs.some((row) => row.stage_done === 'gate-proof:1'), false)
+  assert.equal(io.calls.logs.some((row) => row.stage === 'escalate:driver'), true)
+  assert.equal(io.calls.logs.some((row) => row.stage_done === 'escalate:driver'), true)
 })
 
 test('bounce-reviewer at review exhaustion re-reviews the same tree', () => {
@@ -7105,7 +7107,7 @@ test('RV1-1 ordinary scope inventory failure remains a driver crash', () => {
     assert.equal(result.status, 'escalation', label)
     assert.equal(result.details.escalation.where, 'driver', label)
     assert.equal(result.details.escalation.why, 'scope inventory unavailable', label)
-    assert.deepEqual(result.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1'], label)
+    assert.deepEqual(result.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'escalate:driver'], label)
   }
 })
 

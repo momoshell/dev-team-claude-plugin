@@ -3538,7 +3538,7 @@ test('T7 — head is acquired, not injected', () => {
 
 test('T8 — journal stage rows', () => {
   const crash = crashRun()
-  assert.deepEqual(escalationStageRows(crash.io), [])
+  assert.deepEqual(escalationStageRows(crash.io), ['stage:escalate:builder', 'stage_done:escalate:builder'])
   const deliberate = deliberateRun()
   assert.deepEqual(escalationStageRows(deliberate.io), ['stage:escalate:plan', 'stage_done:escalate:plan'])
 })
@@ -6076,4 +6076,51 @@ test('FL6 warm Cargo suite failure retries before suite-red recovery', () => {
   assert.deepEqual(io.calls.run.map(row => typeof row === 'string' ? row : row.cmd).filter(command => command.includes('-- --exact')), [isolated])
   assert.deepEqual(io.calls.logs.filter(row => row.flake).map(row => row.flake), [{ stage: 'suite', round: 1, outcome: 'green', reason: null, tests: [{ test: name, file, rerun: 'passed' }] }])
   assert.equal(io.calls.logs.filter(row => row.suite_red).length, 0)
+})
+
+test('BZ4 — a lead consult crash after review:r1 journals escalate:acp-session-busy', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', [{ id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'human decision', disposition: 'ask-user', hardening: 'ungateable', hardening_why: 'not mechanically expressible' }]),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const originalAssign = io.assign
+  io.assign = (spec) => {
+    if (spec.role === 'lead') throw Object.assign(new Error('acp seat lead is busy [acp-session-busy]'), { stage: 'acp-session-busy' })
+    return originalAssign(spec)
+  }
+  const envelope = driveTask({ ...CTX, limits: { ...CTX.limits, build_rounds: 1, review_rounds: 1 } }, io)
+  assert.equal(envelope.status, 'escalation')
+  assert.equal(envelope.details.escalation.where, 'acp-session-busy')
+  assert.deepEqual(envelope.details.stages.slice(-2), ['review:r1', 'escalate:acp-session-busy'])
+  assert.deepEqual(escalationStageRows(io), ['stage:escalate:acp-session-busy', 'stage_done:escalate:acp-session-busy'])
+})
+
+test('BZ5 — a no-stage crash journals escalate:driver even when the journal throws', () => {
+  const fixture = () => fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() },
+    changed: () => { throw new Error('scope inventory unavailable') },
+  })
+  const io1 = fixture()
+  const envelope1 = driveTask(CTX, io1)
+  assert.equal(envelope1.status, 'escalation')
+  assert.equal(envelope1.details.escalation.where, 'driver')
+  assert.deepEqual(escalationStageRows(io1), ['stage:escalate:driver', 'stage_done:escalate:driver'])
+  const io2 = fixture()
+  const original2 = io2.log
+  let attempts = 0
+  io2.log = (row) => {
+    if (row?.stage?.startsWith('escalate') || row?.stage_done?.startsWith('escalate')) { attempts += 1; throw new Error('journal write failed') }
+    original2(row)
+  }
+  let envelope = null
+  let thrown = null
+  try { envelope = driveTask(CTX, io2) } catch (err) { thrown = err }
+  assert.equal(thrown, null)
+  assert.equal(envelope?.status, 'escalation')
+  assert.equal(envelope?.details?.escalation?.where, 'driver')
+  assert.equal(attempts, 2)
 })

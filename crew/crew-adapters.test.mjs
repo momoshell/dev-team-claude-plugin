@@ -855,6 +855,7 @@ test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster 
   const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
+  rawRoster.tiers.build.reviewer = { ...rawRoster.tiers.build.reviewer, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   const base = capabilityRegister()
   const register = capabilityRegister({ coding_agents: {
     pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' },
@@ -889,7 +890,7 @@ test('ADR047 P1 an unavailable advisor agent refuses only when a granted seat wi
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   const claudeSeated = (advisor) => {
     const value = structuredClone(shipped)
-    for (const role of ['planner', 'builder']) {
+    for (const role of ['planner', 'builder', 'reviewer']) {
       value.tiers.build[role] = { ...value.tiers.build[role], provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
     }
     value.tiers.build.advisor = advisor
@@ -1631,32 +1632,51 @@ test('G1 ordinary hosted raw provider remains unchanged', async () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+// pi provider namespaces carry no slash (capabilities.schema.json pins pi_provider to
+// ^[a-z0-9-]+$, and PI_PROVIDERS maps meta to the Muse Code subscription's `meta`, not the
+// retired `openrouter/meta`), so a raw override can only ever match at its FIRST slash. The
+// resolver still walks every later split point; this test pins both halves of that: a multi-slash
+// raw whose id carries a slash resolves at the first split, and the retired three-segment
+// OpenRouter spelling — which once matched meta at the second split — no longer reaches meta at
+// any split point and refuses instead of silently seating the subscription.
 test('A1 raw slash provider resolves across every split point', async () => {
   const root = scratchDir('crew-raw-slash-a1-')
-  const raw = 'openrouter/meta/muse-spark-1.3-contributor'
+  const raw = 'meta/muse-spark-1.3-contributor'
+  const slashedId = 'meta/muse/muse-spark-1.3-contributor'
+  const retired = 'openrouter/meta/muse-spark-1.3-contributor'
   try {
     const base = capabilityRegister()
     const register = capabilityRegister({ coding_agents: {
       pi: { ...base.coding_agents.pi, providers: ['openai', 'anthropic', 'meta', 'llama-swap'] },
     } })
+    for (const model of [raw, slashedId]) {
+      const probed = []
+      const adapters = await resolveAdapters(['planner'], {
+        'model-planner': model, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+      }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } })
+      assert.equal(adapters.planner.configDir, null)
+      const command = adapters.planner.adapter.seatCommand({
+        role: 'planner', model, promptFile: '/tmp/role-planner.md',
+        tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: root,
+        bootBrief: 'boot', effort: 'high', grants: adapters.planner.grants, configDir: adapters.planner.configDir,
+      })
+      assert.ok(command.includes(`--model ${model}`), model)
+      assert.deepEqual(probed, [])
+      await assert.rejects(
+        () => resolveAdapters(['planner'], {
+          'model-planner': model, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+        }, null, { register: capabilityRegister(), root, probeEndpoint: async () => true }),
+        (err) => err.reason === 'agent-provider-unsupported',
+      )
+    }
     const probed = []
-    const adapters = await resolveAdapters(['planner'], {
-      'model-planner': raw, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
-    }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } })
-    assert.equal(adapters.planner.configDir, null)
-    const command = adapters.planner.adapter.seatCommand({
-      role: 'planner', model: raw, promptFile: '/tmp/role-planner.md',
-      tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: root,
-      bootBrief: 'boot', effort: 'high', grants: adapters.planner.grants, configDir: adapters.planner.configDir,
-    })
-    assert.ok(command.includes('--model openrouter/meta/muse-spark-1.3-contributor'))
-    assert.deepEqual(probed, [])
     await assert.rejects(
       () => resolveAdapters(['planner'], {
-        'model-planner': raw, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
-      }, null, { register: capabilityRegister(), root, probeEndpoint: async () => true }),
-      (err) => err.reason === 'agent-provider-unsupported',
+        'model-planner': retired, 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents',
+      }, null, { register, root, probeEndpoint: async (url) => { probed.push(url); return true } }),
+      (err) => err.reason === 'agent-provider-unsupported' && err.message.includes('openrouter'),
     )
+    assert.deepEqual(probed, [])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -1713,6 +1733,9 @@ test('D1 raw matching providers refuse ambiguity', async () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+// Since meta maps to the slash-free `meta` namespace (2026-10-16), 'openrouter/meta/' no longer
+// reaches the resolver's later-split trailing-slash break for any shipped provider: it refuses
+// because no admitted pi provider spells `openrouter`. The spelling is kept as the retired one.
 test('E2 raw trailing slash refuses without probing', async () => {
   const root = scratchDir('crew-raw-trailing-slash-e2-')
   try {

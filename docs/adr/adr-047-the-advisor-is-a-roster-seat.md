@@ -61,7 +61,8 @@ the ratified ladder (`crew/crew.mjs:1165-1169`), the `--model-<role>`/`--agent-<
 (`resolveSeatModels`, `crew/crew.mjs:1128-1140`). Three results:
 
 - **Model spelling differs from a seat's.** A seat's cell is translated by its adapter, and pi spells `openai` as
-  `openai-codex` and `meta` as `openrouter/meta` (`PI_PROVIDERS`, `crew/adapters/adapter-pi.mjs:105`). The pi-child
+  `openai-codex` and `meta` as `meta`, the Muse Code subscription (`openrouter/meta` until 2026-10-16)
+  (`PI_PROVIDERS`, `crew/adapters/adapter-pi.mjs:109`). The pi-child
   channel passes the roster key raw to `pi --model` (`advisor.ts:1098`). *Not measured here:* whether
   `openai/gpt-6-sol` resolves inside pi. The seat path exists because nobody assumes that it does.
 - **The breaker cannot see the advisor.** A dead endpoint records a synthetic cell
@@ -247,3 +248,11 @@ This amendment supersedes operator decision 2 only for the judge tier. Judge now
 **Grounds, supplied by the operator.** Advisor delivery became real at PR #1773: 20/21, then 46/74 tier-1 notes delivered. Judge builders pass first review only 14/30. The advisor costs about $0.02 per lane and gives the passive advisor measurement a judge arm. These are supplied pre-change measurements, not a measured benefit from this amendment.
 
 **What does not change.** The advisor remains passive, advisory and builder-only; grants, overrides, the roster/adapter path and the existing ratify-or-delete protocol are unchanged.
+
+## Amendment 2 (2026-10-16, operator decision) — build and judge ship the sol advisor
+
+This amendment supersedes Amendment 1's model choice. Build and judge now ship `openai/gpt-6.1-sol` at `medium`; mechanical stays `null`.
+
+**Grounds, supplied by the operator.** Per token `openai/gpt-6.1-sol` is at or below `openai/gpt-5.6-terra` on every rate the roster prices (input 2 vs 2, output 10 vs 12, cache read 0.1 vs 0.2 per Mtok) and sits in a higher ladder band (frontier vs workhorse). Terra was seated on 2026-09-30 as a same-band stand-in for the unroutable sonnet cell, not on measured advisor benefit. The `advisor-arms` readout at the time of this decision (window 2026-10-06) is not ratifiable — 6–7 runs per arm — and is not cited as evidence that sol advises better.
+
+**What does not change.** Everything Amendment 1 left unchanged, and the `advisor-ab` arms: `openai/gpt-5.6-terra` remains an arm.

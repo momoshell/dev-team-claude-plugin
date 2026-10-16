@@ -35,6 +35,12 @@
       "effort": "medium"
     },
     {
+      "provider": "meta",
+      "id": "muse-wonder-1.0-contributor",
+      "agent": "pi",
+      "effort": "medium"
+    },
+    {
       "provider": "openai",
       "id": "gpt-5.6-terra",
       "agent": "pi",

@@ -103,8 +103,10 @@ export function capabilitiesFor({ transport, grants } = {}) {
 
 // pi namespaces models as <pi-provider>/<id>. openai -> openai-codex is
 // DELIBERATE: that provider routes through the ChatGPT subscription OAuth
-// (verified `pi auth check --provider openai-codex`).
-export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'openrouter/meta' })
+// (verified `pi auth check --provider openai-codex`). meta -> meta is the Muse
+// Code subscription OAuth at api.meta.ai, not per-token OpenRouter (probed
+// 2026-10-16 against muse-spark-1.3-contributor and muse-wonder-1.0-contributor).
+export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'meta' })
 
 export const ROUTER_ATTEMPT_URL_ENV = 'CREW_ROUTER_ATTEMPT_URL'
 const ROUTER_ATTEMPT_REFUSAL = 'refusing malformed CREW_ROUTER_ATTEMPT_URL (expected http://host/a/<token>/) — refusing a guessed endpoint'

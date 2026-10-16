@@ -20,8 +20,9 @@ import { teardownCore } from './crew.mjs'
 import { driveJournalSites, noncanonicalJournalSinks } from './drive-fixtures.mjs'
 import { tokenizeJs, blankJsComments } from './js-tokens.mjs'
 
-function acpFloorFixture(tier) {
+function acpFloorFixture(tier, editRoster = () => {}) {
   const roster = JSON.parse(readFileSync(join(ROOT, 'crew/roster.json'), 'utf8'))
+  editRoster(roster)
   const cell = roster.tiers[tier].reviewer
   const root = scratchDir(`acp-floor-${tier}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
@@ -70,7 +71,10 @@ test('AR2', () => {
 
 test('ACP reseat still refuses different cells and requests without a tier', () => {
   const exactWhy = 'ACP seat reviewer cannot be reseated because its live client cannot change models in-session'
-  const mechanical = acpFloorFixture('mechanical')
+  // The shipped reviewer is one cell on every tier (2026-10-16), so the judge cell is made to
+  // differ here: a different-cell reseat is what this test refuses.
+  const mechanical = acpFloorFixture('mechanical', (roster) => { roster.tiers.judge.reviewer = { ...roster.tiers.judge.reviewer, effort: 'xhigh' } })
+  assert.notEqual(mechanical.member.effort, 'xhigh')
   const mechanicalMember = structuredClone(mechanical.member)
   const mechanicalSeat = structuredClone(mechanical.seat)
   const different = mechanical.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })

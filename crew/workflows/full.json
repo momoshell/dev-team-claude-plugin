@@ -4,8 +4,8 @@
     "plan": {
       "role": "planner",
       "agent": "pi",
-      "provider": "openai",
-      "id": "gpt-6.1-sol",
+      "provider": "meta",
+      "id": "muse-wonder-1.0-contributor",
       "effort": "medium",
       "skills": [],
       "extensions": [
@@ -16,9 +16,9 @@
     "build": {
       "role": "builder",
       "agent": "pi",
-      "provider": "openai",
-      "id": "gpt-6-luna",
-      "effort": "high",
+      "provider": "meta",
+      "id": "muse-spark-1.3-contributor",
+      "effort": "xhigh",
       "skills": [],
       "extensions": [
         "crew/pi/extensions/builderloop.ts",
@@ -37,9 +37,9 @@
     },
     "review": {
       "role": "reviewer",
-      "agent": "claude",
-      "provider": "anthropic",
-      "id": "claude-opus-5-5",
+      "agent": "pi",
+      "provider": "openai",
+      "id": "gpt-6.1-sol",
       "effort": "high",
       "skills": [],
       "extensions": []

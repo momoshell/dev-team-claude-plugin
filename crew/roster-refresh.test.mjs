@@ -311,7 +311,7 @@ test('readRosterModels refuses a record with no numeric cost', () => {
 
 test('readRosterModels accepts the shipped roster', () => {
   const models = readRosterModels(roster, 'crew/roster.json')
-  assert.equal(Object.keys(models).length, 18)
+  assert.equal(Object.keys(models).length, 19)
 })
 
 test('synthetic catalog leaves every shipped llama-swap model under cannot confirm', () => {
@@ -457,6 +457,14 @@ test('SUCC2 a dated snapshot is never a successor', () => {
 // onto the full-price non-contributor model.
 test('SUCC3 a tiered family keeps its tier', () => {
   assert.deepEqual(successorOf('meta/muse-spark-1.3-contributor', CATALOG_KEYS), { key: 'meta/muse-spark-1.3-contributor', successor: null, reason: 'already-newest' })
+})
+
+// Mutation killed: folding wonder into the spark family reseats the planner onto a Spark release,
+// and dropping its tier suffix moves a contributor seat onto the full-price model.
+test('SUCC3b a wonder contributor bumps only within muse-wonder-*-contributor', () => {
+  const keys = ['meta/muse-wonder-1.0-contributor', 'meta/muse-wonder-1.1-contributor', 'meta/muse-wonder-2.0', 'meta/muse-spark-9.9-contributor']
+  assert.deepEqual(modelFamily('muse-wonder-1.0-contributor'), { family: 'muse-wonder-*-contributor', version: [1, 0] })
+  assert.deepEqual(successorOf('meta/muse-wonder-1.0-contributor', keys), { key: 'meta/muse-wonder-1.0-contributor', successor: 'meta/muse-wonder-1.1-contributor', reason: null })
 })
 
 // Mutation killed: guessing a family for an unrecognised shape would reseat a local model.

@@ -31,14 +31,14 @@ const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', impo
 
 test('ADR047 A1 build roster resolves its canonical nullable advisor cell without seating it', () => {
   const resolved = resolveTier(shippedRoster(), 'build')
-  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: null })
+  assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: null })
   assert.equal(resolved.roles.includes('advisor'), false)
 })
-test('ADR047 build advisor roster literal remains pinned to terra', () => {
-  assert.deepEqual(shippedRoster().tiers.build.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
+test('ADR047 build advisor roster literal remains pinned to sol', () => {
+  assert.deepEqual(shippedRoster().tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
 })
-test('ADR047 A2 judge resolves terra and mechanical keeps advisor explicitly null', () => {
-  assert.deepEqual(resolveTier(shippedRoster(), 'judge').advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: null })
+test('ADR047 A2 judge resolves sol and mechanical keeps advisor explicitly null', () => {
+  assert.deepEqual(resolveTier(shippedRoster(), 'judge').advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: null })
   assert.equal(resolveTier(shippedRoster(), 'mechanical').advisor, null)
 })
 test('ADR047 A3 advisor is not a process role and canonical override is honored', () => {
@@ -2396,17 +2396,23 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Sonnet successors', () => {
+test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet successors, the Muse planner and builder, and the Sol reviewer', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-10-10')
+  assert.equal(shipped.updated_at, '2026-10-16')
   // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
-  assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
-  assert.equal(shipped.tiers.build.builder.effort, 'high')
-  assert.deepEqual(shipped.tiers.judge.advisor, { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'medium' })
+  assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
+  // Operator, 2026-10-16: Spark builds at xhigh on build and judge; mechanical stays medium.
+  assert.equal(shipped.tiers.build.builder.effort, 'xhigh')
+  assert.equal(shipped.tiers.judge.builder.effort, 'xhigh')
+  assert.equal(shipped.tiers.mechanical.builder.effort, 'medium')
+  assert.deepEqual(shipped.tiers.judge.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
   assert.equal(shipped.tiers.mechanical.advisor, null)
   for (const tier of ['mechanical', 'build', 'judge']) {
-    assert.equal(shipped.tiers[tier].planner.id, 'gpt-6.1-sol')
-    assert.equal(shipped.tiers[tier].reviewer.id, 'claude-opus-5-5')
+    // Operator, 2026-10-16: the planner and builder seats move onto the Muse Code subscription.
+    assert.deepEqual([shipped.tiers[tier].planner.provider, shipped.tiers[tier].planner.id, shipped.tiers[tier].planner.agent], ['meta', 'muse-wonder-1.0-contributor', 'pi'])
+    assert.deepEqual([shipped.tiers[tier].builder.provider, shipped.tiers[tier].builder.id, shipped.tiers[tier].builder.agent], ['meta', 'muse-spark-1.3-contributor', 'pi'])
+    // Operator, 2026-10-16: Sol reviews on every tier, through pi, at high.
+    assert.deepEqual(shipped.tiers[tier].reviewer, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' })
   }
   for (const tier of ['build', 'judge']) {
     assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')
@@ -2472,6 +2478,13 @@ test('shipped roster and ladder seat the ratified Sol, Luna, Opus, Fable and Son
   const utility = ladder.bands.find((band) => band.band === 'utility')
   assert.ok(frontier.members.includes('anthropic/claude-opus-5-5'))
   assert.ok(frontier.members.includes('openai/gpt-6.1-sol'))
+  assert.ok(frontier.members.includes('meta/muse-wonder-1.0-contributor'))
+  assert.match(String(frontier.membership_basis), /meta\/muse-wonder-1\.0-contributor is an assertion ratified by the operator on 2026-10-16/)
+  // No catalog prices Wonder Contributor: the row borrows muse-wonder-1.0's rates as an upper bound.
+  const wonder = shipped.models['meta/muse-wonder-1.0-contributor']
+  assert.deepEqual([wonder.cost_in_per_mtok, wonder.cost_out_per_mtok, wonder.cost_cache_read_per_mtok, wonder.cost_cache_write_per_mtok, wonder.context], [4, 20, 0.2, 0, 1048576])
+  assert.match(wonder.cache_rate_source, /UPPER BOUND, not a measurement/)
+  assert.equal(wonder.last_verified, '2026-10-16')
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
   assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
   assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)

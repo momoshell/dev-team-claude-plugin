@@ -160,6 +160,9 @@ export const FAMILY_SHAPES = Object.freeze([
   { pattern: /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?$/, family: (m) => `claude-${m[1]}`, version: (m) => [Number(m[2]), Number(m[3] ?? 0)] },
   // muse-spark-<major>.<minor>[-<tier>]: the tier is part of the family, so a contributor stays one.
   { pattern: /^muse-spark-(\d+)\.(\d+)(-[a-z]+)?$/, family: (m) => `muse-spark-*${m[3] ?? ''}`, version: (m) => [Number(m[1]), Number(m[2])] },
+  // muse-wonder-<major>.<minor>[-<tier>]: spark's shape, its own family, so a Wonder seat is never
+  // bumped onto a Spark release, and a contributor stays one.
+  { pattern: /^muse-wonder-(\d+)\.(\d+)(-[a-z]+)?$/, family: (m) => `muse-wonder-*${m[3] ?? ''}`, version: (m) => [Number(m[1]), Number(m[2])] },
 ])
 
 export function modelFamily(id) {

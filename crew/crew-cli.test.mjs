@@ -1768,7 +1768,7 @@ test('B1 boot crew record remains profile and assurance only', async () => {
       const bootConfiguration = bootRecord(dir).run_configuration
       // ADR-047 (TL7): the boot JOURNAL's record carries the resolved advisor cell;
       // crew.json keeps profile and assurance only, because seats.advisor records it there.
-      const judgeAdvisor = { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-5.6-terra', model: 'openai-codex/gpt-5.6-terra' }
+      const judgeAdvisor = { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: 'openai-codex/gpt-6.1-sol' }
       assert.deepEqual(bootConfiguration, {
         profile: crew.run_configuration.profile,
         assurance: crew.run_configuration.assurance,
@@ -2445,7 +2445,7 @@ test('an injected opener without existsSync reads rows and refuses before state 
       ),
       (error) => {
         assert.equal(error.code, 'breaker-open')
-        for (const value of ['gpt-6-luna', '--model-', '--agent-', '--tier']) assert.ok(error.message.includes(value), `missing ${value}`)
+        for (const value of [buildBreakerCell().model_id, '--model-', '--agent-', '--tier']) assert.ok(error.message.includes(value), `missing ${value}`)
         return true
       },
     )))
@@ -2488,9 +2488,8 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
   writeFileSync(dbPath, 'fake ledger')
   const openLedger = fakeBreakerLedger([breakerRow({ failures: 1 })], { attemptRows: [
     breakerAttempt(),
-    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'lead' }),
-    breakerAttempt({ provider: 'openai', model_id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium', role: 'planner' }),
-    breakerAttempt({ provider: 'anthropic', model_id: 'claude-opus-5-5', agent: 'claude', effort: 'high', role: 'reviewer' }),
+    // Every other build seat reads its cell from the shipped roster, so a reseat moves the fixture with it.
+    ...['lead', 'planner', 'reviewer'].map((role) => breakerAttempt((({ provider, id, agent, effort }) => ({ provider, model_id: id, agent, effort, role }))(shippedRoster().tiers.build[role]))),
   ] })
   try {
     await withBreakerEnv({ CREW_BREAKER_THRESHOLD: '0.2', CREW_BREAKER_WINDOW_MS: '3600000', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => bootCmd(
@@ -2501,7 +2500,7 @@ test('a below-threshold breaker verdict is journaled alongside allocation', asyn
     assert.equal(breaker.verdict, 'closed')
     assert.equal(breaker.threshold_rate, 0.2)
     assert.equal(breaker.window_ms, 3600000)
-    const breakerCell = breaker.cells.find((cell) => cell.provider === 'openai' && cell.model_id === 'gpt-6-luna' && cell.agent === 'pi' && cell.effort === buildBreakerCell().effort)
+    const breakerCell = breaker.cells.find((cell) => ['provider', 'model_id', 'agent', 'effort'].every((key) => cell[key] === buildBreakerCell()[key]))
     assert.ok(breakerCell)
     assert.equal(breakerCell.numerator, 1)
     assert.equal(breakerCell.denominator, 12)
@@ -4774,10 +4773,10 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
-  assert.equal(resolved.seats.planner.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.planner.id, 'muse-wonder-1.0-contributor')
   assert.equal(resolved.seats.lead.id, 'claude-opus-5-5')
-  assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
-  assert.equal(resolved.seats.builder.id, 'gpt-6-luna')
+  assert.equal(resolved.seats.reviewer.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.builder.id, 'muse-spark-1.3-contributor')
 })
 
 test('D1-codes workflow refusal set is frozen and every validator code is reachable', () => {

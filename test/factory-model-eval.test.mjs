@@ -1212,16 +1212,16 @@ test('routing policy and ledger write refusals stop bench admission without fabr
 const ROLE_BENCH_ROOT = 'docs/audits/2026-09-17/bench'
 const ROLE_NAMES = ['planner', 'builder']
 const reviewedCandidateShas = {
-  // Updated 2026-09-30 by the operator-ratified successor bump: production moves to
-  // openai/gpt-6.1-sol at medium; the local candidate set is unchanged. The operator ratified the
-  // bump, not this file: the new candidates.json has had no separate operator review.
-  // (Updated 2026-09-23 by the successor bump of PR #1507: production moved to openai/gpt-6-sol.)
-  planner: 'ffd4453393dce0bb21528771ffee1f22d5f3c09a0b2d2cbbe74375a3c6f1d76d',
-  // Updated 2026-09-25 by the operator-ratified builder reseat: production moves from
-  // meta/muse-spark-1.3-contributor to openai/gpt-6-luna at medium; the local candidate set is
-  // unchanged. The operator ratified the seat, not this file: no separate operator review.
-  // (Re-reviewed 2026-09-20: builder effort low -> medium. 2026-09-19: `"tier": "mechanical"`.)
-  builder: '1367e4fad4388c4aaaea385bb1314f1a84670df8dc955b46d7a5e482eb15d58b',
+  // Updated 2026-10-16 by the operator-ratified planner reseat: production moves from
+  // openai/gpt-6.1-sol to meta/muse-wonder-1.0-contributor at medium; the local
+  // candidate set is unchanged. The operator ratified the seat, not this file: no separate review.
+  // (Updated 2026-09-30: production moved to openai/gpt-6.1-sol. 2026-09-23, PR #1507: to gpt-6-sol.)
+  planner: '034010b26759c55f58dd6a12febea57b7f2f62c22155119b2a2e189eb46640e9',
+  // Updated 2026-10-16 by the operator-ratified builder reseat: production moves from
+  // openai/gpt-6-luna back to meta/muse-spark-1.3-contributor at medium. The file returns to the
+  // exact bytes the operator re-reviewed on 2026-09-20 (builder effort low -> medium), so this
+  // digest is that reviewed one. (2026-09-25: Luna seated. 2026-09-19: `"tier": "mechanical"`.)
+  builder: '061c879340054af7221a8dba80019dbe0f1042e8104ab1c3e337b8ff8a8a74e5',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`

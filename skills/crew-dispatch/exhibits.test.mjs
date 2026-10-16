@@ -16,8 +16,8 @@ const MANIFEST = join(HERE, 'anchors.json')
 const LAB_TEST_FILE = 'crew/pi/extensions/lab.test.mjs'
 const QA_GRANT_OWNER = 'skills/qa-test-writing/grants.json'
 const QA_EVIDENCE_OWNER = 'skills/qa-test-writing/anchor-evidence.mjs'
-const LEAN_OWNER = 'skills/lean-build/anchors.json'
-const LEAN_TEST_FILE = 'skills/lean-build/exhibits.test.mjs'
+const LEAN_OWNER = 'skills/code-less/anchors.json'
+const LEAN_TEST_FILE = 'skills/code-less/exhibits.test.mjs'
 const GATE_KIT_OWNER = 'crew/guidelines/gate-kit.mjs'
 const GATE_KIT_TEST_FILE = 'crew/guidelines/gate-kit.test.mjs'
 const FRONTEND_OWNER = 'skills/frontend-svelte/anchors.json'
@@ -361,7 +361,7 @@ test('I1 tracked non-test owners are covered by dynamic reach census', () => {
     ['visualizer/web/src/lib/WorkflowsPage.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/WorkflowGraph.svelte', ['test/visualizer-panels.test.mjs']],
     ['visualizer/web/src/lib/stage-docs.json', ['test/visualizer-panels.test.mjs']],
-    ['skills/lean-build/SKILL.md', ['crew/drive-docs.test.mjs']],
+    ['skills/code-less/SKILL.md', ['crew/drive-docs.test.mjs']],
     ['hooks/skill-gate.mjs', ['hooks/skill-gate.test.mjs']],
     ['hooks/hooks.json', ['hooks/skill-gate.test.mjs']],
     ['skills/skill-map.json', ['hooks/skill-gate.test.mjs']],
@@ -460,7 +460,7 @@ test('RV2-1 newly tracked lab grant owners are covered by dynamic reach census',
   }
 })
 
-test('RV2-1 lean-build owner is covered by dynamic reach census', () => {
+test('RV2-1 code-less owner is covered by dynamic reach census', () => {
   const addedOwners = [LEAN_OWNER]
   const currentReach = collectTestReach({ checkout: ROOT })
   const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedOwners])]

@@ -1850,7 +1850,7 @@ test('pin-check H1', () => {
   // MUTATION H1: disabling the moved-pin contribution keeps this real one-line drift green.
   // Every value below is derived at runtime from a real manifest entry, so this file
   // restates no currently pinned anchor key and the checkout itself is never written.
-  const realManifest = JSON.parse(readFileSync(join(ROOT, 'skills/lean-build/anchors.json'), 'utf8'))
+  const realManifest = JSON.parse(readFileSync(join(ROOT, 'skills/code-less/anchors.json'), 'utf8'))
   const [realKey, realExpected] = Object.entries(realManifest)[0]
   const sep = realKey.lastIndexOf(':')
   const rel = realKey.slice(0, sep)

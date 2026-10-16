@@ -1,5 +1,5 @@
 ---
-name: lean-build
+name: code-less
 description: This repo's worked examples for the ladder in crew/roles/_shared.md — the rungs that recur here, each with the replacement that was accepted.
 compatibility: Delivered inline in every seat's role prompt (the `## Plugin skills` block), so a pi seat no longer loads it with `--skill`; the ladder still reaches every seat through `_shared.md`.
 ---

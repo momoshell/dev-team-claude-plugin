@@ -287,7 +287,7 @@ export function complexityTags(reviewerCharter) {
 const TAGS_SHA256 = 'bc5486211755d3ab6a644b6e2cc013f493d4db6fb48eb7ef7ee9278c57ed5df1'
 const LADDER_SHA256 = '9e8228f275d9243a5a2b3a69b56dd4c8bfce66ef04786509f2bddafea2cef397'
 
-test('the ladder lives once, in _shared.md; builder keeps only its output rule; lean-build carries the repo examples', () => {
+test('the ladder lives once, in _shared.md; builder keeps only its output rule; code-less carries the repo examples', () => {
   const sharedLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', '_shared.md'), 'utf8').split('\n')
   const builderLines = readFileSync(join(REPO_ROOT, 'crew', 'roles', 'builder.md'), 'utf8').split('\n')
   // The rungs are DERIVED from _shared.md, never copied here: a test that carries the six
@@ -316,10 +316,10 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   }
   assert.equal(builderLines.filter((line) => line === '- Output the code, then at most three lines of \`skipped X, add when Y\`.').length, 1)
 
-  const skill = readFileSync(join(REPO_ROOT, 'skills/lean-build/SKILL.md'), 'utf8')
+  const skill = readFileSync(join(REPO_ROOT, 'skills/code-less/SKILL.md'), 'utf8')
   const skillLines = skill.split('\n')
   assert.equal(skillLines[0], '---')
-  assert.equal(skillLines[1], 'name: lean-build')
+  assert.equal(skillLines[1], 'name: code-less')
   assert.match(skillLines[2] || '', /^description: .+_shared\.md.+$/)
   assert.equal(skillLines[3], "compatibility: Delivered inline in every seat's role prompt (the `## Plugin skills` block), so a pi seat no longer loads it with `--skill`; the ladder still reaches every seat through `_shared.md`.")
   assert.equal(skillLines[4], '---')
@@ -344,7 +344,7 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
   assert.ok(reviewerProse.includes('do not flag it'), 'the one smoke test is never bloat')
   assert.equal(skill.includes('Review tags:'), false, 'tags are not duplicated into the skill')
 
-  const leanAnchors = JSON.parse(readFileSync(join(REPO_ROOT, 'skills/lean-build/anchors.json'), 'utf8'))
+  const leanAnchors = JSON.parse(readFileSync(join(REPO_ROOT, 'skills/code-less/anchors.json'), 'utf8'))
   const expectedExamples = [
     { line: "- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])`", file: 'crew/seat-io.mjs', firstFragment: "execFileSync('git', ['add', '--', ...toAdd]", lastFragment: "execFileSync('git', ['add', '--', ...toAdd]" },
     { line: "- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])`", file: 'crew/variants.mjs', firstFragment: "stages: Object.freeze(['plan', 'check', 'build'", lastFragment: "'gate-baseline'" },
@@ -364,8 +364,8 @@ test('the ladder lives once, in _shared.md; builder keeps only its output rule; 
     assert.equal(file, expected.file)
     assert.equal(existsSync(join(REPO_ROOT, file)), true, file)
     assert.ok(last >= first, `${file}:${first}-${last} is not a range`)
-    // The citation is checked against the lean-build content manifest, not the source: the
-    // manifest-to-source check is skills/lean-build/exhibits.test.mjs, which treats a shifted
+    // The citation is checked against the code-less content manifest, not the source: the
+    // manifest-to-source check is skills/code-less/exhibits.test.mjs, which treats a shifted
     // line as repairable after merge (ADR-040). Reading the source here made every lane that
     // moves a cited line fence this granted skill, a prompt surface.
     const firstPin = leanAnchors[`${file}:${first}`]

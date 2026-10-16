@@ -212,14 +212,14 @@ after(async () => {
 const skillBody = (name) => readFileSync(join(ROOT, 'skills', name, 'SKILL.md'), 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
 
 test('skill-delivery M1 role and path rules resolve in ordered deduplicated paths', () => {
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
 })
 test('skill-delivery M2 reviewer role rules resolve two skills', () => {
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'reviewer', files: [] }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'reviewer', files: [] }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md'])
 })
 test('skill-delivery M3 reviewer null fence preserves absence while [] is measured', () => {
   const map = loadMap(ROOT).map
-  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: null }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: null }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md'])
   assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: null }).paths_unmeasured, 'no-fence-register')
   assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: [] }).paths_unmeasured, null)
 })
@@ -253,20 +253,20 @@ test('skill-delivery D1 own fence delivers backend-node body in the builder prom
   assert.ok(prompt.indexOf('## Plugin skills') > prompt.indexOf('# Role'))
   assert.equal(prompt.includes('---\nname: backend-node'), false)
 })
-test('skill-delivery D2 every booted role receives the exact lean-build body', async () => {
+test('skill-delivery D2 every booted role receives the exact code-less body', async () => {
   const { dir } = await skillBoot()
-  for (const role of SKILL_ROLES) assert.ok(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8').includes(skillBody('lean-build')))
+  for (const role of SKILL_ROLES) assert.ok(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8').includes(skillBody('code-less')))
 })
 test('skill-delivery D3 over-budget status includes absolute path and exact bytes without body', () => {
   const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 300 })
-  const body = skillBody('lean-build'); const path = join(ROOT, 'skills/lean-build/SKILL.md'); const bytes = Buffer.byteLength(body, 'utf8')
+  const body = skillBody('code-less'); const path = join(ROOT, 'skills/code-less/SKILL.md'); const bytes = Buffer.byteLength(body, 'utf8')
   assert.ok(result.section.includes(`over-budget: ${bytes} bytes — ${path}`)); assert.equal(result.section.includes(body), false)
 })
 test('skill-delivery D4 unreadable status includes absolute path', () => {
   const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], read: () => { throw new Error('EPERM') } })
   // Kills: an unreadable skill recorded as a measured zero (bytes 0, "0 bytes") instead of absent.
-  assert.ok(result.section.includes(`unreadable: unmeasured — ${join(ROOT, 'skills/lean-build/SKILL.md')}`))
-  const record = result.skills.find((skill) => skill.path === join(ROOT, 'skills/lean-build/SKILL.md'))
+  assert.ok(result.section.includes(`unreadable: unmeasured — ${join(ROOT, 'skills/code-less/SKILL.md')}`))
+  const record = result.skills.find((skill) => skill.path === join(ROOT, 'skills/code-less/SKILL.md'))
   assert.equal(record.status, 'unreadable')
   assert.equal(record.bytes, null)
 })
@@ -385,7 +385,7 @@ test('skill-delivery W1 maximum union of shipped path rules is delivered within 
 test('skill-delivery R1 reviewer documentation names ladder sources', () => {
   const skill = readFileSync(join(ROOT, 'skills/pr-review/SKILL.md'), 'utf8')
   const rubric = readFileSync(join(ROOT, 'skills/pr-review/references/rubric.md'), 'utf8')
-  assert.ok(skill.includes("- A hand-rolled shape where crew/roles/_shared.md's ladder or skills/lean-build/SKILL.md names an accepted one is a finding."))
+  assert.ok(skill.includes("- A hand-rolled shape where crew/roles/_shared.md's ladder or skills/code-less/SKILL.md names an accepted one is a finding."))
   assert.match(rubric, /## Ladder/)
 })
 
@@ -3022,17 +3022,17 @@ test('SR5 lead reachable union is exactly empty', () => {
   // MUTATION: reachableRules ignores role restrictions on path rules.
   assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'lead' }), { skills: [], paths_unmeasured: null })
 })
-test('SR6 shipped lead fence has only lean-build', () => {
+test('SR6 shipped lead fence has only code-less', () => {
   // MUTATION: grant backend-node to lead in the shipped role matrix.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md'])
 })
-test('SR7 shipped planner fence has lean-build and qa-test-writing', () => {
+test('SR7 shipped planner fence has code-less and qa-test-writing', () => {
   // MUTATION: remove planner from the test-writing map rule.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'planner', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'planner', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
 })
-test('SR8 shipped tech-lead fence has lean-build, pr-review and qa-test-writing', () => {
+test('SR8 shipped tech-lead fence has code-less, pr-review and qa-test-writing', () => {
   // MUTATION: remove tech-lead from the test-writing map rule.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'tech-lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/lean-build/SKILL.md', 'skills/pr-review/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'tech-lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
 })
 test('SR9 reachable compiled prompts fit pinned frozen ceilings', () => {
   // MUTATION: lower one reachable skill-block ceiling by one byte.

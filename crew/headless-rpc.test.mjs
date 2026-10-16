@@ -2679,7 +2679,7 @@ test('P1 skill-read RPC row deduplicates repeated skill document reads', () => {
     const frames = [
       { type: 'turn_start' },
       ...[1, 2].flatMap((n) => [
-        { type: 'tool_execution_start', toolCallId: `skill-${n}`, toolName: 'read', args: { path: '/plugin/skills/lean-build/SKILL.md' } },
+        { type: 'tool_execution_start', toolCallId: `skill-${n}`, toolName: 'read', args: { path: '/plugin/skills/code-less/SKILL.md' } },
         { type: 'tool_execution_end', toolCallId: `skill-${n}`, toolName: 'read' },
       ]),
       { type: 'turn_end' },
@@ -2688,7 +2688,7 @@ test('P1 skill-read RPC row deduplicates repeated skill document reads', () => {
     f.writeStream(`${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
     writeFileSync(run.returnPath, JSON.stringify(ordinaryRpcEnvelope(run.id)))
     assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
-    assert.deepEqual(rows.find((row) => row.seat_turn_census)?.seat_turn_census.skill_reads, ['skills/lean-build/SKILL.md'])
+    assert.deepEqual(rows.find((row) => row.seat_turn_census)?.seat_turn_census.skill_reads, ['skills/code-less/SKILL.md'])
   } finally { f.cleanup() }
 })
 

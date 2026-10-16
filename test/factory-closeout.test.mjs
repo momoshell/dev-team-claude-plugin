@@ -1769,10 +1769,10 @@ test('B2 a granted-skill-only PR is a prompt change and enters the due list', ()
   const body = 'Measure: first-round pass rate\nunmeasured — n insufficient; reason: skill prose evidence; re-measure after 12 seats.\n'
   const { deps } = harness({
     promptMeasurePath,
-    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload({ files: [{ path: 'skills/lean-build/SKILL.md' }] })), stderr: '' }]],
+    answers: [['--json files,mergedAt', { status: 0, stdout: JSON.stringify(promptMetadataPayload({ files: [{ path: 'skills/code-less/SKILL.md' }] })), stderr: '' }]],
   })
   // MUTATION B2: read the bare PROMPT_SURFACE.paths again in promptMetadata and this sweeps as not-prompt-change.
-  const register = { roles: { builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } } } }
+  const register = { roles: { builder: { skills: [], by_agent: { pi: { skills: ['skills/code-less/SKILL.md'] } } } } }
   const result = reapPromptMeasures({ lane: 'skill-only', pr: { number: 1003, body, checkout: root }, root, deps, register })
   assert.notEqual(result.reason, 'not-prompt-change')
   assert.equal(existsSync(promptMeasurePath), true)

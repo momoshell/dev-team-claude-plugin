@@ -31,7 +31,7 @@ Upstream NOTICE, the applicable part:
 
 ## ponytail (MIT)
 
-`skills/lean-build/SKILL.md` and the ladder in `crew/roles/_shared.md` derive
+`skills/code-less/SKILL.md` and the ladder in `crew/roles/_shared.md` derive
 from ponytail by Dietrich Gebert, https://github.com/DietrichGebert/ponytail at
 revision `e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156`, rewritten for this repository's seats, doctrine and marker
 name. Licence copy: `docs/licenses/ponytail-MIT.txt`. The notice, as the MIT

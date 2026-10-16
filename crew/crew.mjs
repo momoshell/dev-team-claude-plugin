@@ -5353,10 +5353,10 @@ if (invokedDirectly) {
 
 const SKILL_ROOT_BYTES = Buffer.byteLength(dirname(HERE), 'utf8')
 export const SKILL_BLOCK_CEILINGS = Object.freeze({
-  builder: 9721 + 7 * SKILL_ROOT_BYTES,
+  builder: 9959 + 8 * SKILL_ROOT_BYTES,
   lead: 16,
   planner: 7059 + 4 * SKILL_ROOT_BYTES,
-  reviewer: 7217 + 8 * SKILL_ROOT_BYTES,
+  reviewer: 7455 + 9 * SKILL_ROOT_BYTES,
   'tech-lead': 6490 + 2 * SKILL_ROOT_BYTES,
 })
 export const ROLE_PROMPT_CEILINGS = Object.freeze(Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, bytes + 2 + SKILL_BLOCK_CEILINGS[role]])))

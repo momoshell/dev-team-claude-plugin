@@ -2909,17 +2909,56 @@ test('RK1 the same dispatch id in two run segments of one checkout is two assign
   assert.deepEqual([row.measured, row.edited_without_load], [2, 2])
 })
 
-// MUTATION GR1: not clearing the seat-skills snapshot at run-start carries one run's grant into the next.
-test('GR1 a seat-skills grant in one run does not count for the next run, which has none', () => {
+// MUTATION SB1: restoring the clear at run-start wipes the boot-time grant before its window.
+test('SB1 a boot-time seat-skills grant survives run-start to its window', () => {
   const window = (at) => ({ at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] })
   const rows = [
-    { at: '2026-10-16T00:00:00.000Z', event: 'run-start', run_id: 'run-a' },
-    { at: '2026-10-16T00:00:00.500Z', event: 'seat-skills', seat_skills: { builder: { skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] } } },
-    window('2026-10-16T00:00:01.000Z'),
-    { at: '2026-10-16T00:00:02.000Z', event: 'run-start', run_id: 'run-b' }, window('2026-10-16T00:00:03.000Z'),
+    { at: '2026-10-16T00:00:00.000Z', event: 'boot' },
+    { at: '2026-10-16T00:00:00.500Z', event: 'seat-skills', role: 'builder', skills: [{ path: '/abs/skills/code-less/SKILL.md', status: 'granted', selected_by: 'map-role' }], paths_unmeasured: [] },
+    { at: '2026-10-16T00:00:01.000Z', event: 'run-start', run_id: 'run-a' },
+    window('2026-10-16T00:00:02.000Z'),
   ]
-  const row = skillVerbRow(rows, 'gr1', { since: '2026-10-16T00:00:00.000Z' })
-  assert.deepEqual([row.granted, row.granted_absent_reason], [null, 'seat-skills-row-absent'])
+  const row = skillVerbRow(rows, 'sb1', { since: '2026-10-16T00:00:00.000Z' })
+  assert.deepEqual([row.granted, row.granted_absent_reason], [1, null])
+})
+
+// MUTATION SB2: not clearing at boot carries one boot's reviewer grant into the next boot.
+test('SB2 a seat-skills grant applies only within its boot segment across two boots', () => {
+  const map = Object.freeze({ version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] }] })
+  const window = (at, role, dispatch_id) => ({ at, event: 'skill-load-window', role, dispatch_id, transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] })
+  const grant = (at, role) => ({ at, event: 'seat-skills', role, skills: [{ path: '/abs/skills/code-less/SKILL.md', status: 'granted', selected_by: 'map-role' }], paths_unmeasured: [] })
+  const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'boot' },
+    grant('2026-10-16T00:00:00.500Z', 'builder'),
+    grant('2026-10-16T00:00:00.600Z', 'reviewer'),
+    { at: '2026-10-16T00:00:01.000Z', event: 'run-start', run_id: 'run-a' },
+    window('2026-10-16T00:00:02.000Z', 'builder', 'd1'),
+    window('2026-10-16T00:00:03.000Z', 'reviewer', 'd1'),
+    { at: '2026-10-16T00:00:04.000Z', event: 'boot' },
+    grant('2026-10-16T00:00:04.500Z', 'builder'),
+    { at: '2026-10-16T00:00:05.000Z', event: 'run-start', run_id: 'run-b' },
+    window('2026-10-16T00:00:06.000Z', 'builder', 'd1'),
+    window('2026-10-16T00:00:07.000Z', 'reviewer', 'd1'),
+  ]
+  const dir = scratchDir('sl-sb2-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    ingestJournal(journal, ledger, { adw_id: 'sb2' })
+    const all = ledger.skillLoads({ map, since: '2026-10-16T00:00:00.000Z' })
+    const builder = all.find((r) => r.role === 'builder' && r.skill === 'code-less')
+    const reviewer = all.find((r) => r.role === 'reviewer' && r.skill === 'code-less')
+    assert.deepEqual([builder.granted, builder.granted_absent_reason], [2, null])
+    assert.deepEqual([reviewer.granted, reviewer.granted_absent_reason], [null, 'seat-skills-row-absent'])
+  } finally { ledger.close() }
+})
+
+// MUTATION SB3: reverting SKILL_LOADS_DEFINITION to run wording removes the boot-segment grant scope.
+test('SB3 SKILL_LOADS_DEFINITION scopes the seat-skills grant to its boot segment', () => {
+  assert.ok(SKILL_LOADS_DEFINITION.includes('whose boot segment has a seat-skills journal row'))
+  assert.ok(SKILL_LOADS_DEFINITION.includes('boot segment'))
+  assert.ok(SKILL_LOADS_DEFINITION.includes('cleared only at the next boot and never at run-start'))
 })
 
 // MUTATION MV1: dropping the rule-shape check lets a string when.paths cover nothing, so a covered

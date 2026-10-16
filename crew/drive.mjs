@@ -10855,6 +10855,57 @@ function runTask(ctx, io, crash) {
     suiteBuildNote = 'rebase-conflict-fix'
     return { ok: true, bounce }
   }
+  let settledRebase = null
+  const settleRetainedRebase = () => {
+    const pending = pendingRebaseConflict
+    const eligible = currentRebaseConflictProof(pending)
+    if (!eligible.ok) {
+      return { escalation: pendingRebaseEscalate(`the retained conflict could not be proved immediately before continuation: ${eligible.why}`) }
+    }
+    let preSettleChanged
+    try { preSettleChanged = [...new Set(io.changedFiles())] }
+    catch (err) { return { escalation: pendingRebaseEscalate(`the conflict-fix round's changed files could not be read immediately before continuation: ${err?.message ?? String(err)}`) } }
+    const settleDebris = preSettleChanged.filter((path) => ENVELOPE_DEBRIS.test(path))
+    if (settleDebris.length > 0) {
+      return { escalation: pendingRebaseEscalate(`the conflict-fix round left protocol debris in the checkout (${settleDebris.join(', ')}); the rebase was not continued`) }
+    }
+    const settleAddCommand = `git add -- ${pending.paths.map((path) => shellArg(path)).join(' ')}`
+    let settleAdded
+    try { settleAdded = io.run(settleAddCommand) }
+    catch (err) { settleAdded = { ok: false, output: err?.message ?? String(err) } }
+    if (settleAdded?.ok !== true) {
+      return { escalation: pendingRebaseEscalate(`staging the retained conflict paths failed${settleAdded?.output ? `: ${String(settleAdded.output).slice(-1000)}` : ''}`) }
+    }
+    let settleContinued
+    try { settleContinued = io.run('git -c core.editor=true rebase --continue') } catch (err) { settleContinued = { ok: false, output: err?.message ?? String(err) } }
+    if (settleContinued?.ok !== true) {
+      const afterFailure = currentRebaseConflictProof(pending)
+      if (!afterFailure.ok) {
+        return { escalation: pendingRebaseEscalate(`continuing the retained rebase failed and the current conflict stages are no longer eligible: ${afterFailure.why}`) }
+      }
+      const route = rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
+      if (route === 'bounce' && builderRemaining() > 0) {
+        const bounced = retainRebaseConflict({ ...pending, stageBytes: new Map(afterFailure.stages) }, `rebase --continue failed${settleContinued?.output ? `: ${String(settleContinued.output).slice(-1000)}` : ''}`)
+        if (!bounced.ok) {
+          return { escalation: pendingRebaseEscalate(bounced.why) }
+        }
+        return { bounce: true }
+      }
+      return { escalation: pendingRebaseEscalate(`continuing the retained rebase failed${settleContinued?.output ? `: ${String(settleContinued.output).slice(-1000)}` : ''}; the conflict recovery budget is exhausted`) }
+    }
+    let settleHeadResult
+    try { settleHeadResult = io.run('git rev-parse HEAD') }
+    catch (err) { settleHeadResult = { ok: false, output: err?.message ?? String(err) } }
+    const continuedHead = fullOidFromResult(settleHeadResult)
+    if (!continuedHead) {
+      return { escalation: pendingRebaseEscalate('the retained rebase continued, but HEAD was not a verified full commit OID') }
+    }
+    settledRebase = { head: continuedHead, base_sha: pending.base_sha, accepted_commit_files: [...new Set(Array.isArray(pending.accepted_commit_files) ? pending.accepted_commit_files : [])], pre_settle_changed: preSettleChanged }
+    S.commit = continuedHead
+    committedBaseline = true
+    pendingRebaseConflict = null
+    return { ok: true }
+  }
   const censusFiles = (census) => {
     const rows = Array.isArray(census?.failures) ? census.failures : []
     return [...new Set(rows.map((row) => typeof row === 'string' ? row : row?.file).filter((file) => typeof file === 'string' && file.length > 0))]
@@ -11543,9 +11594,19 @@ function runTask(ctx, io, crash) {
     }
     builderEnv = env
     if (!seededBuild) stageComplete()
+    let scopeIo = io
+    if (pendingRebaseConflict) {
+      const settledEarly = settleRetainedRebase()
+      if (settledEarly.escalation) return settledEarly.escalation
+      if (settledEarly.bounce) { buildBrief = suiteBuildBrief; buildNote = 'rebase-conflict-fix'; continue }
+      if (settledEarly.ok && Array.isArray(settledRebase?.pre_settle_changed)) {
+        const preSettleChanged = settledRebase.pre_settle_changed
+        scopeIo = Object.create(io, { changedFiles: { value: () => [...new Set([...preSettleChanged, ...io.changedFiles()])] } })
+      }
+    }
 
     const mergedScope = mergeCarriedCorrections(carriedCorrections, env.details, mutations)
-    const scoped = runScopeGate({ round, finalRound, builderDetails: mergedScope.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths, observeChanged: (paths) => { S.scopeChanged = paths } })
+    const scoped = runScopeGate({ round, finalRound, builderDetails: mergedScope.details, builderObservation, acceptBuilderBaseline, hasAcceptanceGate: Boolean(gateCmd), ctx, io: scopeIo, plans, scopeFiles, planPath, inScope, mutations, readBuilt, art, stage, stageComplete, failureUpgrade, escalate, escalateReversion, frozenVerifier: pendingFrozenInventory ? verifyPendingFrozenRepair : null, sensitivityFloor, flooredProtectedPaths, observeChanged: (paths) => { S.scopeChanged = paths } })
     const scopeCorrections = scoped.corrections ?? { entries: [], refusals: [] }
     processCarried({ carried: mergedScope.carried.filter((entry) => scopeCorrections.entries.some((used) => used.check === entry.check)), drops: [...mergedScope.drops, ...scopeCorrections.refusals.filter((refusal) => mergedScope.carried.some((entry) => entry.check === refusal.check))] }, 'scope')
     for (const entry of scopeCorrections.entries) rememberCorrection(entry, round, mutations)
@@ -12516,7 +12577,7 @@ function runTask(ctx, io, crash) {
   let published = null
   let publishFiles = null
   verifiedPublishBaseSha = null
-  const continuingRebase = pendingRebaseConflict !== null
+  const continuingRebase = pendingRebaseConflict !== null || settledRebase !== null
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv, brief: briefText, onBoundIssuePromotion: (closes_promoted) => io.log(recordRow({ at: io.now(), closes_promoted, source: 'bound-issue' })) })
   const subject = String(message).split('\n')[0]
@@ -12528,58 +12589,26 @@ function runTask(ctx, io, crash) {
   let report = null
   let committing = []
   if (pendingRebaseConflict) {
-    const pending = pendingRebaseConflict
-    const eligible = currentRebaseConflictProof(pending)
-    if (!eligible.ok) {
+    const settledAtCommit = settleRetainedRebase()
+    if (settledAtCommit.escalation) {
       stageComplete()
-      return pendingRebaseEscalate(`the retained conflict could not be proved immediately before continuation: ${eligible.why}`)
+      return settledAtCommit.escalation
     }
-    const addCommand = `git add -- ${pending.paths.map((path) => shellArg(path)).join(' ')}`
-    let added
-    try { added = io.run(addCommand) }
-    catch (err) { added = { ok: false, output: err?.message ?? String(err) } }
-    if (added?.ok !== true) {
+    if (settledAtCommit.bounce) {
       stageComplete()
-      return pendingRebaseEscalate(`staging the retained conflict paths failed${added?.output ? `: ${String(added.output).slice(-1000)}` : ''}`)
+      continue suiteCycle
     }
-    let continued
-    try { continued = io.run('git -c core.editor=true rebase --continue') }
-    catch (err) { continued = { ok: false, output: err?.message ?? String(err) } }
-    if (continued?.ok !== true) {
-      const afterFailure = currentRebaseConflictProof(pending)
-      if (!afterFailure.ok) {
-        stageComplete()
-        return pendingRebaseEscalate(`continuing the retained rebase failed and the current conflict stages are no longer eligible: ${afterFailure.why}`)
-      }
-      const route = rebaseConflictRoute({ mechanical: false, bounces: rebaseConflictBounces, buildRounds: limits.build_rounds })
-      if (route === 'bounce' && builderRemaining() > 0) {
-        const bounced = retainRebaseConflict({ ...pending, stageBytes: new Map(afterFailure.stages) }, `rebase --continue failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}`)
-        if (!bounced.ok) {
-          stageComplete()
-          return pendingRebaseEscalate(bounced.why)
-        }
-        stageComplete()
-        continue suiteCycle
-      }
-      stageComplete()
-      return pendingRebaseEscalate(`continuing the retained rebase failed${continued?.output ? `: ${String(continued.output).slice(-1000)}` : ''}; the conflict recovery budget is exhausted`)
-    }
-    let headResult
-    try { headResult = io.run('git rev-parse HEAD') }
-    catch (err) { headResult = { ok: false, output: err?.message ?? String(err) } }
-    const continuedHead = fullOidFromResult(headResult)
-    if (!continuedHead) {
-      stageComplete()
-      return pendingRebaseEscalate('the retained rebase continued, but HEAD was not a verified full commit OID')
-    }
-    const durable = pending
-    baseSha = durable.base_sha
-    verifiedPublishBaseSha = durable.base_sha
+  }
+  if (settledRebase !== null && pendingRebaseConflict === null) {
+    baseSha = settledRebase.base_sha
+    verifiedPublishBaseSha = settledRebase.base_sha
     rebased = true
-    committing = [...new Set(Array.isArray(durable.accepted_commit_files) ? durable.accepted_commit_files : [])]
-    S.commit = continuedHead
-    committedBaseline = true
-    pendingRebaseConflict = null
+    const changedAfterSettle = [...new Set(io.changedFiles())]
+    committing = [...new Set([...settledRebase.accepted_commit_files, ...changedAfterSettle])]
+    if (changedAfterSettle.length > 0) {
+      S.commit = io.commit(changedAfterSettle, message)
+    }
+    settledRebase = null
     stageComplete()
   } else {
     if (pendingFrozenInventory) {

@@ -1008,6 +1008,7 @@ const HEALTHY_RESULT = {
     }],
     modifiers: [],
     gate: null,
+    diff_mutation: { measured: false, reason: 'no-report', generated: 0, killed: 0, survived: 0, unmeasured_files: 0 },
   },
 }
 
@@ -1122,6 +1123,7 @@ const ZERO_CAPACITY_RESULT = Object.freeze({
     }],
     modifiers: [],
     gate: null,
+    diff_mutation: { measured: false, reason: 'no-report', generated: 0, killed: 0, survived: 0, unmeasured_files: 0 },
   },
 })
 

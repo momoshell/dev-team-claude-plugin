@@ -19,6 +19,7 @@ This is the measured UX boundary an agent works inside. The counts below describ
 | Showing loading, empty, or error | Keep loading explicit, empty states actionable, errors announced | `references/states.md` |
 | Adding keyboard behavior or focus style | Stay native-first, operable, and visibly focused | `references/keyboard-focus.md` |
 | Adding or keeping animation | Honor reduced motion for every animation | `references/motion.md` |
+| Checking a component before finishing | Check the measured accessibility mistakes before finishing | `references/accessibility-checklist.md` |
 | Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
 
 ## Critical rules

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
@@ -12,7 +12,7 @@ const OWNER = 'skills/ux/anchors.json'
 const LIB = join(ROOT, 'visualizer/web/src/lib')
 const SKILL_DOC = join(HERE, 'SKILL.md')
 const REF_DIR = join(HERE, 'references')
-const EXPECTED_REFS = ['absence.md', 'keyboard-focus.md', 'motion.md', 'sources.md', 'states.md']
+const EXPECTED_REFS = ['absence.md', 'accessibility-checklist.md', 'keyboard-focus.md', 'motion.md', 'sources.md', 'states.md']
 const VERCEL_ID = 'vercel-web-interface-guidelines.md'
 const CSV_ID = 'ui-ux-pro-max-ux-guidelines.csv'
 
@@ -382,5 +382,70 @@ test('C1', () => {
     const actual = readdirSync(join(skillDir, 'references')).filter((name) => name.endsWith('.md')).sort()
     const routed = [...new Set([...skill.matchAll(/`references\/([A-Za-z0-9_-]+\.md)`/g)].map((match) => match[1]))].sort()
     assert.deepEqual(routed, actual, `${skillDir} must route every references/*.md that exists and none that does not`)
+  }
+})
+
+function parseChecklist(body) {
+  const lines = body.split('\n')
+  const header = lines.findIndex((line) => line.trim() === '| Pattern | Here | Fix |')
+  const droppedAt = lines.findIndex((line) => line.trim() === '## Dropped rows')
+  const rows = []
+  if (header >= 0) {
+    for (let i = header + 1; i < lines.length; i += 1) {
+      const line = lines[i]
+      if (!line.startsWith('|')) break
+      if (/^\|[\s|:-]+\|$/.test(line)) continue
+      rows.push(line)
+    }
+  }
+  const dropped = droppedAt >= 0 ? lines.slice(droppedAt + 1).filter((line) => line.startsWith('- ')) : []
+  return { rows, dropped }
+}
+
+// Mutation killed: removing the accessibility route from ux SKILL.md breaks the routed set.
+test('AX1', () => {
+  const rel = 'skills/ux/references/accessibility-checklist.md'
+  assert.ok(existsSync(join(ROOT, rel)), `expected checklist file, found missing at ${rel}`)
+  assert.ok(EXPECTED_REFS.includes('accessibility-checklist.md'), "expected EXPECTED_REFS to gain 'accessibility-checklist.md', found absent at skills/ux/exhibits.test.mjs")
+  const skill = readFileSync(SKILL_DOC, 'utf8')
+  assert.ok(skill.includes('`references/accessibility-checklist.md`'), 'expected backticked references/accessibility-checklist.md route, found absent at skills/ux/SKILL.md')
+})
+
+// Mutation killed: renaming the Dropped rows heading breaks the row accounting.
+test('AX2', () => {
+  const rel = 'skills/ux/references/accessibility-checklist.md'
+  const body = readFileSync(join(ROOT, rel), 'utf8')
+  assert.equal(/visualizer\/[^\s`|]+:\d+/.test(body), false, `expected bare paths only, found a path:line citation at ${rel}`)
+  const { rows, dropped } = parseChecklist(body)
+  assert.ok(rows.length > 0, `expected checklist data rows, found none at ${rel}`)
+  for (const row of rows) {
+    const paths = [...row.matchAll(/visualizer\/[^\s`|)]+/g)].map((match) => match[0])
+    assert.ok(paths.length > 0, `expected every data row to name a visualizer/ path, found a row without one at ${rel}: ${row.slice(0, 80)}`)
+    for (const found of paths) assert.ok(existsSync(join(ROOT, found)), `expected row path to exist, found missing ${found} at ${rel}`)
+  }
+  assert.equal(rows.length + dropped.length, 14, `expected rows plus dropped to equal 14, found ${rows.length} rows plus ${dropped.length} dropped at ${rel}`)
+})
+
+// Mutation killed: altering the pinned revision in the checklist head breaks provenance.
+test('AX3', () => {
+  const rel = 'skills/ux/references/accessibility-checklist.md'
+  const head = readFileSync(join(ROOT, rel), 'utf8').slice(0, 2500)
+  for (const needle of ['https://github.com/jakubkrehel/skills', '4c66b1fa86e9ab70187b43d7da9b6fdb29f2ef63', 'MIT', 'THIRD-PARTY-NOTICES.md']) {
+    assert.ok(head.includes(needle), `expected checklist head to name ${needle}, found absent at ${rel}`)
+  }
+})
+
+// Mutation killed: removing the licence-copy path from THIRD-PARTY-NOTICES.md breaks attribution.
+test('TP1', () => {
+  const notices = readFileSync(join(ROOT, 'THIRD-PARTY-NOTICES.md'), 'utf8')
+  assert.ok(notices.includes('## jakubkrehel/skills (MIT)'), 'expected a ## jakubkrehel/skills (MIT) section, found absent at THIRD-PARTY-NOTICES.md')
+  for (const needle of ['skills/ux/references/accessibility-checklist.md', 'skills/ui-design/references/colour-checklist.md', 'docs/licenses/jakubkrehel-skills-MIT.txt']) {
+    assert.ok(notices.includes(needle), `expected notices to name ${needle}, found absent at THIRD-PARTY-NOTICES.md`)
+  }
+  const licRel = 'docs/licenses/jakubkrehel-skills-MIT.txt'
+  assert.ok(existsSync(join(ROOT, licRel)), `expected licence copy, found missing at ${licRel}`)
+  const lic = readFileSync(join(ROOT, licRel), 'utf8')
+  for (const needle of ['Copyright (c) 2026 Jakub Krehel', 'Permission is hereby granted, free of charge']) {
+    assert.ok(lic.includes(needle), `expected licence to carry ${needle}, found absent at ${licRel}`)
   }
 })

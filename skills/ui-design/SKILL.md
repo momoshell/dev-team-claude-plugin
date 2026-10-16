@@ -19,6 +19,7 @@ This is the boundary an agent designs inside. The visualizer's system is real in
 | Checking whether a component obeys the theme contract | Apply T1–T4 and distinguish enforced tests from stated rules; consult the tabular-numerals register for measured figures | `references/contract.md` |
 | Choosing status, role, lane, or absence colour | Route state through tones and aliases; inspect the leak inventory and divergences | `references/state-colour.md` |
 | Assessing contrast or what this lane cannot establish | Preserve the measured limits and absences, including the per-rule hover-contrast register | `references/limits.md` |
+| Checking colour choices before finishing | Route state through tones and aliases; check the measured colour mistakes | `references/colour-checklist.md` |
 | Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
 
 ## Critical rules
@@ -52,4 +53,5 @@ The counts in this file are reproducible with `grep` over `visualizer/web/src`, 
 - `references/contract.md` — T1–T4, switch ownership, and the mechanical test floor
 - `references/state-colour.md` — R1–R5, leak inventory, and divergences
 - `references/limits.md` — contrast, hover states, vacuous coverage, and recon limits
+- `references/colour-checklist.md` — measured colour mistakes to check before finishing
 - `references/sources.md` — provenance for the two cited rule sources; record URL, commit, digest, and license without vendoring either source

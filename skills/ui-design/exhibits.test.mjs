@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -590,4 +590,54 @@ test('K1', () => {
   assert.equal(rows.length, 25)
   assert.equal(new Set(rows.map((row) => row.file)).size, 12)
   assert.equal(measured, 3)
+})
+
+function parseChecklist(body) {
+  const lines = body.split('\n')
+  const header = lines.findIndex((line) => line.trim() === '| Pattern | Here | Fix |')
+  const droppedAt = lines.findIndex((line) => line.trim() === '## Dropped rows')
+  const rows = []
+  if (header >= 0) {
+    for (let i = header + 1; i < lines.length; i += 1) {
+      const line = lines[i]
+      if (!line.startsWith('|')) break
+      if (/^\|[\s|:-]+\|$/.test(line)) continue
+      rows.push(line)
+    }
+  }
+  const dropped = droppedAt >= 0 ? lines.slice(droppedAt + 1).filter((line) => line.startsWith('- ')) : []
+  return { rows, dropped }
+}
+
+// Mutation killed: removing the colour route from the Routing table breaks the routed set.
+test('CL1', () => {
+  const rel = 'skills/ui-design/references/colour-checklist.md'
+  assert.ok(existsSync(join(ROOT, rel)), `expected colour checklist, found missing at ${rel}`)
+  const skill = readFileSync(SKILL_DOC, 'utf8')
+  const routing = skill.split('## Routing')[1].split('## ')[0]
+  assert.ok(routing.includes('`references/colour-checklist.md`'), 'expected backticked references/colour-checklist.md route in the Routing table, found absent at skills/ui-design/SKILL.md')
+})
+
+// Mutation killed: renaming the Dropped rows heading breaks the row accounting.
+test('CL2', () => {
+  const rel = 'skills/ui-design/references/colour-checklist.md'
+  const body = readFileSync(join(ROOT, rel), 'utf8')
+  assert.equal(/visualizer\/[^\s`|]+:\d+/.test(body), false, `expected bare paths only, found a path:line citation at ${rel}`)
+  const { rows, dropped } = parseChecklist(body)
+  assert.ok(rows.length > 0, `expected checklist data rows, found none at ${rel}`)
+  for (const row of rows) {
+    const paths = [...row.matchAll(/visualizer\/[^\s`|)]+/g)].map((match) => match[0])
+    assert.ok(paths.length > 0, `expected every data row to name a visualizer/ path, found a row without one at ${rel}: ${row.slice(0, 80)}`)
+    for (const found of paths) assert.ok(existsSync(join(ROOT, found)), `expected row path to exist, found missing ${found} at ${rel}`)
+  }
+  assert.equal(rows.length + dropped.length, 17, `expected rows plus dropped to equal 17, found ${rows.length} rows plus ${dropped.length} dropped at ${rel}`)
+})
+
+// Mutation killed: altering the pinned revision in the checklist head breaks provenance.
+test('CL3', () => {
+  const rel = 'skills/ui-design/references/colour-checklist.md'
+  const head = readFileSync(join(ROOT, rel), 'utf8').slice(0, 2500)
+  for (const needle of ['https://github.com/jakubkrehel/skills', '4c66b1fa86e9ab70187b43d7da9b6fdb29f2ef63', 'MIT', 'THIRD-PARTY-NOTICES.md']) {
+    assert.ok(head.includes(needle), `expected checklist head to name ${needle}, found absent at ${rel}`)
+  }
 })

@@ -1128,7 +1128,7 @@ export function parseDiffMutationReport(output, { generation, cap } = {}) {
         || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
     })) return null
     const executed = report.mutants.filter((mutant) => mutant.outcome === 'killed' || mutant.outcome === 'survived').length
-    if (executed > report.cap || report.mutants.length !== report.killed + report.survived + report.skipped) return null
+    if (executed > report.cap || executed !== report.killed + report.survived || report.mutants.length - executed > report.skipped) return null
     if (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored')) return null
     return report
   } catch { return null }
@@ -4952,7 +4952,7 @@ export function composePrBody(record) {
   const prSections = [
     ['## What', intent],
     ['## Why', why],
-    ['## Proof', [...gateLines, ...suiteLines, ...flakes.map((row) => neutralizeClosingProse(`- Flake: ${row.stage} · ${row.test} · ${row.file} · ${row.rerun}`)), ...reviewLines].join('\n')],
+    ['## Proof', [...gateLines, ...suiteLines, ...diffMutationLines(record), ...flakes.map((row) => neutralizeClosingProse(`- Flake: ${row.stage} · ${row.test} · ${row.file} · ${row.rerun}`)), ...reviewLines].join('\n')],
     ...(hardeningLines.length > 0 ? [['## Hardening blind spots', hardeningLines.join('\n')]] : []),
     ...(files.length ? [['## Changed', files.map((f) => neutralizeClosingProse(`- ${f}`)).join('\n')]] : []),
     ['## Run', runLines.join('\n')],
@@ -13390,7 +13390,7 @@ function runTask(ctx, io, crash) {
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals, ...carriedBlock() },
       suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
-      hardening: hardenBlindSpots.length > 0 ? { unmeasured: hardenBlindSpots } : null,
+      hardening: hardenBlindSpots.length > 0 ? { unmeasured: hardenBlindSpots } : null, diff_mutation: diffMutationMeasurement(diffMutationReports),
     }
     let registerText = ''
     try { registerText = String(io.readFile(CAPABILITIES_PATH) || '') } catch { /* narration is never load-bearing */ }
@@ -13441,7 +13441,7 @@ function runTask(ctx, io, crash) {
       ...(S.documentation ? { documentation: S.documentation } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
-      gate: gateBlock(),
+      gate: gateBlock(), diff_mutation: diffMutationMeasurement(diffMutationReports),
       ...(hardenBlindSpots.length > 0 ? { hardening_unmeasured: hardenBlindSpots.map((entry) => ({ finding: entry.finding, test: entry.test, check: entry.check, outcome: entry.outcome, why: entry.why })) } : {}),
       ...(frozenInventoryReports.length > 0 ? { frozen_inventory_repairs: frozenInventoryReports.map((report) => ({ ...report })) } : {}),
       ...acceptDecisionBlock(),
@@ -17129,4 +17129,31 @@ export function plannerCoverageReask({ env, dispatch, briefText, round, briefFil
     // The coverage retry buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.
     if ([ZERO_TURN_NON_START, 'planner-no-envelope'].includes(pendingEnforcement?.get('planner')?.kind)) pendingEnforcement.delete('planner')
   }
+}
+
+export const DIFF_MUTATION_UNMEASURED_REASONS = Object.freeze(['no-report', 'unsupported-language', 'runner-unavailable', 'tree-not-restored', 'no-mutable-candidate'])
+
+export function diffMutationMeasurement(reports) {
+  const rows = Array.isArray(reports) ? reports.filter((report) => report && typeof report === 'object') : []
+  const sum = (key) => rows.reduce((total, report) => total + (Number.isInteger(report[key]) ? report[key] : 0), 0)
+  const generated = sum('generated')
+  const killed = sum('killed')
+  const survived = sum('survived')
+  // lean: unmeasured_files sums per-round non-mjs file sections, so a file changed in two rounds counts twice; dedupe by path once the report lists skipped paths
+  const unmeasured_files = rows.reduce((total, report) => total + (Number.isInteger(report.skip_counts?.['non-mjs']) ? report.skip_counts['non-mjs'] : 0), 0)
+  const measured = generated > 0
+  const reason = measured ? null
+    : rows.length === 0 ? 'no-report'
+    : rows.some((report) => report.fatal || (report.skip_counts?.['tree-not-restored'] ?? 0) > 0) ? 'tree-not-restored'
+    : rows.some((report) => (report.skip_counts?.['runner-unavailable'] ?? 0) > 0) ? 'runner-unavailable'
+    : unmeasured_files > 0 ? 'unsupported-language'
+    : 'no-mutable-candidate'
+  return { measured, reason, generated, killed, survived, unmeasured_files }
+}
+
+export function diffMutationLines(record) {
+  const diff = record && Object.hasOwn(record, 'diff_mutation') ? record.diff_mutation : null
+  return !diff || typeof diff !== 'object' ? [] : diff.measured
+    ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
+    : [`- Diff mutation: unmeasured — ${diff.reason}`]
 }

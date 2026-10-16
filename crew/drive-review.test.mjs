@@ -1684,7 +1684,7 @@ test('the unexhausted plan path keeps its diagnostics unchanged', () => {
   })
   const result = driveTask(CTX_TL, io)
   assert.deepEqual(Object.keys(result.details).sort(), [
-    'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted',
+    'accepted_via', 'cold_suite', 'commit', 'consults', 'diff_mutation', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted',
     'files_committed', 'gate', 'growth', 'modifiers', 'stages',
   ])
   assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
@@ -1916,7 +1916,7 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   const omitted = driveTask(CTX, omittedIo)
   const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
   assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'document', 'suite', 'suite:cold', 'done'])
-  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'diff_mutation', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.deepEqual(omitted, explicit)
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
 })
@@ -1935,7 +1935,7 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   assert.equal(result.details.gate, null)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'diff_mutation', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.assign.find(({ role }) => role === 'builder').briefFile, TRIAGE_NOTE)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /Failure brief \(verbatim\)/)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /files_in_scope/)
@@ -2335,7 +2335,7 @@ test("a reviewed shape's acceptance is untouched by the envelope contract", () =
   })
   const result = driveTask({ ...CTX, variant: 'full' }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'diff_mutation', 'dissents', 'enforcements', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.logs.some((line) => line.envelope_accepted), false)
 
   const triageIo = fakeIo({ envelopes: { 'planner:1': triageEnv({ summary: '' }) }, changed: [] })
@@ -7827,4 +7827,19 @@ test('RPL1 review_only accepts optional replacement and returns its exact bytes'
   const io = strictReviewIo(reviewEnvelope())
   driveTask(REVIEW_CTX, io)
   assert.match(io.calls.writeLog.map((row) => row.content).join('\n'), /optional fields replacement are each non-empty when present/)
+})
+
+const DM_T825E2 = { generation: 1, cap: 8, configured_cap: 8, cap_omitted: 0, total_candidates: 0, generated: 0, killed: 0, timeout_killed: 0, survived: 0, skipped: 5, omitted: 0, omitted_reason: 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot', blind_spot: null, skip_counts: { 'non-mjs': 5 }, mutants: [] }
+
+// MUTATION DM4: feed diffMutationMeasurement([]) on the done return and details.diff_mutation loses unsupported-language.
+test('DM4 done return reports unsupported-language for the t825e2 zero-mutant report', () => {
+  const io = diffDriverIo({ report: DM_T825E2 })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.diff_mutation, { measured: false, reason: 'unsupported-language', generated: 0, killed: 0, survived: 0, unmeasured_files: 5 })
+  const killed = { id: 'dm4-killed-1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'const value = false', outcome: 'killed' }
+  const measuredIo = diffDriverIo({ report: diffReport([killed]) })
+  const measuredResult = driveTask(CTX, measuredIo)
+  assert.equal(measuredResult.status, 'done')
+  assert.equal(measuredResult.details.diff_mutation.measured, true)
 })

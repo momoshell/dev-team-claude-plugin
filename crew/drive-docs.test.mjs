@@ -1612,6 +1612,12 @@ test('lead preservation C1 every citation is verified', () => {
   assert.equal(verifyLeadRow(row, readLeadDriveLines()), citations.length)
 })
 
+// MUTATION M1: insert a line above planAcceptContractLines in crew/drive.mjs and the lead charter citations no longer land on their quoted lines.
+test('M1 diff-mutation zero-shift keeps lead charter citations aligned', () => {
+  const row = readLeadRow()
+  assert.equal(verifyLeadRow(row, readLeadDriveLines()), parseLeadCitations(row.source).length)
+})
+
 test('lead preservation D1 past-end citation fails by name', () => {
   const row = readLeadRow()
   const driveLines = readLeadDriveLines()

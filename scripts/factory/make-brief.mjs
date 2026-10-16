@@ -2531,8 +2531,10 @@ export function extractPremiseClaims(request = {}) {
       if (typeof firstInterior === 'string') {
         const commentAt = firstInterior.indexOf('//')
         if (commentAt >= 0) {
-          const commentCitation = premiseCitationMatches(firstInterior.slice(commentAt + 2))[0]
-          if (commentCitation) binding = { ...premiseCitationFromMatch(commentCitation), form: 'comment' }
+          const commentText = firstInterior.slice(commentAt + 2)
+          const commentCitation = premiseCitationMatches(commentText)[0]
+          const commentHead = commentText.search(/\S/)
+          if (commentCitation && commentCitation.index === commentHead) binding = { ...premiseCitationFromMatch(commentCitation), form: 'comment' }
         }
       }
       if (!binding && region.opener > 0 && !premiseFenceLine(lines[region.opener - 1])) {

@@ -15,6 +15,8 @@ import { ROOT, scratchDir } from './helpers.mjs'
 import {
   openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL,
 } from '../scripts/factory/ledger.mjs'
+import { SKILL_LOAD_ABSENT_REASONS as LEDGER_SKILL_LOAD_ABSENT_REASONS, SKILL_LOADS_DEFINITION } from '../scripts/factory/ledger.mjs'
+import { SKILL_LOAD_ABSENT_REASONS as CREW_SKILL_LOAD_ABSENT_REASONS } from '../crew/headless.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 
@@ -2672,7 +2674,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 49)
+    assert.equal(Object.keys(TABLES).length, 51)
   } finally {
     conn.close()
     ledger.close()
@@ -2792,4 +2794,181 @@ test('cellAttempts keys operator overrides by model string', () => {
     assert.equal(rows.find((row) => row.model_key === 'vendor/override-a')?.attempts, 1)
     assert.equal(rows.find((row) => row.model_key === 'vendor/override-b')?.attempts, 1)
   } finally { ledger.close() }
+})
+
+
+// MUTATION SL7: adding a randomUUID element to the skill_loads identity_key duplicates rows on re-ingest.
+test('SL7 ingesting skill load rows twice yields one row in each skill table', () => {
+  const dir = scratchDir('sl7-ledger-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    const rows = [
+      { at: '2026-10-16T00:00:01.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:01.000Z' },
+      { at: '2026-10-16T00:00:01.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'scripts/factory/probe-repo.mjs', seq: 2 }] },
+    ]
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'sl7-run' }).complete, true)
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'sl7-run' }).complete, true)
+    assert.equal(ledger.dumpTable('skill_loads').length, 1)
+    assert.equal(ledger.dumpTable('skill_load_windows').length, 1)
+  } finally { ledger.close() }
+})
+
+// MUTATION LV6: collapsing slice to null in the skill_loads identity_key merges a SKILL.md load and a
+// reference load of one skill; every transport journals an assignment's loads under one shared `at`.
+test('LV6 a SKILL.md load and a reference load of one skill in one assignment stay two rows', () => {
+  const dir = scratchDir('lv6-ledger-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    const at = '2026-10-16T00:00:01.000Z'
+    const rows = [
+      { at, event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: at },
+      { at, event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: 'closeout', seq: 2, load_at: at },
+    ]
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    ingestJournal(journal, ledger, { adw_id: 'lv6-run' })
+    assert.deepEqual(ledger.dumpTable('skill_loads').map((row) => row.slice).sort(), ['closeout', null].sort())
+  } finally { ledger.close() }
+})
+
+test('skill load writers validate, accept dotted skills, and replay idempotently; absent reasons agree across modules', () => {
+  assert.deepEqual(LEDGER_SKILL_LOAD_ABSENT_REASONS, CREW_SKILL_LOAD_ABSENT_REASONS)
+  assert.ok(SKILL_LOADS_DEFINITION.includes('every assignment is a fresh session'))
+  const dir = scratchDir('sl-writers-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const at = '2026-10-16T00:00:01.000Z'
+    ledger.recordSkillLoad({ adw_id: 'w1', dispatch_id: 'd1', role: 'builder', transport: 'headless-rpc', skill: 'qa.test-writing', slice: null, seq: 1, at_ms: Date.parse(at) })
+    ledger.recordSkillLoad({ adw_id: 'w1', dispatch_id: 'd1', role: 'builder', transport: 'headless-rpc', skill: 'qa.test-writing', slice: null, seq: 1, at_ms: Date.parse(at) })
+    assert.equal(ledger.dumpTable('skill_loads').length, 1)
+    assert.throws(() => ledger.recordSkillLoad({ adw_id: 'w1', dispatch_id: 'd1', role: 'builder', transport: 'x', skill: 'a/b', seq: 1, at_ms: 1 }), LedgerUsageError)
+    assert.throws(() => ledger.recordSkillLoad({ adw_id: 'w1', dispatch_id: 'd1', role: 'builder', transport: 'x', skill: 'ok', seq: 0, at_ms: 1 }), LedgerUsageError)
+    ledger.recordSkillLoadWindow({ adw_id: 'w1', dispatch_id: 'd1', role: 'builder', transport: 'pane', loads_absent_reason: 'pane-unobservable', first_edits: null, at_ms: Date.parse(at) })
+    assert.throws(() => ledger.recordSkillLoadWindow({ adw_id: 'w1', dispatch_id: 'd2', role: 'builder', transport: 'pane', loads_absent_reason: 'bogus', first_edits: null, at_ms: 1 }), LedgerUsageError)
+    assert.throws(() => ledger.recordSkillLoadWindow({ adw_id: 'w1', dispatch_id: 'd2', role: 'builder', transport: 'pane', loads_absent_reason: null, first_edits: [{ path: '../x.mjs', seq: 1 }], at_ms: 1 }), LedgerUsageError)
+    assert.equal(ledger.dumpTable('skill_load_windows').length, 1)
+  } finally { ledger.close() }
+})
+
+test('skillLoads verb uses the latest window per dispatch and granted comes only from seat-skills rows', () => {
+  const dir = scratchDir('sl-verb-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    const rows = [
+      { at: '2026-10-16T00:00:01.000Z', event: 'boot', seat_skills: { builder: { skills: [{ path: '/abs/skills/code-less/SKILL.md', status: 'delivered', bytes: 1 }] } } },
+      { at: '2026-10-16T00:00:02.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:02.000Z' },
+      { at: '2026-10-16T00:00:03.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 2 }] },
+      { at: '2026-10-16T00:00:04.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 1 }] },
+    ]
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'sl-verb-run' }).complete, true)
+    const map = { version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] }
+    const row = ledger.skillLoads({ since: '2026-10-16T00:00:00.000Z', until: '2026-10-17T00:00:00.000Z', map }).find((r) => r.role === 'builder' && r.skill === 'code-less')
+    assert.ok(row)
+    assert.deepEqual([row.measured, row.loaded_before_edit, row.edited_without_load, row.untouched], [1, 0, 1, 0])
+    assert.deepEqual([row.granted, row.granted_absent_reason], [null, 'seat-skills-row-absent'])
+  } finally { ledger.close() }
+})
+
+const SKILL_VERB_MAP = Object.freeze({ version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] })
+function skillVerbRow(rows, adw, query) {
+  const dir = scratchDir('sl-verb2-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    ingestJournal(journal, ledger, { adw_id: adw })
+    return ledger.skillLoads({ map: SKILL_VERB_MAP, ...query }).find((r) => r.role === 'builder' && r.skill === 'code-less')
+  } finally { ledger.close() }
+}
+
+// MUTATION WN1: matching loads to a window by clock (at_ms <= window) instead of by attempt lets the first
+// attempt's load count for the re-ask once --since drops the first window.
+test('WN1 the verdict for one assignment does not depend on whether --since includes its earlier attempt', () => {
+  const rows = [
+    { at: '2026-10-16T00:00:01.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:01.000Z' },
+    { at: '2026-10-16T00:00:01.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] },
+    { at: '2026-10-16T00:00:05.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 2 }] },
+  ]
+  const verdict = (row) => [row.loaded_before_edit, row.edited_without_load]
+  assert.deepEqual(verdict(skillVerbRow(rows, 'wn1', { since: '2026-10-16T00:00:00.000Z' })), [0, 1])
+  assert.deepEqual(verdict(skillVerbRow(rows, 'wn1', { since: '2026-10-16T00:00:03.000Z' })), [0, 1])
+})
+
+// MUTATION RK1: dropping run_key from the assignment key merges two runs' d1 assignments into one.
+test('RK1 the same dispatch id in two run segments of one checkout is two assignments', () => {
+  const window = (at) => ({ at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'acp', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 1 }] })
+  const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'run-start', run_id: 'run-a' }, window('2026-10-16T00:00:01.000Z'),
+    { at: '2026-10-16T00:00:02.000Z', event: 'run-start', run_id: 'run-b' }, window('2026-10-16T00:00:03.000Z'),
+  ]
+  const row = skillVerbRow(rows, 'rk1', { since: '2026-10-16T00:00:00.000Z' })
+  assert.deepEqual([row.measured, row.edited_without_load], [2, 2])
+})
+
+// MUTATION GR1: not clearing the seat-skills snapshot at run-start carries one run's grant into the next.
+test('GR1 a seat-skills grant in one run does not count for the next run, which has none', () => {
+  const window = (at) => ({ at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] })
+  const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'run-start', run_id: 'run-a' },
+    { at: '2026-10-16T00:00:00.500Z', event: 'seat-skills', seat_skills: { builder: { skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] } } },
+    window('2026-10-16T00:00:01.000Z'),
+    { at: '2026-10-16T00:00:02.000Z', event: 'run-start', run_id: 'run-b' }, window('2026-10-16T00:00:03.000Z'),
+  ]
+  const row = skillVerbRow(rows, 'gr1', { since: '2026-10-16T00:00:00.000Z' })
+  assert.deepEqual([row.granted, row.granted_absent_reason], [null, 'seat-skills-row-absent'])
+})
+
+// MUTATION MV1: dropping the rule-shape check lets a string when.paths cover nothing, so a covered
+// edit reads untouched instead of the map being refused.
+test('MV1 skill-loads refuses a map whose rule has a malformed when.paths, roles or skills', () => {
+  const dir = scratchDir('mv1-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const rule = (when, skills = ['dev-team:code-less']) => ({ version: 1, exempt: [], rules: [{ when, skills }] })
+    for (const map of [rule({ paths: 'crew/**/*.mjs', roles: ['builder'] }), rule({ paths: ['crew/**/*.mjs'], roles: 'builder' }), rule({ paths: ['crew/**/*.mjs'] }, 'dev-team:code-less'), rule({ paths: [] })]) {
+      assert.throws(() => ledger.skillLoads({ map }), (err) => err instanceof LedgerUsageError && /map invalid/.test(err.message))
+    }
+    assert.ok(Array.isArray(ledger.skillLoads({ map: rule({ paths: ['crew/**/*.mjs'], roles: ['builder'] }) })))
+  } finally { ledger.close() }
+})
+
+// MUTATION MV2: checking only that paths are strings, not that matchGlob accepts them, lets
+// /crew/**/*.mjs cover nothing and a covered edit read untouched.
+test('MV2 skill-loads refuses a map path or exempt glob that the skill-map matcher never matches', () => {
+  const dir = scratchDir('mv2-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    for (const map of [
+      { version: 1, exempt: [], rules: [{ when: { paths: ['/crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] },
+      { version: 1, exempt: ['docs/'], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] },
+      // MUTATION MV2b: dropping the non-empty rules check returns rows: [] for any assignments.
+      { version: 1, exempt: [], rules: [] },
+    ]) assert.throws(() => ledger.skillLoads({ map }), (err) => err instanceof LedgerUsageError && /map invalid/.test(err.message))
+  } finally { ledger.close() }
+})
+
+// MUTATION MV3: removing the rule-selects-nothing clause accepts when: {}, and a covered edit reads untouched.
+test('MV3 skill-loads refuses a rule whose when has neither paths nor roles, naming rule-selects-nothing', () => {
+  const dir = scratchDir('mv3-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const map = { version: 1, exempt: [], rules: [{ when: {}, skills: ['dev-team:code-less'] }] }
+    assert.throws(() => ledger.skillLoads({ map }), (err) => err instanceof LedgerUsageError && /map invalid: rule-selects-nothing/.test(err.message))
+  } finally { ledger.close() }
+})
+
+// MUTATION SM1: keying windows on at_ms without the attempt number drops a re-ask window that shares a
+// millisecond with the first attempt, and its covered edit reads untouched.
+test('SM1 two attempts of one dispatch in the same millisecond stay two windows and the re-ask is judged', () => {
+  const at = '2026-10-16T00:00:01.000Z'
+  const rows = [
+    { at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] },
+    { at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 1 }] },
+  ]
+  const row = skillVerbRow(rows, 'sm1', { since: '2026-10-16T00:00:00.000Z' })
+  assert.deepEqual([row.measured, row.untouched, row.edited_without_load], [1, 0, 1])
 })

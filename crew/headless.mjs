@@ -9,7 +9,7 @@ import {
   writeFileSync as fsWriteFileSync,
   renameSync as fsRenameSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -802,6 +802,105 @@ export function skillReadsOf(toolName, input) {
   return [...reads].sort()
 }
 
+export const SKILL_LOAD_ABSENT_REASONS = Object.freeze(['pane-unobservable', 'stream-absent', 'no-frames'])
+
+export function relativeToCheckout(path, checkout) {
+  if (typeof path !== 'string' || path === '') return null
+  const normalized = String(path).replaceAll('\\', '/')
+  const absolute = normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized) || isAbsolute(String(path))
+  if (!absolute) {
+    // posix.normalize folds `././crew/a.mjs` and `crew//a.mjs` to the form matchGlob accepts.
+    const rel = posix.normalize(normalized)
+    if (rel === '' || rel === '.' || rel === '..' || rel.startsWith('../') || rel.includes('/../') || rel.startsWith('/')) return null
+    return rel
+  }
+  if (typeof checkout !== 'string' || checkout === '') return null
+  const rel = relative(resolve(checkout), resolve(normalized)).split(sep).join('/')
+  if (rel === '' || rel === '..' || rel.startsWith('../') || rel.startsWith('/')) return null
+  if (rel.startsWith('./')) return rel.slice(2)
+  return rel
+}
+
+// Blind spots: bash edits (sed -i, heredocs) are not edit-class and are not
+// seen; there is no recorded claude Skill call on any transport, so that path
+// is pinned only by the existing skillReadsOf unit test. A call observed with
+// its id is held until fail(id) drops it (the transport reported an error
+// result); a call whose result never arrives stays counted.
+export function createSkillLoadTracker() {
+  let nextSeq = 0
+  const seenLoadKeys = new Map()
+  const loads = []
+  const seenEditPaths = new Map()
+  const firstEdits = []
+  const failed = new Set()
+  const byCall = new Map()
+  function observe(toolName, input, at = null, explicitSeq = null, callId = null) {
+    const seq = explicitSeq ?? (++nextSeq)
+    if (callId !== null && callId !== undefined) {
+      if (failed.has(callId)) return seq
+      if (!byCall.has(callId)) byCall.set(callId, [])
+      byCall.get(callId).push({ toolName, input, at, seq })
+      return seq
+    }
+    record(toolName, input, at, seq)
+    return seq
+  }
+  function fail(callId) {
+    if (callId === null || callId === undefined) return
+    failed.add(callId)
+    byCall.delete(callId)
+  }
+  function record(toolName, input, at, seq) {
+    for (const read of skillReadsOf(toolName, input)) {
+      const skillMatch = read.match(/^skills\/([^/]+)\/SKILL\.md$/)
+      const referenceMatch = read.match(/^skills\/([^/]+)\/references\/([^/]+\.md)$/)
+      const skill = skillMatch ? skillMatch[1] : referenceMatch ? referenceMatch[1] : null
+      if (skill === null) continue
+      const slice = skillMatch ? null : referenceMatch[2].slice(0, -3)
+      const loadKey = `${skill}\0${slice ?? ''}`
+      const known = seenLoadKeys.get(loadKey)
+      if (known !== undefined && loads[known].seq > seq) loads[known] = { skill, slice, seq, load_at: at ?? null }
+      if (seenLoadKeys.has(loadKey)) continue
+      seenLoadKeys.set(loadKey, loads.length)
+      loads.push({ skill, slice, seq, load_at: at ?? null })
+    }
+    if (classifyToolCall(toolName, input) === 'edit') {
+      for (const operand of censusFileOperands(toolName, input).paths) {
+        const raw = String(operand).replaceAll('\\', '/')
+        if (seenEditPaths.has(raw)) {
+          const index = seenEditPaths.get(raw)
+          if (firstEdits[index].seq > seq) firstEdits[index] = { path: raw, seq }
+          continue
+        }
+        seenEditPaths.set(raw, firstEdits.length)
+        firstEdits.push({ path: raw, seq })
+      }
+    }
+  }
+  function snapshot() {
+    for (const calls of byCall.values()) for (const call of calls) record(call.toolName, call.input, call.at, call.seq)
+    byCall.clear()
+    return {
+      loads: loads.map((entry) => ({ ...entry })).sort((a, b) => a.seq - b.seq),
+      first_edits: firstEdits.map((entry) => ({ ...entry })).sort((a, b) => a.seq - b.seq),
+    }
+  }
+  return { observe, fail, snapshot }
+}
+
+export function skillLoadWindowEdits(firstEdits, checkout) {
+  const byPath = new Map()
+  for (const edit of firstEdits ?? []) {
+    if (!edit || typeof edit.path !== 'string') continue
+    const rel = relativeToCheckout(edit.path, checkout)
+    if (rel === null) continue
+    const seq = edit.seq
+    if (!Number.isSafeInteger(seq) || seq <= 0) continue
+    if (!byPath.has(rel) || byPath.get(rel).seq > seq) byPath.set(rel, { path: rel, seq })
+  }
+  return [...byPath.values()].sort((a, b) => a.seq - b.seq)
+}
+
 export function censusFileOperands(toolName, input) {
   const name = typeof toolName === 'string' ? toolName.toLowerCase() : ''
   const path = censusPath(input)
@@ -852,6 +951,7 @@ export function claudeCensus(text) {
   let bashReadsAbsentReason = null
   let firstStamp = null
   let lastStamp = null
+  const skillTracker = createSkillLoadTracker()
 
   for (const line of String(text ?? '').split('\n')) {
     if (!line.trim()) continue
@@ -877,6 +977,7 @@ export function claudeCensus(text) {
         const klass = classifyToolCall(use.name, use.input)
         toolCalls += 1
         byClass[klass] += 1
+        skillTracker.observe(use.name, use.input, censusTimestamp(frame?.timestamp), toolCalls, use.id ?? null)
         for (const path of skillReadsOf(use.name, use.input)) skillReads.add(path)
         const observed = censusFileOperands(use.name, use.input)
         for (const path of observed.paths) {
@@ -894,6 +995,7 @@ export function claudeCensus(text) {
     if (frame?.type !== 'user') continue
     const content = Array.isArray(frame.message?.content) ? frame.message.content : []
     for (const result of content.filter((block) => block?.type === 'tool_result')) {
+      if (result.is_error === true) skillTracker.fail(result.tool_use_id)
       const start = starts.get(result.tool_use_id)
       if (!start) {
         unmatched += 1
@@ -925,6 +1027,8 @@ export function claudeCensus(text) {
     suite_runs: byClass.test,
     distinct_files_read: files.size,
     skill_reads: [...skillReads].sort(),
+    skill_loads: skillTracker.snapshot().loads,
+    first_edits: skillTracker.snapshot().first_edits,
     re_reads: reReads,
     bash_reads_absent_reason: bashReadsAbsentReason,
     tool_spans_matched: matched,
@@ -2151,6 +2255,20 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (injectedLog) return injectedLog(obj)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(obj)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
   }
+  function journalSkillLoads(run, stream) {
+    if (!run || run.skillLoadsJournalled) return
+    run.skillLoadsJournalled = true
+    const skillLoadJournalAt = now()
+    if (!stream?.census || stream.census_absent) {
+      const skillLoadAbsentReason = stream?.census_absent === CENSUS_ABSENT_CAUSES.stream_absent ? 'stream-absent' : 'no-frames'
+      log({ at: skillLoadJournalAt, event: 'skill-load-window', role: run.role, dispatch_id: run.id, transport: 'headless-json', loads_absent_reason: skillLoadAbsentReason, first_edits: null })
+      return
+    }
+    for (const load of stream.census.skill_loads ?? []) {
+      log({ at: skillLoadJournalAt, event: 'skill-loaded', role: run.role, dispatch_id: run.id, transport: 'headless-json', skill: load.skill, slice: load.slice ?? null, seq: load.seq, load_at: load.load_at ?? skillLoadJournalAt })
+    }
+    log({ at: skillLoadJournalAt, event: 'skill-load-window', role: run.role, dispatch_id: run.id, transport: 'headless-json', loads_absent_reason: null, first_edits: skillLoadWindowEdits(stream.census.first_edits ?? [], checkout || crew.checkout) })
+  }
   function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
     if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
@@ -2162,6 +2280,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       ...(includeCensus ? { seat_turn_census: censusRow(run, 'headless-json', stream) } : {}),
       ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
     })
+    if (includeCensus) journalSkillLoads(run, stream)
   }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
@@ -2561,6 +2680,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     emitUsage(run, telemetry.usage)
     log(turnCeilingDetail({ at: now(), role: run.role, id: run.id, turns, budget, absentReason }))
     log({ at: now(), seat_turn_census: censusRow(run, 'headless-json', telemetry) })
+    journalSkillLoads(run, telemetry)
     if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
     return turnCeilingEnvelope({ id: run.id, role: run.role, returnPath, turns, budget, rejectedStatus: null })
   }

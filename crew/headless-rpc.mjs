@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { sleptMilliseconds } from './headless.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, createSkillLoadTracker, skillLoadWindowEdits, SKILL_LOAD_ABSENT_REASONS, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
@@ -365,6 +365,7 @@ export function newCensus() {
     _files: new Set(),
     _first_at: null,
     _last_at: null,
+    _skill_tracker: createSkillLoadTracker(),
   }
 }
 
@@ -391,6 +392,7 @@ export function foldCensusFrame(census, frame, at) {
     census.by_class[klass] += 1
     census.suite_runs = census.by_class.test
     for (const path of skillReadsOf(frame.toolName, frame.args)) census.skill_reads.add(path)
+    census._skill_tracker.observe(frame.toolName, frame.args, Number.isFinite(at) ? at : null, null, frame.toolCallId ?? null)
     const observed = censusFileOperands(frame.toolName, frame.args)
     for (const path of observed.paths) {
       if (census._files.has(path)) census.re_reads += 1
@@ -404,6 +406,7 @@ export function foldCensusFrame(census, frame, at) {
     }
   }
   if (frame.type === 'tool_execution_end') {
+    if (frame.isError === true) census._skill_tracker?.fail(frame.toolCallId ?? null)
     const start = census._open[frame.toolCallId]
     if (start && at === start.at) { census.tool_spans_same_poll += 1; delete census._open[frame.toolCallId]; return census }
     if (!start || !Number.isFinite(at) || at < start.at) {
@@ -441,9 +444,17 @@ export function finaliseCensus(census) {
   delete census._files
   delete census._first_at
   delete census._last_at
+  if (census._skill_tracker) {
+    const skillSnapshot = census._skill_tracker.snapshot()
+    census.skill_loads = skillSnapshot.loads
+    census.first_edits = skillSnapshot.first_edits
+    delete census._skill_tracker
+  }
   if (firstAt === null || lastAt === null) {
     return {
       ...census,
+      skill_loads: census.skill_loads ?? [],
+      first_edits: census.first_edits ?? [],
       in_tool_ms: null, out_of_tool_ms: null, clock_absent: CENSUS_ABSENT_CAUSES.replay_no_frame_clock,
       span_ms: null,
     }
@@ -937,6 +948,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
           pre_first_turn_missing_components: timing.pre_first_turn_missing_components,
         },
       })
+      const skillLoadJournalAt = now()
+      for (const load of census?.skill_loads ?? []) {
+        log({ at: skillLoadJournalAt, event: 'skill-loaded', role: turn.role, dispatch_id: turn.id, transport: 'headless-rpc', skill: load.skill, slice: load.slice ?? null, seq: load.seq, load_at: load.load_at ?? skillLoadJournalAt })
+      }
+      const skillLoadAbsentReason = noFrames ? (streamUnreadable ? 'stream-absent' : 'no-frames') : null
+      const skillLoadWindowFirstEdits = noFrames ? null : skillLoadWindowEdits(census?.first_edits ?? [], checkout || crew.checkout)
+      log({ at: skillLoadJournalAt, event: 'skill-load-window', role: turn.role, dispatch_id: turn.id, transport: 'headless-rpc', loads_absent_reason: skillLoadAbsentReason, first_edits: skillLoadWindowFirstEdits })
     })
   }
   function seatDir(role) { return join(root, role) }

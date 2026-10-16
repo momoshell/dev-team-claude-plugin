@@ -5471,3 +5471,62 @@ test('FS2 caller JSON re-asks use a fresh session without changing refused bytes
     assert.equal(readFileSync(first.returnPath, 'utf8'), 'original refused bytes')
   } finally { f.cleanup() }
 })
+
+import { createSkillLoadTracker, relativeToCheckout, skillLoadWindowEdits, SKILL_LOAD_ABSENT_REASONS as HEADLESS_SKILL_LOAD_ABSENT_REASONS } from './headless.mjs'
+
+test('skill load tracker keeps first load and first raw edit at the lowest seq', () => {
+  assert.deepEqual(HEADLESS_SKILL_LOAD_ABSENT_REASONS, ['pane-unobservable', 'stream-absent', 'no-frames'])
+  const tracker = createSkillLoadTracker()
+  tracker.observe('read', { path: 'skills/code-less/SKILL.md' }, 100)
+  tracker.observe('read', { path: 'skills/code-less/SKILL.md' }, 101)
+  tracker.observe('read', { path: 'skills/code-less/references/closeout.md' }, 102)
+  tracker.observe('edit', { path: '/repo/crew/a.mjs' }, 103)
+  tracker.observe('edit', { path: '/repo/crew/a.mjs' }, 104)
+  const snap = tracker.snapshot()
+  assert.deepEqual(snap.loads, [
+    { skill: 'code-less', slice: null, seq: 1, load_at: 100 },
+    { skill: 'code-less', slice: 'closeout', seq: 3, load_at: 102 },
+  ])
+  assert.deepEqual(snap.first_edits, [{ path: '/repo/crew/a.mjs', seq: 4 }])
+  assert.deepEqual(skillLoadWindowEdits(snap.first_edits, '/repo'), [{ path: 'crew/a.mjs', seq: 4 }])
+  assert.equal(relativeToCheckout('/repo/crew/a.mjs', '/repo'), 'crew/a.mjs')
+  assert.equal(relativeToCheckout('/outside/a.mjs', '/repo'), null)
+  assert.equal(relativeToCheckout('../a.mjs', '/repo'), null)
+  // MUTATION RN1: stripping one leading ./ instead of posix.normalize leaves ./crew/a.mjs, which matchGlob rejects.
+  assert.equal(relativeToCheckout('././crew/a.mjs', '/repo'), 'crew/a.mjs')
+  assert.equal(relativeToCheckout('crew//a.mjs', '/repo'), 'crew/a.mjs')
+  assert.equal(relativeToCheckout('crew/../../a.mjs', '/repo'), null)
+  const explicit = createSkillLoadTracker()
+  explicit.observe('read', { path: 'skills/x/SKILL.md' }, 10, 7)
+  explicit.observe('read', { path: 'skills/y/SKILL.md' }, 11)
+  assert.deepEqual(explicit.snapshot().loads.map((l) => [l.skill, l.seq]), [['y', 1], ['x', 7]])
+  const census = claudeCensus([
+    { type: 'assistant', timestamp: '2026-10-16T00:00:01.000Z', message: { id: 'm1', content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'dev-team:backend-node' } }] } },
+    { type: 'assistant', timestamp: '2026-10-16T00:00:02.000Z', message: { id: 'm2', content: [{ type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: '/repo/crew/x.mjs' } }] } },
+  ].map((f) => JSON.stringify(f)).join('\n'))
+  assert.deepEqual(census.skill_loads.map(({ skill, slice, seq }) => ({ skill, slice, seq })), [{ skill: 'backend-node', slice: null, seq: 1 }])
+  assert.deepEqual(census.first_edits, [{ path: '/repo/crew/x.mjs', seq: 2 }])
+})
+
+
+test('headless-json journals skill loads and a checkout-relative window after the census row', () => {
+  const f = b416JsonFixture()
+  try {
+    const editPath = join(f.dir, 'crew', 'x.mjs')
+    const frames = [
+      { type: 'assistant', timestamp: '2026-10-16T00:00:01.000Z', message: { id: 'm1', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: join(f.dir, 'skills', 'code-less', 'SKILL.md') } }] } },
+      { type: 'assistant', timestamp: '2026-10-16T00:00:02.000Z', message: { id: 'm2', content: [{ type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: editPath } }] } },
+      { type: 'result', subtype: 'success' },
+    ]
+    f.writeStream(frames.map((x) => JSON.stringify(x)).join('\n') + '\n')
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: f.role, status: 'done' }))
+    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+    const loaded = f.rows.filter((r) => r.event === 'skill-loaded')
+    assert.equal(loaded.length, 1)
+    assert.deepEqual([loaded[0].skill, loaded[0].transport], ['code-less', 'headless-json'])
+    const win = f.rows.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits, [{ path: 'crew/x.mjs', seq: 2 }])
+    assert.equal(f.rows.filter((r) => r.seat_turn_census).length, 1)
+  } finally { f.cleanup() }
+})

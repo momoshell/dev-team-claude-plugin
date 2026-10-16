@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { appendFileSync, chmodSync, existsSync as fsExistsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import { scratchDir } from '../test/helpers.mjs'
+import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { acpIo, ACP_CANCEL_SETTLE_MS, ACP_CENSUS_TURNS_ABSENT, ACP_CONTEXT_BASIS } from './acp-io.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 import { ACP_BINARY, acpLaunch as claudeAcpLaunch, capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
@@ -26,7 +26,7 @@ function fixture(options = {}) {
     close() { calls.push('close'); return options.closeResult || { outcome: 'proven', reason: 'fixture' } },
     reprove(windowMs) { calls.push(['reprove', windowMs]); return options.reproveResult || { outcome: 'proven', reason: 'fixture' } },
   }
-  const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
+  const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: options.checkout ?? root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), monotonic: options.monotonic, sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
   return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
@@ -960,5 +960,78 @@ test('BZ3 — an exhausted reprove throws a staged acp-session-busy refusal nami
     assert.equal(err?.stage, 'acp-session-busy')
     assert.match(err.message, /builder/)
     assert.equal(f.calls.filter((entry) => entry === 'start').length, starts)
+  } finally { cleanup(f) }
+})
+
+// MUTATION SL4: replacing the ACP tracker tool-name argument with 'other' records no ACP load.
+test('SL4 ACP edit then reference read journals the reference load after the edit', () => {
+  const f = fixture({ checkout: '/Users/momoshell/Dev/dt-b998-advisorseat' })
+  try {
+    assign(f)
+    const lines = readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', 'acp-pi-edit-then-reference-read.ndjson'), 'utf8').trim().split('\n')
+    let at = 5000
+    for (const line of lines) { at += 1; f.update('tool_call', { sessionId: 's1', kind: 'tool_call', update: JSON.parse(line).params.update, at }) }
+    f.io.close()
+    const loaded = f.logs.filter((r) => r.event === 'skill-loaded')
+    assert.equal(loaded.length, 1)
+    assert.deepEqual([loaded[0].skill, loaded[0].slice, loaded[0].transport], ['crew-recovery', 'closeout', 'acp'])
+    const win = f.logs.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits, [{ path: 'crew/adapter-pi.test.mjs', seq: 1 }])
+    assert.ok(loaded[0].seq > win[0].first_edits[0].seq)
+  } finally { cleanup(f) }
+})
+
+test('ACP recorded claude turn replay journals the probe write as first edit', () => {
+  const f = fixture({ checkout: '/private/var/folders/kf/0nfx7tkj17b4801wb6_44hmh0000gn/T/acp-mode-test' })
+  try {
+    assign(f)
+    const records = readFileSync(new URL('../test/fixtures/acp/claude-turn.ndjson', import.meta.url), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    for (const row of records) {
+      if (row.dir !== 'agent->client' || !row.frame?.params?.update) continue
+      f.update('tool_call', { sessionId: 's1', kind: 'tool_call', update: row.frame.params.update, at: row.ms })
+    }
+    f.io.close()
+    const win = f.logs.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits, [{ path: 'acp-probe.txt', seq: 1 }])
+    const census = f.logs.find((r) => r.seat_turn_census)?.seat_turn_census
+    assert.equal(census.skill_reads, null)
+  } finally { cleanup(f) }
+})
+
+test('ACP Skill arrives on tool_call_update after an empty first rawInput, and a frameless settle is no-frames', () => {
+  const f = fixture({})
+  try {
+    assign(f)
+    f.update('tool_call', { sessionId: 's1', kind: 'tool_call', update: { sessionUpdate: 'tool_call', toolCallId: 'sk1', kind: 'other', title: 'Skill', status: 'in_progress', _meta: { claudeCode: { toolName: 'Skill' } }, rawInput: {} }, at: 5001 })
+    f.update('tool_call', { sessionId: 's1', kind: 'tool_call', update: { sessionUpdate: 'tool_call_update', toolCallId: 'sk1', kind: 'other', title: 'Skill', status: 'in_progress', _meta: { claudeCode: { toolName: 'Skill' } }, rawInput: { skill: 'dev-team:code-less' } }, at: 5002 })
+    f.io.close()
+    const loaded = f.logs.filter((r) => r.event === 'skill-loaded')
+    assert.equal(loaded.length, 1)
+    assert.deepEqual([loaded[0].skill, loaded[0].slice, loaded[0].seq], ['code-less', null, 1])
+  } finally { cleanup(f) }
+  const g = fixture({})
+  try {
+    assign(g)
+    g.io.close()
+    const win = g.logs.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual([win[0].loads_absent_reason, win[0].first_edits], ['no-frames', null])
+    assert.equal(g.logs.filter((r) => r.event === 'skill-loaded').length, 0)
+  } finally { cleanup(g) }
+})
+
+// Frame shape as the Skill test above (no recorded claude ACP Bash call exists).
+// MUTATION AB1: restoring the kind-only name (Skill aside) makes a Bash `cat` of a SKILL.md an `execute`
+// call, which records no load.
+test('AB1 an ACP Bash call that cats a SKILL.md is a load', () => {
+  const f = fixture({})
+  try {
+    assign(f)
+    f.update('tool_call', { sessionId: 's1', kind: 'tool_call', update: { sessionUpdate: 'tool_call', toolCallId: 'b1', kind: 'execute', title: 'cat', status: 'completed', _meta: { claudeCode: { toolName: 'Bash' } }, rawInput: { command: 'cat skills/code-less/SKILL.md' } }, at: 5001 })
+    f.io.close()
+    const loaded = f.logs.filter((r) => r.event === 'skill-loaded')
+    assert.deepEqual(loaded.map((r) => [r.skill, r.slice]), [['code-less', null]])
   } finally { cleanup(f) }
 })

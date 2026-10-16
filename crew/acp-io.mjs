@@ -2,7 +2,7 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, unlinkSync 
 import { delimiter, isAbsolute, join } from 'node:path'
 import { ACP_UPDATE_KINDS, acpClient as defaultClient, acpRefuse } from './acp-client.mjs'
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
-import { acpProviderFailureKind, acpTextReset, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds } from './headless.mjs'
+import { acpProviderFailureKind, acpTextReset, providerRetryRouter, providerResetInstant, PROVIDER_RESET_STATUS, PROVIDER_RESET_ABSENT, readEnvelopeOrThrow, sleptMilliseconds, createSkillLoadTracker, skillLoadWindowEdits } from './headless.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
 import { permissionHandler } from './acp-permission.mjs'
@@ -15,6 +15,19 @@ export const ACP_CANCEL_SETTLE_MS = 1000
 const ACP_ADAPTERS = Object.freeze({ pi: piAdapter, claude: claudeAdapter })
 const ACP_POLL_INTERVAL_MS = 25
 
+// The agent's own tool name when it reports one (claude: Bash, Read, Edit, Skill), so a successful
+// `cat skills/x/SKILL.md` through Bash is a load; otherwise the ACP kind, with execute read as bash.
+function acpSkillToolName(data, snapshot) {
+  const named = data?._meta?.claudeCode?.toolName
+  if (typeof named === 'string' && named !== '') return named
+  if (snapshot?.kind === 'execute') return 'bash'
+  return typeof snapshot?.kind === 'string' ? snapshot.kind : 'other'
+}
+function acpSkillToolInput(data, snapshot) {
+  if (data?.rawInput && typeof data.rawInput === 'object' && !Array.isArray(data.rawInput) && Object.keys(data.rawInput).length) return [data.rawInput]
+  const inputs = (Array.isArray(snapshot?.locations) ? snapshot.locations : []).filter((path) => typeof path === 'string').map((path) => ({ path }))
+  return inputs.length ? inputs : [{}]
+}
 export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi', deps = {} }) {
   const exists = deps.existsSync || fsExistsSync
   const read = deps.readFileSync || fsReadFileSync
@@ -125,6 +138,13 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
         const snapshot = { ...(data.kind == null ? { kind: previous.kind } : { kind: data.kind }), status: data.status ?? previous.status ?? null, title: data.title ?? previous.title ?? null, locations, has_diff }
         a.tools.set(id, snapshot)
         log({ at: now(), acp_tool_call: { role, assignment_id: a.id, tool_call_id: id, ...snapshot } })
+        const acpToolName = acpSkillToolName(data, snapshot)
+        const acpToolInputs = acpSkillToolInput(data, snapshot)
+        const acpLoadAt = Number.isFinite(update.at) ? update.at : now()
+        let acpSeq
+        if (id !== null && id !== undefined) { if (!a.toolSeqs.has(id)) a.toolSeqs.set(id, ++a.toolSeqNext); acpSeq = a.toolSeqs.get(id) } else { acpSeq = ++a.toolSeqNext }
+        for (const acpToolInput of acpToolInputs) a.skillTracker.observe(acpToolName, acpToolInput, acpLoadAt, acpSeq, id ?? null)
+        if (snapshot.status === 'failed') a.skillTracker.fail(id ?? null)
       }
       emit({ kind: 'heartbeat', at: update.at, role })
     }
@@ -152,7 +172,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const { client, profile } = getClient(role)
     if (prior) settlePriorBeforePrompt(prior, id, client)
     const promptId = client.beginPrompt([{ type: 'text', text }])
-    assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, contextFirst: null, contextPeak: null, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
+    assignments.set(returnPath, { id, role, briefFile, returnPath, promptId, contextFirst: null, contextPeak: null, sawUpdate: false, lastTurn: null, profile, tools: new Map(), settled: false, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME }, skillTracker: createSkillLoadTracker(), toolSeqs: new Map(), toolSeqNext: 0 })
     current.set(role, returnPath)
     return { id, returnPath }
   }
@@ -234,6 +254,16 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     try {
       const tool_calls = assignment.sawUpdate ? assignment.tools.size : null
       log({ at: now(), seat_turn_census: { role: assignment.role, dispatch_id: assignment.id, transport: 'acp', model: crew.members[assignment.role]?.model ?? null, session_id: client?.sessionId ?? null, turns: null, tool_calls, skill_reads: null, context_first_tokens: assignment.contextFirst, context_peak_tokens: assignment.contextPeak, context_mean_tokens: null, context_calls: null, context_absent_reason: assignment.contextFirst === null ? 'aggregate-usage-only' : null, ...(assignment.contextFirst === null ? {} : { context_basis: ACP_CONTEXT_BASIS }), absent_reason: ACP_CENSUS_TURNS_ABSENT } })
+      const skillLoadJournalAt = now()
+      const skillSnapshot = assignment.skillTracker ? assignment.skillTracker.snapshot() : { loads: [], first_edits: [] }
+      for (const load of skillSnapshot.loads) {
+        log({ at: skillLoadJournalAt, event: 'skill-loaded', role: assignment.role, dispatch_id: assignment.id, transport: 'acp', skill: load.skill, slice: load.slice ?? null, seq: load.seq, load_at: load.load_at ?? skillLoadJournalAt })
+      }
+      if (!assignment.sawUpdate) {
+        log({ at: skillLoadJournalAt, event: 'skill-load-window', role: assignment.role, dispatch_id: assignment.id, transport: 'acp', loads_absent_reason: 'no-frames', first_edits: null })
+      } else {
+        log({ at: skillLoadJournalAt, event: 'skill-load-window', role: assignment.role, dispatch_id: assignment.id, transport: 'acp', loads_absent_reason: null, first_edits: skillLoadWindowEdits(skillSnapshot.first_edits, checkout || process.cwd()) })
+      }
     } catch { /* census is best-effort */ }
     return turn
   }

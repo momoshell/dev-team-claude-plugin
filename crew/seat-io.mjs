@@ -3035,6 +3035,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       const census = paneTurnCensus({ taskDir: paths.taskDir, role: info.role, id: info.id, model: censusMember?.model ?? null, agent: censusMember?.agent ?? 'claude', adapter: adapters?.[info.role]?.adapter ?? null, deps })
       io.log(recordRow({ at: now(), seat_turn_census: census }))
     } catch { /* census is best-effort */ }
+    // TL10: claude pane seats with a transcript record are readable (paneTurnCensus runs claudeCensus on them) but not folded for loads in this lane, so pane-unobservable means not instrumented here, not impossible to observe.
+    try { io.log(recordRow({ at: now(), event: 'skill-load-window', role: info.role, dispatch_id: info.id, transport: 'pane', loads_absent_reason: 'pane-unobservable', first_edits: null })) } catch { /* census is best-effort */ }
     try {
       const member = crew.members?.[info?.role] || null
       const sentPath = paneUsageSentPath(info.role)

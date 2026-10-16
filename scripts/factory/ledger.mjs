@@ -83,6 +83,7 @@ import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { modelString as claudeModelString } from '../../crew/adapters/adapter-claude.mjs'
 import { modelString as piModelString, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES } from '../../crew/adapters/adapter-pi.mjs'
+import { matchGlob, validGlob } from '../../hooks/skill-gate.mjs'
 export { EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES }
 // NONCE_PREFIX was imported from the legacy runtime's contract
 // (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
@@ -436,6 +437,8 @@ const PLANNER_SYMBOLS_METRICS = Object.freeze([
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
 export const CELL_RATE_FLOOR = 12
+export const SKILL_LOAD_ABSENT_REASONS = Object.freeze(['pane-unobservable', 'stream-absent', 'no-frames'])
+export const SKILL_LOADS_DEFINITION = 'window = skill_load_windows.at_ms in [since, until); unit = one assignment (adw_id, run segment, role, dispatch_id) — every assignment is a fresh session, so a load in an earlier assignment does not count, and dispatch ids restart per run segment (run-start run_id, else its ordinal); each dispatch is judged on its in-window skill_load_windows row with the greatest at_ms (its latest attempt, re-asks reuse the dispatch id), using only the skill_loads bound to that attempt (attempts are numbered per run segment, role and dispatch in journal order, and a load takes the attempt of the window that follows it, so neither the requested window nor clock ties move a load between attempts); covered paths = the skill map path rules for that (role, skill) through matchGlob, honouring each rule roles filter and the map exempt list, a rule skill dev-team:<dir> or <dir>#<ref> resolving to <dir>; a skill whose applicable rules carry no when.paths has no covered path, so all its measured assignments read untouched; a (role, skill) row is emitted only when at least one map rule naming the skill applies to that role; loaded_before_edit = measured assignments whose earliest load of the skill (any slice) precedes their first covered edit; edited_without_load = measured assignments with a covered edit and no earlier load; untouched = measured assignments with no covered edit; rate = loaded_before_edit / (loaded_before_edit + edited_without_load) with the denominator printed, thin iff that denominator is below CELL_RATE_FLOOR; unmeasured assignments are counted per closed loads_absent_reason and an empty first_edits list never stands for not-observed; granted = assignments whose run has a seat-skills journal row listing the skill for that role with status granted, null with granted_absent_reason seat-skills-row-absent when any assignment run has no such record, never 0 for absent; the boot row is never read for granted; claude pane seats with a transcript record are readable but not folded for loads in this lane, so pane-unobservable means not instrumented here; blind spots: edits made through bash (sed -i, heredocs) are not edit-class and are not seen, a call whose error result arrived is dropped but a call whose result never arrived is counted, and no recorded claude Skill call exists on any transport, so the Skill path is covered only by the skillReadsOf unit pin in crew/headless.test.mjs'
 export const SUITE_REASK_ABSENT = Object.freeze({ unobserved: 'reask-unobserved', envelope_unobserved: 'reask-envelope-unobserved', uncorrelated: 'reask-uncorrelated' })
 export const SUITE_REFUSAL_UNSTAMPED = 'unstamped-counted-at-ingest'
 export const SUITE_DECISION_ABSENT = Object.freeze({ pre_amendment: 'pre-amendment', cell: 'seat-cell-unavailable', run_id: 'run-id-unavailable' })
@@ -857,6 +860,23 @@ export const TABLES = Object.freeze({
     // and SQLite enforces the key itself: replaying a write adds nothing, even for a row
     // whose run_id is absent.
     unique: [['adw_id', 'identity_key', 'role', 'decision', 'at_ms']], indexes: [],
+  },
+  skill_loads: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' }, { name: 'identity_key', decl: 'TEXT NOT NULL' }, { name: 'run_key', decl: 'TEXT' }, { name: 'attempt', decl: 'INTEGER' },
+      { name: 'role', decl: 'TEXT' }, { name: 'dispatch_id', decl: 'TEXT' }, { name: 'transport', decl: 'TEXT' },
+      { name: 'skill', decl: 'TEXT' }, { name: 'slice', decl: 'TEXT' }, { name: 'seq', decl: 'INTEGER' },
+      { name: 'load_at_ms', decl: 'INTEGER' }, { name: 'at_ms', decl: 'INTEGER' }, { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'identity_key']], indexes: [],
+  },
+  skill_load_windows: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' }, { name: 'run_key', decl: 'TEXT' }, { name: 'attempt', decl: 'INTEGER' }, { name: 'role', decl: 'TEXT' }, { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' }, { name: 'loads_absent_reason', decl: 'TEXT' }, { name: 'first_edits_json', decl: 'TEXT' },
+      { name: 'granted_skills_json', decl: 'TEXT' }, { name: 'at_ms', decl: 'INTEGER' }, { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'run_key', 'dispatch_id', 'role', 'attempt', 'at_ms']], indexes: [],
   },
   run_seats: {
     columns: [
@@ -1710,6 +1730,8 @@ export const JOURNAL_FACT_EVENTS = Object.freeze({
   'phase-slot-wait': 'recordPhaseSlotWait',
   'experiment-arm': 'recordExperimentArm',
   'seat-suite-policy': 'recordSuiteDecision',
+  'skill-loaded': 'recordSkillLoad',
+  'skill-load-window': 'recordSkillLoadWindow',
 })
 
 export const ADVISOR_SOURCES = Object.freeze(['rotation', 'explicit', 'default'])
@@ -1720,7 +1742,7 @@ export const SHADOW_PICK_EXCLUSION_REASONS = Object.freeze(['band-unknown', 'ban
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'recordEscalationProposal', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordAdvisorSourceBackfill', 'recordRunSeat', 'recordShadowPick', 'recordRunObservation', 'recordGateResult', 'recordChunkRun', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordAdvisorAbWindow', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordEvalCell', 'recordRoutingChoice', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'recordProviderFailure', 'recordPlanScope', 'recordSeatReask', 'recordAcceptReask', 'recordRpcExitContext', 'recordSeatTurnCensus', 'recordPlanAdoption', 'recordExternalFence', 'recordMutationAnchorBind', 'recordMutationAnchorAbsence', 'recordPhaseSlotWait', 'recordExperimentArm', 'recordNarrationMeasurement', 'recordScreenerProposal', 'recordAdvisorUsage', 'recordAdvisorAbWindow', 'recordSeatTurn', 'recordSeatToolCall', 'recordSeatPermission', 'recordSuiteDecision', 'recordSkillLoad', 'recordSkillLoadWindow', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1780,6 +1802,8 @@ export const WRITER_MIRROR_TABLES = Object.freeze({
   recordSeatToolCall: 'seat_tool_calls',
   recordSeatPermission: 'seat_permissions',
   recordSuiteDecision: 'suite_decisions',
+  recordSkillLoad: 'skill_loads',
+  recordSkillLoadWindow: 'skill_load_windows',
 })
 
 // Writers whose mirror is an UPDATE of a row another writer created: they add
@@ -3795,6 +3819,62 @@ export function openLedger({
     return args
   }
 
+  function recordSkillLoad(input = {}) {
+    requireFields(input, ['adw_id', 'dispatch_id', 'role', 'transport', 'skill', 'seq', 'at_ms'], 'recordSkillLoad')
+    if (typeof input.skill !== 'string' || !/^[^/\s]+$/.test(input.skill)) throw new LedgerUsageError("recordSkillLoad: field 'skill' must match /^[^/\s]+$/")
+    const slice = input.slice ?? null
+    if (slice !== null && (typeof slice !== 'string' || !/^[^/\s]+$/.test(slice))) throw new LedgerUsageError("recordSkillLoad: field 'slice' must be null or match /^[^/\s]+$/")
+    if (!Number.isSafeInteger(input.seq) || input.seq <= 0) throw new LedgerUsageError("recordSkillLoad: field 'seq' must be a positive safe integer")
+    const atMs = epochMsOrNull(input.at_ms)
+    if (!Number.isFinite(atMs)) throw new LedgerUsageError("recordSkillLoad: field 'at_ms' must be a finite epoch millisecond value")
+    const args = redact({
+      adw_id: input.adw_id, identity_key: JSON.stringify([input.run_key ?? null, input.attempt ?? null, input.dispatch_id, input.role, atMs, input.skill, slice]),
+      run_key: input.run_key ?? null, attempt: input.attempt ?? null, role: input.role, dispatch_id: input.dispatch_id, transport: input.transport, skill: input.skill, slice,
+      seq: input.seq, load_at_ms: epochMsOrNull(input.load_at_ms ?? input.load_at), at_ms: atMs, created_at: isoMs(input.created_at ?? input.at_ms),
+    }, stats)
+    appendJsonl('recordSkillLoad', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('skill_loads')
+      conn.prepare(`INSERT OR IGNORE INTO skill_loads (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordSkillLoadWindow(input = {}) {
+    requireFields(input, ['adw_id', 'dispatch_id', 'role', 'transport', 'at_ms'], 'recordSkillLoadWindow')
+    const atMs = epochMsOrNull(input.at_ms)
+    if (!Number.isFinite(atMs)) throw new LedgerUsageError("recordSkillLoadWindow: field 'at_ms' must be a finite epoch millisecond value")
+    const reason = input.loads_absent_reason ?? null
+    if (reason !== null && !SKILL_LOAD_ABSENT_REASONS.includes(reason)) throw new LedgerUsageError("recordSkillLoadWindow: field 'loads_absent_reason' must be a closed skill-load absent reason or null")
+    let firstEdits = null
+    if (reason === null) {
+      if (!Array.isArray(input.first_edits)) throw new LedgerUsageError("recordSkillLoadWindow: field 'first_edits' must be an array when loads_absent_reason is null")
+      for (const edit of input.first_edits) {
+        if (!edit || typeof edit.path !== 'string' || edit.path.trim() === '' || edit.path.startsWith('/') || edit.path.split('/').includes('..') || !Number.isSafeInteger(edit.seq) || edit.seq <= 0) throw new LedgerUsageError("recordSkillLoadWindow: field 'first_edits' entries must be {path: relative, seq: positive safe integer}")
+      }
+      firstEdits = input.first_edits.map((e) => ({ path: e.path, seq: e.seq }))
+    } else if (input.first_edits !== null && input.first_edits !== undefined) {
+      throw new LedgerUsageError("recordSkillLoadWindow: field 'first_edits' must be null when loads_absent_reason is non-null")
+    }
+    let grantedSkills = null
+    if (input.granted_skills !== null && input.granted_skills !== undefined) {
+      if (!Array.isArray(input.granted_skills) || input.granted_skills.some((s) => typeof s !== 'string' || !/^[^/\s]+$/.test(s))) throw new LedgerUsageError("recordSkillLoadWindow: field 'granted_skills' must be null or an array of skill names")
+      grantedSkills = [...new Set(input.granted_skills)].sort()
+    }
+    const args = redact({
+      adw_id: input.adw_id, run_key: input.run_key ?? null, attempt: input.attempt ?? null, role: input.role, dispatch_id: input.dispatch_id, transport: input.transport,
+      loads_absent_reason: reason, first_edits_json: firstEdits === null ? null : JSON.stringify(firstEdits),
+      granted_skills_json: grantedSkills === null ? null : JSON.stringify(grantedSkills),
+      at_ms: atMs, created_at: isoMs(input.created_at ?? input.at_ms),
+    }, stats)
+    appendJsonl('recordSkillLoadWindow', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('skill_load_windows')
+      conn.prepare(`INSERT OR IGNORE INTO skill_load_windows (${cols.map(quoteSqlIdentifier).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordSeatReask(input = {}) {
     requireFields(input, ['event', 'outcome'], 'recordSeatReask')
     requireEnum(input.event, SEAT_REASK_EVENTS, 'recordSeatReask', 'event')
@@ -5579,6 +5659,102 @@ export function openLedger({
     }))
   }
 
+
+  function skillLoads({ since = null, until = null, map = null } = {}) {
+    let skillMap = map
+    if (skillMap === null || skillMap === undefined) {
+      let raw
+      try { raw = readFileSync(fileURLToPath(new URL('../../skills/skill-map.json', import.meta.url)), 'utf8') } catch { throw new LedgerUsageError('skill-loads: map unreadable') }
+      try { skillMap = JSON.parse(raw) } catch { throw new LedgerUsageError('skill-loads: map unparseable') }
+    }
+    // A malformed rule must refuse: read leniently, a string `when.paths` or a glob matchGlob never matches
+    // (`/crew/**`) would silently cover nothing and report a covered edit as untouched.
+    const stringList = (value) => Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item !== '')
+    const validRule = (rule) => rule && typeof rule === 'object' && !Array.isArray(rule) && stringList(rule.skills)
+      && rule.when && typeof rule.when === 'object' && !Array.isArray(rule.when)
+      && (rule.when.paths === undefined || (stringList(rule.when.paths) && rule.when.paths.every(validGlob))) && (rule.when.roles === undefined || stringList(rule.when.roles))
+    if (!skillMap || typeof skillMap !== 'object' || Array.isArray(skillMap) || !Array.isArray(skillMap.rules) || skillMap.rules.length === 0 || !Array.isArray(skillMap.exempt)
+      || !skillMap.exempt.every(validGlob) || !skillMap.rules.every(validRule)) throw new LedgerUsageError('skill-loads: map invalid')
+    // A rule with neither selector covers nothing for anyone; validateMap refuses it too.
+    if (skillMap.rules.some((rule) => rule.when.paths === undefined && rule.when.roles === undefined)) throw new LedgerUsageError('skill-loads: map invalid: rule-selects-nothing')
+    const toMs = (value) => value === null || value === undefined ? null : (typeof value === 'number' ? value : Date.parse(value))
+    const sinceMs = toMs(since)
+    const untilMs = toMs(until)
+    const windowRows = queryRows('SELECT * FROM skill_load_windows WHERE at_ms IS NOT NULL AND (? IS NULL OR at_ms >= ?) AND (? IS NULL OR at_ms < ?)', [sinceMs, sinceMs, untilMs, untilMs])
+    const loadRows = queryRows('SELECT * FROM skill_loads WHERE at_ms IS NOT NULL', [])
+    const sameAssignment = (a, b) => a.adw_id === b.adw_id && a.run_key === b.run_key && a.role === b.role && a.dispatch_id === b.dispatch_id
+    const latest = new Map()
+    for (const row of windowRows) {
+      const key = JSON.stringify([row.adw_id, row.run_key, row.role, row.dispatch_id])
+      const prev = latest.get(key)
+      if (!prev || (row.attempt ?? 0) > (prev.attempt ?? 0) || ((row.attempt ?? 0) === (prev.attempt ?? 0) && row.at_ms > prev.at_ms)) latest.set(key, row)
+    }
+    const assignments = [...latest.values()]
+    const exemptGlobs = skillMap.exempt
+    const resolveSkill = (name) => String(name).replace(/^dev-team:/, '').split('#')[0]
+    const cells = new Map()
+    for (const assignment of assignments) {
+      const role = assignment.role
+      for (const rule of skillMap.rules) {
+        const when = rule?.when && typeof rule.when === 'object' ? rule.when : {}
+        if (Array.isArray(when.roles) && !when.roles.includes(role)) continue
+        for (const rawSkill of Array.isArray(rule?.skills) ? rule.skills : []) {
+          const skill = resolveSkill(rawSkill)
+          const key = JSON.stringify([role, skill])
+          if (!cells.has(key)) cells.set(key, { role, skill, pathGlobs: [], assignments: [] })
+          const cell = cells.get(key)
+          for (const glob of Array.isArray(when.paths) ? when.paths : []) if (!cell.pathGlobs.includes(glob)) cell.pathGlobs.push(glob)
+        }
+      }
+    }
+    for (const cell of cells.values()) {
+      cell.assignments = assignments.filter((a) => a.role === cell.role)
+    }
+    const isMeasuredSkillLoadWindow = (windowRow) => windowRow.loads_absent_reason === null
+    const rows = []
+    for (const cell of [...cells.values()].sort((a, b) => String(a.role).localeCompare(String(b.role)) || String(a.skill).localeCompare(String(b.skill)))) {
+      let measured = 0, unmeasured = 0, loaded_before_edit = 0, edited_without_load = 0, untouched = 0
+      const unmeasured_by_reason = {}
+      let grantedCount = 0
+      let anyGrantedAbsent = false
+      for (const assignment of cell.assignments) {
+        if (assignment.granted_skills_json === null) anyGrantedAbsent = true
+        else {
+          let grantedList = []
+          try { grantedList = JSON.parse(assignment.granted_skills_json) } catch { grantedList = [] }
+          if (Array.isArray(grantedList) && grantedList.includes(cell.skill)) grantedCount += 1
+        }
+        if (!isMeasuredSkillLoadWindow(assignment)) {
+          unmeasured += 1
+          if (assignment.loads_absent_reason !== null) unmeasured_by_reason[assignment.loads_absent_reason] = (unmeasured_by_reason[assignment.loads_absent_reason] ?? 0) + 1
+          continue
+        }
+        measured += 1
+        let firstEdits = []
+        try { firstEdits = JSON.parse(assignment.first_edits_json ?? '[]') } catch { firstEdits = [] }
+        if (!Array.isArray(firstEdits)) firstEdits = []
+        const pathGlobs = cell.pathGlobs
+        const coveredEdits = firstEdits.filter((edit) => pathGlobs.some((glob) => matchGlob(glob, edit.path)) && !exemptGlobs.some((glob) => matchGlob(glob, edit.path)))
+        const coveredSeqs = coveredEdits.map((edit) => edit.seq)
+        const firstCoveredSeq = coveredSeqs.length ? Math.min(...coveredSeqs) : null
+        if (firstCoveredSeq === null) { untouched += 1; continue }
+        const loads = loadRows.filter((load) => sameAssignment(load, assignment) && load.attempt === assignment.attempt && load.skill === cell.skill)
+        if (loads.some((load) => load.seq < firstCoveredSeq)) loaded_before_edit += 1
+        else edited_without_load += 1
+      }
+      const denominator = loaded_before_edit + edited_without_load
+      rows.push({
+        role: cell.role, skill: cell.skill, measured, unmeasured, unmeasured_by_reason,
+        loaded_before_edit, edited_without_load, untouched, denominator,
+        rate: denominator ? loaded_before_edit / denominator : null,
+        thin: denominator < CELL_RATE_FLOOR,
+        granted: anyGrantedAbsent ? null : grantedCount,
+        granted_absent_reason: anyGrantedAbsent ? 'seat-skills-row-absent' : null,
+      })
+    }
+    return rows
+  }
+
   function cellAttempts({ since = null, until = null } = {}) {
     return queryRows(`
       WITH scoped AS (
@@ -6843,11 +7019,11 @@ export function openLedger({
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordAdvisorSourceBackfill, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
     escalationProposalFor,
-    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordAdvisorAbWindow, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision,
+    recordGateResult, recordChunkRun, recordGateDiscrimination, recordMutationAnchorBind, recordMutationAnchorAbsence, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordEvalCell, recordRoutingChoice, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim, recordProviderFailure, recordPlanScope, recordSeatReask, recordAcceptReask, recordRpcExitContext, recordSeatTurnCensus, recordPlanAdoption, recordExternalFence, recordPhaseSlotWait, recordExperimentArm, recordNarrationMeasurement, recordScreenerProposal, recordAdvisorUsage, recordAdvisorAbWindow, recordSeatTurn, recordSeatToolCall, recordSeatPermission, recordSuiteDecision, recordSkillLoad, recordSkillLoadWindow,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
     chunkProgress: (parentLane, chunkId = null) => chunkProgress({ conn: ensureDb(), parentLane, chunkId }),
-    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, contextCensusRows, contextSessions, contextEvents, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, contextCensusRows, contextSessions, contextEvents, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, skillLoads, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -6956,12 +7132,35 @@ export function replayJsonl(jsonlPath, ledger) {
   return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure, ...(legacySkipped > 0 ? { legacy_skipped: legacySkipped } : {}) }
 }
 
-function journalFactArgs(writer, row, adwId, reask = null) {
+function journalFactArgs(writer, row, adwId, reask = null, seatSkillsSnapshot = null, skillRun = null) {
   const source = row && typeof row === 'object' && !Array.isArray(row) ? row : {}
   const value = (key) => source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) ? source[key] : {}
   const rowAdwId = source.adw_id ?? adwId ?? null
   const atMs = epochMsOrNull(source.at)
   const createdAt = atMs === null ? undefined : atMs
+  if (writer === JOURNAL_FACT_EVENTS['skill-loaded']) {
+    return {
+      adw_id: rowAdwId, run_key: skillRun?.key ?? null, attempt: skillRun?.attempt ?? null, dispatch_id: source.dispatch_id ?? null, role: source.role ?? null, transport: source.transport ?? null,
+      skill: source.skill ?? null, slice: source.slice ?? null, seq: source.seq, load_at: source.load_at ?? null,
+      at_ms: atMs, created_at: createdAt,
+    }
+  }
+  if (writer === JOURNAL_FACT_EVENTS['skill-load-window']) {
+    let granted_skills = null
+    if (seatSkillsSnapshot && typeof seatSkillsSnapshot.has === 'function' && seatSkillsSnapshot.has(source.role)) {
+      const granted = new Set()
+      for (const entry of seatSkillsSnapshot.get(source.role) ?? []) {
+        const dir = typeof entry?.path === 'string' ? (entry.path.match(/(?:^|\/)skills\/([^/]+)\/(?:SKILL\.md|references\/[^/]+\.md)$/)?.[1] ?? null) : null
+        if (dir !== null) { if (entry?.status === 'granted') granted.add(dir) }
+      }
+      granted_skills = [...granted].sort()
+    }
+    return {
+      adw_id: rowAdwId, run_key: skillRun?.key ?? null, attempt: skillRun?.attempt ?? null, dispatch_id: source.dispatch_id ?? null, role: source.role ?? null, transport: source.transport ?? null,
+      loads_absent_reason: source.loads_absent_reason ?? null, first_edits: source.first_edits ?? null, granted_skills,
+      at_ms: atMs, created_at: createdAt,
+    }
+  }
   if (writer === JOURNAL_FACT_EVENTS['seat-suite-policy']) {
     // ADR-046 Amendment 1: the cell and run are what the ROW says, never re-joined from
     // run_seats (unique per lane and role, not per boot). A row with no run_id key was
@@ -7413,6 +7612,62 @@ function suiteReaskAbsentReason(reask) {
 // it in the same run. A role's transport is fixed for a run, so (adw_id, run_id, role)
 // pins the transport too. A refusal whose run_id is not the journal's current run (a
 // pre-amendment row, or a journal with no run-start) cannot be correlated and says so.
+function seatSkillsIndex(lines) {
+  const byLine = new Map()
+  const current = new Map()
+  for (const [i, line] of lines.entries()) {
+    if (!line) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    if (row.event === 'run-start') current.clear()
+    if (row.event === 'seat-skills') {
+      if (row.seat_skills && typeof row.seat_skills === 'object' && !Array.isArray(row.seat_skills)) {
+        for (const [role, value] of Object.entries(row.seat_skills)) {
+          if (value && Array.isArray(value.skills)) current.set(role, [...value.skills])
+        }
+      } else if (typeof row.role === 'string' && Array.isArray(row.skills)) {
+        current.set(row.role, [...row.skills])
+      }
+    }
+    if (row.event === 'skill-load-window') {
+      byLine.set(i + 1, new Map([...current.entries()].map(([role, skills]) => [role, [...skills]])))
+    }
+  }
+  return byLine
+}
+
+// A skill fact belongs to the run segment it was written in: dispatch ids (ACP d1, d2…) restart in every
+// run of one checkout, so (adw_id, dispatch_id) alone merges two runs' assignments. The key is the
+// segment's run-start run_id, else its ordinal; lines before any run-start are segment 0. Within a
+// segment each (role, dispatch_id) window is numbered (attempt 1, 2… — re-asks reuse the dispatch id),
+// and a skill-loaded row takes the number of the window that follows it, so loads bind to their attempt
+// without comparing clocks (two attempts can share one millisecond).
+function skillRunKeyIndex(lines) {
+  const byLine = new Map()
+  let ordinal = 0
+  let key = 'segment:0'
+  const windows = new Map()
+  for (const [i, line] of lines.entries()) {
+    if (!line) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    if (row.event === 'run-start') {
+      ordinal += 1
+      key = typeof row.run_id === 'string' && row.run_id !== '' ? row.run_id : `segment:${ordinal}`
+      windows.clear()
+      continue
+    }
+    if (row.event !== 'skill-loaded' && row.event !== 'skill-load-window') continue
+    const slot = JSON.stringify([row.role ?? null, row.dispatch_id ?? null])
+    const seen = windows.get(slot) ?? 0
+    if (row.event === 'skill-load-window') windows.set(slot, seen + 1)
+    byLine.set(i + 1, { key, attempt: seen + 1 })
+  }
+  return byLine
+}
+
 function suiteReaskIndex(lines) {
   let run = null
   const pending = new Map()
@@ -7474,6 +7729,8 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, from
   let mirrorFailed = false
   const lines = String(content).split('\n')
   const reasks = suiteReaskIndex(lines)
+  const seatSkills = seatSkillsIndex(lines)
+  const skillRunKeys = skillRunKeyIndex(lines)
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1
     if (!line) continue
@@ -7573,7 +7830,7 @@ function ingestJournalRows(journalPath, target, scratch, { adw_id, sinceMs, from
       }
     } else {
       try {
-        pending.push({ writer, args: journalFactArgs(writer, source, adw_id, reasks.get(lineNo) ?? null) })
+        pending.push({ writer, args: journalFactArgs(writer, source, adw_id, reasks.get(lineNo) ?? null, seatSkills.get(lineNo) ?? null, skillRunKeys.get(lineNo) ?? null) })
       } catch (err) {
         failed += 1
         if (firstFailure === null) firstFailure = { line: lineNo, reason: ingestFailureReason(err) }
@@ -8108,6 +8365,7 @@ const VERB_FLAGS = Object.freeze({
   configurations: new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
   'suite-refusals': new Set(['since', 'until']),
+  'skill-loads': new Set(['since', 'until', 'map']),
   'shadow-picks': new Set(['tier']),
   cells: new Set(['since', 'until', 'prices', 'repo']),
   evals: new Set(['bench', 'prices']),
@@ -9165,6 +9423,24 @@ export function main(argv) {
       const rows = ledger.suiteRefusals({ since, until })
       if (ledger.stats().degraded) refuse('suite-refusals: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({ schema: 1, question: 'How often does each seated cell refuse suite commands?', definition: SUITE_REFUSAL_DEFINITION, since, until, floor: CELL_RATE_FLOOR, unstamped: null, unstamped_absent_reason: SUITE_REFUSAL_UNSTAMPED, rows })}\n`)
+      return 0
+    }
+    if (verb === 'skill-loads') {
+      if (positional.length) refuse('skill-loads: takes no positional arguments')
+      if (!Object.hasOwn(flags, 'since')) refuse('skill-loads: --since is required')
+      const since = windowBound(flags.since, 'since', 'skill-loads')
+      const until = Object.hasOwn(flags, 'until') ? windowBound(flags.until, 'until', 'skill-loads') : null
+      if (until !== null && until <= since) refuse('skill-loads: --until must be later than --since')
+      let map = null
+      if (Object.hasOwn(flags, 'map')) {
+        let raw
+        try { raw = readFileSync(flags.map, 'utf8') } catch { refuse('skill-loads: map unreadable') }
+        try { map = JSON.parse(raw) } catch { refuse('skill-loads: map unparseable') }
+        if (!map || typeof map !== 'object' || Array.isArray(map) || !Array.isArray(map.rules) || !Array.isArray(map.exempt)) refuse('skill-loads: map invalid')
+      }
+      const rows = ledger.skillLoads({ since, until, map })
+      if (ledger.stats().degraded) refuse('skill-loads: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({ schema: 1, question: 'Did each seat load its covering skill before its first covered edit?', definition: SKILL_LOADS_DEFINITION, since, until, floor: CELL_RATE_FLOOR, rows })}\n`)
       return 0
     }
     if (verb === 'cell-failures') {

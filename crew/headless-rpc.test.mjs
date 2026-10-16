@@ -82,7 +82,7 @@ function fixture(options = {}) {
   const crew = options.crew || { checkout: dir, members: { [role]: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
   const adapterEntry = options.adapterEntry || (options.grants ? { adapter, grants: options.grants } : adapter)
-  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', turnCeilings: options.turnCeilings, deps })
+  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: options.checkout ?? dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', turnCeilings: options.turnCeilings, deps })
   return {
     dir, paths, crew, io, writes, commands, specs, signals, role, sleepCount: () => sleepCount,
     writeStream: (text) => writeFileSync(join(paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), text),
@@ -4267,7 +4267,7 @@ test('census finalisation keeps the public field set closed', () => {
   assert.deepEqual(Object.keys(result).sort(), [
     'bash_reads_absent_reason', 'by_class', 'clock_absent', 'compactions', 'context_absent_reason',
     'context_calls', 'context_first_tokens', 'context_mean_tokens', 'context_peak_tokens',
-    'distinct_files_read', 'in_tool_ms', 'out_of_tool_ms', 're_reads', 'skill_reads', 'span_ms',
+    'distinct_files_read', 'first_edits', 'in_tool_ms', 'out_of_tool_ms', 're_reads', 'skill_loads', 'skill_reads', 'span_ms',
     'suite_runs', 'tool_calls', 'tool_spans_matched', 'tool_spans_same_poll', 'tool_spans_unmatched', 'turns',
   ].sort())
 })
@@ -4322,4 +4322,120 @@ test('CN3 inconsistent clock keeps measured buckets', () => {
   assert.equal(result.span_ms, 50)
   assert.equal(result.out_of_tool_ms, null)
   assert.equal(result.clock_absent, CENSUS_ABSENT_CAUSES.clock_union_exceeds_span)
+})
+
+
+// MUTATION SL1: changing the skill-loaded event string in journalTurnCensus removes the journalled load row.
+test('SL1 load-then-edit journals a skill-loaded row before the first covered edit', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const frames = readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', 'pi-rpc-load-then-edit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    settle(f, run, [...frames, { type: 'agent_settled' }])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const loaded = rows.filter((r) => r.event === 'skill-loaded')
+    assert.equal(loaded.length, 1)
+    assert.deepEqual([loaded[0].skill, loaded[0].slice, loaded[0].transport], ['code-less', null, 'headless-rpc'])
+    const win = rows.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits.map((e) => e.path), ['scripts/factory/probe-repo.mjs'])
+    assert.ok(win[0].first_edits[0].seq > loaded[0].seq)
+  } finally { f.cleanup() }
+})
+
+// A recorded failed read (b1224's own builder stream, isError: true) with only args.path changed to a
+// skill path, then the recorded load-then-edit frames. The skill-loads fixtures were captured under the
+// skill's previous directory name; only that path text was renamed to code-less after PR 1828.
+// MUTATION FR1: dropping the isError fail() call in foldCensusFrame counts the failed read as the first load.
+test('FR1 a skill read whose result is an error is not a load; the later successful read is', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const read = (name) => readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', name), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    settle(f, run, [...read('pi-rpc-failed-load.jsonl'), ...read('pi-rpc-load-then-edit.jsonl'), { type: 'agent_settled' }])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const loaded = rows.filter((r) => r.event === 'skill-loaded')
+    assert.deepEqual(loaded.map((r) => [r.skill, r.seq]), [['code-less', 2]])
+  } finally { f.cleanup() }
+})
+
+// MUTATION SL2: returning the input unrelativised from relativeToCheckout leaves an absolute first_edits path.
+test('SL2 edit-no-load journals no load and a checkout-relative first edit', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row), checkout: '/Users/momoshell/Dev/dt-b1209-builderwait' })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const frames = readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', 'pi-rpc-edit-no-load.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    settle(f, run, [...frames, { type: 'agent_settled' }])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    assert.equal(rows.filter((r) => r.event === 'skill-loaded').length, 0)
+    const win = rows.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits.map((e) => e.path), ['crew/headless-rpc.mjs'])
+  } finally { f.cleanup() }
+})
+
+// MUTATION SL3: changing first_edits: skillLoadWindowFirstEdits to null in journalTurnCensus makes the window null instead of [].
+test('SL3 load with only an outside-checkout write journals an empty first_edits list', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const frames = readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', 'pi-rpc-load-no-covered-edit.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    settle(f, run, [...frames, { type: 'agent_settled' }])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const loaded = rows.filter((r) => r.event === 'skill-loaded')
+    assert.equal(loaded.length, 1)
+    assert.equal(loaded[0].skill, 'code-less')
+    const win = rows.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.deepEqual(win[0].first_edits, [])
+  } finally { f.cleanup() }
+})
+
+// MUTATION SL6: replacing the no-frames loads_absent_reason expression with null leaves no closed reason.
+test('SL6 a frameless assignment journals a closed absent reason and null first_edits', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run, [])
+    assert.equal(f.io.wait(run.returnPath, 60).status, 'done')
+    const win = rows.filter((r) => r.event === 'skill-load-window')
+    assert.equal(win.length, 1)
+    assert.ok(['pane-unobservable', 'stream-absent', 'no-frames'].includes(win[0].loads_absent_reason))
+    assert.equal(win[0].first_edits, null)
+  } finally { f.cleanup() }
+})
+
+test('skill-load census fold pins fixture loads and raw first edits, and finalise is idempotent', () => {
+  for (const [file, wantLoads] of [
+    ['pi-rpc-load-then-edit.jsonl', [{ skill: 'code-less', slice: null, seq: 1 }]],
+    ['pi-rpc-edit-no-load.jsonl', []],
+    ['pi-rpc-load-no-covered-edit.jsonl', [{ skill: 'code-less', slice: null, seq: 1 }]],
+  ]) {
+    const census = newCensus()
+    let at = 1000
+    for (const line of readFileSync(join(ROOT, 'test', 'fixtures', 'skill-loads', file), 'utf8').trim().split('\n')) foldCensusFrame(census, JSON.parse(line), ++at)
+    const done = finaliseCensus(census)
+    assert.deepEqual(done.skill_loads.map(({ skill, slice, seq }) => ({ skill, slice, seq })), wantLoads, file)
+    assert.ok(Array.isArray(done.first_edits), file)
+    const again = finaliseCensus(done)
+    assert.deepEqual(again.skill_loads, done.skill_loads)
+    assert.deepEqual(again.first_edits, done.first_edits)
+  }
+})
+
+test('a settled no-envelope RPC turn journals exactly one census row and one skill-load window', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '{"type":"agent_settled"}\n')
+    f.io.wait(run.returnPath, 60)
+    assert.equal(rows.filter((r) => r.seat_turn_census).length, 1)
+    assert.equal(rows.filter((r) => r.event === 'skill-load-window').length, 1)
+  } finally { f.cleanup() }
 })

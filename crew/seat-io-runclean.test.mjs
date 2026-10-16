@@ -423,6 +423,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
   ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
   ['recordRow', '', 'at seat_turn_census'],
+  ['recordRow', "event='skill-load-window'", 'at role dispatch_id transport loads_absent_reason first_edits'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', "event='seat-session'", 'at role id transport outcome why'],
@@ -653,11 +654,11 @@ test('SS4', () => {
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 40)
+  assert.equal(sites.length, 41)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 28)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 12)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 13)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -4253,3 +4254,24 @@ test('CW4', () => cwFixture((f) => {
   assert.equal(equal.ok, true)
   assert.equal(equal.output, 'main:link')
 }))
+
+
+// MUTATION SL5: changing the pane loads_absent_reason to null makes the pane window measured.
+test('SL5 pane wait journals one pane-unobservable skill-load window and no load', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const journal = []
+    const crew = { members: { planner: { surface_id: 'surface-planner', transport: 'pane', agent: 'claude', model: 'claude-opus-5' } } }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      now: () => 0, sleep: () => {}, tree: () => ({ windows: [] }), locate: () => false,
+      sendLine: () => {}, assignmentLine: () => 'assignment', logLine: (_path, row) => journal.push(row), cmux: () => ({ ok: false }),
+    })
+    io.emit = () => {}
+    const assignment = io.assign({ role: 'planner', briefFile: join(fixture.paths.taskDir, 'brief.md') })
+    assert.doesNotThrow(() => io.wait(assignment.returnPath, 0))
+    const wins = journal.filter((row) => row.event === 'skill-load-window')
+    assert.equal(wins.length, 1)
+    assert.deepEqual([wins[0].loads_absent_reason, wins[0].first_edits, wins[0].transport], ['pane-unobservable', null, 'pane'])
+    assert.equal(journal.filter((row) => row.event === 'skill-loaded').length, 0)
+    assert.equal(journal.filter((row) => row.seat_turn_census).length, 1)
+  })
+})

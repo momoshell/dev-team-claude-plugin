@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-const validGlob = (g) => typeof g === 'string' && g.length > 0 && !g.startsWith('/') && !g.endsWith('/') && !g.includes('\\') && !g.includes('?') && g.split('/').every((s) => s.length > 0 && s !== '.' && s !== '..' && (!s.includes('**') || s === '**'))
+export const validGlob = (g) => typeof g === 'string' && g.length > 0 && !g.startsWith('/') && !g.endsWith('/') && !g.includes('\\') && !g.includes('?') && g.split('/').every((s) => s.length > 0 && s !== '.' && s !== '..' && (!s.includes('**') || s === '**'))
 const keySet = (o, keys) => object(o) && Object.keys(o).every((k) => keys.includes(k))
 
 // requireSkillFiles: the edit gate refuses a map naming a skill it cannot open. Seat delivery

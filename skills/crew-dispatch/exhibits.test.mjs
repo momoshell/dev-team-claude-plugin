@@ -418,6 +418,48 @@ test('RV2-1 newly tracked skill-read owner is covered by dynamic reach census', 
   assert.equal(currentReach.pathByFile.get(SKILL_READS_OWNER)?.has(SKILL_READS_TEST), true)
 })
 
+
+test('RV2-1 newly tracked skill-load fixture owners are covered by dynamic reach census', () => {
+  const addedOwners = [
+    ['test/fixtures/skill-loads/pi-rpc-load-then-edit.jsonl', ['crew/headless-rpc.test.mjs']],
+    ['test/fixtures/skill-loads/pi-rpc-edit-no-load.jsonl', ['crew/headless-rpc.test.mjs']],
+    ['test/fixtures/skill-loads/pi-rpc-load-no-covered-edit.jsonl', ['crew/headless-rpc.test.mjs']],
+    ['test/fixtures/skill-loads/acp-pi-edit-then-reference-read.ndjson', ['crew/seat-io-acp.test.mjs']],
+  ]
+  const currentReach = collectTestReach({ checkout: ROOT })
+  const addedPaths = addedOwners.map(([owner]) => owner)
+  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedPaths])]
+  const current = reachCensus(currentFiles, currentReach)
+  for (const [owner, expectedTests] of addedOwners) {
+    const ownerTests = currentReach.pathByFile.get(owner)
+    for (const expectedTest of expectedTests) assert.ok(ownerTests?.has(expectedTest), owner + ' must be reached by ' + expectedTest)
+  }
+  const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
+  const pristineReach = collectTestReach({
+    checkout: ROOT,
+    deps: {
+      spawn: () => ({ status: 0, stdout: pristineFiles.join('\0') + '\0' }),
+      readFileSync: (path) => {
+        const repoRelative = relative(ROOT, path)
+        return execFileSync('git', ['-C', ROOT, 'show', 'HEAD:' + repoRelative], { encoding: 'utf8' })
+      },
+    },
+  })
+  const pristine = reachCensus(pristineFiles, pristineReach)
+  assert.ok(current.owners > 0 && current.pairs > 0)
+  assert.ok(pristine.owners > 0 && pristine.pairs > 0)
+  const missingOwners = addedPaths.filter((owner) => !pristineFiles.includes(owner))
+  for (const owner of missingOwners) assert.equal(pristineReach.pathByFile.has(owner), false)
+  const ownerDelta = current.owners - pristine.owners
+  const pairDelta = current.pairs - pristine.pairs
+  assert.equal(Number.isInteger(ownerDelta), true)
+  assert.equal(Number.isInteger(pairDelta), true)
+  if (missingOwners.length > 0) {
+    assert.ok(ownerDelta >= missingOwners.length)
+    assert.ok(pairDelta >= addedOwners.reduce((total, [owner, tests]) => total + (missingOwners.includes(owner) ? tests.length : 0), 0))
+  }
+})
+
 test('RV2-1 newly tracked lab grant owners are covered by dynamic reach census', () => {
   const addedOwners = [QA_GRANT_OWNER, QA_EVIDENCE_OWNER]
   const currentReach = collectTestReach({ checkout: ROOT })

@@ -877,3 +877,74 @@ test('chunk CLI chunk-progress prints parent progress and refuses unknown flags'
   assert.equal(bad.status, 2)
   ledger.close()
 })
+
+
+const SL_MAP = { version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs', 'scripts/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] }
+function slJournalRows(extra = []) {
+  return [
+    { at: '2026-10-16T00:00:01.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:01.000Z' },
+    { at: '2026-10-16T00:00:02.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'scripts/factory/probe-repo.mjs', seq: 2 }] },
+    { at: '2026-10-16T00:00:03.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd2', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/headless-rpc.mjs', seq: 1 }] },
+    { at: '2026-10-16T00:00:04.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd3', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:04.000Z' },
+    { at: '2026-10-16T00:00:05.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd3', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] },
+    ...extra,
+  ]
+}
+function slRun(rows) {
+  const dir = scratchDir('sl-cli-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  const journal = join(dir, 'journal.jsonl')
+  writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  assert.equal(ingestJournal(journal, ledger, { adw_id: 'sl-cli-run' }).complete, true)
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const mapPath = join(dir, 'map.json')
+  writeFileSync(mapPath, JSON.stringify(SL_MAP))
+  const result = run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--until', '2026-10-17T00:00:00Z', '--map', mapPath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  return { payload, row: payload.rows.find((r) => r.role === 'builder' && r.skill === 'code-less'), dbPath, mapPath, dir }
+}
+
+// MUTATION SL8: changing load.seq < firstCoveredSeq to > misjudges load-before-edit.
+test('SL8 skill-loads reports load-before, edited-without and untouched over the three captures', () => {
+  const { row } = slRun(slJournalRows())
+  assert.ok(row)
+  assert.deepEqual([row.loaded_before_edit, row.edited_without_load, row.untouched, row.rate, row.denominator, row.thin], [1, 1, 1, 0.5, 2, true])
+})
+
+// MUTATION SL9: inverting isMeasuredSkillLoadWindow counts the pane window as measured.
+test('SL9 a pane window is unmeasured and leaves the measured counts unchanged', () => {
+  const { row } = slRun(slJournalRows([{ at: '2026-10-16T00:00:06.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd4', transport: 'pane', loads_absent_reason: 'pane-unobservable', first_edits: null }]))
+  assert.ok(row)
+  assert.deepEqual([row.loaded_before_edit, row.edited_without_load, row.untouched, row.measured, row.unmeasured], [1, 1, 1, 3, 1])
+  assert.deepEqual(row.unmeasured_by_reason, { 'pane-unobservable': 1 })
+})
+
+// MUTATION SL10: inverting the granted-absent test on granted_skills_json reports granted for an absent seat-skills row.
+test('SL10 with no seat-skills row granted is null even when a boot row lists the skill delivered', () => {
+  const boot = { at: '2026-10-16T00:00:00.000Z', event: 'boot', seat_skills: { builder: { skills: [{ path: '/abs/skills/code-less/SKILL.md', status: 'delivered', bytes: 1 }] } } }
+  const { row } = slRun([boot, ...slJournalRows()])
+  assert.ok(row)
+  assert.deepEqual([row.granted, row.granted_absent_reason], [null, 'seat-skills-row-absent'])
+})
+
+// MUTATION SL11: changing the seat-skills status granted to delivered counts no granted skill.
+test('SL11 a granted seat-skills row counts granted for every builder assignment', () => {
+  const seatSkills = { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', seat_skills: { builder: { skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] } } }
+  const { row } = slRun([seatSkills, ...slJournalRows()])
+  assert.ok(row)
+  assert.deepEqual([row.granted, row.granted_absent_reason], [3, null])
+})
+
+test('skill-loads CLI happy path and refusals', () => {
+  const { payload, dbPath, mapPath } = slRun(slJournalRows())
+  assert.equal(payload.schema, 1)
+  assert.equal(payload.floor, 12)
+  assert.equal(run(['skill-loads'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  assert.equal(run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--map', join(scratchDir('sl-badmap-'), 'nope.json')], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  const badMap = join(scratchDir('sl-badmap2-'), 'map.json')
+  writeFileSync(badMap, '{not json')
+  assert.equal(run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--map', badMap], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  assert.equal(run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--until', '2026-10-16T00:00:00Z', '--map', mapPath], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+})

@@ -274,7 +274,8 @@ test('skill-delivery D2 only the builder seat pastes the code-less body', async 
 })
 test('skill-delivery D3 over-budget status includes absolute path and exact bytes without body', () => {
   // MUTATION: record an over-budget inline body as delivered and the status line changes.
-  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 300 })
+  // 1024 holds the status lines under a long temp-dir checkout path and stays below both inline bodies.
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 1024 })
   const body = skillBody('code-less'); const path = join(ROOT, 'skills/code-less/SKILL.md'); const bytes = Buffer.byteLength(body, 'utf8')
   assert.ok(result.section.includes(`over-budget: ${bytes} bytes — ${path}`)); assert.equal(result.section.includes(body), false)
   const record = result.skills.find((skill) => skill.path === path)

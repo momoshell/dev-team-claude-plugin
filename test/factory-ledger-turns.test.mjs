@@ -15,6 +15,8 @@ import { ROOT, scratchDir } from './helpers.mjs'
 import {
   openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, CONTEXT_ABSENT_REASONS, BOUNCE_SOURCES, NEXT_GATE_OUTCOMES, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, RUN_VARIANTS_WITHOUT_MARKER, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
 } from '../scripts/factory/ledger.mjs'
+import { PROVIDER_FAILURE_LEDGER_KINDS } from '../scripts/factory/ledger.mjs'
+import { PROVIDER_FAILURE_KINDS } from '../crew/headless.mjs'
 
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES, SUITE_SLOT_PHASE_NAMES, anchorAbsentWhy, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 
@@ -3050,6 +3052,29 @@ test('a rejected fact does not claim its key: a valid row sharing it is still wr
     assert.equal(result.applied, 1)
     assert.equal(ledger.dumpTable('provider_failures').length, 1)
     assert.equal(ledger.dumpTable('provider_failures')[0].kind, 'rate_limit')
+  } finally { ledger.close() }
+})
+
+// Mutation killed: add a kind to one closed set and not the other, and the ledger refuses (or never sees) a kind the driver writes.
+test('the ledger provider_failure kinds equal the driver PROVIDER_FAILURE_KINDS as a set', () => {
+  assert.deepEqual([...PROVIDER_FAILURE_LEDGER_KINDS].sort(), Object.values(PROVIDER_FAILURE_KINDS).sort())
+  assert.equal(new Set(PROVIDER_FAILURE_LEDGER_KINDS).size, PROVIDER_FAILURE_LEDGER_KINDS.length)
+})
+
+test('a stream-stall provider_failure round-trips with a null status', { skip: SKIP }, () => {
+  // Mutation killed: drop stream-stall from PROVIDER_FAILURE_LEDGER_KINDS and this row is refused at ingest (gate PS3).
+  const adwId = 'stream-stall-provider'
+  const ledger = openTestLedger()
+  const journalPath = join(nextDir(), 'journal.jsonl')
+  writeFileSync(journalPath, JSON.stringify({ at: '2030-01-01T00:00:00.000Z', role: 'builder', id: 'd-stall', headless_outcome: 'timeout', provider_failure: { kind: 'stream-stall', status: null } }) + '\n')
+  try {
+    assert.deepEqual(ingestJournal(journalPath, ledger, { adw_id: adwId }), {
+      applied: 1, skipped: 0, ignored: 0, failed: 0, unstamped: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(ledger.dumpTable('provider_failures').map((row) => ({ adw_id: row.adw_id, role: row.role, dispatch_id: row.dispatch_id, kind: row.kind, status: row.status, outcome: row.outcome })), [{
+      adw_id: adwId, role: 'builder', dispatch_id: 'd-stall', kind: 'stream-stall', status: null,
+      outcome: 'timeout',
+    }])
   } finally { ledger.close() }
 })
 

@@ -196,6 +196,7 @@ export const PROVIDER_FAILURE_KINDS = Object.freeze({
   AUTHENTICATION_FAILED: 'authentication_failed',
   SERVER_ERROR: 'server_error',
   UNCLASSIFIED: 'provider-unclassified',
+  STREAM_STALL: 'stream-stall',
 })
 
 // A status nobody recorded is NULL, never a kind: an unmeasured cell carries no
@@ -257,6 +258,9 @@ export const PROVIDER_RETRY_TOTAL_WAIT_MS = (5 * 60 + 30) * 60 * 1000
 // was at the wrong altitude. The ladder SATURATES on its last rung rather than
 // running off the end, so the attempt bound above is the only thing that stops
 // it.
+// POLICY bound between the measured 8m51s longest legitimate in-response
+// silence and the measured 15m48s/17m25s stalls, not a provider fact.
+export const PROVIDER_STALL_MS = 600000
 export const PROVIDER_BACKOFF_LADDER_MS = Object.freeze([60_000, 300_000, 900_000])
 // OUR slack past a stated reset, so a clock a few seconds fast does not retry
 // into a window that is still closed. Ours and stated — never a provider fact.
@@ -333,6 +337,7 @@ export const PROVIDER_RETRY_ACTIONS = Object.freeze({
   [PROVIDER_FAILURE_KINDS.RATE_LIMIT]: 'park',
   [PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED]: 'refuse',
   [PROVIDER_FAILURE_KINDS.UNCLASSIFIED]: 'none',
+  [PROVIDER_FAILURE_KINDS.STREAM_STALL]: 'backoff',
 })
 
 // A reset instant nobody stated is UNKNOWN with a closed reason, never a
@@ -1714,6 +1719,23 @@ export function parseStream(path, readFileSync, existsSync) {
   }
 }
 
+export function streamRetryPending(text) {
+  let sawResult = false
+  let lastProgress = -1
+  let lastRetry = -1
+  let index = 0
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue
+    let event
+    try { event = JSON.parse(line) } catch { continue }
+    if (event?.type === 'result') sawResult = true
+    else if (event?.type === 'assistant' || event?.type === 'user') lastProgress = index
+    else if (event?.type === 'system' && event?.subtype === 'api_retry') lastRetry = index
+    index += 1
+  }
+  return !sawResult && lastRetry !== -1 && lastRetry > lastProgress
+}
+
 function parseExit(path, readFileSync, existsSync) {
   if (!existsSync(path)) return null
   try {
@@ -2458,10 +2480,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   }
   // The end sequence, factored so the wait expiry, the turn ceiling and a suite
   // refusal share ONE author: SIGTERM the group, grace, SIGKILL, prove dead, release.
-  function endDispatch(run, returnPath) {
+  // graceWait: a stall-initiated end kills a worker the provider path will respawn, so its grace
+  // waits on the raw park seam; seat-io's sleep would read the SIGTERMed root as a seat death.
+  function endDispatch(run, returnPath, graceWait = sleep) {
     if (run.pid != null) { try { kill(-run.pid, 'SIGTERM') } catch {} }
     const graceDeadline = now() + KILL_GRACE_MS
-    while (now() < graceDeadline && parseExit(run.exit, read, exists) === null) sleep(WAIT_POLL_MS)
+    while (now() < graceDeadline && parseExit(run.exit, read, exists) === null) graceWait(WAIT_POLL_MS)
     if (parseExit(run.exit, read, exists) === null && run.pid != null) {
       let proven = false
       try { kill(-run.pid, 'SIGKILL'); proven = true } catch (err) { proven = err?.code === 'ESRCH' }
@@ -2603,6 +2627,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
   }
   function waitUntil(returnPath, deadline) {
     const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
+    let lastStreamLength = -1, lastGrowthAt = null, stalled = false
     let priorWall = now()
     let priorMono
     try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
@@ -2616,6 +2641,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
         const monoDelta = mono - priorMono
         const slept = sleptMilliseconds(wallDelta, monoDelta)
         deadline += slept
+        if (lastGrowthAt !== null) lastGrowthAt += slept // a host sleep is not stream silence
         if (slept > 0) { try { log(operationalRow({ at: now(), event: 'host_suspended', role: run.role, transport: 'headless-json', slept_ms: slept, wall_ms: wallDelta, mono_ms: monoDelta })) } catch { /* diagnostics only */ } }
         priorWall = wall; priorMono = mono
       }
@@ -2626,14 +2652,20 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       if (env) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
       if (exitCode !== null) { const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
+      // lean: reread the cumulative stream per poll for stall detection; incremental tailing if stream sizes make this costly
+      const observed = readStreamObservation(run)
+      if (observed.read) {
+        if (lastGrowthAt === null || observed.text.length !== lastStreamLength) { lastStreamLength = observed.text.length; lastGrowthAt = wall }
+        if (wall - lastGrowthAt >= PROVIDER_STALL_MS && streamRetryPending(observed.text)) { stalled = true; break }
+      } else lastGrowthAt = null // an unread interval measured no silence
       sleep(WAIT_POLL_MS)
     }
-    endDispatch(run, returnPath)
+    endDispatch(run, returnPath, stalled ? delay : sleep)
     const racedEnforced = enforceBeforeEnvelope(run, returnPath, { alreadyEnded: true })
     if (racedEnforced) return racedEnforced
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
-    const exitCode = parseExit(run.exit, read, exists), stream = telemetryParser(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused, census: stream.census })
+    const exitCode = parseExit(run.exit, read, exists), parsed = telemetryParser(run.stream, read, exists), stream = stalled && !parsed.terminal && !parsed.providerFailure ? { ...parsed, providerFailure: { kind: PROVIDER_FAILURE_KINDS.STREAM_STALL, status: null } } : parsed, outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused, census: stream.census })
     recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream)
   }
   return { assign, wait }

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from '../../test/helpers.mjs'
 import { SEAT_DIED_STAGE, SEAT_REFUSAL_STAGE } from '../../crew/seat-io.mjs'
 import { VARIANT_NAMES } from '../../crew/variants.mjs'
+import { PROVIDER_FAILURE_KINDS } from '../../crew/headless.mjs'
 import { assertAnchorsPinned, pinnedKey } from '../qa-test-writing/anchor-pin.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
@@ -74,6 +75,19 @@ test('every reference file is routed from SKILL.md', () => {
       assert.ok(skill.includes(`references/${name}`), `SKILL.md must route references/${name}`)
     }
   }
+})
+
+// Mutation killed: a provider_failure kind added to or dropped from PROVIDER_FAILURE_KINDS without instruments.md (or the reverse) reddens this.
+test('instruments.md names exactly the PROVIDER_FAILURE_KINDS closed set', () => {
+  const lines = readText(join(HERE, 'references/instruments.md')).split('\n')
+  const start = lines.findIndex((line) => /^\s*-\s.*`provider_failure`/.test(line))
+  assert.ok(start >= 0, 'instruments.md must carry a provider_failure bullet')
+  let end = start + 1
+  while (end < lines.length && lines[end].trim() !== '' && !/^\s*-\s/.test(lines[end])) end += 1
+  const bullet = lines.slice(start, end).join(' ')
+  const set = [...bullet.matchAll(/`([^`]*\|[^`]*)`/g)].map((m) => m[1].split('|').map((member) => member.trim())).find((members) => members.includes('rate_limit'))
+  assert.ok(set, 'the provider_failure bullet must carry the closed kind set')
+  assert.deepEqual([...set].sort(), Object.values(PROVIDER_FAILURE_KINDS).sort())
 })
 
 // Mutation killed: dropping one measured case lets a known instrument failure become an operator rule.

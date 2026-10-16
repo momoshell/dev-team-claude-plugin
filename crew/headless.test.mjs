@@ -6,9 +6,9 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { execFileSync, spawn as realSpawn } from 'node:child_process'
 import {
-  attributeExit, censusFileOperands, skillReadsOf, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds,
+  attributeExit, censusFileOperands, skillReadsOf, classifyRun, claudeCensus, claudeTurnBoundaryCount, classifyToolCall, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream, readEnvelopeOrThrow, sleptMilliseconds, streamRetryPending,
   CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, noEnvelopeDetail, PROVIDER_FAILURE_KINDS, providerFailureKind, providerResetInstant, acpTextReset, providerRetryDecision,
-  PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
+  PROVIDER_BACKOFF_LADDER_MS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS, PROVIDER_STALL_MS,
   PARK_BEAT_EVENT, PARK_BEAT_MS, PARK_BEAT_SOURCE, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, recogniseProviderCondition, recogniseSeatRefusal, TOOL_CLASSES, WAIT_POLL_MS,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
   SESSION_BUSY_EVENT, SESSION_BUSY_SETTLE_MS, SESSION_BUSY_VERDICTS, SESSION_BUSY_PHASES,
@@ -1777,7 +1777,7 @@ const FALLBACK_TEST_CHAIN = [
   { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high', model: 'claude-sonnet-5' },
 ]
 
-function fallbackFixture(script, { chain = FALLBACK_TEST_CHAIN, clock = null, onSleep = null } = {}) {
+function fallbackFixture(script, { chain = FALLBACK_TEST_CHAIN, clock = null, onSleep = null, onKill = null } = {}) {
   const dir = scratchDir('headless-fallback-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -1790,7 +1790,7 @@ function fallbackFixture(script, { chain = FALLBACK_TEST_CHAIN, clock = null, on
   writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
   const journal = []; let spawns = 0; let pid = 4200; let lastRunDir = null
   const deps = {
-    log: (row) => journal.push(row), kill: () => {},
+    log: (row) => journal.push(row), kill: () => { onKill?.({ runDir: lastRunDir, spawns, returnsDir }) },
     ...(clock ? { now: () => clock.t } : {}),
     sleep(ms) {
       if (clock) clock.t += Number(ms) || 0
@@ -1827,7 +1827,7 @@ function withTerminalStatus(tail, status) {
   }).join('\n')
 }
 
-function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false, emit = null, emitThrows = false, clearRefuse = false, onDelay = null, readCrewJson = null, seedWake = false }) {
+function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift = 0, sleepThrows = false, spawnThrowsOn = 0, noExit = false, emit = null, emitThrows = false, clearRefuse = false, onDelay = null, onSleep = null, suspend = null, dieOnKill = false, streamReadFails = null, readCrewJson = null, seedWake = false }) {
   const dir = scratchDir('headless-provider-retry-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -1836,7 +1836,7 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
   const crew = { checkout: dir, members: { builder: member }, seats: { builder: { ...member } }, ...(seedWake ? { wake: { by: 'operator', requested_at: at, assignment_id: 'd1', started_at: at } } : {}) }
   writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
   const journal = []; const parks = []; const polls = []; const beats = []; const parkSamples = []
-  let clock = at; let spawns = 0; let pid = 9300; let clearRefused = false; let crewReads = 0; let fixtureRef = null
+  let clock = at; let spawns = 0; let pid = 9300; let clearRefused = false; let crewReads = 0; let fixtureRef = null; let lastRunDir = null; let mono = 0; let killed = false
   const crewJson = () => {
     try { return JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')) } catch { return null }
   }
@@ -1846,6 +1846,7 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
       const value = readCrewJson?.({ path, encoding, reads: crewReads, clock, fixture: fixtureRef })
       if (value !== undefined) return value
     }
+    if (streamReadFails && String(path).endsWith('stream.jsonl') && streamReadFails(clock)) throw new Error('fixture: stream unreadable')
     return readFileSync(path, encoding)
   }
   const requestWake = () => updateCrewJson({ dir }, (disk) => {
@@ -1879,11 +1880,14 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
       log,
       emit: emitThrows ? () => { throw new Error('fixture: emitter refused') } : (emit || ((event) => beats.push({ ...event }))),
       readFileSync: readCrew,
-      writeFileSync: writeCrew, kill: () => {}, uuid: () => 'provider-retry-session',
+      writeFileSync: writeCrew, kill: () => { killed = true }, uuid: () => 'provider-retry-session',
       now: () => clock,
+      ...(suspend ? { monotonic: () => mono } : {}),
       sleep(ms) {
-        if (sleepThrows) { const error = new Error('seat died: builder — its worker root is gone'); error.stage = 'seat-died'; throw error }
-        clock += ms; polls.push(ms)
+        if (sleepThrows || (dieOnKill && killed)) { const error = new Error('seat died: builder — its worker root is gone'); error.stage = 'seat-died'; throw error }
+        clock += ms; mono += ms; polls.push(ms)
+        if (suspend && polls.length === suspend.atPoll) clock += suspend.ms
+        onSleep?.({ clock, runDir: lastRunDir, polls: polls.length, spawns, returnsDir })
       },
       delay(ms) {
         clock += ms + drift
@@ -1892,11 +1896,12 @@ function providerRetryFixture({ tail, at, refusals = 1, fallback = null, drift =
         onDelay?.({ fixture: fixtureRef, clock, polls: parks.length, ms })
       },
       spawn() {
-        spawns += 1
+        spawns += 1; killed = false
         if (spawns === spawnThrowsOn) throw new Error('spawn refused')
         const root = join(taskDir, 'headless')
         const dirs = readdirSync(root).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
         const runDir = join(root, dirs.at(-1))
+        lastRunDir = runDir
         if (spawns <= refusals) writeRefusal(runDir)
         else writeAnswer(runDir)
         return { pid: ++pid, unref() {} }
@@ -2021,6 +2026,28 @@ function writeBudgetAnswer(runDir, returnsDir) {
   writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
   writeFileSync(join(runDir, 'exit'), '0')
 }
+
+// The two frames every stall fixture is built from: one progress frame, then an unanswered api_retry.
+const ASSISTANT_FRAME = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'hi' } })
+const RETRY_FRAME = JSON.stringify({ type: 'system', subtype: 'api_retry', attempt: 1 })
+const STALLED_TAIL = `${ASSISTANT_FRAME}\n${RETRY_FRAME}\n`
+
+// Mutation killed: block the budget-refusal fallback whenever the wait ended on a stall, and a worker that writes its refusal while being ended never reaches its declared fallback.
+test('a stalled seat that answers its kill with a budget refusal still takes the model fallback', () => {
+  const clock = { t: 1788115200000 }
+  const f = fallbackFixture((n, runDir, returnsDir) => {
+    if (n === 1) writeFileSync(join(runDir, 'stream.jsonl'), STALLED_TAIL)
+    else writeBudgetAnswer(runDir, returnsDir)
+  }, { clock, onKill: ({ runDir, spawns }) => { if (spawns === 1) writeBudgetRefusal(runDir) } })
+  try {
+    const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
+    const envelope = f.io.wait(run.returnPath, 1500)
+    assert.equal(envelope.assignment_id, 'd1')
+    assert.equal(f.spawnCount(), 2)
+    assert.equal(f.fallbackRows().length, 1)
+    assert.ok(clock.t - 1788115200000 < 1500 * 1000, 'the stall ended the wait before its deadline')
+  } finally { f.cleanup() }
+})
 
 test('a budget refusal re-asks the same assignment on the consumed fallback cell', () => {
   const f = fallbackFixture((n, runDir, returnsDir) => n === 1 ? writeBudgetRefusal(runDir) : writeBudgetAnswer(runDir, returnsDir))
@@ -2420,6 +2447,185 @@ test('#887 parks a 429, backs off an unrefused 529, and bypasses the death-probe
     assert.equal(server.journal.filter((row) => row.event === 'provider-retry').length, 1)
     assert.equal(server.journal.find((row) => row.event === 'provider-retry').waited_on, 'backoff-ladder')
   } finally { server.cleanup() }
+})
+
+test('streamRetryPending fires only when api_retry follows the last progress frame', () => {
+  // Mutation killed: retarget the api_retry subtype test and pending streams read as not pending (gate PS1).
+  const user = JSON.stringify({ type: 'user', message: { role: 'user', content: 'go' } })
+  const result = JSON.stringify({ type: 'result', subtype: 'success' })
+  const thinking = JSON.stringify({ type: 'system', subtype: 'thinking_tokens', n: 3 })
+  assert.equal(streamRetryPending([ASSISTANT_FRAME, RETRY_FRAME].join('\n')), true)
+  assert.equal(streamRetryPending([RETRY_FRAME].join('\n')), true)
+  assert.equal(streamRetryPending([ASSISTANT_FRAME, RETRY_FRAME, thinking].join('\n')), true)
+  assert.equal(streamRetryPending([ASSISTANT_FRAME, RETRY_FRAME, ASSISTANT_FRAME].join('\n')), false)
+  assert.equal(streamRetryPending([ASSISTANT_FRAME, RETRY_FRAME, user].join('\n')), false)
+  assert.equal(streamRetryPending([ASSISTANT_FRAME, RETRY_FRAME, result].join('\n')), false)
+  assert.equal(streamRetryPending([RETRY_FRAME, ASSISTANT_FRAME].join('\n')), false)
+  assert.equal(streamRetryPending([ASSISTANT_FRAME].join('\n')), false)
+  assert.equal(streamRetryPending(''), false)
+  assert.equal(streamRetryPending('not json\n' + ASSISTANT_FRAME + '\n' + RETRY_FRAME), true)
+})
+
+test('stream-stall routes to backoff on the 60s first rung', () => {
+  // Mutation killed: map STREAM_STALL to none and the stall is no longer routed (gate PS2).
+  assert.equal(PROVIDER_FAILURE_KINDS.STREAM_STALL, 'stream-stall')
+  assert.equal(PROVIDER_STALL_MS, 600000)
+  assert.equal(PROVIDER_RETRY_ACTIONS[PROVIDER_FAILURE_KINDS.STREAM_STALL], 'backoff')
+  const first = providerRetryDecision({ kind: 'stream-stall', status: null, attempts: 0, waitedMs: 0, at: 0 })
+  assert.equal(first.retry, true)
+  assert.equal(first.wait_ms, 60000)
+  assert.equal(first.waited_on, 'backoff-ladder')
+  const spent = providerRetryDecision({ kind: 'stream-stall', status: null, attempts: PROVIDER_RETRY_MAX, waitedMs: 0, at: 0 })
+  assert.equal(spent.retry, false)
+  assert.equal(spent.attempts_spent, PROVIDER_RETRY_MAX)
+})
+
+test('a stream stalled after api_retry is retried before its deadline', () => {
+  // Mutation killed: raise the stall threshold and the seat burns to its deadline instead of retrying (gate PS5).
+  const at = 1788115200000
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1, noExit: true })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 1500)
+    assert.equal(envelope.status, 'done')
+    assert.equal(f.spawns(), 2)
+    const retried = f.journal.find((row) => row.event === 'provider-retry')
+    assert.equal(retried.kind, 'stream-stall')
+    assert.equal(retried.status, null)
+    assert.ok(retried.at < at + 1500 * 1000)
+    const outcome = f.journal.find((row) => row.headless_outcome === 'timeout' && row.provider_failure && row.provider_failure.kind === 'stream-stall')
+    assert.ok(outcome)
+    assert.deepEqual(outcome.provider_failure, { kind: 'stream-stall', status: null })
+    const resumed = f.journal.find((row) => row.event === 'provider-retry-resumed')
+    assert.ok(resumed, 'a stall retry journals provider-retry-resumed')
+    assert.equal(resumed.kind, 'stream-stall')
+    assert.equal(resumed.assignment_id, retried.assignment_id)
+    assert.ok(f.journal.indexOf(resumed) > f.journal.indexOf(retried))
+  } finally { f.cleanup() }
+})
+
+// Mutation killed: let the stall-initiated kill grace wait on the death-probing sleep, and the SIGTERMed root reads as seat-died before the backoff runs.
+test('a stalled worker that dies on its SIGTERM is still retried, not reported as a seat death', () => {
+  const at = 1788115200000
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1, noExit: true, dieOnKill: true })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 1500)
+    assert.equal(envelope.status, 'done')
+    assert.equal(f.spawns(), 2)
+    assert.equal(f.journal.find((row) => row.event === 'provider-retry')?.kind, 'stream-stall')
+  } finally { f.cleanup() }
+})
+
+// Mutation killed: keep the pre-failure growth instant across unreadable polls, and a stream that recovers is declared stalled on the first readable poll.
+test('an unreadable stream interval is not counted as silence', () => {
+  const at = 1788115200000
+  const recovered = at + 700_000
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1, noExit: true, streamReadFails: (clock) => clock > at && clock < recovered })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 3000)
+    assert.equal(envelope.status, 'done')
+    const retried = f.journal.find((row) => row.event === 'provider-retry')
+    assert.equal(retried.kind, 'stream-stall')
+    assert.ok(retried.at >= recovered + PROVIDER_STALL_MS, `retried at +${retried.at - at}ms, before 600s of readable silence`)
+  } finally { f.cleanup() }
+})
+
+test('a stall is ended only by awake silence: a host sleep does not count toward PROVIDER_STALL_MS', () => {
+  // Mutation killed: stop shifting the silence clock by the measured host sleep and the seat is retried right after waking.
+  const at = 1788115200000
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1, noExit: true, suspend: { atPoll: 2, ms: 3_600_000 } })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 10_000)
+    assert.equal(envelope.status, 'done')
+    assert.ok(f.journal.some((row) => row.event === 'host_suspended'))
+    const retried = f.journal.find((row) => row.event === 'provider-retry')
+    assert.equal(retried.kind, 'stream-stall')
+    assert.ok(retried.at >= at + 3_600_000 + PROVIDER_STALL_MS, `retried at +${retried.at - at}ms, inside the awake silence window`)
+  } finally { f.cleanup() }
+})
+
+test('a retry-pending stream with an exit file or a result frame is never a stall', () => {
+  // Mutation killed: drop the result-frame guard from streamRetryPending, or test the stall before the exit file, and a finished run is retried as stream-stall.
+  const at = 1788115200000
+  const result = JSON.stringify({ type: 'result', subtype: 'error_during_execution' })
+  const exited = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1 })
+  try {
+    assert.throws(() => exited.io.wait(exited.run.returnPath, 1500))
+    assert.equal(exited.spawns(), 1)
+    assert.equal(exited.journal.some((row) => JSON.stringify(row).includes('stream-stall')), false)
+  } finally { exited.cleanup() }
+  const resulted = providerRetryFixture({ tail: `${STALLED_TAIL}${result}\n`, at, refusals: 1, noExit: true })
+  try {
+    assert.throws(() => resulted.io.wait(resulted.run.returnPath, 1500), (error) => error.stage === 'headless-timeout')
+    assert.equal(resulted.spawns(), 1)
+    assert.ok(resulted.polls.reduce((sum, ms) => sum + ms, 0) >= 1500 * 1000 - WAIT_POLL_MS, 'a run with a result frame waits to its deadline, never ended early as a stall')
+    assert.equal(resulted.journal.some((row) => JSON.stringify(row).includes('stream-stall')), false)
+  } finally { resulted.cleanup() }
+})
+
+test('a stall the ladder declines escalates with the stream-stall provider fact, never as a bare timeout', () => {
+  // Mutation killed: drop the stalled providerFailure on the timeout path and the declined stall throws a bare headless-timeout.
+  const at = 1788115200000
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 99, noExit: true })
+  try {
+    let thrown = null
+    try { f.io.wait(f.run.returnPath, 20_000) } catch (error) { thrown = error }
+    assert.ok(thrown, 'a stall on every attempt must end the dispatch')
+    assert.equal(thrown.stage, 'headless-timeout')
+    assert.deepEqual(thrown.providerFailure, { kind: 'stream-stall', status: null })
+    assert.match(thrown.message, /\[provider stream-stall status null: \d+ of \d+ retry attempts spent/)
+    assert.equal(f.spawns(), PROVIDER_RETRY_MAX + 1)
+    const declined = f.journal.find((row) => row.event === 'provider-retry-declined')
+    assert.ok(declined, 'a declined stall journals provider-retry-declined')
+    assert.equal(declined.kind, 'stream-stall')
+  } finally { f.cleanup() }
+})
+
+test('stream growth resets the 600s stall clock', () => {
+  // Mutation killed: stop resetting the silence clock on growth and the retry fires mid-growth (gate PS5 scope).
+  const at = 1788115200000
+  let lastAppendAt = null
+  let retrySeenAtStop = null
+  const f = providerRetryFixture({ tail: STALLED_TAIL, at, refusals: 1, noExit: true, onSleep: ({ clock, runDir, polls }) => {
+    if (runDir === null) return
+    if (polls <= 130) {
+      const current = readFileSync(join(runDir, 'stream.jsonl'), 'utf8')
+      writeFileSync(join(runDir, 'stream.jsonl'), current + JSON.stringify({ type: 'system', subtype: 'thinking_tokens', n: polls }) + '\n')
+      if (polls === 130) { lastAppendAt = clock; retrySeenAtStop = f.journal.some((row) => row.event === 'provider-retry') }
+    }
+  } })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 2000)
+    assert.equal(envelope.status, 'done')
+    assert.equal(f.spawns(), 2)
+    assert.ok(lastAppendAt !== null)
+    assert.equal(retrySeenAtStop, false)
+    assert.equal(f.journal.filter((row) => row.event === 'provider-retry').length, 1)
+    const retried = f.journal.find((row) => row.event === 'provider-retry')
+    assert.equal(retried.kind, 'stream-stall')
+    assert.ok(retried.at >= lastAppendAt + PROVIDER_STALL_MS)
+  } finally { f.cleanup() }
+})
+
+test('silence without api_retry never stalls', () => {
+  // Mutation killed: treat bare silence as a stall and this seat retries instead of answering once (gate PS5 scope).
+  const at = 1788115200000
+  let answered = false
+  const f = providerRetryFixture({ tail: `${ASSISTANT_FRAME}\n`, at, refusals: 1, noExit: true, onSleep: ({ clock, runDir, returnsDir }) => {
+    if (!answered && runDir !== null && clock - at >= 700000) {
+      answered = true
+      writeFileSync(join(returnsDir, 'd1.builder.json'), JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done' }))
+      writeFileSync(join(runDir, 'stream.jsonl'), JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')
+      writeFileSync(join(runDir, 'exit'), '0')
+    }
+  } })
+  try {
+    const envelope = f.io.wait(f.run.returnPath, 1500)
+    assert.equal(envelope.status, 'done')
+    assert.equal(answered, true)
+    assert.equal(f.spawns(), 1)
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry'), false)
+    assert.equal(f.journal.some((row) => row.event === 'provider-retry-declined'), false)
+  } finally { f.cleanup() }
 })
 
 test('#948 keeps a 429 park observable from start through resume', () => {

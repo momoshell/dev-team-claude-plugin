@@ -1280,7 +1280,7 @@ const CRASH_WHY = 'builder: no valid envelope at builder:3 within 2400s'
 
 const CRASH_STAGES = [
   'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'gate:r1', 'build:r2', 'scope-gate:r2',
-  'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3',
+  'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3', 'escalate:builder',
 ]
 
 const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7', summary: 'the distinctive finding', disposition: null }]

@@ -6619,7 +6619,7 @@ function runTask(ctx, io, crash) {
   // value crew/crew.mjs:1848 wrote is preserved — the summary keeps its `the driver
   // crashed (...)` wrapper, `where` stays `err.stage || 'driver'`, and `why` stays
   // the RAW message — so no downstream reader changes; only `details` grows.
-  // Only provider-annotated crash exits are terminal stages; ordinary crashes remain unjournalled.
+  // Every crash exit is a terminal stage; ordinary and provider-annotated crashes both journal escalate:<where>.
   crash.envelope = (err) => {
     // ONE derivation, with a NULLISH fallback. `||` would substitute 'Error' for a
     // deliberately empty message, where crew/crew.mjs:1848 records '' and its
@@ -6636,7 +6636,7 @@ function runTask(ctx, io, crash) {
       // SETS, and a resume reader must never have to branch on which exit wrote
       // the record — so this stays empty rather than becoming a place to grow one.
       extraDetails: {},
-      terminal: Boolean(err?.providerFailure),
+      terminal: true, // every crash journals its escalate:<where> stage row
     })
   }
   let lastGateOutput = null
@@ -7393,7 +7393,7 @@ function runTask(ctx, io, crash) {
   // `converge-pr` escalations (crew/drive.mjs:1868,1878) keep overriding it through
   // extraDetails, which is why that spread stays LAST (crew/drive.test.mjs:5200).
   function escalationResult({ where, why, question, summary, commit, artifacts = [], extraDetails = {}, escalationExtra = {}, terminal }) {
-    if (terminal) stage(`escalate:${where}`)
+    if (terminal) { try { stage(`escalate:${where}`) } catch { /* best-effort: the escalate row never blocks the envelope */ } }
     const details = {
       stages: S.stages, escalation: { where, why, question, ...escalationExtra }, commit, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, enforcements: S.enforcements,
@@ -7411,7 +7411,7 @@ function runTask(ctx, io, crash) {
     }
     const result = { status: 'escalation', summary, artifacts: [journal, ...artifacts], details }
     markResume(result, details)
-    if (terminal) stageComplete()
+    if (terminal) { try { stageComplete() } catch { /* best-effort: the escalate row never blocks the envelope */ } }
     return result
   }
 

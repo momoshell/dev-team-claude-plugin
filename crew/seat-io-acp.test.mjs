@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync, chmodSync, existsSync as fsExistsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
-import { acpIo, ACP_CENSUS_TURNS_ABSENT, ACP_CONTEXT_BASIS } from './acp-io.mjs'
+import { acpIo, ACP_CANCEL_SETTLE_MS, ACP_CENSUS_TURNS_ABSENT, ACP_CONTEXT_BASIS } from './acp-io.mjs'
 import { acpLaunch as piAcpLaunch, capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 import { ACP_BINARY, acpLaunch as claudeAcpLaunch, capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { cellFailureKind, ACP_TRANSPORT, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, seatIo } from './seat-io.mjs'
@@ -23,7 +23,8 @@ function fixture(options = {}) {
     pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; if (cancelledTurn && cancelPollsRemaining > 0) { cancelPollsRemaining -= 1; return null }; const turn = pollResults.length ? pollResults.shift() : cancelledTurn; if (turn) { pending = false; cancelledTurn = null }; return turn || null },
     cancelPrompt(id) { calls.push(['cancelPrompt', id]); if (!options.cancelNoReply) { cancelledTurn = options.cancelTurn || { stopReason: 'cancelled', usage: null }; cancelPollsRemaining = options.cancelPollsRemaining || 0 } },
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
-    close() { calls.push('close'); return { outcome: 'proven', reason: 'fixture' } },
+    close() { calls.push('close'); return options.closeResult || { outcome: 'proven', reason: 'fixture' } },
+    reprove(windowMs) { calls.push(['reprove', windowMs]); return options.reproveResult || { outcome: 'proven', reason: 'fixture' } },
   }
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: root, adapters: options.adapters || {}, bin: '/bin/pi',
     deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
@@ -925,5 +926,39 @@ test('FS4 fresh ACP assignments create distinct clients and never resume', () =>
     assert.deepEqual(events.filter(([kind]) => kind === 'new' || kind === 'prompt' || kind === 'resume'), [
       ['new', 1], ['prompt', 1], ['new', 2], ['prompt', 2], ['new', 3], ['prompt', 3],
     ])
+  } finally { cleanup(f) }
+})
+
+test('BZ2 — a retained unproven client reproves before a new client is created', () => {
+  // MUTATION: replace `const reproof = retained.client.reprove(cancelWindowMs)` in crew/acp-io.mjs with a
+  // proven stub and no reprove row is recorded, so the order assertion reddens.
+  const f = fixture({ closeResult: { outcome: 'unproven', reason: 'probe' }, reproveResult: { outcome: 'proven', reason: 'probe' } })
+  try {
+    assign(f)
+    const retired = f.io.retire('builder')
+    assert.equal(retired.outcome, 'unproven')
+    assign(f, { id: 'next' })
+    assert.equal(f.calls.filter((entry) => entry === 'start').length, 2)
+    assert.equal(f.calls.filter((entry) => Array.isArray(entry) && entry[0] === 'beginPrompt').length, 2)
+    const reproveAt = f.calls.findIndex((entry) => Array.isArray(entry) && entry[0] === 'reprove')
+    const starts = f.calls.flatMap((entry, index) => (entry === 'start' ? [index] : []))
+    assert.ok(reproveAt >= 0 && reproveAt < starts[1])
+    assert.equal(f.calls[reproveAt][1], ACP_CANCEL_SETTLE_MS)
+  } finally { cleanup(f) }
+})
+
+test('BZ3 — an exhausted reprove throws a staged acp-session-busy refusal naming the role', () => {
+  // MUTATION: replace `{ stage: 'acp-session-busy', role })` in crew/acp-io.mjs with `{ stage: 'driver', role })`
+  // and the stage assertion reddens.
+  const f = fixture({ closeResult: { outcome: 'unproven', reason: 'probe' }, reproveResult: { outcome: 'unproven', reason: 'probe' } })
+  try {
+    assign(f)
+    f.io.retire('builder')
+    const starts = f.calls.filter((entry) => entry === 'start').length
+    let err = null
+    try { assign(f, { id: 'next' }) } catch (error) { err = error }
+    assert.equal(err?.stage, 'acp-session-busy')
+    assert.match(err.message, /builder/)
+    assert.equal(f.calls.filter((entry) => entry === 'start').length, starts)
   } finally { cleanup(f) }
 })

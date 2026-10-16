@@ -49,8 +49,9 @@ and a new producer fails that test.
 ## Crash stages
 
 A crash exit carries `where: err?.stage || 'driver'` (`drive.mjs`), so every
-transport stage below reaches an escalation record as a `where`. These are
-`terminal: false` and do not record an `escalate:<where>` stage row.
+transport stage below reaches an escalation record as a `where`. Every crash
+exit is terminal: each records an `escalate:<where>` stage row and its
+`stage_done`, best-effort (a throwing journal never blocks the envelope).
 
 | Stage | Meaning | Operator's first move |
 |---|---|---|

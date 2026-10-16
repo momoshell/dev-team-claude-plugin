@@ -719,3 +719,132 @@ test('RV1-1', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('BZ1 — post-SIGKILL polling and the zombie census each prove death', () => {
+  // MUTATION (i): revert `return probeBounded(ACP_KILL_PROOF_MS, pgid)` to the baseline single
+  // store.probeEvidence return and the live-census half reddens — only polling can prove it.
+  // MUTATION (ii): replace `if (groupAllZombie(pgid))` with `if (false)` and the all-zombie EPERM half
+  // reddens — only the census can prove it.
+  const scenario = (kill, spawnSync) => {
+    const root = scratchDir('acp-bz1-')
+    const acpRoot = join(root, 'acp')
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    writeFileSync(join(acpRoot, 'builder', 'pgid'), '901')
+    let clock = 0
+    const deps = {
+      pid: 900,
+      spawn: () => ({ pid: 901, unref() {} }),
+      openSync: () => 7,
+      writeSync: () => {},
+      closeSync: () => {},
+      kill,
+      spawnSync,
+      now: () => clock++,
+      sleep: () => {},
+      log: () => {},
+    }
+    const api = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps })
+    api.start()
+    writeFileSync(acpSeatPaths(acpRoot, 'builder').fifo, '')
+    const result = api.close()
+    let secondError = null
+    if (result.outcome === 'proven') {
+      try {
+        acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps }).start()
+      } catch (err) { secondError = err }
+    }
+    return { root, result, secondError }
+  }
+  let killed = false
+  let probes = 0
+  const killPoll = (pid, sig) => {
+    if (sig === 'SIGKILL') { killed = true; return true }
+    if (sig === 0) {
+      if (killed && ++probes >= 3) { const err = new Error('no such process'); err.code = 'ESRCH'; throw err }
+      return true
+    }
+    return true
+  }
+  const polling = scenario(killPoll, () => ({ status: 0, stdout: '901 S\n' }))
+  try {
+    assert.equal(polling.result.outcome, 'proven')
+    assert.equal(polling.result.reason, 'probe')
+    assert.equal(polling.secondError, null)
+  } finally { rmSync(polling.root, { recursive: true, force: true }) }
+  const killEperm = (pid, sig) => {
+    if (sig === 0) { const err = new Error('operation not permitted'); err.code = 'EPERM'; throw err }
+    return true
+  }
+  const zombie = scenario(killEperm, () => ({ status: 0, stdout: '901 Z\n' }))
+  try {
+    assert.equal(zombie.result.outcome, 'proven')
+    assert.equal(zombie.result.reason, 'zombie-group')
+    assert.equal(zombie.secondError, null)
+  } finally { rmSync(zombie.root, { recursive: true, force: true }) }
+})
+
+test('BZ1 real-process witness — a TERM-ignoring sleep proves dead after SIGKILL', () => {
+  const root = scratchDir('acp-bz1-real-')
+  try {
+    const acpRoot = join(root, 'acp')
+    const api = acpClient({
+      launch: { bin: '/bin/sh', args: ['-c', "trap '' TERM; exec sleep 30"] },
+      dir: acpRoot,
+      cwd: root,
+      role: 'builder',
+      deps: { pid: process.pid, log: () => {} },
+    })
+    api.start()
+    const result = api.close()
+    assert.equal(result.outcome, 'proven')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('reprove re-proves an unproven close once death is observable', () => {
+  // MUTATION: revert `return probeBounded(ACP_KILL_PROOF_MS, pgid)` to the baseline single probe and the
+  // final proven assertion reddens; break the reservation clear and the second start keeps throwing busy.
+  const root = scratchDir('acp-reprove-')
+  try {
+    const acpRoot = join(root, 'acp')
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    writeFileSync(join(acpRoot, 'builder', 'pgid'), '901')
+    let clock = 0
+    let dead = false
+    const kill = (pid, sig) => {
+      if (sig === 0 && dead) { const err = new Error('no such process'); err.code = 'ESRCH'; throw err }
+      if (sig === 0) { const err = new Error('operation not permitted'); err.code = 'EPERM'; throw err }
+      return true
+    }
+    const launch = { bin: '/bin/false', args: [], env: {} }
+    const deps = {
+      pid: 900,
+      spawn: () => ({ pid: 901, unref() {} }),
+      openSync: () => 7,
+      writeSync: () => {},
+      closeSync: () => {},
+      kill,
+      spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+      now: () => clock++,
+      sleep: () => {},
+      log: () => {},
+    }
+    const first = acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps })
+    first.start()
+    writeFileSync(acpSeatPaths(acpRoot, 'builder').fifo, '')
+    const closed = first.close()
+    assert.notEqual(closed.outcome, 'proven')
+    let busy = null
+    try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { busy = err }
+    assert.equal(busy?.reason, 'acp-session-busy')
+    const still = first.reprove(50)
+    assert.notEqual(still.outcome, 'proven')
+    dead = true
+    const reproven = first.reprove(50)
+    assert.equal(reproven.outcome, 'proven')
+    let secondError = null
+    try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { secondError = err }
+    assert.equal(secondError, null)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

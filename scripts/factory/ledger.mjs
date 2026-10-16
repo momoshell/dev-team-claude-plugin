@@ -495,6 +495,7 @@ export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 export const NARRATION_OUTCOMES = Object.freeze(['accepted', 'refused'])
 export const PROVIDER_FAILURE_LEDGER_KINDS = Object.freeze([
   'rate_limit', 'authentication_failed', 'server_error', 'provider-unclassified',
+  'stream-stall',
 ])
 export const PLAN_SCOPE_VERDICTS = Object.freeze([
   'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened',

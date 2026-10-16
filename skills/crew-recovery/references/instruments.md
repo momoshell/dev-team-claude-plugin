@@ -32,6 +32,8 @@ intent — find the mechanism in code first.
   The `headless-json` transport emits none, so its absence is not evidence.
 - `provider_failure` is present only when a provider failure was classified. Its
   `kind` is the closed `PROVIDER_FAILURE_KINDS` set
-  `rate_limit | authentication_failed | server_error | provider-unclassified`
-  (including the hyphenated member), and it carries `status`. A non-finite status
-  yields no kind at all rather than a guess.
+  `rate_limit | authentication_failed | server_error | provider-unclassified | stream-stall`
+  (including the hyphenated member), and it carries `status`. A `stream-stall` carries
+  `status: null` — no provider status was ever measured, so none is recorded. When a kind is read
+  from a result frame's status, a non-finite status yields no kind at all rather than a guess;
+  `stream-stall` is the one kind classified from the stream's shape, not from a status.

@@ -162,6 +162,9 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
+          "extensions": [
+            "crew/pi/extensions/submit.ts"
+          ],
           "skills": [
             "skills/lean-build/SKILL.md"
           ]

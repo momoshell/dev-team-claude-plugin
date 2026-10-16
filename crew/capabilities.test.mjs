@@ -677,21 +677,31 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
 })
 
-test('the shipped register grants code-less to every role on both agents', () => {
+test('the shipped register grants code-less to the reviewer only on both agents', () => {
+  // MUTATION: restore code-less to every role overlay and the reviewer-only pin fails.
   const loaded = loadCapabilities()
   const expectedSkills = [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')]
-  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+  for (const role of ['lead', 'planner', 'builder', 'tech-lead']) {
     for (const agent of ['pi', 'claude']) {
       const grants = grantsFor(loaded, role, { agent })
-      assert.deepEqual(grants.skills, expectedSkills)
+      assert.deepEqual(grants.skills, [])
       assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent }))
     }
   }
+  for (const agent of ['pi', 'claude']) {
+    const grants = grantsFor(loaded, 'reviewer', { agent })
+    assert.deepEqual(grants.skills, expectedSkills)
+    assert.doesNotThrow(() => assertGrantsBacked('reviewer', grants, loaded, { agent }))
+  }
 })
 
-test('shipped claude reviewer and lead seats compose their session plugin dir with the granted skill', () => {
+test('shipped claude reviewer seat composes its session plugin dir while lead has no skill', () => {
+  // MUTATION: remove code-less from the reviewer claude overlay and the reviewer compose fails.
   const loaded = loadCapabilities()
-  for (const role of ['reviewer', 'lead']) {
+  const lead = grantsFor(loaded, 'lead', { agent: 'claude' })
+  assert.deepEqual(lead.skills, [])
+  assert.doesNotThrow(() => assertGrantsBacked('lead', lead, loaded, { agent: 'claude' }))
+  for (const role of ['reviewer']) {
     const grants = grantsFor(loaded, role, { agent: 'claude' })
     assert.deepEqual(grants.skills, [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')])
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent: 'claude' }))
@@ -723,7 +733,8 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
-  const expectedSkills = [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')]
+  // MUTATION: restore code-less to the builder pi overlay and the empty-skills pin fails.
+  const expectedSkills = []
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
   assert.deepEqual(pi.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])

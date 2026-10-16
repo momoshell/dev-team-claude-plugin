@@ -11,16 +11,26 @@ const keySet = (o, keys) => object(o) && Object.keys(o).every((k) => keys.includ
 // requireSkillFiles: the edit gate refuses a map naming a skill it cannot open. Seat delivery
 // passes false and reports each unopenable skill on its own row, so one missing file never
 // withholds every other skill.
+const SKILL_ENTRY_RE = /^dev-team:([a-z0-9][a-z0-9-]*)(?:#([a-z0-9][a-z0-9-]*))?$/
+function parseSkillEntry(s) {
+  const m = typeof s === 'string' ? s.match(SKILL_ENTRY_RE) : null
+  if (!m) return null
+  const skill = m[1]
+  const ref = m[2] || null
+  return { skill, ref, path: ref ? 'skills/' + skill + '/references/' + ref + '.md' : 'skills/' + skill + '/SKILL.md' }
+}
 export function validateMap(map, root = process.cwd(), { requireSkillFiles = true } = {}) {
   if (!keySet(map, ['version', 'exempt', 'rules']) || map.version !== 1 || !Array.isArray(map.exempt) || !map.exempt.length || !map.exempt.every(validGlob) || !Array.isArray(map.rules) || !map.rules.length) return false
   return map.rules.every((rule) => {
-    if (!keySet(rule, ['when', 'skills']) || !keySet(rule.when, ['paths', 'roles']) || (!own(rule.when, 'paths') && !own(rule.when, 'roles')) || !Array.isArray(rule.skills) || !rule.skills.length) return false
+    if (!keySet(rule, ['when', 'skills', 'delivery']) || !keySet(rule.when, ['paths', 'roles']) || (!own(rule.when, 'paths') && !own(rule.when, 'roles')) || !Array.isArray(rule.skills) || !rule.skills.length) return false
+    if (own(rule, 'delivery') && rule.delivery !== 'inline' && rule.delivery !== 'grant') return false
     if (own(rule.when, 'paths') && (!Array.isArray(rule.when.paths) || !rule.when.paths.length || !rule.when.paths.every(validGlob))) return false
     if (own(rule.when, 'roles') && (!Array.isArray(rule.when.roles) || !rule.when.roles.length || !rule.when.roles.every((r) => typeof r === 'string' && r.length))) return false
     return rule.skills.every((s) => {
-      if (typeof s !== 'string' || !/^dev-team:[a-z0-9][a-z0-9-]*$/.test(s)) return false
+      const parsed = parseSkillEntry(s)
+      if (!parsed) return false
       if (!requireSkillFiles) return true
-      try { return !!readFileSync(join(root, 'skills', s.slice('dev-team:'.length), 'SKILL.md')) } catch { return false }
+      try { return !!readFileSync(join(root, parsed.path)) } catch { return false }
     })
   })
 }
@@ -57,20 +67,41 @@ export function matchGlob(glob, path) {
   return match(0, 0)
 }
 
-export function resolveSeatSkills({ map, role, files }) {
+function collectSeatEntries({ map, role, files, reachable }) {
   const roleRules = map.rules.filter((rule) => !own(rule.when, 'paths') && rule.when.roles?.includes(role))
-  const pathRules = files === null ? [] : map.rules.filter((rule) => (!own(rule.when, 'roles') || rule.when.roles.includes(role)) && rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
+  const pathRules = reachable
+    ? map.rules.filter((rule) => own(rule.when, 'paths') && (!own(rule.when, 'roles') || rule.when.roles.includes(role)))
+    : (files === null ? [] : map.rules.filter((rule) => (!own(rule.when, 'roles') || rule.when.roles.includes(role)) && rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file)))))
+  const byPath = new Map()
+  const order = []
+  for (const rule of [...roleRules, ...pathRules]) {
+    for (const s of rule.skills) {
+      const parsed = parseSkillEntry(s)
+      if (!parsed) continue
+      const prior = byPath.get(parsed.path)
+      if (!prior) {
+        const entry = { path: parsed.path, delivery: rule.delivery || 'grant', selected_by: own(rule.when, 'paths') ? 'map-path' : 'map-role', globs: own(rule.when, 'paths') ? [...rule.when.paths] : [] }
+        byPath.set(parsed.path, entry)
+        order.push(parsed.path)
+      } else {
+        if (rule.delivery === 'inline') prior.delivery = 'inline'
+        if (own(rule.when, 'paths')) for (const g of rule.when.paths) if (!prior.globs.includes(g)) prior.globs.push(g)
+      }
+    }
+  }
+  const entries = order.map((p) => byPath.get(p))
+  return { entries, skills: entries.map((e) => e.path) }
+}
+
+export function resolveSeatSkills({ map, role, files }) {
+  const built = collectSeatEntries({ map, role, files, reachable: false })
   const paths_unmeasured = files === null ? 'no-fence-register' : null
-  const skills = new Set()
-  for (const rule of [...roleRules, ...pathRules]) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
-  return { skills: [...skills], paths_unmeasured }
+  return { skills: [...built.skills], entries: built.entries, paths_unmeasured }
 }
 
 export function reachableSeatSkills({ map, role }) {
-  const reachableRules = map.rules.filter((rule) => own(rule.when, 'paths') ? (!own(rule.when, 'roles') || rule.when.roles.includes(role)) : rule.when.roles.includes(role))
-  const skills = new Set()
-  for (const rule of reachableRules) for (const skill of rule.skills) skills.add(`skills/${skill.slice('dev-team:'.length)}/SKILL.md`)
-  return { skills: [...skills], paths_unmeasured: null }
+  const built = collectSeatEntries({ map, role, files: [], reachable: true })
+  return { skills: [...built.skills], entries: built.entries, paths_unmeasured: null }
 }
 
 export function requiredSkills(map, path) {
@@ -78,7 +109,7 @@ export function requiredSkills(map, path) {
   const result = new Set()
   for (const rule of map.rules) {
     if (!own(rule.when, 'paths')) continue
-    if (rule.when.paths.some((g) => matchGlob(g, path))) for (const skill of rule.skills) result.add(skill)
+    if (rule.when.paths.some((g) => matchGlob(g, path))) for (const skill of rule.skills) result.add(skill.split('#')[0])
   }
   return [...result].sort()
 }

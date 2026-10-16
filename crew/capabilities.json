@@ -54,14 +54,10 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         },
         "claude": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         }
       }
     },
@@ -85,9 +81,7 @@
             "crew/pi/extensions/submit.ts"
           ],
           "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }],
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ],
+          "skills": [],
           "agents": [
             {
               "name": "scout",
@@ -96,9 +90,7 @@
           ]
         },
         "claude": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         }
       }
     },
@@ -129,14 +121,10 @@
             "crew/pi/extensions/submit.ts",
             "crew/pi/extensions/reminders.ts"
           ],
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         },
         "claude": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ],
+          "skills": [],
           "mcp_servers": [
             {
               "name": "fff",
@@ -190,14 +178,10 @@
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/submit.ts"
           ],
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         },
         "claude": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ]
+          "skills": []
         }
       }
     }

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { scratchDir } from '../test/helpers.mjs'
-import { matchGlob, loadMap } from './skill-gate.mjs'
+import { matchGlob, loadMap, validateMap } from './skill-gate.mjs'
 
 const SCRIPT = 'hooks/skill-gate.mjs'
 const MANIFEST = 'hooks/hooks.json'
@@ -46,17 +46,56 @@ function post(dir, skills, agent_id = 'a') { for (const skill of skills) invoke(
 function transcript(dir, rows, path = 'transcript.jsonl') { const file = join(dir, path); writeFileSync(file, rows.map((x) => JSON.stringify(x)).join('\n')); return file }
 const call = (skill) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Skill', input: { skill } }] } })
 
-test('M1', () => {
+test('RP1 strict delivery and slice references validate', () => {
+  // MUTATION: break SKILL_ENTRY_RE so dev-team:alpha#ref is refused even with its reference file present.
+  const dir = scratchDir('skill-gate-rp1-')
+  mkdirSync(join(dir, 'skills', 'alpha', 'references'), { recursive: true })
+  writeFileSync(join(dir, 'skills', 'alpha', 'references', 'ref.md'), '# ref\n')
+  const good = { version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:alpha#ref'] }] }
+  assert.equal(validateMap(good, dir, { requireSkillFiles: true }), true)
+  assert.equal(validateMap({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'eager', skills: ['dev-team:alpha#ref'] }] }, dir, { requireSkillFiles: true }), false)
+  assert.equal(validateMap({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:alpha#ref'], surprise: true }] }, dir, { requireSkillFiles: true }), false)
+  assert.equal(validateMap({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:alpha#missing'] }] }, dir, { requireSkillFiles: true }), false)
+  assert.equal(validateMap({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:alpha#missing'] }] }, dir, { requireSkillFiles: false }), true)
+})
+test('RP2 slice satisfies the edit gate via its parent skill', () => {
+  // MUTATION: restore result.add(skill) so the slice never maps to its parent and the seat stays denied.
   const dir = fixture()
-  const result = invoke(dir, 'session-start')
+  mkdirSync(join(dir, 'skills', 'alpha', 'references'), { recursive: true })
+  writeFileSync(join(dir, 'skills', 'alpha', 'references', 'ref.md'), '# ref\n')
+  writeMap(dir, { version: 1, exempt: ['**/anchors.json', 'docs/audits/**'], rules: [{ when: { paths: ['crew/**/*.mjs'] }, skills: ['dev-team:alpha#ref'] }] })
+  const denied = invoke(dir, 'pre-edit')
+  deny(denied)
+  assert.match(denied.stdout, /dev-team:alpha/)
+  assert.doesNotMatch(denied.stdout, /#ref/)
+  post(dir, ['dev-team:alpha'])
+  const allowed = invoke(dir, 'pre-edit', { agent_id: 'a' })
+  assert.equal(allowed.status, 0)
+  assert.equal(allowed.stdout, '')
+})
+test('RP3 M1 shipped role packs pin exactly and session start is byte-identical', () => {
+  // MUTATION: flip rule 5 of skills/skill-map.json from grant to inline and the shipped-map pin fails.
+  const dir = fixture()
+  const result = invoke(dir, 'session-start', {}, {}, ROOT)
   assert.equal(result.status, 0)
   assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['**/anchors.json', 'docs/audits/**'], rules: [
-    { when: { roles: ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:code-less'] },
-    { when: { roles: ['reviewer', 'tech-lead'] }, skills: ['dev-team:pr-review'] },
-    ...pathRules,
+    { when: { roles: ['planner'] }, delivery: 'inline', skills: ['dev-team:qa-test-writing#gates'] },
+    { when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:code-less', 'dev-team:qa-test-writing#vacuity'] },
+    { when: { roles: ['reviewer'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
+    { when: { roles: ['tech-lead'] }, delivery: 'inline', skills: ['dev-team:pr-review#falsification'] },
+    { when: { roles: ['reviewer'] }, delivery: 'grant', skills: ['dev-team:code-less', 'dev-team:qa-test-writing#vacuity'] },
+    { when: { roles: ['tech-lead'] }, delivery: 'grant', skills: ['dev-team:qa-test-writing#gates'] },
+    { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs', 'test/**/*.mjs', 'skills/**/*.mjs', 'visualizer/**/*.mjs', 'visualizer/**/*.js', 'visualizer/**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] },
+    { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:backend-node'] },
+    { when: { paths: ['**/*.test.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
-  assert.match(result.stdout, /dev-team:code-less/)
+  assert.equal(
+    JSON.parse(result.stdout).hookSpecificOutput.additionalContext,
+    'crew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs, test/**/*.mjs, skills/**/*.mjs, visualizer/**/*.mjs, visualizer/**/*.js, visualizer/**/*.svelte \u2192 dev-team:code-less\ncrew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs \u2192 dev-team:backend-node\n**/*.test.mjs \u2192 dev-team:qa-test-writing\nvisualizer/**/*.svelte, visualizer/**/*.js, visualizer/**/*.mjs, visualizer/**/*.css \u2192 dev-team:frontend-svelte\nvisualizer/**/*.svelte, visualizer/**/*.css \u2192 dev-team:ui-design, dev-team:ux\nLoading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
+  )
 })
 test('M2', () => {
   const dir = fixture(); writeMap(dir, { ...JSON.parse(readFileSync(join(dir, MAP_PATH))), surprise: true })

@@ -4,7 +4,8 @@
 import { test } from 'node:test'
 import { renderBrief } from '../scripts/factory/make-brief.mjs'
 import assert from 'node:assert/strict'
-import { chmodSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
@@ -1143,7 +1144,7 @@ test('A1 retained rebase state reaches conflict resolver before any abort', () =
   assert.equal(io.calls.order.some((entry) => entry === 'run:git rebase --abort'), false)
   assert.equal(io.calls.order.slice(builderBounce, continued).filter((entry) => entry === 'commit').length, 0)
   assert.equal(io.state.resetCommand, 'git reset --soft base1111')
-  assert.equal(io.state.commitCount, 2)
+  assert.equal(io.state.commitCount, 3)
   assert.equal(io.state.resolverCalls.length, 0)
 })
 
@@ -3541,4 +3542,536 @@ test('DM6 published pr-body Proof holds one Diff mutation line', () => {
   const end = rest.indexOf('\n\n## ')
   const proof = end < 0 ? rest : rest.slice(0, end)
   assert.equal(proof.split('\n').filter((line) => line.startsWith('- Diff mutation:')).length, 1)
+})
+
+// Real-git rebase settlement harness for b1222-rebaseround
+// Origin and lane change the same interior line of docs guide,
+// so neither anchor nor eof append can resolve it.
+const RB_NL = String.fromCharCode(10)
+const RB_BASE = ['# Guide', 'intro line', 'shared line', 'middle line', 'outro line', ''].join(RB_NL)
+const RB_LANE = ['# Guide', 'intro line', 'lane change', 'middle line', 'outro line', ''].join(RB_NL)
+const RB_ORIGIN = ['# Guide', 'intro line', 'origin change', 'middle line', 'outro line', ''].join(RB_NL)
+const RB_RESOLVED = ['# Guide', 'intro line', 'resolved change', 'middle line', 'outro line', ''].join(RB_NL)
+const RB_HARDENED = ['# Guide', 'intro line', 'resolved change', 'middle line', 'outro line', 'HARDEN-MARKER', ''].join(RB_NL)
+const RB_OTHER_BASE = 'other base' + RB_NL
+const RB_OTHER_EDIT = 'other builder edit' + RB_NL
+const RB_CHECK_L1 = 'import { readFileSync } from'
+const RB_CHECK_L2 = 'nodefsplaceholder'
+const RB_CHECK = ["import { readFileSync } from 'node:fs'", "const text = readFileSync('docs/guide.md', 'utf8')", "if (text.includes('HARDEN-MARKER')) process.exit(0)", "process.exit(1)"].join(RB_NL)
+function rbSetupRepos(includeOther) {
+  const taskDir = scratchDir('rb-task-')
+  const originDir = scratchDir('rb-origin-')
+  const laneParent = scratchDir('rb-lane-')
+  const checkout = join(laneParent, 'checkout')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  delete env.FORCE_COLOR
+  delete env.CLICOLOR_FORCE
+  const runSetup = (cmd, cwd) => {
+    const r = spawnSync('sh', ['-c', cmd], { cwd: cwd, encoding: 'utf8', env: env })
+    assert.equal(r.status, 0, cmd)
+    return r
+  }
+  runSetup('git init -q -b main', originDir)
+  runSetup('git config user.name t', originDir)
+  runSetup('git config user.email t@t', originDir)
+  mkdirSync(join(originDir, 'docs'), { recursive: true })
+  writeFileSync(join(originDir, 'docs/guide.md'), RB_BASE)
+  writeFileSync(join(originDir, 'docs/check.mjs'), RB_CHECK)
+  if (includeOther) {
+    writeFileSync(join(originDir, 'docs/other.md'), RB_OTHER_BASE)
+  }
+  runSetup('git add -A', originDir)
+  runSetup('git commit -q -m base', originDir)
+  const cloneRes = spawnSync('git', ['clone', '-q', originDir, checkout], { encoding: 'utf8', env: env })
+  assert.equal(cloneRes.status, 0, 'git clone')
+  runSetup('git config user.name t', checkout)
+  runSetup('git config user.email t@t', checkout)
+  runSetup('git checkout -q -b feature/ship', checkout)
+  writeFileSync(join(originDir, 'docs/guide.md'), RB_ORIGIN)
+  runSetup('git add -A', originDir)
+  runSetup('git commit -q -m origin', originDir)
+  const head = runSetup('git rev-parse HEAD', checkout).stdout.trim()
+  const sh = (cmd) => {
+    return spawnSync('sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', env: env })
+  }
+  return { taskDir: taskDir, originDir: originDir, checkout: checkout, head: head, sh: sh, env: env }
+}
+function rbWireIo(opts) {
+  const checkout = opts.checkout
+  const sh = opts.sh
+  const taskDir = opts.taskDir
+  const scope = opts.scope
+  const envelopes = opts.envelopes
+  const editFn = opts.editFn
+  const env = opts.env
+  const io = publicationIo({ changed: scope, envelopes: envelopes })
+  io.calls.assign = []
+  const baseAssign = io.assign.bind(io)
+  io.assign = function (spec) {
+    const assigned = baseAssign(spec)
+    io.calls.assign.push({ role: spec.role, note: spec.note, briefFile: spec.briefFile, id: assigned.id, returnPath: assigned.returnPath })
+    io.calls.order.push('assign:' + spec.role + ':' + String(assigned.returnPath).split(':').pop())
+    return assigned
+  }
+  const snapshots = []
+  const baseWait = io.wait.bind(io)
+  io.wait = function (returnPath) {
+    const got = baseWait(returnPath)
+    let ls = ''
+    try {
+      const r = sh('git ls-files -u')
+      ls = String(r.stdout || '')
+    } catch (e) {
+      ls = ''
+    }
+    let mergeExists = false
+    try {
+      const g = sh('git rev-parse --git-path rebase-merge')
+      const p = String(g.stdout || '').trim()
+      let abs = p
+      if (!p.startsWith('/')) {
+        abs = join(checkout, p)
+      }
+      mergeExists = existsSync(abs)
+    } catch (e) {
+      mergeExists = false
+    }
+    snapshots.push({ returnPath: returnPath, ls: ls, mergeExists: mergeExists })
+    if (typeof editFn === 'function') {
+      editFn(returnPath, io.calls.assign[io.calls.assign.length - 1])
+    }
+    return got
+  }
+  const baseRun = io.run.bind(io)
+  io.run = function (cmd) {
+    const text = String(cmd)
+    const isGit = text.startsWith('git ') || text.startsWith('GIT_INDEX_FILE') || text.startsWith('git -C') || text.indexOf(' git -C ') >= 0 || text.indexOf('write-tree') >= 0 || text.indexOf('ls-files') >= 0 || text.indexOf('rev-parse --git-path') >= 0
+    const isCheck = text.indexOf('docs/check.mjs') >= 0
+    if (isGit || isCheck) {
+      const r = sh(text)
+      const out = String(r.stdout || '') + String(r.stderr || '')
+      const ok = r.status === 0
+      try {
+        io.calls.run.push(text)
+      } catch (e) {}
+      try {
+        io.calls.order.push('run:' + text)
+      } catch (e) {}
+      return { ok: ok, output: out, stderr: String(r.stderr || ''), status: r.status }
+    }
+    return baseRun(cmd)
+  }
+  const baseRead = io.readFile.bind(io)
+  io.readFile = function (p) {
+    if (typeof p === 'string' && p.startsWith(checkout + '/')) {
+      if (existsSync(p)) {
+        return readFileSync(p, 'utf8')
+      }
+      return null
+    }
+    return baseRead(p)
+  }
+  const baseWrite = io.writeFile.bind(io)
+  io.writeFile = function (p, content) {
+    if (typeof p === 'string' && p.startsWith(checkout + '/')) {
+      writeFileSync(p, content)
+      return
+    }
+    return baseWrite(p, content)
+  }
+  io.changedFiles = function () {
+    const r = spawnSync('git', ['-C', checkout, 'status', '--porcelain', '-uall', '-z'], { encoding: 'utf8', env: env })
+    if (r.status !== 0) {
+      throw new Error('git status failed')
+    }
+    const raw = String(r.stdout || '')
+    if (raw.length === 0) {
+      return []
+    }
+    const parts = raw.split(String.fromCharCode(0))
+    const paths = []
+    for (let i = 0; i < parts.length; i++) {
+      const entry = parts[i]
+      if (!entry) {
+        continue
+      }
+      let q = entry
+      const arrow = q.indexOf(' -> ')
+      if (arrow >= 0) {
+        q = q.slice(arrow + 4)
+      } else if (q.length > 3) {
+        q = q.slice(3)
+      }
+      if (q.length > 0) {
+        let dup = false
+        for (let j = 0; j < paths.length; j++) {
+          if (paths[j] === q) {
+            dup = true
+            break
+          }
+        }
+        if (!dup) {
+          paths.push(q)
+        }
+      }
+    }
+    return paths
+  }
+  io.commit = function (files, message) {
+    const list = Array.isArray(files) ? files : []
+    if (list.length === 0) {
+      return null
+    }
+    const addArgs = ['-C', checkout, 'add', '--'].concat(list)
+    const a = spawnSync('git', addArgs, { encoding: 'utf8', env: env })
+    if (a.status !== 0) {
+      return null
+    }
+    const c = spawnSync('git', ['-C', checkout, 'commit', '-m', message], { encoding: 'utf8', env: env })
+    if (c.status !== 0) {
+      return null
+    }
+    const h = spawnSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: env })
+    if (h.status !== 0) {
+      return null
+    }
+    return String(h.stdout || '').trim()
+  }
+  return { io: io, snapshots: snapshots }
+}
+test('RB1 rebase settled before any later seat assignment', () => {
+  const scope = ['docs/guide.md']
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const snapshots = wired.snapshots
+  const ctx = { ...CTX, task: 'rb1', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 3 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  let rev2 = null
+  for (let i = 0; i < snapshots.length; i++) {
+    if (snapshots[i].returnPath === 'reviewer:2') {
+      rev2 = snapshots[i]
+      break
+    }
+  }
+  assert.ok(rev2, 'missing reviewer 2 snapshot')
+  assert.equal(rev2.ls, '')
+  assert.equal(rev2.mergeExists, false)
+  const originHead = sh('git rev-parse origin/main').stdout.trim()
+  const parent = sh('git log --pretty=%P -n 1 HEAD').stdout.trim()
+  assert.ok(parent.indexOf(originHead) >= 0, 'lane parent is origin main')
+})
+test('RB2 hardening runs on settled tree with invocation proof', () => {
+  const scope = ['docs/guide.md']
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const finding = { id: 'F1', severity: 'must-fix', location: 'docs/guide.md:3', summary: 'lane defect', evidence: 'review saw defect' }
+  const hardened = [{ finding: 'F1', invocation: 'node docs/check.mjs', name: 'F1 guard', file: 'docs/guide.md', find: 'HARDEN-MARKER', replace: 'HARDEN-REMOVED' }]
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'reviewer:2': reviewEnv('changes-needed', [finding]),
+    'builder:3': buildEnv({ details: { files_changed: scope, commit_message: 'harden guard', hardened: hardened } }),
+    'reviewer:3': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+    }
+    if (returnPath === 'builder:3') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_HARDENED)
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const ctx = { ...CTX, task: 'rb2', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 4 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  const stages = Array.isArray(result.details.stages) ? result.details.stages : []
+  let hasHarden = false
+  for (let i = 0; i < stages.length; i++) {
+    if (String(stages[i]).startsWith('lane:harden:r')) {
+      hasHarden = true
+      break
+    }
+  }
+  assert.equal(hasHarden, true)
+  const rows = io.calls.logs.filter((row) => row && row.finding_hardened && row.finding_hardened.finding === 'F1')
+  assert.ok(rows.length > 0)
+  for (let i = 0; i < rows.length; i++) {
+    const why = String(rows[i].finding_hardened.why || '')
+    assert.equal(why.indexOf('write-tree') < 0, true)
+  }
+  const esc = result.details.escalation
+  assert.ok(!esc || esc.where !== 'harden')
+})
+test('RB3 failed continue escalates at rebase with no later stages', () => {
+  const scope = ['docs/guide.md', 'docs/other.md']
+  const setup = rbSetupRepos(true)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve with outside edit' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+      writeFileSync(join(checkout, 'docs/other.md'), RB_OTHER_EDIT)
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const ctx = { ...CTX, task: 'rb3', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 2 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  const esc = result.details.escalation
+  assert.equal(esc.where, 'rebase')
+  const why = String(esc.why || '')
+  assert.ok(why.indexOf('docs/guide.md') >= 0)
+  assert.equal(why.indexOf('budget is exhausted') < 0, true)
+  const stages = Array.isArray(result.details.stages) ? result.details.stages : []
+  let rebaseIdx = -1
+  for (let i = 0; i < stages.length; i++) {
+    if (stages[i] === 'rebase') {
+      rebaseIdx = i
+      break
+    }
+  }
+  assert.ok(rebaseIdx >= 0)
+  let fixIdx = -1
+  for (let j = rebaseIdx + 1; j < stages.length; j++) {
+    if (String(stages[j]).startsWith('build:r')) {
+      fixIdx = j
+      break
+    }
+  }
+  assert.ok(fixIdx >= 0)
+  for (let k = fixIdx + 1; k < stages.length; k++) {
+    const s = String(stages[k])
+    assert.equal(s.startsWith('scope-gate'), false)
+    assert.equal(s.startsWith('lane:'), false)
+    assert.equal(s.startsWith('gate:'), false)
+    assert.equal(s.startsWith('review:'), false)
+  }
+})
+// MUTATION: restore the buildNote === 'rebase-conflict-fix' conjunct in the early-settle guard and the bounced round never settles
+test('rebase-conflict-fix bounced round still settles at next done', () => {
+  const scope = ['docs/guide.md']
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ status: 'insufficient', summary: 'need more time', details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'builder:3': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve again' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+    }
+    if (returnPath === 'builder:3') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const snapshots = wired.snapshots
+  const ctx = { ...CTX, task: 'rbtl1', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 4 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  let rev2 = null
+  for (let i = 0; i < snapshots.length; i++) {
+    if (snapshots[i].returnPath === 'reviewer:2') {
+      rev2 = snapshots[i]
+      break
+    }
+  }
+  assert.ok(rev2, 'missing reviewer 2 snapshot')
+  assert.equal(rev2.ls, '')
+  assert.equal(rev2.mergeExists, false)
+})
+
+// MUTATION: remove the debris refusal in settleRetainedRebase (crew/drive.mjs) and staged returns/injected.json is committed by rebase --continue
+test('rebase conflict fix staged envelope debris is refused before continue', () => {
+  const scope = ['docs/guide.md']
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+      mkdirSync(join(checkout, 'returns'), { recursive: true })
+      writeFileSync(join(checkout, 'returns/injected.json'), '{}' + RB_NL)
+      const added = sh('git add returns/injected.json')
+      assert.equal(added.status, 0, String(added.stderr || ''))
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const ctx = { ...CTX, task: 'rbdebris', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 3 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'rebase')
+  assert.ok(String(result.details.escalation.why || '').indexOf('returns/injected.json') >= 0, String(result.details.escalation.why || ''))
+  const mergePath = String(sh('git rev-parse --git-path rebase-merge').stdout || '').trim()
+  const mergeAbs = mergePath.startsWith('/') ? mergePath : join(checkout, mergePath)
+  assert.equal(existsSync(mergeAbs), true)
+  assert.equal(String(sh('git log --all --format=%H -- returns/injected.json').stdout || '').trim(), '')
+  const stages = Array.isArray(result.details.stages) ? result.details.stages : []
+  let rebaseIdx = -1
+  for (let i = 0; i < stages.length; i++) {
+    if (stages[i] === 'rebase') { rebaseIdx = i; break }
+  }
+  assert.ok(rebaseIdx >= 0)
+  let fixIdx = -1
+  for (let j = rebaseIdx + 1; j < stages.length; j++) {
+    if (String(stages[j]).startsWith('build:r')) { fixIdx = j; break }
+  }
+  assert.ok(fixIdx >= 0)
+  for (let k = fixIdx + 1; k < stages.length; k++) {
+    const s = String(stages[k])
+    assert.equal(s.startsWith('scope-gate'), false, s)
+    assert.equal(s.startsWith('lane:'), false, s)
+    assert.equal(s.startsWith('gate:'), false, s)
+    assert.equal(s.startsWith('review:'), false, s)
+  }
+})
+// MUTATION: remove the pre-settle union at the early call site in crew/drive.mjs (pass live io to runScopeGate) and the staged protected path never reaches the build-discovery floor
+test('rebase conflict fix staged protected path reaches build-discovery floor', () => {
+  const scope = ['docs/guide.md']
+  const protectedPath = 'docs/protected-floor.md'
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+      writeFileSync(join(checkout, protectedPath), 'protected new file' + RB_NL)
+      const added = sh('git add ' + protectedPath)
+      assert.equal(added.status, 0, String(added.stderr || ''))
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  io.reseat = () => ({ applied: true, already: true })
+  const ctx = { ...CTX, task: 'rbprotected', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, protectedPaths: [protectedPath], publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 3 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done', JSON.stringify(result.details.escalation || {}))
+  const modifiers = Array.isArray(result.details.modifiers) ? result.details.modifiers : []
+  assert.ok(modifiers.some((m) => m && m.kind === 'build-discovery' && Array.isArray(m.paths) && m.paths.indexOf(protectedPath) >= 0), JSON.stringify(modifiers))
+  const logRows = io.calls.logs.filter((row) => row && row.modifier && row.modifier.kind === 'build-discovery' && Array.isArray(row.modifier.paths) && row.modifier.paths.indexOf(protectedPath) >= 0)
+  assert.ok(logRows.length > 0, 'build-discovery journal row naming protected path')
+})
+// MUTATION: change if (settleDebris.length > 0) to if (settleDebris.length < 0) in settleRetainedRebase (crew/drive.mjs) and staged returns/injected.json is committed by rebase --continue instead of refused
+test('RV1-1 staged returns debris is refused before rebase continue settles', () => {
+  const scope = ['docs/guide.md']
+  const setup = rbSetupRepos(false)
+  const checkout = setup.checkout
+  const sh = setup.sh
+  const taskDir = setup.taskDir
+  const head = setup.head
+  const env = setup.env
+  const envelopes = {
+    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: scope } }),
+    'builder:1': buildEnv({ details: { files_changed: scope, commit_message: 'feat lane' } }),
+    'reviewer:1': reviewEnv('pass'),
+    'builder:2': buildEnv({ details: { files_changed: scope, commit_message: 'fix resolve' } }),
+    'reviewer:2': reviewEnv('pass')
+  }
+  const editFn = (returnPath) => {
+    if (returnPath === 'builder:1') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_LANE)
+    }
+    if (returnPath === 'builder:2') {
+      writeFileSync(join(checkout, 'docs/guide.md'), RB_RESOLVED)
+      mkdirSync(join(checkout, 'returns'), { recursive: true })
+      writeFileSync(join(checkout, 'returns/injected.json'), '{}' + RB_NL)
+      const added = sh('git add returns/injected.json')
+      assert.equal(added.status, 0, String(added.stderr || ''))
+    }
+  }
+  const wired = rbWireIo({ checkout: checkout, sh: sh, taskDir: taskDir, scope: scope, envelopes: envelopes, editFn: editFn, env: env })
+  const io = wired.io
+  const ctx = { ...CTX, task: 'rv1guard', checkout: checkout, taskDir: taskDir, journal: join(taskDir, 'journal.jsonl'), head: head, files_in_scope: scope, publish: { branch: 'feature/ship', base: 'main' }, limits: { build_rounds: 3 } }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'rebase')
+  assert.ok(String(result.details.escalation.why || '').indexOf('returns/injected.json') >= 0, String(result.details.escalation.why || ''))
+  assert.equal(String(sh('git log --all --format=%H -- returns/injected.json').stdout || '').trim(), '')
 })

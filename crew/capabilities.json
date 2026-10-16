@@ -55,12 +55,12 @@
       "by_agent": {
         "pi": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         },
         "claude": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         }
       }
@@ -86,7 +86,7 @@
           ],
           "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }],
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ],
           "agents": [
             {
@@ -97,7 +97,7 @@
         },
         "claude": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         }
       }
@@ -130,12 +130,12 @@
             "crew/pi/extensions/reminders.ts"
           ],
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         },
         "claude": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ],
           "mcp_servers": [
             {
@@ -166,12 +166,12 @@
             "crew/pi/extensions/submit.ts"
           ],
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         },
         "claude": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         }
       }
@@ -191,12 +191,12 @@
             "crew/pi/extensions/submit.ts"
           ],
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         },
         "claude": {
           "skills": [
-            "skills/lean-build/SKILL.md"
+            "skills/code-less/SKILL.md"
           ]
         }
       }

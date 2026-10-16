@@ -995,7 +995,7 @@ test('the default claude planner pane command is pinned byte for byte across the
   try {
   // GRANTED: the register's role-level `tools: ["Task"]` reaches --allowedTools
   // through adapter-claude's allowedTools() merge, and the claude overlay's
-  // lean-build skill reaches its session plugin dir. Byte-for-byte, no exceptions.
+  // code-less skill reaches its session plugin dir. Byte-for-byte, no exceptions.
   // seatCommand refuses an unmaterialised skill grant, so the granted skill is
   // materialised into the scratch task dir first (resolved from the real checkout
   // root; the materialised file name is root-independent, so the PIN_ROOT
@@ -1013,7 +1013,7 @@ test('the default claude planner pane command is pinned byte for byte across the
       seatCommand({ ...seat, model: 'opus', grants: EMPTY_GRANTS }),
       `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
-    // The by_agent overlay now carries the claude planner's lean-build skill, so
+    // The by_agent overlay now carries the claude planner's code-less skill, so
     // stripping it removes exactly the session plugin dir and nothing else: the
     // stripped command is the pre-grant pin byte for byte.
     const stripped = JSON.parse(JSON.stringify(register))
@@ -1035,7 +1035,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/lean-build/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --skill "/repo/skills/code-less/SKILL.md" --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -1056,7 +1056,7 @@ test('the shipped planner pi RPC command pins the complete extension-derived too
     '--session-id', 'planner', '--append-system-prompt', '/tmp/crew-task/role-planner.md',
     '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope', '--exclude-tools', 'edit',
     '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts',
-    '-e', '/repo/crew/pi/extensions/readgate.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+    '-e', '/repo/crew/pi/extensions/readgate.ts', '-e', '/repo/crew/pi/extensions/submit.ts', '--skill', '/repo/skills/code-less/SKILL.md',
   ])
 })
 
@@ -1093,11 +1093,11 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/submit.ts" -e "/repo/crew/pi/extensions/reminders.ts" --skill \"/repo/skills/lean-build/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/submit.ts" -e "/repo/crew/pi/extensions/reminders.ts" --skill \"/repo/skills/code-less/SKILL.md\" --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
   assert.equal(builderCommand.split(' -e ').length - 1, 5)
-  assert.equal(builderCommand.includes('--skill "/repo/skills/lean-build/SKILL.md"'), true)
+  assert.equal(builderCommand.includes('--skill "/repo/skills/code-less/SKILL.md"'), true)
   assert.equal(builderCommand.includes('--no-skills'), false)
   assert.equal(builderCommand.includes('/repo/crew/pi/extensions/fff.ts'), false)
   assert.ok(builderCommand.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
@@ -1107,9 +1107,9 @@ test('BG1', () => {
   try {
   const claudeBuilder = grantsFor(register, 'builder', { ...PIN_ROOT, agent: 'claude' })
   assert.deepEqual(claudeBuilder.extensions, [])
-  // The lean-build skill is granted under both overlays; the claude builder
+  // The code-less skill is granted under both overlays; the claude builder
   // materialises it into its session plugin dir before composing its command.
-  assert.deepEqual(claudeBuilder.skills, ['/repo/skills/lean-build/SKILL.md'])
+  assert.deepEqual(claudeBuilder.skills, ['/repo/skills/code-less/SKILL.md'])
   writeSeatSkills({ taskDir: claudeTaskDir, role: 'builder', grants: grantsFor(register, 'builder', { agent: 'claude' }) })
   assert.doesNotThrow(() => seatCommand({ ...builder, taskDir: claudeTaskDir, grants: claudeBuilder }))
   assert.equal(seatCommand({ ...builder, taskDir: claudeTaskDir, grants: claudeBuilder }).includes(`--plugin-dir "${skillsPluginDir({ taskDir: claudeTaskDir, role: 'builder' })}"`), true)
@@ -1122,7 +1122,7 @@ test('BG1', () => {
     })
     assert.equal(command.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
     assert.equal(command.includes('/repo/crew/pi/extensions/reminders.ts'), false)
-    assert.equal(command.split('--skill "/repo/skills/lean-build/SKILL.md"').length - 1, 1)
+    assert.equal(command.split('--skill "/repo/skills/code-less/SKILL.md"').length - 1, 1)
     assert.equal(command.includes('--no-skills'), false)
     assert.equal(command.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
@@ -1159,7 +1159,7 @@ test('BG2', () => {
       '--tools', 'read,bash,edit,write,grep,find,ls,retrieve,submit_envelope', '--no-context-files', '--no-extensions',
       '-e', '/repo/crew/pi/extensions/builderloop.ts', '-e', '/repo/crew/pi/extensions/readgate.ts',
       '-e', '/repo/crew/pi/extensions/skeletonread.ts', '-e', '/repo/crew/pi/extensions/submit.ts',
-      '-e', '/repo/crew/pi/extensions/reminders.ts', '--skill', '/repo/skills/lean-build/SKILL.md',
+      '-e', '/repo/crew/pi/extensions/reminders.ts', '--skill', '/repo/skills/code-less/SKILL.md',
     ],
     env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/crew-task', CREW_FFF: '0' },
   })
@@ -1168,7 +1168,7 @@ test('BG2', () => {
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/readgate.ts'), true)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/skeletonread.ts'), true)
   assert.equal(builder.args.filter((value) => value === '--skill').length, 1)
-  assert.equal(builder.args.includes('/repo/skills/lean-build/SKILL.md'), true)
+  assert.equal(builder.args.includes('/repo/skills/code-less/SKILL.md'), true)
   assert.equal(builder.args.includes('--no-skills'), false)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/fff.ts'), false)
   assert.equal(builder.args.includes('/repo/crew/pi/extensions/reminders.ts'), true)
@@ -1183,7 +1183,7 @@ test('BG2', () => {
     assert.equal(command.args.includes('/repo/crew/pi/extensions/builderloop.ts'), false)
     assert.equal(command.args.includes('/repo/crew/pi/extensions/reminders.ts'), false)
     assert.equal(command.args.filter((value) => value === '--skill').length, 1)
-    assert.equal(command.args.filter((value) => value === '/repo/skills/lean-build/SKILL.md').length, 1)
+    assert.equal(command.args.filter((value) => value === '/repo/skills/code-less/SKILL.md').length, 1)
     assert.equal(command.args.includes('--no-skills'), false)
     assert.equal(command.args.includes('/repo/crew/pi/extensions/readgate.ts'), role === 'planner' || role === 'tech-lead')
   }
@@ -2985,8 +2985,8 @@ test('the shipped register is where the fan-out grant lives', async () => {
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
     assert.deepEqual(register.roles[role].skills, [])
-    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/lean-build/SKILL.md'])
-    assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/lean-build/SKILL.md'])
+    assert.deepEqual(register.roles[role].by_agent?.pi?.skills ?? [], ['skills/code-less/SKILL.md'])
+    assert.deepEqual(register.roles[role].by_agent?.claude?.skills ?? [], ['skills/code-less/SKILL.md'])
     // ADR-047 decision 9: lane 2 (PR #1614) landed, so the builder alone is granted the advisor.
     assert.equal(register.roles[role].advisor, role === 'builder')
   }

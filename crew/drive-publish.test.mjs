@@ -1816,10 +1816,10 @@ test('F1 capability-register grants require claims and identify the triggering s
   const register = {
     roles: {
       lead: { skills: ['skills/backend-node/SKILL.md'] },
-      builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+      builder: { skills: [], by_agent: { pi: { skills: ['skills/code-less/SKILL.md'] } } },
     },
   }
-  for (const file of ['skills/backend-node/SKILL.md', 'skills/lean-build/SKILL.md']) {
+  for (const file of ['skills/backend-node/SKILL.md', 'skills/code-less/SKILL.md']) {
     const defect = promptMeasurementDefect({ files: [file], body: '', register })
     assert.equal(typeof defect, 'string', file)
     assert.ok(defect.includes(file), file)

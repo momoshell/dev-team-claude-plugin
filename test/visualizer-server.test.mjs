@@ -3642,7 +3642,7 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
     const agents = await json(server.base, '/api/agents')
     // Mutation: omit pluginRoot from the agents-source construction.
     assert.ok(agents.json.agents.length > 0)
-    assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/lean-build/SKILL.md'))
+    assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/code-less/SKILL.md'))
     assert.equal(agents.json.plugin_root, ROOT)
     assert.equal(agents.json.checkout, root)
     assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/roles/builder.md')

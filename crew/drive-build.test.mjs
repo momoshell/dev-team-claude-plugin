@@ -8354,12 +8354,12 @@ test('A5 anchor-manifest-only plan keeps the plain builder brief and writes no w
 })
 
 test('A6 granted-skill parent directory scope sends the plain brief to builder', () => {
-  const scope = ['skills/lean-build/']
+  const scope = ['skills/code-less/']
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
-    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['skills/lean-build/SKILL.md'] } }), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['skills/code-less/SKILL.md'] } }), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
-    changed: ['skills/lean-build/SKILL.md'],
+    changed: ['skills/code-less/SKILL.md'],
   })
   driveTask(CTX, io)
   const assignment = io.calls.assign.find(({ role }) => role === 'builder')
@@ -8368,7 +8368,7 @@ test('A6 granted-skill parent directory scope sends the plain brief to builder',
 })
 
 test('A2 granted skill plan sends the plain brief to builder', () => {
-  const scope = ['skills/lean-build/SKILL.md']
+  const scope = ['skills/code-less/SKILL.md']
   const plan = planEnv({ details: { ...planEnv().details, files_in_scope: scope, prompt_claim: 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.' } })
   const io = fakeIo({
     envelopes: { 'planner:1': plan, 'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: scope } }), 'reviewer:1': reviewEnv('pass') },

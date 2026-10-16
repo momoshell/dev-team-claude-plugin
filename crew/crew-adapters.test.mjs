@@ -574,7 +574,7 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
       && /seat builder/.test(error.message)
       && /coding_agents\.nope/.test(error.message),
   )
-  // The shipped register grants lean-build under every role/agent overlay, so
+  // The shipped register grants code-less under every role/agent overlay, so
   // both claude authoring seats resolve WITH the skill grant. Deleting the pi
   // overlay skills must leave those claude grants unchanged; seatCommand refuses
   // an unmaterialised skill grant, so each side is materialised into the same
@@ -590,7 +590,7 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
     for (const role of ['builder', 'reviewer']) {
       assert.deepEqual(before[role].grants.skills, after[role].grants.skills)
       assert.equal(before[role].grants.skills.length, 1)
-      assert.equal(before[role].grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+      assert.equal(before[role].grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
       writeSeatSkills({ taskDir, role, grants: before[role].grants })
       const seat = {
         role, model: 'sonnet', promptFile: `/tmp/crew-task/role-${role}.md`,
@@ -609,15 +609,15 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
   // A register that grants skills role-wide now resolves on claude and delivers
   // via the seat plugin dir; role-wide extensions still refuse.
   const roleWide = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
-  roleWide.roles.builder.skills = ['skills/lean-build/SKILL.md']
+  roleWide.roles.builder.skills = ['skills/code-less/SKILL.md']
   const resolved = await resolveAdapters(['builder'], {}, null, { register: roleWide })
   assert.equal(resolved.builder.grants.skills.length, 1)
   const roleWideDir = scratchDir('b860-role-wide-skills-')
   try {
     writeSeatSkills({ taskDir: roleWideDir, role: 'builder', grants: resolved.builder.grants })
     assert.equal(
-      readFileSync(join(roleWideDir, 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+      readFileSync(join(roleWideDir, 'claude-skills', 'builder', 'skills', 'code-less', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
     )
     assert.match(seatCommand({
       role: 'builder', model: 'sonnet', promptFile: `/tmp/crew-task/role-builder.md`,
@@ -642,12 +642,12 @@ test('a claude seat with a skill grant resolves, materialises, and composes --pl
   const register = JSON.parse(JSON.stringify(shipped))
   register.roles.builder.by_agent = {
     ...(register.roles.builder.by_agent || {}),
-    claude: { skills: ['skills/lean-build/SKILL.md'] },
+    claude: { skills: ['skills/code-less/SKILL.md'] },
   }
   const resolved = await resolveAdapters(['builder'], { 'agent-builder': 'claude' }, null, { register })
   const grants = resolved.builder.grants
   assert.equal(grants.skills.length, 1)
-  assert.equal(grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  assert.equal(grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
   const taskDir = scratchDir('b860-claude-skill-delivery-')
   try {
     const seat = {
@@ -661,11 +661,11 @@ test('a claude seat with a skill grant resolves, materialises, and composes --pl
     assert.throws(() => claudeHeadlessCommand(headlessSeat), (err) => err.reason === 'grant-unsupported')
     writeSeatSkills({ taskDir, role: 'builder', grants })
     const dir = skillsPluginDir({ taskDir, role: 'builder' })
-    assert.deepEqual(seatSkillFiles({ taskDir, role: 'builder', grants }), [join(dir, 'skills', 'lean-build', 'SKILL.md')])
-    assert.equal(skillDirName(grants.skills[0]), 'lean-build')
+    assert.deepEqual(seatSkillFiles({ taskDir, role: 'builder', grants }), [join(dir, 'skills', 'code-less', 'SKILL.md')])
+    assert.equal(skillDirName(grants.skills[0]), 'code-less')
     assert.equal(
-      readFileSync(join(dir, 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+      readFileSync(join(dir, 'skills', 'code-less', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
     )
     assert.doesNotThrow(() => assertSkillsMaterialised({ taskDir, role: 'builder', grants }))
     assert.equal(seatCommand(seat).includes(`--plugin-dir "${dir}"`), true)
@@ -685,7 +685,7 @@ test('bootCmd materialises the claude skills dir for a claude skill grant', asyn
   const register = JSON.parse(JSON.stringify(shipped))
   register.roles.builder.by_agent = {
     ...(register.roles.builder.by_agent || {}),
-    claude: { skills: ['skills/lean-build/SKILL.md'] },
+    claude: { skills: ['skills/code-less/SKILL.md'] },
   }
   let workspaceCalls = 0
   try {
@@ -695,8 +695,8 @@ test('bootCmd materialises the claude skills dir for a claude skill grant', asyn
     ))
     assert.equal(workspaceCalls, 0)
     assert.equal(
-      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'code-less', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
     )
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -712,14 +712,14 @@ test('mixed-agent boot keeps the pi planner skill grant while materialising the 
   const register = JSON.parse(JSON.stringify(shipped))
   register.roles.builder.by_agent = {
     ...(register.roles.builder.by_agent || {}),
-    claude: { skills: ['skills/lean-build/SKILL.md'] },
+    claude: { skills: ['skills/code-less/SKILL.md'] },
   }
   const args = { 'agent-planner': 'pi', 'agent-builder': 'claude' }
   const resolved = await resolveAdapters(['planner', 'builder'], args, null, { register })
   assert.equal(resolved.planner.grants.skills.length, 1)
-  assert.equal(resolved.planner.grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  assert.equal(resolved.planner.grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
   assert.equal(resolved.builder.grants.skills.length, 1)
-  assert.equal(resolved.builder.grants.skills[0].endsWith('skills/lean-build/SKILL.md'), true)
+  assert.equal(resolved.builder.grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
   let workspaceCalls = 0
   try {
     await withHome(home, () => bootCmd(
@@ -728,8 +728,8 @@ test('mixed-agent boot keeps the pi planner skill grant while materialising the 
     ))
     assert.equal(workspaceCalls, 0)
     assert.equal(
-      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'code-less', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
     )
   } finally {
     rmSync(home, { recursive: true, force: true })

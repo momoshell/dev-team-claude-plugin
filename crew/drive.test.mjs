@@ -5591,7 +5591,7 @@ test('RV1-2 PC1 main and resume publish the driver NA claim and journal one clas
 // RV1-2 / PC2. Mutation: `validPlanPromptClaim` returns true unconditionally — watched red.
 test('RV1-2 PC2 a prompt-scoped plan without one valid claim escalates at plan before any builder', () => {
   const malformed = [undefined, '', `${PC_PLAN}\n${PC_PLAN}`, `Measure: ${PC_PLAN}`, 'not applicable — citation-only.', 42]
-  for (const scope of [['crew/roles/builder.md'], ['crew/roles/'], ['skills/lean-build/SKILL.md']]) {
+  for (const scope of [['crew/roles/builder.md'], ['crew/roles/'], ['skills/code-less/SKILL.md']]) {
     for (const claim of malformed) {
       const io = pcIo({ scope, claim })
       const result = driveTask(PC_CTX, io)

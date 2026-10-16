@@ -677,9 +677,9 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
 })
 
-test('the shipped register grants lean-build to every role on both agents', () => {
+test('the shipped register grants code-less to every role on both agents', () => {
   const loaded = loadCapabilities()
-  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
+  const expectedSkills = [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')]
   for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
     for (const agent of ['pi', 'claude']) {
       const grants = grantsFor(loaded, role, { agent })
@@ -693,15 +693,15 @@ test('shipped claude reviewer and lead seats compose their session plugin dir wi
   const loaded = loadCapabilities()
   for (const role of ['reviewer', 'lead']) {
     const grants = grantsFor(loaded, role, { agent: 'claude' })
-    assert.deepEqual(grants.skills, [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')])
+    assert.deepEqual(grants.skills, [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')])
     assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent: 'claude' }))
     const taskDir = scratchDir(`crew-shipped-claude-${role}-`)
     try {
       writeSeatSkills({ taskDir, role, grants })
       const pluginDir = skillsPluginDir({ taskDir, role })
       assert.equal(
-        readFileSync(join(pluginDir, 'skills', 'lean-build', 'SKILL.md'), 'utf8'),
-        readFileSync(join(REGISTER_ROOT, 'skills/lean-build/SKILL.md'), 'utf8'),
+        readFileSync(join(pluginDir, 'skills', 'code-less', 'SKILL.md'), 'utf8'),
+        readFileSync(join(REGISTER_ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
       )
       const command = claudeSeatCommand({
         role, model: 'claude-fable-5', promptFile: join(taskDir, `role-${role}.md`),
@@ -723,7 +723,7 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
-  const expectedSkills = [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')]
+  const expectedSkills = [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')]
   const pi = grantsFor(loaded, 'builder', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
   assert.deepEqual(pi.mcp_servers, [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
@@ -779,10 +779,10 @@ test('the read gate is absent from lead and reviewer pi and all claude overlays'
 test('an adapter without an overlay gets exactly the role-level grant', () => {
   const base = capabilityRegister()
   const shipped = loadCapabilities({ register: capabilityRegister({ roles: {
-    planner: { ...base.roles.planner, by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+    planner: { ...base.roles.planner, by_agent: { pi: { skills: ['skills/code-less/SKILL.md'] } } },
   } }) })
   const roleLevel = grantsFor(shipped, 'planner')
-  assert.deepEqual(grantsFor(shipped, 'planner', { agent: 'pi' }).skills, [join(REGISTER_ROOT, 'skills/lean-build/SKILL.md')])
+  assert.deepEqual(grantsFor(shipped, 'planner', { agent: 'pi' }).skills, [join(REGISTER_ROOT, 'skills/code-less/SKILL.md')])
   const claude = grantsFor(shipped, 'planner', { agent: 'claude' })
   assert.deepEqual(claude, roleLevel)
   assert.deepEqual(claude.extensions, [])

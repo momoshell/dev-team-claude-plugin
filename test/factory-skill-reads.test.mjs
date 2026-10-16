@@ -14,7 +14,7 @@ function journal(root, name, rows) {
 test('R1 skill-read rates distinguish measured rows, deduplicate paths, include archives and sort', () => {
   const root = scratchDir('skill-read-')
   journal(root, 'archive', [
-    { at: 1780000000000, seat_turn_census: { transport: 'headless-rpc', role: 'builder', skill_reads: ['skills/lean-build/SKILL.md', 'skills/lean-build/SKILL.md'] } },
+    { at: 1780000000000, seat_turn_census: { transport: 'headless-rpc', role: 'builder', skill_reads: ['skills/code-less/SKILL.md', 'skills/code-less/SKILL.md'] } },
     { at: 1780000000000, seat_turn_census: { transport: 'headless-rpc', role: 'builder', skill_reads: [] } },
     { at: 1780000000000, seat_turn_census: { transport: 'headless-rpc', role: 'builder' } },
     { at: 1780000000000, seat_turn_census: { transport: 'headless-json', role: 'planner', skill_reads: ['skills/x/SKILL.md'] } },
@@ -23,7 +23,7 @@ test('R1 skill-read rates distinguish measured rows, deduplicate paths, include 
   const result = spawnSync(process.execPath, [script, '--root', root], { encoding: 'utf8' })
   assert.equal(result.status, 0)
   assert.match(result.stdout, /pi builder: 1 of 2 measured; 1 unmeasured/)
-  assert.match(result.stdout, /pi builder skills\/lean-build\/SKILL\.md: 1 of 2/)
+  assert.match(result.stdout, /pi builder skills\/code-less\/SKILL\.md: 1 of 2/)
   assert.match(result.stdout, /claude planner: 1 of 1 measured; 0 unmeasured/)
   assert.match(result.stdout, /acp builder: 0 of 0 measured; 1 unmeasured/)
   const filtered = spawnSync(process.execPath, [script, '--root', root, '--since', '2026-06-01T00:00:00Z'], { encoding: 'utf8' })

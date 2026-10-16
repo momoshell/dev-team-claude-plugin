@@ -49,10 +49,10 @@ test('K6 Claude context excludes nested parent tool usage', () => {
 })
 
 test('skill-read classifier counts only plugin skill documents from read tools', () => {
-  assert.deepEqual(skillReadsOf('read', { path: '/abs/plugin/skills/lean-build/SKILL.md' }), ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(skillReadsOf('read', { path: '/abs/plugin/skills/code-less/SKILL.md' }), ['skills/code-less/SKILL.md'])
   assert.deepEqual(skillReadsOf('read', { path: 'skills/qa/references/gates.md' }), ['skills/qa/references/gates.md'])
   assert.deepEqual(skillReadsOf('Skill', { skill: 'dev-team:backend-node' }), ['skills/backend-node/SKILL.md'])
-  assert.deepEqual(skillReadsOf('Bash', { command: 'cat /plugin/skills/lean-build/SKILL.md' }), ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(skillReadsOf('Bash', { command: 'cat /plugin/skills/code-less/SKILL.md' }), ['skills/code-less/SKILL.md'])
   assert.deepEqual(skillReadsOf('read', { path: '/plugin/skills/pr-review/anchors.json' }), [])
   assert.deepEqual(skillReadsOf('write', { path: '/plugin/skills/x/SKILL.md' }), [])
   assert.deepEqual(skillReadsOf('Skill', { skill: '../backend-node' }), [])
@@ -60,7 +60,7 @@ test('skill-read classifier counts only plugin skill documents from read tools',
 })
 
 test('RV1-1 Claude crew-skills plugin prefix maps to the requested skill document', () => {
-  assert.deepEqual(skillReadsOf('Skill', { skill: 'crew-skills-reviewer:lean-build' }), ['skills/lean-build/SKILL.md'])
+  assert.deepEqual(skillReadsOf('Skill', { skill: 'crew-skills-reviewer:code-less' }), ['skills/code-less/SKILL.md'])
 })
 
 test('Q1: suitefacts writers stamp deterministic clocks and dispatch identities', () => {
@@ -3481,12 +3481,12 @@ test('D1 headless-json reports transport-named unmeasured compactions in both ce
 test('C1 skill-read Claude row records Skill calls and absent rows stay null', () => {
   const f = b416JsonFixture()
   try {
-    const frame = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'skill-read', name: 'Skill', input: { skill: 'dev-team:lean-build' } }] } }
+    const frame = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'skill-read', name: 'Skill', input: { skill: 'dev-team:code-less' } }] } }
     f.writeStream(`${JSON.stringify(frame)}\n`)
     writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: f.role, status: 'done' }))
     assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
     const row = f.rows.find((entry) => entry.seat_turn_census)?.seat_turn_census
-    assert.deepEqual(row.skill_reads, ['skills/lean-build/SKILL.md'])
+    assert.deepEqual(row.skill_reads, ['skills/code-less/SKILL.md'])
   } finally { f.cleanup() }
   const absent = b416JsonFixture()
   try {

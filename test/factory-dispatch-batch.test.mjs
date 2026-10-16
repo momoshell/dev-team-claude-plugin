@@ -2688,7 +2688,7 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
 const PROMPT_REGISTER_FIXTURE = {
   roles: {
     lead: { skills: ['skills/backend-node/SKILL.md'] },
-    builder: { skills: [], by_agent: { pi: { skills: ['skills/lean-build/SKILL.md'] } } },
+    builder: { skills: [], by_agent: { pi: { skills: ['skills/code-less/SKILL.md'] } } },
   },
 }
 
@@ -2721,7 +2721,7 @@ test('PS-C1 anchors remain a wide dispatch prompt surface', () => {
 })
 
 test('PS-D1 role-level and by-agent grants force dispatch assurance', () => {
-  for (const file of ['skills/backend-node/SKILL.md', 'skills/lean-build/SKILL.md']) {
+  for (const file of ['skills/backend-node/SKILL.md', 'skills/code-less/SKILL.md']) {
     const verdict = promptSurfaceVerdict({ files: [file], register: PROMPT_REGISTER_FIXTURE })
     assert.deepEqual(verdict, { hits: [file], promptChange: true, forced: 'judge' }, file)
   }

@@ -108,5 +108,5 @@ of their hand-written code against the lean ladder. So:
 - Push as `cd <worktree> && git push …`: the review hook reads the lane directory
   from `cd <dir>;` with the semicolon attached and refuses.
 - Skills to load: `dev-team:backend-node`, `dev-team:qa-test-writing`,
-  `dev-team:lean-build`; the ladder is in `crew/roles/_shared.md`; the harvest is
+  `dev-team:code-less`; the ladder is in `crew/roles/_shared.md`; the harvest is
   `node scripts/factory/lean-debt.mjs`.

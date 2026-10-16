@@ -10,7 +10,7 @@ import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
 import {
   COMMIT_TRAILER, CONVERGE_CTX, CTX, CTX_REPAIR, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, TRIAGE_FILES, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg, triageEnv,
 } from './drive-fixtures.mjs'
-import { boundIssueOf, anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand } from './drive.mjs'
+import { boundIssueOf, anchorConflictMechanical, canonicalAnchorManifest, canonicalCitationDoc, lineNumberOnlyAnchorResolution, issueStatementDefect, promptMeasurementDefect, rebaseConflictRoute, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, ANCHOR_PIN_COMMAND, EOF_APPEND_ENCODING_REFUSAL, EOF_APPEND_MODE_REFUSAL, EOF_APPEND_REFUSALS, eofAppendModesAgree, eofAppendResolution, eofAppendStrictUtf8, PRESCRIPTION_PINS_FILE, hardenWitnessCommand, parseDiffMutationReport, diffMutationMeasurement, DIFF_MUTATION_UNMEASURED_REASONS } from './drive.mjs'
 
 const A1_RESUME_TRACE = Object.freeze(['gate', 'suite', 'suite', 'publish'])
 const A1_CONVERGE_TRACE = Object.freeze(['converge', 'suite', 'commit', 'publish'])
@@ -3473,4 +3473,72 @@ test('a closing keyword glued to an issue number binds no close', () => {
   const message = composeCommitMessage({ task: 'glued', planEnv: planEnv({ details: { commit_subject: 'subject' } }), builderEnv: { summary: 'built', details: { commit_message: 'close#900014' } } })
   assert.deepEqual(issueTrailers(message).closes, [])
   assert.deepEqual(issueTrailers('Closes:#900018\nfixes #900019').closes, ['#900018', '#900019'])
+})
+
+const DM_T825E2 = { generation: 1, cap: 8, configured_cap: 8, cap_omitted: 0, total_candidates: 0, generated: 0, killed: 0, timeout_killed: 0, survived: 0, skipped: 5, omitted: 0, omitted_reason: 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot', blind_spot: null, skip_counts: { 'non-mjs': 5 }, mutants: [] }
+
+// MUTATION DM1: restore the strict mutants.length equality in parseDiffMutationReport and the verbatim t825e2 report parses to null again. The producer counts parse-time and admission skips in skipped but never lists them in mutants (countDiffReport in scripts/factory/prove-mutations.mjs).
+test('DM1 non-mjs-only zero-mutant report parses and measures unsupported-language', () => {
+  const parsed = parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify(DM_T825E2)}`, { generation: 1, cap: 8 })
+  assert.deepEqual(parsed, DM_T825E2)
+  assert.deepEqual(diffMutationMeasurement([parsed]), { measured: false, reason: 'unsupported-language', generated: 0, killed: 0, survived: 0, unmeasured_files: 5 })
+  const mirror = { ...DM_T825E2, generated: 1, killed: 1 }
+  assert.equal(parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify(mirror)}`, { generation: 1, cap: 8 }), null)
+})
+
+// MUTATION DM2: map the empty-reports reason to 'no-mutable-candidate' and the empty input no longer produces 'no-report'.
+test('DM2 unmeasured reasons cover the five brief inputs', () => {
+  assert.equal(Object.isFrozen(DIFF_MUTATION_UNMEASURED_REASONS), true)
+  const reasons = [
+    diffMutationMeasurement([]).reason,
+    diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, fatal: { reason: 'tree-not-restored' }, skip_counts: {} }]).reason,
+    diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'runner-unavailable': 1 } }]).reason,
+    diffMutationMeasurement([DM_T825E2]).reason,
+    diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'comment-or-blank': 1 } }]).reason,
+  ]
+  assert.deepEqual([...reasons].sort(), [...DIFF_MUTATION_UNMEASURED_REASONS].sort())
+})
+
+// MUTATION DM3: invert the measured test (generated < 0) and the t563c tallies read unmeasured.
+test('DM3 measured tallies stay measured with unmeasured non-mjs files counted', () => {
+  const t563c = { generated: 8, killed: 8, survived: 0, skip_counts: { 'non-mjs': 4, 'comment-or-blank': 40, 'malformed-hunk': 35, 'unsupported-line': 9 } }
+  const result = diffMutationMeasurement([t563c])
+  assert.equal(result.measured, true)
+  assert.equal(result.reason, null)
+  assert.equal(result.unmeasured_files, 4)
+  assert.deepEqual([result.generated, result.killed, result.survived], [8, 8, 0])
+})
+
+// MUTATION DM5: render 'measured — <reason>' for an unmeasured record and the Proof line text changes.
+test('DM5 Proof renders the diff-mutation line and omits it without the key', () => {
+  const proofOf = (body) => {
+    const start = body.indexOf('## Proof\n')
+    const rest = body.slice(start)
+    const end = rest.indexOf('\n\n## ')
+    return end < 0 ? rest : rest.slice(0, end)
+  }
+  const unmeasured = proofOf(composePrBody({ intent: 'x', diff_mutation: { measured: false, reason: 'unsupported-language', generated: 0, killed: 0, survived: 0, unmeasured_files: 5 } }))
+  assert.ok(unmeasured.includes('- Diff mutation: unmeasured \u2014 unsupported-language'))
+  const measured = proofOf(composePrBody({ intent: 'x', diff_mutation: { measured: true, reason: null, generated: 8, killed: 8, survived: 0, unmeasured_files: 4 } }))
+  assert.ok(measured.includes('- Diff mutation: 8 generated, 8 killed, 0 survived; 4 changed file(s) unmeasured (unsupported-language)'))
+  const sparse = composePrBody({ closes: ['#806'] })
+  assert.equal(sparse, [
+    '## What',
+    '## Why\nCloses #806',
+    '## Proof\nNo acceptance gate ran.\nSuite counts: not measured.\n- Review: not recorded \u00b7 no residuals',
+    '## Run',
+  ].join('\n\n'))
+  assert.equal(composePrBody({ intent: 'x' }).includes('Diff mutation:'), false)
+})
+
+// MUTATION DM6: rename the publish-record key to diff_mutation_off and the published pr-body.md loses its Diff mutation line.
+test('DM6 published pr-body Proof holds one Diff mutation line', () => {
+  const { io, result } = runPublished({})
+  assert.equal(result.status, 'done')
+  const body = io.calls.writes[`${TD}/pr-body.md`]
+  const start = body.indexOf('## Proof\n')
+  const rest = body.slice(start)
+  const end = rest.indexOf('\n\n## ')
+  const proof = end < 0 ? rest : rest.slice(0, end)
+  assert.equal(proof.split('\n').filter((line) => line.startsWith('- Diff mutation:')).length, 1)
 })

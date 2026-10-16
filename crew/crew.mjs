@@ -3635,7 +3635,7 @@ plugin: crew.plugin, repo_key: crew.repo_key, repo_key_absent_reason: crew.repo_
   // lean: advisor uses the builder transport; lane 2 owns a separate print-command consult transport if introduced
   const effectiveSeats = effectiveSeatRecords(roles, seats, members, sources, adapters, advisor)
   try {
-    const emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
+    const emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), replaceEnded: true })
     emitter.recordSeats(effectiveSeats)
   } catch { /* instrumentation is never load-bearing */ }
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json'), charter_arm: charterArm, charter_bytes: charter.bytes })}\n`)
@@ -4087,7 +4087,7 @@ export function runCmd(args, deps = {}) {
   // or blockless brief still records null proposal fields.
   let emitter = null
   try {
-    emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), briefPath: briefFile })
+    emitter = openRunDep({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), briefPath: briefFile, replaceEnded: true })
     emitter.startRun()
   } catch { emitter = null }
   installRunFinalizersDep?.(emitter)

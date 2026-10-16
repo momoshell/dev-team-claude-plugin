@@ -474,6 +474,7 @@ function buildDegradedEmitter(stderr, reason) {
 
   return {
     adwId: null,
+    adoption: null,
     sidecar: drop(null),
     startRun: drop(undefined),
     recordSeats: drop(undefined),
@@ -706,6 +707,7 @@ function openRunInner({
   // are outside this lane's fence, so today only a direct caller passes it; the
   // boot record's optional `brief_file` key is the fallback (bootProposal).
   briefPath = null,
+  replaceEnded = false,
   // TEST SEAM ONLY (never used by a real call site): overrides how emit()
   // obtains its ledger handle, so a test can inject a handle whose writers
   // throw or are otherwise degraded without touching the real ledger.
@@ -959,15 +961,27 @@ function openRunInner({
   // here is exactly the bug this round exists to fix: two racing callers
   // both see "no run yet" and mint two different adw_ids sharing one seq
   // counter.
+  let adoption = null
   function createOrAdoptSidecar() {
     const holder = acquireLock(lockPath, now, _sleepSync)
     if (!holder) return null
     try {
       const existing = readJsonOrNull(sidecarPath)
-      if (existing && existing.adw_id) return existing
+      if (existing && existing.adw_id) {
+        if (replaceEnded && existing.run_ended === true) {
+          const fresh = { ...initialSidecar(randomUUID(), now()), supersedes: existing.adw_id }
+          replaceLocked(sidecarPath, fresh)
+          adoption = 'replaced-ended'
+          return fresh
+        }
+        adoption = 'adopted'
+        return existing
+      }
       const candidate = initialSidecar(randomUUID(), now())
       const created = createExclusive(sidecarPath, candidate)
-      return created ? candidate : (readJsonOrNull(sidecarPath) || candidate)
+      if (created) { adoption = 'created'; return candidate }
+      adoption = 'adopted'
+      return readJsonOrNull(sidecarPath) || candidate
     } finally {
       releaseLock(lockPath, holder)
     }
@@ -1542,6 +1556,7 @@ function openRunInner({
 
   return {
     adwId,
+    adoption,
     sidecar: () => {
       const current = readJsonOrNull(sidecarPath) || sidecar
       return current === null ? null : deepFreeze(structuredClone(current))

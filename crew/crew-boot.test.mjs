@@ -3262,3 +3262,60 @@ test('plugin provenance measures a checkout whose path ends in a space', async (
   assert.match(record.plugin_sha, /^[a-f0-9]{40}$/)
   assert.equal(record.absent_reason, null)
 })
+
+// ---------------------------------------------------------------------------
+// b1215: boot/run pass replaceEnded:true; resume/teardown/daemon keep adopting
+// ---------------------------------------------------------------------------
+
+test('b1215: bootCmd opens with replaceEnded:true so a restart mints a fresh sidecar', async () => {
+  // Kills: replaceEnded removed from the bootCmd call line (restart adopts the ended sidecar again).
+  const home = scratchDir('b1215-boot-open-home-')
+  const { checkout } = testCheckout('b1215-boot-open-checkout-', home)
+  let captured = null
+  try {
+    await withHome(home, () => bootCmd({ task: 'b1215-boot-open', checkout, roles: 'planner', 'agent-planner': 'pi', 'headless-all': true, 'claude-bin': process.execPath }, {
+      env: { CREW_PI_CODEMODE: 'off' }, homedir: () => home,
+      awaitSeatsReady: async () => {}, cmux() { throw new Error('unexpected cmux') },
+      openRun: (opts) => { captured = opts; return { recordSeats() {} } },
+    }))
+  } finally { rmSync(home, { recursive: true, force: true }) }
+  assert.ok(captured, 'expected bootCmd to open a run')
+  assert.equal(captured.replaceEnded, true)
+})
+
+test('b1215: runCmd opens with replaceEnded:true so a restart mints a fresh sidecar', async () => {
+  // Kills: replaceEnded removed from the runCmd call line (restart adopts the ended sidecar again).
+  const root = scratchDir('b1215-run-open-')
+  const home = join(root, 'home'), checkout = join(root, 'checkout')
+  mkdirSync(home); mkdirSync(checkout)
+  const saved = Object.fromEntries(['HOME', 'DEVTEAM_FACTORY_DIR', 'DEVTEAM_LEDGER_DIR', 'DEVTEAM_LEDGER_DB'].map((key) => [key, process.env[key]]))
+  Object.assign(process.env, { HOME: home, DEVTEAM_FACTORY_DIR: join(home, 'factory'), DEVTEAM_LEDGER_DIR: join(home, 'ledger'), DEVTEAM_LEDGER_DB: join(home, 'ledger.db') })
+  git(checkout, 'init', '-q')
+  git(checkout, 'config', 'user.email', 'crew@example.invalid'); git(checkout, 'config', 'user.name', 'crew')
+  writeFileSync(join(checkout, 'a.mjs'), 'fixture\n'); git(checkout, 'add', 'a.mjs'); git(checkout, 'commit', '-qm', 'base')
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# fixture\n')
+  const task = 'b1215-run-open'
+  const bootDeps = {
+    cmux: () => ({}), tree: () => ({}), renameTab: () => {},
+    awaitSeatsReady: async () => {}, openRun: () => ({ recordSeats() {} }),
+  }
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  let captured = null
+  try {
+    await bootCmd({ task, checkout, 'headless-all': true, 'claude-bin': process.execPath }, bootDeps)
+    runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+      ...bootDeps,
+      seatIo: () => ({}),
+      drive: () => done,
+      appendCompletion: () => {},
+      writeTerminalLine: () => {},
+      openRun: (opts) => { captured = opts; return { startRun() {}, endRun() {} } },
+    })
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+    rmSync(root, { recursive: true, force: true })
+  }
+  assert.ok(captured, 'expected runCmd to open a run')
+  assert.equal(captured.replaceEnded, true)
+})

@@ -1203,6 +1203,112 @@ test('S5: openRun against a pre-created run.json (never created via openRun itse
 })
 
 // ---------------------------------------------------------------------------
+// b1215: replace-ended adoption (opt-in via replaceEnded)
+// ---------------------------------------------------------------------------
+// Seeding helper mirrors the S5 preseeded-sidecar fixture shape verbatim,
+// with the ended flag threaded through (run_started true: the run lived).
+function seedB1215Sidecar(dir, adwId, ended) {
+  const ledgerDir = join(dir, 'ledger')
+  mkdirSync(ledgerDir, { recursive: true })
+  const seeded = {
+    adw_id: adwId,
+    repo_slug: 'r',
+    task_slug: 't',
+    db_path: join(ledgerDir, 'ledger.db'),
+    jsonl_path: join(ledgerDir, 'ledger.jsonl'),
+    created_at: new Date().toISOString(),
+    run_started: true,
+    run_ended: ended,
+    phase: { name: null, seq: null, phase_id: null, started_at: null },
+    seq: { event: { next: 7, reserved_through: 6 }, phase: { next: 1, reserved_through: 0 } },
+    gate_attempts: {},
+    heartbeats: {},
+    billed: { input: null, output: null, cache_write: null, cache_read: null },
+    stats: { emitted: 0, dropped: 0, lock_giveups: 0, resolution_ambiguous: 0, resolution_missing: 0, payload_keys_dropped: 0 },
+    dispatches: {},
+  }
+  writeFileSync(join(ledgerDir, 'run.json'), JSON.stringify(seeded))
+  return seeded
+}
+
+function readB1215Sidecar(dir) {
+  return JSON.parse(readFileSync(join(dir, 'ledger', 'run.json'), 'utf8'))
+}
+
+test('b1215(a): ended sidecar + replaceEnded:true mints a new adw_id with supersedes pointing at the old id', () => {
+  // Kills: replacement condition forced false (ended sidecar adopted again).
+  const dir = freshDir('b1215-replaced')
+  seedB1215Sidecar(dir, 'b1215-ended-old', true)
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, replaceEnded: true })
+  assert.notEqual(emitter.adwId, 'b1215-ended-old')
+  assert.equal(emitter.adoption, 'replaced-ended')
+  const sc = readB1215Sidecar(dir)
+  assert.equal(sc.adw_id, emitter.adwId)
+  assert.equal(sc.supersedes, 'b1215-ended-old')
+  assert.equal(sc.run_started, false)
+  assert.equal(sc.run_ended, false)
+  emitter.dispose()
+})
+
+test('b1215(b): ended sidecar with the option omitted is adopted, never replaced', () => {
+  // Kills: replacement made unconditional on run_ended (default mints instead of adopting).
+  const dir = freshDir('b1215-default-adopt')
+  seedB1215Sidecar(dir, 'b1215-ended-old', true)
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  assert.equal(emitter.adwId, 'b1215-ended-old')
+  assert.equal(emitter.adoption, 'adopted')
+  emitter.dispose()
+})
+
+test('b1215(c): live sidecar + replaceEnded:true is adopted unchanged', () => {
+  // Kills: run_ended test dropped from the replacement condition (live sidecar replaced).
+  const dir = freshDir('b1215-live-adopt')
+  seedB1215Sidecar(dir, 'b1215-live-old', false)
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, replaceEnded: true })
+  assert.equal(emitter.adwId, 'b1215-live-old')
+  assert.equal(emitter.adoption, 'adopted')
+  assert.equal(readB1215Sidecar(dir).supersedes, undefined)
+  emitter.dispose()
+})
+
+test('b1215(d): fresh lane reports created with no supersedes', () => {
+  // Kills: exclusive-create path reported as adopted.
+  const dir = freshDir('b1215-fresh')
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, replaceEnded: true })
+  assert.ok(emitter.adwId)
+  assert.equal(emitter.adoption, 'created')
+  assert.equal(readB1215Sidecar(dir).supersedes, undefined)
+  emitter.dispose()
+})
+
+test('b1215(e): degraded open reports honest null adoption beside null adwId', () => {
+  // Kills: degraded emitter reported as adopted (honest null absence lost).
+  const parent = freshDir('b1215-degraded')
+  const stateFile = join(parent, 'not-a-dir')
+  writeFileSync(stateFile, 'file')
+  const emitter = openRun({ stateDir: stateFile, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} }, replaceEnded: true })
+  assert.equal(emitter.adwId, null)
+  assert.equal(emitter.adoption, null)
+  emitter.dispose()
+})
+
+test('b1215(f): replaced emitter startRun+endRun lands a real ledger session under the NEW adw_id', { skip: SKIP }, () => {
+  // Kills: fresh sidecar spread from the ended sidecar (run_started/run_ended stay true, start/end swallowed).
+  const dir = freshDir('b1215-roundtrip')
+  seedB1215Sidecar(dir, 'b1215-ended-old', true)
+  const dbPath = join(dir, 'ledger', 'ledger.db')
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', dbPath, stderr: { write: () => {} }, replaceEnded: true })
+  emitter.startRun()
+  emitter.endRun({ status: 'ok' })
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const session = ledger.getSession(emitter.adwId)
+    assert.ok(session, 'expected a ledger session for the replaced run ' + emitter.adwId)
+    assert.equal(session.status, 'ok')
+  } finally { ledger.close(); emitter.dispose() }
+})
+
+// ---------------------------------------------------------------------------
 // S6: the adopted sidecar's db_path travels with it
 // ---------------------------------------------------------------------------
 

@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -574,11 +575,12 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
       && /seat builder/.test(error.message)
       && /coding_agents\.nope/.test(error.message),
   )
-  // The shipped register grants code-less under every role/agent overlay, so
-  // both claude authoring seats resolve WITH the skill grant. Deleting the pi
-  // overlay skills must leave those claude grants unchanged; seatCommand refuses
-  // an unmaterialised skill grant, so each side is materialised into the same
-  // scratch task dir before its command is composed.
+  // The shipped register grants code-less only under the reviewer overlays,
+  // so the reviewer claude seat resolves WITH the skill grant while the builder
+  // resolves grantless. Deleting the pi overlay skills must leave those claude
+  // grants unchanged; seatCommand refuses an unmaterialised skill grant, so each
+  // granted side is materialised into the same scratch task dir before its
+  // command is composed.
   const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   const withoutPiSkills = JSON.parse(JSON.stringify(shipped))
   for (const role of ['planner', 'builder']) delete withoutPiSkills.roles[role].by_agent.pi.skills
@@ -587,7 +589,8 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
   const after = await resolveAdapters(['builder', 'reviewer'], claudeArgs, null, { register: withoutPiSkills })
   const taskDir = scratchDir('b921-shipped-skills-')
   try {
-    for (const role of ['builder', 'reviewer']) {
+    // MUTATION: restore code-less to the builder claude overlay and the empty-skills pin fails.
+    for (const role of ['reviewer']) {
       assert.deepEqual(before[role].grants.skills, after[role].grants.skills)
       assert.equal(before[role].grants.skills.length, 1)
       assert.equal(before[role].grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
@@ -602,6 +605,16 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
         seatCommand({ ...seat, grants: after[role].grants }),
       )
       assert.match(seatCommand({ ...seat, grants: before[role].grants }), /--plugin-dir/)
+    }
+    for (const role of ['builder']) {
+      assert.deepEqual(before[role].grants.skills, [])
+      assert.deepEqual(after[role].grants.skills, [])
+      const seat = {
+        role, model: 'sonnet', promptFile: `/tmp/crew-task/role-${role}.md`,
+        tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
+        taskDir, bootBrief: 'boot',
+      }
+      assert.doesNotMatch(seatCommand({ ...seat, grants: before[role].grants }), /--plugin-dir/)
     }
   } finally {
     rmSync(taskDir, { recursive: true, force: true })
@@ -638,6 +651,7 @@ test('resolveAdapters rejects an unknown --agent-<role>; role-wide skills on cla
 })
 
 test('a claude seat with a skill grant resolves, materialises, and composes --plugin-dir on pane and headless argv', async () => {
+  // MUTATION: drop custom by_agent skill overlays in resolveAdapters and the grant length pin fails.
   const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
   const register = JSON.parse(JSON.stringify(shipped))
   register.roles.builder.by_agent = {
@@ -677,7 +691,8 @@ test('a claude seat with a skill grant resolves, materialises, and composes --pl
   }
 })
 
-test('bootCmd materialises the claude skills dir for a claude skill grant', async () => {
+test('bootCmd drops the inlined claude skill grant instead of materialising it', async () => {
+  // MUTATION: remove the applySeatSkillGrants call at the boot call site and the inlined skill is materialised.
   const home = scratchDir('b860-claude-skills-boot-home-')
   const { root: checkoutRoot, checkout } = testCheckout('b860-claude-skills-boot-checkout-')
   const task = 'b860-claude-skills-boot'
@@ -694,17 +709,19 @@ test('bootCmd materialises the claude skills dir for a claude skill grant', asyn
       { register, cmux: () => { workspaceCalls += 1; return {} }, awaitSeatsReady: async () => {} },
     ))
     assert.equal(workspaceCalls, 0)
-    assert.equal(
-      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'code-less', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
-    )
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(crew.members.builder.grant_snapshot.grants.skills, [])
+    assert.equal(existsSync(join(dir, 'task', 'claude-skills', 'builder')), false)
+    assert.ok(readFileSync(join(dir, 'task', 'role-builder.md'), 'utf8').includes('The ladder is in your shared charter'))
   } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
 })
 
-test('mixed-agent boot keeps the pi planner skill grant while materialising the claude builder plugin root', async () => {
+test('mixed-agent boot leaves planner grantless while dropping the inlined claude builder grant', async () => {
+  // MUTATION: skip the boot call-site grant transform and the builder snapshot keeps its inlined skill.
   const home = scratchDir('b860-mixed-skills-boot-home-')
   const { root: checkoutRoot, checkout } = testCheckout('b860-mixed-skills-boot-checkout-')
   const task = 'b860-mixed-skills-boot'
@@ -716,8 +733,7 @@ test('mixed-agent boot keeps the pi planner skill grant while materialising the 
   }
   const args = { 'agent-planner': 'pi', 'agent-builder': 'claude' }
   const resolved = await resolveAdapters(['planner', 'builder'], args, null, { register })
-  assert.equal(resolved.planner.grants.skills.length, 1)
-  assert.equal(resolved.planner.grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
+  assert.deepEqual(resolved.planner.grants.skills, [])
   assert.equal(resolved.builder.grants.skills.length, 1)
   assert.equal(resolved.builder.grants.skills[0].endsWith('skills/code-less/SKILL.md'), true)
   let workspaceCalls = 0
@@ -727,16 +743,47 @@ test('mixed-agent boot keeps the pi planner skill grant while materialising the 
       { register, cmux: () => { workspaceCalls += 1; return {} }, awaitSeatsReady: async () => {} },
     ))
     assert.equal(workspaceCalls, 0)
-    assert.equal(
-      readFileSync(join(testCrewDir(home, checkout, task), 'task', 'claude-skills', 'builder', 'skills', 'code-less', 'SKILL.md'), 'utf8'),
-      readFileSync(join(ROOT, 'skills/code-less/SKILL.md'), 'utf8'),
-    )
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(crew.members.builder.grant_snapshot.grants.skills, [])
+    assert.deepEqual(crew.members.planner.grant_snapshot.grants.skills, [])
+    assert.equal(existsSync(join(dir, 'task', 'claude-skills', 'builder')), false)
   } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
 })
 
+test('RP10 fenced claude builder materialises granted backend-node but not inlined code-less, and lead gets no skills dir', async () => {
+  // MUTATION: pass empty adapters to applySeatSkillGrants at the boot call site and claude builder gets no backend-node.
+  const home = scratchDir('rp10-claude-grants-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('rp10-claude-grants-checkout-')
+  execSync('git init -q', { cwd: checkout })
+  mkdirSync(join(checkout, 'crew'), { recursive: true })
+  writeFileSync(join(checkout, 'crew', 'x.mjs'), 'export {}\n')
+  execSync('git add crew/x.mjs && git -c user.email=test@example.com -c user.name=test commit -qm fence-fixture', { cwd: checkout })
+  writeFileSync(join(home, 'fences.json'), JSON.stringify({ lanes: [{ lane: 'own', files: ['crew/x.mjs'] }] }))
+  let workspaceCalls = 0
+  try {
+    await withHome(home, () => bootCmd(
+      { task: 'rp10-claude-grants', checkout, roles: 'builder,lead', 'agent-builder': 'claude', 'agent-lead': 'claude', 'headless-all': true, 'claude-bin': process.execPath, fences: join(home, 'fences.json'), lane: 'own' },
+      { cmux: () => { workspaceCalls += 1; return {} }, awaitSeatsReady: async () => {} },
+    ))
+    assert.equal(workspaceCalls, 0)
+    const dir = testCrewDir(home, checkout, 'rp10-claude-grants')
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.deepEqual(crew.members.builder.grant_snapshot.grants.skills, [join(ROOT, 'skills/backend-node/SKILL.md')])
+    assert.equal(
+      readFileSync(join(dir, 'task', 'claude-skills', 'builder', 'skills', 'backend-node', 'SKILL.md'), 'utf8'),
+      readFileSync(join(ROOT, 'skills/backend-node/SKILL.md'), 'utf8'),
+    )
+    assert.equal(existsSync(join(dir, 'task', 'claude-skills', 'builder', 'skills', 'code-less')), false)
+    assert.equal(existsSync(join(dir, 'task', 'claude-skills', 'lead')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
 test('writeSeatSkills replaces the role plugin root from scratch on rewrite', () => {
   const taskDir = scratchDir('b860-claude-skills-reboot-')
   try {

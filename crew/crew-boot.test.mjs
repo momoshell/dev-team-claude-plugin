@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED, SKILL_BLOCK_CEILINGS, ROLE_PROMPT_CEILINGS, ROLE_PROMPT_UNMEASURED_CAUSES, rolePromptBytes, rolePromptRefusals, ROLE_PROMPT_REFUSAL, omitInlinedPiSkills } from './crew.mjs'
+import { writeRosterSnapshot, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, advisorManifest, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, PANE_LAUNCH_MAX_BYTES, runCmd, stopCmd, resolveAdapters, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, persistedAdapters, ACP_TURN_CEILING_UNMEASURED, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, fenceSkillFiles, loadDeliveryMap, SKILL_PATHS_UNMEASURED, SKILL_BLOCK_CEILINGS, ROLE_PROMPT_CEILINGS, ROLE_PROMPT_UNMEASURED_CAUSES, rolePromptBytes, rolePromptRefusals, ROLE_PROMPT_REFUSAL, applySeatSkillGrants } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath } from './factoryctl.mjs'
@@ -212,23 +212,27 @@ after(async () => {
 const skillBody = (name) => readFileSync(join(ROOT, 'skills', name, 'SKILL.md'), 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
 
 test('skill-delivery M1 role and path rules resolve in ordered deduplicated paths', () => {
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+  // MUTATION: resolve code-less without its slice (drop the #vacuity entry) and the builder union loses vacuity.md.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/qa-test-writing/references/vacuity.md', 'skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
 })
-test('skill-delivery M2 reviewer role rules resolve two skills', () => {
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'reviewer', files: [] }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md'])
+test('skill-delivery M2 reviewer role rules resolve three skills', () => {
+  // MUTATION: drop the reviewer grant rules and code-less with vacuity leave the reviewer union.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'reviewer', files: [] }).skills, ['skills/pr-review/SKILL.md', 'skills/code-less/SKILL.md', 'skills/qa-test-writing/references/vacuity.md'])
 })
 test('skill-delivery M3 reviewer null fence preserves absence while [] is measured', () => {
+  // MUTATION: report [] as no-fence-register and the measured half of this test fails.
   const map = loadMap(ROOT).map
-  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: null }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md'])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: null }).skills, ['skills/pr-review/SKILL.md', 'skills/code-less/SKILL.md', 'skills/qa-test-writing/references/vacuity.md'])
   assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: null }).paths_unmeasured, 'no-fence-register')
   assert.equal(resolveSeatSkills({ map, role: 'reviewer', files: [] }).paths_unmeasured, null)
 })
 test('skill-delivery M4 boot journals mapped skills and closed map failures', async () => {
+  // MUTATION: journal raw render records (with delivery keys) and the boot row gains unmapped keys.
   const { row } = await skillBoot()
   for (const role of SKILL_ROLES) {
-    const expected = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).skills
+    const expected = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).skills.map((skill) => ({ path: skill.path, status: skill.status, bytes: skill.bytes }))
     assert.deepEqual(row.seat_skills[role].skills, expected)
-    assert.ok(expected.length > 0)
+    if (role !== 'lead') assert.ok(expected.length > 0)
     assert.equal(Object.hasOwn(row.seat_skills[role], 'reason'), false)
   }
   for (const [reason, content] of [['map-unreadable', null], ['map-unparseable', '{'], ['map-schema', '{}']]) {
@@ -245,22 +249,37 @@ test('skill-delivery M4 boot journals mapped skills and closed map failures', as
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
 })
-test('skill-delivery D1 own fence delivers backend-node body in the builder prompt', async () => {
+test('skill-delivery D1 own fence grants the backend-node index line in the builder prompt', async () => {
+  // MUTATION: paste granted skills instead of indexing them and the builder prompt carries the backend-node body.
   const { dir } = await skillBoot(true)
   const prompt = readFileSync(join(dir, 'task', 'role-builder.md'), 'utf8')
   assert.ok(prompt.includes('## Plugin skills'))
-  assert.ok(prompt.includes(skillBody('backend-node')))
+  assert.ok(prompt.includes('- granted: ' + join(ROOT, 'skills/backend-node/SKILL.md') + ' \u2014 '))
+  assert.ok(prompt.includes('Load before editing crew/**/*.mjs'))
+  assert.equal(prompt.includes(skillBody('backend-node')), false)
+  assert.ok(prompt.includes(skillBody('code-less')))
   assert.ok(prompt.indexOf('## Plugin skills') > prompt.indexOf('# Role'))
   assert.equal(prompt.includes('---\nname: backend-node'), false)
 })
-test('skill-delivery D2 every booted role receives the exact code-less body', async () => {
+test('skill-delivery D2 only the builder seat pastes the code-less body', async () => {
+  // MUTATION: restore the all-roles code-less rule and every seat pastes the code-less body.
   const { dir } = await skillBoot()
-  for (const role of SKILL_ROLES) assert.ok(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8').includes(skillBody('code-less')))
+  assert.ok(readFileSync(join(dir, 'task', 'role-builder.md'), 'utf8').includes(skillBody('code-less')))
+  const reviewer = readFileSync(join(dir, 'task', 'role-reviewer.md'), 'utf8')
+  assert.equal(reviewer.includes(skillBody('code-less')), false)
+  assert.ok(reviewer.includes('- granted: ' + join(ROOT, 'skills/code-less/SKILL.md') + ' \u2014 '))
+  const lead = readFileSync(join(dir, 'task', 'role-lead.md'), 'utf8')
+  assert.equal(lead.includes(skillBody('code-less')), false)
+  assert.equal(lead.includes('skills/code-less/SKILL.md'), false)
 })
 test('skill-delivery D3 over-budget status includes absolute path and exact bytes without body', () => {
-  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 300 })
+  // MUTATION: record an over-budget inline body as delivered and the status line changes.
+  // 1024 holds the status lines under a long temp-dir checkout path and stays below both inline bodies.
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], budget: 1024 })
   const body = skillBody('code-less'); const path = join(ROOT, 'skills/code-less/SKILL.md'); const bytes = Buffer.byteLength(body, 'utf8')
   assert.ok(result.section.includes(`over-budget: ${bytes} bytes — ${path}`)); assert.equal(result.section.includes(body), false)
+  const record = result.skills.find((skill) => skill.path === path)
+  assert.deepEqual({ status: record.status, delivery: record.delivery, selected_by: record.selected_by }, { status: 'over-budget', delivery: 'inline', selected_by: 'map-role' })
 })
 test('skill-delivery D4 unreadable status includes absolute path', () => {
   const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: [], read: () => { throw new Error('EPERM') } })
@@ -318,10 +337,13 @@ test('U1', () => {
   assert.equal(fenced.reason, null)
   assert.ok(fenced.files.includes(panel))
   const render = (files) => renderSeatSkills({ root: ROOT, mapResult: loadDeliveryMap(ROOT), role: 'builder', files })
+  // MUTATION: deliver path-rule skills inline and the granted pin below fails.
   const skillPaths = ['skills/frontend-svelte/SKILL.md', 'skills/ui-design/SKILL.md', 'skills/ux/SKILL.md'].map((path) => join(ROOT, path))
-  const delivered = render(fenced.files).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'delivered')
-  assert.deepEqual(delivered.map((skill) => skill.path), skillPaths)
-  assert.deepEqual(delivered, render([panel]).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'delivered'))
+  const granted = render(fenced.files).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'granted')
+  assert.deepEqual(granted.map((skill) => skill.path), skillPaths)
+  assert.deepEqual(granted, render([panel]).skills.filter((skill) => skillPaths.includes(skill.path) && skill.status === 'granted'))
+  const delivered = render(fenced.files).skills.filter((skill) => skill.status === 'delivered').map((skill) => skill.path)
+  assert.deepEqual(delivered, [join(ROOT, 'skills/code-less/SKILL.md'), join(ROOT, 'skills/qa-test-writing/references/vacuity.md')])
 })
 
 // Kills: omit --exclude-standard, which admits this existing ignored component.
@@ -341,13 +363,14 @@ test('U3', () => {
   assert.ok(files.includes('committed/keep.txt'))
 })
 
+// MUTATION: resolve the fixture rules as granted and the present skill lands unreadable with no trigger.
 // Kills: delivery loading the map with the edit gate's strict file check (one missing skill
 // withholds every skill as map-schema). The strict hook default is pinned in the same test.
 test('skill-delivery L1 one missing skill file is reported alone and every other skill is delivered', () => {
   const root = scratchDir('skill-delivery-l1-')
   mkdirSync(join(root, 'skills', 'present'), { recursive: true })
   writeFileSync(join(root, 'skills', 'present', 'SKILL.md'), '---\nname: present\n---\npresent body\n')
-  writeFileSync(join(root, 'skills', 'skill-map.json'), JSON.stringify({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, skills: ['dev-team:present', 'dev-team:absent'] }] }))
+  writeFileSync(join(root, 'skills', 'skill-map.json'), JSON.stringify({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:present', 'dev-team:absent'] }] }))
   assert.equal(loadMap(root).reason, 'map-schema')
   const result = renderSeatSkills({ root, mapResult: loadDeliveryMap(root), role: 'builder', files: null })
   assert.deepEqual(result.skills.map((skill) => [skill.path.slice(root.length + 1), skill.status]), [
@@ -355,6 +378,8 @@ test('skill-delivery L1 one missing skill file is reported alone and every other
     ['skills/present/SKILL.md', 'delivered'],
   ])
   assert.ok(result.section.includes('present body'))
+  const present = result.skills.find((skill) => skill.path.endsWith('skills/present/SKILL.md'))
+  assert.deepEqual({ status: present.status, delivery: present.delivery, selected_by: present.selected_by }, { status: 'delivered', delivery: 'inline', selected_by: 'map-role' })
 })
 test('skill-delivery B1 boot journal byte accounting subtracts the skills section and separators', async () => {
   const { dir, row } = await skillBoot()
@@ -367,20 +392,32 @@ test('skill-delivery B1 boot journal byte accounting subtracts the skills sectio
   }
 })
 test('skill-delivery B2 boot journal skill records have closed statuses, paths and byte counts', async () => {
+  // MUTATION: record granted bytes as the index-line length and the granted null-bytes pin fails.
   const { row } = await skillBoot()
   for (const role of SKILL_ROLES) {
     const skills = row.seat_skills[role].skills
+    if (role === 'lead') { assert.deepEqual(skills, []); continue }
     assert.ok(skills.length > 0)
-    for (const skill of skills) assert.ok(SKILL_DELIVERY_STATUSES.includes(skill.status) && isAbsolute(skill.path) && Number.isInteger(skill.bytes))
+    for (const skill of skills) {
+      assert.ok(SKILL_DELIVERY_STATUSES.includes(skill.status) && isAbsolute(skill.path))
+      if (skill.status === 'granted') assert.equal(skill.bytes, null)
+      else assert.ok(Number.isInteger(skill.bytes))
+    }
   }
 })
-test('skill-delivery W1 maximum union of shipped path rules is delivered within budget', () => {
+test('skill-delivery W1 maximum union of shipped path rules is granted within budget', () => {
+  // MUTATION: resolve path-rule skills as inline and the granted-status pin fails.
   const files = ['crew/x.mjs', 'crew/x.test.mjs', 'visualizer/x.svelte', 'visualizer/x.css']
   for (const role of SKILL_ROLES) {
     const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files })
-    assert.ok(result.skills.every((skill) => skill.status === 'delivered'))
+    assert.ok(result.skills.every((skill) => skill.status === 'delivered' || skill.status === 'granted'))
+    for (const skill of result.skills) {
+      if (skill.delivery === 'grant') assert.equal(skill.status, 'granted')
+      else assert.equal(skill.status, 'delivered')
+    }
     assert.ok(Buffer.byteLength(result.section, 'utf8') <= SKILLS_BYTE_BUDGET)
   }
+  assert.deepEqual(renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'lead', files }).skills, [])
 })
 test('skill-delivery R1 reviewer documentation names ladder sources', () => {
   const skill = readFileSync(join(ROOT, 'skills/pr-review/SKILL.md'), 'utf8')
@@ -389,6 +426,132 @@ test('skill-delivery R1 reviewer documentation names ladder sources', () => {
   assert.match(rubric, /## Ladder/)
 })
 
+test('RP4 shipped role packs resolve exact entries and code-less stays out of excluded roles', () => {
+  // MUTATION: neutralise the role filter in resolveSeatSkills path-rule selection and code-less reaches excluded roles.
+  const map = loadMap(ROOT).map
+  assert.deepEqual(resolveSeatSkills({ map, role: 'planner', files: [] }).entries, [
+    { path: 'skills/qa-test-writing/references/gates.md', delivery: 'inline', selected_by: 'map-role', globs: [] },
+  ])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'builder', files: [] }).entries, [
+    { path: 'skills/code-less/SKILL.md', delivery: 'inline', selected_by: 'map-role', globs: [] },
+    { path: 'skills/qa-test-writing/references/vacuity.md', delivery: 'inline', selected_by: 'map-role', globs: [] },
+  ])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'reviewer', files: [] }).entries, [
+    { path: 'skills/pr-review/SKILL.md', delivery: 'inline', selected_by: 'map-role', globs: [] },
+    { path: 'skills/code-less/SKILL.md', delivery: 'grant', selected_by: 'map-role', globs: [] },
+    { path: 'skills/qa-test-writing/references/vacuity.md', delivery: 'grant', selected_by: 'map-role', globs: [] },
+  ])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'tech-lead', files: [] }).entries, [
+    { path: 'skills/pr-review/references/falsification.md', delivery: 'inline', selected_by: 'map-role', globs: [] },
+    { path: 'skills/qa-test-writing/references/gates.md', delivery: 'grant', selected_by: 'map-role', globs: [] },
+  ])
+  assert.deepEqual(resolveSeatSkills({ map, role: 'lead', files: [] }).entries, [])
+  for (const role of ['planner', 'lead', 'tech-lead']) {
+    const result = resolveSeatSkills({ map, role, files: ['crew/a.mjs', 'test/a.test.mjs'] })
+    assert.equal(result.skills.includes('skills/code-less/SKILL.md'), false)
+  }
+})
+test('RP5 entries deduplicate paths and inline wins over path selection', () => {
+  // MUTATION: make the shared entry builder last-selection-wins and builder code-less becomes grant.
+  const map = loadMap(ROOT).map
+  const files = ['crew/x.mjs', 'crew/x.test.mjs', 'visualizer/x.svelte', 'visualizer/x.css']
+  for (const role of SKILL_ROLES) {
+    const paths = resolveSeatSkills({ map, role, files }).entries.map((entry) => entry.path)
+    assert.deepEqual([...new Set(paths)], paths)
+  }
+  const codeLess = resolveSeatSkills({ map, role: 'builder', files }).entries.find((entry) => entry.path === 'skills/code-less/SKILL.md')
+  assert.equal(codeLess.delivery, 'inline')
+  assert.equal(codeLess.selected_by, 'map-role')
+})
+test('RP6 builder render pastes inline skills and indexes backend-node as granted', () => {
+  // MUTATION: rename the '- granted: ' prefix in renderSeatSkills and the backend-node index line disappears.
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'] })
+  assert.ok(result.section.includes(skillBody('code-less')))
+  assert.ok(result.section.includes(readFileSync(join(ROOT, 'skills/qa-test-writing/references/vacuity.md'), 'utf8')))
+  assert.equal(result.section.includes(skillBody('backend-node')), false)
+  assert.equal(result.section.includes(skillBody('qa-test-writing')), false)
+  const backendNode = join(ROOT, 'skills/backend-node/SKILL.md')
+  const granted = result.section.split('\n').filter((line) => line.startsWith('- granted: ' + backendNode))
+  assert.equal(granted.length, 1)
+  assert.ok(granted[0].includes('crew/**/*.mjs'))
+  const record = result.skills.find((skill) => skill.path === backendNode)
+  assert.equal(record.status, 'granted')
+  assert.equal(record.bytes, null)
+})
+test('folded granted description joins continuations and stops at the first sentence', () => {
+  // MUTATION: keep only the first folded continuation line and the granted trigger loses its continuation.
+  const root = scratchDir('folded-granted-trigger-')
+  try {
+    mkdirSync(join(root, 'skills', 'alpha'), { recursive: true })
+    writeFileSync(join(root, 'skills', 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: >-\n  First sentence\n  continues here. Second sentence.\n---\nAlpha body.\n')
+    writeFileSync(join(root, 'skills', 'skill-map.json'), JSON.stringify({ version: 1, exempt: ['docs/**'], rules: [{ when: { roles: ['builder'] }, delivery: 'grant', skills: ['dev-team:alpha'] }] }))
+    const result = renderSeatSkills({ root, mapResult: loadDeliveryMap(root), role: 'builder', files: [] })
+    const absolute = join(root, 'skills/alpha/SKILL.md')
+    assert.deepEqual(result.section.split('\n').filter((line) => line.startsWith('- granted: ')), [`- granted: ${absolute} — First sentence continues here.`])
+    assert.deepEqual(result.skills, [{ path: absolute, status: 'granted', bytes: null, delivery: 'grant', selected_by: 'map-role' }])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+test('RP7 unreadable granted skill leaves no index line and no native grant', () => {
+  // MUTATION: flip the granted-unreadable record to status granted and a missing granted skill is reported granted.
+  const read = (path, encoding) => { if (path === join(ROOT, 'skills/backend-node/SKILL.md')) throw new Error('EPERM'); return readFileSync(path, encoding) }
+  const result = renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role: 'builder', files: ['crew/x.mjs', 'crew/x.test.mjs'], read })
+  const backendNode = join(ROOT, 'skills/backend-node/SKILL.md')
+  const record = result.skills.find((skill) => skill.path === backendNode)
+  assert.equal(record.status, 'unreadable')
+  assert.equal(record.bytes, null)
+  assert.equal(result.section.split('\n').some((line) => line.startsWith('- granted: ' + backendNode)), false)
+  const adapters = { builder: { name: 'pi', grants: { skills: [], extensions: ['keep'] } } }
+  applySeatSkillGrants(adapters, { builder: result }, ROOT)
+  assert.deepEqual(adapters.builder.grants.skills, [join(ROOT, 'skills/qa-test-writing/SKILL.md')])
+  assert.deepEqual(adapters.builder.grants.extensions, ['keep'])
+})
+test('RP8 granted SKILL.md paths reach every adapter grant without slices or inlined paths', () => {
+  // MUTATION: drop the SKILL.md suffix filter in applySeatSkillGrants and a granted slice is natively granted.
+  const files = ['crew/x.mjs', 'crew/x.test.mjs', 'visualizer/x.svelte', 'visualizer/x.css']
+  const mapResult = loadDeliveryMap(ROOT)
+  const skillResults = Object.fromEntries(SKILL_ROLES.map((role) => [role, renderSeatSkills({ root: ROOT, mapResult, role, files })]))
+  const builderGranted = ['skills/backend-node/SKILL.md', 'skills/qa-test-writing/SKILL.md', 'skills/frontend-svelte/SKILL.md', 'skills/ui-design/SKILL.md', 'skills/ux/SKILL.md'].map((rel) => join(ROOT, rel))
+  assert.deepEqual(skillResults.builder.skills.filter((record) => record.status === 'granted' && record.path.endsWith('/SKILL.md')).map((record) => record.path), builderGranted)
+  for (const agent of ['pi', 'claude']) {
+    const adapters = Object.fromEntries(SKILL_ROLES.map((role) => [role, { name: agent, grants: { skills: ['skills/keep/SKILL.md'], extensions: ['keep'] } }]))
+    const originals = Object.fromEntries(SKILL_ROLES.map((role) => [role, adapters[role]]))
+    applySeatSkillGrants(adapters, skillResults, ROOT)
+    for (const role of SKILL_ROLES) {
+      const rendered = skillResults[role]
+      for (const record of rendered.skills.filter((entry) => entry.status === 'granted' && entry.path.endsWith('/SKILL.md'))) assert.ok(adapters[role].grants.skills.includes(record.path), agent + ' ' + role + ' missing ' + record.path)
+      for (const record of rendered.skills.filter((entry) => entry.path.endsWith('/SKILL.md') === false)) assert.equal(adapters[role].grants.skills.includes(record.path), false)
+      for (const record of rendered.skills.filter((entry) => entry.status === 'delivered')) assert.equal(adapters[role].grants.skills.includes(record.path), false)
+      assert.ok(adapters[role].grants.skills.includes('skills/keep/SKILL.md'))
+      assert.deepEqual(adapters[role].grants.extensions, ['keep'])
+      assert.notEqual(adapters[role], originals[role])
+      assert.deepEqual(originals[role].grants.skills, ['skills/keep/SKILL.md'])
+    }
+    assert.deepEqual(adapters.builder.grants.skills, ['skills/keep/SKILL.md', ...builderGranted])
+  }
+})
+test('RP9 booted crew journals one seat-skills row per role after the boot row', async () => {
+  // MUTATION: rename the seat-skills journal event in crew.mjs and no seat-skills row is journalled.
+  const { dir } = await skillBoot()
+  const lines = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  const bootIndex = lines.findIndex((entry) => entry.event === 'boot')
+  assert.ok(bootIndex >= 0)
+  const rows = lines.filter((entry) => entry.event === 'seat-skills')
+  assert.deepEqual(rows.map((row) => row.role).sort(), [...SKILL_ROLES].sort())
+  for (const row of rows) {
+    assert.ok(lines.indexOf(row) > bootIndex)
+    assert.deepEqual(Object.keys(row).sort(), ['at', 'event', 'paths_unmeasured', 'role', 'skills'])
+    assert.equal(row.event, 'seat-skills')
+    assert.equal(typeof row.at, 'string')
+    assert.equal(row.paths_unmeasured, 'no-fence-register')
+    for (const skill of row.skills) {
+      assert.deepEqual(Object.keys(skill).sort(), ['path', 'selected_by', 'status'])
+      assert.ok(isAbsolute(skill.path))
+      assert.ok(skill.status === 'inline' || skill.status === 'granted')
+    }
+  }
+  assert.deepEqual(rows.find((row) => row.role === 'lead').skills, [])
+  assert.deepEqual(rows.find((row) => row.role === 'builder').skills.find((skill) => skill.path === join(ROOT, 'skills/code-less/SKILL.md')), { path: join(ROOT, 'skills/code-less/SKILL.md'), status: 'inline', selected_by: 'map-role' })
+})
 test('ADR047 J1 manifest records empty tripwires and resolved advisor cell', () => {
   const manifest = advisorManifest({ briefText: '- unrelated · item', task: 'task', runStartedAt: 1, cell: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' } })
   assert.deepEqual(manifest.tripwires, [])
@@ -3016,30 +3179,42 @@ test('SR3 role-scoped path rule remains required and described', () => {
 })
 test('SR4 builder reachable union is ordered, deduplicated and unmeasured', () => {
   // MUTATION: reachableRules drops its role-matching path branch.
-  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'builder' }), { skills: ['skills/base/SKILL.md', 'skills/alpha/SKILL.md'], paths_unmeasured: null })
+  // Entries share the single C1 collector, so the pin covers skills and entries together.
+  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'builder' }), {
+    skills: ['skills/base/SKILL.md', 'skills/alpha/SKILL.md'],
+    entries: [
+      { path: 'skills/base/SKILL.md', delivery: 'grant', selected_by: 'map-role', globs: [] },
+      { path: 'skills/alpha/SKILL.md', delivery: 'grant', selected_by: 'map-path', globs: ['crew/**/*.mjs'] },
+    ],
+    paths_unmeasured: null,
+  })
 })
 test('SR5 lead reachable union is exactly empty', () => {
   // MUTATION: reachableRules ignores role restrictions on path rules.
-  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'lead' }), { skills: [], paths_unmeasured: null })
+  assert.deepEqual(reachableSeatSkills({ map: SR_MAP, role: 'lead' }), { skills: [], entries: [], paths_unmeasured: null })
 })
-test('SR6 shipped lead fence has only code-less', () => {
-  // MUTATION: grant backend-node to lead in the shipped role matrix.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md'])
+test('SR6 shipped lead fence selects no skill', () => {
+  // MUTATION: select any skill for lead in the shipped role matrix.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, [])
 })
-test('SR7 shipped planner fence has code-less and qa-test-writing', () => {
-  // MUTATION: remove planner from the test-writing map rule.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'planner', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+test('SR7 shipped planner fence selects only the gates slice', () => {
+  // MUTATION: select code-less for planner in the shipped map.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'planner', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/qa-test-writing/references/gates.md'])
 })
-test('SR8 shipped tech-lead fence has code-less, pr-review and qa-test-writing', () => {
-  // MUTATION: remove tech-lead from the test-writing map rule.
-  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'tech-lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/code-less/SKILL.md', 'skills/pr-review/SKILL.md', 'skills/qa-test-writing/SKILL.md'])
+test('SR8 shipped tech-lead fence selects falsification inline and gates as grant', () => {
+  // MUTATION: remove tech-lead from the shipped grant rule.
+  assert.deepEqual(resolveSeatSkills({ map: loadMap(ROOT).map, role: 'tech-lead', files: ['crew/a.mjs', 'test/a.test.mjs'] }).skills, ['skills/pr-review/references/falsification.md', 'skills/qa-test-writing/references/gates.md'])
 })
-test('SR9 reachable compiled prompts fit pinned frozen ceilings', () => {
+test('RP12 SR9 reset ceilings pin measured role prompts with granted skills', () => {
+  // MUTATION: raise SKILLS_BYTE_BUDGET to 32768 and the reset-budget pin fails.
   // MUTATION: lower one reachable skill-block ceiling by one byte.
-  const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 6, lead: 1, planner: 5, reviewer: 7, 'tech-lead': 3 }
-  const base = { builder: 21659, lead: 1704, planner: 18102, reviewer: 26581, 'tech-lead': 13018 }
-  const blocks = Object.fromEntries(Object.keys(base).map((role) => [role, base[role] + factors[role] * rootBytes]))
+  const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 7, lead: 0, planner: 4, reviewer: 8, 'tech-lead': 2 }
+  const base = { builder: 9721, lead: 16, planner: 7059, reviewer: 7217, 'tech-lead': 6490 }
+  const blocks = Object.fromEntries(Object.keys(base).map((role) => [role, role === 'lead' ? base[role] : base[role] + factors[role] * rootBytes]))
   assert.deepEqual(SKILL_BLOCK_CEILINGS, blocks); assert.equal(Object.isFrozen(SKILL_BLOCK_CEILINGS), true)
+  assert.equal(SKILLS_BYTE_BUDGET, 16384)
+  const main = { builder: 21659 + 6 * rootBytes, planner: 18102 + 5 * rootBytes, reviewer: 26581 + 7 * rootBytes, 'tech-lead': 13018 + 3 * rootBytes }
+  for (const role of Object.keys(main)) assert.ok(blocks[role] < main[role], role + ': ' + blocks[role] + ' < ' + main[role])
   const ceilings = Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, n]) => [role, n + 2 + blocks[role]]))
   assert.deepEqual(ROLE_PROMPT_CEILINGS, ceilings); assert.equal(Object.isFrozen(ROLE_PROMPT_CEILINGS), true)
   assert.deepEqual(ROLE_PROMPT_UNMEASURED_CAUSES, ['charter-unreadable', 'skill-map-unreadable', 'skill-unreadable']); assert.equal(Object.isFrozen(ROLE_PROMPT_UNMEASURED_CAUSES), true)
@@ -3052,6 +3227,7 @@ test('SR9 reachable compiled prompts fit pinned frozen ceilings', () => {
     assert.equal(measured[role].bytes, expected)
     assert.equal(measured[role].skills_bytes, Buffer.byteLength(rendered.section, 'utf8'))
     assert.ok(measured[role].bytes <= ceilings[role])
+    assert.equal(rendered.section.split(ROOT).length - 1, factors[role])
   }
   assert.deepEqual(rolePromptRefusals(measured), [])
 })
@@ -3066,7 +3242,10 @@ test('SR11 unreadable skills, charters and maps remain null with closed causes',
   // MUTATION: turn a failed reachable skill read into a measured numeric zero.
   const read = (path, encoding) => { if (path.endsWith('SKILL.md')) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return readFileSync(path, encoding) }
   const unavailable = rolePromptBytes(undefined, ROOT, { readFileSync: read })
-  assert.ok(Object.values(unavailable).every((row) => row.bytes === null && row.reason === 'skill-unreadable'))
+  for (const [role, row] of Object.entries(unavailable)) {
+    if (role === 'lead' || role === 'tech-lead') assert.ok(row.bytes !== null && row.reason === null, role)
+    else assert.ok(row.bytes === null && row.reason === 'skill-unreadable', role)
+  }
   assert.ok(rolePromptRefusals(unavailable).every((row) => row.includes('skill-unreadable')))
   assert.ok(Object.values(rolePromptBytes(join(ROOT, 'absent-charters'))).every((row) => row.bytes === null && row.reason === 'charter-unreadable'))
   const root = scratchDir('sr11-map-'); mkdirSync(join(root, 'skills'), { recursive: true })
@@ -3074,34 +3253,37 @@ test('SR11 unreadable skills, charters and maps remain null with closed causes',
     rmSync(join(root, 'skills/skill-map.json')); assert.ok(Object.values(rolePromptBytes(undefined, root)).every((row) => row.bytes === null && row.reason === 'skill-map-unreadable'))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
-test('SR12 delivered inlined pi skills are omitted across installation roots', () => {
+test('SR12 granted and delivered records drop register skills across installation roots', () => {
   // MUTATION: compare absolute delivery record paths rather than plugin-relative suffixes.
-  // MUTATION: break after the first pi entry; drop the grants spread.
+  // MUTATION: break after the first adapter entry; drop the grants spread.
   const entry = { name: 'pi', grants: { skills: ['/reg/skills/x/SKILL.md', '/reg/skills/y/SKILL.md'], extensions: ['keep'] } }
   const adapters = { planner: entry, builder: { name: 'pi', grants: { skills: ['/reg/skills/x/SKILL.md', '/reg/skills/z/SKILL.md'], extensions: ['keep2'] } } }
-  omitInlinedPiSkills(adapters, {
+  applySeatSkillGrants(adapters, {
     planner: { skills: [{ path: '/plug/skills/x/SKILL.md', status: 'delivered' }, { path: '/plug/skills/y/SKILL.md', status: 'unreadable' }] },
-    builder: { skills: [{ path: '/plug/skills/x/SKILL.md', status: 'delivered' }] },
+    builder: { skills: [{ path: '/plug/skills/x/SKILL.md', status: 'delivered' }, { path: '/plug/skills/w/SKILL.md', status: 'granted' }] },
   }, '/plug')
   assert.deepEqual(adapters.planner.grants.skills, ['/reg/skills/y/SKILL.md']); assert.deepEqual(entry.grants.skills, ['/reg/skills/x/SKILL.md', '/reg/skills/y/SKILL.md'])
-  assert.deepEqual(adapters.builder.grants.skills, ['/reg/skills/z/SKILL.md'])
+  assert.deepEqual(adapters.builder.grants.skills, ['/reg/skills/z/SKILL.md', '/plug/skills/w/SKILL.md'])
   assert.deepEqual(adapters.planner.grants.extensions, ['keep']); assert.deepEqual(adapters.builder.grants.extensions, ['keep2'])
   assert.notEqual(adapters.planner, entry)
 })
-test('SR13 over-budget inline pi skill stays granted', () => {
-  // MUTATION: omit pi skills without checking the delivered status.
+test('SR13 over-budget inline record keeps its register grant', () => {
+  // MUTATION: drop register skills without checking the delivered-or-granted status.
   const adapters = { planner: { name: 'pi', grants: { skills: ['/r/skills/x/SKILL.md'] } } }
-  omitInlinedPiSkills(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'over-budget' }] } }, '/p')
+  applySeatSkillGrants(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'over-budget' }] } }, '/p')
   assert.deepEqual(adapters.planner.grants.skills, ['/r/skills/x/SKILL.md'])
 })
-test('SR14 Claude grants remain untouched', () => {
-  // MUTATION: apply omission to non-pi adapter grants.
-  const claude = { name: 'claude', grants: { skills: ['/r/skills/x/SKILL.md'] } }, adapters = { planner: claude }
-  omitInlinedPiSkills(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'delivered' }] } }, '/p')
-  assert.equal(adapters.planner, claude)
+test('SR14 claude grants are transformed like pi grants', () => {
+  // MUTATION: skip non-pi adapters and the claude grant keeps its inlined skill.
+  const claude = { name: 'claude', grants: { skills: ['/r/skills/x/SKILL.md'], extensions: ['keep'] } }, adapters = { planner: claude }
+  applySeatSkillGrants(adapters, { planner: { skills: [{ path: '/p/skills/x/SKILL.md', status: 'delivered' }, { path: '/p/skills/y/SKILL.md', status: 'granted' }] } }, '/p')
+  assert.deepEqual(adapters.planner.grants.skills, ['/p/skills/y/SKILL.md'])
+  assert.deepEqual(adapters.planner.grants.extensions, ['keep'])
+  assert.notEqual(adapters.planner, claude)
+  assert.deepEqual(claude.grants.skills, ['/r/skills/x/SKILL.md'])
 })
 test('SR15 boot persists empty planner grants and emits no-skills', async () => {
-  // MUTATION: remove the pre-persistence pi inline-skill omission call.
+  // MUTATION: restore code-less to the planner register overlays and the empty-grants pin fails.
   const f = await bootPaneLaunchFixture('sr15-inline', { args: { 'agent-planner': 'pi' } })
   try { assert.equal(f.error, null); const crew = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8')); const launcher = readFileSync(join(f.taskDir, 'launch-planner.sh'), 'utf8')
     assert.deepEqual(persistedAdapters(crew).planner.grants.skills, []); assert.match(launcher, /--no-skills/)

@@ -2859,9 +2859,9 @@ export function charterBytesRecord(taskDir, roles, sections = {}, deps = {}, ski
   return { bytes, base, memory_bytes, skills_bytes, ...(Object.keys(unmeasured).length ? { unmeasured } : {}) }
 }
 
-export const SKILL_DELIVERY_STATUSES = Object.freeze(['delivered', 'over-budget', 'unreadable'])
+export const SKILL_DELIVERY_STATUSES = Object.freeze(['delivered', 'over-budget', 'unreadable', 'granted'])
 export const SKILLS_SECTION_HEADING = '## Plugin skills'
-export const SKILLS_BYTE_BUDGET = 32768
+export const SKILLS_BYTE_BUDGET = 16384
 
 export const SKILL_PATHS_UNMEASURED = Object.freeze(['no-fence-register', 'fence-files-unlisted'])
 
@@ -2887,20 +2887,61 @@ export function fenceSkillFiles(entries, { checkout, listTracked = trackedUnder 
   return { files: [...new Set([...paths, ...tracked])], reason: null }
 }
 
+function seatSkillTrigger(raw) {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/)
+  if (!match) return null
+  const lines = match[1].split('\n')
+  let desc = null
+  for (let i = 0; i < lines.length; i++) {
+    const found = lines[i].match(/^description:\s*(.*)$/)
+    if (!found) continue
+    const rest = found[1].trim()
+    if (rest === '>' || rest === '>-') {
+      const parts = []
+      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]); j++) parts.push(lines[j].trim())
+      desc = parts.join(' ')
+    } else {
+      desc = rest
+      for (let j = i + 1; j < lines.length && /^[ \t]/.test(lines[j]) && !/^[A-Za-z_-]+:/.test(lines[j].trim()); j++) desc += ' ' + lines[j].trim()
+    }
+    break
+  }
+  if (!desc) return null
+  let text = desc.trim()
+  const quoted = text.match(/^(['"])(.*)\1$/)
+  if (quoted) text = quoted[2]
+  const sentence = text.indexOf('. ')
+  if (sentence !== -1) return text.slice(0, sentence + 1)
+  if (text.endsWith('.')) return text
+  return text
+}
+
 export function renderSeatSkills({ root, mapResult, role, files, filesReason = null, budget = SKILLS_BYTE_BUDGET, read = readFileSync, reachable = false }) {
   const records = []
   const bodies = []
   const resolved = mapResult?.ok ? (reachable ? reachableSeatSkills({ map: mapResult.map, role }) : resolveSeatSkills({ map: mapResult.map, role, files })) : null
   const reason = mapResult?.ok ? null : (mapResult?.reason || 'map-unreadable')
   if (resolved) {
-    for (const path of resolved.skills) {
-      const absolute = join(root, path)
-      try {
-        const raw = read(absolute, 'utf8')
-        const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/)
-        if (!match) throw new Error('invalid frontmatter')
-        bodies.push({ path: absolute, body: raw.slice(match[0].length) })
-      } catch { records.push({ path: absolute, status: 'unreadable', bytes: null }) }
+    for (const entry of resolved.entries) {
+      const absolute = join(root, entry.path)
+      const isSlice = entry.path.includes('/references/')
+      if (entry.delivery === 'inline') {
+        try {
+          const raw = read(absolute, 'utf8')
+          const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/)
+          const body = isSlice ? raw : raw.slice(match[0].length)
+          bodies.push({ path: absolute, body, delivery: 'inline', selected_by: entry.selected_by })
+        } catch { records.push({ path: absolute, status: 'unreadable', bytes: null }) }
+      } else {
+        try {
+          const raw = read(absolute, 'utf8')
+          const trigger = isSlice ? raw.match(/^# (.+)$/m)?.[1].trim() : seatSkillTrigger(raw)
+          if (!trigger) throw new Error('no trigger')
+          const globsSuffix = entry.globs.length ? ` Load before editing ${entry.globs.join(', ')}.` : ''
+          const grantedLine = `- granted: ${absolute} — ${trigger}${globsSuffix}`
+          bodies.push({ kind: 'granted', path: absolute, line: grantedLine, delivery: entry.delivery, selected_by: entry.selected_by })
+        } catch { records.push({ path: absolute, status: 'unreadable', bytes: null, delivery: entry.delivery, selected_by: entry.selected_by }) }
+      }
     }
   }
   // An unreadable skill was never measured: its bytes are null and the line says so, never "0 bytes".
@@ -2909,6 +2950,18 @@ export function renderSeatSkills({ root, mapResult, role, files, filesReason = n
   if (reason) lines.push(`Reason: ${reason}`)
   for (const item of records) lines.push(statusLine(item))
   for (const item of bodies) {
+    if (item.kind === 'granted') {
+      const bytes = Buffer.byteLength(item.line, 'utf8')
+      const candidate = [...lines, item.line].join('\n')
+      if (Buffer.byteLength(candidate, 'utf8') <= budget) {
+        lines.push(item.line)
+        records.push({ path: item.path, status: 'granted', bytes: null, delivery: item.delivery, selected_by: item.selected_by })
+      } else {
+        lines.push(statusLine({ path: item.path, status: 'over-budget', bytes }))
+        records.push({ path: item.path, status: 'over-budget', bytes, delivery: item.delivery, selected_by: item.selected_by })
+      }
+      continue
+    }
     const bytes = Buffer.byteLength(item.body, 'utf8')
     const candidate = [...lines, statusLine({ ...item, status: 'delivered', bytes }), item.body].join('\n')
     if (Buffer.byteLength(candidate, 'utf8') <= budget) {
@@ -2916,7 +2969,7 @@ export function renderSeatSkills({ root, mapResult, role, files, filesReason = n
     } else {
       item.status = 'over-budget'; item.bytes = bytes; lines.push(statusLine(item))
     }
-    records.push({ path: item.path, status: item.status, bytes: item.bytes })
+    records.push({ path: item.path, status: item.status, bytes: item.bytes, delivery: 'inline', selected_by: item.selected_by })
   }
   let section = lines.join('\n')
   if (Buffer.byteLength(section, 'utf8') > budget) section = `${SKILLS_SECTION_HEADING}\nReason: section-budget-too-small`
@@ -3454,7 +3507,7 @@ export async function bootCmd(args, deps = {}) {
     ownFiles = fenceSkillFiles(gathered.find((entry) => entry.lane === args.lane)?.files || [], { checkout })
   }
   const skillResults = Object.fromEntries(roles.map((role) => [role, renderSeatSkills({ root: dirname(HERE), mapResult, role, files: ownFiles.files, filesReason: ownFiles.reason })]))
-  const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section])); omitInlinedPiSkills(adapters, skillResults, dirname(HERE))
+  const skillsSections = Object.fromEntries(roles.map((role) => [role, skillResults[role].section])); applySeatSkillGrants(adapters, skillResults, dirname(HERE))
   for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '', charterArm, skillsSections[role])
   const charter = charterBytesRecord(paths.taskDir, roles, memory.sections, {}, skillsSections)
   // Materialise every register-authoritative Claude MCP set before composing a
@@ -3627,6 +3680,7 @@ plugin: crew.plugin, repo_key: crew.repo_key, repo_key_absent_reason: crew.repo_
     ...(memory.record ? { memory: memory.record } : {}),
     ...(advisorRecord.granted.length ? { advisor: advisorJournalRecord(advisorRecord) } : {}),
   })
+  for (const role of roles) logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'seat-skills', role, skills: skillResults[role].skills.filter((record) => record.status === 'delivered' || record.status === 'granted').map((record) => ({ path: record.path, status: record.status === 'delivered' ? 'inline' : 'granted', selected_by: record.selected_by })), paths_unmeasured: skillResults[role].paths_unmeasured })
   // The seats this boot just launched carry the brief in their argv, so their own
   // ready reply is both due and the only evidence that counts (#741). Gate HERE,
   // after crew.json is on disk: a boot killed at this line leaves a workspace a
@@ -5299,11 +5353,11 @@ if (invokedDirectly) {
 
 const SKILL_ROOT_BYTES = Buffer.byteLength(dirname(HERE), 'utf8')
 export const SKILL_BLOCK_CEILINGS = Object.freeze({
-  builder: 21659 + 6 * SKILL_ROOT_BYTES,
-  lead: 1704 + SKILL_ROOT_BYTES,
-  planner: 18102 + 5 * SKILL_ROOT_BYTES,
-  reviewer: 26581 + 7 * SKILL_ROOT_BYTES,
-  'tech-lead': 13018 + 3 * SKILL_ROOT_BYTES,
+  builder: 9721 + 7 * SKILL_ROOT_BYTES,
+  lead: 16,
+  planner: 7059 + 4 * SKILL_ROOT_BYTES,
+  reviewer: 7217 + 8 * SKILL_ROOT_BYTES,
+  'tech-lead': 6490 + 2 * SKILL_ROOT_BYTES,
 })
 export const ROLE_PROMPT_CEILINGS = Object.freeze(Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, bytes + 2 + SKILL_BLOCK_CEILINGS[role]])))
 export const ROLE_PROMPT_REFUSAL = 'role-prompt-over-ceiling'
@@ -5319,7 +5373,7 @@ export function rolePromptBytes(dir = ROLES_DIR, root = dirname(HERE), deps = {}
     catch { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[0] }; continue }
     if (!mapResult.ok) { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[1] }; continue }
     const rendered = renderSeatSkills({ root, mapResult, role, files: [], reachable: true, budget: Number.MAX_SAFE_INTEGER, read })
-    if (rendered.skills.some((record) => record.status !== 'delivered')) { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[2] }; continue }
+    if (rendered.skills.some((record) => record.status !== 'delivered' && record.status !== 'granted')) { sizes[role] = { bytes: null, skills_bytes: null, reason: ROLE_PROMPT_UNMEASURED_CAUSES[2] }; continue }
     sizes[role] = { bytes: Buffer.byteLength(composeRolePrompt(shared, card, '', 'control', rendered.section), 'utf8'), skills_bytes: Buffer.byteLength(rendered.section, 'utf8'), reason: null }
   }
   return sizes
@@ -5335,11 +5389,11 @@ export function rolePromptRefusals(measured = rolePromptBytes()) {
   return refusals
 }
 
-export function omitInlinedPiSkills(adapters, skillResults, root) {
+export function applySeatSkillGrants(adapters, skillResults, root) {
   for (const [role, entry] of Object.entries(adapters)) {
-    if (entry.name !== 'pi') continue
-    const delivered = (skillResults[role]?.skills || []).filter((record) => record.status === 'delivered').map((record) => `/${relative(root, record.path)}`)
-    const skills = (entry.grants?.skills || []).filter((skill) => !delivered.some((suffix) => skill.endsWith(suffix)))
+    const inlined = (skillResults[role]?.skills || []).filter((record) => record.status === 'delivered' || record.status === 'granted').map((record) => `/${relative(root, record.path)}`)
+    const skills = (entry.grants?.skills || []).filter((skill) => !inlined.some((suffix) => skill.endsWith(suffix)))
+    for (const record of (skillResults[role]?.skills || []).filter((record) => record.status === 'granted' && record.path.endsWith('/SKILL.md'))) skills.push(record.path)
     adapters[role] = { ...entry, grants: { ...entry.grants, skills } }
   }
 }

@@ -14,7 +14,7 @@ import {
   ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CONVENTIONS_IDIOM_BYTE_LIMIT, CONVENTIONS_IDIOM_LIMIT, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
-  discoverTripwires, exportEntries, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
+  discoverTripwires, exportEntries, extractKeys, extractPremiseClaims, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
@@ -4288,4 +4288,70 @@ test('BR8 unreadable ps and missing summary retain honest reap verdicts', () => 
   assert.equal(badCwd.reason, 'spawn-error')
   assert.equal(badCwd.reap.outcome, 'unproven')
   assert.equal(badCwd.reap.reason, 'no-report')
+})
+
+// MUTATION: replace `commentCitation.index === commentHead` with `commentCitation.index >= 0` and the mid-sentence mention re-binds to comment form, reddening the prose binding assertion.
+test('comment head only binds at head — mid-sentence mention falls through to prose', () => {
+  const ask = [
+    'The quoted source is lib/widget.mjs:1-2.',
+    '```js',
+    '// this ordinary comment mentions scripts/factory/emit.mjs:631 mid-sentence',
+    'const answer = 1',
+    '```',
+  ].join('\n')
+  const claim = extractPremiseClaims({ ask }).find((entry) => entry.kind === 'bound' || entry.kind === 'unbound')
+  assert.equal(claim.kind, 'bound')
+  assert.equal(claim.citation, 'lib/widget.mjs:1-2')
+  assert.equal(claim.path, 'lib/widget.mjs')
+  assert.equal(claim.binding, 'prose')
+  assert.equal(claim.quote, '// this ordinary comment mentions scripts/factory/emit.mjs:631 mid-sentence\nconst answer = 1')
+})
+
+// MUTATION: replace `commentCitation.index === commentHead` with `commentCitation.index >= 0` and the mid-sentence mention binds instead of staying unbound, reddening the unbound assertion.
+test('comment head only binds at head — mid-sentence mention without prose stays unbound', () => {
+  const ask = [
+    '```js',
+    '// this ordinary comment mentions scripts/factory/emit.mjs:631 mid-sentence',
+    'const answer = 1',
+    '```',
+  ].join('\n')
+  const claim = extractPremiseClaims({ ask }).find((entry) => entry.kind === 'bound' || entry.kind === 'unbound')
+  assert.equal(claim.kind, 'unbound')
+  assert.equal(claim.citation, null)
+  assert.equal(claim.path, null)
+  assert.equal(claim.binding, null)
+  assert.equal(claim.quote, '// this ordinary comment mentions scripts/factory/emit.mjs:631 mid-sentence\nconst answer = 1')
+})
+
+// MUTATION: replace `binding.form === 'comment' ? region.interior.slice(1) : region.interior` with `region.interior` and the head-citation metadata line stays in the quote, reddening the quote assertion.
+test('comment head citation still binds comment form and drops the metadata line', () => {
+  const ask = [
+    '```js',
+    '// lib/widget.mjs:1 — head note',
+    'const answer = 1',
+    '```',
+  ].join('\n')
+  const claim = extractPremiseClaims({ ask }).find((entry) => entry.kind === 'bound' || entry.kind === 'unbound')
+  assert.equal(claim.kind, 'bound')
+  assert.equal(claim.citation, 'lib/widget.mjs:1')
+  assert.equal(claim.path, 'lib/widget.mjs')
+  assert.equal(claim.binding, 'comment')
+  assert.equal(claim.quote, 'const answer = 1')
+})
+
+// MUTATION: replace `binding.form === 'comment' ? region.interior.slice(1) : region.interior` with `region.interior` and the whitespace-head metadata line stays in the quote, reddening the quote assertion.
+test('whitespace head citation still binds comment form and drops the metadata line', () => {
+  const ask = [
+    '```js',
+    '//   lib/widget.mjs:1-2 — head note',
+    'const answer = 1',
+    'const other = 2',
+    '```',
+  ].join('\n')
+  const claim = extractPremiseClaims({ ask }).find((entry) => entry.kind === 'bound' || entry.kind === 'unbound')
+  assert.equal(claim.kind, 'bound')
+  assert.equal(claim.citation, 'lib/widget.mjs:1-2')
+  assert.equal(claim.path, 'lib/widget.mjs')
+  assert.equal(claim.binding, 'comment')
+  assert.equal(claim.quote, 'const answer = 1\nconst other = 2')
 })

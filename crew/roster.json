@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-16",
+  "updated_at": "2026-10-17",
   "tiers": {
     "mechanical": {
       "advisor": null,
@@ -71,7 +71,7 @@
       },
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0-contributor",
+        "id": "muse-wonder-full-1.0-contributor",
         "agent": "pi",
         "effort": "high"
       },
@@ -396,6 +396,21 @@
       ],
       "source": "api.meta.ai/v1/models (Muse Code subscription; rates borrowed from models.dev meta/muse-wonder-1.0)",
       "last_verified": "2026-10-16"
+    },
+    "meta/muse-wonder-full-1.0-contributor": {
+      "cost_in_per_mtok": 4,
+      "cost_out_per_mtok": 20,
+      "cost_cache_read_per_mtok": 0.2,
+      "cost_cache_write_per_mtok": 0,
+      "cache_rate_source": "No catalog publishes a rate for meta/muse-wonder-full-1.0-contributor: api.meta.ai/v1/models serves the id (listed live on the Muse Code subscription and probed through pi, 2026-10-17) but neither pi's model directory nor models.dev lists it or any muse-wonder-full model. This entry carries the published muse-wonder-1.0 rates (input 4, output 20, cacheRead 0.2, cacheWrite 0 per Mtok, models.dev provider meta) as a BORROWED figure, not a measurement and not a bound: Full may price above plain Wonder, so cost ceilings computed from this entry may err low. Replace when a catalog publishes one.",
+      "context": 1048576,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "vendor-diverse"
+      ],
+      "source": "api.meta.ai/v1/models (Muse Code subscription; rates borrowed from models.dev meta/muse-wonder-1.0)",
+      "last_verified": "2026-10-17"
     }
   }
 }

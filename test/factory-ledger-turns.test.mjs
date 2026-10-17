@@ -796,6 +796,7 @@ test('every roster model carries its ratified cache rates and their provenance',
     'openai/gpt-6-astra': { read: 1, write: 12.5 },
     "meta/muse-spark-1.3-contributor": { read: 0.002, write: 0 },
     'meta/muse-wonder-1.0-contributor': { read: 0.2, write: 0 },
+    'meta/muse-wonder-full-1.0-contributor': { read: 0.2, write: 0 },
     'llama-swap/qwen3.8-27b': { read: 0, write: 0 },
     'llama-swap/gpt-oss-20b': { read: 0, write: 0 },
     'llama-swap/gemma4-31b': { read: 0, write: 0 },
@@ -813,6 +814,7 @@ test('every roster model carries its ratified cache rates and their provenance',
     'openai/gpt-6-luna': 'models.dev lists openai/gpt-6-luna at input 0.1, output 0.5, cacheRead 0.01, cacheWrite 0.125 per Mtok and context 1050000. It also declares a second price tier above 272000 input tokens (input 0.2, output 0.75, cacheRead 0.02, cacheWrite 0.25) that this single-rate entry cannot represent; the openai-codex route this model is seated through serves a 272K context, so one request cannot reach it there, but a route serving the listed 1050000 context would be underpriced by this entry.',
     "meta/muse-spark-1.3-contributor": "openrouter publishes a cacheRead of 0.002 per Mtok against a 0.1 input rate for meta/muse-spark-1.3-contributor — a 0.02x multiplier, NOT the 0.10x that anthropic and openai publish. The figure is recorded as served rather than normalised to the ratified 0.10x, because a rate nobody charges is not a cheaper guess, it is a wrong one. cacheWrite is a published 0.00x rate rather than an absent one.",
     'meta/muse-wonder-1.0-contributor': "No catalog publishes a rate for meta/muse-wonder-1.0-contributor: api.meta.ai/v1/models serves the id (probed through pi 1.3.0 on the Muse Code subscription, 2026-10-16) but neither pi's model directory nor models.dev lists it. This entry carries the published muse-wonder-1.0 rates (input 4, output 20, cacheRead 0.2, cacheWrite 0 per Mtok, models.dev provider meta) as an UPPER BOUND, not a measurement: Contributor tiers price below their base model (Spark 1.3 Contributor is 0.1/0.2 against 1.25/4.25), so cost ceilings computed from this entry err high. pi prices the probe at 1.25/4.25, a fallback for an uncatalogued id, not a published rate. Replace when a catalog publishes one.",
+    'meta/muse-wonder-full-1.0-contributor': "No catalog publishes a rate for meta/muse-wonder-full-1.0-contributor: api.meta.ai/v1/models serves the id (listed live on the Muse Code subscription and probed through pi, 2026-10-17) but neither pi's model directory nor models.dev lists it or any muse-wonder-full model. This entry carries the published muse-wonder-1.0 rates (input 4, output 20, cacheRead 0.2, cacheWrite 0 per Mtok, models.dev provider meta) as a BORROWED figure, not a measurement and not a bound: Full may price above plain Wonder, so cost ceilings computed from this entry may err low. Replace when a catalog publishes one.",
     'llama-swap/qwen3.8-27b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/qwen3.8-27b cache reads and writes.',
     'llama-swap/gpt-oss-20b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gpt-oss-20b cache reads and writes.',
     'llama-swap/gemma4-31b': 'llama-swap local serving has a published 0 rate rather than an absent one for llama-swap/gemma4-31b cache reads and writes.',
@@ -840,7 +842,7 @@ test('every roster model carries its ratified cache rates and their provenance',
       // Published at 0.25 against a 10 input — 0.025x — by models.dev and by Claude Code's own
       // price table; pinned to that figure for the same reason as Opus 5.5 above.
       assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.025) <= 1e-12)
-    } else if (key === 'meta/muse-wonder-1.0-contributor') {
+    } else if (key === 'meta/muse-wonder-1.0-contributor' || key === 'meta/muse-wonder-full-1.0-contributor') {
       // Borrowed from models.dev's meta/muse-wonder-1.0 as an upper bound (2026-10-16): 0.2 against
       // a 4 input — 0.05x. Pinned to the borrowed figure for the same reason as Opus 5.5 above.
       assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.05) <= 1e-12)

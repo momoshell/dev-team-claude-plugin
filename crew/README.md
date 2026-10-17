@@ -29,7 +29,7 @@ still win over the one-flag form.
 |---|---|---|---|---|---|---|
 | `mechanical` | — | — | pi/muse-wonder-1.0-contributor, medium | pi/muse-spark-1.3-contributor, medium | pi/gpt-6.1-sol, high | — |
 | `build` | pi/gpt-6.1-sol, medium | claude/claude-opus-5-5, high | pi/muse-wonder-1.0-contributor, medium | pi/muse-spark-1.3-contributor, xhigh | pi/gpt-6.1-sol, high | — |
-| `judge` | pi/gpt-6.1-sol, medium | claude/claude-opus-5-5, high | pi/muse-wonder-1.0-contributor, high | pi/muse-spark-1.3-contributor, xhigh | pi/gpt-6.1-sol, high | claude/claude-opus-5-5, xhigh |
+| `judge` | pi/gpt-6.1-sol, medium | claude/claude-opus-5-5, high | pi/muse-wonder-full-1.0-contributor, high | pi/muse-spark-1.3-contributor, xhigh | pi/gpt-6.1-sol, high | claude/claude-opus-5-5, xhigh |
 
 Cells are `<agent>/<id>, <effort>`, or — for an unseated role.
 This table shows the primary rung only; `crew/roster.json` is authoritative.

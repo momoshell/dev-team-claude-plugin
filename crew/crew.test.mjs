@@ -2398,7 +2398,7 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
 
 test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet successors, the Muse planner and builder, and the Sol reviewer', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-10-16')
+  assert.equal(shipped.updated_at, '2026-10-17')
   // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
   assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
   // Operator, 2026-10-16: Spark builds at xhigh on build and judge; mechanical stays medium.
@@ -2409,7 +2409,9 @@ test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet success
   assert.equal(shipped.tiers.mechanical.advisor, null)
   for (const tier of ['mechanical', 'build', 'judge']) {
     // Operator, 2026-10-16: the planner and builder seats move onto the Muse Code subscription.
-    assert.deepEqual([shipped.tiers[tier].planner.provider, shipped.tiers[tier].planner.id, shipped.tiers[tier].planner.agent], ['meta', 'muse-wonder-1.0-contributor', 'pi'])
+    // Operator, 2026-10-17: the judge planner is Wonder Full; mechanical and build keep Wonder.
+    const plannerId = tier === 'judge' ? 'muse-wonder-full-1.0-contributor' : 'muse-wonder-1.0-contributor'
+    assert.deepEqual([shipped.tiers[tier].planner.provider, shipped.tiers[tier].planner.id, shipped.tiers[tier].planner.agent], ['meta', plannerId, 'pi'])
     assert.deepEqual([shipped.tiers[tier].builder.provider, shipped.tiers[tier].builder.id, shipped.tiers[tier].builder.agent], ['meta', 'muse-spark-1.3-contributor', 'pi'])
     // Operator, 2026-10-16: Sol reviews on every tier, through pi, at high.
     assert.deepEqual(shipped.tiers[tier].reviewer, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' })
@@ -2485,6 +2487,13 @@ test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet success
   assert.deepEqual([wonder.cost_in_per_mtok, wonder.cost_out_per_mtok, wonder.cost_cache_read_per_mtok, wonder.cost_cache_write_per_mtok, wonder.context], [4, 20, 0.2, 0, 1048576])
   assert.match(wonder.cache_rate_source, /UPPER BOUND, not a measurement/)
   assert.equal(wonder.last_verified, '2026-10-16')
+  // Nor Wonder Full: its row borrows the same rates, and says the error direction is unknown.
+  assert.ok(frontier.members.includes('meta/muse-wonder-full-1.0-contributor'))
+  assert.match(String(frontier.membership_basis), /meta\/muse-wonder-full-1\.0-contributor is an assertion ratified by the operator on 2026-10-17/)
+  const wonderFull = shipped.models['meta/muse-wonder-full-1.0-contributor']
+  assert.deepEqual([wonderFull.cost_in_per_mtok, wonderFull.cost_out_per_mtok, wonderFull.cost_cache_read_per_mtok, wonderFull.cost_cache_write_per_mtok, wonderFull.context], [4, 20, 0.2, 0, 1048576])
+  assert.match(wonderFull.cache_rate_source, /BORROWED figure, not a measurement and not a bound/)
+  assert.equal(wonderFull.last_verified, '2026-10-17')
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
   assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
   assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)

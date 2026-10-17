@@ -638,9 +638,9 @@ export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // implements: an unimplemented value would pass validation and then be run as
 // something else, which is the drift the enum exists to stop.
 export const SHAPE_SOURCES = Object.freeze({
-  scope: Object.freeze(['plan', 'inherited', 'brief']),
+  scope: Object.freeze(['plan', 'inherited', 'brief', 'lane']),
   lane: Object.freeze(['plan', 'ctx']),
-  gate: Object.freeze(['plan', 'none', 'brief']),        // ⚓ A2
+  gate: Object.freeze(['plan', 'none', 'brief', 'lane']),        // ⚓ A2
 })
 // The stages the reviewed executor emits unconditionally after the plan loop —
 // they ARE the reviewed loop, and no declaration may skip them (:1930-2167).
@@ -666,13 +666,19 @@ export const DIRECTED_SOURCES = Object.freeze({ scope: 'brief', lane: 'ctx', gat
 export const DIRECTED_SEATS = Object.freeze(['builder', 'reviewer'])
 export const DIRECTED_STAGES = Object.freeze([DIRECTED_STAGE_HEAD, 'build', 'scope-gate',
   'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'converge'])
-// The CLOSED table of partial reviewed topologies this executor implements. Data
+export const FINISH_VARIANT = 'finish'
+export const FINISH_SOURCES = Object.freeze({ scope: 'lane', lane: 'ctx', gate: 'lane' })
+export const FINISH_SEATS = Object.freeze(['builder', 'reviewer'])
+export const FINISH_STAGES = Object.freeze(['finish-triage', 'build', 'scope-gate', 'lane', 'gate', 'review', 'commit', 'rebase', 'suite', 'decision'])
+export const FINISH_REVIEW_CAP = 3
+// The CLOSED table of THREE partial reviewed topologies this executor implements. Data
 // consulted at fixed sites, never a composition engine: each key has its own
 // executor branch below, and a name absent from this table is refused before it
 // can reach a stage it does not declare.
 export const PARTIAL_REVIEWED = Object.freeze({
   [TRIAGE_STAGE_HEAD]: Object.freeze({ sources: TRIAGE_SOURCES, stages: TRIAGE_STAGES, required_seats: 'tier' }),
   [DIRECTED_STAGE_HEAD]: Object.freeze({ sources: DIRECTED_SOURCES, stages: DIRECTED_STAGES, required_seats: DIRECTED_SEATS }),
+  [FINISH_VARIANT]: Object.freeze({ sources: FINISH_SOURCES, stages: FINISH_STAGES, required_seats: FINISH_SEATS }),
 })
 
 // Why a declaration's sources cannot be honoured, or null. The supplied key set
@@ -6272,12 +6278,13 @@ function runTask(ctx, io, crash) {
   if (declarationDefect) {
     throw fail('variant', `the ${variant} shape's declaration cannot be honoured: ${declarationDefect}`)
   }
-  const limits = { ...LIMITS, ...(ctx.limits || {}) }
+  const limits = { ...LIMITS, ...(variant === FINISH_VARIANT ? { review_rounds: FINISH_REVIEW_CAP } : {}), ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
   const S = { consults: 0, stages: [], flakes: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  const finishState = { verdicts: [], capped: false, openFindings: [], gateBytes: null, gateFile: null, escalation: null, gateOk: null }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
@@ -8525,6 +8532,110 @@ function runTask(ctx, io, crash) {
       },
     } }
   }
+  const driveFinishRound = () => {
+    stage('finish-triage:r1')
+    const taskReturnPath = ctx.finish?.task_return
+    if (typeof taskReturnPath !== 'string' || !taskReturnPath) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'ctx.finish.task_return is absent — a finish run finishes the escalated lane named by its task return') }
+    }
+    let taskReturn = null
+    try {
+      const taskReturnText = io.readFile(taskReturnPath)
+      taskReturn = JSON.parse(taskReturnText)
+    } catch {
+      taskReturn = null
+    }
+    if (!taskReturn || typeof taskReturn !== 'object') {
+      stageComplete()
+      return { stop: escalate('finish-triage', `the escalated task return at ${taskReturnPath} is unreadable or unparseable — the finish scope, lane, and gate cannot be adopted from it`) }
+    }
+    const escalation = taskReturn.details?.escalation ?? null
+    const where = escalation?.where
+    const why = escalation?.why
+    if (typeof where !== 'string' || !where || typeof why !== 'string' || !why) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'the escalated task return carries no details.escalation {where, why} — there is no lane to finish') }
+    }
+    if (taskReturn.details?.commit != null) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'finishing a committed build is split 2 work — this lane already committed, so there is nothing to finish') }
+    }
+    let acceptedEnv = null
+    try {
+      const acceptedText = readOrNull(art('plan.accepted.envelope.json'))
+      if (typeof acceptedText === 'string') acceptedEnv = JSON.parse(acceptedText)
+    } catch {
+      acceptedEnv = null
+    }
+    const scope = finishScopeFrom(acceptedEnv, taskReturn)
+    if (!scope) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'neither the accepted envelope nor resume_checkpoint.accepted_scope names a usable files_in_scope — the scope gate cannot run without it') }
+    }
+    const scopeErrors = validateScopeEntries(scope)
+    if (scopeErrors.length > 0) {
+      stageComplete()
+      return { stop: escalate('finish-triage', `files_in_scope carries entries the scope gate cannot honor — fix the scope, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`) }
+    }
+    const gateCmd = taskReturn.details?.gate?.cmd
+    if (typeof gateCmd !== 'string' || !gateCmd.trim()) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'the escalated task return carries no details.gate.cmd — the lane gate cannot be re-proved without it') }
+    }
+    const rawGateFile = gateFileFromCommand(gateCmd)
+    const gateFile = rawGateFile ? (rawGateFile.startsWith('/') ? rawGateFile : `${ctx.checkout}/${rawGateFile}`) : art('gate.mjs')
+    const gateBytes = readOrNull(gateFile)
+    if (typeof gateBytes !== 'string') {
+      stageComplete()
+      return { stop: escalate('finish-triage', `the gate file at ${gateFile} is unreadable — the lane gate cannot be re-proved without it`) }
+    }
+    finishState.gateBytes = gateBytes
+    finishState.gateFile = gateFile
+    finishState.escalation = escalation
+    const laneCmd = shape.sources.lane === 'ctx' ? ctx.lane : null
+    if (!laneCmd) {
+      stageComplete()
+      return { stop: escalate('finish-triage', 'a finish run takes its validation lane from the dispatch (--validation-lane) and ctx carries none') }
+    }
+    const briefPath = art('finish-brief.md')
+    const acceptedPlanPath = art('plan.accepted.md')
+    const reviewBytes = readOrNull(art('review.md'))
+    io.writeFile(briefPath, [
+      '# Finish assignment', '',
+      `Escalation: ${escalation.where}: ${escalation.why}`, '',
+      `Accepted plan: ${acceptedPlanPath}`,
+      `Gate: ${gateCmd}`,
+      ...(typeof reviewBytes === 'string' ? [`Review: ${art('review.md')}`] : []),
+      '',
+      'Files in scope:',
+      ...scope.map((entry) => `- ${entry}`),
+      '',
+      `Validation lane (fixed): ${laneCmd}`,
+      '',
+      `Do not write to ${acceptedPlanPath}, ${art('plan.accepted.envelope.json')}, ${gateFile}, or ${taskReturnPath}: plan.accepted.md, plan.accepted.envelope.json, the gate file and the escalated task.json are read-only.`,
+      '',
+      'Return contract:',
+      '  status: "done"',
+      '  summary: a non-empty sentence',
+    ].join('\n'))
+    io.log(recordRow({ at: io.now(), finish: {
+      variant: 'finish', seat: null, scope_source: 'lane', lane_source: 'ctx',
+      gate_source: 'lane', scope: scope.length,
+    } }))
+    stageComplete()
+    return { plan: {
+      status: 'done', role: null, summary: 'finish of the lane escalated at ' + where,
+      artifacts: [briefPath],
+      details: {
+        plan_path: briefPath,
+        files_in_scope: scope,
+        validation_lane: laneCmd,
+        gate_cmd: gateCmd,
+        commit_subject: acceptedEnv?.details?.commit_subject,
+      },
+    } }
+  }
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = stepCheckpoint ? stepCheckpoint.returns.planner : null
   let planAdversary = null
@@ -9057,7 +9168,7 @@ function runTask(ctx, io, crash) {
   }
   }
   if (!plans && !stepCheckpoint) {
-    const sourced = variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
+    const sourced = variant === FINISH_VARIANT ? driveFinishRound() : variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
     if (sourced.stop) return sourced.stop
     planEnv = sourced.plan
   }
@@ -9083,7 +9194,7 @@ function runTask(ctx, io, crash) {
     const acceptedEnvelope = readOrNull(acceptedEnvelopePath)
     acceptedPlannerReturn = typeof acceptedEnvelope === 'string' ? { path: acceptedEnvelopePath, text: acceptedEnvelope } : null
   }
-  freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
+  if (variant !== FINISH_VARIANT) freezeAcceptedPlan(planPath, plans ? acceptedPlannerReturn : null)
   restoreAcceptedPlan(S.stages.at(-1)?.startsWith('check:') ? 'plan-check' : 'plan')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
   const plannedScopeFiles = planEnv.details?.files_in_scope
@@ -9234,7 +9345,7 @@ function runTask(ctx, io, crash) {
   {
     const coverage = acceptanceCoverage(briefText, mutations)
     io.log(recordRow({ at: io.now(), event: 'acceptance-coverage', ...coverage }))
-    if (coverage.status === 'measured' && coverage.uncovered.length > 0) {
+    if (coverage.status === 'measured' && coverage.uncovered.length > 0 && variant !== FINISH_VARIANT) {
       return escalate('plan', acceptanceCoverageWhy(coverage), planEnv.artifacts || [])
     }
   }
@@ -9366,7 +9477,7 @@ function runTask(ctx, io, crash) {
       io.log(recordRow({ at: io.now(), gate_discrimination: gateDiscrimination, gate_generation: gateGeneration, gate_summary: summary, gate_proof_note: gateProofNote }))
       emit({ kind: 'discrimination', generation: gateGeneration, verdict: gateDiscrimination, summary, note: gateProofNote })
     }
-    if (typeof io.runClean !== 'function') {
+    if (typeof io.runClean !== 'function' || !stageEnabled(shape, 'gate-proof')) {
       gateDiscrimination = 'unproven'
       settleProof(null)
       return null
@@ -10491,7 +10602,7 @@ function runTask(ctx, io, crash) {
     try { stepReverifyResult = runGate('step:reverify', gateCmd) } catch { stepReverifyResult = null }
     stageComplete()
   }
-  if (gateCmd && !stepCheckpoint) {
+  if (gateCmd && !stepCheckpoint && variant !== FINISH_VARIANT) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
     let finalBaselineOutput = baseline.output
@@ -11668,6 +11779,8 @@ function runTask(ctx, io, crash) {
     // (pre-build) tree before it is trusted against the already-built tree.
     if (gateCmd) {
       stage(`gate:r${round}`)
+      const currentGateBytes = finishState.gateFile ? readOrNull(finishState.gateFile) : null
+      if (variant === FINISH_VARIANT) { if (currentGateBytes !== finishState.gateBytes) { stageComplete(); return escalate('finish-gate', 'the gate file changed during the finish run; mutation re-proof of a changed check is split 2') } }
       let forceFullCheckProof = false
       let gateRes = buildLoopGate(`gate:r${round}`, gateCmd)
       // MUTATION B3: neutralise this call and the triage this lane hoisted no longer
@@ -11811,6 +11924,7 @@ function runTask(ctx, io, crash) {
         continue
       }
       lastGateOutput = gateRes.output
+      if (variant === FINISH_VARIANT) finishState.gateOk = gateRes.ok
       if (gateRes.ok) {
         finalReview.residuals = upsertReversionResidual(finalReview.residuals, pendingReversion)
         pendingReversion = null
@@ -12031,6 +12145,7 @@ function runTask(ctx, io, crash) {
       let panelResult = null
       let panelBeforeAcceptFindings = null
       let panelBeforeLastReview = null
+      if (variant === FINISH_VARIANT && finishState.verdicts.length >= FINISH_REVIEW_CAP) { stageComplete(); return escalate('review', '[finish-review-cap] the finish run has spent its 3 reviewer verdicts; another review would exceed the ADR-051 cap') }
       try {
         if (panel) {
           panelBeforeAcceptFindings = S.acceptFindings
@@ -12078,6 +12193,7 @@ function runTask(ctx, io, crash) {
       const counted = v === 'revise'
       if (counted) reviews += 1
       io.log(recordRow({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews, ...(shapeRefusal ? { refused: shapeRefusal.reason } : {}) } }))
+      if (variant === FINISH_VARIANT && v != null) finishState.verdicts.push({ round: roundNo, verdict: v })
       // #800 R4 — dispositions are settled BEFORE either verdict branch, but ONLY for a
       // verdict the driver could read. A shape-refused or unreadable envelope is
       // refused, never partially executed. An `ask-user` finding is a decision code may
@@ -12208,6 +12324,7 @@ function runTask(ctx, io, crash) {
         stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build
       }
       if (v === 'revise') {
+        if (variant === FINISH_VARIANT && finishState.verdicts.length >= FINISH_REVIEW_CAP) { finishState.capped = true; finishState.openFindings = reviewFindings(review.details)?.findings ?? []; accepted = 'review-capped'; stageComplete(); break build }
         const fixes = applyAutoFixes(disposed.autoFix, roundNo)
         // #839 — CODE closed every finding that demanded a change, but the guard that
         // would catch the class next time does not exist yet and only a builder can
@@ -12394,7 +12511,7 @@ function runTask(ctx, io, crash) {
   }
 
   const reshapeFixRounds = wholeBuildRound - 2
-  const reshapeEligible = !reshapeAttempted && !pendingRebaseConflict && gateCmd && reshapeFixRounds >= 2
+  const reshapeEligible = !reshapeAttempted && !pendingRebaseConflict && gateCmd && stageEnabled(shape, 'gate-proof') && reshapeFixRounds >= 2
   if (reshapeEligible) {
     reshapeAttempted = true
     let reshapeSnapshot = null
@@ -12648,18 +12765,21 @@ function runTask(ctx, io, crash) {
         pendingFrozenInventory = null
       }
       stageComplete()
-      stage('document')
-      const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
-      S.commit = documented.commit
-      S.documentation = documented.documentation
-      stageComplete()
+      if (variant !== FINISH_VARIANT) {
+        stage('document')
+        const documented = runDocumentationDecision({ ctx, io, commit: S.commit, inScope })
+        S.commit = documented.commit
+        S.documentation = documented.documentation
+        stageComplete()
+      }
     }
   }
 
-  if (publishing) {
+  const rebaseBranch = publishing ? publishBase : 'main'
+  if (publishing || variant === FINISH_VARIANT) {
     stage('rebase')
     const rebaseStartedAt = io.now()
-    const base = `origin/${publishBase}`
+    const base = `origin/${rebaseBranch}`
     const probe = (command) => {
       let result
       try { result = io.run(command) } catch { return null }
@@ -12668,7 +12788,7 @@ function runTask(ctx, io, crash) {
     }
     if (!continuingRebase) {
     let fetched
-    try { fetched = io.run(`git fetch origin ${shellArg(publishBase)}`) }
+    try { fetched = io.run(`git fetch origin ${shellArg(rebaseBranch)}`) }
     catch (err) { fetched = { ok: false, output: err?.message ?? String(err) } }
     if (!fetched?.ok) {
       stageComplete()
@@ -13355,7 +13475,13 @@ function runTask(ctx, io, crash) {
     return escalate('cold-suite', 'the cold suite was green, but its pass/fail summary could not be measured for publication', [], { commit: S.commit, cold_suite: coldSuite })
   }
 
-  if (publishing) {
+  let finishReportPath = null
+  if (variant === FINISH_VARIANT) {
+    stage('decision')
+    finishReportPath = art('finish-report.json')
+    io.writeFile(finishReportPath, JSON.stringify(composeFinishReport({ lane: ctx.laneName || ctx.task, run_id: ctx.run_id ?? null, escalation: finishState.escalation, capped: finishState.capped, commit: S.commit, base: baseSha, verdicts: finishState.verdicts, openFindings: finishState.openFindings, gateCmd, gateOk: finishState.gateOk, coldVerdict: coldSuite.verdict, residuals: finalReview.residuals ?? [] }), null, 2))
+    stageComplete()
+  } else if (publishing) {
     stage('publish')
     const branch = String(publishing.branch || '').trim()
     const refusePublish = (reason, detail) => {
@@ -13468,6 +13594,7 @@ function runTask(ctx, io, crash) {
     artifacts: [planPath, art('review.md'), journal],
     details: {
       ...(variant === DIRECTED_STAGE_HEAD ? { variant } : {}),
+      ...(variant === FINISH_VARIANT ? { variant: 'finish', finish_report: finishReportPath } : {}),
       commit: S.commit, stages: S.stages, files_committed: publishing ? publishFiles : committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       ...(published ? { pr: published } : {}),
@@ -13486,6 +13613,36 @@ function runTask(ctx, io, crash) {
   markResume(result, result.details)
   stageComplete()
   return result
+  }
+}
+
+export function finishScopeFrom(acceptedEnv, taskReturn) {
+  const acceptedScope = acceptedEnv?.details?.files_in_scope
+  if (Array.isArray(acceptedScope) && acceptedScope.length > 0) return [...acceptedScope]
+  const fallback = taskReturn?.details?.resume_checkpoint?.accepted_scope
+  if (Array.isArray(fallback) && fallback.length > 0) return [...fallback]
+  return null
+}
+
+export function composeFinishReport({ lane, run_id, escalation, capped, commit, base, verdicts, openFindings, gateCmd, gateOk, coldVerdict, residuals }) {
+  const verdictList = Array.isArray(verdicts) ? [...verdicts] : []
+  const findings = Array.isArray(openFindings) ? [...openFindings] : []
+  const residualList = Array.isArray(residuals) ? [...residuals] : []
+  return {
+    schema: 'finish-report/1',
+    lane,
+    run_id: run_id ?? null,
+    ...(run_id == null ? { run_id_absent: 'run-id-not-supplied' } : {}),
+    escalation: escalation ?? null,
+    outcome: capped ? 'review-capped' : 'ready',
+    commit: commit ?? null,
+    base: base ?? null,
+    ...(base == null ? { base_absent: 'rebase-base-not-measured' } : {}),
+    review: { rounds: verdictList.length, verdicts: verdictList, open_findings: capped ? findings : [] },
+    gate: { cmd: gateCmd ?? null, ok: gateOk ?? null },
+    suite: { warm: 'green', cold: coldVerdict ?? null },
+    residuals: residualList,
+    pushed: false,
   }
 }
 

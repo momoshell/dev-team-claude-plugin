@@ -135,6 +135,18 @@ const EXECUTABLE_SHAPES = Object.freeze({
     assignment: null,
     sources: Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' }),
   }),
+  finish: Object.freeze({
+    execution: 'reviewed',
+    required_seats: Object.freeze(['builder', 'reviewer']),
+    stages: Object.freeze(['finish-triage', 'build', 'scope-gate',
+      'lane', 'gate', 'review', 'commit', 'rebase', 'suite', 'decision']),
+    off_critical_path_stages: NO_OFF_CRITICAL_PATH_STAGES,
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or the third revise at the finish review cap (review-capped)',
+    envelope_fields: Object.freeze([]),
+    assignment: null,
+    sources: Object.freeze({ scope: 'lane', lane: 'ctx', gate: 'lane' }),
+  }),
   verify_only: Object.freeze({
     execution: 'envelope',
     required_seats: Object.freeze(['reviewer']),

@@ -10,8 +10,6 @@
   "crew/reclaim.mjs:12": "export const PARK_STATES = Object.freeze",
   "crew/pi/extensions/subagent.ts:473": "totals.cost += usage.cost.total",
   "crew/pi/extensions/subagent.ts:653": "Complete or absent — never partial",
-  "crew/shape-validator.mjs:255": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/shape-validator.mjs:244": "if (!shape || typeof shape !== 'object')",
   "scripts/factory/reap-stale.mjs:80": "export const REAP_ACCOUNTING = Object.freeze",
   "crew/daemon.test.mjs:265": "assert.doesNotMatch(variantsCode",
   "crew/daemon.test.mjs:254": "imports.every((specifier)",
@@ -41,5 +39,7 @@
   "scripts/factory/ledger.mjs:8395": "function refuseUnknownFlags(verb, flags)",
   "scripts/factory/ledger.mjs:8355": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:8403": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:10237": "unknown verb: ${verb}"
+  "scripts/factory/ledger.mjs:10237": "unknown verb: ${verb}",
+  "crew/shape-validator.mjs:261": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
+  "crew/shape-validator.mjs:250": "if (!shape || typeof shape !== 'object')"
 }

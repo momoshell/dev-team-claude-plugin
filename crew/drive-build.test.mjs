@@ -6,7 +6,7 @@ import { tokenizeJs } from './js-tokens.mjs'
 import {
   staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_REPAIR, DIRECTED_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
@@ -3658,7 +3658,7 @@ test('directed declaration is pinned and honourable', () => {
   assert.deepEqual(VARIANTS.directed, DIRECTED_SNAPSHOT)
   assert.equal(shapeDefect(VARIANTS.directed, 'directed'), null)
   assert.ok(shapeDefect(VARIANTS.directed, 'quality'))
-  assert.deepEqual(Object.keys(PARTIAL_REVIEWED), ['repair', 'directed'])
+  assert.deepEqual(Object.keys(PARTIAL_REVIEWED), ['repair', 'directed', 'finish'])
 })
 
 test('A1-directed: directed preserves its baseline-before-build trace', () => {
@@ -3704,7 +3704,7 @@ test('A1-directed: directed preserves its baseline-before-build trace', () => {
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
   assert.equal(Object.isFrozen(VARIANTS), true)
-  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'verify_only', 'stepped'])
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'review_only', 'review_panel', 'repair', 'directed', 'finish', 'verify_only', 'stepped'])
   assert.deepEqual(ENVELOPE_FIELD_KINDS, ['text', 'records', 'paths', 'object'])
   assert.equal(VARIANTS.full.required_seats, 'tier')
   assert.match(VARIANTS.full.accepted_by, /review.*pass/)
@@ -12068,5 +12068,254 @@ test('RV1-1 checkpoint freezes runner and rerun, and refuses bad frozen values',
     const invalid = rv1Checkpoint(); invalid.suite.rerun = value
     assert.equal(resumeCheckpointDefect(invalid), 'checkpoint test rerun command is invalid')
   }
+})
+
+var FINISH_NL = String.fromCharCode(10)
+var FINISH_GATE = 'node /tmp/fake-task/gate.mjs'
+var FINISH_GREEN = GATE_SUMMARY_PREFIX + ' ' + '{"total":2,"failed":0,"errored":0}'
+var FINISH_RED = 'red' + FINISH_NL + GATE_SUMMARY_PREFIX + ' ' + '{"total":2,"failed":2,"errored":0}'
+function finishBaseRuns() {
+  var runs = {}
+  runs[FINISH_GATE] = { ok: true, output: FINISH_GREEN }
+  runs['lane-cmd'] = { ok: true, output: '' }
+  runs['suite-cmd'] = { ok: true, output: '' }
+  runs['git fetch origin ' + shellArg('main')] = { ok: true, output: '' }
+  runs['git rev-parse ' + shellArg('origin/main')] = { ok: true, output: 'base1111' + FINISH_NL }
+  runs['git merge-base HEAD ' + shellArg('origin/main')] = { ok: true, output: 'base1111' + FINISH_NL }
+  runs['git rev-parse HEAD'] = { ok: true, output: 'pre1111' + FINISH_NL }
+  return runs
+}
+function finishHappyIo(over) {
+  var base = { files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: finishBaseRuns(), cleanRuns: {}, changed: ['a.mjs', 'a.test.mjs'] }
+  base.cleanRuns[FINISH_GATE] = { ok: false, output: FINISH_RED }
+  if (over) {
+    for (var k in over) base[k] = over[k]
+  }
+  return fakeIo(base)
+}
+
+test('FS3: finish happy trace ends at decision with nothing pushed', () => {
+  var io = finishHappyIo()
+  var result = driveTask(CTX_FINISH, io)
+  assert.equal(result.status, 'done')
+  var raw = result.details.stages.slice()
+  assert.ok(raw.indexOf('review:pass') !== -1)
+  var normalised = raw.filter(function(label) { return label !== 'review:pass' }).filter(function(label) { var head = String(label).split(':')[0]; return head !== 'done' && head !== 'escalate' }).map(function(label) { return String(label).split(':')[0] })
+  assert.deepEqual(normalised, ['finish-triage', 'build', 'scope-gate', 'lane', 'gate', 'review', 'commit', 'rebase', 'suite', 'suite', 'decision'])
+  var banned = ['plan', 'check', 'gate-baseline', 'gate-proof', 'document', 'publish', 'converge']
+  for (var i = 0; i < banned.length; i = i + 1) {
+    var head = banned[i]
+    var found = raw.some(function(label) { return String(label).split(':')[0] === head })
+    assert.equal(found, false, head)
+  }
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'planner' }).length, 0)
+  assert.equal(io.calls.run.some(function(r) { return String(r.cmd).indexOf('git push') !== -1 }), false)
+  assert.equal(io.calls.run.some(function(r) { return String(r.cmd).indexOf('gh pr create') !== -1 }), false)
+  assert.equal(result.details.variant, 'finish')
+})
+
+test('FS4: finish brief quotes escalation where and why verbatim', () => {
+  var io = finishHappyIo()
+  var result = driveTask(CTX_FINISH, io)
+  assert.equal(result.status, 'done')
+  var brief = io.calls.writes[TD + '/finish-brief.md']
+  assert.ok(brief.indexOf('Escalation: review: review could not converge') !== -1)
+  assert.ok(brief.indexOf(TD + '/plan.accepted.md') !== -1)
+  assert.ok(brief.indexOf(FINISH_GATE) !== -1)
+  assert.ok(brief.indexOf(TD + '/review.md') !== -1)
+  var crashTask = TD + '/finish-task.json'
+  var crashFiles = {}
+  for (var k in FINISH_FILES) crashFiles[k] = FINISH_FILES[k]
+  crashFiles[crashTask] = JSON.stringify({ status: 'escalation', summary: 'crashed', artifacts: [], details: { escalation: { where: 'driver', why: 'acp seat lead is busy [acp-session-busy]' }, commit: null, gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['a.mjs', 'a.test.mjs'] } } })
+  var crashIo = finishHappyIo({ files: crashFiles })
+  var crashRes = driveTask(CTX_FINISH, crashIo)
+  assert.equal(crashRes.status, 'done')
+  var crashBrief = crashIo.calls.writes[TD + '/finish-brief.md']
+  assert.ok(crashBrief.indexOf('acp seat lead is busy [acp-session-busy]') !== -1)
+  assert.ok(crashBrief.indexOf('Escalation: driver: acp seat lead is busy [acp-session-busy]') !== -1)
+})
+
+test('FS5: finish scope precedence fallback and triage escalations carry no seat', () => {
+  var precFiles = {}
+  for (var k in FINISH_FILES) precFiles[k] = FINISH_FILES[k]
+  precFiles[TD + '/plan.accepted.envelope.json'] = JSON.stringify({ status: 'done', summary: 'a', artifacts: [], details: { files_in_scope: ['a.mjs', 'a.test.mjs'] } })
+  precFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: null, gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['b.mjs'] } } })
+  var precIo = finishHappyIo({ files: precFiles })
+  var precRes = driveTask(CTX_FINISH, precIo)
+  assert.equal(precRes.status, 'done')
+  var precBrief = precIo.calls.writes[TD + '/finish-brief.md']
+  assert.ok(precBrief.indexOf('a.mjs') !== -1)
+  var fallFiles = {}
+  for (var k2 in FINISH_FILES) fallFiles[k2] = FINISH_FILES[k2]
+  delete fallFiles[TD + '/plan.accepted.envelope.json']
+  var fallIo = finishHappyIo({ files: fallFiles })
+  var fallRes = driveTask(CTX_FINISH, fallIo)
+  assert.equal(fallRes.status, 'done')
+  var noScopeFiles = {}
+  for (var k3 in FINISH_FILES) noScopeFiles[k3] = FINISH_FILES[k3]
+  delete noScopeFiles[TD + '/plan.accepted.envelope.json']
+  noScopeFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: null, gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: [] } } })
+  var noScopeIo = finishHappyIo({ files: noScopeFiles })
+  var noScopeRes = driveTask(CTX_FINISH, noScopeIo)
+  assert.equal(noScopeRes.status, 'escalation')
+  assert.equal(noScopeRes.details.escalation.where, 'finish-triage')
+  assert.equal(noScopeIo.calls.assign.length, 0)
+  var noGateFiles = {}
+  for (var k4 in FINISH_FILES) noGateFiles[k4] = FINISH_FILES[k4]
+  noGateFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: null, gate: {}, resume_checkpoint: { accepted_scope: ['a.mjs'] } } })
+  var noGateIo = finishHappyIo({ files: noGateFiles })
+  var noGateRes = driveTask(CTX_FINISH, noGateIo)
+  assert.equal(noGateRes.status, 'escalation')
+  assert.equal(noGateRes.details.escalation.where, 'finish-triage')
+  assert.equal(noGateIo.calls.assign.length, 0)
+  var noCtxIo = finishHappyIo()
+  var noCtxRes = driveTask({ task: CTX_FINISH.task, briefFile: CTX_FINISH.briefFile, taskDir: CTX_FINISH.taskDir, checkout: CTX_FINISH.checkout, roles: CTX_FINISH.roles, seatedRoles: CTX_FINISH.seatedRoles, lane: CTX_FINISH.lane, suite: CTX_FINISH.suite, env: CTX_FINISH.env, variant: 'finish' }, noCtxIo)
+  assert.equal(noCtxRes.status, 'escalation')
+  assert.equal(noCtxRes.details.escalation.where, 'finish-triage')
+  assert.equal(noCtxIo.calls.assign.length, 0)
+  var badGateFiles = {}
+  for (var k5 in FINISH_FILES) badGateFiles[k5] = FINISH_FILES[k5]
+  delete badGateFiles[TD + '/gate.mjs']
+  var badGateIo = finishHappyIo({ files: badGateFiles })
+  var badGateRes = driveTask(CTX_FINISH, badGateIo)
+  assert.equal(badGateRes.status, 'escalation')
+  assert.equal(badGateRes.details.escalation.where, 'finish-triage')
+  assert.equal(badGateIo.calls.assign.length, 0)
+})
+
+test('FS6: finish refuses a committed build at triage with no seat', () => {
+  var committedFiles = {}
+  for (var k in FINISH_FILES) committedFiles[k] = FINISH_FILES[k]
+  committedFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: 'abc1234', gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['a.mjs'] } } })
+  var io = finishHappyIo({ files: committedFiles })
+  var res = driveTask(CTX_FINISH, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'finish-triage')
+  assert.equal(io.calls.assign.length, 0)
+})
+
+test('FS7: finish never overwrites accepted plan gate or task return', () => {
+  var paths = [TD + '/plan.accepted.md', TD + '/plan.accepted.envelope.json', TD + '/gate.mjs', TD + '/finish-task.json']
+  function checkNoOverwrite(io) {
+    for (var i = 0; i < paths.length; i = i + 1) {
+      var p = paths[i]
+      var found = io.calls.writeLog.some(function(entry) { return entry.path === p })
+      assert.equal(found, false, p)
+    }
+  }
+  var happyIo = finishHappyIo()
+  var happyRes = driveTask(CTX_FINISH, happyIo)
+  assert.equal(happyRes.status, 'done')
+  checkNoOverwrite(happyIo)
+  var escFiles = {}
+  for (var k in FINISH_FILES) escFiles[k] = FINISH_FILES[k]
+  escFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: 'abc1234', gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['a.mjs'] } } })
+  var escIo = finishHappyIo({ files: escFiles })
+  var escRes = driveTask(CTX_FINISH, escIo)
+  assert.equal(escRes.status, 'escalation')
+  checkNoOverwrite(escIo)
+  var wtFiles = {}
+  for (var k2 in FINISH_FILES) wtFiles[k2] = FINISH_FILES[k2]
+  var before = {}
+  for (var i2 = 0; i2 < paths.length; i2 = i2 + 1) before[paths[i2]] = wtFiles[paths[i2]]
+  var wtIo = finishHappyIo({ files: wtFiles, writeThrough: true })
+  var wtRes = driveTask(CTX_FINISH, wtIo)
+  assert.equal(wtRes.status, 'done')
+  for (var i3 = 0; i3 < paths.length; i3 = i3 + 1) assert.equal(wtFiles[paths[i3]], before[paths[i3]], paths[i3])
+})
+
+test('FS8: finish gate change escalates before review and unchanged gate reruns', () => {
+  var mutFiles = {}
+  for (var k in FINISH_FILES) mutFiles[k] = FINISH_FILES[k]
+  var mutIo = fakeIo({ files: mutFiles, envelopes: { 'builder:1': function() { mutFiles[TD + '/gate.mjs'] = 'mutated'; return buildEnv() }, 'reviewer:1': reviewEnv('pass') }, runs: finishBaseRuns(), cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var mutRes = driveTask(CTX_FINISH, mutIo)
+  assert.equal(mutRes.status, 'escalation')
+  assert.equal(mutRes.details.escalation.where, 'finish-gate')
+  assert.equal(mutIo.calls.assign.filter(function(a) { return a.role === 'reviewer' }).length, 0)
+  var twoIo = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass') }, runs: finishBaseRuns(), cleanRuns: (function() { var m2 = {}; m2[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m2 })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var twoRes = driveTask(CTX_FINISH, twoIo)
+  assert.equal(twoRes.status, 'done')
+  var gateRuns = twoIo.calls.run.filter(function(r) { return r.cmd === FINISH_GATE })
+  assert.equal(gateRuns.length, 2)
+})
+
+test('FS9: finish third revise caps without lead and still commits rebases suites', () => {
+  function mkFindings(id) { return [{ id: id, severity: 'should-fix', location: 'a.mjs:1', summary: 'fix it' }] }
+  var io = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('revise', mkFindings('F1')), 'reviewer:2': reviewEnv('revise', mkFindings('F2')), 'reviewer:3': reviewEnv('revise', mkFindings('F3')) }, runs: finishBaseRuns(), cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var res = driveTask({ task: CTX_FINISH.task, briefFile: CTX_FINISH.briefFile, taskDir: CTX_FINISH.taskDir, checkout: CTX_FINISH.checkout, roles: CTX_FINISH.roles, seatedRoles: CTX_FINISH.seatedRoles, lane: CTX_FINISH.lane, suite: CTX_FINISH.suite, env: CTX_FINISH.env, finish: CTX_FINISH.finish, variant: 'finish', limits: { build_rounds: 3 } }, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.accepted_via, 'review-capped')
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'lead' }).length, 0)
+  assert.equal(res.details.consults, 0)
+  var heads = res.details.stages.map(function(l) { return String(l).split(':')[0] })
+  assert.ok(heads.indexOf('commit') !== -1)
+  assert.ok(heads.indexOf('rebase') !== -1)
+  assert.ok(heads.indexOf('decision') !== -1)
+  assert.equal(heads.filter(function(h) { return h === 'suite' }).length, 2)
+  var report = JSON.parse(io.calls.writes[TD + '/finish-report.json'])
+  assert.equal(report.outcome, 'review-capped')
+  assert.equal(report.review.rounds, 3)
+})
+
+// Mutation killed: raise the choke-point cap in driveFinish review dispatch (verdicts.length >= FINISH_REVIEW_CAP -> >= 999); a fourth reviewer is then assigned and this test goes red.
+test('FS9: finish review cap bounds suite-red late repair to three reviewer verdicts', () => {
+  function mkFindings(id) { return [{ id: id, severity: 'should-fix', location: 'a.mjs:1', summary: 'fix it' }] }
+  var runs = finishBaseRuns()
+  runs['suite-cmd:1'] = { ok: false, output: suiteRed('a.test.mjs') }
+  var io = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(), 'reviewer:1': reviewEnv('revise', mkFindings('F1')), 'reviewer:2': reviewEnv('revise', mkFindings('F2')), 'reviewer:3': reviewEnv('pass') }, runs: runs, cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var res = driveTask(CTX_FINISH, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.ok(res.details.escalation.why.indexOf('[finish-review-cap]') !== -1)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' }).length, 3)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' && a.note === 'review' }).length, 3)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'builder' }).length, 4)
+  var heads = res.details.stages.map(function(l) { return String(l).split(':')[0] })
+  assert.equal(heads.indexOf('decision'), -1)
+  assert.equal(TD + '/finish-report.json' in io.calls.writes, false)
+})
+
+// Mutation killed: raise the choke-point cap in driveFinish review dispatch (verdicts.length >= FINISH_REVIEW_CAP -> >= 999); a fourth reviewer is then assigned and this test goes red.
+test('RV1-1 finish review cap is run-wide across suite-red re-entry', () => {
+  function mkFindings(id) { return [{ id: id, severity: 'should-fix', location: 'a.mjs:1', summary: 'fix it' }] }
+  var runs = finishBaseRuns()
+  runs['suite-cmd:1'] = { ok: false, output: suiteRed('a.test.mjs') }
+  var io = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(), 'reviewer:1': reviewEnv('revise', mkFindings('F1')), 'reviewer:2': reviewEnv('revise', mkFindings('F2')), 'reviewer:3': reviewEnv('pass') }, runs: runs, cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var res = driveTask(CTX_FINISH, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.ok(res.details.escalation.why.indexOf('[finish-review-cap]') !== -1)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' }).length, 3)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' && a.note === 'review' }).length, 3)
+  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'builder' }).length, 4)
+  var heads = res.details.stages.map(function(l) { return String(l).split(':')[0] })
+  assert.equal(heads.indexOf('decision'), -1)
+  assert.equal(TD + '/finish-report.json' in io.calls.writes, false)
+})
+
+test('FS10: finish report carries contracted keys and capped findings', () => {
+  var happyIo = finishHappyIo()
+  var happyRes = driveTask(CTX_FINISH, happyIo)
+  assert.equal(happyRes.status, 'done')
+  assert.ok(happyRes.details.finish_report)
+  assert.equal(happyRes.details.finish_report, TD + '/finish-report.json')
+  assert.equal('pr' in happyRes.details, false)
+  var happyReport = JSON.parse(happyIo.calls.writes[TD + '/finish-report.json'])
+  assert.equal(happyReport.schema, 'finish-report/1')
+  assert.equal(happyReport.pushed, false)
+  var keys = Object.keys(happyReport).sort()
+  assert.deepEqual(keys, ['base', 'commit', 'escalation', 'gate', 'lane', 'outcome', 'pushed', 'residuals', 'review', 'run_id', 'run_id_absent', 'schema', 'suite'].sort())
+  assert.equal(happyReport.run_id, null)
+  assert.equal(happyReport.run_id_absent, 'run-id-not-supplied')
+  assert.equal(happyReport.base, 'base1111')
+  assert.equal('base_absent' in happyReport, false)
+  function mk(id, summary) { return [{ id: id, severity: 'should-fix', location: 'a.mjs:1', summary: summary }] }
+  var capIo = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('revise', mk('F1', 'first')), 'reviewer:2': reviewEnv('revise', mk('F2', 'second')), 'reviewer:3': reviewEnv('revise', mk('F3', 'third')) }, runs: finishBaseRuns(), cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
+  var capRes = driveTask({ task: CTX_FINISH.task, briefFile: CTX_FINISH.briefFile, taskDir: CTX_FINISH.taskDir, checkout: CTX_FINISH.checkout, roles: CTX_FINISH.roles, seatedRoles: CTX_FINISH.seatedRoles, lane: CTX_FINISH.lane, suite: CTX_FINISH.suite, env: CTX_FINISH.env, finish: CTX_FINISH.finish, variant: 'finish', limits: { build_rounds: 3 } }, capIo)
+  assert.equal(capRes.status, 'done')
+  var capReport = JSON.parse(capIo.calls.writes[TD + '/finish-report.json'])
+  assert.equal(capReport.outcome, 'review-capped')
+  var hasF3 = capReport.review.open_findings.some(function(f) { return f.id === 'F3' })
+  assert.equal(hasF3, true)
 })
 

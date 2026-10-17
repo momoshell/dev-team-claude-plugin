@@ -12,6 +12,7 @@ lane from the checkout.
   "review_panel": { "trigger": "a read-only three-seat base/head code review", "ctx": [] },
   "repair":   { "trigger": "CI red",                        "ctx": ["--validation-lane"] },
   "directed": { "trigger": "an orchestrator-authored plan", "ctx": ["--validation-lane"] },
+  "finish": { "trigger": "an escalated lane to finish in its own worktree", "ctx": ["--validation-lane"] },
   "verify_only": { "trigger": "a declared behavior to verify", "ctx": [] },
   "stepped": { "trigger": "an ordered plan with a validated chunk program", "ctx": [] }
 }
@@ -27,12 +28,13 @@ lane from the checkout.
 | `stepped` | An ordered plan declares a validated chunk program for sequential builder assignments. | The requested tier's seats. | `planned`. | No context required; do not combine with `--chunked` or `--chunk`. |
 | `repair` | CI is red and the failing run already supplies the bounded scope and validation lane. | The requested tier's seats. | `planned`. | Inherited scope plus `--validation-lane`; its lane source is `ctx`. |
 | `directed` | An orchestrator-authored plan already declares the gate and write surface. | `builder` and `reviewer`. | `planned`. | The brief supplies scope and gate; `--validation-lane` supplies the `ctx` lane. |
+| `finish` | An escalated lane must finish in its own worktree. | `builder` and `reviewer`. | `planned`. | The lane supplies scope and gate; `--validation-lane` supplies the `ctx` lane; ends at decision, nothing pushed. |
 
 `full` is the default reviewed shape. A `scout` run is an envelope run: it
 must not edit the checkout, and its planner writes notes in the task
 workspace. A `repair` run is triage, not a shortened planning loop: it carries
 the failing scope and lane into one bounded fix. A `directed` run treats the
-brief as the plan and never asks a seat to author a gate it did not receive.
+brief as the plan and never asks a seat to author a gate it did not receive. A `finish` run finishes an escalated lane with builder and reviewer, planned writes, ending at decision with nothing pushed.
 A default `full` run selects ordered in-lane steps at plan-accept for 2+ valid chunks unless `--execution full` or `--variant full` was explicit; `--chunked` and `--chunk` remain separate lanes. A stepped build escalated after a done step can resume without replanning: one gate run re-verifies done steps in order, skipping only green steps and rebuilding from the first red step within the original global builder budget.
 
 A `review_only` run is an envelope run: it returns the declared base/head identity, a closed outcome, structured findings (or an explicitly measured no-findings empty list), `reviewed_files` paths, and `unreviewable_files` `{path, reason}` rows. Unreviewable reasons are closed to `binary`, `generated`, `too-large`, and `out-of-context`; both lists must be bounded to the base/head change set and remain disjoint. The driver accepts it only with the unchanged zero-write scope proof; there is no commit.

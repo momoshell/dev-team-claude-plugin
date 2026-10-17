@@ -1,12 +1,12 @@
 ---
 name: frontend-svelte
 description: >-
-  Constrains Svelte work to this repository's measured visualizer conventions while
-  routing every Svelte API question to the svelte MCP. Load it before creating or
-  editing a visualizer component, changing the app shell, adding a plain-module
-  shaper, or deciding how a source-level test should pin Svelte code. It covers the
-  component prop and rune idioms, module boundaries, theme ownership, and the fact
-  that this checkout tests logic with node --test and components as source text.
+  Load before creating or editing a visualizer component, changing the app shell,
+  adding a plain-module shaper, or deciding how a source-level test should pin Svelte
+  code. Constrains Svelte work to this repository's measured visualizer conventions
+  while routing every Svelte API question to the svelte MCP. It covers the component
+  prop and rune idioms, module boundaries, theme ownership, and the fact that this
+  checkout tests logic with node --test and components as source text.
 ---
 
 This is a retrieval-first repo skill, not a Svelte API manual. A Svelte API fact is retrieved from the svelte MCP, never restated here. This skill owns only this repo's conventions: the visualizer's structure, its component idioms, and how its code is tested.

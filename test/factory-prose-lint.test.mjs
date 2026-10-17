@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -15,6 +15,22 @@ const TICK = String.fromCharCode(96)
 const FENCE = TICK + TICK + TICK
 const run = (args, input) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', input })
 const writeFixture = (dir, name, text) => { const p = join(dir, name); writeFileSync(p, text); return p }
+
+function skillDescriptions() {
+  const skills = join(ROOT, 'skills')
+  return readdirSync(skills, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const path = join('skills', entry.name, 'SKILL.md')
+      const raw = readFileSync(join(ROOT, path), 'utf8')
+      const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)
+      const field = frontmatter?.[1].match(/^description:[ \t]*(.*)(?:\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*))?$/m)
+      const lines = field ? [field[1], ...(field[2] ? field[2].split(/\r?\n/) : [])] : []
+      if (lines[0] === '>' || lines[0] === '>-') lines.shift()
+      return { path, description: lines.map((line) => line.trim()).filter(Boolean).join(' ') }
+    })
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+}
 
 // The expected vocabularies below are written as split string literals, and
 // other banned fragments are joined inline, so no banned term appears
@@ -162,6 +178,19 @@ test('PP8 the lint imports only node and relative modules', () => {
   const specs = [...src.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g)].map((m) => m[1])
   assert.ok(specs.length > 0)
   assert.deepEqual(specs.filter((s) => !(s.startsWith('node:') || s.startsWith('.'))), [])
+})
+
+// Mutation SD1: change code-less's opening "Use when" trigger to non-trigger wording.
+test('SD1', () => {
+  const offenders = skillDescriptions().filter(({ description }) =>
+    !/^(?:Use when|Load when|Load before)\b/.test(description))
+  assert.deepEqual(offenders, [], offenders.map(({ path, description }) => `${path}: ${description}`).join('\\n'))
+})
+
+// Mutation SD2: add U+2014 to code-less's description after the opening trigger.
+test('SD2', () => {
+  const offenders = skillDescriptions().filter(({ description }) => description.includes(DASH))
+  assert.deepEqual(offenders, [], offenders.map(({ path, description }) => `${path}: ${description}`).join('\\n'))
 })
 
 test('PP9 licence copy and third-party notice name the pinned revision', () => {

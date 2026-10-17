@@ -1,16 +1,16 @@
 ---
 name: qa-test-writing
 description: >-
-  Writes and reviews tests for this repo against rules it has already paid for:
-  proving a check can fail (vacuity), naming the mutation each check kills,
-  building acceptance gates that are red at baseline and provably
-  discriminating, pinning vendor stream formats with recorded captures instead
-  of hand-built frames, declaring tripwires when a change moves code or changes
-  a detector, and recording an unmeasured value as absent rather than zero. Use
-  when writing a new test, reviewing whether an existing test pins anything,
+  Use when writing a new test, reviewing whether an existing test pins anything,
   authoring an acceptance gate, deciding what a lane's tripwire tests are,
   debugging a test that passes when it should not, or judging whether a suite's
-  green means anything.
+  green means anything. Writes and reviews tests for this repo
+  against rules it has already paid for: proving a check can fail (vacuity),
+  naming the mutation each check kills, building acceptance gates that are red
+  at baseline and provably discriminating, pinning vendor stream formats with
+  recorded captures instead of hand-built frames, declaring tripwires when a
+  change moves code or changes a detector, and recording an unmeasured value as
+  absent rather than zero.
 ---
 
 Every rule here was paid for by a defect that shipped. Each one names its

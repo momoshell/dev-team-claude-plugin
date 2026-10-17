@@ -1,11 +1,11 @@
 ---
 name: ui-design
 description: >-
+  Load before designing or reviewing a Svelte component, choosing a colour, adding
+  a panel, or deciding how state, role, lane, and unmeasured values should appear.
   Constrains new visualizer UI to the measured design boundary: theme-paired chrome,
   Tier-2 alias tokens, explicit status and identity colour routing, panel and spacing
-  idioms, honest absence marks, and known contrast and enforcement limits. Load it
-  before designing or reviewing a Svelte component, choosing a colour, adding a panel,
-  or deciding how state, role, lane, and unmeasured values should appear. It records
+  idioms, honest absence marks, and known contrast and enforcement limits. It records
   this checkout's evidence rather than inventing a generic design system.
 ---
 

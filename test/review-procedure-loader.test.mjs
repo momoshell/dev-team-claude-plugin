@@ -96,3 +96,15 @@ test('no review-skill document calls the shipped panel parked', () => {
   }
   assert.deepEqual(offenders, [])
 })
+
+test('BB3', () => {
+  const text = readFileSync(GUIDELINES, 'utf8')
+  const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []
+  assert.deepEqual(found, [])
+})
+
+test('BB4', () => {
+  const text = readFileSync(join(ROOT, 'crew/guidelines/seat-pre-return-checklist.md'), 'utf8')
+  const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []
+  assert.deepEqual(found, [])
+})

@@ -77,17 +77,14 @@ only if the whole patch's write surface is readable and inside the plan's
 validation lane and the acceptance gate against the patched tree. A patch that
 fails any of those is refused, journalled, and sent to the builder.
 
-Ship an ordinary text hunk
-or accept a builder round.
-
 `ask-user` touches behaviour or scope. Code never closes one: it goes to the
 lead as a closed decision **on either verdict**, and an unresolved one escalates
 as `review-unresolved`.
 
 `no-op` is informational; it changes nothing and demands nothing.
 
-`disposition` is OPTIONAL in this release and REQUIRED from the next. A value outside the
-closed set is read as **absent**, never guessed.
+`disposition` is optional. A value outside the closed set is read as
+**absent**, never guessed.
 
 Only a finding the driver ACCEPTS (unique id, severity in the closed set) can
 authorize a mechanical apply; a malformed entry is dropped, and its patch bytes

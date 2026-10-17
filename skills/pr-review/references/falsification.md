@@ -5,8 +5,9 @@ rounds. The rubric (`references/rubric.md`) says what to attack; this says what
 survives. Adapted from KiroCrew's review prompts (Apache-2.0; licence and
 NOTICE in `THIRD-PARTY-NOTICES.md`), rewritten for this repo's seats, severity
 enum and carriers. Nothing here overrides the verdict contract in
-`crew/roles/reviewer.md`: line 1 of a review is still the verdict, and the
-severities are still `must-fix`, `should-fix`, `consider`.
+`crew/roles/reviewer.md`: line 1 of a review is still the verdict. Severities
+by seat: review uses `must-fix`, `should-fix`, `consider`; a plan check uses
+`blocker`, `major`, `minor`.
 
 ## The diff is not evidence
 

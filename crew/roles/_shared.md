@@ -17,7 +17,7 @@ files in the task directory.
    is only a pointer. Read the named files before doing anything.
 3. Do the work per your role charter (below the shared section).
 4. Write your ReturnEnvelope (JSON, shape below) to the return path named in
-   the assignment. Write it with a single Write of the complete file.
+   the assignment. Write it with a single Write of the complete file; pi seats: `submit_envelope` validates first.
 5. End your turn with exactly one line, nothing after it:
    `CREW-DONE <your-role> <assignment-id>`
    Then WAIT for the next assignment. Never continue past a finished

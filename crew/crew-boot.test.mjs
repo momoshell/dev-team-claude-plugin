@@ -2258,7 +2258,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   assert.equal(Object.isFrozen(CHARTER_SOURCE_BUDGET), true)
   assert.equal(Object.isFrozen(CHARTER_BASELINE_BYTES), true)
   assert.deepEqual(CHARTER_BASELINE_BYTES, { _shared: 3432, builder: 5169, lead: 9378, planner: 16930, reviewer: 7697, 'tech-lead': 6529 })
-  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4942, builder: 4387, lead: 9099, planner: 16848, reviewer: 7522, 'tech-lead': 6295 })
+  assert.deepEqual(CHARTER_SOURCE_BUDGET, { _shared: 4987, builder: 4387, lead: 9152, planner: 16848, reviewer: 7424, 'tech-lead': 6310 })
   for (const value of [...Object.values(CHARTER_BASELINE_BYTES), ...Object.values(CHARTER_SOURCE_BUDGET), ...Object.values(CHARTER_CEILINGS)]) assert.equal(Number.isInteger(value), true)
   const shared = readFileSync(join(ROOT, 'crew', 'roles', '_shared.md'), 'utf8')
   const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
@@ -2270,7 +2270,7 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
     assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + (role === 'planner' ? 2 * delta : delta) : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49093)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49108)
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, Object.values(CHARTER_SOURCE_BUDGET).reduce((sum, value) => sum + value, 0))
   assert.ok(CHARTER_SOURCE_TOTAL_BUDGET < 49135)
 
@@ -3210,7 +3210,7 @@ test('RP12 SR9 reset ceilings pin measured role prompts with granted skills', ()
   // MUTATION: raise SKILLS_BYTE_BUDGET to 32768 and the reset-budget pin fails.
   // MUTATION: lower one reachable skill-block ceiling by one byte.
   const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 8, lead: 0, planner: 4, reviewer: 9, 'tech-lead': 2 }
-  const base = { builder: 9959, lead: 16, planner: 7059, reviewer: 7455, 'tech-lead': 6490 }
+  const base = { builder: 9959, lead: 16, planner: 7059, reviewer: 7455, 'tech-lead': 6540 }
   const blocks = Object.fromEntries(Object.keys(base).map((role) => [role, role === 'lead' ? base[role] : base[role] + factors[role] * rootBytes]))
   assert.deepEqual(SKILL_BLOCK_CEILINGS, blocks); assert.equal(Object.isFrozen(SKILL_BLOCK_CEILINGS), true)
   assert.equal(SKILLS_BYTE_BUDGET, 16384)

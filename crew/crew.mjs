@@ -2755,24 +2755,24 @@ export const CHARTER_BASELINE_BYTES = Object.freeze({
 
 // Delivered source bytes, per file. Every card is below its baseline above.
 export const CHARTER_SOURCE_BUDGET = Object.freeze({
-  _shared: 4942,
+  _shared: 4987,
   builder: 4387,
-  lead: 9099,
+  lead: 9152,
   planner: 16848,
-  reviewer: 7522,
-  'tech-lead': 6295,
+  reviewer: 7424,
+  'tech-lead': 6310,
 })
-export const CHARTER_SOURCE_TOTAL_BUDGET = 49093
+export const CHARTER_SOURCE_TOTAL_BUDGET = 49108
 
 // Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
 // plus the installation-path delta per authored guideline citation.
 const CHARTER_GUIDELINE_DELTA = Buffer.byteLength(CHARTER_GUIDELINES_DIR, 'utf8') - Buffer.byteLength('crew/guidelines', 'utf8')
 export const CHARTER_CEILINGS = Object.freeze({
-  builder: 9331 + CHARTER_GUIDELINE_DELTA,
-  lead: 14043,
-  planner: 21792 + 2 * CHARTER_GUIDELINE_DELTA,
-  reviewer: 12466 + CHARTER_GUIDELINE_DELTA,
-  'tech-lead': 11239,
+  builder: 9376 + CHARTER_GUIDELINE_DELTA,
+  lead: 14141,
+  planner: 21837 + 2 * CHARTER_GUIDELINE_DELTA,
+  reviewer: 12413 + CHARTER_GUIDELINE_DELTA,
+  'tech-lead': 11299,
 })
 
 export const CHARTER_BUDGET_REFUSAL = 'charter-over-ceiling'
@@ -5357,7 +5357,7 @@ export const SKILL_BLOCK_CEILINGS = Object.freeze({
   lead: 16,
   planner: 7059 + 4 * SKILL_ROOT_BYTES,
   reviewer: 7455 + 9 * SKILL_ROOT_BYTES,
-  'tech-lead': 6490 + 2 * SKILL_ROOT_BYTES,
+  'tech-lead': 6540 + 2 * SKILL_ROOT_BYTES,
 })
 export const ROLE_PROMPT_CEILINGS = Object.freeze(Object.fromEntries(Object.entries(CHARTER_CEILINGS).map(([role, bytes]) => [role, bytes + 2 + SKILL_BLOCK_CEILINGS[role]])))
 export const ROLE_PROMPT_REFUSAL = 'role-prompt-over-ceiling'

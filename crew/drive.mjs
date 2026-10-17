@@ -831,14 +831,14 @@ const { readFileSync, writeFileSync } = require('node:fs')
 const bytes = readFileSync(process.argv[1])
 const prefix = Buffer.from(process.argv[2] + ': child setpgid (')
 const kept = []
-for (let start = 0; start < bytes.length;) {
-  const lf = bytes.indexOf(10, start)
-  const end = lf === -1 ? bytes.length : lf + 1
-  const line = bytes.subarray(start, lf === -1 ? end : lf)
-  if (!line.subarray(0, prefix.length).equals(prefix) || !/^[0-9]+ to [0-9]+\): Operation not permitted$/.test(line.subarray(prefix.length).toString('latin1'))) kept.push(bytes.subarray(start, end))
-  start = end
+let emitFrom = 0, searchFrom = 0
+while (searchFrom < bytes.length) {
+  const at = bytes.indexOf(prefix, searchFrom); if (at === -1) break
+  const match = /^[0-9]+ to [0-9]+\): Operation not permitted/.exec(bytes.subarray(at + prefix.length, at + prefix.length + 128).toString('latin1'))
+  const end = match ? at + prefix.length + match[0].length : -1
+  if (end !== -1 && (end === bytes.length || bytes[end] === 10)) { kept.push(bytes.subarray(emitFrom, at)); emitFrom = end === bytes.length ? end : end + 1; searchFrom = emitFrom } else searchFrom = at + prefix.length
 }
-writeFileSync(2, Buffer.concat(kept))
+kept.push(bytes.subarray(emitFrom)); writeFileSync(2, Buffer.concat(kept))
 `
 
 // The measured pgid and root-identity guard stay unchanged. Gate stderr remains
@@ -17345,10 +17345,11 @@ export function diffMutationMeasurement(reports) {
   const survived = sum('survived')
   // lean: unmeasured_files sums per-round non-mjs file sections, so a file changed in two rounds counts twice; dedupe by path once the report lists skipped paths
   const unmeasured_files = rows.reduce((total, report) => total + (Number.isInteger(report.skip_counts?.['non-mjs']) ? report.skip_counts['non-mjs'] : 0), 0)
-  const measured = generated > 0
+  const treeNotRestored = rows.some((report) => report.fatal || (report.skip_counts?.['tree-not-restored'] ?? 0) > 0)
+  const measured = !treeNotRestored && killed + survived > 0
   const reason = measured ? null
     : rows.length === 0 ? 'no-report'
-    : rows.some((report) => report.fatal || (report.skip_counts?.['tree-not-restored'] ?? 0) > 0) ? 'tree-not-restored'
+    : treeNotRestored ? 'tree-not-restored'
     : rows.some((report) => (report.skip_counts?.['runner-unavailable'] ?? 0) > 0) ? 'runner-unavailable'
     : unmeasured_files > 0 ? 'unsupported-language'
     : 'no-mutable-candidate'

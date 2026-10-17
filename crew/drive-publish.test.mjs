@@ -3487,7 +3487,7 @@ test('DM1 non-mjs-only zero-mutant report parses and measures unsupported-langua
   assert.equal(parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify(mirror)}`, { generation: 1, cap: 8 }), null)
 })
 
-// MUTATION DM2: map the empty-reports reason to 'no-mutable-candidate' and the empty input no longer produces 'no-report'.
+// MUTATION MH3: swap the 'tree-not-restored' and 'runner-unavailable' return values in diffMutationMeasurement and the ordered reasons no longer match.
 test('DM2 unmeasured reasons cover the five brief inputs', () => {
   assert.equal(Object.isFrozen(DIFF_MUTATION_UNMEASURED_REASONS), true)
   const reasons = [
@@ -3497,10 +3497,10 @@ test('DM2 unmeasured reasons cover the five brief inputs', () => {
     diffMutationMeasurement([DM_T825E2]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'comment-or-blank': 1 } }]).reason,
   ]
-  assert.deepEqual([...reasons].sort(), [...DIFF_MUTATION_UNMEASURED_REASONS].sort())
+  assert.deepEqual(reasons, ['no-report', 'tree-not-restored', 'runner-unavailable', 'unsupported-language', 'no-mutable-candidate'])
 })
 
-// MUTATION DM3: invert the measured test (generated < 0) and the t563c tallies read unmeasured.
+// MUTATION DM3: invert the measured test (killed + survived < 0) and the t563c tallies read unmeasured.
 test('DM3 measured tallies stay measured with unmeasured non-mjs files counted', () => {
   const t563c = { generated: 8, killed: 8, survived: 0, skip_counts: { 'non-mjs': 4, 'comment-or-blank': 40, 'malformed-hunk': 35, 'unsupported-line': 9 } }
   const result = diffMutationMeasurement([t563c])
@@ -3508,6 +3508,26 @@ test('DM3 measured tallies stay measured with unmeasured non-mjs files counted',
   assert.equal(result.reason, null)
   assert.equal(result.unmeasured_files, 4)
   assert.deepEqual([result.generated, result.killed, result.survived], [8, 8, 0])
+})
+
+// MUTATION MH1: restore measured = generated > 0 in diffMutationMeasurement and a report whose candidates never ran reads measured again.
+test('MH1 selected-but-unran candidates are unmeasured runner-unavailable', () => {
+  const rec = diffMutationMeasurement([{ generated: 3, killed: 0, survived: 0, skip_counts: { 'runner-unavailable': 3 } }])
+  assert.equal(rec.measured, false)
+  assert.equal(rec.reason, 'runner-unavailable')
+  assert.ok(composePrBody({ intent: 'x', diff_mutation: rec }).includes('- Diff mutation: unmeasured \u2014 runner-unavailable'))
+})
+
+// MUTATION MH4: drop the !treeNotRestored term from the measured predicate and a fatal round combined with a measured round reads measured again.
+test('MH4 a fatal round stays visible beside a measured round', () => {
+  const rec = diffMutationMeasurement([
+    { generated: 2, killed: 2, survived: 0, skip_counts: {} },
+    { generated: 0, killed: 0, survived: 0, skip_counts: {}, fatal: { reason: 'tree-not-restored' } },
+  ])
+  assert.equal(rec.measured, false)
+  assert.equal(rec.reason, 'tree-not-restored')
+  assert.equal(rec.killed, 2)
+  assert.equal(rec.generated, 2)
 })
 
 // MUTATION DM5: render 'measured — <reason>' for an unmeasured record and the Proof line text changes.

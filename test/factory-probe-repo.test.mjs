@@ -1226,6 +1226,11 @@ test('FB1', () => {
   assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
     branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD',
   })
+  git(root, 'checkout', 'main')
+  git(root, 'branch', '-D', 'master')
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
+  })
   git(root, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
   assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
     branch: 'main', basis: `default base branch main · no profile at ${path}`,

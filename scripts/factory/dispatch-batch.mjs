@@ -1376,7 +1376,8 @@ function renderSurfaceUnmeasured(name, reason) {
 export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) {
   const d = normalDeps(deps)
   const checkout = typeof checkoutDir === 'string' && checkoutDir.trim() ? checkoutDir : process.cwd()
-  const surfaceBaseRef = resolveDispatchBase(checkout, d).branch
+  const surfaceBase = resolveDispatchBase(checkout, d)
+  const surfaceBaseRef = surfaceBase.ref ?? surfaceBase.branch
   let name = 'unknown'
   try {
     name = laneNameOf(lane)
@@ -2591,7 +2592,8 @@ export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
 export function createWorktrees({ plans, checkout, created = [], deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
-  const worktreeBaseRef = resolveDispatchBase(root, d).branch
+  const worktreeBase = resolveDispatchBase(root, d)
+  const worktreeBaseRef = worktreeBase.ref ?? worktreeBase.branch
   for (const plan of Array.isArray(plans) ? plans : []) {
     let result
     try {

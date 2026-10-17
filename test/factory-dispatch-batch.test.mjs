@@ -7453,6 +7453,17 @@ test('W1 base branch: default dependency creates worktree at ratified dispute co
   assert.equal(git(dir, 'rev-parse', 'HEAD'), dispute); assert.notEqual(git(dir, 'rev-parse', 'HEAD'), git(checkout, 'rev-parse', 'HEAD'))
 })
 
+test('W2 base branch: a remote-only origin/HEAD default creates the worktree at its tracking ref', () => {
+  // MUTATION W2: drop the tracking ref so createWorktrees passes the bare remote-only branch name.
+  const checkout = gitFixture(), factoryRoot = scratchDir('dispatch-remote-base-profile-'), dir = join(scratchDir('dispatch-remote-base-worktree-'), 'lane')
+  git(checkout, 'checkout', '-b', 'remote-only'); put(join(checkout, 'master-only'), 'unique'); git(checkout, 'add', '.'); git(checkout, 'commit', '-m', 'master-only')
+  const master = git(checkout, 'rev-parse', 'HEAD'); git(checkout, 'checkout', 'main'); git(checkout, 'branch', '-D', 'remote-only')
+  git(checkout, 'update-ref', 'refs/remotes/origin/master', master.trim())
+  git(checkout, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/master')
+  createWorktrees({ checkout, plans: [{ lane: 'lane', branch: 'crew/remote-base-test', dir }], deps: { factoryRoot } })
+  assert.equal(git(dir, 'rev-parse', 'HEAD'), master)
+})
+
 test('dispatchBatch default base resolver retains its scratch factoryRoot after dependency normalization', async () => {
   // MUTATION: drop factoryRoot from normalDeps; the proposed-profile run then reads the operator store, resolves main and does not refuse.
   const checkout = gitFixture(), factoryRoot = scratchDir('dispatch-batch-default-profile-')

@@ -9781,6 +9781,8 @@ export function main(argv) {
             + (billedOutputTokens / 1e6) * price.cost_out_per_mtok
             + (billedCacheReadTokens / 1e6) * cacheReadRate
             + (billedCacheWriteTokens / 1e6) * cacheWriteRate
+          // Finite rates can still overflow; JSON would print Infinity as null with no reason.
+          if (!Number.isFinite(costUsd)) { costUsd = null; absent.cost_usd = 'cost-not-finite' }
         }
         if (row.model_key !== null && priceKey === null) absent.price_key = `the model string ${row.model_key} is translated to no single ${row.agent === null ? 'adapter' : row.agent}-catalog key, and a prefix is never stripped to guess one — unmapped, so this cell is unpriced, never free`
         if (!hasRates) {
@@ -9812,7 +9814,7 @@ export function main(argv) {
           billed_cache_read_tokens: billedCacheReadTokens,
           price_key: priceKey,
           cost_usd: costUsd,
-          cost_estimated: costUsd === null ? null : price.rate_estimated === true,
+          cost_estimated: Number.isFinite(costUsd) ? price.rate_estimated === true : null,
           absent,
         }
       })

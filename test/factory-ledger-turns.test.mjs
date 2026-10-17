@@ -651,7 +651,7 @@ test('RE7', { skip: SKIP }, () => {
     { name: 'missing-model', flag: null, models: {}, cost: null },
     { name: 'missing-rate', flag: null, rates: { ...rates, cost_in_per_mtok: null }, cost: null },
     { name: 'missing-usage', flag: null, missingUsage: true, cost: null },
-    { name: 'overflow', flag: null, rates: { ...rates, cost_in_per_mtok: 1e308 }, cost: null, advisorOnly: true },
+    { name: 'overflow', flag: null, rates: { ...rates, cost_in_per_mtok: 1e308 }, cost: null },
   ]) {
     const tokens = scenario.zero ? { in: 0, out: 0, cw: 0, cr: 0 } : { in: 1e6, out: 2e6, cw: 3e6, cr: 4e6 }
     if (scenario.missingUsage) tokens.in = null
@@ -676,7 +676,9 @@ test('RE7', { skip: SKIP }, () => {
       assert.deepEqual([row.cost_usd, row.cost_estimated], [scenario.cost, scenario.flag], scenario.name)
       if (scenario.cost === null) assert.ok(row.absent.cost_usd, scenario.name)
     }
-    if (scenario.advisorOnly) assert.equal(payload.advisor_spend[0].absent.cost_usd, 'cost-not-finite')
+    if (scenario.name === 'overflow') {
+      for (const row of [payload.rows[0], payload.advisor_spend[0]]) assert.equal(row.absent.cost_usd, 'cost-not-finite')
+    }
   }
 })
 

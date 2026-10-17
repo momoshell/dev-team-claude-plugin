@@ -37,6 +37,8 @@ function catalogRow(key, value) {
     tags: Array.isArray(value?.tags) ? [...value.tags] : (value?.tags ?? null),
     source: value?.source ?? null,
     last_verified: value?.last_verified ?? null,
+    rate_estimated: value?.rate_estimated === true,
+    rate_estimate_reason: value?.rate_estimate_reason ?? null,
   }
 }
 

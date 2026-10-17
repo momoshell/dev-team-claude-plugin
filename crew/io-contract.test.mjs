@@ -1349,6 +1349,10 @@ test('RE9', () => {
       assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers[tier][role], { ceiling: ladder.cost_ceilings[tier] }), null)
     }
   }
+  // A seat already on its declared target is never upgraded onto itself again.
+  const twice = makeTierFixture({ role: 'builder', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+  assert.deepEqual([twice.io.reseat('builder').to?.id, twice.crew.seats.builder.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
+  assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
   const cell = (provider, id, effort = 'medium', agent = 'pi') => ({ provider, id, effort, agent })
   const fixture = () => ({
     tiers: {

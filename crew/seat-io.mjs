@@ -3730,17 +3730,16 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             if (typeof entry !== 'object' || Array.isArray(entry)) return false
             return Number.isFinite(entry.cost_out_per_mtok) && entry.cost_out_per_mtok <= ceiling
           }
-          const sameCell = rung && currentCell
-            && currentCell.provider === rung.cell.provider
-            && currentCell.id === rung.cell.id
-            && currentCell.effort === rung.cell.effort
+          const onCell = (cell) => cell && cell.provider === rung.cell.provider && cell.id === rung.cell.id && cell.effort === rung.cell.effort
+          const sameCell = rung && (onCell(currentCell) || onCell(live))
           if (!rung || sameCell || !allowedTarget(rung.cell)) {
             if (!RESEAT_LADDER.includes(crew.tier)) {
               return { applied: false, reason: 'exhausted', why: `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`, from, to: null }
             }
             const declared = currentCellOrLive?.fallback?.[0]
             const self = declared?.provider === currentCellOrLive.provider && declared?.id === currentCellOrLive.id
-            rung = Array.isArray(currentCellOrLive.fallback) && !self && allowedTarget(declared)
+            const onDeclared = declared?.provider === live.provider && declared?.id === live.id
+            rung = Array.isArray(currentCellOrLive.fallback) && !self && !onDeclared && allowedTarget(declared)
               ? {
                 rung: `declared:${currentCellOrLive.id}→${declared.id}`,
                 cell: {
@@ -3748,7 +3747,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
                   effort: declared.effort ?? currentCellOrLive.effort,
                 },
               }
-              : nextModelRung(roster, currentCellOrLive, { ceiling })
+              : nextModelRung(roster, onDeclared ? live : currentCellOrLive, { ceiling })
             if (!rung) {
               return {
                 applied: false, reason: 'exhausted',

@@ -1743,6 +1743,11 @@ test('roster endpoint serves the runtime roster read-only and degrades honestly'
       assert.equal(typeof models.get(seat.model_key).cost_out_per_mtok, 'number')
       assert.equal(typeof models.get(seat.model_key).last_verified, 'string')
     }
+    // Borrowed rates reach the client labelled, never as plain measured prices.
+    assert.ok(Object.values(onDisk.models).some((entry) => entry.rate_estimated === true))
+    for (const [key, entry] of Object.entries(onDisk.models)) {
+      assert.deepEqual([models.get(key).rate_estimated, models.get(key).rate_estimate_reason], [entry.rate_estimated === true, entry.rate_estimate_reason ?? null], key)
+    }
     assert.equal((await json(base, '/api/roster', { method: 'POST' })).status, 405)
     assert.equal((await json(base, '/api/roster', { method: 'PUT' })).status, 405)
     await stopServer(child); child = null;

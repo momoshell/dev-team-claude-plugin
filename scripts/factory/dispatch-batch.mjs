@@ -3502,13 +3502,21 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
 
 export function tierFloor({ files, extra } = {}) {
   const paths = resolveProtectedPaths(extra)
-  const hits = protectedHitsIn(files, paths)
+  const protectedFiles = (Array.isArray(files) ? files : []).map((entry) => {
+    const parsed = parseFenceScope(entry)
+    return parsed.kind === 'span' ? parsed.path : entry
+  })
+  const hits = protectedHitsIn(protectedFiles, paths)
   const forced = hits.length > 0 ? 'judge' : null
   return { hits, forced, floor: forced }
 }
 
 export function promptSurfaceVerdict({ files, register = loadCapabilities() } = {}) {
-  const hits = protectedHitsIn(files, promptSurfacePaths(register))
+  const protectedFiles = (Array.isArray(files) ? files : []).map((entry) => {
+    const parsed = parseFenceScope(entry)
+    return parsed.kind === 'span' ? parsed.path : entry
+  })
+  const hits = protectedHitsIn(protectedFiles, promptSurfacePaths(register))
   return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
 }
 

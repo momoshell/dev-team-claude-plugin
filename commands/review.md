@@ -1,16 +1,16 @@
 ---
 description: Review a pull request through the measured PR-review lane.
-argument-hint: <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]
+argument-hint: --pr <positive decimal integer> [options] | --local [options]
 ---
 
-Use `/review` when you need the existing PR-review workflow to inspect a pull request.
+Use `/review --pr 123` to inspect a pull request, or `/review --local` to review a local repository.
 
 Load the `pr-review` skill (`skills/pr-review/SKILL.md`) and follow it for the review above. This command only names the procedure and passes the argument through.
 
 Usage:
-- Literal: `npm run crew:review -- --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]`
-- Local: `npm run crew:review -- --local [--repo <path>] [--base <ref>] [--model-reviewer <provider/model>] [--artifact-dir <path>] [--no-post] [--panel] [--panel-distinct-agents]`
-- Executable: `npm run crew:review -- --pr $ARGUMENTS`
+- Literal: `node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]`
+- Local: `node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" --local [--repo <path>] [--base <ref>] [--model-reviewer <provider/model>] [--artifact-dir <path>] [--no-post] [--panel] [--panel-distinct-agents]`
+- Executable: `node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" $ARGUMENTS`
 
 The lane never posts APPROVE; it posts only COMMENT or REQUEST_CHANGES when posting is enabled. `--no-post` renders without touching GitHub for publication.
 

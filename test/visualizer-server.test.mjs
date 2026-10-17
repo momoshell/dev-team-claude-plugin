@@ -10,7 +10,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
-import { parseCliArgs, pluginWriteMode, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
+import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, ServerUsageError, startServer as startVisualizerServer, writeGuard, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createWorkflowsSource, WORKFLOW_FEED_REASONS } from '../visualizer/server/workflows-source.mjs'
 import { VARIANTS } from '../crew/variants.mjs'
 import { SHAPE_DEFECT_CODES } from '../crew/shape-validator.mjs'
@@ -3915,3 +3915,312 @@ test('RO5 installed plugin keeps roster propose, stage and compose open', async 
     rmSync(dir, { recursive:true, force:true })
   }
 })
+test('RO1 link-mode install target refuses writes', () => {
+  const home = '/tmp/link-home'
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
+  const marker = JSON.stringify({target: '/tmp/checkout'})
+  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => p
+  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
+    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-install-target', plugin_root: '/tmp/checkout'
+  })
+})
+
+test('RO1 filesystem root link target refuses writes', () => {
+  const home = '/tmp/root-home'
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
+  const marker = JSON.stringify({target: '/'})
+  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => p
+  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
+    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-install-target', plugin_root: '/tmp/checkout'
+  })
+})
+
+test('RO1 malformed link marker fails closed', () => {
+  const home = '/tmp/malformed-home'
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
+  const marker = '{bad json'
+  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => p
+  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
+    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-marker-unreadable', plugin_root: '/tmp/checkout'
+  })
+})
+
+test('RO1 unresolvable link target fails closed', () => {
+  const home = '/tmp/unresolvable-home'
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
+  const marker = JSON.stringify({target: '/tmp/unresolvable-target'})
+  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => { if (p === '/tmp/unresolvable-target') { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err } return p }
+  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
+    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-marker-unreadable', plugin_root: '/tmp/checkout'
+  })
+})
+
+test('RO1 marker-absent checkout stays writable', () => {
+  const home = '/tmp/clean-home'
+  const fakeReaddir = (p) => { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => p
+  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
+    writable: true, reason: null, basis: null, plugin_root: '/tmp/checkout'
+  })
+})
+
+test('pluginWriteTargetMode refuses plugin cache and link targets', () => {
+  const home = '/tmp/target-home'
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
+  const marker = JSON.stringify({target: '/tmp/link-target'})
+  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const fakeRealpath = (p) => p
+  const cached = pluginWriteTargetMode({target: join(home, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0', '.env.local'), home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead})
+  assert.equal(cached.writable, false)
+  assert.equal(cached.basis, 'under-claude-plugins-dir')
+  const linked = pluginWriteTargetMode({target: '/tmp/link-target/crew/roster.json', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead})
+  assert.equal(linked.writable, false)
+  assert.equal(linked.basis, 'link-mode-install-target')
+  const ordinary = pluginWriteTargetMode({target: '/tmp/ordinary-checkout/crew/roster.json', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead})
+  assert.equal(ordinary.writable, true)
+  assert.equal(ordinary.basis, null)
+  const badMarker = '{bad json'
+  const badRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return badMarker; throw new Error('ENOENT ' + p) }
+  const malformed = pluginWriteTargetMode({target: '/tmp/ordinary-checkout/crew/roster.json', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: badRead})
+  assert.equal(malformed.writable, false)
+  assert.equal(malformed.basis, 'link-mode-marker-unreadable')
+  const symlinkRealpath = (p) => { if (p === '/tmp/checkout') return join(home, '.claude', 'plugins', 'store'); if (String(p).startsWith('/tmp/checkout/')) return String(p).replace('/tmp/checkout', join(home, '.claude', 'plugins', 'store')); return p }
+  const emptyReaddir = (p) => { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const emptyRead = (p) => { throw new Error('ENOENT ' + p) }
+  const symlinked = pluginWriteTargetMode({target: '/tmp/checkout/crew/roster.json', home, existsSync: fakeExists, realpathSync: symlinkRealpath, readdirSync: emptyReaddir, readFileSync: emptyRead})
+  assert.equal(symlinked.writable, false)
+  assert.equal(symlinked.basis, 'under-claude-plugins-dir')
+})
+
+test('pluginWriteTargetMode resolves a missing-parent symlink ancestor into the plugin cache', () => {
+  const home = '/tmp/ancestor-home'
+  const cacheTarget = join(home, '.claude', 'plugins', 'cache', 'm', 'p', '1')
+  const fakeRealpath = (p) => {
+    if (p === '/work/cache-alias') return cacheTarget
+    if (p === '/work/cache-alias/new' || p === '/work/cache-alias/new/.env.local') { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+    return p
+  }
+  const fakeReaddir = (p) => { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
+  const fakeRead = (p) => { throw new Error('ENOENT ' + p) }
+  const fakeExists = () => true
+  const resolved = pluginWriteTargetMode({target: '/work/cache-alias/new/.env.local', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead})
+  assert.equal(resolved.writable, false)
+  assert.equal(resolved.basis, 'under-claude-plugins-dir')
+  assert.equal(resolved.plugin_root, join(cacheTarget, 'new', '.env.local'))
+})
+
+test('writeGuard allows loopback Host spellings with matching port', () => {
+  const goodLoopback = writeGuard({headers: {'content-type': 'application/json', host: '127.0.0.1:4488'}, socket: {localPort: 4488}})
+  assert.equal(goodLoopback, null)
+  const goodBracket = writeGuard({headers: {'content-type': 'application/json', host: '[::1]:4488'}, socket: {localPort: 4488}})
+  assert.equal(goodBracket, null)
+  const goodLocal = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:4488'}, socket: {localPort: 4488}})
+  assert.equal(goodLocal, null)
+  const badPort = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:9999'}, socket: {localPort: 4488}})
+  assert.equal(badPort.status, 403)
+  assert.equal(badPort.error.includes('localhost:9999'), true)
+  const evil = writeGuard({headers: {'content-type': 'application/json', origin: 'http://evil.example:4488', host: 'evil.example:4488'}, socket: {localPort: 4488}})
+  assert.equal(evil.status, 403)
+  assert.equal(evil.error.includes('evil.example'), true)
+  const missing = writeGuard({headers: {'content-type': 'application/json'}, socket: {localPort: 4488}})
+  assert.equal(missing.status, 403)
+})
+
+test('writeGuard treats the implicit HTTP port as 80, not a wildcard', () => {
+  const bare80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 80}})
+  assert.equal(bare80, null)
+  const explicit80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:80'}, socket: {localPort: 80}})
+  assert.equal(explicit80, null)
+  const wrongExplicit = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:8080'}, socket: {localPort: 80}})
+  assert.equal(wrongExplicit.status, 403)
+  assert.equal(wrongExplicit.error, 'write host refused: localhost:8080')
+  const bareNon80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 4488}})
+  assert.equal(bareNon80.status, 403)
+  assert.equal(bareNon80.error, 'write host refused: localhost')
+  assert.equal(sameOrigin('http://localhost', 'localhost'), true)
+  const sameOriginPair = writeGuard({headers: {'content-type': 'application/json', host: 'localhost', origin: 'http://localhost'}, socket: {localPort: 80}})
+  assert.equal(sameOriginPair, null)
+})
+
+test('state-writing routes refuse DNS-rebinding Host before writing state', async () => {
+  const dir = scratchDir('visualizer-dns-rebinding-')
+  const checkout = join(dir, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    const port = Number(new URL(server.base).port)
+    const evilHost = 'evil.example:' + port
+    const body = JSON.stringify({ engaged: true, actor: 'evil.example' })
+    const evil = await rawRequest({ port, requestLine: 'POST /api/intake/brake HTTP/1.1', headers: ['Host: ' + evilHost, 'content-type: application/json', 'Origin: http://' + evilHost, 'content-length: ' + Buffer.byteLength(body), 'connection: close'], body })
+    assert.equal(rawStatus(evil), 403)
+    assert.equal(rawJson(evil).error.includes('evil.example'), true)
+    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
+    const wrongHost = 'localhost:9999'
+    const wrongBody = JSON.stringify({ engaged: true, actor: 'evil.example' })
+    const wrongPort = await rawRequest({ port, requestLine: 'POST /api/intake/brake HTTP/1.1', headers: ['Host: ' + wrongHost, 'content-type: application/json', 'Origin: http://' + wrongHost, 'content-length: ' + Buffer.byteLength(wrongBody), 'connection: close'], body: wrongBody })
+    assert.equal(rawStatus(wrongPort), 403)
+    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
+  } finally {
+    if (server) await stopServer(server.child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('RO3-target per-target roster paths refuse ladder apply without writing', async () => {
+  const makeOptions = (dir, pluginRoot, home, rosterPath) => ({
+    pluginRoot, home, rosterPath, envFile: join(dir, '.env.local'), ledgerDb: join(dir, 'ledger.db'), triageDb: join(dir, 'triage.db'), crewRoot: dir,
+    fetchImpl: async () => new Response(JSON.stringify({ tier: 'free', intelligence_index_version: 4.1, pagination: { has_more: false }, data: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    openRouterCatalog: { get: async () => ({ configured: true, source: 'OpenRouter', source_url: 'https://openrouter.ai/api/v1/models', models: [], absent: null }) }
+  })
+  const reviewer = serverRosterFixture().tiers.build.reviewer
+  const move = { tier: 'build', role: 'reviewer', cell: { provider: reviewer.provider, id: reviewer.id, agent: reviewer.agent, effort: reviewer.effort === 'high' ? 'xhigh' : 'high' } }
+  const dirOne = realpathSync(scratchDir('visualizer-plugin-target-cache-'))
+  const pluginOne = join(dirOne, 'plugin')
+  const homeOne = join(dirOne, 'home')
+  mkdirSync(join(pluginOne, '.git'), { recursive: true })
+  mkdirSync(homeOne, { recursive: true })
+  const rosterOne = join(homeOne, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0', 'roster.json')
+  mkdirSync(join(homeOne, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0'), { recursive: true })
+  writeFileSync(rosterOne, JSON.stringify(serverRosterFixture(), null, 2))
+  const beforeOne = readFileSync(rosterOne, 'utf8')
+  let handlesOne
+  try {
+    handlesOne = await startInProcess({}, makeOptions(dirOne, pluginOne, homeOne, rosterOne))
+    const applied = await json(handlesOne.base, '/api/roster/ladder/apply', postJson({ moves: [move] }))
+    assert.equal(applied.status, 409)
+    assert.equal(applied.json.basis, 'under-claude-plugins-dir')
+    assert.equal(readFileSync(rosterOne, 'utf8'), beforeOne)
+  } finally {
+    if (handlesOne) await stopInProcess(handlesOne.server)
+    rmSync(dirOne, { recursive: true, force: true })
+  }
+  const dirTwo = realpathSync(scratchDir('visualizer-plugin-target-link-'))
+  const pluginTwo = join(dirTwo, 'plugin')
+  const homeTwo = join(dirTwo, 'home')
+  const linkTarget = join(dirTwo, 'link-target')
+  mkdirSync(join(pluginTwo, '.git'), { recursive: true })
+  mkdirSync(homeTwo, { recursive: true })
+  mkdirSync(linkTarget, { recursive: true })
+  const cacheTwo = join(homeTwo, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0')
+  mkdirSync(cacheTwo, { recursive: true })
+  writeFileSync(join(cacheTwo, '.claude-plugin-link'), JSON.stringify({ target: linkTarget }))
+  const rosterTwo = join(linkTarget, 'roster.json')
+  writeFileSync(rosterTwo, JSON.stringify(serverRosterFixture(), null, 2))
+  const beforeTwo = readFileSync(rosterTwo, 'utf8')
+  let handlesTwo
+  try {
+    handlesTwo = await startInProcess({}, makeOptions(dirTwo, pluginTwo, homeTwo, rosterTwo))
+    const applied = await json(handlesTwo.base, '/api/roster/ladder/apply', postJson({ moves: [move] }))
+    assert.equal(applied.status, 409)
+    assert.equal(applied.json.basis, 'link-mode-install-target')
+    assert.equal(readFileSync(rosterTwo, 'utf8'), beforeTwo)
+  } finally {
+    if (handlesTwo) await stopInProcess(handlesTwo.server)
+    rmSync(dirTwo, { recursive: true, force: true })
+  }
+})
+
+test('RO4-target per-target env paths refuse persistent catalog key without writing', async () => {
+  const makeOptions = (dir, pluginRoot, home, envFile) => ({
+    pluginRoot, home, rosterPath: join(dir, 'roster.json'), envFile, ledgerDb: join(dir, 'ledger.db'), triageDb: join(dir, 'triage.db'), crewRoot: dir,
+    fetchImpl: async () => new Response(JSON.stringify({ tier: 'free', intelligence_index_version: 4.1, pagination: { has_more: false }, data: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    openRouterCatalog: { get: async () => ({ configured: true, source: 'OpenRouter', source_url: 'https://openrouter.ai/api/v1/models', models: [], absent: null }) }
+  })
+  const dirOne = realpathSync(scratchDir('visualizer-plugin-target-env-cache-'))
+  const pluginOne = join(dirOne, 'plugin')
+  const homeOne = join(dirOne, 'home')
+  mkdirSync(join(pluginOne, '.git'), { recursive: true })
+  mkdirSync(homeOne, { recursive: true })
+  writeFileSync(join(dirOne, 'roster.json'), JSON.stringify(serverRosterFixture(), null, 2))
+  const envOne = join(homeOne, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0', '.env.local')
+  mkdirSync(join(homeOne, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0'), { recursive: true })
+  let handlesOne
+  try {
+    handlesOne = await startInProcess({}, makeOptions(dirOne, pluginOne, homeOne, envOne))
+    const persisted = await json(handlesOne.base, '/api/model-catalog/key', postJson({ api_key: 'target-cache-secret-value', persist: true }))
+    assert.equal(persisted.status, 409)
+    assert.equal(persisted.json.basis, 'under-claude-plugins-dir')
+    assert.equal(existsSync(envOne), false)
+  } finally {
+    if (handlesOne) await stopInProcess(handlesOne.server)
+    rmSync(dirOne, { recursive: true, force: true })
+  }
+  const dirTwo = realpathSync(scratchDir('visualizer-plugin-target-env-link-'))
+  const pluginTwo = join(dirTwo, 'plugin')
+  const homeTwo = join(dirTwo, 'home')
+  const linkTarget = join(dirTwo, 'link-target')
+  mkdirSync(join(pluginTwo, '.git'), { recursive: true })
+  mkdirSync(homeTwo, { recursive: true })
+  mkdirSync(linkTarget, { recursive: true })
+  const cacheTwo = join(homeTwo, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0')
+  mkdirSync(cacheTwo, { recursive: true })
+  writeFileSync(join(cacheTwo, '.claude-plugin-link'), JSON.stringify({ target: linkTarget }))
+  writeFileSync(join(dirTwo, 'roster.json'), JSON.stringify(serverRosterFixture(), null, 2))
+  const envTwo = join(linkTarget, '.env.local')
+  let handlesTwo
+  try {
+    handlesTwo = await startInProcess({}, makeOptions(dirTwo, pluginTwo, homeTwo, envTwo))
+    const persisted = await json(handlesTwo.base, '/api/model-catalog/key', postJson({ api_key: 'target-link-secret-value', persist: true }))
+    assert.equal(persisted.status, 409)
+    assert.equal(persisted.json.basis, 'link-mode-install-target')
+    assert.equal(existsSync(envTwo), false)
+  } finally {
+    if (handlesTwo) await stopInProcess(handlesTwo.server)
+    rmSync(dirTwo, { recursive: true, force: true })
+  }
+})
+test('RO4-target missing-parent symlink env path refuses persistent catalog key without creating directories', async () => {
+  const dir = realpathSync(scratchDir('visualizer-plugin-target-env-missing-parent-'))
+  const pluginRoot = join(dir, 'plugin')
+  const home = join(dir, 'home')
+  mkdirSync(join(pluginRoot, '.git'), { recursive: true })
+  mkdirSync(home, { recursive: true })
+  writeFileSync(join(dir, 'roster.json'), JSON.stringify(serverRosterFixture(), null, 2))
+  const cacheReal = join(home, '.claude', 'plugins', 'cache', 'm', 'p', '1')
+  mkdirSync(cacheReal, { recursive: true })
+  const alias = join(dir, 'cache-alias')
+  symlinkSync(cacheReal, alias, 'dir')
+  const envFile = join(alias, 'new', '.env.local')
+  const options = {
+    pluginRoot, home, rosterPath: join(dir, 'roster.json'), envFile, ledgerDb: join(dir, 'ledger.db'), triageDb: join(dir, 'triage.db'), crewRoot: dir,
+    fetchImpl: async () => new Response(JSON.stringify({ tier: 'free', intelligence_index_version: 4.1, pagination: { has_more: false }, data: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    openRouterCatalog: { get: async () => ({ configured: true, source: 'OpenRouter', source_url: 'https://openrouter.ai/api/v1/models', models: [], absent: null }) }
+  }
+  let handles
+  try {
+    handles = await startInProcess({}, options)
+    const persisted = await json(handles.base, '/api/model-catalog/key', postJson({ api_key: 'missing-parent-secret-value', persist: true }))
+    assert.equal(persisted.status, 409)
+    assert.equal(persisted.json.error, 'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.')
+    assert.equal(persisted.json.basis, 'under-claude-plugins-dir')
+    assert.equal(existsSync(join(cacheReal, 'new')), false)
+    assert.equal(existsSync(join(cacheReal, 'new', '.env.local')), false)
+    assert.equal(existsSync(envFile), false)
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+

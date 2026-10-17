@@ -863,3 +863,87 @@ export function findingRows(returns = {}) {
   }
   return { groups, pending: measured ? null : FINDINGS_PENDING }
 }
+
+function percent(value, total) {
+  return total > 0 && value != null ? Math.round(value / total * 100) : null
+}
+
+export function operationsRunSummary(runSet = {}) {
+  const absent = typeof runSet?.absent === 'string' && runSet.absent.trim() ? runSet.absent : null
+  if (absent) return { absent, measured: false, unmeasured: `Unmeasured — ${absent}`, total: null, running: null, ok: null, fail: null, terminal: null, pass: null }
+  const settled = runSet?.settled || {}
+  const total = runSet?.runs ?? null
+  const running = settled.running ?? 0
+  const ok = settled.ok ?? 0
+  const terminal = ok + (settled.fail ?? 0) + (settled.aborted ?? 0)
+  return { absent: null, measured: true, unmeasured: null, total, running, ok, fail: (settled.fail ?? 0) + (settled.aborted ?? 0), terminal, pass: percent(ok, terminal) }
+}
+
+export function operationsTeardownSummary(teardowns = {}) {
+  const absent = typeof teardowns?.absent === 'string' && teardowns.absent.trim() ? teardowns.absent : null
+  if (absent) return { absent, measured: false, unmeasured: `Unmeasured — ${absent}`, seats: null, proven: null, failed: null, unproven: null, measuredRuns: null, totalRuns: null, coverage: null, clean: null }
+  const totals = teardowns?.totals || {}
+  const source = Array.isArray(teardowns?.runs) ? teardowns.runs : []
+  const measured = teardowns?.measured === true
+  const measuredRuns = source.filter((run) => run?.state === 'measured').length
+  const why = source.map((run) => run?.not_measured_why).find((value) => typeof value === 'string' && value.trim()) || 'no seat_teardowns rows were recorded in the window, so teardown is not measured, never a clean zero'
+  return {
+    absent: null,
+    measured,
+    unmeasured: measured ? null : `Unmeasured — ${why}`,
+    seats: totals.seats ?? null,
+    proven: totals.proven ?? null,
+    failed: totals.failed ?? null,
+    unproven: totals.unproven ?? null,
+    measuredRuns,
+    totalRuns: source.length,
+    coverage: percent(measuredRuns, source.length),
+    clean: measured ? (totals.failed ?? 0) === 0 && (totals.unproven ?? 0) === 0 : null
+  }
+}
+
+export function operationsHealthSummary(cellHealth = {}) {
+  const absent = typeof cellHealth?.absent === 'string' && cellHealth.absent.trim() ? cellHealth.absent : null
+  if (absent) return { absent, measured: false, unmeasured: `Unmeasured — ${absent}`, cells: null, failures: null, affected: null, faultDomains: [] }
+  const cells = Array.isArray(cellHealth?.cells) ? cellHealth.cells : []
+  const failures = cells.reduce((sum, cell) => sum + (Number(cell?.failures) || 0), 0)
+  const affected = cells.filter((cell) => (Number(cell?.failures) || 0) > 0).length
+  const faultDomains = cells
+    .filter((cell) => (Number(cell?.failures) || 0) > 0)
+    .sort((a, b) => (b.failures ?? 0) - (a.failures ?? 0))
+    .slice(0, 4)
+    .map((cell) => ({
+      key: cell.key,
+      model: `${cell.provider}/${cell.model_id}`,
+      agent: cell.agent,
+      effort: cell.effort,
+      failures: cell.failures,
+      roles: Array.isArray(cell.roles) ? cell.roles.join(', ') : 'roles unavailable',
+      kind: cell.by_kind?.[0]?.kind || 'failure kind unavailable',
+    }))
+  return { absent: null, measured: true, unmeasured: null, cells: cells.length, failures, affected, faultDomains }
+}
+
+export function operationsPosture({ loading = false, degraded = false, errors = [], brake = null, runSummary, teardownSummary, healthSummary } = {}) {
+  if (loading) return { tone: 'quiet', label: 'Reading the factory', message: 'Building an operational picture from the latest ledger evidence.' }
+  if (degraded || errors.length) return { tone: 'fail', label: 'Telemetry degraded', message: 'Some operating signals are unavailable. Treat apparent zeros as unknown.' }
+  if (brake?.state === 'engaged') return { tone: 'fail', label: 'Intake is paused', message: 'The stop switch is engaged. Work already in flight is unaffected.' }
+  if (runSummary?.measured === false) return { tone: 'quiet', label: 'Factory posture unmeasured', message: runSummary.unmeasured }
+  if (teardownSummary?.measured === false) return { tone: 'quiet', label: 'Factory posture unmeasured', message: teardownSummary.unmeasured }
+  if (healthSummary?.measured === false) return { tone: 'quiet', label: 'Factory posture unmeasured', message: healthSummary.unmeasured }
+  if (runSummary?.fail > 0 || healthSummary?.failures > 0) return {
+    tone: 'watch',
+    label: 'Factory needs attention',
+    message: `${runSummary.fail} task${runSummary.fail === 1 ? '' : 's'} did not complete cleanly and ${healthSummary.affected} model cell${healthSummary.affected === 1 ? '' : 's'} recorded failures in the active windows.`,
+  }
+  return { tone: 'ok', label: 'Factory is operating cleanly', message: 'No recorded failures or teardown leaks in the active windows.' }
+}
+
+export function cellHealthTotals(panel = {}) {
+  if (panel?.absent) return { failures: null, affected: null, quiet: null, absent: panel.absent, measured: false, unmeasured: `Unmeasured — ${panel.absent}`, badge_label: `Unmeasured — ${panel.absent}`, badge_tone: 'unmeasured' }
+  const rows = Array.isArray(panel?.rows) ? panel.rows : []
+  const failures = rows.reduce((sum, row) => sum + (Number(row.failures) || 0), 0)
+  const affected = rows.filter((row) => (Number(row.failures) || 0) > 0).length
+  const quiet = rows.filter((row) => row.state === 'silent').length
+  return { failures, affected, quiet, absent: panel?.absent ?? null, measured: true, unmeasured: null, badge_label: failures ? `${failures} failures` : 'no failures', badge_tone: failures ? 'watch' : 'clear' }
+}

@@ -1,6 +1,6 @@
 <script>
   import { getCellHealth, getIntake, getIntakeBrake, getRunSet, getSeatTeardowns } from './api.js'
-  import { PANEL_REFRESH_MS } from './panels.js'
+  import { PANEL_REFRESH_MS, operationsHealthSummary, operationsPosture, operationsRunSummary, operationsTeardownSummary } from './panels.js'
   import { operationsOverview } from './fleet.js'
 
   let { runs = [], degraded = false, now = Date.now(), onopen = () => {} } = $props()
@@ -55,52 +55,11 @@
     return () => clearInterval(timer)
   })
 
-  let runSummary = $derived.by(() => {
-    const settled = runSet?.settled || {}
-    const total = runSet?.runs ?? null
-    const running = settled.running ?? 0
-    const ok = settled.ok ?? 0
-    const fail = (settled.fail ?? 0) + (settled.aborted ?? 0)
-    const terminal = ok + fail
-    return { total, running, ok, fail, terminal, pass: percent(ok, terminal) }
-  })
+  let runSummary = $derived(operationsRunSummary(runSet))
 
-  let teardownSummary = $derived.by(() => {
-    const totals = teardowns?.totals || {}
-    const source = Array.isArray(teardowns?.runs) ? teardowns.runs : []
-    const measuredRuns = source.filter((run) => run?.state === 'measured').length
-    const clean = (totals.failed ?? 0) === 0 && (totals.unproven ?? 0) === 0
-    return {
-      seats: totals.seats ?? null,
-      proven: totals.proven ?? null,
-      failed: totals.failed ?? null,
-      unproven: totals.unproven ?? null,
-      measuredRuns,
-      totalRuns: source.length,
-      coverage: percent(measuredRuns, source.length),
-      clean,
-    }
-  })
+  let teardownSummary = $derived(operationsTeardownSummary(teardowns))
 
-  let healthSummary = $derived.by(() => {
-    const cells = Array.isArray(cellHealth?.cells) ? cellHealth.cells : []
-    const failures = cells.reduce((sum, cell) => sum + (Number(cell?.failures) || 0), 0)
-    const affected = cells.filter((cell) => (Number(cell?.failures) || 0) > 0).length
-    const faultDomains = cells
-      .filter((cell) => (Number(cell?.failures) || 0) > 0)
-      .sort((a, b) => (b.failures ?? 0) - (a.failures ?? 0))
-      .slice(0, 4)
-      .map((cell) => ({
-        key: cell.key,
-        model: `${cell.provider}/${cell.model_id}`,
-        agent: cell.agent,
-        effort: cell.effort,
-        failures: cell.failures,
-        roles: Array.isArray(cell.roles) ? cell.roles.join(', ') : 'roles unavailable',
-        kind: cell.by_kind?.[0]?.kind || 'failure kind unavailable',
-      }))
-    return { cells: cells.length, failures, affected, faultDomains }
-  })
+  let healthSummary = $derived(operationsHealthSummary(cellHealth))
 
   let coverage = $derived.by(() => {
     const usage = runSet?.coverage || null
@@ -149,17 +108,7 @@
     return buckets.map((bucket) => ({ ...bucket, total: bucket.ok + bucket.fail + bucket.running, maximum }))
   })
 
-  let posture = $derived.by(() => {
-    if (loading) return { tone: 'quiet', label: 'Reading the factory', message: 'Building an operational picture from the latest ledger evidence.' }
-    if (degraded || errors.length) return { tone: 'fail', label: 'Telemetry degraded', message: 'Some operating signals are unavailable. Treat apparent zeros as unknown.' }
-    if (brake?.state === 'engaged') return { tone: 'fail', label: 'Intake is paused', message: 'The stop switch is engaged. Work already in flight is unaffected.' }
-    if (runSummary.fail > 0 || healthSummary.failures > 0) return {
-      tone: 'watch',
-      label: 'Factory needs attention',
-      message: `${runSummary.fail} task${runSummary.fail === 1 ? '' : 's'} did not complete cleanly and ${healthSummary.affected} model cell${healthSummary.affected === 1 ? '' : 's'} recorded failures in the active windows.`,
-    }
-    return { tone: 'ok', label: 'Factory is operating cleanly', message: 'No recorded failures or teardown leaks in the active windows.' }
-  })
+  let posture = $derived(operationsPosture({ loading, degraded, errors, brake, runSummary, teardownSummary, healthSummary }))
 
   function openException(row) {
     if (row.source) onopen(row.source)
@@ -189,7 +138,7 @@
         <span class="fail" style={`--share:${percent(runSummary.fail, runSummary.total) ?? 0}%`}></span>
         <span class="running" style={`--share:${percent(runSummary.running, runSummary.total) ?? 0}%`}></span>
       </div>
-      <div class="legend"><span><i class="ok"></i>{runSummary.pass ?? '—'}% completion quality</span><span><i class="fail"></i>{runSummary.fail} unsuccessful</span><span><i class="running"></i>{runSummary.running} running</span></div>
+      <div class="legend"><span><i class="ok"></i>{runSummary.pass ?? '—'}% completion quality</span><span><i class="fail"></i>{runSummary.fail ?? '—'} unsuccessful</span><span><i class="running"></i>{runSummary.running ?? '—'} running</span></div>
     </article>
 
     <article class="score-card">
@@ -228,14 +177,14 @@
 
   <div class="evidence-grid">
     <article class="faults">
-      <div class="section-title"><div><p class="eyebrow">Concentrated risk</p><h3>Fault domains</h3></div><span>{healthSummary.failures} events · {cellHealth?.window?.label || 'window loading'}</span></div>
+      <div class="section-title"><div><p class="eyebrow">Concentrated risk</p><h3>Fault domains</h3></div><span>{healthSummary.failures ?? '—'} events · {cellHealth?.window?.label || 'window loading'}</span></div>
       {#if healthSummary.faultDomains.length}
         <div class="fault-list">
           {#each healthSummary.faultDomains as fault (fault.key)}
             <div class="fault-row"><span class="fault-count">{fault.failures}</span><div><strong>{fault.model}</strong><small>{fault.agent} · {fault.effort} · {fault.roles}</small></div><span class="fault-kind">{fault.kind}</span></div>
           {/each}
         </div>
-      {:else}<p class="empty">No cell failures recorded in this window.</p>{/if}
+      {:else}{#if healthSummary.absent}<p class="empty">Unmeasured — {healthSummary.absent}</p>{:else}<p class="empty">No cell failures recorded in this window.</p>{/if}{/if}
     </article>
 
     <article class="exceptions">

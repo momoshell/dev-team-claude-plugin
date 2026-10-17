@@ -4512,6 +4512,31 @@ test('#900 an appeal excuses only a finding the review owed', () => {
   assert.deepEqual(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').map((entry) => entry.finding_hardened.finding), ['F1'])
 })
 
+const appealSeverityRun = () => {
+  const reReported = { ...B376_APPEAL_MARK, severity: 'should-fix' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [reReported]),
+    files: { ...B376_FILES },
+  })
+  return { io, result: driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io) }
+}
+
+test('AS1 an appeal grant survives a should-fix re-report of the owed finding', () => {
+  const { result } = appealSeverityRun()
+  assert.equal(result.status, 'done')
+})
+
+test('AS2 a should-fix appeal grant writes one ungateable row for the owed finding', () => {
+  const { io } = appealSeverityRun()
+  assert.deepEqual(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').map((entry) => entry.finding_hardened.finding), ['F1'])
+})
+
+test('AS3 a should-fix appeal grant issues no harden-fix bounce', () => {
+  const { io } = appealSeverityRun()
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 0)
+})
+
 test('#900 ordinary builder defects and pre-repair-green spend no appeal', () => {
   const missing = b376ProofIo({ hardened: [], files: { ...B376_FILES } })
   const missingResult = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, missing)

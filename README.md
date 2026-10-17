@@ -43,7 +43,7 @@ There are two ways to use it:
 
 - **Skills only.** Nothing else to set up. The knowledge skills (`pr-review`,
   `qa-test-writing`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`)
-  work in any repo. Most repos stop here.
+  work in any repo. Most repos stop here. The plugin registers no hooks.
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
   (`engines` in `package.json`), and a crew root (`~/.crew`, or
   `DEVTEAM_CREW_ROOT`). Run the runtime from the clone and point it at the

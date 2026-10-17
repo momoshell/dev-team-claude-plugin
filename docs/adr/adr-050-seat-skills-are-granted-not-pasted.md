@@ -211,3 +211,9 @@ Lanes 1 and 2 are independent; lane 3 needs both; lane 4 needs 1.
 4. **The default flips at 80% loads before a covered edit, at 12 lanes per arm, with no loss of first-round
    pass rate;** a role below 80% gets enforcement rather than pasted bodies.
 5. **Names:** `lean-build` becomes `code-less`; the no-ai-slop adaptation is `prose-plain`.
+
+## Operator decisions (2026-10-17)
+
+The plugin registers no Claude Code hook. The operator session is never gated. Seats receive skills
+through role packs (inline) and native grants. Any claude-seat enforcement under section 5 needs a new
+seat-scoped mechanism.

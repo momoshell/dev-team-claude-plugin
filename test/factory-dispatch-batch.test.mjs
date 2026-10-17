@@ -97,6 +97,7 @@ import {
   main,
   batchAliasWarnings,
   bootCommand,
+  baselineCachePath,
   measureBatchBaseline,
   mergeCheckLine,
   normalDeps,
@@ -150,7 +151,8 @@ import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, issueBindingFor, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { git, scratchDir } from './helpers.mjs'
-import { ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
+import { defaultProfilePath, ProfileRefusal, repoKeyFor } from '../scripts/factory/probe-repo.mjs'
+import { fileURLToPath } from 'node:url'
 
 test('E1 journals sourced admissions and refuses an unsourced admission', async () => {
   for (const source of [undefined, 'unknown']) {
@@ -3409,6 +3411,106 @@ test('TB6', async () => {
   for (const command of seatCommands) {
     assert.equal(command.args.includes(`--${TURN_CENSUS_FLAG}`), false)
     assert.equal(command.args.includes(censusPath), false)
+  }
+})
+
+// MUTATION FB3: bypassing the profiled lane must miss the cargo-command cache record.
+test('FB3', () => {
+  const checkout = scratchDir('fb3-foreign-checkout-')
+  const factoryRoot = scratchDir('fb3-factory-')
+  const stateRoot = scratchDir('fb3-state-')
+  const bin = scratchDir('fb3-bin-')
+  put(join(checkout, 'tracked.txt'), 'tracked\n')
+  git(checkout, 'init', '-q', '-b', 'main')
+  git(checkout, 'config', 'user.email', 'fb3@example.invalid')
+  git(checkout, 'config', 'user.name', 'FB3 fixture')
+  git(checkout, 'add', '.')
+  git(checkout, 'commit', '-q', '-m', 'base')
+  git(checkout, 'remote', 'add', 'origin', 'https://github.com/example/foreign.git')
+  const sha = git(checkout, 'rev-parse', 'HEAD').trim()
+  const repoKey = repoKeyFor({ checkout })
+  const profilePath = defaultProfilePath({ repoKey, factoryRoot })
+  const cargo = join(bin, 'cargo')
+  writeFileSync(cargo, '#!/bin/sh\nprintf "%s\\n" "test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"\nexit 1\n')
+  const chmod = spawnSync('chmod', ['+x', cargo], { encoding: 'utf8' })
+  assert.equal(chmod.status, 0, chmod.stderr)
+
+  const writeTestProfile = (testCommand) => put(profilePath, JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: repoKey,
+    repo_slug: 'foreign',
+    fields: { test_command: testCommand },
+    meta: { probed_at: '2026-10-01T00:00:00.000Z' },
+  }, null, 2))
+  writeTestProfile({
+    status: 'ratified',
+    value: 'cargo test --workspace',
+    source: 'FB3 fixture',
+    ratified_by: 'factory test',
+    ratified_at: '2026-10-01T00:00:00.000Z',
+  })
+  assert.equal(fsExistsSync(join(checkout, 'package.json')), false)
+  const measuredPath = join(stateRoot, 'measured.json')
+  const compiler = fileURLToPath(new URL('../scripts/factory/make-brief.mjs', import.meta.url))
+  const measuredRun = spawnSync(process.execPath, [compiler, '--measure-baseline', measuredPath, '--checkout', checkout], {
+    cwd: checkout,
+    encoding: 'utf8',
+    env: { ...process.env, DEVTEAM_FACTORY_DIR: factoryRoot, PATH: bin + ':' + (process.env.PATH || '') },
+  })
+  assert.equal(measuredRun.status, 0, measuredRun.stderr + '\n' + measuredRun.stdout)
+  const measured = JSON.parse(readFileSync(measuredPath, 'utf8'))
+  assert.equal(measured.sha, sha)
+  assert.equal(measured.command, 'cargo test --workspace')
+  assert.equal(measured.pass, 1)
+  assert.equal(measured.fail, 2)
+  assert.equal(measured.status, 'red')
+
+  const deps = {
+    home: stateRoot,
+    env: { DEVTEAM_LEDGER_DIR: stateRoot },
+    factoryRoot,
+    log: () => {},
+  }
+  const cachePathForSha = baselineCachePath({ sha, deps })
+  const cacheRecord = { ...measured, command: 'cargo test --workspace' }
+  put(cachePathForSha, JSON.stringify(cacheRecord))
+  let measurementSpawns = 0
+  const cachedDeps = {
+    ...deps,
+    spawn: () => {
+      measurementSpawns += 1
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }
+  const plans = [{ lane: 'lane-a', dir: checkout }]
+  const heads = new Map([['lane-a', sha]])
+  const cached = measureBatchBaseline({ plans, outDir: join(stateRoot, 'out'), checkout, heads, deps: cachedDeps })
+  assert.equal(cached, cachePathForSha)
+  assert.equal(measurementSpawns, 0)
+
+  put(join(checkout, 'package.json'), JSON.stringify({ scripts: { test: 'npm test' } }))
+  const fallbackProfiles = [
+    ['absent', null],
+    ['proposed', { status: 'proposed', value: 'cargo test --workspace', source: 'FB3 fixture' }],
+    ['unusable', {
+      status: 'ratified',
+      value: 42,
+      source: 'FB3 fixture',
+      ratified_by: 'factory test',
+      ratified_at: '2026-10-01T00:00:00.000Z',
+    }],
+  ]
+  for (const [label, field] of fallbackProfiles) {
+    if (field === null) rmSync(profilePath, { force: true })
+    else writeTestProfile(field)
+    put(cachePathForSha, JSON.stringify({ sha, command: 'npm test', pass: 5, fail: 0, status: 'green' }))
+    assert.equal(
+      measureBatchBaseline({ plans, outDir: join(stateRoot, 'fallback-' + label), checkout, heads, deps: cachedDeps }),
+      cachePathForSha,
+      label + ' profile must fall back to package.json',
+    )
+    assert.equal(measurementSpawns, 0, label + ' fallback must hit the package command cache')
   }
 })
 

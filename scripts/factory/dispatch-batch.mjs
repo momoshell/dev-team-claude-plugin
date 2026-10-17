@@ -21,7 +21,7 @@ import { openRun } from './emit.mjs'
 import { checkoutBaseBranch, checkoutWorktreeSetup, validateWorktreeSetup, runWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
-import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, issueBindingFor, validateRequest } from './make-brief.mjs'
+import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherProfile, isTripwireFile, issueBindingFor, laneFromProfile, profileField, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -3087,6 +3087,8 @@ export function laneHeads({ plans, deps } = {}) {
 
 function laneTestCommand({ dir, deps }) {
   const d = normalDeps(deps)
+  const { lane } = laneFromProfile(profileField(gatherProfile({ checkout: dir, factoryRoot: d.factoryRoot }), 'test_command'))
+  if (lane) return lane
   try {
     const data = JSON.parse(textOf(d.readFileSync(join(dir, 'package.json'), 'utf8')))
     return typeof data?.scripts?.test === 'string' && data.scripts.test.trim() ? data.scripts.test : null

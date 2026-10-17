@@ -1162,9 +1162,18 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null, timeou
   const output = stripVTControlCharacters(`${result.stdout || ''}\n${result.stderr || ''}`)
   const passMatch = output.match(/^\s*(?:ℹ\s*)?pass\s+(\d+)\s*$/m)
   const failMatch = output.match(/^\s*(?:ℹ\s*)?fail\s+(\d+)\s*$/m)
-  if (!passMatch || !failMatch) return unknownBaseline(selectedLane, 'missing-summary', basis, reap)
-  const pass = Number(passMatch[1])
-  const fail = Number(failMatch[1])
+  let pass
+  let fail
+  if (passMatch && failMatch) {
+    pass = Number(passMatch[1])
+    fail = Number(failMatch[1])
+  } else {
+    const cargoMatches = [...output.matchAll(/^\s*test result: (?:ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;.*$/gm)]
+    if (cargoMatches.length === 0) return unknownBaseline(selectedLane, 'missing-summary', basis, reap)
+    pass = cargoMatches.reduce((total, match) => total + Number(match[1]), 0)
+    fail = cargoMatches.reduce((total, match) => total + Number(match[2]), 0)
+  }
+
   if (fail > 0) return { lane: selectedLane, pass, fail, status: 'red', reason: null, laneBasis: basis, reap }
   if (result.status !== 0) return { lane: selectedLane, pass, fail, status: 'unknown', reason: 'nonzero-exit', laneBasis: basis, reap }
   return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis, reap }

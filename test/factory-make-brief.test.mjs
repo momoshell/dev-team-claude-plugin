@@ -4131,6 +4131,53 @@ test('gatherBaseline names output past its buffer as output-overflow, not timeou
   assert.equal(baseline.reap.reason, 'probe-dead')
 })
 
+// MUTATION FB2: replacing cargoMatches with an empty array must lose all Cargo counts.
+test('FB2', () => {
+  const run = (lines, exitCode = 0) => {
+    const encoded = lines.join('\\n') + '\\n'
+    return gatherBaseline({ checkout: ROOT, lane: 'printf "' + encoded + '"; exit ' + exitCode })
+  }
+  const red = run([
+    'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+    'test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s',
+  ], 1)
+  assert.equal(red.pass, 4)
+  assert.equal(red.fail, 2)
+  assert.equal(red.status, 'red')
+  assert.equal(red.reason, null)
+
+  const green = run([
+    'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+    'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s',
+  ])
+  assert.equal(green.pass, 6)
+  assert.equal(green.fail, 0)
+  assert.equal(green.status, 'green')
+  assert.equal(green.reason, null)
+
+  const nonzero = run([
+    'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+  ], 1)
+  assert.equal(nonzero.pass, 2)
+  assert.equal(nonzero.fail, 0)
+  assert.equal(nonzero.status, 'unknown')
+  assert.equal(nonzero.reason, 'nonzero-exit')
+
+  const noise = run(['cargo emitted no summary'])
+  assert.equal(noise.status, 'unknown')
+  assert.equal(noise.reason, 'missing-summary')
+
+  const nodePrecedence = run([
+    'pass 7',
+    'fail 1',
+    'test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+  ])
+  assert.equal(nodePrecedence.pass, 7)
+  assert.equal(nodePrecedence.fail, 1)
+  assert.equal(nodePrecedence.status, 'red')
+  assert.equal(nodePrecedence.reason, null)
+})
+
 function reapChildLane(root, failing = false) {
   const pidFile = join(root, 'child.pid')
   const summary = failing ? 'pass 2\\nfail 1\\n' : 'pass 2\\nfail 0\\n'

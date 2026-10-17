@@ -2089,7 +2089,11 @@ export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot }
   try { lstatSync(path); present = true } catch (error) {
     if (error?.code !== 'ENOENT') throw new ProfileRefusal(`cannot inspect base branch profile · ${path}`, 'profile-unreadable')
   }
-  if (!present) return { branch: 'main', basis: `default base branch main · no profile at ${path}` }
+  if (!present) {
+    const remoteDefault = gatherDefaultBranch(resolve(checkout || process.cwd()), true, false)
+    if (remoteDefault.status === 'proposed') return { branch: remoteDefault.value, basis: remoteDefault.source }
+    return { branch: 'main', basis: `default base branch main · no profile at ${path}` }
+  }
   let profile
   try { profile = readProfile(path) } catch {
     throw new ProfileRefusal(`cannot read base branch profile · ${path}`, 'profile-unreadable')

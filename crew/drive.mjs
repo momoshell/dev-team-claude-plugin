@@ -15617,14 +15617,19 @@ export function hardeningAppealable(refusals) {
 }
 // The appeal READER. Only a reviewer-origin envelope reaches it — the driver assigns the
 // reviewer seat — and only an id the review ALREADY owed can be excused: an appeal may not
-// mint a finding, re-open a closed one, or excuse something no review raised. It reuses
-// `hardeningDebt` so the mark's shape ('ungateable' plus a NON-EMPTY hardening_why, via
-// `hardeningOf`) is decided by one predicate everywhere.
+// mint a finding, re-open a closed one, or excuse something no review raised. It reads the
+// appeal envelope's normalised findings directly, not `hardeningDebt`: an appeal reviewer
+// may re-report the owed finding at a severity other than must-fix, and `hardeningDebt`'s
+// must-fix filter (the normal path, unchanged) would drop the grant before the mark is
+// read. The mark's shape ('ungateable' plus a NON-EMPTY hardening_why, via
+// `hardeningOf` inside `reviewFindings`) is still decided by one predicate everywhere.
 export function hardeningAppealMarks(details, owed) {
   const wanted = new Set((Array.isArray(owed) ? owed : []).map(({ id }) => id))
   // MUTATION C3: drop the owed intersection and an appeal reviewer can excuse a finding
   // the review never raised — a mark minted rather than granted.
-  return hardeningDebt(details).exempt.filter(({ id }) => wanted.has(id))               // ANCHOR HA2
+  // MUTATION HA-SEV: add a must-fix severity filter to the appeal read below and a
+  // should-fix re-report of an owed finding drops the reviewer's grant.
+  return (reviewFindings(details)?.findings ?? []).filter(({ id, hardening }) => wanted.has(id) && hardening === 'ungateable').map(({ id, hardening_why }) => ({ id, why: hardening_why }))               // ANCHOR HA2
 }
 export function hardeningAppealLines(round, owed, refusals, rows) {
   const byId = new Map((Array.isArray(owed) ? owed : []).map((finding) => [finding.id, finding]))

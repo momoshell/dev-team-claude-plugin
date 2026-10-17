@@ -66,11 +66,25 @@ test('reject-always is used when reject-once is unavailable', () => {
   const result = settlePermission({ toolCall, options: [{ kind: 'reject_always', optionId: 'deny-all' }], lead: () => { throw Error('must not call') } })
   assert.equal(result.optionId, 'deny-all')
 })
-test('allow-always fallback is used and allow policy falls back to rejection', () => {
+test('allow_always is never selected and allow policy falls back to rejection', () => {
   const allowAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
-  assert.equal(settlePermission({ toolCall, options: allowAlways, policy: { autoApprove: ['shell'] } }).optionId, 'all')
+  assert.equal(settlePermission({ toolCall, options: allowAlways, policy: { autoApprove: ['shell'] } }).optionId, 'deny')
   assert.equal(settlePermission({ toolCall, options, policy: { autoApprove: ['shell'] } }).optionId, 'allow')
   assert.equal(settlePermission({ toolCall, options: [options[0]], policy: { autoApprove: ['shell'] } }).optionId, 'reject')
+})
+test('AT6 lead allow_always decision maps to allow_once or reject and answered stays raw', () => {
+  const first = settle({ lead: () => ({ details: { decision: 'always' } }) })
+  assert.equal(first.optionId, 'allow')
+  assert.equal(first.row.answered, 'always')
+  assert.equal(first.row.policy, 'lead')
+  const onlyAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
+  const second = settlePermission({ toolCall, options: onlyAlways, lead: () => ({ details: { decision: 'all' } }) })
+  assert.equal(second.optionId, 'deny')
+  assert.equal(second.row.answered, 'all')
+})
+test('AT6 roster autoApprove with only allow_always offered selects reject', () => {
+  const onlyAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
+  assert.equal(settlePermission({ toolCall, options: onlyAlways, policy: { autoApprove: ['shell'] } }).optionId, 'deny')
 })
 test('Claude option IDs are accepted as IDs, not ACP kinds', () => {
   assert.equal(settle({ lead: () => ({ details: { decision: 'allow' } }) }).optionId, 'allow')

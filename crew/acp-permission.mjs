@@ -93,7 +93,7 @@ export function settlePermission({ request, toolCall = request?.toolCall, option
   const reject = options.find((o) => o.kind === 'reject_once') ?? options.find((o) => o.kind === 'reject_always')
   if (!reject) throw Object.assign(new Error('permission-no-reject-option'), { reason: 'permission-no-reject-option' })
 
-  const allow = options.find((o) => o.kind === 'allow_once') ?? options.find((o) => o.kind === 'allow_always')
+  const allow = options.find((o) => o.kind === 'allow_once')
   const keys = [toolCall?.title, toolCall?.kind].filter((key) => typeof key === 'string')
   policy = { autoDeny: policy.autoDeny ?? [], autoApprove: policy.autoApprove ?? [] }
   let selected
@@ -121,7 +121,7 @@ export function settlePermission({ request, toolCall = request?.toolCall, option
     if (source !== 'roster') {
       answered = decision ?? null
       const match = options.find((o) => o.optionId === decision)
-      selected = match ?? reject
+      selected = match?.kind === 'allow_always' ? options.find((o) => o.kind === 'allow_once') ?? reject : match ?? reject
     }
   }
 

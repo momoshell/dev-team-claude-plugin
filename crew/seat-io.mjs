@@ -3732,7 +3732,16 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           }
           const onCell = (cell) => cell && cell.provider === rung.cell.provider && cell.id === rung.cell.id && cell.effort === rung.cell.effort
           const sameCell = rung && (onCell(currentCell) || onCell(live))
-          if (!rung || sameCell || !allowedTarget(rung.cell)) {
+          // Once the live seat has left its roster cell, the tier step is measured against the live
+          // model: a rung priced at or below it would be a downgrade, and repeated reseats oscillate.
+          const priceOf = (cell) => {
+            const entry = cell && roster?.models?.[`${cell.provider}/${cell.id}`]
+            return Number.isFinite(entry?.cost_in_per_mtok) ? entry.cost_in_per_mtok : null
+          }
+          const liveMoved = !currentCell || live.provider !== currentCell.provider || live.id !== currentCell.id
+          const downgrade = rung && liveMoved && priceOf(live) !== null
+            && (priceOf(rung.cell) === null || priceOf(rung.cell) <= priceOf(live))
+          if (!rung || sameCell || downgrade || !allowedTarget(rung.cell)) {
             if (!RESEAT_LADDER.includes(crew.tier)) {
               return { applied: false, reason: 'exhausted', why: `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`, from, to: null }
             }

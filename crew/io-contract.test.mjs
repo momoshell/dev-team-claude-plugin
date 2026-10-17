@@ -1353,6 +1353,12 @@ test('RE9', () => {
   const twice = makeTierFixture({ role: 'builder', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
   assert.deepEqual([twice.io.reseat('builder').to?.id, twice.crew.seats.builder.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
   assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
+  // Repeated reseats are monotonic: the mechanical tier step never pulls a Sol seat back to Luna.
+  const climb = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: SHIPPED_ROSTER.tiers.mechanical.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+  const steps = [1, 2, 3, 4].map(() => { const out = climb.io.reseat('builder'); return [out.applied, climb.crew.seats.builder.id, climb.crew.seats.builder.effort] })
+  assert.deepEqual(steps, [
+    [true, 'gpt-6-luna', 'xhigh'], [true, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'],
+  ])
   const cell = (provider, id, effort = 'medium', agent = 'pi') => ({ provider, id, effort, agent })
   const fixture = () => ({
     tiers: {

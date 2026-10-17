@@ -89,6 +89,27 @@ export function hasFffPreToolUseHook(settings) {
   }
 }
 
+// Skill isolation for granted seats: dropping --disable-slash-commands lets a
+// granted seat load its plugin skills, but bundled CLI skills would leak in
+// beside them. These settings keys are that seat's only no-leak mechanism.
+// Probe: claude --setting-sources project --settings <copy of this file> --plugin-dir <seat plugin>,
+// then read the system/init frame's skills list — only granted names may appear.
+// Blind spot: a future CLI may ship a non-bundled built-in skill this override
+// list does not name; re-measure from a seat init frame, never assume clear.
+export function hasSkillGrant(grants = NO_GRANTS) {
+  return Array.isArray(grants?.skills) && grants.skills.length > 0
+}
+
+export function hasSkillIsolationSettings(settings) {
+  try {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false
+    return settings?.disableBundledSkills === true
+      && settings.skillOverrides?.design === 'off'
+      && settings.skillOverrides?.doctor === 'off'
+      && settings.skillOverrides?.['plugin-authoring'] === 'off'
+  } catch { return false }
+}
+
 function loadFffSettings({ settings, settingsDocument, readSettings, settingsReader } = {}) {
   try {
     let source
@@ -200,12 +221,18 @@ if (invokedDirectly()) runHook()
 export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injectedSettings, settingsDocument, readSettings, settingsReader } = {}) {
   const p = transport === 'acp' ? ACP_PROFILE : PROFILES[transport]
   if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
-  const settings = hasFffGrant(grants)
+  const settings = (hasFffGrant(grants) || hasSkillGrant(grants))
     ? loadFffSettings({ settings: injectedSettings, settingsDocument, readSettings, settingsReader })
     : undefined
   if (hasFffGrant(grants) && !hasFffPreToolUseHook(settings)) {
     throw Object.assign(
       new Error(`adapter-claude cannot enforce the fff Bash hook from ${PANE_USAGE_SETTINGS} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
+  if (hasSkillGrant(grants) && !hasSkillIsolationSettings(settings)) {
+    throw Object.assign(
+      new Error(`adapter-claude cannot isolate bundled skills from ${PANE_USAGE_SETTINGS} — refusing to boot a seat whose granted skills would leak [grant-unsupported]`),
       { reason: 'grant-unsupported' },
     )
   }
@@ -471,7 +498,7 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--permission-mode', 'bypassPermissions',
       ...STRICT_MCP_ARGS,
       '--mcp-config', mcpConfigPath({ taskDir, role }),
-      '--disable-slash-commands', '--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS,
+      ...((grants?.skills?.length ?? 0) > 0 ? [] : ['--disable-slash-commands']), '--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS,
       ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })] : []),
       ...(effort ? ['--effort', effort] : []),
       '--tools', [allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(','),
@@ -511,7 +538,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
     ...STRICT_MCP_ARGS,
     '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,
-    '--disable-slash-commands', '--setting-sources', 'project', '--settings', `"${PANE_USAGE_SETTINGS}"`,
+    ...((grants?.skills?.length ?? 0) > 0 ? [] : ['--disable-slash-commands']), '--setting-sources', 'project', '--settings', `"${PANE_USAGE_SETTINGS}"`,
     ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, `"${skillsPluginDir({ taskDir, role })}"`] : []),
     ...(effort ? ['--effort', `"${effort}"`] : []),
     '--tools', `"${[allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(',')}"`,

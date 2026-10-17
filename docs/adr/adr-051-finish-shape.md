@@ -120,3 +120,12 @@ completes it.
    data-loss or false-clean finding blocks.
 3. **This repository first.** Lanes from other repositories (the-power) follow in a later wave, once `finish`
    has finished lanes here; their reviewer seats and suites differ and are not measured under this shape.
+
+## Amendment 1 (2026-10-17)
+
+The shipped heads supersede section 1:
+
+- scope-gate kept (reviewed loop emits it unconditionally; feeds review brief via S.scopeChanged)
+- gate-baseline dropped (a dirty-tree baseline measures nothing)
+- suite:cold folds into suite (its head does)
+- decision replaces publish (nothing pushed; the operator decides)

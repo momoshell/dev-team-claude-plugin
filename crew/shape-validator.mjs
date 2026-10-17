@@ -5,9 +5,9 @@ const WRITE_SURFACES = Object.freeze(['planned', 'none'])
 const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records', 'paths', 'object'])
 
 const SHAPE_SOURCES = Object.freeze({
-  scope: Object.freeze(['plan', 'inherited', 'brief']),
+  scope: Object.freeze(['plan', 'inherited', 'brief', 'lane']),
   lane: Object.freeze(['plan', 'ctx']),
-  gate: Object.freeze(['plan', 'none', 'brief']),
+  gate: Object.freeze(['plan', 'none', 'brief', 'lane']),
 })
 
 const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
@@ -76,6 +76,12 @@ export const EXECUTOR_TOPOLOGIES = deepFreeze({
       'lane', 'gate', 'gate-baseline', 'gate-proof', 'review',
       'commit', 'document', 'rebase', 'suite', 'publish', 'converge']),
     sources: Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' }),
+  },
+  finish: {
+    execution: 'reviewed',
+    required_seats: Object.freeze(['builder', 'reviewer']),
+    stages: Object.freeze(['finish-triage', 'build', 'scope-gate', 'lane', 'gate', 'review', 'commit', 'rebase', 'suite', 'decision']),
+    sources: Object.freeze({ scope: 'lane', lane: 'ctx', gate: 'lane' }),
   },
   verify_only: {
     execution: 'envelope',
@@ -197,7 +203,7 @@ function sourcesDefect(sources) {
 }
 
 function partialTopologyDetail(variantName) {
-  return `the partial reviewed shapes this driver implements are repair and directed; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
+  return `the partial reviewed shapes this driver implements are repair, directed and finish; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
 }
 
 function topologyDetail(defect, variantName, actual, expected) {

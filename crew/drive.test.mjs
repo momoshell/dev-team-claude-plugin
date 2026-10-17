@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import { seatWaitCeilingMs } from '../scripts/factory/lane-watch.mjs'
 import assert from 'node:assert/strict'
 import {
-  B318_GATED_RUNS, B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, ACCEPT_FINDINGS_SOFT, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
+  B318_GATED_RUNS, B44_LEADLESS_CTX, adversarialPlanEnv, CENSUS_ROW_ABSENT, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_RUNS, CHUNK_ACCEPTED_GATE, CHUNK_CTX, CHUNK_FILES, CHUNK_MUTATIONS, CHUNK_OWNERSHIP, CHUNK_PLAN, CHUNK_PROGRAM, CHUNK_PROOF_CTX, CHUNK_PROOF_FILES, CHUNK_PROOF_MUTATIONS, CHUNK_PROOF_OWNERSHIP, CHUNK_PROOF_PLAN, CHUNK_PROOF_PROGRAM, CHUNK_SCOPE, CONVERGE_CTX, CONVERGE_GATE, CRASH_WHY, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, CTX_TL, DEFAULT_VARIANT, DIRECTED_BRIEF_PATH, DIRECTED_BRIEF_TEXT, DIRECTED_FILES, FINISH_FILES, DRIVE_JOURNAL_EXPECTED, D_ASK, D_AUTO, D_GREEN_GATE, D_PATCH_A, D_PATCH_B, D_PATCH_EMPTY_PATH, D_PATCH_MIXED_MODE, D_PATCH_MIXED_RENAME, D_RED_GATE, ENVELOPE_DEBRIS, GATE_CUSTODIAN, GATE_SUMMARY_PREFIX, HEALTHY_RESULT, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, JUDGE_TIER, MAX_QUESTIONS, MODIFIER_OUTCOMES, PHASE_SLOT_WAIT_EVENT, PROTECTED_PATHS, RED, REPO_ROOT, REVIEWED_CORE_STAGES, S843_ADDED, S843_D2, S843_RUNS, SCOPE_REFUSALS, SEAT_REFUSAL_STAGE, SENSITIVITY_FLOOR, SHAPE_SOURCES, SKILL_NAMES, SUITE_SLOT_PHASES, SUITE_SLOT_PHASE_NAMES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, TRIAGE_SOURCES, TRIAGE_STAGES, TRIAGE_STAGE_HEAD, ACCEPT_FINDINGS_SOFT, VARIANTS, VARIANT_NAMES, WAITS_S, WAIT_FLAGS, WAIT_REFUSALS, WAIT_ROLES, WAIT_SECONDS_MAX, WAIT_SECONDS_MIN, ZERO_CAPACITY_LOGS, ZERO_CAPACITY_RESULT, answerBounceLines, assertSeats, b127GatePaths, b127InvokeGate, b318Builders, b318ReviewGrants, b318SiteA, b318SiteB, b44AssertLeadlessGate, b44GateFixIo, b44GatePlan, b44MidRunRepairIo, baselineGateDefect, bothExhaustionPointsScenario, buildEnv, carveRun, checkEnv, checkFailureLine, closeoutIo, convergeIo, convergeRun, crashIo, crashRun, dApplyCommand, dAutoRows, dBuilders, dGitApplies, dLeads, dReviewEnv, deliberateRun, directSlotRun, dispositionIo, divergentPlanScenario, driveJournalSites, driveTask, enforcementPreamble, envelopeDefect, envelopeFieldsPresent, escalationStageRows, exhaustionAcceptIo, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, guardedWrite, join, laneFence, laneFenceHits, laneProbeCommand, laneProbeKinds, leadEnv, matchAnswers, mkdirSync, normaliseJournalTimes, operationalRow, osCpus, parseDirectedBrief, parseGateSummary, parseQuestions, parseSuiteCounts, patchTargets, phaseTrace, planEnv, postCommitCrashRun, protectedPlanEnv, protectedReseatRefusal, questionConsultLines, readFileSync, reconEnv, recordRow, refuseWait, replayResumeStages, resolveProtectedPaths, resolveWaits, resumeDoneRows, resumeKeys, resumeStageRows, reviewEnv, rmSync, runChild, runCmd, runCmdFixture, s843Ctx, s843Io, s843PathsIn, s843PlanEnv, scopeBounceBrief, scopeMatcher, scopeRefusal, scratchDir, shapeDefect, shellArg, shellWords, slotCtx, slotFactory, sourcesDefect, spawnSync, stageEnabled, suiteRefusalEnv, throwAutoFixWrites, throwingWaitRun, tmpdir, traceLabels, triageEnv, undeclaredStage, validateScopeEntries, waitsCtx, waitsRecord, writeFileSync,
 } from './drive-fixtures.mjs'
 import { envelopeFieldMetadataDefect as leafEnvelopeFieldMetadataDefect, EXECUTOR_TOPOLOGIES, SHAPE_DEFECT_CODES, shapeValidationDefect } from './shape-validator.mjs'
 import { ADVERSARY_REFUSAL, ADVERSARY_REFUSALS, ADVERSARY_TRIGGERS, CENSUS_CARRIER_FILES as RUNTIME_CENSUS_CARRIER_FILES, SCOPE_ADMISSION_SOURCES, SCOPE_REQUEST_KINDS, fenceScopeOf, fenceScopesIntersect, parseUnifiedZeroHunks, resolveAdversaryTrigger, scopeAdmissionDecision, scopeRequestOf, siblingSpanIntersects, suiteRedTestFiles, suiteRedCargoLocations, suiteRedLocations, SUITE_RUNNER_UNPARSED, adjudicateOwnedProof, chunkDeferredRows, chunkGateVerdict, chunkLedgerChecks, chunkLocalSummary, chunkOwnership, ownedMutations, ownedProofMatch, refuseChunkWithoutChunked, steppedGateVerdict, resolveChunkSelection, restoreChunkState, selectActiveChunk, storeChunkSummary, validateChunks, RESUME_CHECKPOINT_VERSION, RESUME_CHECKPOINT_FAMILIES, LATE_REPAIR_CAUSES, lateRepairDecision, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, withPhaseSlot } from './drive.mjs'
@@ -2557,6 +2557,7 @@ test('coded shape topology is measured against every successful executor family'
     review_panel: ['review_panel', 'scope-gate', 'envelope-accept'],
     repair: ['repair', 'build', 'scope-gate', 'lane', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
     directed: ['directed', 'gate-baseline', 'build', 'scope-gate', 'lane', 'gate', 'gate-proof', 'review', 'review', 'commit', 'document', 'suite', 'suite'],
+    finish: ['finish-triage', 'build', 'scope-gate', 'lane', 'gate', 'review', 'review', 'commit', 'rebase', 'suite', 'suite', 'decision'],
     verify_only: ['verify_only', 'scope-gate', 'envelope-accept'],
   }
   const emittedHeads = (result) => normaliseStageHeads(result.details.stages)
@@ -2634,6 +2635,23 @@ test('coded shape topology is measured against every successful executor family'
         changed: ['a.mjs', 'a.test.mjs'],
       })
       return driveTask(CTX_DIRECTED, io)
+    },
+    finish: () => {
+      const io = fakeIo({
+        files: FINISH_FILES,
+        envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+        runs: {
+          'node /tmp/fake-task/gate.mjs': { ok: true, output: green },
+          'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+          [`git fetch origin ${shellArg('main')}`]: { ok: true, output: '' },
+          [`git rev-parse ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+          [`git merge-base HEAD ${shellArg('origin/main')}`]: { ok: true, output: 'base1111\n' },
+          'git rev-parse HEAD': { ok: true, output: 'pre1111\n' },
+        },
+        cleanRuns: { 'node /tmp/fake-task/gate.mjs': { ok: false, output: red } },
+        changed: ['a.mjs', 'a.test.mjs'],
+      })
+      return driveTask(CTX_FINISH, io)
     },
     verify_only: () => driveTask(
       { ...CTX, variant: 'verify_only', run_id: 'run-verify-783', roles: ['reviewer'], seatedRoles: ['reviewer'] },
@@ -2846,7 +2864,7 @@ test('shape validator exposes a frozen closed vocabulary, preserves legacy detai
     [{ ...VARIANTS.scout, stages: ['scout', 'envelope-accept'] }, 'scout', 'a shape that claims to write nothing must declare the scope-gate stage that proves it'],
     [{ ...VARIANTS.directed, required_seats: ['builder'] }, 'directed', 'the directed shape runs exactly builder, reviewer; required_seats must be that list'],
     [{ ...VARIANTS.repair, sources: undefined }, 'repair', 'the reviewed executor implements exactly the full stage set; this declaration omits plan, check, gate, gate-baseline, gate-repair, gate-reverify, gate-proof, converge, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: no sources declared'],
-    [{ ...VARIANTS.repair }, 'quality', 'the partial reviewed shapes this driver implements are repair and directed; a declaration registered as "quality" would open "quality:r1", a stage it does not declare'],
+    [{ ...VARIANTS.repair }, 'quality', 'the partial reviewed shapes this driver implements are repair, directed and finish; a declaration registered as "quality" would open "quality:r1", a stage it does not declare'],
     [{ ...VARIANTS.repair, sources: { ...VARIANTS.repair.sources, gate: 'brief' } }, 'repair', 'the repair shape sources scope=inherited, lane=ctx, gate=none; this declaration sources scope=inherited, lane=ctx, gate=brief'],
     [{ ...VARIANTS.repair, stages: [...VARIANTS.repair.stages].reverse() }, 'repair', 'a repair shape runs exactly repair, build, scope-gate, lane, review, commit, document, rebase, suite, publish; this declaration runs publish, suite, rebase, document, commit, review, lane, scope-gate, build, repair'],
     [{ ...VARIANTS.full, required_seats: ['planner'] }, undefined, 'a reviewed shape is seated by the tier; required_seats must be "tier"'],
@@ -2877,9 +2895,9 @@ test('shape sources and the repair declaration are pinned', () => {
   assert.match(sourcesDefect({ ...TRIAGE_SOURCES, gate: 'bad' }), /gate/)
   assert.match(sourcesDefect({ ...TRIAGE_SOURCES, proof: 'self' }), /proof/)
   assert.equal(sourcesDefect(VARIANTS.repair.sources), null)
-  assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited', 'brief'])
+  assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited', 'brief', 'lane'])
   assert.deepEqual(SHAPE_SOURCES.lane, ['plan', 'ctx'])
-  assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none', 'brief'])
+  assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none', 'brief', 'lane'])
   assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'commit', 'document', 'rebase', 'suite', 'publish'])
   assert.equal(TRIAGE_STAGE_HEAD, 'repair')
   assert.deepEqual(TRIAGE_STAGES, ['repair', ...REVIEWED_CORE_STAGES])
@@ -6123,4 +6141,23 @@ test('BZ5 — a no-stage crash journals escalate:driver even when the journal th
   assert.equal(envelope?.status, 'escalation')
   assert.equal(envelope?.details?.escalation?.where, 'driver')
   assert.equal(attempts, 2)
+})
+
+test('FS1: finish declaration carries lane sources and ten heads', () => {
+  const finish = VARIANTS.finish
+  assert.equal(finish.execution, 'reviewed')
+  assert.deepEqual([...finish.required_seats], ['builder', 'reviewer'])
+  assert.deepEqual([...finish.stages], ['finish-triage', 'build', 'scope-gate', 'lane', 'gate', 'review', 'commit', 'rebase', 'suite', 'decision'])
+  assert.deepEqual(finish.sources, { scope: 'lane', lane: 'ctx', gate: 'lane' })
+  assert.deepEqual(shapeValidationDefect(finish, 'finish'), { defect: null, detail: null })
+})
+
+test('FS2: finish topology discriminates reorder missing extra', () => {
+  const stages = [...VARIANTS.finish.stages]
+  for (let i = 0; i < stages.length - 1; i += 1) {
+    const swapped = [...stages]; const t = swapped[i]; swapped[i] = swapped[i + 1]; swapped[i + 1] = t
+    assert.equal(shapeValidationDefect({ ...VARIANTS.finish, stages: swapped }, 'finish').defect, 'stage-reordered')
+  }
+  assert.equal(shapeValidationDefect({ ...VARIANTS.finish, stages: stages.filter((s) => s !== 'decision') }, 'finish').defect, 'stage-missing')
+  assert.equal(shapeValidationDefect({ ...VARIANTS.finish, stages: [...stages, 'publish'] }, 'finish').defect, 'stage-extra')
 })

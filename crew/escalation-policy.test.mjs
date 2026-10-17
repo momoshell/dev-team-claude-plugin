@@ -293,6 +293,6 @@ test('escalation stages remain the closed 28-member vocabulary', () => {
     'converge-pr', 'scope', 'gate', 'envelope', 'triage', 'triage-scope', 'plan', 'plan-carve',
     'plan-check', 'plan-chunks', 'sensitivity-floor', 'anchor-absent', 'census-exhibits', 'scope-request', 'build',
     'lane', 'harden', 'review', 'refuted-must-fix', 'diff-mutation', 'review-unresolved', 'rebase',
-    'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed',
+    'suite', 'cold-suite', 'publish', 'scout', 'directed', 'plan-scope-malformed', 'finish-triage', 'finish-gate',
   ])
 })

@@ -85,6 +85,20 @@
       ]
     }
   },
+  "decision": {
+    "description": "The driver opens the decision stage to record the finish report for an escalated lane with nothing pushed.",
+    "charter": null,
+    "source": {
+      "file": "crew/drive.mjs",
+      "sites": [
+        {
+          "callee": "stage",
+          "label": "decision",
+          "occurrence": 1
+        }
+      ]
+    }
+  },
   "directed": {
     "description": "The directed execution shape opens its brief-led round before the declared reviewed stages continue.",
     "charter": null,
@@ -178,6 +192,20 @@
         {
           "callee": "stage",
           "label": "escalate:${where}",
+          "occurrence": 1
+        }
+      ]
+    }
+  },
+  "finish-triage": {
+    "description": "The finish execution shape opens its triage round to adopt the escalated lane scope, lane, and gate before building.",
+    "charter": null,
+    "source": {
+      "file": "crew/drive.mjs",
+      "sites": [
+        {
+          "callee": "stage",
+          "label": "finish-triage:r1",
           "occurrence": 1
         }
       ]

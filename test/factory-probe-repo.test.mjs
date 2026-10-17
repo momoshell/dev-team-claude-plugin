@@ -1224,7 +1224,17 @@ test('FB1', () => {
   git(root, 'update-ref', 'refs/remotes/origin/master', git(root, 'rev-parse', 'master').trim())
   git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/master')
   assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
-    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD',
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
+  })
+  // A local master behind origin/master must not override the remote default.
+  put(root, 'remote-ahead.txt', 'remote ahead\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '-q', '-m', 'origin moves on')
+  git(root, 'update-ref', 'refs/remotes/origin/master', 'HEAD')
+  git(root, 'reset', '-q', '--hard', 'HEAD~1')
+  assert.notEqual(git(root, 'rev-parse', 'master').trim(), git(root, 'rev-parse', 'origin/master').trim())
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
   })
   git(root, 'checkout', 'main')
   git(root, 'branch', '-D', 'master')

@@ -2092,9 +2092,10 @@ export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot }
   if (!present) {
     const remoteDefault = gatherDefaultBranch(resolve(checkout || process.cwd()), true, false)
     if (remoteDefault.status === 'proposed') {
-      // A remote-only default has no local branch to resolve, so name its tracking ref for git.
-      const local = gitOutput(resolve(checkout || process.cwd()), ['rev-parse', '--verify', '--quiet', `refs/heads/${remoteDefault.value}`])
-      if (nonEmptyString(local)) return { branch: remoteDefault.value, basis: remoteDefault.source }
+      // The default came from origin/HEAD, so its tracking ref is the base: a same-named local
+      // branch may be stale, and a remote-only default has no local branch at all.
+      const tracking = gitOutput(resolve(checkout || process.cwd()), ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${remoteDefault.value}`])
+      if (!nonEmptyString(tracking)) return { branch: remoteDefault.value, basis: remoteDefault.source }
       return { branch: remoteDefault.value, basis: remoteDefault.source, ref: `origin/${remoteDefault.value}` }
     }
     return { branch: 'main', basis: `default base branch main · no profile at ${path}` }

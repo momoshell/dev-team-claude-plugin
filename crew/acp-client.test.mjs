@@ -848,3 +848,27 @@ test('reprove re-proves an unproven close once death is observable', () => {
     assert.equal(secondError, null)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+test('AT5 fifo failure signals the group, clears the reservation, and refuses acp-spawn-failed', () => {
+  const root = scratchDir('acp-fifo-')
+  const acpRoot = join(root, 'acp')
+  const kills = []
+  let clock = 1000
+  const baseDeps = {
+    pid: 99001,
+    spawn: () => ({ pid: 99002, unref() {} }),
+    writeSync: () => {},
+    closeSync: () => {},
+    existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
+    kill: (target, signal) => { kills.push([target, signal]) },
+    now: () => { clock += 1000; return clock },
+    sleep: () => {},
+    log: () => {},
+  }
+  try {
+    const first = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...baseDeps, openSync: () => { throw Object.assign(new Error('no fifo'), { code: 'ENOENT' }) } } })
+    assert.throws(() => first.start(), (e) => e.reason === 'acp-spawn-failed')
+    assert.deepEqual(kills, [[-99002, 'SIGTERM']])
+    const second = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...baseDeps, openSync: () => 7 } })
+    assert.equal(second.start().pid, 99002)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

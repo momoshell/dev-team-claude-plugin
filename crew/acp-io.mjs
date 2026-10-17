@@ -148,13 +148,19 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       }
       emit({ kind: 'heartbeat', at: update.at, role })
     }
-    const client = clientFactory({ launch, dir: join(seatTaskDir, 'acp'), cwd: checkout || process.cwd(), role, onPermission,
-      sinks: Object.fromEntries(ACP_UPDATE_KINDS.map((kind) => [kind, onUpdate])),
-      deps: { ...deps.clientDeps, log } })
-    client.start()
-    client.initialize()
-    client.newSession(launch.sessionParams ?? { cwd: checkout || process.cwd(), mcpServers: [] })
-    if (launch.mode) client.setMode(launch.mode)
+    let client
+    try {
+      client = clientFactory({ launch, dir: join(seatTaskDir, 'acp'), cwd: checkout || process.cwd(), role, onPermission,
+        sinks: Object.fromEntries(ACP_UPDATE_KINDS.map((kind) => [kind, onUpdate])),
+        deps: { ...deps.clientDeps, log } })
+      client.start()
+      client.initialize()
+      client.newSession(launch.sessionParams ?? { cwd: checkout || process.cwd(), mcpServers: [] })
+      if (launch.mode) client.setMode(launch.mode)
+    } catch (error) {
+      try { client?.close() } catch {}
+      throw error
+    }
     const state = { client, profile, role }
     clients.set(role, state)
     return state
@@ -187,8 +193,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       }
       return null
     }
-    const assignment = assignments.get(returnPath)
-    if (envelope.assignment_id !== assignment.id) return null
+    // A mismatched assignment_id is returned for drive's anti-replay re-ask, never swallowed here.
     return envelope
   }
   function noEnvelope(cause, returnPath, assignment) {
@@ -273,6 +278,11 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
     const deadline = now() + Math.max(0, Number(timeoutS) || 0) * 1000
     return waitUntil(returnPath, deadline)
   }
+  function exitMarkerPresent(assignment) {
+    const client = clients.get(assignment.role)?.client
+    if (typeof client?.hasExitMarker !== 'function') return false
+    try { return client.hasExitMarker() === true } catch { return false }
+  }
   function waitUntil(returnPath, deadline) {
     const assignment = assignments.get(returnPath)
     if (!assignment) throw new Error(`acp assignment not found at ${returnPath}`)
@@ -295,6 +305,12 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
         const routed = providerRetryOnFailure({ role: assignment.role, id: assignment.id, briefFile: assignment.briefFile, returnPath: assignment.returnPath }, returnPath, deadline, stream)
         if (routed.act === 'retry') return routed.resume()
         throw providerAnnotated(noEnvelope(lastTurn.refusal, returnPath, assignment), { role: assignment.role, id: assignment.id }, stream)
+      }
+      const deadCause = lastTurn ? 'turn-ended-without-envelope' : exitMarkerPresent(assignment) ? 'exit-marker' : null
+      if (deadCause) {
+        const finalEnvelope = readEnvelope(returnPath, assignment.id)
+        if (finalEnvelope) { settle(assignment); return finalEnvelope }
+        throw noEnvelope(deadCause, returnPath, assignment)
       }
       const wall = now(); let mono
       try { mono = monotonic(); if (!Number.isFinite(mono)) mono = undefined } catch { mono = undefined }

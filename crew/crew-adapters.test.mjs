@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, effectiveDeny, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY, hasSkillIsolationSettings, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny, piSeatAgentDir } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
@@ -47,7 +47,7 @@ test('K9 off MCP grants resolve independently; K10 on resolves MCP profile', asy
   assert.ok(on.builder.grants.extensions.includes('builtin:mcp'))
   assert.equal(on.builder.adapter.capabilitiesFor({ transport: 'pane', grants: on.builder.grants }).mcp_servers, true)
 })
-void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, claudeAcpLaunch, ACP_BINARY, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
+void [test, assert, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, tmpdir, join, dirname, fileURLToPath, mcpConfigDocument, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS, seatCommand, claudeHeadlessCommand, capabilitiesFor, claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, claudeAcpLaunch, ACP_BINARY, hasSkillIsolationSettings, PANE_USAGE_SETTINGS, piCapabilitiesFor, translateDeny, testCheckout, ROOT, scratchDir, shippedRoster, roster, withHome, testCrewDir, capabilityRegister, capabilityFixtureRoot]
 
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 const BOOT_GRANTS = { tools: ['mcp__search__find', 'Read'], skills: [], mcp_servers: [{ name: 'search', command: { bin: '/fixture/search', args: [] }, url: null }] }
@@ -2311,4 +2311,86 @@ test('NP4 an absent fff-mcp strips the server, keeps codemode and restores built
   const claude = (await resolveAdapters(['builder'], {}, null, { env: {}, exists: npExists(false) })).builder
   assert.deepEqual(claude.grants.mcp_servers, [])
   assert.deepEqual(claude.search, { tools: ['Glob', 'Grep'], fff: 'withheld', reason: 'binary-absent' })
+})
+
+test('CK1 granted headless command omits disable flag and keeps isolation set', () => {
+  // MUTATION CK1: restore the unconditional --disable-slash-commands operand on the headless argv line.
+  const taskDir = scratchDir('claude-ck1-')
+  const source = join(taskDir, 'ck1-skill.md')
+  writeFileSync(source, '# ck1 skill\n')
+  const grants = { tools: [], extensions: [], agents: [], skills: [source], advisor: false, mcp_servers: [] }
+  writeSeatSkills({ taskDir, role: 'builder', grants })
+  const { args, env } = claudeHeadlessCommand({ ...BOOT_BASE, taskDir, grants })
+  assert.equal(args.includes('--disable-slash-commands'), false)
+  assert.equal(args.filter((entry) => entry === '--setting-sources').length, 1)
+  assert.equal(bootValue(args, '--setting-sources'), 'project')
+  assert.ok(args.includes('--strict-mcp-config'))
+  assert.equal(args.filter((entry) => entry === '--settings').length, 1)
+  assert.equal(bootValue(args, '--settings'), PANE_USAGE_SETTINGS)
+  assert.equal(args.filter((entry) => entry === '--plugin-dir').length, 1)
+  assert.equal(bootValue(args, '--plugin-dir'), skillsPluginDir({ taskDir, role: 'builder' }))
+  assert.equal(args.includes('--add-dir'), false)
+  assert.equal(args.includes('--plugin-url'), false)
+  assert.equal(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1')
+  assert.equal(claudeHeadlessCommand(BOOT_BASE).args.includes('--disable-slash-commands'), true)
+})
+
+test('CK2 granted pane command omits disable flag and keeps isolation set', () => {
+  // MUTATION CK2: restore the unconditional --disable-slash-commands operand on the pane command line.
+  const taskDir = scratchDir('claude-ck2-')
+  const source = join(taskDir, 'ck2-skill.md')
+  writeFileSync(source, '# ck2 skill\n')
+  const grants = { tools: [], extensions: [], agents: [], skills: [source], advisor: false, mcp_servers: [] }
+  writeSeatSkills({ taskDir, role: 'builder', grants })
+  const pane = seatCommand({ ...BOOT_BASE, taskDir, grants })
+  assert.equal(pane.includes('--disable-slash-commands'), false)
+  assert.match(pane, /(?:^| )--setting-sources project(?: |$)/)
+  assert.ok(pane.includes('--strict-mcp-config'))
+  assert.ok(pane.includes(`--settings "${PANE_USAGE_SETTINGS}"`))
+  assert.equal(pane.match(/--plugin-dir/g).length, 1)
+  assert.ok(pane.includes(`--plugin-dir "${skillsPluginDir({ taskDir, role: 'builder' })}"`))
+  assert.equal(pane.includes('--add-dir'), false)
+  assert.equal(pane.includes('--plugin-url'), false)
+  assert.match(pane, /(?:^| )CLAUDE_CODE_DISABLE_CLAUDE_MDS=1(?: |$)/)
+  assert.match(seatCommand(BOOT_BASE), /(?:^| )--disable-slash-commands(?: |$)/)
+})
+
+test('CK3 shipped usage settings carry isolation keys and predicate returns true', () => {
+  // MUTATION CK3: flip disableBundledSkills to false in crew/adapters/claude-usage.settings.json.
+  const doc = JSON.parse(readFileSync(CLAUDE_USAGE_SETTINGS, 'utf8'))
+  assert.equal(doc.disableBundledSkills, true)
+  assert.deepEqual(doc.skillOverrides, { design: 'off', doctor: 'off', 'plugin-authoring': 'off' })
+  assert.equal(hasSkillIsolationSettings(doc), true)
+})
+
+test('CK4 capabilitiesFor refuses skill grant without isolation settings', () => {
+  // MUTATION CK4: invert the disableBundledSkills comparison in hasSkillIsolationSettings.
+  const taskDir = scratchDir('claude-ck4-')
+  const source = join(taskDir, 'ck4-skill.md')
+  writeFileSync(source, '# ck4 skill\n')
+  const grants = { tools: [], extensions: [], agents: [], skills: [source], advisor: false, mcp_servers: [] }
+  const shipped = JSON.parse(readFileSync(CLAUDE_USAGE_SETTINGS, 'utf8'))
+  const bad = [
+    { hooks: shipped.hooks },
+    { ...shipped, disableBundledSkills: false },
+    { ...shipped, skillOverrides: { design: 'off', doctor: 'off' } },
+    '{',
+    '',
+  ]
+  for (const settings of bad) {
+    assert.throws(() => capabilitiesFor({ transport: 'pane', grants, settings }), (err) => err?.reason === 'grant-unsupported')
+  }
+  capabilitiesFor({ transport: 'pane', grants, settings: shipped })
+  let reads = 0
+  capabilitiesFor({ transport: 'pane', grants: { ...grants, skills: [] }, readSettings: () => { reads += 1; return shipped }, settingsReader: () => { reads += 1; return shipped } })
+  assert.equal(reads, 0)
+})
+
+test('CK4 capabilitiesFor refuses a skill grant when the settings reader throws', () => {
+  // MUTATION: let loadFffSettings propagate a reader throw instead of returning undefined and the refusal is lost.
+  const grants = { tools: [], extensions: [], agents: [], skills: ['/repo/skills/ck4/SKILL.md'], advisor: false, mcp_servers: [] }
+  assert.throws(
+    () => capabilitiesFor({ transport: 'pane', grants, readSettings: () => { throw new Error('EPERM') } }),
+    (err) => err?.reason === 'grant-unsupported',
+  )
 })

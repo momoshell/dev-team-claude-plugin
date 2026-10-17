@@ -12149,7 +12149,7 @@ function runTask(ctx, io, crash) {
       }
       // #800 revision 2 — journalled HERE, not in the pass branch below, because the
       // ask-user branch `continue`s the build loop and the pass branch is therefore
-      // unreachable for a pass carrying BOTH dispositions. The patch was correctly not
+      // unreachable for a pass carrying BOTH dispositions unless the lead accepts (#1788). The patch was correctly not
       // applied either way; without this move, that one case is the only pass whose
       // skipped auto-fix leaves no refusal row, and a record that exists for every case
       // but one is worse than none.
@@ -12159,11 +12159,15 @@ function runTask(ctx, io, crash) {
       if (v && disposed.askUser.length > 0) {
         const lastAsk = finalRound()
         const askOptions = !lastAsk || canGrant('review') ? ['bounce-builder', 'escalate'] : ['escalate']
-        const c = consultLead(askUserLines(disposed.askUser).join('\n'), askOptions, [planPath, lastReviewPath], { exclude: 'reviewer' })
-        if (c.decision !== 'bounce-builder') {
+        if (askUserAcceptable(v, disposed.askUser)) askOptions.push('accept')
+        const c = consultLead(askUserLines(disposed.askUser, v).join('\n'), askOptions, [planPath, lastReviewPath], { exclude: 'reviewer' })
+        if (c.decision === 'accept') {
+          io.log(recordRow({ at: io.now(), ask_user_accepted: { round: roundNo, consult: S.consults, findings: disposed.askUser.map(({ id }) => id), reason: c.reason } }))
+        } else if (c.decision !== 'bounce-builder') {
           stageComplete()
           return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) }, { finding_ids: disposed.askUser.map(({ id }) => id) })
         }
+        if (c.decision === 'bounce-builder') {
         if (lastAsk) { grant('review', round); grantBuilderAllowance('review', round); extraReviews += 1 }
         // A review carrying BOTH dispositions still gets its auto-fix applied: the
         // ask-user finding is what needs the seat, the auto-fix never did. The builder
@@ -12179,6 +12183,7 @@ function runTask(ctx, io, crash) {
         buildBrief = b; buildNote = 'review-fix'
         stageComplete()
         continue build
+        }
       }
       if (v === 'pass') {
         // Review-sourced snapshots advance only on a passing review; base pins never move.
@@ -15005,13 +15010,21 @@ export function dispositionPlan(details) {
   return { autoFix, askUser, needsSeat }
 }
 
+// #1788 — accept is offered only on a pass whose every ask-user finding is a
+// request for evidence (severity consider), never on a finding demanding a change.
+export function askUserAcceptable(verdict, askUserFindings) {
+  return verdict === 'pass' && askUserFindings.length > 0 && askUserFindings.every((finding) => finding.severity === 'consider')
+}
+
 // The lead's ask-user consult body. The lead decides what to do with findings the
 // reviewer says a human must weigh — never re-deciding the findings themselves.
-export function askUserLines(findings) {
+export function askUserLines(findings, verdict = null) {
   return [
     `The reviewer marked ${findings.length} finding(s) \`ask-user\`: they touch behaviour or scope, so code may not close them.`,
     ...findings.map((f) => `- ${f.id} (${f.severity ?? 'unstated'}) ${f.location ?? ''} — ${f.summary ?? ''}`.replace(/\s+/g, ' ').trim()),
-    'Send them to the builder with guidance, or escalate to a human.',
+    askUserAcceptable(verdict, findings)
+      ? 'Accept them as-is, send them to the builder with guidance, or escalate to a human.'
+      : 'Send them to the builder with guidance, or escalate to a human.',
   ]
 }
 

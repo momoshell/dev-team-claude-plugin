@@ -8,7 +8,7 @@ import {
   FALSIFICATION_HEADING, FALSIFICATION_PATH, FALSIFICATION_ABSENT, falsificationLines,
   ACCEPT_FINDINGS, ACCEPT_FINDINGS_SOFT, ACCEPT_REASKS, adversarialPlanEnv, ACCEPT_REFUSALS, B318_GATED_RUNS, B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, CENSUS_ABSENT_REASONS, CENSUS_ROW_ABSENT, CENSUS_TURNS_ABSENT, CENSUS_UNREADABLE, SCREENER_MODELS, SCREENER_REGISTER, screenerResult, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_MUTATION, CHECK_RUNS, CLOBBER_R2, CONVERGE_GATE, CONVERGE_PLAN, CRASH_FINDINGS, CRASH_STAGES, CTX, CTX_REPAIR, CTX_TL, DECISIONS, D_ASK, D_AUTO, D_COLLISION_CTX, D_PANEL_CTX, D_PATCH_A, D_PATCH_B, ENVELOPE_REFUSAL_REASONS, FINDING_DISPOSITIONS, LIMITS, MUST_FIX_REFUTATION_FINDINGS, NAME_VERDICTS, PANEL_ADJUDICATORS, PANEL_PARTNERS, PERSPECTIVE_TARGETS, PLAN_CHECK_FINDINGS, PLAN_RESIDUAL, PLAN_SCOPE, PLAN_SCOPE_VERDICTS, RED, REFUTATION_CLAIM, REFUTATION_CONVERGE_PLAN, REFUTATION_CONVERGE_RUNS, REFUTATION_EVIDENCE_MAX, RESIDUAL_TYPES, REVIEW_FINDINGS, REVIEW_GATE_PASS, S843_ADDED, S843_D2, S843_DISPATCHED, S843_DROPPED, S843_NARROWED, S843_RUNS, SECOND_OPINION, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, VARIANTS, acceptBounceLines, acceptContractLines, acceptedRawById, assertDriverIdRefusal, b127GatePaths, b127GroupCommand, b127InvokeGate, b127Lines, b127PidAlive, b127Spy, b318Builders, b318GatedPlan, b318Options, b318ReviewGrants, b318SiteA, b318SiteB, b376ProofIo, bounceTargetOf, buildEnv, checkEnv, classCollisionIo, closeoutIo, crashRun, dAdjEnv, dAutoRows, dBuilders, dDecisionBrief, dGitApplies, dLeads, dOffers, dPanelOutcomes, dPartnerEnv, dPatchWrite, dPlanEnv, dRemintRows, dReviewEnv, dispositionIo, dispositionOf, dispositionPanelIo, dispositionPlan, divergentCollisionIo, divergentPlanScenario, driveTask, envelopeDefect, envelopeFieldsPresent, exhaustionAcceptIo, fakeIo, findingIdDefect, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, join, leadEnv, legacyReviewerExemptions, nameVerdict, observeTurnCensus, panelSeats, phaseTrace, planAcceptContractLines, planCheckAcceptIo, planEnv, planRevisionRun, planScopeVerdict, planThenReviewIo, protectedPlanEnv, protectedReseatRefusal, publicationIo, readFileSync, reconEnv, regrantVerdict, resolveValidationLane, reviewConvergeRun, reviewEnv, reviewFindings, reviewOutcome, reviewShapeDefect, rmSync, roundCursor, s843Ctx, s843Io, s843PlanEnv, s843Rows, scratchDir, shapeDefect, slotCtx, slotFactory, spawnSync, staleVerdictLines, triageEnv, turnCeilingBreached, twoRoundReviewIo, validateAcceptDecision, validateCarve, validatePlanResiduals, validateScopeEntries, validationPlan, validationProbeRun, validationRows, verdictFindingsDefect, writeFileSync, existsSync,
 } from './drive-fixtures.mjs'
-import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PLANNED_TEST_UNMEASURED_REASONS, plannedTestEvidence, plannedTestLines, stepGapLines, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace, RESHAPE_TEST_PATH } from './drive.mjs'
+import { CREATES_MARK, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, askUserAcceptable, askUserLines, createsFromBrief, hardeningPrescriptionConflict, hardeningTestPath, planScopeWhy, prescriptionAuthorshipEvidence, prescriptionSpanIsLaneAuthored, prescriptionSpansAreLaneAuthored, scopeSuggestions, shellArg, VACUITY_CLAIMS, vacuityFindingDefect, PLUGIN_ROOT, HARDENING_PRESERVATION_REFUSALS, PLANNED_TEST_UNMEASURED_REASONS, plannedTestEvidence, plannedTestLines, stepGapLines, PRESCRIPTION_PINS_FILE, PRESCRIPTION_PIN_BASELINE_REASONS, verifyPrescriptionPin, runBytesInPlace, RESHAPE_TEST_PATH } from './drive.mjs'
 import { screenerAdjudicationRows } from './screener.mjs'
 import { ROOT as REPO_ROOT } from '../test/helpers.mjs'
 import { checkSkillAnchors, laneFence, partitionShifts, shiftsAreOwedHere } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -2724,6 +2724,76 @@ test('#800 §7b 24 — pass ask-user findings pause acceptance for the lead', ()
   assert.equal(result.details.escalation.where, 'review-unresolved')
   assert.equal(dLeads(io).length, 1)
   assert.equal(io.calls.commits.length, 0)
+})
+
+const askFinding = (id, severity) => ({ ...D_ASK, id, severity })
+
+const askAcceptOffered = (findings, verdict) => {
+  const io = dispositionIo(findings, { verdict })
+  driveTask(CTX, io)
+  const brief = dDecisionBrief(io)
+  assert.equal(dLeads(io).length, 1)
+  assert.equal(dOffers(brief, 'escalate'), true)
+  return dOffers(brief, 'accept')
+}
+
+test('#800 §7b 49 — askUserAcceptable is true only for pass with a non-empty all-consider list', () => {
+  assert.equal(askUserAcceptable('pass', [{ severity: 'consider' }]), true)
+  assert.equal(askUserAcceptable('pass', []), false)
+  assert.equal(askUserAcceptable('pass', [{ severity: 'consider' }, { severity: 'should-fix' }]), false)
+  assert.equal(askUserAcceptable('pass', [{ severity: 'consider' }, {}]), false)
+  assert.equal(askUserAcceptable('changes-needed', [{ severity: 'consider' }]), false)
+  assert.equal(askUserAcceptable('revise', [{ severity: 'consider' }]), false)
+  assert.equal(askUserAcceptable(null, [{ severity: 'consider' }]), false)
+})
+
+test('#800 §7b 50 — askUserLines names accept only when acceptable and is otherwise byte-identical', () => {
+  const consider = [{ id: 'RV1-1', severity: 'consider', location: 'a.mjs:1', summary: 'evidence only' }]
+  const oldLast = 'Send them to the builder with guidance, or escalate to a human.'
+  assert.equal(askUserLines(consider, 'pass').at(-1), 'Accept them as-is, send them to the builder with guidance, or escalate to a human.')
+  assert.equal(askUserLines(consider).at(-1), oldLast)
+  assert.equal(askUserLines(consider, 'changes-needed').at(-1), oldLast)
+  assert.equal(askUserLines([{ severity: 'should-fix' }], 'pass').at(-1), oldLast)
+  assert.deepEqual(askUserLines(consider).slice(0, -1), askUserLines(consider, 'pass').slice(0, -1))
+})
+
+// #1788 — accept route for a pass whose every ask-user finding is consider.
+test('AK1 — a pass verdict with a consider ask-user finding offers accept in the decision brief', () => {
+  assert.equal(askAcceptOffered([askFinding('RV1-1', 'consider')], 'pass'), true)
+})
+
+test('AK2 — a lead accept ends done with the review:pass stage, exactly one commit and exactly one builder assignment', () => {
+  const io = dispositionIo([askFinding('RV1-1', 'consider')], { verdict: 'pass', leadDecision: 'accept' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.stages.includes('review:pass'), true)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(dBuilders(io).length, 1)
+})
+
+test('AK3 — a lead accept journals exactly one ask_user_accepted row carrying round 1, the accept decision\'s consult number, findings ["RV1-1"] and the lead\'s reason', () => {
+  const io = dispositionIo([askFinding('RV1-1', 'consider')], { verdict: 'pass', leadDecision: 'accept' })
+  driveTask(CTX, io)
+  const rows = io.calls.logs.filter((row) => row.ask_user_accepted)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].ask_user_accepted.findings, ['RV1-1'])
+  assert.equal(rows[0].ask_user_accepted.round, 1)
+  const decisionRow = io.calls.logs.find((r) => r.decision === 'accept')
+  assert.ok(decisionRow)
+  assert.equal(rows[0].ask_user_accepted.consult, decisionRow.consult)
+  assert.equal(rows[0].ask_user_accepted.reason, 'because')
+})
+
+test('AK4 — accept is offered for a consider finding on pass and not for a should-fix finding on pass', () => {
+  assert.deepEqual([askAcceptOffered([askFinding('RV1-1', 'consider')], 'pass'), askAcceptOffered([askFinding('RV1-1', 'should-fix')], 'pass')], [true, false])
+})
+
+test('AK5 — accept is offered for a consider finding on pass and not on changes-needed', () => {
+  assert.deepEqual([askAcceptOffered([askFinding('RV1-1', 'consider')], 'pass'), askAcceptOffered([askFinding('RV1-1', 'consider')], 'changes-needed')], [true, false])
+})
+
+test('AK6 — accept is offered when every ask-user finding is consider and not when one is should-fix', () => {
+  assert.deepEqual([askAcceptOffered([askFinding('RV1-1', 'consider'), askFinding('RV1-2', 'consider')], 'pass'), askAcceptOffered([askFinding('RV1-1', 'consider'), askFinding('RV1-2', 'should-fix')], 'pass')], [true, false])
 })
 
 test('#800 §7b 29 — a panel pass must-fix refusal re-asks reviewer A before any panel work', () => {

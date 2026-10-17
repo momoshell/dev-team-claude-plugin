@@ -1580,6 +1580,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at screener_panel"],
   ["recordRow", "", "at review_round"],
   ["recordRow", "", "at auto_fix"],
+  ["recordRow", "", "at ask_user_accepted"],
   ["recordRow", "", "at reshape_delta"],
   ["recordRow", "", "at reshape_reverted"],
   ["recordRow", "", "at reshape"],

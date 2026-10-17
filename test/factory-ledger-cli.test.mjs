@@ -878,6 +878,50 @@ test('chunk CLI chunk-progress prints parent progress and refuses unknown flags'
   ledger.close()
 })
 
+test('DG degraded mirror refuses gate-review-gap, eligible-tasks, phases, tail, procs and chunk-progress with exit 2', () => {
+  const corruptDb = join(scratchDir('dg-corrupt-'), 'ledger.db')
+  writeFileSync(corruptDb, 'this is not a database')
+  for (const args of [['gate-review-gap'], ['eligible-tasks'], ['phases', 'x'], ['tail', 'x'], ['procs', 'x'], ['chunk-progress', 'x']]) {
+    const r = run(args, { DEVTEAM_LEDGER_DB: corruptDb })
+    assert.equal(r.status, 2, `${args.join(' ')} must refuse a degraded mirror: status=${r.status} stderr=${r.stderr}`)
+    assert.match(r.stderr, /the ledger mirror is degraded/)
+    assert.equal(r.stdout.trim(), '')
+    assert.doesNotMatch(r.stderr, /at .*ledger\.mjs/)
+  }
+})
+
+test('DG doctor on a degraded mirror exits non-zero with null row counts; healthy doctor exits 0', () => {
+  const corruptDb = join(scratchDir('dg-doctor-corrupt-'), 'ledger.db')
+  writeFileSync(corruptDb, 'this is not a database')
+  const degraded = run(['doctor'], { DEVTEAM_LEDGER_DB: corruptDb })
+  assert.notEqual(degraded.status, 0, degraded.stderr)
+  const payload = JSON.parse(degraded.stdout)
+  assert.equal(payload.degraded, true)
+  assert.equal(typeof payload.degraded_reason, 'string')
+  assert.ok(payload.degraded_reason)
+  const vals = Object.values(payload.row_counts)
+  assert.ok(vals.length > 0)
+  for (const v of vals) assert.equal(v, null)
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const healthy = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(healthy.status, 0, healthy.stderr)
+  assert.equal(JSON.parse(healthy.stdout).degraded, false)
+})
+
+test('DG healthy chunk-progress absent parent prints chunks_total null', () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const r = run(['chunk-progress', 'no-such-parent'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(r.status, 0, r.stderr)
+  const payload = JSON.parse(r.stdout)
+  assert.equal(payload.chunks_total, null)
+  assert.equal(payload.measured, false)
+  assert.equal(payload.absent_reason, 'chunk-parent-absent')
+})
+
 
 const SL_MAP = { version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs', 'scripts/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] }
 function slJournalRows(extra = []) {
@@ -908,14 +952,16 @@ function slRun(rows) {
 
 // MUTATION SL8: changing load.seq < firstCoveredSeq to > misjudges load-before-edit.
 test('SL8 skill-loads reports load-before, edited-without and untouched over the three captures', () => {
-  const { row } = slRun(slJournalRows())
+  const grant = { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] }
+  const { row } = slRun([grant, ...slJournalRows()])
   assert.ok(row)
   assert.deepEqual([row.loaded_before_edit, row.edited_without_load, row.untouched, row.rate, row.denominator, row.thin], [1, 1, 1, 0.5, 2, true])
 })
 
 // MUTATION SL9: inverting isMeasuredSkillLoadWindow counts the pane window as measured.
 test('SL9 a pane window is unmeasured and leaves the measured counts unchanged', () => {
-  const { row } = slRun(slJournalRows([{ at: '2026-10-16T00:00:06.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd4', transport: 'pane', loads_absent_reason: 'pane-unobservable', first_edits: null }]))
+  const grant = { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] }
+  const { row } = slRun([grant, ...slJournalRows([{ at: '2026-10-16T00:00:06.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd4', transport: 'pane', loads_absent_reason: 'pane-unobservable', first_edits: null }])])
   assert.ok(row)
   assert.deepEqual([row.loaded_before_edit, row.edited_without_load, row.untouched, row.measured, row.unmeasured], [1, 1, 1, 3, 1])
   assert.deepEqual(row.unmeasured_by_reason, { 'pane-unobservable': 1 })
@@ -947,4 +993,36 @@ test('skill-loads CLI happy path and refusals', () => {
   writeFileSync(badMap, '{not json')
   assert.equal(run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--map', badMap], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
   assert.equal(run(['skill-loads', '--since', '2026-10-16T00:00:00Z', '--until', '2026-10-16T00:00:00Z', '--map', mapPath], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+})
+
+test('EA5 edit-assist CLI prints rows, requires --since and refuses degraded mirrors', () => {
+  const dir = scratchDir('ea-cli-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  ledger.startSession({ adw_id: 'ea-cli-on', repo_slug: 'r', task_slug: 'ea-cli-on' })
+  ledger.recordRunConfiguration({ adw_id: 'ea-cli-on', schema_version: 1, task_profile: 'build', task_profile_source: 'test', requested_execution: 'x', effective_execution: 'x', execution_source: 'test', requested_assurance: 'x', effective_assurance: 'x', assurance_source: 'test', legacy_variant: 'x', legacy_tier: 'x', edit_assist: 'on' })
+  ledger.recordRunSeat({ adw_id: 'ea-cli-on', role: 'builder', agent: 'pi', provider: 'prov', model_id: 'm1', model: 'm1', effort: 'high', transport: 'headless-rpc', source: 'roster', policy_state: 'passed' })
+  ledger.recordSeatTurnCensus({ adw_id: 'ea-cli-on', role: 'builder', dispatch_id: 'd1', edit_calls: 10, at_ms: Date.parse('2026-10-16T00:00:01.000Z') })
+  ledger.recordBuilderEditFailure({ adw_id: 'ea-cli-on', cause: 'not-unique', cause_absent_reason: null, assist: 'on', edit_index: 0, path: 'a.mjs', at_ms: Date.parse('2026-10-16T00:00:01.000Z') })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const happy = run(['edit-assist', '--since', '2020-01-01T00:00:00.000Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(happy.status, 0, happy.stderr)
+  const payload = JSON.parse(happy.stdout)
+  assert.equal(payload.schema, 1)
+  assert.equal(payload.floor, 12)
+  assert.ok(Array.isArray(payload.rows))
+  assert.equal(payload.rows.length, 1)
+  assert.equal(payload.rows[0].arm, 'on')
+  assert.equal(payload.rows[0].failed_edits, 1)
+  assert.equal(payload.rows[0].round_trips, null)
+  assert.equal(payload.rows[0].round_trips_absent_reason, 'successful-edit-stream-unrecorded')
+  assert.deepEqual(Object.keys(payload.excluded).sort(), ['arm-disagreement', 'arm-unset', 'builder-cell-mixed', 'builder-seat-absent', 'edits-unmeasured'])
+  assert.equal(run(['edit-assist'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  assert.equal(run(['edit-assist', '--since', '2026-10-16T00:00:00Z', '--until', '2026-10-16T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
+  const corruptDb = join(scratchDir('ea-cli-corrupt-'), 'ledger.db')
+  writeFileSync(corruptDb, 'this is not a database')
+  const degraded = run(['edit-assist', '--since', '2026-01-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: corruptDb })
+  assert.equal(degraded.status, 2)
+  assert.match(degraded.stderr, /the ledger mirror is degraded/)
+  assert.equal(degraded.stdout.trim(), '')
 })

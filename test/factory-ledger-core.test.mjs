@@ -2647,6 +2647,21 @@ test('chunk RV1-1 unbooted chunk reports null green with chunk-lane-unbooted and
   }
 })
 
+test('chunk absent parent reports chunks_total null with chunk-parent-absent, never zero', () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordChunkRun({ parentLane: 'p-absent-seed', chunkId: 'c1', lane: 'p-absent-seed-c1', wave: 0, checksOwned: ['A1'] })
+    const out = ledger.chunkProgress('no-such-parent')
+    assert.deepEqual(out.chunks, [])
+    assert.equal(out.chunks_done, null)
+    assert.equal(out.chunks_total, null)
+    assert.equal(out.measured, false)
+    assert.equal(out.absent_reason, 'chunk-parent-absent')
+  } finally {
+    ledger.close()
+  }
+})
+
 test('shadow-pick vocabulary matches crew and writer rejects unknown outcome/reason or unexplained absence', () => {
   assert.deepEqual(SHADOW_PICK_OUTCOMES, SHADOW_OUTCOMES)
   assert.deepEqual(SHADOW_PICK_EXCLUSION_REASONS, SHADOW_EXCLUSIONS)
@@ -2674,7 +2689,7 @@ test('chunk upsertChunkRun recompile replaces owned checks and CHUNK_PROGRESS_SQ
     const m = doc.match(/<!-- CHUNK_PROGRESS_SQL -->\s*```sql\s*([\s\S]*?)```/)
     assert.ok(m)
     assert.equal(m[1].replace(/\s+/g, ' ').trim(), CHUNK_PROGRESS_SQL.replace(/\s+/g, ' ').trim())
-    assert.equal(Object.keys(TABLES).length, 51)
+    assert.equal(Object.keys(TABLES).length, 52)
   } finally {
     conn.close()
     ledger.close()
@@ -2868,8 +2883,11 @@ test('skillLoads verb uses the latest window per dispatch and granted comes only
     const map = { version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] }
     const row = ledger.skillLoads({ since: '2026-10-16T00:00:00.000Z', until: '2026-10-17T00:00:00.000Z', map }).find((r) => r.role === 'builder' && r.skill === 'code-less')
     assert.ok(row)
-    assert.deepEqual([row.measured, row.loaded_before_edit, row.edited_without_load, row.untouched], [1, 0, 1, 0])
+    assert.deepEqual([row.measured, row.loaded_before_edit, row.edited_without_load, row.untouched], [0, 0, 0, 0])
     assert.deepEqual([row.granted, row.granted_absent_reason], [null, 'seat-skills-row-absent'])
+    assert.deepEqual(row.delivery, { granted: 0, inline: 0, not_offered: 0, unknown: 1 })
+    assert.equal(row.denominator, 0)
+    assert.equal(row.rate, null)
   } finally { ledger.close() }
 })
 
@@ -2889,6 +2907,7 @@ function skillVerbRow(rows, adw, query) {
 // attempt's load count for the re-ask once --since drops the first window.
 test('WN1 the verdict for one assignment does not depend on whether --since includes its earlier attempt', () => {
   const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] },
     { at: '2026-10-16T00:00:01.000Z', event: 'skill-loaded', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', skill: 'code-less', slice: null, seq: 1, load_at: '2026-10-16T00:00:01.000Z' },
     { at: '2026-10-16T00:00:01.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] },
     { at: '2026-10-16T00:00:05.000Z', event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 2 }] },
@@ -2902,6 +2921,7 @@ test('WN1 the verdict for one assignment does not depend on whether --since incl
 test('RK1 the same dispatch id in two run segments of one checkout is two assignments', () => {
   const window = (at) => ({ at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'acp', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 1 }] })
   const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] },
     { at: '2026-10-16T00:00:00.000Z', event: 'run-start', run_id: 'run-a' }, window('2026-10-16T00:00:01.000Z'),
     { at: '2026-10-16T00:00:02.000Z', event: 'run-start', run_id: 'run-b' }, window('2026-10-16T00:00:03.000Z'),
   ]
@@ -3005,9 +3025,187 @@ test('MV3 skill-loads refuses a rule whose when has neither paths nor roles, nam
 test('SM1 two attempts of one dispatch in the same millisecond stay two windows and the re-ask is judged', () => {
   const at = '2026-10-16T00:00:01.000Z'
   const rows = [
+    { at: '2026-10-16T00:00:00.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] },
     { at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [] },
     { at, event: 'skill-load-window', role: 'builder', dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 1 }] },
   ]
   const row = skillVerbRow(rows, 'sm1', { since: '2026-10-16T00:00:00.000Z' })
   assert.deepEqual([row.measured, row.untouched, row.edited_without_load], [1, 0, 1])
+})
+
+test('SK delivery buckets classify granted/inline/not_offered/unknown and granted wins over inline', () => {
+  const dir = scratchDir('sl-delivery-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const journal = join(dir, 'journal.jsonl')
+    const win = (role) => ({ at: '2026-10-16T00:00:03.000Z', event: 'skill-load-window', role, dispatch_id: 'd1', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'crew/a.mjs', seq: 2 }] })
+    const rows = [
+      { at: '2026-10-16T00:00:01.000Z', event: 'seat-skills', role: 'builder', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }] },
+      { at: '2026-10-16T00:00:01.000Z', event: 'seat-skills', role: 'reviewer', skills: [{ path: 'skills/code-less/SKILL.md', status: 'inline' }] },
+      { at: '2026-10-16T00:00:01.000Z', event: 'seat-skills', role: 'planner', skills: [{ path: 'skills/backend-node/SKILL.md', status: 'granted' }] },
+      { at: '2026-10-16T00:00:01.000Z', event: 'seat-skills', role: 'lead', skills: [{ path: 'skills/code-less/SKILL.md', status: 'granted' }, { path: 'skills/code-less/references/x.md', status: 'inline' }] },
+      win('builder'), win('reviewer'), win('planner'), win('tech-lead'), win('lead'),
+    ]
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'sl-delivery-run' }).complete, true)
+    const map = { version: 1, exempt: [], rules: [{ when: { paths: ['crew/**/*.mjs'] }, skills: ['dev-team:code-less'] }] }
+    const byRole = Object.fromEntries(ledger.skillLoads({ since: '2026-10-16T00:00:00.000Z', map }).filter((r) => r.skill === 'code-less').map((r) => [r.role, r]))
+    assert.deepEqual(byRole.builder.delivery, { granted: 1, inline: 0, not_offered: 0, unknown: 0 })
+    assert.deepEqual(byRole.reviewer.delivery, { granted: 0, inline: 1, not_offered: 0, unknown: 0 })
+    assert.deepEqual(byRole.planner.delivery, { granted: 0, inline: 0, not_offered: 1, unknown: 0 })
+    assert.deepEqual(byRole['tech-lead'].delivery, { granted: 0, inline: 0, not_offered: 0, unknown: 1 })
+    assert.deepEqual(byRole.lead.delivery, { granted: 1, inline: 0, not_offered: 0, unknown: 0 })
+    assert.equal(byRole.builder.measured, 1)
+    for (const role of ['reviewer', 'planner', 'tech-lead']) {
+      assert.equal(byRole[role].measured, 0)
+      assert.equal(byRole[role].denominator, 0)
+      assert.equal(byRole[role].rate, null)
+    }
+  } finally { ledger.close() }
+})
+
+test('EA1 builder_edit_failures writer validates closed enums and double ingest yields 2 rows', () => {
+  assert.equal(Object.keys(TABLES).length, 52)
+  assert.equal(JOURNAL_FACT_KEYS.builder_edit_failure, 'recordBuilderEditFailure')
+  const dir = scratchDir('ea1-writer-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const base = { adw_id: 'ea1-lane', at_ms: Date.parse('2026-10-16T00:00:01.000Z'), path: 'crew/a.mjs', edit_index: 1 }
+    assert.throws(() => ledger.recordBuilderEditFailure({ ...base, assist: 'maybe', cause: 'not-unique', cause_absent_reason: null }), LedgerUsageError)
+    assert.throws(() => ledger.recordBuilderEditFailure({ ...base, assist: 'on', cause: 'bogus', cause_absent_reason: null }), LedgerUsageError)
+    assert.throws(() => ledger.recordBuilderEditFailure({ ...base, assist: 'on', cause: 'not-unique', cause_absent_reason: 'file-unreadable' }), LedgerUsageError)
+    assert.throws(() => ledger.recordBuilderEditFailure({ ...base, assist: 'on', cause: null, cause_absent_reason: null }), LedgerUsageError)
+    assert.throws(() => ledger.recordBuilderEditFailure({ ...base, assist: 'on', cause: 'not-unique', cause_absent_reason: null, edit_index: -1 }), LedgerUsageError)
+    const ok1 = ledger.recordBuilderEditFailure({ ...base, assist: 'off', cause: 'not-unique', cause_absent_reason: null })
+    assert.ok(ok1.identity_key)
+    assert.equal(ledger.dumpTable('builder_edit_failures').length, 1)
+    const journal = join(dir, 'journal.jsonl')
+    const rows = [
+      { at: '2026-10-16T00:00:01.000Z', builder_edit_failure: { cause: 'not-unique', cause_absent_reason: null, assist: 'off', edit_index: 1, path: 'crew/a.mjs' } },
+      { at: '2026-10-16T00:00:02.000Z', builder_edit_failure: { cause: null, cause_absent_reason: 'file-unreadable', assist: 'on', edit_index: 2, path: 'crew/b.mjs' } },
+    ]
+    writeFileSync(journal, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'ea1-journal' }).complete, true)
+    assert.equal(ingestJournal(journal, ledger, { adw_id: 'ea1-journal' }).complete, true)
+    assert.equal(ledger.dumpTable('builder_edit_failures').filter((r) => r.adw_id === 'ea1-journal').length, 2)
+  } finally { ledger.close() }
+})
+
+test('EA2 EA3 editAssist per-cell rates use measured edit_calls with anchor subset, thin and round-trip blind spot', () => {
+  const dir = scratchDir('ea-readout-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const seed = (adw, arm, failures, editCalls, provider, modelId) => {
+      ledger.startSession({ adw_id: adw, repo_slug: 'r', task_slug: adw })
+      ledger.recordRunConfiguration({ adw_id: adw, schema_version: 1, task_profile: 'build', task_profile_source: 'test', requested_execution: 'x', effective_execution: 'x', execution_source: 'test', requested_assurance: 'x', effective_assurance: 'x', assurance_source: 'test', legacy_variant: 'x', legacy_tier: 'x', edit_assist: arm })
+      ledger.recordRunSeat({ adw_id: adw, role: 'builder', agent: 'pi', provider: provider ?? 'prov', model_id: modelId ?? 'm1', model: modelId ?? 'm1', effort: 'high', transport: 'headless-rpc', source: 'roster', policy_state: 'passed' })
+      if (editCalls !== undefined) ledger.recordSeatTurnCensus({ adw_id: adw, role: 'builder', dispatch_id: 'd1', edit_calls: editCalls, at_ms: Date.parse('2026-10-16T00:00:01.000Z') })
+      for (const [i, f] of failures.entries()) {
+        ledger.recordBuilderEditFailure({ adw_id: adw, cause: f.cause, cause_absent_reason: f.cause_absent_reason, assist: arm, edit_index: i, path: 'a.mjs', at_ms: Date.parse('2026-10-16T00:00:0' + (i + 1) + '.000Z') })
+      }
+    }
+    seed('ea-on', 'on', [{ cause: 'not-unique', cause_absent_reason: null }, { cause: 'never-seen', cause_absent_reason: null }, { cause: 'seen-stale', cause_absent_reason: null }, { cause: null, cause_absent_reason: 'file-unreadable' }], 200)
+    seed('ea-off', 'off', [{ cause: 'indentation', cause_absent_reason: null }], 100)
+    seed('ea-zero', 'on', [], 0, 'prov-zero', 'm-zero')
+    seed('ea-clean', 'off', [], 50, 'prov-clean', 'm-clean')
+    const out = ledger.editAssist({ since: '2020-01-01T00:00:00.000Z', until: '2100-01-01T00:00:00.000Z' })
+    const on = out.rows.find((r) => r.arm === 'on' && r.edit_calls === 200)
+    const off = out.rows.find((r) => r.arm === 'off' && r.edit_calls === 100)
+    assert.ok(on)
+    assert.ok(off)
+    assert.equal(on.seats, 1)
+    assert.equal(on.failed_edits, 4)
+    assert.equal(on.failed_per_100, 2)
+    assert.equal(on.anchor_failures, 2)
+    assert.equal(on.anchor_per_100, 1)
+    assert.deepEqual(on.cause_mix, { 'file-unreadable': 1, 'never-seen': 1, 'not-unique': 1, 'seen-stale': 1 })
+    assert.equal(on.thin, true)
+    assert.equal(on.round_trips, null)
+    assert.equal(on.round_trips_absent_reason, 'successful-edit-stream-unrecorded')
+    assert.equal(off.failed_per_100, 1)
+    assert.equal(off.anchor_failures, 1)
+    const zero = out.rows.find((r) => r.edit_calls === 0)
+    assert.ok(zero)
+    assert.equal(zero.failed_per_100, null)
+    assert.equal(zero.anchor_per_100, null)
+    const clean = out.rows.find((r) => r.edit_calls === 50)
+    assert.ok(clean)
+    assert.equal(clean.failed_edits, 0)
+    assert.equal(clean.failed_per_100, 0)
+    assert.equal(clean.anchor_per_100, 0)
+    // Every row carries the cell it was seeded under, value for value: a row with a null
+    // or borrowed provider/model/effort must fail here, not merely a row missing the key.
+    const seededCell = { 200: ['prov', 'm1'], 100: ['prov', 'm1'], 0: ['prov-zero', 'm-zero'], 50: ['prov-clean', 'm-clean'] }
+    assert.equal(out.rows.length, 4)
+    for (const row of out.rows) {
+      assert.equal(row.round_trips, null)
+      assert.equal(row.round_trips_absent_reason, 'successful-edit-stream-unrecorded')
+      assert.deepEqual([row.provider, row.model_id, row.effort], [...seededCell[row.edit_calls], 'high'])
+    }
+  } finally { ledger.close() }
+})
+
+test('EA4 editAssist excludes lanes in precedence with closed reasons', () => {
+  const dir = scratchDir('ea-excluded-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const cfg = (adw, arm) => {
+      ledger.startSession({ adw_id: adw, repo_slug: 'r', task_slug: adw })
+      ledger.recordRunConfiguration({ adw_id: adw, schema_version: 1, task_profile: 'build', task_profile_source: 'test', requested_execution: 'x', effective_execution: 'x', execution_source: 'test', requested_assurance: 'x', effective_assurance: 'x', assurance_source: 'test', legacy_variant: 'x', legacy_tier: 'x', edit_assist: arm })
+    }
+    const seat = (adw) => ledger.recordRunSeat({ adw_id: adw, role: 'builder', agent: 'pi', provider: 'prov', model_id: 'm1', model: 'm1', effort: 'high', transport: 'headless-rpc', source: 'roster', policy_state: 'passed' })
+    cfg('x-unset', null)
+    cfg('x-disagree', 'on'); seat('x-disagree'); ledger.recordSeatTurnCensus({ adw_id: 'x-disagree', role: 'builder', dispatch_id: 'd1', edit_calls: 10, at_ms: 1 })
+    const j1 = join(dir, 'j1.jsonl')
+    writeFileSync(j1, JSON.stringify({ at: '2026-10-16T00:00:01.000Z', builder_edit_failure: { cause: 'never-seen', cause_absent_reason: null, assist: 'off', edit_index: 1, path: 'a.mjs' } }) + '\n')
+    assert.equal(ingestJournal(j1, ledger, { adw_id: 'x-disagree' }).complete, true)
+    cfg('x-noseat', 'on')
+    cfg('x-nocensus', 'on'); seat('x-nocensus')
+    cfg('x-nullcensus', 'on'); seat('x-nullcensus'); ledger.recordSeatTurnCensus({ adw_id: 'x-nullcensus', role: 'builder', dispatch_id: 'd1', edit_calls: null, at_ms: 1 })
+    const out = ledger.editAssist({ since: '2020-01-01T00:00:00.000Z', until: '2100-01-01T00:00:00.000Z' })
+    assert.deepEqual(out.excluded, { 'arm-unset': 1, 'arm-disagreement': 1, 'builder-seat-absent': 1, 'builder-cell-mixed': 0, 'edits-unmeasured': 2 })
+    assert.equal(out.rows.length, 0)
+    // builder-cell-mixed is defensive and untestable-by-construction: run_seats unique (adw_id, role)
+    // allows only one builder row per lane through the writer, so two builder rows cannot be inserted
+    // without bypassing the writer and weakening the schema; the distinct-tuple code path stays.
+  } finally { ledger.close() }
+})
+
+test('skillLoadWindow seat_skills writer validates, sorts keys and replays via seat_skills_json', () => {
+  const dir = scratchDir('sl-seat-skills-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const at = '2026-10-16T00:00:01.000Z'
+    const base = { adw_id: 'w-seat', dispatch_id: 'd1', role: 'builder', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [], at_ms: Date.parse(at) }
+    const args = ledger.recordSkillLoadWindow({ ...base, seat_skills: { 'code-less': 'inline', 'backend-node': 'granted' } })
+    assert.equal(args.seat_skills_json, JSON.stringify({ 'backend-node': 'granted', 'code-less': 'inline' }))
+    assert.equal(ledger.dumpTable('skill_load_windows').length, 1)
+    assert.throws(() => ledger.recordSkillLoadWindow({ ...base, dispatch_id: 'd2', seat_skills: ['code-less'] }), LedgerUsageError)
+    assert.throws(() => ledger.recordSkillLoadWindow({ ...base, dispatch_id: 'd2', seat_skills: { 'a/b': 'granted' } }), LedgerUsageError)
+    assert.throws(() => ledger.recordSkillLoadWindow({ ...base, dispatch_id: 'd2', seat_skills: { 'code-less': 'delivered' } }), LedgerUsageError)
+    assert.throws(() => ledger.recordSkillLoadWindow({ ...base, dispatch_id: 'd2', seat_skills_json: 'not-json' }), LedgerUsageError)
+    const replayed = ledger.recordSkillLoadWindow({ ...base, dispatch_id: 'd9', seat_skills_json: JSON.stringify({ 'code-less': 'granted' }) })
+    assert.equal(replayed.seat_skills_json, JSON.stringify({ 'code-less': 'granted' }))
+    assert.equal(ledger.dumpTable('skill_load_windows').length, 2)
+  } finally { ledger.close() }
+})
+
+test('skillLoadWindow replayJsonl restores a measured window with its delivery snapshot', () => {
+  const dir = scratchDir('sl-window-replay-')
+  const source = openLedger({ dbPath: join(dir, 'source.db') })
+  const target = openLedger({ dbPath: join(dir, 'target.db') })
+  try {
+    source.recordSkillLoadWindow({ adw_id: 'w-replay', run_key: 'run-1', attempt: 1, dispatch_id: 'd1', role: 'builder', transport: 'headless-rpc', loads_absent_reason: null, first_edits: [{ path: 'src/a.js', seq: 2 }], granted_skills: ['code-less'], seat_skills: { 'code-less': 'granted', 'backend-node': 'inline' }, at_ms: Date.parse('2026-10-16T00:00:01.000Z') })
+    const sourceRow = source.dumpTable('skill_load_windows')[0]
+    // kills mutation: disabling the first_edits_json replay resolution in recordSkillLoadWindow
+    const first = replayJsonl(source._jsonlPath, target)
+    const second = replayJsonl(source._jsonlPath, target)
+    assert.deepEqual([first.failed, first.complete], [0, true])
+    assert.deepEqual([second.failed, second.complete], [0, true])
+    assert.equal(target.dumpTable('skill_load_windows').length, 1)
+    const replayedRow = target.dumpTable('skill_load_windows')[0]
+    assert.equal(replayedRow.first_edits_json, sourceRow.first_edits_json)
+    assert.equal(replayedRow.granted_skills_json, sourceRow.granted_skills_json)
+    assert.equal(replayedRow.seat_skills_json, sourceRow.seat_skills_json)
+  } finally { source.close(); target.close() }
 })

@@ -27,6 +27,37 @@ node crew/factoryctl.mjs run --brief /abs/path/brief.md --tier build
 node crew/factoryctl.mjs ls
 ```
 
+## Install
+
+```
+/plugin marketplace add momoshell/dev-team-claude-plugin
+/plugin install dev-team@dev-team
+```
+
+This brings the skills and the `/dispatch`, `/close-out`, `/status` and
+`/onboard` commands into any project. The install follows `ref: main` in
+`.claude-plugin/marketplace.json`, not a tag, so an installed copy tracks the
+head of `main`.
+
+There are two ways to use it:
+
+- **Skills only.** Nothing else to set up. The knowledge skills (`pr-review`,
+  `qa-test-writing`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`)
+  work in any repo. Most repos stop here.
+- **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
+  (`engines` in `package.json`), and a crew root (`~/.crew`, or
+  `DEVTEAM_CREW_ROOT`). Run the runtime from the clone and point it at the
+  target with `--checkout`. Headless is the default transport; cmux is needed
+  only to watch a lane in panes.
+
+You do not need the operator's pinned worktree or a `crew` launcher on your
+PATH (`bin/crew.mjs`). Both are the operator's own setup for running lanes from
+a frozen copy. A clone run with `node crew/crew.mjs` is enough.
+
+[`skills/crew-onboard/`](skills/crew-onboard/SKILL.md) covers the rest:
+deciding what a target can use, and profiling and ratifying a foreign checkout
+before its first lane.
+
 ## What's in this repo
 
 - **`crew/`** — the runtime: a cmux driver (verified-send, context-aware ops),

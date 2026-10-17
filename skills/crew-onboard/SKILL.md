@@ -47,8 +47,7 @@ target. Confusing the two is the failure this skill prevents.
 /plugin install dev-team@dev-team
 ```
 
-That is the whole install. It brings the skills and the `/dispatch`,
-`/close-out`, `/status` and `/onboard` commands into any project.
+For what the install brings, the two ways to use it, and what the crew runtime needs, see the [README Install section](../../README.md#install).
 
 ## What onboarding actually decides
 

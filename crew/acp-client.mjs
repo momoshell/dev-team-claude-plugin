@@ -145,7 +145,12 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     for (let i = 0; i < 20 && fd == null; i += 1) {
       try { fd = open(paths.fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch { sleep(ACP_POLL_MS) }
     }
-    if (fd == null) throw acpRefuse('acp-spawn-failed', `acp fifo did not appear for seat ${role}`)
+    if (fd == null) {
+      const pgid = Number(child?.pid)
+      if (Number.isSafeInteger(pgid) && pgid > 1) { try { kill(-pgid, 'SIGTERM') } catch {} }
+      try { store.clear(handle) } catch {}
+      throw acpRefuse('acp-spawn-failed', `acp fifo did not appear for seat ${role}`)
+    }
     return { pid: child.pid }
   }
 
@@ -348,6 +353,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return last
   }
 
+  function hasExitMarker() { return exists(paths.exit) }
+
   function proveDead() {
     const exitProof = () => exists(paths.exit)
     if (exitProof()) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
@@ -391,5 +398,5 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return closeResult
   }
 
-  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, reprove, get sessionId() { return session.id } }
+  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, reprove, hasExitMarker, get sessionId() { return session.id } }
 }

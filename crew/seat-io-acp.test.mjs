@@ -15,21 +15,22 @@ function fixture(options = {}) {
   const briefFile = join(root, 'brief.md'); writeFileSync(briefFile, 'brief body')
   const calls = []; const logs = []; const heartbeats = []; let sinks; let launch; let onPermission
   const pollResults = [...(options.pollResults ?? (Object.hasOwn(options, 'turn') ? [options.turn] : []))]
-  let promptSeq = 16; let pending = false; let cancelledTurn = null; let cancelPollsRemaining = 0
+  let promptSeq = 16; let pending = false; let cancelledTurn = null; let cancelPollsRemaining = 0; let initializeThrew = false; let factoryCalls = 0
   const fake = {
     sessionId: 'session-test',
-    start() { calls.push('start') }, initialize() { calls.push('initialize') }, newSession(params) { calls.push(['newSession', params]) }, setMode(mode) { calls.push(['setMode', mode]) },
+    start() { calls.push('start') }, initialize() { calls.push('initialize'); if (options.initializeError && !initializeThrew) { initializeThrew = true; throw options.initializeError } }, newSession(params) { calls.push(['newSession', params]) }, setMode(mode) { calls.push(['setMode', mode]) },
     beginPrompt(blocks) { calls.push(['beginPrompt', blocks]); if (options.guardPending && pending) throw new Error('overlapping prompt'); pending = true; return ++promptSeq },
-    pollPrompt() { calls.push('pollPrompt'); if (options.pollError) throw options.pollError; if (cancelledTurn && cancelPollsRemaining > 0) { cancelPollsRemaining -= 1; return null }; const turn = pollResults.length ? pollResults.shift() : cancelledTurn; if (turn) { pending = false; cancelledTurn = null }; return turn || null },
+    pollPrompt() { calls.push('pollPrompt'); if (options.onPoll) options.onPoll(); if (options.pollError) throw options.pollError; if (cancelledTurn && cancelPollsRemaining > 0) { cancelPollsRemaining -= 1; return null }; const turn = pollResults.length ? pollResults.shift() : cancelledTurn; if (turn) { pending = false; cancelledTurn = null }; return turn || null },
     cancelPrompt(id) { calls.push(['cancelPrompt', id]); if (!options.cancelNoReply) { cancelledTurn = options.cancelTurn || { stopReason: 'cancelled', usage: null }; cancelPollsRemaining = options.cancelPollsRemaining || 0 } },
     resumeSession() { calls.push('resumeSession') }, cancel() { calls.push('cancel') },
     close() { calls.push('close'); return options.closeResult || { outcome: 'proven', reason: 'fixture' } },
     reprove(windowMs) { calls.push(['reprove', windowMs]); return options.reproveResult || { outcome: 'proven', reason: 'fixture' } },
   }
+  if (options.exitMarker !== undefined) fake.hasExitMarker = () => options.exitMarker === true
   const io = acpIo({ crew: options.crew || { members: { builder: { model: 'test' } } }, paths, taskDir: paths.taskDir, checkout: options.checkout ?? root, adapters: options.adapters || {}, bin: '/bin/pi',
-    deps: { clientFactory(opts) { sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
+    deps: { clientFactory(opts) { factoryCalls += 1; sinks = opts.sinks; launch = opts.launch; onPermission = opts.onPermission; return fake }, permissionLead: options.permissionLead, permissionTimeoutMs: options.permissionTimeoutMs, log: options.log || ((row) => logs.push(row)), emit: (row) => heartbeats.push(row),
       existsSync: options.existsSync || ((path) => path === '/bin/pi' || fsExistsSync(path)), readFileSync: options.readFileSync, now: options.now || (() => 100), monotonic: options.monotonic, sleep: options.sleep || (() => {}), closeSettleMs: options.closeSettleMs, cancelSettleMs: options.cancelSettleMs } })
-  return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
+  return { root, paths, briefFile, io, calls, logs, heartbeats, queueTurn: (turn) => pollResults.push(turn), get factoryCalls() { return factoryCalls }, get launch() { return launch }, get onPermission() { return onPermission }, update: (kind, payload) => (typeof kind === 'string' ? sinks[kind](payload) : sinks.agent_message_chunk(kind)) }
 }
 function assign(f, extra = {}) { return f.io.assign({ role: 'builder', briefFile: f.briefFile, ...extra }) }
 function cleanup(f) { rmSync(f.root, { recursive: true, force: true }) }
@@ -385,7 +386,62 @@ test('T9', () => {
 test('T10', () => {
   const f = fixture({ turn: { stopReason: 'end_turn', refusal: null } }); try {
     const out = assign(f); writeFileSync(out.returnPath, JSON.stringify({ status: 'done', assignment_id: 'stale' }))
-    assert.throws(() => f.io.wait(out.returnPath, 0), (e) => e.stage === 'acp-no-envelope')
+    assert.equal(f.io.wait(out.returnPath, 0).assignment_id, 'stale')
+  } finally { cleanup(f) }
+})
+test('AT1 settled turn without envelope throws turn-ended-without-envelope before the deadline', () => {
+  let wall = 0, mono = 0
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: null, refusal: null }, now: () => wall, monotonic: () => mono, sleep: (ms) => { wall += ms; mono += ms } })
+  try {
+    const out = assign(f)
+    assert.throws(() => f.io.wait(out.returnPath, 2400), (e) => e.stage === 'acp-no-envelope' && e.cause === 'turn-ended-without-envelope')
+    assert.ok(wall < 2400 * 1000)
+  } finally { cleanup(f) }
+})
+test('AT1 envelope written during the settling poll still wins', () => {
+  let wall = 0, mono = 0
+  let out = null
+  let wrote = false
+  const f = fixture({ turn: { stopReason: 'end_turn', usage: null, refusal: null }, now: () => wall, monotonic: () => mono, sleep: (ms) => { wall += ms; mono += ms }, onPoll: () => { if (out && !wrote) { wrote = true; writeFileSync(out.returnPath, JSON.stringify({ assignment_id: out.id, role: 'builder', status: 'done' })) } } })
+  try {
+    out = assign(f)
+    assert.equal(f.io.wait(out.returnPath, 2400).status, 'done')
+  } finally { cleanup(f) }
+})
+test('AT2 exit marker while prompt unanswered throws exit-marker before the deadline', () => {
+  let wall = 0, mono = 0
+  const f = fixture({ exitMarker: true, now: () => wall, monotonic: () => mono, sleep: (ms) => { wall += ms; mono += ms } })
+  try {
+    const out = assign(f)
+    assert.throws(() => f.io.wait(out.returnPath, 2400), (e) => e.stage === 'acp-no-envelope' && e.cause === 'exit-marker')
+    assert.ok(wall < 2400 * 1000)
+  } finally { cleanup(f) }
+})
+test('AT2 client without exit marker accessor waits to the deadline as today', () => {
+  let wall = 0, mono = 0
+  const f = fixture({ now: () => wall, monotonic: () => mono, sleep: (ms) => { wall += ms; mono += ms } })
+  try {
+    const out = assign(f)
+    assert.throws(() => f.io.wait(out.returnPath, 1), (e) => e.stage === 'acp-no-envelope' && e.cause === null)
+  } finally { cleanup(f) }
+})
+test('AT3 mismatched assignment_id envelope is returned unchanged', () => {
+  const f = fixture()
+  try {
+    const out = assign(f)
+    const envelope = { assignment_id: 'someone-else', role: 'builder', status: 'done' }
+    writeFileSync(out.returnPath, JSON.stringify(envelope))
+    assert.deepEqual(f.io.wait(out.returnPath, 0), envelope)
+  } finally { cleanup(f) }
+})
+test('AT4 failed initialize closes the client and the next assign builds a new one', () => {
+  const f = fixture({ initializeError: new Error('nope') })
+  try {
+    assert.throws(() => assign(f), /nope/)
+    assert.ok(f.calls.indexOf('close') > f.calls.indexOf('initialize'))
+    assert.equal(f.factoryCalls, 1)
+    assign(f)
+    assert.equal(f.factoryCalls, 2)
   } finally { cleanup(f) }
 })
 test('Claude ACP nested adapter launches its own binary', () => {

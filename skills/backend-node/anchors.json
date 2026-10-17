@@ -34,12 +34,12 @@
   "test/factory-emit.test.mjs:1849": "CLI: emit-cli-unknown-flag-refusal",
   "scripts/factory/emit.mjs:1644": "function refuseUnknownFlags(verb, flags)",
   "crew/drive.mjs:564": "export const DECISIONS = Object.freeze",
-  "scripts/factory/ledger.mjs:533": "export const CI_DECISIONS = Object.freeze",
-  "scripts/factory/ledger.mjs:4402": "requireEnum(input.decision, CI_DECISIONS",
-  "scripts/factory/ledger.mjs:8395": "function refuseUnknownFlags(verb, flags)",
-  "scripts/factory/ledger.mjs:8355": "const VERB_FLAGS = Object.freeze",
-  "scripts/factory/ledger.mjs:8403": "unknown flag --${name}",
-  "scripts/factory/ledger.mjs:10237": "unknown verb: ${verb}",
   "crew/shape-validator.mjs:261": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
-  "crew/shape-validator.mjs:250": "if (!shape || typeof shape !== 'object')"
+  "crew/shape-validator.mjs:250": "if (!shape || typeof shape !== 'object')",
+  "scripts/factory/ledger.mjs:538": "export const CI_DECISIONS = Object.freeze",
+  "scripts/factory/ledger.mjs:8608": "function refuseUnknownFlags(verb, flags)",
+  "scripts/factory/ledger.mjs:8567": "const VERB_FLAGS = Object.freeze",
+  "scripts/factory/ledger.mjs:8616": "unknown flag --${name}",
+  "scripts/factory/ledger.mjs:10470": "unknown verb: ${verb}",
+  "scripts/factory/ledger.mjs:4481": "requireEnum(input.decision, CI_DECISIONS"
 }

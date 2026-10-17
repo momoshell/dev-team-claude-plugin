@@ -1355,7 +1355,7 @@ test('RE9', () => {
   assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
   // Sol pass 3: a walk from the stale roster cell picked a cheaper model than the live one.
   const walkRoster = {
-    tiers: { mechanical: { builder: { provider: 'openai', id: 'a', effort: 'medium', agent: 'pi' } }, build: { builder: { provider: 'openai', id: 'c', effort: 'medium', agent: 'pi' } }, judge: {} },
+    tiers: { mechanical: { builder: { provider: 'openai', id: 'a', effort: 'medium', agent: 'pi', fallback: [{ provider: 'openai', id: 'b', agent: 'pi' }] } }, build: { builder: { provider: 'openai', id: 'c', effort: 'medium', agent: 'pi' } }, judge: {} },
     models: {
       'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
       'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },

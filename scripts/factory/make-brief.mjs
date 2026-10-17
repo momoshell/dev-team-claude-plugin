@@ -222,8 +222,8 @@ there is no moment to commit one either. The gate is the orchestrator's artefact
 
 // Copied byte-for-byte from the converged brief's standing acceptance block.
 export const ACCEPTANCE_GATE_BLOCK = Object.freeze(`Planner authors it; **RED at baseline**, printing
-\`GATE-SUMMARY {"total":n,"failed":n,"errored":n}\` (\`GATE_SUMMARY_PREFIX\`,
-\`crew/drive.mjs:70\`) with \`errored: 0\` at baseline (#153). Prove the gate
+\`GATE-SUMMARY {"total":n,"failed":n,"errored":n}\` (\`GATE_SUMMARY_PREFIX\` in
+\`crew/drive.mjs\`) with \`errored: 0\` at baseline (#153). Prove the gate
 discriminates (#168), resolve the repo from \`process.cwd()\`, name in a comment
 the mutation each check kills, never assert the checkout is clean. If your
 gate shells out to the suite, strip ANSI before parsing it (#240).`)
@@ -249,8 +249,8 @@ was unreachable on a machine with no \`claude\` installed (#672).
 
 A new test that reaches a binary-resolution seam (\`resolveWorkerBin\` and its
 siblings) must do one of exactly two things: STUB the resolution —
-\`crew/crew.test.mjs:546\` sets \`CREW_CLAUDE_BIN\` around the call and restores it
-— or SKIP with a named reason — \`crew/adapter-pi.test.mjs:62\`,
+\`crew/crew-boot.test.mjs\` saves, deletes and restores \`CREW_CLAUDE_BIN\` around the
+call — or SKIP with a named reason — \`crew/adapter-pi.test.mjs\`,
 \`if (!command) return t.skip('pi is not installed on PATH')\`. Doing neither, on a
 path that resolves a binary, is the reviewable signal.`)
 
@@ -258,8 +258,8 @@ path that resolves a binary, is the reviewable signal.`)
 // standing tail in the rendered Conventions block.
 export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a Node ≥26 floor; follow the existing
   \`scripts/factory/*\` conventions rather than inventing new ones.
-- No version bump (#137). Commit on green only. Never push, never open a PR.
-  No \`Co-Authored-By\` trailers.
+- No version bump (#137). Commit nothing: the driver commits on green.
+  Never push, never open a PR. No \`Co-Authored-By\` trailers.
 - If interrupted, write your ReturnEnvelope first on resume — \`status:
   insufficient\` if incomplete. A silent seat is indistinguishable from a dead
   one.`)

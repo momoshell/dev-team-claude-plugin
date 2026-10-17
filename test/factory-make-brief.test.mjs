@@ -1967,6 +1967,19 @@ test('every fence sibling spelling that the matcher cannot read is refused', () 
   }
 })
 
+test('BB1', () => {
+  const found = []
+  for (const [name, block] of [['ACCEPTANCE_GATE_BLOCK', ACCEPTANCE_GATE_BLOCK], ['HOSTILE_ENV_BLOCK', HOSTILE_ENV_BLOCK], ['CONVENTIONS_BLOCK', CONVENTIONS_BLOCK], ['MUTATION_CONTRACT_BLOCK', MUTATION_CONTRACT_BLOCK]]) {
+    for (const hit of String(block).match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []) found.push(`${name}: ${hit}`)
+  }
+  assert.deepEqual(found, [])
+})
+
+test('BB2', () => {
+  assert.equal(CONVENTIONS_BLOCK.includes('Commit on green only'), false)
+  assert.ok(CONVENTIONS_BLOCK.includes('Commit nothing'))
+})
+
 test('standing blocks and unfilled slots render verbatim', () => {
   const root = fixture('standing')
   const { brief } = compile(root)
@@ -1982,10 +1995,11 @@ test('standing blocks and unfilled slots render verbatim', () => {
   assert.ok(brief.includes('ReturnEnvelope'))
   assert.ok(brief.split(SLOT_MARKER).length - 1 >= 2)
   // Every other standing block is byte-identical to fc13fa1; b76 touched only the
-  // mutation contract, and b161 moved the conventions block's floor.
+  // mutation contract, b161 moved the conventions block's floor, and b1240 re-pinned
+  // both digests for the cite/commit-rule fix.
   const digest = (text) => createHash('sha256').update(text).digest('hex')
-  assert.equal(digest(ACCEPTANCE_GATE_BLOCK), 'd8fc7641f8ad456c0bd60032571a3c09d5f2a81e2fe0a480190369e854db61a2')
-  assert.equal(digest(CONVENTIONS_BLOCK), 'e3d510a9129041cc5d30e2a81e4b2eadf898f812219a82d16ea6fd2f4d8d47f5')
+  assert.equal(digest(ACCEPTANCE_GATE_BLOCK), '8ec09fce53ce77406c1dd6e05c141e8f6913a0d6223e90f80d81a21e8cfe0217')
+  assert.equal(digest(CONVENTIONS_BLOCK), 'debc2924f5a0f1b19044e54399a27c7668aa745ed5a1431014946555498f676a')
 })
 
 // #672: the gate and the defect shared a blind spot — every check ran on the
@@ -2002,7 +2016,7 @@ test('every compiled brief requires a hostile-environment pass of the lane\'s ow
   // and why: the three assumptions a same-environment gate cannot see
   for (const reason of ['resolved binary', '$HOME', '$PATH']) assert.ok(gate.includes(reason), reason)
   // stub-or-skip, both sanctioned forms, both precedents
-  for (const clause of ['STUB', 'SKIP with a named reason', 't.skip(', 'crew/crew.test.mjs', 'crew/adapter-pi.test.mjs']) {
+  for (const clause of ['STUB', 'SKIP with a named reason', 't.skip(', 'crew/crew-boot.test.mjs', 'crew/adapter-pi.test.mjs']) {
     assert.ok(gate.includes(clause), clause)
   }
   // additive: the block sits inside the acceptance section, once, and removing it

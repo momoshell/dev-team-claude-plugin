@@ -4064,7 +4064,7 @@ test('writeGuard treats the implicit HTTP port as 80, not a wildcard', () => {
 })
 
 test('state-writing routes refuse DNS-rebinding Host before writing state', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-dns-rebinding-'))
+  const dir = scratchDir('visualizer-dns-rebinding-')
   const checkout = join(dir, 'checkout')
   mkdirSync(checkout, { recursive: true })
   let server

@@ -17,6 +17,17 @@ const register = read(REGISTER)
 const readme = read(README)
 const crewReadme = read(CREW_README)
 const claude = read(CLAUDE)
+const portability = read('skills/crew-onboard/references/portability.md')
+const onboardSkill = read('skills/crew-onboard/SKILL.md')
+const marketplace = JSON.parse(read('.claude-plugin/marketplace.json'))
+
+function docSection(markdown, heading) {
+  const start = markdown.indexOf(heading)
+  assert.notEqual(start, -1, `missing ${heading}`)
+  const after = markdown.slice(start + heading.length)
+  const next = after.indexOf('\n## ')
+  return next === -1 ? markdown.slice(start) : markdown.slice(start, start + heading.length + next)
+}
 
 const VISUALIZER_COMMAND = 'npm run viz:build     # release-time check: operator runs it on main before tagging'
 const VISUALIZER_POLICY = "`npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the\noperator runs on main before tagging; it is never a lane's done-means."
@@ -298,4 +309,49 @@ test("A1/B1: visualizer build is a release-time check, not a lane gate", () => {
     .replace(VISUALIZER_POLICY, OLD_VISUALIZER_POLICY)
   const oldErrors = visualizerGateErrors(oldClaude)
   assert.notDeepEqual(oldErrors, [])
+})
+
+test('OD1', () => {
+  // MUTATION OD1: rename the Measured heading in portability.md and no measured coverage is named any more.
+  assert.ok(!portability.includes('has not been measured against a `--checkout` outside this'))
+  const measured = docSection(portability, '## Measured outside this repository')
+  for (const needle of ['vectora-foundry/the-power', 'cargo test --workspace', '336']) {
+    assert.ok(measured.includes(needle), `Measured section misses ${needle}`)
+  }
+  assert.ok(measured.includes('68') && measured.includes('`success`'), 'Measured section misses 68 success sessions')
+})
+
+test('OD2', () => {
+  // MUTATION OD2: rename state-channels-plus in portability.md and the unproven third repository is unnamed.
+  const unproven = docSection(portability, '## What is not proven')
+  assert.ok(unproven.includes('state-channels-plus'), 'What is not proven misses state-channels-plus')
+})
+
+test('OD3', () => {
+  // MUTATION OD3: alter the marketplace-add command in README.md and the derived install line no longer matches.
+  const installLine = `/plugin install ${marketplace.plugins[0].name}@${marketplace.name}`
+  const installIdx = readme.indexOf('## Install')
+  const whatsIdx = readme.indexOf("## What's in this repo")
+  assert.notEqual(installIdx, -1, 'missing ## Install')
+  assert.ok(whatsIdx !== -1 && installIdx < whatsIdx, 'Install must precede What is in this repo')
+  const install = docSection(readme, '## Install')
+  assert.ok(install.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
+  assert.ok(install.includes(installLine), `Install misses ${installLine}`)
+})
+
+test('OD4', () => {
+  // MUTATION OD4: rename --checkout in README.md and the Install section no longer names the checkout flag.
+  assert.equal(marketplace.plugins[0].source.ref, 'main')
+  const install = docSection(readme, '## Install')
+  for (const needle of ['ref: main', '--checkout', 'DEVTEAM_CREW_ROOT', 'bin/crew.mjs']) {
+    assert.ok(install.includes(needle), `Install misses ${needle}`)
+  }
+})
+
+test('OD5', () => {
+  // MUTATION OD5: retarget README.md#install to README.md#setup in SKILL.md and the Installing link no longer reaches Install.
+  const installing = docSection(onboardSkill, '## Installing')
+  assert.ok(installing.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
+  assert.ok(installing.includes('/plugin install dev-team@dev-team'))
+  assert.ok(installing.includes('README.md#install'))
 })

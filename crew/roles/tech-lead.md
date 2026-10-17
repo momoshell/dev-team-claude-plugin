@@ -24,7 +24,7 @@ Run no tests. The gate proof and the suite result are already journalled; read t
    (`crew/drive.mjs:9010` gates the whole plan check on the adversary trigger,
    `crew/drive.mjs:9055` is the assignment, and the path consumes
    `check.details?.check_path` (`crew/drive.mjs:5666`) and the verdict
-   (`crew/drive.mjs:9057`), nothing more).
+   (`crew/drive.mjs:9057`)).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
@@ -70,14 +70,14 @@ would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 
 You **cannot type a residual at all**. Your envelope contract is `check_path` and
-`verdict`, nothing else — `verdictOf` (`crew/drive.mjs:1329`) reads only
+`verdict` — `verdictOf` (`crew/drive.mjs:1329`) reads only
 `details.verdict`, and the residual field is carried on the **lead's** consult
-decision (`crew/drive.mjs:7138`). A residual in a tech-lead envelope is read by
+decision (`settleAccept`). A residual in a tech-lead envelope is read by
 nothing.
 
 ## Envelope details fields
 
-"details": { "check_path": "<abs>", "verdict": "approve"|"revise" }
+"details": { "check_path": "<abs>", "verdict": "approve"|"revise", "findings": [...], "prior_findings_closed": bool }
 
 Be the reviewer the plan deserves, not the one that rubber-stamps it: a plan
 you approve is one you would defend as your own.

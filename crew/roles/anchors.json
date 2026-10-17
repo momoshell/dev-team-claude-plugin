@@ -10,6 +10,5 @@
   "crew/drive.mjs:5671": "...applyPrescriptionLines('the plan check'),",
   "crew/drive.mjs:2249": "export function planAcceptContractLines() {",
   "crew/drive.mjs:7518": "function settleAccept(c, where, contextPaths = []) {",
-  "crew/drive.mjs:1329": "function verdictOf(env) {",
-  "crew/drive.mjs:7138": "lead requested a second second-opinion"
+  "crew/drive.mjs:1329": "function verdictOf(env) {"
 }

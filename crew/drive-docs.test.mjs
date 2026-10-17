@@ -8,7 +8,7 @@ import { statSync } from 'node:fs'
 import { relative } from 'node:path'
 import assert from 'node:assert/strict'
 import {
-  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, existsSync, join, mkdirSync, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
+  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PLAN_CHECK_SEVERITIES, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, existsSync, join, mkdirSync, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
@@ -416,7 +416,7 @@ test('the shared charter and validator agree on the findings contract', () => {
   assert.ok(dispositionField)
   const dispositions = [...dispositionField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
   assert.deepEqual(dispositions, [...FINDING_DISPOSITIONS])
-  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+  assert.ok(block.includes('`disposition` is optional'))
 })
 
 test("the reviewer guidelines carry a defended 'Do not flag' list", () => {
@@ -838,7 +838,7 @@ test('#800 §7b 34 — the shared charter pin includes disposition and its compa
   const line = block.match(/"disposition":\s*([^\n]+)/)?.[1]
   assert.ok(line)
   assert.deepEqual([...line.matchAll(/"([^\"]+)"/g)].map((match) => match[1]), [...FINDING_DISPOSITIONS])
-  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+  assert.ok(block.includes('`disposition` is optional'))
 })
 
 const DOCUMENT_DIFF = [
@@ -1799,5 +1799,52 @@ Self-apply \`crew/guidelines/seat-pre-return-checklist.md\` items \`B1\`-\`B3\`,
 `
   assert.equal(outside, expected)
   assert.equal(CHARTER_SOURCE_BUDGET.builder, 4387)
-  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49093)
+  assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49108)
+})
+
+// b1239 seat-prompt alignment pins: each SP test reads the shipped file.
+test('SP1', () => {
+  const source = readFileSync(join(REPO_ROOT, 'skills/pr-review/references/falsification.md'), 'utf8')
+  for (const severity of [...PLAN_CHECK_SEVERITIES, ...FINDING_SEVERITIES]) assert.ok(source.includes('`' + severity + '`'), severity)
+})
+
+test('SP2', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/tech-lead.md'), 'utf8')
+  const line = source.split('\n').find((entry) => entry.includes('"check_path"')) || ''
+  assert.ok(line.includes('"findings"'))
+  assert.ok(line.includes('"prior_findings_closed"'))
+  assert.equal(source.includes('crew/drive.mjs:7138'), false)
+})
+
+test('SP3', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/lead.md'), 'utf8')
+  assert.equal(source.includes('exactly two shapes'), false)
+  assert.ok(source.includes('review_panel'))
+  assert.ok(source.includes('adjudicator'))
+  assert.ok(source.includes('ask-user consult'))
+})
+
+test('SP4', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/lead.md'), 'utf8').replace(/\s+/g, ' ')
+  assert.ok(source.includes('offered only on a pass with all ask-user findings `consider`'))
+  assert.ok(source.includes('needs no `residuals` or `refuted`'))
+})
+
+test('SP5', () => {
+  const lead = readFileSync(join(REPO_ROOT, 'crew/roles/lead.md'), 'utf8')
+  assert.equal(lead.includes('the test lane) to inform'), false)
+  const skill = readFileSync(join(REPO_ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
+  assert.equal(skill.includes("Run the plan's validation lane yourself"), false)
+})
+
+test('SP6', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8')
+  assert.equal(source.split('\n').some((line) => line.trim() === 'Ship an ordinary text hunk'), false)
+  assert.equal(source.includes('REQUIRED from the next'), false)
+})
+
+test('SP7', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/_shared.md'), 'utf8')
+  const loop = source.slice(source.indexOf('## The assignment loop'), source.indexOf('## ReturnEnvelope shape'))
+  assert.ok(loop.includes('`submit_envelope`'))
 })

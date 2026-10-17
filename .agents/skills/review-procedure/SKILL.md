@@ -11,7 +11,8 @@ restates it.
 
 1. Read `plan.md` in the task dir, then `git diff` / `git status`, then every
    changed file in full.
-2. Run the plan's validation lane yourself. Never trust a reported pass.
+2. Read the journalled validation-lane and suite results; run no tests
+   yourself. Never trust a reported pass the journal does not carry.
 3. Load the guidelines: run `scripts/load-guidelines.mjs` from THIS skill's
    directory — inside this plugin's own checkout that is
    `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, and from

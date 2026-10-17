@@ -7426,6 +7426,13 @@ test('D2 base branch: dependent wave checks containment against dispute', async 
   assert.ok(probe); assert.equal(probe.args.at(-1), 'dispute'); assert.equal(resolutions, 1)
 })
 
+test('D2b base branch: dependent wave checks a remote-only default against its tracking ref', async () => {
+  // MUTATION D2b: check containment against the bare branch name instead of the tracking ref.
+  const result = await dispatchFixture({ label: 'D2b-base', names: ['lane-a', 'lane-b'], requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) }, runFlags: { wave: '2', 'dry-run': true }, outcomes: { 'lane-a': { status: 'done', details: { commit: 'c'.repeat(40) } } }, baseBranch: () => ({ branch: 'master', ref: 'origin/master' }) })
+  const probe = result.spawned.find(call => call.args.includes('--is-ancestor') && call.args.includes('c'.repeat(40)))
+  assert.ok(probe); assert.equal(probe.args.at(-1), 'origin/master')
+})
+
 test('D3 base branch: both surface scan clocks probe dispute', () => {
   // MUTATION D3: restore main as the surface scan tip.
   const calls = [], deps = { baseBranch: () => ({ branch: 'dispute' }), statSync: () => ({ mtime: new Date(0) }), spawn: call => { calls.push(call.args); if (call.args.includes('cat-file')) return { status: 0, stdout: 'commit\n' }; if (call.args.includes('rev-parse')) return { status: 0, stdout: 'a'.repeat(40) + '\n' }; return { status: 0, stdout: '' } } }

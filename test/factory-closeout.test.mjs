@@ -1014,6 +1014,14 @@ test('C2 base branch: committed recovery rebases onto dispute', () => {
   assert.equal(spawned(calls, 'git rebase')[0]?.args[1], 'dispute')
 })
 
+test('C3 base branch: committed recovery rebases a remote-only default onto its tracking ref', () => {
+  // MUTATION C3: rebase onto the bare branch name instead of the resolver's tracking ref.
+  const fixture = laneFixture('closeout-C3-base', { commit: 'abc123' })
+  const { deps, calls } = harness({ home: fixture.home, baseBranch: () => ({ branch: 'master', ref: 'origin/master' }), answers: [['crew.mjs teardown', teardownReply()], ['pgrep', { status: 1, stdout: '', stderr: '' }], ['--test', { status: 0, stdout: '# pass 1\\n# fail 0\\n# skipped 0\\n', stderr: '' }]] })
+  recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(spawned(calls, 'git rebase')[0]?.args[1], 'origin/master')
+})
+
 test('base branch refusal stops merge allocation and committed recovery rebase; pre-commit path skips resolver', () => {
   const fixture = laneFixture('closeout-base-refusal', { commit: 'abc123' })
   const allocation = harness({ home: fixture.home, baseBranch: () => { throw Object.assign(new Error('profile-unratified'), { reason: 'profile-unratified' }) }, answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }]] })

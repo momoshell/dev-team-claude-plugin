@@ -4466,7 +4466,7 @@ function prepareDispatchContext(options) {
           })
           break
         }
-        const baseRef = dispatchBase.branch
+        const baseRef = dispatchBase.ref ?? dispatchBase.branch
         if (!baseContains({ commit: outcome.commit, base: baseRef, checkout: root, deps: d })) refuse(`lane ${lane.lane} depends on ${dep} whose result ${outcome.commit || 'none'} is not contained in the dispatch base ${baseRef}; merge it before dispatching wave ${waveNumber}`, DEPENDENT_BASE_STALE)
       }
     }

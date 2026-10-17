@@ -16,7 +16,7 @@ import {
   FIELD_KIND_NAMES, FIELD_KINDS, IDIOM_CLASSES, IDIOM_UNMEASURED_REASONS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
-  checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
+  checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestCommand, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, profileWorktreeSetup, validateWorktreeSetup, readProfile,
   requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, isPlainBranchName, BASE_BRANCH_REFUSALS,
   runWorktreeSetup, removeWorktreeExcludes,
@@ -181,6 +181,32 @@ test('checkoutTestRunner classifies an explicit --suite that differs from the ra
     assert.deepEqual(checkoutTestRunner({ ...options, suite }), checkoutTestRunner(options), String(suite))
   }
   assert.equal(checkoutTestRunner({ checkout: root, profilePath: join(root, 'missing.json'), suite: 'cargo test' }).runner, 'cargo')
+})
+
+// Mutation killed: returning profiled.command without the null fallback drops the ratified command.
+test('checkoutTestCommand returns the trimmed ratified command or null', () => {
+  const root = scratchDir('probe-test-command-')
+  const checkout = join(root, 'checkout')
+  mkdirSync(checkout)
+  const profilePath = join(root, 'profile.json')
+  const ratified = (value) => ({ status: 'ratified', value, source: 'fixture', ratified_by: 'operator', ratified_at: 'now' })
+  const write = (field) => writeFileSync(profilePath, JSON.stringify({ repo_key: 'fixture', fields: { test_command: field } }))
+  const options = { checkout, profilePath }
+  write(ratified('  cargo test --workspace  '))
+  const result = checkoutTestCommand(options)
+  assert.equal(result.command, 'cargo test --workspace')
+  assert.match(result.basis, /ratified/)
+  write({ ...ratified('cargo test --workspace'), status: 'proposed' })
+  assert.equal(checkoutTestCommand(options).command, null)
+  write({ status: 'unknown' })
+  assert.equal(checkoutTestCommand(options).command, null)
+  assert.equal(checkoutTestCommand({ checkout, profilePath: join(root, 'missing.json') }).command, null)
+  for (const body of ['{', '']) {
+    writeFileSync(profilePath, body)
+    assert.equal(checkoutTestCommand(options).command, null)
+  }
+  write({ status: 'ratified', value: 'cargo test', source: 'fixture' })
+  assert.throws(() => checkoutTestCommand(options), (error) => error instanceof ProfileRefusal && error.reason === 'profile-ratification-invalid')
 })
 
 function captureMain(args) {

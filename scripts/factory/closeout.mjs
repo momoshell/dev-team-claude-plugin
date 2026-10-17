@@ -32,10 +32,11 @@ import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-pat
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
-import { checkoutBaseBranch, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
+import { checkoutBaseBranch, checkoutTestCommand, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
 
 const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
+const CREW_PATH = fileURLToPath(new URL('../../crew/crew.mjs', import.meta.url))
 
 // 256 MiB: the suite's own output is the largest thing this module reads, and a truncated
 // read is indistinguishable from a failure without it.
@@ -97,6 +98,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   MERGE_CONFLICT: 'merge-conflict',
   SUITE_RED: 'suite-red',
   SUITE_UNREADABLE: 'suite-unreadable',
+  SUITE_EMPTY: 'suite-empty',
   ANCHOR_ROT: 'anchor-rot',
   ANCHOR_AMBIGUOUS: 'anchor-ambiguous',
   ISSUE_CLOSE_FAILED: 'issue-close-failed',
@@ -200,6 +202,7 @@ export function normalDeps(deps = {}) {
     home: deps.home || homedir(),
     factoryRoot: deps.factoryRoot,
     baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
+    testCommand: deps.testCommand || (({ checkout }) => checkoutTestCommand({ checkout, factoryRoot: deps.factoryRoot })),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
   d.promptMeasurePath = deps.promptMeasurePath || defaultPromptMeasurePath(d)
@@ -961,7 +964,8 @@ function mergeOne({ lane, scratch, deps }) {
   return { lane, merged: true }
 }
 
-function suiteCommand(cwd, env = colourNeutralEnv()) {
+function suiteCommand({ cwd, env = colourNeutralEnv(), command = null } = {}) {
+  if (command) return { file: '/bin/sh', args: ['-c', command], cwd, env }
   return {
     file: 'node',
     args: ['--test', '--test-reporter=tap', '--test-timeout=30000', '**/*.test.mjs'],
@@ -970,15 +974,18 @@ function suiteCommand(cwd, env = colourNeutralEnv()) {
   }
 }
 
-function runSuite({ cwd, deps, env, reason = CLOSEOUT_REFUSALS.SUITE_RED, step = 'suite' }) {
+function runSuite({ cwd, checkout = cwd, deps, env, reason = CLOSEOUT_REFUSALS.SUITE_RED, step = 'suite' }) {
   const d = normalDeps(deps)
-  const result = runCommand(suiteCommand(cwd, env), d)
+  const resolved = d.testCommand({ checkout })
+  const command = typeof resolved?.command === 'string' && resolved.command.trim() ? resolved.command.trim() : null
+  const result = runCommand(suiteCommand({ cwd, env, command }), d)
   const suite = parseSuiteCounts(stripAnsi(textOf(result?.stdout)))
   // A run whose OUTPUT could not be read is unmeasured, and saying "the suite is red" about
   // it is a claim nobody made: ENOBUFS killed the child mid-stream, so `fail` is unknown.
   if (!suite) {
     refuse(`the suite in ${cwd} reported no counts: ${childFailure(result)}`, CLOSEOUT_REFUSALS.SUITE_UNREADABLE, step)
   }
+  if (suite.pass + suite.fail === 0) refuse(`the suite in ${cwd} ran no tests: ${JSON.stringify(suite)}`, CLOSEOUT_REFUSALS.SUITE_EMPTY, step)
   if (!commandOk(result) || suite.fail > 0) {
     refuse(`suite failed in ${cwd}: ${JSON.stringify(suite)}`, reason, step)
   }
@@ -1030,7 +1037,7 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
       return { merged: batch.length }
     },
     suite: () => {
-      report.suite = runSuite({ cwd: scratch, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(scratch, '.dev-team', 'factory') } })
+      report.suite = runSuite({ cwd: scratch, checkout: root, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(scratch, '.dev-team', 'factory') } })
       return { suite: report.suite }
     },
     'anchor-repair': () => {
@@ -1482,7 +1489,14 @@ function teardownLane({ lane, checkout, crewDir, deps }) {
   const d = normalDeps(deps)
   const crew = readCrew({ crewDir, lane, deps: d })
   const laneDir = fallbackLaneDir({ lane, checkout, crew })
-  const result = runCommand({ file: 'node', args: ['crew/crew.mjs', 'teardown', '--task', lane, '--checkout', laneDir], cwd: checkout }, d)
+  const result = runCommand({ file: 'node', args: [CREW_PATH, 'teardown', '--task', lane, '--checkout', laneDir], cwd: checkout }, d)
+  let payload = null
+  for (const line of String(result?.stdout ?? '').split('\n')) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try { payload = JSON.parse(text) } catch { /* a non-payload line is not the teardown's answer */ }
+  }
+  if (!payload) refuse(`teardown for ${lane} printed no readable JSON payload: ${childFailure(result)}`, CLOSEOUT_REFUSALS.TEARDOWN_UNPROVEN, 'teardown')
   const verdict = teardownVerdict(result)
   const evidence = verdict.verdict !== TEARDOWN_PROVEN ? pgrepFallback({ lane, verdict, deps: d }) : verdict
   const stateDir = stateDirAfterTeardown({ lane, result, crewDir, deps: d })
@@ -1625,7 +1639,7 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
       return { gate: 'green' }
     },
     suite: () => {
-      report.suite = runSuite({ cwd: laneDir, deps: d })
+      report.suite = runSuite({ cwd: laneDir, checkout, deps: d })
       return { suite: report.suite }
     },
     'cold-verify': () => {
@@ -1640,7 +1654,7 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
         try { runColdWorktreeSetup({ checkout, laneDir: cold, lookup: d.worktreeSetup, deps: d }) } catch (error) {
           refuse(`worktree-setup-failed: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, 'cold-verify')
         }
-        const suite = runSuite({ cwd: cold, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(cold, '.dev-team', 'factory') }, reason: CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, step: 'cold-verify' })
+        const suite = runSuite({ cwd: cold, checkout, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(cold, '.dev-team', 'factory') }, reason: CLOSEOUT_REFUSALS.COLD_VERIFY_FAILED, step: 'cold-verify' })
         report.cold_suite = suite
         return { suite }
       } catch (error) {
@@ -1669,8 +1683,10 @@ export function recover({ lane, checkout, checkoutExplicit, deps } = {}) {
   const d = normalDeps(deps)
   const name = typeof lane === 'string' ? lane : String(lane ?? '')
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
-  let crewDir = dirname(crewJsonPath({ checkout: root, lane: name, deps: d }))
-  const report = { lane: name, crew_dir: crewDir, adopt: null }
+  const resolvedCrewDir = resolveReapCrewDir({ lane: name, laneDir: root, deps: d })
+  let crewDir = resolvedCrewDir.crewDir
+  const crewDirSource = resolvedCrewDir.crew_dir_source
+  const report = { lane: name, crew_dir: crewDir, crew_dir_source: crewDirSource, stateDir: crewDir, adopt: null }
   const runners = {
     quiet: () => {
       const crew = readCrew({ crewDir, lane: name, deps: d, step: 'quiet' })
@@ -1691,8 +1707,15 @@ export function recover({ lane, checkout, checkoutExplicit, deps } = {}) {
       return { from: crewDir, to }
     },
     teardown: () => {
+      if (crewDirSource === 'archive') {
+        const evidence = pgrepFallback({ lane: name, verdict: { verdict: 'unproven', why: 'crew state already archived before teardown' }, deps: d })
+        report.teardown = { ...evidence, stateDir: crewDir }
+        report.stateDir = crewDir
+        return report.teardown
+      }
       const result = teardownLane({ lane: name, checkout: root, crewDir, deps: d })
       report.teardown = result
+      report.stateDir = result.stateDir
       crewDir = result.stateDir
       return result
     },

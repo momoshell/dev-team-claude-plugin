@@ -87,7 +87,7 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, realCopy = false, copyError = null, filterProbe = null } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, testCommand = undefined, realCopy = false, copyError = null, filterProbe = null } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   const HARNESS_DEFAULTS = [
@@ -100,6 +100,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     promptMeasurePath: queuePath,
     factoryRoot: scratch('closeout-factory-root-'),
     ...(baseBranch ? { baseBranch } : {}),
+    ...(testCommand ? { testCommand } : {}),
     mkdtempSync: (prefix) => scratchDir(basename(prefix), { parent: dirname(prefix) }),
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
@@ -2769,6 +2770,190 @@ test('RA4 recovery-copy and other-lane archives are ignored', () => {
   assert.equal(detail.crew_dir_source, 'live')
   assert.equal(detail.archive_candidates, 0)
   assert.equal(spawned(calls, 'ledger.mjs turns').length, 0)
+})
+
+// Mutation killed: file:'/bin/sh', args:['-c', command] -> file:'node' in suiteCommand; ratified command no longer via sh.
+test('ratified test command runs the merge-check suite through /bin/sh', () => {
+  const cargoOk = 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n'
+  const { deps, calls } = harness({
+    testCommand: () => ({ command: 'cargo test --workspace', basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['cargo test --workspace', { status: 0, stdout: cargoOk, stderr: '' }],
+      ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal, null)
+  const suite = calls.spawn.find((call) => call.file === '/bin/sh')
+  assert.ok(suite)
+  assert.deepEqual(suite.args, ['-c', 'cargo test --workspace'])
+  assert.equal(suite.env.NO_COLOR, '1')
+  assert.equal(suite.env.FORCE_COLOR, undefined)
+  assert.equal(result.report.suite.pass, 3)
+  assert.equal(result.report.suite.fail, 0)
+})
+
+// Mutation killed: runSuite without the resolved command keeps node argv for a ratified checkout.
+test('ratified test command runs recover warm and cold suites through /bin/sh', () => {
+  const fixture = laneFixture('closeout-recover-ratified-', { commit: 'abc123' })
+  const cargoOk = 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.1s\n'
+  const { deps, calls } = harness({
+    home: fixture.home,
+    testCommand: () => ({ command: 'cargo test --workspace', basis: 'fixture' }),
+    answers: [
+      ['crew.mjs teardown', teardownReply()],
+      ['cargo test --workspace', { status: 0, stdout: cargoOk, stderr: '' }],
+    ],
+  })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.refusal, null)
+  const suites = calls.spawn.filter((call) => call.file === '/bin/sh')
+  assert.equal(suites.length, 2)
+  for (const suite of suites) assert.deepEqual(suite.args, ['-c', 'cargo test --workspace'])
+  assert.ok(suites.some((call) => call.cwd === fixture.checkout))
+  assert.ok(suites.some((call) => call.cwd !== fixture.checkout))
+})
+
+// Mutation killed: suiteCommand default argv changed; the unratified contract is byte-for-byte node --test.
+test('a null test command keeps the node suite argv', () => {
+  const { deps, calls } = harness({
+    testCommand: () => ({ command: null, basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['--test', { status: 0, stdout: '# pass 1\n# fail 0\n# skipped 0\n', stderr: '' }],
+      ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal, null)
+  const suite = spawned(calls, '--test')[0]
+  assert.ok(suite)
+  assert.equal(suite.file, 'node')
+  assert.deepEqual(suite.args, ['--test', '--test-reporter=tap', '--test-timeout=30000', '**/*.test.mjs'])
+})
+
+// Mutation killed: if (suite.pass + suite.fail === 0) -> if (false && ...) in runSuite; empty suite green again.
+test('a parseable suite with zero tests refuses suite-empty in merge-check', () => {
+  const { deps } = harness({
+    testCommand: () => ({ command: null, basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['--test', { status: 0, stdout: '# pass 0\n# fail 0\n# skipped 0\n', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_EMPTY)
+  assert.equal(result.refusal.step, 'suite')
+})
+
+// Mutation killed: warm suite without the empty refusal lets a zero-test recovery through.
+test('a parseable suite with zero tests refuses suite-empty in the recover warm suite', () => {
+  const fixture = laneFixture('closeout-recover-empty-warm-', { commit: 'abc123' })
+  const { deps } = harness({
+    home: fixture.home,
+    testCommand: () => ({ command: null, basis: 'fixture' }),
+    answers: [
+      ['crew.mjs teardown', teardownReply()],
+      ['--test', { status: 0, stdout: '# pass 0\n# fail 0\n# skipped 0\n', stderr: '' }],
+    ],
+  })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_EMPTY)
+  assert.equal(result.refusal.step, 'suite')
+})
+
+// Mutation killed: cold-verify without the empty refusal reports cold-verify-failed for no tests.
+test('a parseable suite with zero tests refuses suite-empty at cold-verify', () => {
+  const fixture = laneFixture('closeout-recover-empty-cold-', { commit: 'abc123' })
+  const ok = { status: 0, stdout: '# pass 1\n# fail 0\n# skipped 0\n', stderr: '' }
+  const empty = { status: 0, stdout: '# pass 0\n# fail 0\n# skipped 0\n', stderr: '' }
+  const { deps } = harness({
+    home: fixture.home,
+    testCommand: () => ({ command: null, basis: 'fixture' }),
+    answers: [
+      ['crew.mjs teardown', teardownReply()],
+      ['--test', (argv, options) => (options.cwd === fixture.checkout ? ok : empty)],
+    ],
+  })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_EMPTY)
+  assert.equal(result.refusal.step, 'cold-verify')
+})
+
+// Mutation killed: empty-suite refusal keyed on unparseable output; garbage must stay suite-unreadable.
+test('unparseable suite output still refuses suite-unreadable', () => {
+  const { deps } = harness({
+    testCommand: () => ({ command: null, basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['--test', { status: 0, stdout: 'hello, no counts here\n', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_UNREADABLE)
+  assert.equal(result.refusal.step, 'suite')
+})
+
+// Mutation killed: CREW_PATH -> 'crew/crew.mjs'; teardown not module-resolved.
+test('teardown spawns the module-resolved crew.mjs', () => {
+  const fixture = laneFixture('closeout-teardown-path-')
+  const { deps, calls } = harness({ home: fixture.home, answers: [['crew.mjs teardown', teardownReply()]] })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.refusal, null)
+  const call = spawned(calls, 'teardown').find((candidate) => candidate.args.includes('teardown'))
+  assert.ok(call)
+  const expected = fileURLToPath(new URL('../crew/crew.mjs', import.meta.url))
+  assert.equal(call.args[0], expected)
+  assert.equal(existsSync(expected), true)
+})
+
+// Mutation killed: if (!payload) refuse( -> if (false && ...) in teardownLane; payload-less teardown uses pgrep again.
+test('a teardown that prints no payload refuses teardown-unproven without pgrep fallback', () => {
+  for (const stdout of ['', 'starting teardown\nall done, no json here\n']) {
+    const fixture = laneFixture('closeout-teardown-payloadless-')
+    const { deps, calls } = harness({
+      home: fixture.home,
+      answers: [['crew.mjs teardown', { status: 0, stdout, stderr: '' }]],
+    })
+    const result = recover({ lane, checkout: fixture.checkout, deps })
+    assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.TEARDOWN_UNPROVEN)
+    assert.equal(result.refusal.step, 'teardown')
+    assert.equal(spawned(calls, 'pgrep').length, 0)
+  }
+})
+
+// Mutation killed: if (crewDirSource === 'archive') -> if (false && ...); archived lane spawns teardown.
+test('recover on an archived crew dir skips teardown and records the archive', () => {
+  const fixture = laneFixture('closeout-recover-archived-')
+  const archived = `${fixture.crewDir}${ARCHIVE_MARK}2026-10-17T10-00-00-000Z`
+  renameSync(fixture.crewDir, archived)
+  const { deps, calls } = harness({
+    home: fixture.home,
+    answers: [['pgrep', { status: 1, stdout: '', stderr: '' }]],
+  })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(spawned(calls, 'teardown').length, 0)
+  assert.equal(spawned(calls, 'pgrep').length, 1)
+  assert.equal(result.refusal, null)
+  assert.equal(result.code, 0)
+  assert.equal(result.report.crew_dir_source, 'archive')
+  assert.equal(result.report.stateDir, archived)
+  assert.equal(result.report.crew_dir, archived)
+})
+
+// Mutation killed: archived teardown guard without the pgrep refusal lets a live seat through.
+test('recover on an archived crew dir refuses when pgrep finds a live pid', () => {
+  const fixture = laneFixture('closeout-recover-archived-pid-')
+  const archived = `${fixture.crewDir}${ARCHIVE_MARK}2026-10-17T10-00-00-000Z`
+  renameSync(fixture.crewDir, archived)
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [['pgrep', { status: 0, stdout: '41234\n', stderr: '' }]],
+  })
+  const result = recover({ lane, checkout: fixture.checkout, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.TEARDOWN_UNPROVEN)
+  assert.equal(result.refusal.step, 'teardown')
 })
 
 test('RA5 archived crew.json supplies plugin provenance', () => {

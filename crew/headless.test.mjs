@@ -17,7 +17,7 @@ import {
   suiteRunPolicy, recogniseSuiteInvocation, testTargets, fenceCovers, shellToolCalls,
   splitShellCommands, executableText, stripHeredocBodies, commandTokens,
   suitePolicyCounters, countSuiteDecision, suitePolicyReport, SUITE_RUN_OWNERSHIP, SUITE_RUN_OWNERSHIP_KINDS,
-  suiteRefusalRow, suitePolicyRow, suiteSeatCell,
+  suiteRefusalRow, suitePolicyRow, suiteSeatCell, journalSeatSkillsLeak,
 } from './headless.mjs'
 import { KNOWN_FLAGS, main, wakeVerb } from './factoryctl.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
@@ -3354,7 +3354,7 @@ function b416ClaudeStream({ turns = 2, command = null } = {}) {
   return `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
 }
 
-function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, seat = null, runId = null, emit = null } = {}) {
+function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onSleep = null, turnCeilings = null, telemetry = null, writeExitOnTerm = false, seat = null, runId = null, emit = null, grants = null } = {}) {
   const dir = scratchDir('b416-json-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
@@ -3366,7 +3366,7 @@ function b416JsonFixture({ role = 'builder', policy = null, fallback = null, onS
   let assigned = null
   const io = headlessIo({
     crew, paths, taskDir, checkout: dir,
-    adapters: { [role]: { adapter } }, bin: '/worker/bin', turnCeilings,
+    adapters: { [role]: { adapter, ...(grants ? { grants } : {}) } }, bin: '/worker/bin', turnCeilings,
     deps: {
       ...(telemetry ? { parseStream: telemetry } : {}), ...(emit ? { emit } : {}),
       spawn: () => ({ pid: 4242, unref() {} }), uuid: () => 'b416-json-session',
@@ -5528,5 +5528,69 @@ test('headless-json journals skill loads and a checkout-relative window after th
     assert.equal(win.length, 1)
     assert.deepEqual(win[0].first_edits, [{ path: 'crew/x.mjs', seq: 2 }])
     assert.equal(f.rows.filter((r) => r.seat_turn_census).length, 1)
+  } finally { f.cleanup() }
+})
+
+test('seat skills leak detector journals exactly one row naming only the extra skill', () => {
+  // MUTATION: return null without scanning the init frame and no leak row is journalled.
+  const text = [
+    JSON.stringify({ type: 'system', subtype: 'init', skills: ['alpha', 'rogue-skill'] }),
+    JSON.stringify({ type: 'result', subtype: 'success' }),
+  ].join('\n') + '\n'
+  const rows = []
+  const row = journalSeatSkillsLeak({ text, grants: { skills: ['/repo/skills/alpha/SKILL.md'] }, role: 'builder', dispatch_id: 'd1', at: 7, log: (entry) => rows.push(entry) })
+  assert.deepEqual(row, { at: 7, event: 'seat_skills_leak', role: 'builder', dispatch_id: 'd1', transport: 'headless-json', extra_skills: ['rogue-skill'] })
+  assert.deepEqual(rows, [row])
+})
+
+test('seat skills leak detector stays silent on granted-only, malformed, and missing inputs', () => {
+  // MUTATION: journal on every init frame and the granted-only input produces a row.
+  const grantedOnly = JSON.stringify({ type: 'system', subtype: 'init', skills: ['alpha'] }) + '\n'
+  const grants = { skills: ['/repo/skills/alpha/SKILL.md'] }
+  const rows = []
+  const log = (entry) => rows.push(entry)
+  assert.equal(journalSeatSkillsLeak({ text: grantedOnly, grants, role: 'builder', dispatch_id: 'd1', at: 7, log }), null)
+  assert.equal(journalSeatSkillsLeak({ text: 'not json\n{broken', grants, role: 'builder', dispatch_id: 'd1', at: 7, log }), null)
+  assert.equal(journalSeatSkillsLeak({ text: grantedOnly, grants: { skills: [] }, role: 'builder', dispatch_id: 'd1', at: 7, log }), null)
+  assert.equal(journalSeatSkillsLeak({ role: 'builder', dispatch_id: 'd1', at: 7, log }), null)
+  assert.deepEqual(rows, [])
+})
+
+test('seat skills leak detector returns the row when the journal log throws', () => {
+  // MUTATION: let the throwing log propagate and this check goes red.
+  const text = JSON.stringify({ type: 'system', subtype: 'init', skills: ['rogue-skill'] }) + '\n'
+  const row = journalSeatSkillsLeak({ text, grants: { skills: ['/repo/skills/alpha/SKILL.md'] }, role: 'builder', dispatch_id: 'd1', at: 7, log: () => { throw new Error('journal gone') } })
+  assert.deepEqual(row?.extra_skills, ['rogue-skill'])
+})
+
+test('seat skills leak detector reads a recorded claude init frame', () => {
+  // Recorded claude 2.1.231 stream-json capture, g-plugin scenario, init frame on line 7; this witnesses the parser format only, not current 2.1.302 granted-seat naming.
+  // MUTATION: stop matching system/init frames in journalSeatSkillsLeak and no leak row is journalled from the recorded bytes.
+  const text = readFileSync(new URL('../tasks/headless-worker/captures/g-plugin.jsonl', import.meta.url), 'utf8')
+  const rows = []
+  const row = journalSeatSkillsLeak({ text, grants: { skills: ['/repo/skills/deep-research/SKILL.md', '/repo/skills/verify/SKILL.md'] }, role: 'builder', dispatch_id: 'd1', at: 7, log: (entry) => rows.push(entry) })
+  assert.deepEqual(row?.extra_skills, ['svelte:svelte-code-writer', 'svelte:svelte-core-bestpractices', 'design-sync', 'dataviz', 'update-config', 'debug', 'code-review', 'simplify', 'batch', 'fewer-permission-prompts', 'doctor', 'loop', 'schedule', 'claude-api', 'run', 'run-skill-generator'])
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows, [row])
+  assert.equal(rows[0].event, 'seat_skills_leak')
+  assert.equal(rows[0].transport, 'headless-json')
+})
+
+test('headless-json journals a seat skills leak once from a granted seat init frame', () => {
+  // MUTATION: remove the journalSkillsLeak(run) calls in recordOutcome/recordCeilingOutcome and a completed granted seat emits no leak row.
+  const f = b416JsonFixture({ grants: { skills: ['/repo/skills/alpha/SKILL.md'] } })
+  try {
+    const frames = [
+      { type: 'system', subtype: 'init', skills: ['alpha', 'rogue-skill'] },
+      { type: 'result', subtype: 'success' },
+    ]
+    f.writeStream(frames.map((x) => JSON.stringify(x)).join('\n') + '\n')
+    writeFileSync(f.assigned.returnPath, JSON.stringify({ assignment_id: f.assigned.id, role: f.role, status: 'done' }))
+    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+    const leaks = f.rows.filter((r) => r.event === 'seat_skills_leak')
+    assert.equal(leaks.length, 1)
+    assert.deepEqual(leaks[0].extra_skills, ['rogue-skill'])
+    assert.equal(f.io.wait(f.assigned.returnPath, 60).status, 'done')
+    assert.equal(f.rows.filter((r) => r.event === 'seat_skills_leak').length, 1)
   } finally { f.cleanup() }
 })

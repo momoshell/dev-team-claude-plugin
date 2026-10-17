@@ -15,7 +15,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
-import { headlessCommand as defaultHeadlessCommand } from './adapters/adapter-claude.mjs'
+import { headlessCommand as defaultHeadlessCommand, skillDirName } from './adapters/adapter-claude.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { readEnvelopeWithRepair } from './envelope-repair.mjs'
@@ -1766,6 +1766,30 @@ function censusRow(run, transport, stream) {
   }
 }
 
+// Operator decision: a detector, not a longer override list. Reads the first
+// system/init frame's skills list and journals the names no grant covers.
+// Instrumentation only: every failure path returns null, never throws.
+export function journalSeatSkillsLeak({ text, grants, role, dispatch_id, at, transport = 'headless-json', log } = {}) {
+  try {
+    if (!Array.isArray(grants?.skills) || grants.skills.length === 0) return null
+    if (typeof text !== 'string' || !text.trim()) return null
+    const allowed = new Set(grants.skills.map(skillDirName))
+    let listed = null
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue
+      let frame
+      try { frame = JSON.parse(line) } catch { continue }
+      if (frame?.type === 'system' && frame?.subtype === 'init' && Array.isArray(frame?.skills)) { listed = frame.skills; break }
+    }
+    if (!listed) return null
+    const extras = [...new Set(listed.filter((name) => typeof name === 'string' && name && !allowed.has(name)))]
+    if (extras.length === 0) return null
+    const row = { at, event: 'seat_skills_leak', role, dispatch_id, transport, extra_skills: extras }
+    try { log?.(row) } catch { /* ADR-026: instrumentation is never load-bearing */ }
+    return row
+  } catch { return null }
+}
+
 export function parseStream(path, readFileSync, existsSync) {
   const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME }, census: null, census_absent: CENSUS_ABSENT_CAUSES.stream_absent }
   if (!existsSync(path)) return absent
@@ -2269,6 +2293,16 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     }
     log({ at: skillLoadJournalAt, event: 'skill-load-window', role: run.role, dispatch_id: run.id, transport: 'headless-json', loads_absent_reason: null, first_edits: skillLoadWindowEdits(stream.census.first_edits ?? [], checkout || crew.checkout) })
   }
+  function journalSkillsLeak(run) {
+    if (!run || run.skillsLeakJournalled) return
+    run.skillsLeakJournalled = true
+    let text
+    try {
+      if (!exists(run.stream)) return
+      text = read(run.stream, 'utf8')
+    } catch { return }
+    journalSeatSkillsLeak({ text, grants: run.grants, role: run.role, dispatch_id: run.id, at: now(), log })
+  }
   function recordOutcome(run, outcome, stream, exitCode, signal = null, { includeCensus = true, includePolicy = true } = {}) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
     if (includePolicy && run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
@@ -2281,6 +2315,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}),
     })
     if (includeCensus) journalSkillLoads(run, stream)
+    journalSkillsLeak(run)
   }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
@@ -2496,7 +2531,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
     notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
-    const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now(), policy: policy ?? null, seenToolCalls: new Set() }
+    const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now(), policy: policy ?? null, seenToolCalls: new Set(), grants: adapters?.[role]?.grants ?? null }
     runs.set(returnPath, run)
     log({ at: now(), event: 'assignment-delivery', role, assignment_id: id, transport: 'headless-json', mode: delivery.delivery, brief_bytes: delivery.brief_bytes, brief_size_measured: delivery.brief_bytes !== null, brief_size_unmeasured_reason: delivery.unmeasured_reason })
     log({ at: now(), event: 'headless-spawn', role, id, run_id: runId, pid: child.pid, dir, returnPath })
@@ -2681,6 +2716,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     log(turnCeilingDetail({ at: now(), role: run.role, id: run.id, turns, budget, absentReason }))
     log({ at: now(), seat_turn_census: censusRow(run, 'headless-json', telemetry) })
     journalSkillLoads(run, telemetry)
+    journalSkillsLeak(run)
     if (run.policy) log(suitePolicyRow({ role: run.role, transport: 'headless-json', counters: suiteCountersFor(run.role), read: run.policyRead !== false, dispatch_id: run.id, at: now(), run_id: paths.runId ?? null, cell: suiteSeatCell(crew, run.role) }))
     return turnCeilingEnvelope({ id: run.id, role: run.role, returnPath, turns, budget, rejectedStatus: null })
   }

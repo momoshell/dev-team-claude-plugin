@@ -12,6 +12,7 @@
     {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs"],"roles":["builder","reviewer"]},"skills":["dev-team:backend-node"]},
     {"when":{"paths":["**/*.test.mjs"],"roles":["builder","reviewer"]},"skills":["dev-team:qa-test-writing"]},
     {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.js","visualizer/**/*.mjs","visualizer/**/*.css"],"roles":["planner","builder","reviewer"]},"skills":["dev-team:frontend-svelte"]},
-    {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.css"],"roles":["planner","builder","reviewer"]},"skills":["dev-team:ui-design","dev-team:ux"]}
+    {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.css"],"roles":["planner","builder","reviewer"]},"skills":["dev-team:ui-design","dev-team:ux"]},
+    {"when":{"paths":["docs/**/*.md","skills/**/*.md","crew/roles/*.md"],"roles":["builder","reviewer"]},"delivery":"grant","skills":["dev-team:prose-plain"]}
   ]
 }

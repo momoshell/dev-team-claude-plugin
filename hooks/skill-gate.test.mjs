@@ -90,11 +90,12 @@ test('RP3 M1 shipped role packs pin exactly and session start is byte-identical'
     { when: { paths: ['**/*.test.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/roles/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(
     JSON.parse(result.stdout).hookSpecificOutput.additionalContext,
-    'crew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs, test/**/*.mjs, skills/**/*.mjs, visualizer/**/*.mjs, visualizer/**/*.js, visualizer/**/*.svelte \u2192 dev-team:code-less\ncrew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs \u2192 dev-team:backend-node\n**/*.test.mjs \u2192 dev-team:qa-test-writing\nvisualizer/**/*.svelte, visualizer/**/*.js, visualizer/**/*.mjs, visualizer/**/*.css \u2192 dev-team:frontend-svelte\nvisualizer/**/*.svelte, visualizer/**/*.css \u2192 dev-team:ui-design, dev-team:ux\nLoading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
+    'crew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs, test/**/*.mjs, skills/**/*.mjs, visualizer/**/*.mjs, visualizer/**/*.js, visualizer/**/*.svelte \u2192 dev-team:code-less\ncrew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs \u2192 dev-team:backend-node\n**/*.test.mjs \u2192 dev-team:qa-test-writing\nvisualizer/**/*.svelte, visualizer/**/*.js, visualizer/**/*.mjs, visualizer/**/*.css \u2192 dev-team:frontend-svelte\nvisualizer/**/*.svelte, visualizer/**/*.css \u2192 dev-team:ui-design, dev-team:ux\ndocs/**/*.md, skills/**/*.md, crew/roles/*.md \u2192 dev-team:prose-plain\nLoading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
   )
 })
 test('M2', () => {

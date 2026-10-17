@@ -3208,8 +3208,8 @@ test('SR8 shipped tech-lead fence selects falsification inline and gates as gran
 test('RP12 SR9 reset ceilings pin measured role prompts with granted skills', () => {
   // MUTATION: raise SKILLS_BYTE_BUDGET to 32768 and the reset-budget pin fails.
   // MUTATION: lower one reachable skill-block ceiling by one byte.
-  const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 7, lead: 0, planner: 4, reviewer: 8, 'tech-lead': 2 }
-  const base = { builder: 9721, lead: 16, planner: 7059, reviewer: 7217, 'tech-lead': 6490 }
+  const rootBytes = Buffer.byteLength(ROOT, 'utf8'), factors = { builder: 8, lead: 0, planner: 4, reviewer: 9, 'tech-lead': 2 }
+  const base = { builder: 9959, lead: 16, planner: 7059, reviewer: 7455, 'tech-lead': 6490 }
   const blocks = Object.fromEntries(Object.keys(base).map((role) => [role, role === 'lead' ? base[role] : base[role] + factors[role] * rootBytes]))
   assert.deepEqual(SKILL_BLOCK_CEILINGS, blocks); assert.equal(Object.isFrozen(SKILL_BLOCK_CEILINGS), true)
   assert.equal(SKILLS_BYTE_BUDGET, 16384)

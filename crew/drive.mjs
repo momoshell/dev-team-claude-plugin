@@ -6284,7 +6284,7 @@ function runTask(ctx, io, crash) {
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
   const S = { consults: 0, stages: [], flakes: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
-  const finishState = { verdicts: [], capped: false, openFindings: [], gateBytes: null, gateFile: null, escalation: null, gateOk: null }
+  const finishState = { verdicts: [], capped: false, openFindings: [], gateBytes: null, gateFile: null, escalation: null, gateOk: null, gateDiscrimination: null, planBytes: null, envelopeBytes: null }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
@@ -8552,6 +8552,7 @@ function runTask(ctx, io, crash) {
     }
     const escalation = taskReturn.details?.escalation ?? null
     const where = escalation?.where
+    const discrimination = taskReturn.details?.gate?.discrimination
     const why = escalation?.why
     if (typeof where !== 'string' || !where || typeof why !== 'string' || !why) {
       stageComplete()
@@ -8590,9 +8591,16 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return { stop: escalate('finish-triage', `the gate file at ${gateFile} is unreadable — the lane gate cannot be re-proved without it`) }
     }
+    if (where === 'gate' || where === 'gate-proof' || discrimination !== 'proven') {
+      stageComplete()
+      return { stop: escalate('finish-triage', `the escalated task return is not admissible for finish: escalation.where=${where}; details.gate.discrimination=${JSON.stringify(discrimination) ?? 'undefined (absent)'}`) }
+    }
     finishState.gateBytes = gateBytes
     finishState.gateFile = gateFile
     finishState.escalation = escalation
+    finishState.gateDiscrimination = discrimination
+    finishState.planBytes = readOrNull(art('plan.accepted.md'))
+    finishState.envelopeBytes = readOrNull(art('plan.accepted.envelope.json'))
     const laneCmd = shape.sources.lane === 'ctx' ? ctx.lane : null
     if (!laneCmd) {
       stageComplete()
@@ -11781,6 +11789,12 @@ function runTask(ctx, io, crash) {
       stage(`gate:r${round}`)
       const currentGateBytes = finishState.gateFile ? readOrNull(finishState.gateFile) : null
       if (variant === FINISH_VARIANT) { if (currentGateBytes !== finishState.gateBytes) { stageComplete(); return escalate('finish-gate', 'the gate file changed during the finish run; mutation re-proof of a changed check is split 2') } }
+      if (variant === FINISH_VARIANT) {
+        if (readOrNull(art('plan.accepted.md')) !== finishState.planBytes) { stageComplete(); return escalate('finish-gate', 'the accepted plan changed during the finish run; accepted artifacts are read-only') }
+      }
+      if (variant === FINISH_VARIANT) {
+        if (readOrNull(art('plan.accepted.envelope.json')) !== finishState.envelopeBytes) { stageComplete(); return escalate('finish-gate', 'the accepted plan envelope changed during the finish run; accepted artifacts are read-only') }
+      }
       let forceFullCheckProof = false
       let gateRes = buildLoopGate(`gate:r${round}`, gateCmd)
       // MUTATION B3: neutralise this call and the triage this lane hoisted no longer
@@ -12194,6 +12208,14 @@ function runTask(ctx, io, crash) {
       if (counted) reviews += 1
       io.log(recordRow({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews, ...(shapeRefusal ? { refused: shapeRefusal.reason } : {}) } }))
       if (variant === FINISH_VARIANT && v != null) finishState.verdicts.push({ round: roundNo, verdict: v })
+      if (variant === FINISH_VARIANT && v === 'revise' && finishState.verdicts.length >= FINISH_REVIEW_CAP) {
+        finishState.openFindings = reviewFindings(review.details)?.findings ?? []
+        const finishMustFix = finishState.openFindings.filter(({ severity }) => severity === 'must-fix')
+        if (finishMustFix.length > 0) {
+          stageComplete()
+          return escalate('review', `[finish-review-cap-must-fix] the finish review cap was reached with must-fix findings still open: ${finishMustFix.map(({ id }) => id).join(', ')}`)
+        }
+      }
       // #800 R4 — dispositions are settled BEFORE either verdict branch, but ONLY for a
       // verdict the driver could read. A shape-refused or unreadable envelope is
       // refused, never partially executed. An `ask-user` finding is a decision code may
@@ -12279,6 +12301,10 @@ function runTask(ctx, io, crash) {
         const c = consultLead(askUserLines(disposed.askUser, v).join('\n'), askOptions, [planPath, lastReviewPath], { exclude: 'reviewer' })
         if (c.decision === 'accept') {
           io.log(recordRow({ at: io.now(), ask_user_accepted: { round: roundNo, consult: S.consults, findings: disposed.askUser.map(({ id }) => id), reason: c.reason } }))
+          finalReview.residuals.push(...disposed.askUser.map(({ id, summary }) => ({
+            id, type: ASK_USER_ACCEPTED_RESIDUAL_TYPE,
+            summary: `Accepted by lead consult ${S.consults}: ${summary}`,
+          })))
         } else if (c.decision !== 'bounce-builder') {
           stageComplete()
           return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) }, { finding_ids: disposed.askUser.map(({ id }) => id) })
@@ -12324,7 +12350,7 @@ function runTask(ctx, io, crash) {
         stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build
       }
       if (v === 'revise') {
-        if (variant === FINISH_VARIANT && finishState.verdicts.length >= FINISH_REVIEW_CAP) { finishState.capped = true; finishState.openFindings = reviewFindings(review.details)?.findings ?? []; accepted = 'review-capped'; stageComplete(); break build }
+        if (variant === FINISH_VARIANT && finishState.verdicts.length >= FINISH_REVIEW_CAP) { finishState.capped = true; accepted = 'review-capped'; stageComplete(); break build }
         const fixes = applyAutoFixes(disposed.autoFix, roundNo)
         // #839 — CODE closed every finding that demanded a change, but the guard that
         // would catch the class next time does not exist yet and only a builder can
@@ -13479,7 +13505,7 @@ function runTask(ctx, io, crash) {
   if (variant === FINISH_VARIANT) {
     stage('decision')
     finishReportPath = art('finish-report.json')
-    io.writeFile(finishReportPath, JSON.stringify(composeFinishReport({ lane: ctx.laneName || ctx.task, run_id: ctx.run_id ?? null, escalation: finishState.escalation, capped: finishState.capped, commit: S.commit, base: baseSha, verdicts: finishState.verdicts, openFindings: finishState.openFindings, gateCmd, gateOk: finishState.gateOk, coldVerdict: coldSuite.verdict, residuals: finalReview.residuals ?? [] }), null, 2))
+    io.writeFile(finishReportPath, JSON.stringify(composeFinishReport({ lane: ctx.laneName || ctx.task, run_id: ctx.run_id ?? null, escalation: finishState.escalation, capped: finishState.capped, commit: S.commit, base: baseSha, verdicts: finishState.verdicts, openFindings: finishState.openFindings, gateCmd, gateOk: finishState.gateOk, gateDiscrimination: finishState.gateDiscrimination, coldVerdict: coldSuite.verdict, residuals: finalReview.residuals ?? [] }), null, 2))
     stageComplete()
   } else if (publishing) {
     stage('publish')
@@ -13624,7 +13650,7 @@ export function finishScopeFrom(acceptedEnv, taskReturn) {
   return null
 }
 
-export function composeFinishReport({ lane, run_id, escalation, capped, commit, base, verdicts, openFindings, gateCmd, gateOk, coldVerdict, residuals }) {
+export function composeFinishReport({ lane, run_id, escalation, capped, commit, base, verdicts, openFindings, gateCmd, gateOk, gateDiscrimination, coldVerdict, residuals }) {
   const verdictList = Array.isArray(verdicts) ? [...verdicts] : []
   const findings = Array.isArray(openFindings) ? [...openFindings] : []
   const residualList = Array.isArray(residuals) ? [...residuals] : []
@@ -13639,7 +13665,7 @@ export function composeFinishReport({ lane, run_id, escalation, capped, commit, 
     base: base ?? null,
     ...(base == null ? { base_absent: 'rebase-base-not-measured' } : {}),
     review: { rounds: verdictList.length, verdicts: verdictList, open_findings: capped ? findings : [] },
-    gate: { cmd: gateCmd ?? null, ok: gateOk ?? null },
+    gate: { cmd: gateCmd ?? null, ok: gateOk ?? null, discrimination: gateDiscrimination ?? null },
     suite: { warm: 'green', cold: coldVerdict ?? null },
     residuals: residualList,
     pushed: false,
@@ -15166,6 +15192,9 @@ export function dispositionPlan(details) {
   }
   return { autoFix, askUser, needsSeat }
 }
+
+// Driver-owned residual: reviewers cannot claim a lead accepted an ask-user finding.
+export const ASK_USER_ACCEPTED_RESIDUAL_TYPE = 'ask-user-accepted'
 
 // #1788 — accept is offered only on a pass whose every ask-user finding is a
 // request for evidence (severity consider), never on a finding demanding a change.

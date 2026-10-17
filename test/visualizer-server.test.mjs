@@ -5,12 +5,13 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, PHASE_SLOT_WAIT_ABSENT, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
-import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, ServerUsageError, startServer as startVisualizerServer, writeGuard, writeRosterAtomically } from '../visualizer/server/server.mjs'
+import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createWorkflowsSource, WORKFLOW_FEED_REASONS } from '../visualizer/server/workflows-source.mjs'
 import { VARIANTS } from '../crew/variants.mjs'
 import { SHAPE_DEFECT_CODES } from '../crew/shape-validator.mjs'
@@ -4222,5 +4223,90 @@ test('RO4-target missing-parent symlink env path refuses persistent catalog key 
     if (handles) await stopInProcess(handles.server)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('GR1', { skip: SKIP }, async () => {
+  // MUTATION GR1: limiting the shared API guard to /api/journal leaks other route data.
+  const dir = scratchDir('visualizer-api-host-guard-')
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
+    const port = Number(new URL(server.base).port)
+    const host = `evil.example:${port}`
+    for (const path of Object.keys(ROUTE_PARAMS)) {
+      const response = await rawRequest({ port, requestLine: `GET ${path} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'], timeoutMs: 30000 })
+      assert.equal(rawStatus(response), 403, path)
+      assert.deepEqual(rawJson(response), { schema: 2, error: `read host refused: ${host}` }, path)
+    }
+    for (const path of ['/api/not-registered', '/api/health?unknown=1']) {
+      const response = await rawRequest({ port, requestLine: `GET ${path} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'], timeoutMs: 30000 })
+      assert.equal(rawStatus(response), 403, path)
+      assert.deepEqual(rawJson(response), { schema: 2, error: `read host refused: ${host}` }, path)
+    }
+    for (const hostname of ['localhost', '127.0.0.1']) {
+      const response = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${hostname}:${port}`, 'connection: close'] })
+      assert.equal(rawStatus(response), 200, hostname)
+    }
+    const wrongPort = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: ['Host: localhost:8080', 'connection: close'] })
+    assert.equal(rawStatus(wrongPort), 403)
+    assert.deepEqual(rawJson(wrongPort), { schema: 2, error: 'read host refused: localhost:8080' })
+  } finally {
+    if (server) await stopServer(server.child)
+  }
+})
+
+test('GR2', () => {
+  // MUTATION GR2: removing loopback membership accepts evil.example on the matching port.
+  const accepted = ['127.0.0.1:4488', 'localhost:4488', '[::1]:4488']
+  for (const host of accepted) {
+    assert.equal(hostGuard({ headers: { host }, socket: { localPort: 4488 } }, 'read'), null, host)
+  }
+  const refused = [
+    ['evil.example:4488', 4488],
+    ['localhost:9999', 4488],
+    [undefined, 4488],
+    ['', 4488],
+    ['a:b:c', 4488],
+    ['localhost', 4488],
+  ]
+  for (const [host, localPort] of refused) {
+    const actual = hostGuard({ headers: { host }, socket: { localPort } }, 'read')
+    assert.deepEqual(actual, { status: 403, error: `read host refused: ${host}` }, String(host))
+  }
+  assert.equal(hostGuard({ headers: { host: 'localhost' }, socket: { localPort: 80 } }, 'read'), null)
+})
+
+test('GR3', { skip: SKIP }, async () => {
+  // MUTATION GR3: bypassing the shared guard for HEAD lets a hostile HEAD request escape.
+  const dir = scratchDir('visualizer-api-host-head-')
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
+    const port = Number(new URL(server.base).port)
+    const hostile = await rawRequest({ port, requestLine: 'HEAD /api/journal HTTP/1.1', headers: [`Host: evil.example:${port}`, 'connection: close'] })
+    assert.equal(rawStatus(hostile), 403)
+    assert.equal(hostile.text.split('\r\n\r\n', 2)[1] || '', '')
+
+    const legitimate = await rawRequest({ port, requestLine: 'HEAD /api/journal HTTP/1.1', headers: [`Host: 127.0.0.1:${port}`, 'connection: close'] })
+    assert.notEqual(rawStatus(legitimate), 403)
+    assert.equal(legitimate.text.split('\r\n\r\n', 2)[1] || '', '')
+
+    const asset = await rawRequest({ port, requestLine: 'GET /not-a-real-asset HTTP/1.1', headers: [`Host: evil.example:${port}`, 'connection: close'] })
+    assert.notEqual(rawStatus(asset), 403)
+  } finally {
+    if (server) await stopServer(server.child)
+  }
+})
+
+test('GR4', () => {
+  // MUTATION GR4: flipping changeOrigin to false removes the Vite proxy's Host rewriting.
+  const source = readFileSync(join(ROOT, 'visualizer/web/vite.config.mjs'), 'utf8')
+    .replace(/^import .*$/gm, '')
+    .replace(/^export default /m, 'module.exports = ')
+  const module = { exports: {} }
+  runInNewContext(source, { defineConfig: (config) => config, svelte: () => ({}), module })
+  const proxy = module.exports.server.proxy['/api']
+  assert.equal(proxy.target, 'http://127.0.0.1:4488')
+  assert.equal(proxy.changeOrigin, true)
 })
 

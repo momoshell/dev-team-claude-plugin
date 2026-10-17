@@ -446,6 +446,26 @@ export function journalTimestampMs(value) {
   return NaN
 }
 
+function resolveReapCrewDir({ lane, laneDir, deps }) {
+  const d = normalDeps(deps)
+  const live = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
+  let exists
+  try { exists = d.existsSync(live) } catch { exists = true }
+  if (exists) return { crewDir: live, crew_dir_source: 'live', archive_candidates: 0 }
+  const parent = dirname(live)
+  const prefix = `${lane}${ARCHIVE_MARK}`
+  let entries
+  try { entries = d.readdirSync(parent, { withFileTypes: true }) } catch { return { crewDir: live, crew_dir_source: 'live', archive_candidates: 0 } }
+  const candidates = (Array.isArray(entries) ? entries : [])
+    .filter((raw) => !raw || typeof raw.isDirectory !== 'function' || raw.isDirectory())
+    .map((raw) => typeof raw === 'string' ? raw : raw?.name)
+    .filter((name) => typeof name === 'string' && name.startsWith(prefix) && !name.slice(prefix.length).includes(RECOVERY_COPY_SUFFIX))
+    .sort()
+  if (!candidates.length) return { crewDir: live, crew_dir_source: 'live', archive_candidates: 0 }
+  const newest = candidates[candidates.length - 1]
+  return { crewDir: join(parent, newest), crew_dir_source: 'archive', archive_candidates: candidates.length }
+}
+
 function reapIdentity({ crewDir, lane, deps }) {
   const d = normalDeps(deps)
   const path = join(crewDir, 'ledger', 'run.json')
@@ -472,7 +492,8 @@ function reapIdentity({ crewDir, lane, deps }) {
 
 function currentRunWindow({ lane, laneDir, deps }) {
   const d = normalDeps(deps)
-  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
+  const resolved = resolveReapCrewDir({ lane, laneDir, deps: d })
+  const crewDir = resolved.crewDir
   const journalPath = join(crewDir, 'journal.jsonl')
   const identity = reapIdentity({ crewDir, lane, deps: d })
   let text
@@ -539,7 +560,7 @@ function currentRunWindow({ lane, laneDir, deps }) {
   } catch (error) {
     throw new Error(`run-start in ${journalPath} has an unusable timestamp: ${error?.message || String(error)}`)
   }
-  return { since, since_source: selectedBoot ? 'boot' : 'run-start', until, crewDir, journalPath, identity }
+  return { since, since_source: selectedBoot ? 'boot' : 'run-start', until, crewDir, journalPath, identity, crew_dir: crewDir, crew_dir_source: resolved.crew_dir_source, archive_candidates: resolved.archive_candidates }
 }
 
 function ingestReadFailure(error) {
@@ -588,10 +609,12 @@ function reapTurnEconomy({ lane, laneDir, root, deps }) {
   const d = normalDeps(deps)
   let context
   try { context = currentRunWindow({ lane, laneDir, deps: d }) } catch (error) {
-    return turnEconomyUnavailable(error?.message || String(error))
+    const resolved = resolveReapCrewDir({ lane, laneDir, deps: d })
+    return turnEconomyUnavailable(error?.message || String(error), { crew_dir: resolved.crewDir, crew_dir_source: resolved.crew_dir_source, archive_candidates: resolved.archive_candidates })
   }
   const window = { since: context.since, since_source: context.since_source, until: context.until }
   const ingest = safeReapIngest({ journalPath: context.journalPath, identity: context.identity, deps: d, since: context.since })
+  const detail = { crew_dir: context.crewDir, crew_dir_source: context.crew_dir_source, archive_candidates: context.archive_candidates }
   const command = {
     file: 'node',
     args: [LEDGER_PATH, 'turns', '--adw-id', context.identity.adw_id, '--since', window.since, '--until', window.until],
@@ -599,16 +622,16 @@ function reapTurnEconomy({ lane, laneDir, root, deps }) {
     env: { ...process.env, DEVTEAM_LEDGER_DB: context.identity.db_path },
   }
   const result = runCommand(command, d)
-  if (!commandOk(result)) return turnEconomyUnavailable(childFailure(result), { window, ingest })
+  if (!commandOk(result)) return turnEconomyUnavailable(childFailure(result), { window, ingest, ...detail })
   let payload
   try { payload = JSON.parse(textOf(result.stdout).trim()) } catch (error) {
-    return turnEconomyUnavailable(`cannot parse turns readout: ${error?.message || String(error)}`, { window, ingest })
+    return turnEconomyUnavailable(`cannot parse turns readout: ${error?.message || String(error)}`, { window, ingest, ...detail })
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.schema !== 1) {
-    return turnEconomyUnavailable('turns readout must be exactly one schema-1 JSON object', { window, ingest })
+    return turnEconomyUnavailable('turns readout must be exactly one schema-1 JSON object', { window, ingest, ...detail })
   }
-  if (payload.absent) return { measured: false, reason: payload.absent, window, ingest, turn_economy: payload }
-  return { measured: true, window, ingest, turn_economy: payload }
+  if (payload.absent) return { measured: false, reason: payload.absent, window, ingest, turn_economy: payload, ...detail }
+  return { measured: true, window, ingest, turn_economy: payload, ...detail }
 }
 
 function commandOk(result) {
@@ -1301,7 +1324,8 @@ export function reapPluginProvenance({ lane, laneDir, deps, closeout }) {
   let boot
   let absent_reason
   try {
-    const value = JSON.parse(d.readFileSync(crewJsonPath({ checkout: laneDir, lane, deps: d }), 'utf8'))
+    const bootDir = resolveReapCrewDir({ lane, laneDir, deps: d }).crewDir
+    const value = JSON.parse(d.readFileSync(join(bootDir, 'crew.json'), 'utf8'))
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       boot = null
       absent_reason = 'boot_invalid'

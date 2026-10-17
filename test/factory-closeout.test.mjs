@@ -2653,3 +2653,132 @@ test('recover cold-verify removes cold-owned exclude pairs byte-for-byte', () =>
   assert.ok(r.observations[0].exclude.includes(cwOwner(r.observations[0].cwd)), 'the cold pair exists during the suite')
   assert.equal(r.exclude, f.original)
 }))
+test('RA1 reap over archive-only lane reads the sole archive dir', () => {
+  const payload = turnsPayload({ marker: 'ra1-archive' })
+  const fixture = turnsFixture('closeout-ra1-archive-', {
+    rows: [
+      { at: '2026-09-04T06:04:46.127Z', event: 'run-start' },
+      { at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' },
+    ],
+  })
+  const archiveDir = fixture.crewDir + '.archive-2026-10-17T10-37-56-633Z'
+  renameSync(fixture.crewDir, archiveDir)
+  const { deps } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(detail.measured, true)
+  assert.equal(detail.crew_dir, archiveDir)
+  assert.equal(detail.crew_dir_source, 'archive')
+  assert.equal(detail.archive_candidates, 1)
+  assert.deepEqual(detail.turn_economy, payload)
+})
+
+test('RA2 newest archive wins when two archive dirs exist', () => {
+  const home = scratch('closeout-ra2-newest-')
+  const checkout = join(home, 'dt-main')
+  mkdirSync(checkout, { recursive: true })
+  const parent = join(home, '.crew', 'dt-' + lane)
+  const dbPath = join(home, 'sidecar', 'ledger.db')
+  const oldDir = join(parent, lane + '.archive-2026-10-17T10-00-00-000Z')
+  const newDir = join(parent, lane + '.archive-2026-10-17T11-00-00-000Z')
+  const journal = JSON.stringify({ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }) + '\n' + JSON.stringify({ at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' }) + '\n'
+  put(join(oldDir, 'journal.jsonl'), journal)
+  put(join(oldDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'old-adw', task_slug: lane, db_path: dbPath }))
+  put(join(newDir, 'journal.jsonl'), journal)
+  put(join(newDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'new-adw', task_slug: lane, db_path: dbPath }))
+  const payload = turnsPayload()
+  const { deps, calls } = harness({
+    home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(detail.crew_dir, newDir)
+  assert.equal(detail.crew_dir_source, 'archive')
+  assert.equal(detail.archive_candidates, 2)
+  const turnCall = calls.spawn.find((call) => call.argv.includes('ledger.mjs turns'))
+  assert.ok(turnCall)
+  assert.equal(turnCall.args[turnCall.args.indexOf('--adw-id') + 1], 'new-adw')
+})
+
+test('RA3 live dir wins beside an archive dir', () => {
+  const payload = turnsPayload()
+  const fixture = turnsFixture('closeout-ra3-live-', {
+    rows: [
+      { at: '2026-09-04T06:04:46.127Z', event: 'run-start' },
+      { at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' },
+    ],
+  })
+  const archiveDir = fixture.crewDir + '.archive-2026-10-17T10-37-56-633Z'
+  put(join(archiveDir, 'journal.jsonl'), JSON.stringify({ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }) + '\n')
+  put(join(archiveDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'archive-adw', task_slug: lane, db_path: fixture.dbPath }))
+  const { deps, calls } = harness({
+    home: fixture.home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(detail.crew_dir, fixture.crewDir)
+  assert.equal(detail.crew_dir_source, 'live')
+  assert.equal(detail.archive_candidates, 0)
+  const turnCall = calls.spawn.find((call) => call.argv.includes('ledger.mjs turns'))
+  assert.ok(turnCall)
+  assert.equal(turnCall.args[turnCall.args.indexOf('--adw-id') + 1], fixture.adwId)
+})
+
+test('RA4 recovery-copy and other-lane archives are ignored', () => {
+  const home = scratch('closeout-ra4-guard-')
+  const checkout = join(home, 'dt-main')
+  mkdirSync(checkout, { recursive: true })
+  const parent = join(home, '.crew', 'dt-' + lane)
+  const live = join(parent, lane)
+  const dbPath = join(home, 'sidecar', 'ledger.db')
+  const journal = JSON.stringify({ at: '2026-09-04T06:04:46.127Z', event: 'run-start' }) + '\n' + JSON.stringify({ at: '2026-09-04T06:04:46.500Z', event: 'seat-turn-census' }) + '\n'
+  const recoveryDir = join(parent, lane + '.archive-2026-10-17T10-00-00-000Z.recovery-copy')
+  const otherDir = join(parent, lane + '-x.archive-2026-10-17T11-00-00-000Z')
+  put(join(recoveryDir, 'journal.jsonl'), journal)
+  put(join(recoveryDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'recovery-adw', task_slug: lane, db_path: dbPath }))
+  put(join(otherDir, 'journal.jsonl'), journal)
+  put(join(otherDir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'other-adw', task_slug: lane, db_path: dbPath }))
+  const payload = turnsPayload()
+  const { deps, calls } = harness({
+    home,
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout, deps })
+  const detail = rows(result).find((row) => row.step === 'turns').detail
+  assert.equal(detail.measured, false)
+  assert.ok(detail.reason.startsWith('cannot read ledger/run.json for ' + lane + ':'))
+  assert.ok(detail.reason.includes(join(live, 'ledger', 'run.json')))
+  assert.equal(detail.crew_dir, live)
+  assert.equal(detail.crew_dir_source, 'live')
+  assert.equal(detail.archive_candidates, 0)
+  assert.equal(spawned(calls, 'ledger.mjs turns').length, 0)
+})
+
+test('RA5 archived crew.json supplies plugin provenance', () => {
+  const home = scratch('closeout-ra5-provenance-')
+  const laneDir = join(home, 'ra5')
+  mkdirSync(laneDir, { recursive: true })
+  put(join(home, '.crew', 'ra5', 'ra5.archive-2026-10-17T10-37-56-633Z', 'crew.json'), JSON.stringify({ plugin: { plugin_sha: 'a'.repeat(40) } }))
+  const result = reapPluginProvenance({ lane: 'ra5', laneDir, deps: { home }, closeout: { plugin_sha: 'a'.repeat(40) } })
+  assert.deepEqual(result.boot, { plugin_sha: 'a'.repeat(40) })
+  assert.equal(result.absent_reason, null)
+  assert.equal(result.plugin_sha_changed, false)
+})
+

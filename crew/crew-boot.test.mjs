@@ -2143,11 +2143,11 @@ test('an explicit ACP builder persists to crew state and boot journal without ch
     const dir = testCrewDir(home, checkout, task)
     const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
     assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, crew.members[role].transport])), {
-      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-rpc',
+      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-json',
     })
     const boot = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((event) => event.event === 'boot')
     assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, boot.allocation[role].transport])), {
-      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-rpc',
+      lead: 'headless-json', planner: 'headless-rpc', builder: 'acp', reviewer: 'headless-json',
     })
     await t.test('R1 real-boot pi ACP builder launches bridge', () => {
       const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')

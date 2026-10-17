@@ -1,26 +1,26 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-17",
+  "updated_at": "2026-10-18",
   "tiers": {
     "mechanical": {
       "advisor": null,
       "lead": null,
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "high"
       },
       "builder": {
-        "provider": "meta",
-        "id": "muse-spark-1.3-contributor",
+        "provider": "openai",
+        "id": "gpt-6-luna",
         "agent": "pi",
         "effort": "medium"
       },
       "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       }
     },
@@ -38,21 +38,21 @@
         "effort": "high"
       },
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "high"
       },
       "builder": {
-        "provider": "meta",
-        "id": "muse-spark-1.3-contributor",
+        "provider": "openai",
+        "id": "gpt-6-luna",
         "agent": "pi",
         "effort": "xhigh"
       },
       "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       }
     },
@@ -70,21 +70,21 @@
         "effort": "high"
       },
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-full-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
         "effort": "high"
       },
       "builder": {
-        "provider": "meta",
-        "id": "muse-spark-1.3-contributor",
+        "provider": "openai",
+        "id": "gpt-6-luna",
         "agent": "pi",
         "effort": "xhigh"
       },
       "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       },
       "tech-lead": {

@@ -3133,12 +3133,14 @@ test('EA2 EA3 editAssist per-cell rates use measured edit_calls with anchor subs
     assert.equal(clean.failed_edits, 0)
     assert.equal(clean.failed_per_100, 0)
     assert.equal(clean.anchor_per_100, 0)
+    // Every row carries the cell it was seeded under, value for value: a row with a null
+    // or borrowed provider/model/effort must fail here, not merely a row missing the key.
+    const seededCell = { 200: ['prov', 'm1'], 100: ['prov', 'm1'], 0: ['prov-zero', 'm-zero'], 50: ['prov-clean', 'm-clean'] }
+    assert.equal(out.rows.length, 4)
     for (const row of out.rows) {
       assert.equal(row.round_trips, null)
       assert.equal(row.round_trips_absent_reason, 'successful-edit-stream-unrecorded')
-      assert.ok(row.provider)
-      assert.ok('model_id' in row)
-      assert.ok('effort' in row)
+      assert.deepEqual([row.provider, row.model_id, row.effort], [...seededCell[row.edit_calls], 'high'])
     }
   } finally { ledger.close() }
 })

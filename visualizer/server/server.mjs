@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { resolve, join, dirname, basename, sep } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { resolve, join, dirname, basename, sep, relative } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -158,7 +158,8 @@ function assuranceRefusal(res, status, code, message, headers = {}) {
 // the Origin compare is the second lock, for any client that sends one. This is
 // NOT authentication and does not cover a local process — see the residuals.
 const WRITE_CONTENT_TYPE = 'application/json'
-function sameOrigin(origin, host) {
+const WRITE_HOSTNAMES = new Set(['127.0.0.1','localhost','::1'])
+export function sameOrigin(origin, host) {
   if (typeof host !== 'string' || host === '') return false
   let parsed
   try { parsed = new URL(origin) } catch { return false }
@@ -167,6 +168,13 @@ function sameOrigin(origin, host) {
 export function writeGuard(req) {
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
   if (type !== WRITE_CONTENT_TYPE) return { status: 415, error: 'state-writing requests require content-type: application/json' }
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return { status: 403, error: `write host refused: ${host}` }
+  let parsed
+  try { parsed = new URL('http://' + host) } catch { return { status: 403, error: `write host refused: ${host}` } }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const port = parsed.port === '' ? 80 : Number(parsed.port)
+  if (!WRITE_HOSTNAMES.has(hostname) || port !== req.socket?.localPort) return { status: 403, error: `write host refused: ${host}` }
   const origin = req.headers.origin
   if (origin != null && origin !== '' && !sameOrigin(origin, req.headers.host)) return { status: 403, error: 'cross-origin request refused' }
   return null
@@ -435,7 +443,63 @@ function readPickQuery(url) {
   return values
 }
 
-export function pluginWriteMode({ pluginRoot = PROJECT_ROOT, home = homedir(), existsSync: exists = existsSync, realpathSync: realpath = realpathSync } = {}) {
+function pathIsUnder(path, dir) {
+  if (path === dir) return true
+  const prefix = dir.endsWith(sep) ? dir : dir + sep
+  return path.startsWith(prefix)
+}
+function linkMarkerScan({ cacheDir, exists, readFile, realpath, readdir } = {}) {
+  const targets = []
+  let malformed = false
+  const list = (dir) => {
+    try {
+      const names = readdir(dir)
+      return [...names].sort()
+    } catch {
+      return null
+    }
+  }
+  const top = list(cacheDir)
+  if (top === null) return { targets, malformed: false }
+  for (const a of top) {
+    const second = list(join(cacheDir, a))
+    if (second === null) continue
+    for (const b of second) {
+      const third = list(join(cacheDir, a, b))
+      if (third === null) continue
+      for (const c of third) {
+        const marker = join(cacheDir, a, b, c, '.claude-plugin-link')
+        let present = true
+        try { present = exists(marker) } catch { present = true }
+        if (!present) continue
+        try {
+          const raw = readFile(marker, 'utf8')
+          const parsed = JSON.parse(raw)
+          const target = parsed?.target
+          if (typeof target !== 'string' || !target.trim()) throw new Error('bad link target')
+          targets.push(realpath(resolve(target)))
+        } catch {
+          malformed = true
+        }
+      }
+    }
+  }
+  return { targets, malformed }
+}
+function resolveTargetPath(target, realpath) {
+  const lexical = resolve(target)
+  let ancestor = lexical
+  while (true) {
+    try {
+      const realAncestor = realpath(ancestor)
+      return ancestor === lexical ? realAncestor : join(realAncestor, relative(ancestor, lexical))
+    } catch {}
+    const parent = dirname(ancestor)
+    if (parent === ancestor) return lexical
+    ancestor = parent
+  }
+}
+export function pluginWriteMode({ pluginRoot = PROJECT_ROOT, home = homedir(), existsSync: exists = existsSync, realpathSync: realpath = realpathSync, readdirSync: readdir = readdirSync, readFileSync: readFile = readFileSync } = {}) {
   let plugin_root = resolve(pluginRoot)
   const readonly = (basis) => ({ writable:false, reason:'installed-plugin-read-only', basis, plugin_root })
   try { plugin_root = realpath(plugin_root) } catch { return readonly('plugin-root-unresolvable') }
@@ -446,8 +510,27 @@ export function pluginWriteMode({ pluginRoot = PROJECT_ROOT, home = homedir(), e
   try { realPlugins = realpath(plugins) } catch {}
   // A symlinked plugins dir puts the resolved root outside the lexical path, so either spelling refuses.
   if ([plugins, realPlugins].some((dir) => plugin_root === dir || plugin_root.startsWith(dir + sep))) return readonly('under-claude-plugins-dir')
+  const linkScan = linkMarkerScan({cacheDir: join(realPlugins, 'cache'), exists, readFile, realpath, readdir})
+  if (linkScan.malformed) return readonly('link-mode-marker-unreadable')
+  if (linkScan.targets.some((target) => pathIsUnder(plugin_root, target))) return readonly('link-mode-install-target')
   if (!exists(join(plugin_root, '.git'))) return readonly('no-git-work-tree')
   return { writable:true, reason:null, basis:null, plugin_root }
+}
+export function pluginWriteTargetMode({ target, home = homedir(), existsSync: exists = existsSync, realpathSync: realpath = realpathSync, readdirSync: readdir = readdirSync, readFileSync: readFile = readFileSync } = {}) {
+  const lexicalTarget = resolve(target)
+  const resolvedTarget = resolveTargetPath(target, realpath)
+  const targetReadonly = (basis) => ({ writable:false, reason:'installed-plugin-read-only', basis, plugin_root: resolvedTarget })
+  let realHome
+  try { realHome = realpath(resolve(home)) } catch { realHome = resolve(home) }
+  const plugins = join(realHome, '.claude', 'plugins')
+  let realPlugins = plugins
+  try { realPlugins = realpath(plugins) } catch {}
+  const targetPlugins = [plugins, realPlugins]
+  const targetScan = linkMarkerScan({cacheDir: join(realPlugins, 'cache'), exists, readFile, realpath, readdir})
+  if (targetScan.malformed) return targetReadonly('link-mode-marker-unreadable')
+  if ([lexicalTarget, resolvedTarget].some((candidate) => targetPlugins.some((dir) => pathIsUnder(candidate, dir)))) return targetReadonly('under-claude-plugins-dir')
+  if (targetScan.targets.some((targetRoot) => pathIsUnder(lexicalTarget, targetRoot) || pathIsUnder(resolvedTarget, targetRoot))) return targetReadonly('link-mode-install-target')
+  return { writable:true, reason:null, basis:null, plugin_root: resolvedTarget }
 }
 
 export function startServer(options = {}) {
@@ -891,6 +974,8 @@ export function startServer(options = {}) {
           if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
           if (input.persist === true && !writeMode.writable) return json(res, 409, pluginWriteRefusal)
           if (input.persist === true) {
+            const targetMode = pluginWriteTargetMode({target: config.envFile, home: config.home ?? homedir()})
+            if (!targetMode.writable) return json(res, 409, {schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root})
             saveArtificialAnalysisKey(config.envFile, input.api_key)
             modelCatalog.setPersistentApiKey(input.api_key)
           } else modelCatalog.setApiKey(input.api_key)
@@ -947,6 +1032,8 @@ export function startServer(options = {}) {
         }
         const raw = roster.readRaw()
         const ladder = readLadder({ ladderPath: config.ladderPath })
+        const targetMode = pluginWriteTargetMode({target: raw.path, home: config.home ?? homedir()})
+        if (!targetMode.writable) return json(res, 409, {schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root})
         const result = await applyMoves({
           rosterText: raw.text,
           rosterPath: raw.path,

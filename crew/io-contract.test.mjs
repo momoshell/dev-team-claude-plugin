@@ -1353,6 +1353,17 @@ test('RE9', () => {
   const twice = makeTierFixture({ role: 'builder', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
   assert.deepEqual([twice.io.reseat('builder').to?.id, twice.crew.seats.builder.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
   assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
+  // Sol pass 3: a walk from the stale roster cell picked a cheaper model than the live one.
+  const walkRoster = {
+    tiers: { mechanical: { builder: { provider: 'openai', id: 'a', effort: 'medium', agent: 'pi' } }, build: { builder: { provider: 'openai', id: 'c', effort: 'medium', agent: 'pi' } }, judge: {} },
+    models: {
+      'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+      'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 8 },
+    },
+  }
+  const walk = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: walkRoster.tiers.mechanical.builder, readRoster: () => walkRoster, readLadder: () => ({ cost_ceilings: { mechanical: 10 } }) })
+  assert.deepEqual([1, 2, 3].map(() => [walk.io.reseat('builder').applied, walk.crew.seats.builder.id]), [[true, 'c'], [false, 'c'], [false, 'c']])
   // Repeated reseats are monotonic: the mechanical tier step never pulls a Sol seat back to Luna.
   const climb = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: SHIPPED_ROSTER.tiers.mechanical.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
   const steps = [1, 2, 3, 4].map(() => { const out = climb.io.reseat('builder'); return [out.applied, climb.crew.seats.builder.id, climb.crew.seats.builder.effort] })

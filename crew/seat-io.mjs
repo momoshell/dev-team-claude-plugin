@@ -3748,7 +3748,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             const declared = currentCellOrLive?.fallback?.[0]
             const self = declared?.provider === currentCellOrLive.provider && declared?.id === currentCellOrLive.id
             const onDeclared = declared?.provider === live.provider && declared?.id === live.id
-            rung = Array.isArray(currentCellOrLive.fallback) && !self && !onDeclared && allowedTarget(declared)
+            const declaredDowngrade = liveMoved && priceOf(live) !== null
+              && (priceOf(declared) === null || priceOf(declared) <= priceOf(live))
+            rung = Array.isArray(currentCellOrLive.fallback) && !self && !onDeclared && !declaredDowngrade && allowedTarget(declared)
               ? {
                 rung: `declared:${currentCellOrLive.id}→${declared.id}`,
                 cell: {
@@ -3756,7 +3758,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
                   effort: declared.effort ?? currentCellOrLive.effort,
                 },
               }
-              : nextModelRung(roster, onDeclared ? live : currentCellOrLive, { ceiling })
+              : nextModelRung(roster, liveMoved ? live : currentCellOrLive, { ceiling })
             if (!rung) {
               return {
                 applied: false, reason: 'exhausted',

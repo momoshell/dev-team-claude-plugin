@@ -15,6 +15,7 @@ investigating.
 | `escalate:plan-check` | The plan-check seat rejected or could not accept the plan. | Preserve the plan and check return, then identify the rejected contract. |
 | `escalate:plan-chunks` | Chunk plan validation (`validateChunks`) refused a missing, malformed, empty stepped program or invalid ownership; chunk lanes may also refuse an unknown selection or `chunk-without-chunked` when a chunk is named without `--chunked`. | For stepped, fix the plan's chunk program and gate ownership. For chunked lanes, boot WITH `--chunked --chunk <id>` or fix the program, then re-run. |
 | `escalate:plan-carve` | The planner said the surface is too large to build whole or returned an invalid carve. | Keep the slice record and ask the human which slice to dispatch. |
+| `escalate:plan-scope-malformed` | The final plan round still declared `files_in_scope` entries outside the dispatched surface that are neither tracked paths, trailing-slash directory prefixes, nor paths the brief declares created; earlier rounds bounce to the planner, so this stage means no revision was left to bounce it to. | Read the escalation `why`, which names each malformed entry and a did-you-mean correction where one exists. Correct a mistyped entry to its tracked path; for a file the lane must create, declare it so the brief's `## Where` carries a `declared · created · <path>` line; then re-dispatch. Do not ask the builder to guess. |
 | `escalate:sensitivity-floor` | A protected path was discovered and the required judge-tier floor could not be applied. | Stop before lane/review/commit and boot a judge-tier pane; the record names whether discovery occurred at plan acceptance or during build. |
 | `escalate:triage` | Repair triage lacks inherited scope/lane or returned an unusable repair note. | Read the failing run's context and the triage envelope before changing files. |
 | `escalate:triage-scope` | Repair triage returned an empty, malformed, or otherwise invalid context declaration. | Preserve the triage artifact and correct its literal context declaration. |
@@ -46,8 +47,7 @@ investigating.
 | `escalate:converge-pr` | The converge-on-PR path could not settle its gate or review. | Read `details.escalation.where` for the inner stage that produced it. |
 | `escalate:driver` | The crash exit had no `err.stage` to name. | Read `details.escalation.why` and the journal tail; this is the unattributed path. |
 
-The tables are pinned to the emitted sets by `skills/crew-recovery/exhibits.test.mjs`,
-and a new producer fails that test.
+The tables are pinned to the emitted sets by `skills/crew-recovery/exhibits.test.mjs`. Its scan collects every quoted kebab literal on the right of a `.stage =` assignment or `stage:` property (so each ternary branch counts) and the first literal argument of `staged(` and `fail(`, across its listed transport files and every non-test `crew/acp-*.mjs` module, and resolves `escalate(<CONST>.<member>, …)` through the exported frozen object of that name in `crew/drive.mjs`. A new producer in those shapes fails that test; a template-built stage (the families below) or an identifier-valued producer does not.
 
 ## Crash stages
 
@@ -58,6 +58,12 @@ exit is terminal: each records an `escalate:<where>` stage row and its
 
 | Stage | Meaning | Operator's first move |
 |---|---|---|
+| `acp-bin-unresolved` | The ACP binary named by the seat's adapter was not found on the PATH the driver searched. | The error names the binary and the searched PATH. Install the binary or fix the PATH or adapter configuration, then retry. |
+| `acp-launch-unsupported` | The adapter resolved for the role exposes no ACP launch function, so the seat cannot start over ACP. | Check the roster's adapter and agent for that role; give the seat an ACP-capable adapter or a different transport. |
+| `acp-no-envelope` | An ACP turn ended without a valid envelope at the return path. | Read the transport outcome and the seat's stream before retrying; the record says whether any session update was ever seen. An `acp_parse_error` journal row for the same return path means a file was written but did not parse. |
+| `acp-parse-error` | Stamped on the ACP reader's parse failure when a file at the return path is not a valid envelope. The reader catches it (`readEnvelope` in `crew/acp-io.mjs`), journals one `acp_parse_error` row carrying the parse `why`, and treats the file as no envelope, so the turn ends as `acp-no-envelope`: this row documents the stamp, not a `where` you will read today. | Preserve the return file and read the `acp_parse_error` journal row for that return path; it carries the parse failure. |
+| `acp-session-busy` | The role's ACP session was still occupied: a retained client could not be reproven, or a prior prompt did not settle after cancellation. | Confirm the prior turn has settled before assigning again; inspect the session record for the unsettled prompt. |
+| `acp-steer-unsupported` | An in-turn steer was attempted on an ACP seat; the ACP transport does not support interjection. | Do not steer an ACP seat. Wait for the turn to end, then assign the follow-up as a new turn. |
 | `build` | A resumed stepped lane was handed a step checkpoint that fails the checkpoint validator; the message names the defect. | Read the checkpoint named in the run request against the defect, then dispatch fresh rather than resume. |
 | `envelope-refusal` | A seat's envelope failed an anti-replay identity check and was refused. The summary carries the operands — which field, its expected value and the value found — so an ABSENT identity reads differently from a genuinely mismatched one. | Read the operands first. `found=undefined` means the seat never named that field, which is not a replay; a real value that differs is. Eight lanes were lost to this before the two were distinguishable (#1227), every one with its work complete on disk. |
 | `headless-no-envelope` | A headless turn ended without a usable envelope. | Read the transport outcome and the seat's stream before deciding whether to retry. |

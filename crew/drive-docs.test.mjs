@@ -1654,6 +1654,42 @@ test('SA8 ADR-048 Amendment 2 pins the scaled budget and attributed denominators
   assert.match(index, /^- \*\*ADR-048[^\n]*amended 2026-10-03/m)
 })
 
+// MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.
+test('AR1 ADR register next free number is one past the largest minted number', () => {
+  const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')
+  const header = /the next free number is \*\*(\d{3})\*\*/.exec(index)
+  assert.ok(header, 'register header must name the next free number')
+  const rowNums = [...index.matchAll(/^\| (\d{3}) \|/gm)].map((m) => Number(m[1]))
+  const fileNums = readdirSync(new URL('../docs/adr/', import.meta.url)).map((f) => /^adr-(\d{3})-/.exec(f)?.[1]).filter(Boolean).map(Number)
+  assert.equal(Number(header[1]), Math.max(...rowNums, ...fileNums) + 1)
+})
+
+// MUTATION AR2: breaking the 050 full-document link leaves that ADR document without a row linking it.
+test('AR2 every ADR document has an Index row linking it', () => {
+  const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')
+  const files = readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => /^adr-\d{3}-.+\.md$/.test(f)).sort()
+  assert.ok(files.length > 0, 'expected ADR documents in docs/adr')
+  for (const file of files) {
+    const num = file.slice(4, 7)
+    const row = index.split('\n').find((line) => line.startsWith('| ' + num + ' |'))
+    assert.ok(row, 'expected an Index row | ' + num + ' | for ' + file + ', found none')
+    assert.ok(row.includes('[full document](' + file + ')'), 'expected row ' + num + ' to link ' + file + ', found: ' + row)
+  }
+})
+
+// MUTATION AR3: dropping the amendment from the 051 Index row leaves the row predating Amendment 1.
+test('AR3 ADR-051 register entries carry Amendment 1 and mark the operator verb unbuilt', () => {
+  const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')
+  assert.match(index, /^\| 051 \|[^\n]*amended 2026-10-17/m)
+  assert.match(index, /^\| 051 \|[^\n]*lane 1 built/m)
+  const bullet = index.split('\n').find((line) => line.startsWith('- **ADR-051'))
+  assert.ok(bullet, 'expected the ADR-051 bullet, found none')
+  assert.ok(bullet.includes('amended 2026-10-17'), 'expected the bullet to carry amended 2026-10-17, found: ' + bullet)
+  assert.ok(bullet.includes('lane 1 built'), 'expected the bullet to carry lane 1 built, found: ' + bullet)
+  assert.ok(bullet.includes('lanes 2 and 3'), 'expected the bullet to name the verb as lanes 2 and 3, found: ' + bullet)
+  assert.equal(bullet.includes('`crew finish` refuses on'), false)
+})
+
 // MUTATION CC1: reverse the bound-issue promotion instruction; the authoritative planner prompt must catch it.
 test('CC1 planner charter teaches closing and reference issues', () => {
   const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')

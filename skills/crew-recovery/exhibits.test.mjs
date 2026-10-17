@@ -13,8 +13,59 @@ const HERE = fileURLToPath(new URL('./', import.meta.url))
 const MANIFEST = join(HERE, 'anchors.json')
 const pin = (expected) => pinnedKey({ manifestPath: MANIFEST, expected })
 const DRIVE = 'crew/drive.mjs'
-const STAGE_FILES = [DRIVE, 'crew/seat-io.mjs', 'crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/child.mjs', 'crew/reclaim.mjs', 'crew/daemon.mjs']
+const ACP_STAGE_FILES = readdirSync(join(ROOT, 'crew')).filter((name) => /^acp-.+\.mjs$/.test(name) && !name.endsWith('.test.mjs')).sort().map((name) => 'crew/' + name)
+const STAGE_FILES = [DRIVE, 'crew/seat-io.mjs', 'crew/headless.mjs', 'crew/headless-rpc.mjs', 'crew/child.mjs', 'crew/reclaim.mjs', 'crew/daemon.mjs', ...ACP_STAGE_FILES]
 const QUOTE = "['\"`]"
+
+// The right-hand side of a stage assignment or property, from start until the
+// expression ends: a ';' or ',' at bracket depth 0, a closer that would take the
+// depth below 0, or a newline at depth 0 that does not continue the expression.
+// lean: brackets are counted lexically and string contents are not skipped; move to a real parser if a producer puts a bracket inside a stage-adjacent string
+function stageRhs(source, start) {
+  let depth = 0
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i]
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1
+    else if (ch === ')' || ch === ']' || ch === '}') { if (depth === 0) return source.slice(start, i); depth -= 1 }
+    else if (depth === 0 && (ch === ';' || ch === ',')) return source.slice(start, i)
+    else if (depth === 0 && ch === '\n') {
+      const next = source.slice(i + 1).trimStart()
+      const prev = source.slice(start, i).trimEnd()
+      if (!/^[?:.|&]/.test(next) && !/[?:(|&=]$/.test(prev)) return source.slice(start, i)
+    }
+  }
+  return source.slice(start)
+}
+
+// Every kebab literal a .stage assignment or stage: property can produce: the
+// whole right-hand side is scanned, so each branch of a ternary contributes.
+// An equality (.stage === 'x') is not an assignment and is never collected.
+export function scanStages(source) {
+  const emitted = new Set()
+  for (const match of source.matchAll(/(?:\.stage\s*=(?!=)|\bstage:)/g)) {
+    const rhs = stageRhs(source, match.index + match[0].length)
+    const literals = [...rhs.matchAll(new RegExp(QUOTE + '([a-z][a-z0-9-]*)' + QUOTE, 'g'))]
+    for (const literal of literals) emitted.add(literal[1])
+  }
+  for (const helper of ['staged', 'fail']) {
+    for (const match of source.matchAll(new RegExp('\\b' + helper + '\\(\\s*' + QUOTE + '([a-z][a-z0-9-]*)' + QUOTE, 'g'))) emitted.add(match[1])
+  }
+  return emitted
+}
+
+// escalate('x', ...) literals plus escalate(<IDENT>.<member>, ...) resolved
+// through the exported frozen object of that name in the same source. A first
+// argument that names no such object (variant, revalidated.kind) is skipped.
+export function scanEscalates(source) {
+  const emitted = new Set()
+  for (const match of source.matchAll(new RegExp('\\bescalate\\(\\s*' + QUOTE + '([a-z][a-z0-9-]*)' + QUOTE, 'g'))) emitted.add(match[1])
+  for (const match of source.matchAll(/\bescalate\(\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)) {
+    const object = new RegExp('export const ' + match[1] + ' = Object\\.freeze\\(\\{([\\s\\S]*?)\\}\\)').exec(source)
+    const member = object && new RegExp('\\b' + match[2] + ':\\s*' + QUOTE + '([a-z][a-z0-9-]*)' + QUOTE).exec(object[1])
+    if (member) emitted.add(member[1])
+  }
+  return emitted
+}
 
 function readText(path) {
   const text = readFileSync(path, 'utf8')
@@ -25,8 +76,7 @@ function readText(path) {
 // Mutation killed: adding a producer without a row reddens this equality, so the emitted driver set cannot drift undocumented.
 test("escalations.md's driver table equals the escalate() producers", () => {
   const source = readFileSync(join(ROOT, DRIVE), 'utf8')
-  const emitted = new Set()
-  for (const match of source.matchAll(new RegExp(`\\bescalate\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`, 'g'))) emitted.add(match[1])
+  const emitted = scanEscalates(source)
   for (const name of VARIANT_NAMES) if (name !== 'stepped') emitted.add(name)
   emitted.add('driver')
   // The underscore is load-bearing: VARIANT_NAMES are added to `emitted` verbatim,
@@ -43,23 +93,55 @@ test("escalations.md's driver table equals the escalate() producers", () => {
 // Mutation killed: adding a producer without a row reddens this equality, so every transport err.stage reaches the crash table.
 test("escalations.md's crash table equals the err.stage producers", () => {
   const emitted = new Set()
-  for (const rel of STAGE_FILES) {
-    const source = readFileSync(join(ROOT, rel), 'utf8')
-    for (const pattern of [
-      `\\.stage\\s*=\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
-      `\\bstage:\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
-      `\\bstaged\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
-      `\\bfail\\(\\s*${QUOTE}([a-z][a-z0-9-]*)${QUOTE}`,
-    ]) for (const match of source.matchAll(new RegExp(pattern, 'g'))) emitted.add(match[1])
-  }
+  for (const rel of STAGE_FILES) for (const stage of scanStages(readFileSync(join(ROOT, rel), 'utf8'))) emitted.add(stage)
   emitted.add(SEAT_REFUSAL_STAGE)
   emitted.add(SEAT_DIED_STAGE)
-  emitted.add('headless-no-envelope')
   const text = readText(join(HERE, 'references/escalations.md'))
   const start = text.indexOf('## Crash stages')
   assert.notEqual(start, -1, 'escalations.md is missing the crash stages section')
   const documented = new Set([...text.slice(start).matchAll(/^\|\s*`([a-z][a-z0-9-]*)`\s*\|/gm)].map((match) => match[1]))
   assert.deepEqual([...documented].sort(), [...emitted].sort())
+})
+
+// MUTATION EX1: emptying the acp listing spread removes the ACP stages from the emitted set.
+test('EX1 crash table documents the ACP stages the listed acp modules emit', () => {
+  const emitted = new Set()
+  for (const rel of STAGE_FILES) for (const stage of scanStages(readFileSync(join(ROOT, rel), 'utf8'))) emitted.add(stage)
+  const text = readText(join(HERE, 'references/escalations.md'))
+  const documented = new Set([...text.slice(text.indexOf('## Crash stages')).matchAll(/^\|\s*`([a-z][a-z0-9-]*)`\s*\|/gm)].map((m) => m[1]))
+  for (const stage of ['acp-bin-unresolved', 'acp-launch-unsupported', 'acp-no-envelope', 'acp-parse-error', 'acp-session-busy', 'acp-steer-unsupported']) {
+    assert.ok(emitted.has(stage), 'expected the scan to emit ' + stage + ', found it absent from ' + emitted.size + ' emitted stages')
+    assert.ok(documented.has(stage), 'expected a crash-table row for ' + stage + ', found none among ' + documented.size + ' rows')
+  }
+})
+
+// MUTATION EX2: keeping only the first literal of each right-hand side drops the ternary branches.
+test('EX2 ternary stage assignment contributes every branch without a hand-written add', () => {
+  const seatIo = scanStages(readFileSync(join(ROOT, 'crew/seat-io.mjs'), 'utf8'))
+  for (const stage of ['acp-no-envelope', 'rpc-no-envelope', 'headless-no-envelope']) {
+    assert.ok(seatIo.has(stage), 'expected the seat-io ternary scan to collect ' + stage + ', found: ' + [...seatIo].sort().join(','))
+  }
+  const handAdd = 'emitted.add(' + "'headless-no-envelope')"
+  assert.equal(readFileSync(join(HERE, 'exhibits.test.mjs'), 'utf8').includes(handAdd), false)
+})
+
+// MUTATION EX3: adding the member name instead of its resolved value drops plan-scope-malformed.
+test('EX3 driver table resolves the PLAN_SCOPE member escalate call', () => {
+  const emitted = scanEscalates(readFileSync(join(ROOT, DRIVE), 'utf8'))
+  assert.ok(emitted.has('plan-scope-malformed'), 'expected plan-scope-malformed in the emitted set, found: ' + [...emitted].sort().join(','))
+  const prose = readText(join(HERE, 'references/escalations.md'))
+  const row = prose.split('\n').find((line) => line.startsWith('| `escalate:plan-scope-malformed` |'))
+  assert.ok(row, 'expected a driver-table row for escalate:plan-scope-malformed, found none')
+})
+
+// MUTATION EX4: dropping the (?!=) guard makes the equality fixture literal collectable.
+test('EX4 scanStages collects plain and ternary producers and ignores an equality', () => {
+  const fixture = [
+    "error.stage = 'acp-fixture-new'",
+    "x.stage = a ? 'acp-fixture-a' : 'acp-fixture-b'",
+    "if (e.stage === 'acp-fixture-not') throw e",
+  ].join('\n')
+  assert.deepEqual([...scanStages(fixture)].sort(), ['acp-fixture-a', 'acp-fixture-b', 'acp-fixture-new'])
 })
 
 // Mutation killed: moving an instrument citation or weakening its source substring must redden the recovery pin.

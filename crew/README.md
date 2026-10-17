@@ -72,7 +72,7 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | FFF | `crew/capabilities.json`, `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | - |
 | Rule reminders (pi builder) | `crew/pi/extensions/reminders.ts` | - | - |
 | Pi native codemode and MCP (default on; per-lane `pi_codemode: off` or standalone `CREW_PI_CODEMODE=off` opts out; MCP independent) | `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
-| Advisor | `crew/pi/extensions/advisor.ts` | ADR-037 ([decision](../docs/adr/adr-037-local-models.md)) | [Local models](../docs/adr/adr-037-local-models.md) |
+| Advisor | `crew/pi/extensions/advisor.ts` | ADR-047 ([decision](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md)) | [The advisor is a roster seat](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) |
 | Scope and out-of-context journal | `crew/drive.mjs` | ADR-045 ([decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md)) | [Scope decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md) |
 | Validation | `crew/drive.mjs` | - | [Acceptance gate](#the-acceptance-gate-gate-first) |
 | Review | `crew/drive.mjs` | ADR-038 ([decision](../docs/adr/adr-038-floor-forces-proof-not-rounds.md)) | [Review](../docs/adr/adr-038-floor-forces-proof-not-rounds.md) |
@@ -83,7 +83,9 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Publish and open PR, never merge | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
 | Resume (`resumeCmd`) | `crew/crew.mjs` | - | [Model](#the-model) |
 | Converge | `crew/converge.mjs` | - | - |
-| Execution shapes: `review_only`, `review_panel`, `directed`, `verify_only`, `scout`, `repair` | `crew/variants.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
+| Execution shapes: `review_only`, `review_panel`, `directed`, `verify_only`, `scout`, `repair`, `finish`, `stepped` | `crew/variants.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)); `finish` (ADR-051, lane 1 built: shape and executor path; the operator verb is pending), `stepped` (ADR-048) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
+| Seat skills | `skills/skill-map.json`, `crew/crew.mjs` | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
+| Builder edit assist | `crew/pi/extensions/builderloop.ts`, `crew/adapters/adapter-pi.mjs` | ADR-049 ([decision](../docs/adr/adr-049-builder-edit-assist.md)) | off unless CREW_EDIT_ASSIST is set: [Builder edit assist](../docs/adr/adr-049-builder-edit-assist.md) |
 | Turn ceilings | `crew/drive.mjs` | - | [Decisions needed](../docs/decisions-needed.md) |
 | Anchors and pins | `skills/qa-test-writing/anchor-pin.test.mjs` | ADR-040 ([decision](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md)) | [Anchor pins](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md) |
 | Assurance presets and task profiles | `crew/assurances.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
@@ -298,7 +300,7 @@ legible as evidence rather than being mistaken for a scope change.
 
 The driver records a `plan_scope: { round, verdict, added, dropped }` decision row
 per plan round over the closed verdict set
-`plan-scope-undispatched | plan-scope-same | plan-scope-narrowed | plan-scope-widened`.
+`plan-scope-undispatched | plan-scope-same | plan-scope-narrowed | plan-scope-widened | plan-scope-malformed`.
 A `widened` verdict is recorded in that `plan_scope` row (its `added` list);
 it does not bounce or block the write.
 

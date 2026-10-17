@@ -34,7 +34,9 @@ Upstream NOTICE, the applicable part:
 `skills/code-less/SKILL.md` and the ladder in `crew/roles/_shared.md` derive
 from ponytail by Dietrich Gebert, https://github.com/DietrichGebert/ponytail at
 revision `e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156`, rewritten for this repository's seats, doctrine and marker
-name. Licence copy: `docs/licenses/ponytail-MIT.txt`. The notice, as the MIT
+name. The `crew/roles/_shared.md` site carries no marker because the file is
+compiled into every role prompt at a fixed byte budget. Licence copy:
+`docs/licenses/ponytail-MIT.txt`. The notice, as the MIT
 licence requires it to travel with the work:
 
     MIT License
@@ -89,7 +91,9 @@ licence requires it to travel with the work:
 
 `skills/prose-plain/SKILL.md` and `scripts/factory/prose-lint.mjs` derive
 from no-ai-slop by Peter Yang, https://github.com/petergyang/no-ai-slop at
-revision `000650b156983f5159695b441477f4e63b25dc85`, rewritten for this repository (never "vendored": no upstream prose is copied).
+revision `000650b156983f5159695b441477f4e63b25dc85`, rewritten for this
+repository (the BANNED_WORDS list is upstream's banned-outright list minus
+one word; nothing else is copied).
 Licence copy: `docs/licenses/no-ai-slop-MIT.txt`. The notice, as the MIT
 licence requires it to travel with the work:
 

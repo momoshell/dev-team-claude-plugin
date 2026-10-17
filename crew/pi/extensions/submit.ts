@@ -81,6 +81,7 @@ export function createSubmitTool(state: any, io: any = {}) {
 export function attachSubmit(pi: any, io: any = {}) {
   const state: any = { assignment: null, failures: 0, nudged: false }
   pi.registerTool(createSubmitTool(state, io))
+  // Idea credit: the submit-envelope tool follows oh-my-pi's yield tool; no oh-my-pi source is copied, ideas only.
   pi.on('before_agent_start', (event: any) => {
     const assignment = parseAssignment(event?.prompt)
     if (!assignment) {

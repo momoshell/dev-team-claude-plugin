@@ -95,6 +95,7 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
   }
   return { beforeAgentStart, toolResult, get usable() { return usable }, get reason() { return reason } }
 }
+// Idea credit: the rule reminders follow oh-my-pi's TTSR and the non-interrupting tool_result rule reminder; no oh-my-pi source is copied, ideas only, and no licence notice is invented.
 export function attachReminders(pi, options = {}) {
   const hooks = createReminders(options)
   pi.on('before_agent_start', hooks.beforeAgentStart)

@@ -33,9 +33,14 @@ target. Confusing the two is the failure this skill prevents.
 - **Unknown is never a guess and never a zero.** A field the probe could not
   measure carries `null` and one closed reason, so an unmeasured target never
   looks like a cleared one.
-- **Install tracks `main`, not a tag.** `.claude-plugin/marketplace.json`
-  declares `ref: main`, so an installed copy follows HEAD. There is no pinning
-  today — say so rather than implying a version was chosen.
+- **Install is a snapshot, not a tag.** `.claude-plugin/marketplace.json`
+  declares `ref: main`. An installed copy is a snapshot of the commit at
+  install or update time; it moves only on a plugin update, not with each
+  push, and `ref: main` names what an update fetches. A link-mode install
+  loads the plugin in place so it does follow its source directory, but link
+  mode refuses a top-level entry that is a symlink pointing outside the
+  plugin directory. There is no pinning today: say so rather than implying a
+  version was chosen.
 - **Never run this repo's scripts from the installed cache when working on this
   repo.** The cache path is version-pinned and drifts from `main`. See
   `CLAUDE.md`; this is the single most expensive onboarding mistake recorded.

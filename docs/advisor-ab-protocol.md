@@ -33,7 +33,7 @@ recommends the listed arm with the fewest eligible runs (ties keep list order). 
 Lane spend is derived from per-model `agent_sessions` rows, not session cost
 fields; every row in a finished run must have a session id, complete usage and
 a uniquely priced model for that run to count. An arm may show a priced subtotal alongside
-its priced/missing run denominators and the first missing cause. There is no
+its priced/missing run denominators and the first missing cause. `lane_spend_estimated` labels that subtotal true if any contributing price is estimated, false if none are, and null when spend is absent. There is no
 historical backfill; cellUsage dispatch joins intentionally continue summing
 both fallback rows. Advisor spend covers only priced `advisor_usage` consults;
 older and HTTP consults may be journal-only and are not measured as zero. See

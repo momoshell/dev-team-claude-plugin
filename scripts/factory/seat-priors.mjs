@@ -126,21 +126,21 @@ function distinctPairs(rows) {
 }
 
 function priceSession({ identity, volumes, catalog }) {
-  if (!identity) return { cost: null, reason: 'no-provider-model-identity' };
-  if (identity.ambiguous) return { cost: null, reason: 'ambiguous-provider-model-identity' };
+  if (!identity) return { cost: null, estimated: null, reason: 'no-provider-model-identity' };
+  if (identity.ambiguous) return { cost: null, estimated: null, reason: 'ambiguous-provider-model-identity' };
   const entry = catalog[`${identity.provider}/${identity.model_id}`];
-  if (!entry) return { cost: null, reason: 'no-catalog-price' };
+  if (!entry) return { cost: null, estimated: null, reason: 'no-catalog-price' };
   const rates = [
     entry.cost_in_per_mtok,
     entry.cost_out_per_mtok,
     entry.cost_cache_write_per_mtok,
     entry.cost_cache_read_per_mtok,
   ];
-  if (!rates.every((rate) => Number.isFinite(rate))) return { cost: null, reason: 'incomplete-catalog-rates' };
+  if (!rates.every((rate) => Number.isFinite(rate))) return { cost: null, estimated: null, reason: 'incomplete-catalog-rates' };
   const bricks = [volumes.in, volumes.out, volumes.write, volumes.read];
-  if (!bricks.every((bulk) => Number.isFinite(bulk))) return { cost: null, reason: 'missing-token-volume' };
+  if (!bricks.every((bulk) => Number.isFinite(bulk))) return { cost: null, estimated: null, reason: 'missing-token-volume' };
   const cost = (bricks[0] * rates[0] + bricks[1] * rates[1] + bricks[2] * rates[2] + bricks[3] * rates[3]) / 1e6;
-  return { cost, reason: null };
+  return { cost, estimated: entry.rate_estimated === true, reason: null };
 }
 
 function loadRoster(roster) {
@@ -235,7 +235,7 @@ export function computePriors(prefix, { roster = null } = {}) {
     const cellKey = `${start.role}\0${start.model}`;
     let cell = cells.get(cellKey);
     if (!cell) {
-      cell = { role: start.role, model: start.model, starts: 0, reviews: [], costs: [], costReasons: [] };
+      cell = { role: start.role, model: start.model, starts: 0, reviews: [], costs: [], costEstimated: false, costReasons: [] };
       cells.set(cellKey, cell);
     }
     cell.starts += 1;
@@ -260,7 +260,10 @@ export function computePriors(prefix, { roster = null } = {}) {
       catalog,
     });
     if (priced.cost === null) cell.costReasons.push(priced.reason);
-    else cell.costs.push(priced.cost);
+    else {
+      cell.costs.push(priced.cost);
+      cell.costEstimated ||= priced.estimated;
+    }
   }
 
   const rows = [...cells.values()].map((cell) => {
@@ -277,6 +280,7 @@ export function computePriors(prefix, { roster = null } = {}) {
       first_round_passes,
       first_round_pass_rate: review_n >= CELL_RATE_FLOOR ? first_round_passes / review_n : null,
       median_cost_usd: cost_n === 0 ? null : median(costs),
+      median_cost_estimated: cost_n === 0 ? null : cell.costEstimated,
     };
     row.rate_absent = row.first_round_pass_rate === null
       ? (row.review_n === 0 ? 'no first-round review observed for this cell — UNMEASURED, never zero'
@@ -424,7 +428,7 @@ function formatRate(row) {
 
 function formatCost(row) {
   if (row.median_cost_usd === null) return `unmeasured (n=${row.cost_n}; ${row.cost_absent})`;
-  return `$${row.median_cost_usd.toFixed(4)} (n=${row.cost_n})`;
+  return `${row.median_cost_estimated ? 'estimated ' : ''}$${row.median_cost_usd.toFixed(4)} (n=${row.cost_n})`;
 }
 
 function kindLines(kindCounts) {

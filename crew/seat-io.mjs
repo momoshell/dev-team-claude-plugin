@@ -1119,8 +1119,9 @@ export function nextRung(roster, tier, role) {
   }
 }
 
-export function nextModelRung(roster, cell) {
+export function nextModelRung(roster, cell, { ceiling } = {}) {
   try {
+    if (ceiling === null) return null
     const provider = cell?.provider
     const id = cell?.id
     if (typeof provider !== 'string' || provider.trim() === '' || typeof id !== 'string' || id.trim() === '') return null
@@ -1130,12 +1131,15 @@ export function nextModelRung(roster, cell) {
     if (!Object.hasOwn(models, currentKey)) return null
     const current = models[currentKey]
     if (!current || typeof current !== 'object' || Array.isArray(current) || !Number.isFinite(current.cost_in_per_mtok)) return null
+    if (current.rate_estimated === true) return null
     const prefix = `${provider}/`
     const candidates = []
     for (const [key, entry] of Object.entries(models)) {
       if (!key.startsWith(prefix)) continue
       const nextId = key.slice(prefix.length)
       if (!nextId || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      if (entry.rate_estimated === true) continue
+      if (Number.isFinite(ceiling) && (!Number.isFinite(entry.cost_out_per_mtok) || entry.cost_out_per_mtok > ceiling)) continue
       if (!Number.isFinite(entry.cost_in_per_mtok) || entry.cost_in_per_mtok <= current.cost_in_per_mtok) continue
       if (Array.isArray(entry.tags) && entry.tags.includes('override-only')) continue
       candidates.push({ id: nextId, cost: entry.cost_in_per_mtok })
@@ -2201,6 +2205,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const spawnSync = deps.spawnSync || cpSpawnSync
   const now = deps.now || (() => Date.now())
   const readRoster = deps.readRoster || (() => JSON.parse(readFileSync(join(HERE, 'roster.json'), 'utf8')))
+  const readLadder = deps.readLadder || (() => JSON.parse(readFileSync(join(HERE, 'model-ladder.json'), 'utf8')))
   const sleep = deps.sleep || ((ms) => {
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
@@ -3705,37 +3710,51 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
         const currentCellOrLive = currentCell || live
-        const modelFallbackWhy = 'model catalog has no costlier same-provider, non-override-only candidate'
         let rung = floorTier
           ? { rung: `${crew.tier ?? 'unseated'}→${floorTier}`, cell: floorTarget }
           : nextRung(roster, crew.tier, role)
-        if (!floorTier && !rung) {
-          const index = RESEAT_LADDER.indexOf(crew.tier)
-          const why = index < 0
-            ? `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`
-            : index === RESEAT_LADDER.length - 1
-              ? `tier ${String(crew.tier)} is already at the top of the mechanical → build → judge ladder`
-              : `the next tier ${RESEAT_LADDER[index + 1]} seats no ${roleName}`
-          // An unknown tier is not a usable ladder position, so retain its
-          // existing exhausted result rather than treating the live cell as a
-          // model-only upgrade opportunity.
-          if (index < 0) return { applied: false, reason: 'exhausted', why, from, to: null }
-          rung = nextModelRung(roster, currentCellOrLive)
-          if (!rung) return { applied: false, reason: 'exhausted', why: `${why}; ${modelFallbackWhy}`, from, to: null }
-        }
-        const sameCell = !floorTier && currentCell
-          && currentCell.provider === rung.cell.provider
-          && currentCell.id === rung.cell.id
-          && currentCell.effort === rung.cell.effort
-        if (sameCell) {
-          rung = nextModelRung(roster, currentCellOrLive)
-          if (!rung) {
-            return {
-              applied: false,
-              reason: 'exhausted',
-              why: `the next rung repeats the identical cell ${currentCell.id} with effort ${currentCell.effort}; ${modelFallbackWhy}`,
-              from,
-              to: null,
+        if (!floorTier) {
+          let ladder = null
+          try { ladder = readLadder() } catch { ladder = null }
+          const tierCeiling = ladder?.cost_ceilings?.[crew.tier]
+          const ceiling = Number.isFinite(tierCeiling) ? tierCeiling : null
+          const allowedTarget = (cell) => {
+            if (ceiling === null) return false
+            if (!cell || typeof cell !== 'object' || Array.isArray(cell)) return false
+            if (typeof cell.provider !== 'string' || !cell.provider.trim() || typeof cell.id !== 'string' || !cell.id.trim()) return false
+            const models = roster?.models
+            if (!models || typeof models !== 'object' || Array.isArray(models)) return false
+            const key = `${cell.provider}/${cell.id}`
+            const entry = Object.hasOwn(models, key) ? models[key] : null
+            if (!entry || entry.rate_estimated === true) return false
+            if (typeof entry !== 'object' || Array.isArray(entry)) return false
+            return Number.isFinite(entry.cost_out_per_mtok) && entry.cost_out_per_mtok <= ceiling
+          }
+          const sameCell = rung && currentCell
+            && currentCell.provider === rung.cell.provider
+            && currentCell.id === rung.cell.id
+            && currentCell.effort === rung.cell.effort
+          if (!rung || sameCell || !allowedTarget(rung.cell)) {
+            if (!RESEAT_LADDER.includes(crew.tier)) {
+              return { applied: false, reason: 'exhausted', why: `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`, from, to: null }
+            }
+            const declared = currentCellOrLive?.fallback?.[0]
+            const self = declared?.provider === currentCellOrLive.provider && declared?.id === currentCellOrLive.id
+            rung = Array.isArray(currentCellOrLive.fallback) && !self && allowedTarget(declared)
+              ? {
+                rung: `declared:${currentCellOrLive.id}→${declared.id}`,
+                cell: {
+                  provider: declared.provider, id: declared.id, agent: declared.agent,
+                  effort: declared.effort ?? currentCellOrLive.effort,
+                },
+              }
+              : nextModelRung(roster, currentCellOrLive, { ceiling })
+            if (!rung) {
+              return {
+                applied: false, reason: 'exhausted',
+                why: 'no available measured, in-ceiling tier or declared target; model catalog has no costlier same-provider, measured, in-ceiling, non-override-only candidate',
+                from, to: null,
+              }
             }
           }
         }

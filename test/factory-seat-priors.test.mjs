@@ -88,6 +88,52 @@ const PRICED_ROSTER = {
 const SYNTH_CELL = { agent: 'pi', provider: 'synth', model_id: 'synth-a', model: 'alpha-model', effort: 'medium' };
 const priceOf = (v) => (v.in * 1 + v.out * 2 + v.write * 3 + v.read * 4) / 1e6;
 
+// Mutation RE6: hard-code median_cost_estimated to false; mixed priced sessions must retain true.
+test('RE6', async () => {
+  const dir = scratchDir('seat-priors-estimates-');
+  const rates = { cost_in_per_mtok: 1, cost_out_per_mtok: 2, cost_cache_write_per_mtok: 0, cost_cache_read_per_mtok: 0 };
+  async function priors(estimated, { zero = false, missingRates = false, missingTokens = false, identity = true } = {}) {
+    const records = [];
+    for (const [index, model_id] of ['synth-b', 'synth-a'].entries()) {
+      const adw = `r${index}`, session = `s${index}`;
+      records.push(start(adw, 'd', 'builder', 'raw', session));
+      if (identity) records.push(runSeat(adw, 'builder', { ...SYNTH_CELL, model_id, model: 'raw' }));
+      records.push(end(adw, session, { in: missingTokens ? null : zero ? 0 : (index * 2 + 1) * 1e6, out: 0, write: 0, read: 0 }));
+    }
+    const ledger = writeLedger(dir, 'ledger.jsonl', records);
+    const prefix = await readLedgerPrefix(ledger, records.length);
+    return computePriors(prefix, { roster: { models: estimated === null ? {} : {
+      'synth/synth-a': rates,
+      'synth/synth-b': { ...rates, rate_estimated: estimated, ...(missingRates ? { cost_out_per_mtok: null } : {}) },
+    } } });
+  }
+  const meta = { watermark: 6, kindCounts: {}, rosterBlob: 'test-roster', ladderBlob: 'test-ladder' };
+  for (const estimated of [true, false, null]) {
+    const result = await priors(estimated);
+    const row = result.rows[0];
+    assert.deepEqual([row.median_cost_usd, row.cost_n, row.median_cost_estimated],
+      estimated === null ? [null, 0, null] : [2, 2, estimated]);
+    assert.equal(row.cost_absent, estimated === null ? 'no-catalog-price: 2 session(s) unpriced — UNMEASURED, never zero' : null);
+  }
+  const estimatedReport = renderPriorMarkdown(await priors(true), meta);
+  assert.match(estimatedReport.split('\n').find((l) => l.startsWith('| builder | raw |')) ?? '', /estimated \$2\.0000 \(n=2\)/);
+  assert.doesNotMatch(renderPriorMarkdown(await priors(false), meta).split('\n').find((l) => l.startsWith('| builder | raw |')) ?? '', /estimated/);
+  assert.match(estimatedReport, /watermark: 6/);
+  for (const estimated of [true, false]) {
+    const row = (await priors(estimated, { zero: true })).rows[0];
+    assert.deepEqual([row.median_cost_usd, row.cost_n, row.median_cost_estimated], [0, 2, estimated]);
+  }
+  const partial = (await priors(true, { missingRates: true })).rows[0];
+  assert.deepEqual([partial.median_cost_usd, partial.cost_n, partial.median_cost_estimated], [3, 1, false]);
+  for (const [options, reason] of [
+    [{ missingTokens: true }, 'missing-token-volume'],
+    [{ identity: false }, 'no-provider-model-identity'],
+  ]) {
+    const row = (await priors(true, options)).rows[0];
+    assert.deepEqual([row.median_cost_usd, row.cost_n, row.median_cost_estimated, row.cost_absent], [null, 0, null, `${reason}: 2 session(s) unpriced — UNMEASURED, never zero`]);
+  }
+});
+
 test('A1', async () => {
   const dir = scratchDir('seat-priors-a1-');
   const ledger = writeLedger(dir, 'ledger.jsonl', [

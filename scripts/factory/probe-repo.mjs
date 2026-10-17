@@ -2123,6 +2123,11 @@ export function checkoutTestRunner({ checkout, profilePath = null, factoryRoot, 
   return { runner: classifyTestRunner(explicit), basis: `run --suite ${JSON.stringify(explicit)} · overrides ${profiled.answer.basis}`, rerun: profiled.answer.rerun, }
 }
 
+export function checkoutTestCommand({ checkout, profilePath = null, factoryRoot } = {}) {
+  const profiled = profiledTestRunner({ checkout, profilePath, factoryRoot })
+  return { command: profiled.command || null, basis: profiled.answer.basis }
+}
+
 function profileTestRerunCommand(profile) {
   if (profile == null) return null
   const invalid = () => { throw new ProfileRefusal('probe-repo: invalid test_rerun_command field', 'test-rerun-command-invalid') }

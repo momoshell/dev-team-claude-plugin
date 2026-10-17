@@ -83,7 +83,7 @@ stop — with the command below. It refuses by name at the first failed step and
 NEVER dispatches: the decision to run the next lane stays with the operator.
 
 ```sh
-node scripts/factory/closeout.mjs recover <lane>
+node scripts/factory/closeout.mjs recover <lane> --checkout <worktree>
 ```
 
 Two reasons, both structural:
@@ -117,11 +117,9 @@ Read the exit status and the JSON, in that order:
 - **Exit 0 is not proof on its own.** That guard reads
   `if (seats && …)`, so a `seats: null` payload — teardown measured NO seats,
   which `crew/crew.mjs:4752` records deliberately as an ABSENCE rather than a
-  false zero — short-circuits it and takes the success path. Measured today on
-  `b201-anchorrepair`: `exit=0` with
-  `{"archived":"…","seats":null}`, proving nothing. This is the recovery
+  false zero — never proves the seats dead. `seats: null` exits 4 (TEARDOWN_EXIT_SEATLESS), and a measured failure (exit 1, TEARDOWN_EXIT_UNPROVEN) still outranks 4. This is the recovery
   closeout's own path, because a lane whose driver is gone is the one most
-  likely to yield no pane rows. Treat `seats: null` as UNPROVEN and fall back
+  likely to yield no pane rows: the headless cause is that no seat carries a pane surface — every member ran on a surface-less transport, so the sweep probed nothing. Treat `seats: null` as UNPROVEN and fall back
   to `pgrep -f <slug>` before you commit. Tracked as #601.
 - Its JSON carries `{archived, seats:{seats, proven, failed, …}}`. `proven`
   must equal `seats`; `failed` counts seats measured still alive. A clean

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Credit: adapted from no-ai-slop by Peter Yang; see THIRD-PARTY-NOTICES.md.
 // prose-lint — mechanical half of the prose-plain adaptation: banned filler words,
 // em-dash density, and recap endings. Report-only: wired into no gate, hook, npm
 // script or driver path, so a clean run is not proof the prose is good, only that

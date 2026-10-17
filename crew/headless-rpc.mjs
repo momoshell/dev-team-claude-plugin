@@ -1728,6 +1728,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const frames = pollSeat(seat)
     const budget = turnCeilings?.[turn.role] ?? 0
     if (!Number.isFinite(turnCeilings?.[turn.role]) || budget <= 1 || turn.ceilingSteered) return { frames, enforced: enforceRpcBeforeEnvelope(seat, turn, returnPath, options) }
+    // Idea credit: the ceiling steer follows oh-my-pi's task.softRequestBudget; no oh-my-pi source is copied, ideas only, and no licence notice is invented.
     const k = Math.min(ceilingSteerTurns, Math.max(1, budget - 1))
     // Only an IN-FLIGHT turn is steered: a steer queued after settlement would be
     // delivered to the NEXT assignment, and a written envelope needs no warning.

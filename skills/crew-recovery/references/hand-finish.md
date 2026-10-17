@@ -8,6 +8,8 @@ same defect usually comes back. This file is the procedure for finishing such a
 lane by hand. It is generic; commands specific to this repository are in the
 last section.
 
+ADR-051 lane 1 built a `finish` execution shape a driver run can take. The operator verb, `crew finish --accept | --return | --abandon`, is not built yet (lanes 2 and 3), so a hand-finish still ends with this procedure.
+
 `closeout.md` owns the order of preserve, teardown, commit and publish;
 `mutation-proof.md` owns per-check proof; `escalations.md` owns what each
 stage token means. This file does not repeat them.

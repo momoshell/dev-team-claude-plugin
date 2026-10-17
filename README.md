@@ -34,15 +34,19 @@ node crew/factoryctl.mjs ls
 /plugin install dev-team@dev-team
 ```
 
-This brings the skills and the `/dispatch`, `/close-out`, `/status` and
-`/onboard` commands into any project. The install follows `ref: main` in
-`.claude-plugin/marketplace.json`, not a tag, so an installed copy tracks the
-head of `main`.
+This brings the skills and the `/dispatch`, `/close-out`, `/status`,
+`/onboard` and `/review` commands into any project. An installed copy is a
+snapshot of the commit at install or update time; it moves only on a plugin
+update, not with each push. `ref: main` in `.claude-plugin/marketplace.json`
+names what an update fetches, not a tag. A link-mode install is the
+exception: link mode loads the plugin in place so it does follow its source
+directory, but link mode refuses a top-level entry that is a symlink pointing
+outside the plugin directory.
 
 There are two ways to use it:
 
 - **Skills only.** Nothing else to set up. The knowledge skills (`pr-review`,
-  `qa-test-writing`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`)
+  `qa-test-writing`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo. Most repos stop here. The plugin registers no hooks.
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
   (`engines` in `package.json`), and a crew root (`~/.crew`, or
@@ -72,12 +76,13 @@ before its first lane.
   facade over a SQLite WAL ledger (instrumentation is never load-bearing).
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
-  `frontend-svelte`, `ui-design`, `devops`) work in any repo the moment the
-  plugin is installed; the runtime skills (`crew-dispatch`, `crew-recovery`)
+  `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
+  work in any repo the moment the plugin is installed; the runtime skills
+  (`crew-dispatch`, `crew-recovery`)
   drive the crew CLI and need this source tree. `crew-onboard` owns the split
   and the foreign-checkout procedure. Commands are thin entry points that name
   the skill owning each procedure: `/dispatch`, `/close-out`, `/status`,
-  `/onboard`.
+  `/onboard`, `/review`.
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
   architecture decision register (**grep it before minting an ADR number**);
   [`docs/decisions-needed.md`](docs/decisions-needed.md) is the open

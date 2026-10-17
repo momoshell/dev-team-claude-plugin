@@ -348,6 +348,18 @@ test('OD4', () => {
   }
 })
 
+test('RV1-1 ledger advisor-ab row escapes the placeholder pipe', () => {
+  // MUTATION RV1-1: unescape <iso\|ms> to <iso|ms> in docs/ledger-queries.md and the advisor-ab row splits into an extra table cell, hiding --adjudications and the dispatch ids.
+  const docs = read('docs/ledger-queries.md')
+  const row = docs.split('\n').find((line) => line.startsWith('|') && line.includes('ledger.mjs advisor-ab'))
+  assert.ok(row, 'missing advisor-ab row in docs/ledger-queries.md')
+  assert.ok(row.includes('--run-started-at <iso\\|ms>'), 'advisor-ab row must escape the placeholder pipe as <iso\\|ms>')
+  const cells = row.split(/(?<!\\)\|/).slice(1, -1)
+  assert.equal(cells.length, 2, 'advisor-ab row must render as two table cells')
+  assert.ok(cells[1].includes('--adjudications'), 'advisor-ab command cell must keep --adjudications')
+  assert.ok(cells[1].includes('<dispatch-id>...'), 'advisor-ab command cell must keep the dispatch ids')
+})
+
 test('OD5', () => {
   // MUTATION OD5: retarget README.md#install to README.md#setup in SKILL.md and the Installing link no longer reaches Install.
   const installing = docSection(onboardSkill, '## Installing')

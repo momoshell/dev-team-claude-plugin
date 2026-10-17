@@ -2685,6 +2685,25 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
   assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', recommended: 'judge', requested: null }).tier, 'judge')
 })
 
+// MUTATION SF1: restore tierFloor's protectedHitsIn input to raw files.
+test('SF1', () => {
+  const expected = (path) => ({ hits: [path], forced: 'judge', floor: 'judge' })
+  for (const [path, suffix] of [['crew/drive.mjs', ':10-20'], ['crew/roster.json', ':1-3']]) {
+    assert.deepEqual(tierFloor({ files: [path] }), expected(path), `tierFloor bare ${path}`)
+    assert.deepEqual(tierFloor({ files: [path + suffix] }), expected(path), `tierFloor span ${path + suffix}`)
+  }
+  for (const files of [undefined, null, 'crew/drive.mjs', [], ['src/plain.mjs'], ['crew/drive.mjs:0-3'], ['crew/drive.mjs:bad']]) {
+    assert.deepEqual(tierFloor({ files }), { hits: [], forced: null, floor: null }, `tierFloor legacy ${JSON.stringify(files)}`)
+  }
+  assert.deepEqual(tierFloor({ files: ['docs/adr/example.md:1-3'] }), {
+    hits: ['docs/adr/example.md'], forced: 'judge', floor: 'judge',
+  })
+  assert.deepEqual(tierFloor({
+    files: ['crew/drive.mjs', 'crew/drive.mjs:10-20', 'crew/drive.mjs', 'crew/drive.mjs:20-30'],
+  }), expected('crew/drive.mjs'))
+  assert.deepEqual(tierFloor({ files: ['src/private.mjs:4-9'], extra: ['src/private.mjs'] }), expected('src/private.mjs'))
+})
+
 const PROMPT_REGISTER_FIXTURE = {
   roles: {
     lead: { skills: ['skills/backend-node/SKILL.md'] },
@@ -2712,6 +2731,30 @@ test('PS2', () => {
     lane: 'guideline', forced: verdict.forced, recommended: 'build', requested: 'mechanical',
     requestedFrom: 'batch', forceReason: 'prompt-surface-conflict',
   }).tier, 'judge')
+})
+
+// MUTATION SF2: restore promptSurfaceVerdict's protectedHitsIn input to raw files.
+test('SF2', () => {
+  const path = 'skills/code-less/SKILL.md'
+  const expected = { hits: [path], promptChange: true, forced: 'judge' }
+  for (const files of [[path], [path + ':1-5']]) {
+    assert.deepEqual(promptSurfaceVerdict({ files }), expected, `default register ${JSON.stringify(files)}`)
+    assert.deepEqual(promptSurfaceVerdict({ files, register: PROMPT_REGISTER_FIXTURE }), expected, `fixture register ${JSON.stringify(files)}`)
+  }
+  assert.deepEqual(promptSurfaceVerdict({
+    files: [path, path + ':1-5', path, path + ':3-5'], register: PROMPT_REGISTER_FIXTURE,
+  }), expected)
+  assert.deepEqual(promptSurfaceVerdict({ files: ['crew/roles/builder.md:1-5'] }), {
+    hits: ['crew/roles/builder.md'], promptChange: true, forced: 'judge',
+  })
+  assert.deepEqual(promptSurfaceVerdict({ files: ['crew/roles/builder.md:bad'] }), {
+    hits: ['crew/roles/builder.md:bad'], promptChange: true, forced: 'judge',
+  })
+  for (const files of [undefined, null, 'crew/roles/', [], ['src/plain.mjs'], [path + ':0-5']]) {
+    assert.deepEqual(promptSurfaceVerdict({ files }), {
+      hits: [], promptChange: false, forced: null,
+    }, `promptSurfaceVerdict legacy ${JSON.stringify(files)}`)
+  }
 })
 
 test('PS-C1 anchors remain a wide dispatch prompt surface', () => {

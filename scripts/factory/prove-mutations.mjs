@@ -1105,6 +1105,7 @@ export async function runDiffMutationProof(config, deps = {}) {
     let runtimeSkip = null
     let runtimeSkipCause = null
     let escapedResult = null
+    let deadlineCapped = false
     try {
       if (!inScope(candidate.path)) { runtimeSkip = 'out-of-scope' }
       const guardWrite = runtimeSkip ? { ok: false, reason: runtimeSkip } : diffTargetGuard(config, candidate, d, canonicalCheckout)
@@ -1123,13 +1124,17 @@ export async function runDiffMutationProof(config, deps = {}) {
             }
             d.writeFile(guardWrite.abs, reapplied.bytes)
             const remaining = () => Math.max(0, totalDeadline - now())
+            const validationBound = Math.min(runTimeoutMs, remaining())
             validationResult = remaining() > 0
-              ? await runDiffCommand(d, config.validation_lane, config.checkout, Math.min(runTimeoutMs, remaining()))
+              ? await runDiffCommand(d, config.validation_lane, config.checkout, validationBound)
               : diffRunnerUnavailable('result-incomplete')
+            if (validationResult.timeout && validationBound < runTimeoutMs) deadlineCapped = true
             if (!validationResult.escaped && (!validationResult.available || !validationResult.timeout)) {
+              const gateBound = Math.min(runTimeoutMs, remaining())
               gateResult = remaining() > 0
-                ? await runDiffCommand(d, config.gate_cmd, config.checkout, Math.min(runTimeoutMs, remaining()))
+                ? await runDiffCommand(d, config.gate_cmd, config.checkout, gateBound)
                 : diffRunnerUnavailable('result-incomplete')
+              if (gateResult.timeout && gateBound < runTimeoutMs) deadlineCapped = true
             }
             escapedResult = [validationResult, gateResult].find((result) => result?.escaped) || null
             const firstUnavailable = !validationResult.available ? validationResult : gateResult && !gateResult.available ? gateResult : null
@@ -1137,6 +1142,7 @@ export async function runDiffMutationProof(config, deps = {}) {
               runtimeSkip = firstUnavailable.why
               runtimeSkipCause = firstUnavailable.cause
             }
+            else if (deadlineCapped && !escapedResult) { runtimeSkip = 'runner-unavailable'; runtimeSkipCause = 'result-incomplete' }
           }
         }
       }

@@ -1226,6 +1226,29 @@ test('RV1-2 total deadline skips later mutants without killing them', async () =
   rmSync(root, { recursive: true, force: true })
 })
 
+// MUTATION MH2: drop the deadlineCapped skip in runDiffMutationProof and a run timed out on the deadline-capped bound is recorded killed again.
+test('MH2 a timeout on a deadline-capped bound is skipped, never killed', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  try {
+    const result = await mod.runDiffMutationProof({
+      version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
+    }, {
+      now: () => 0,
+      runTimeoutMs: 120000,
+      totalDeadlineMs: 1000,
+      runCommand: () => ({ ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT', message: 'timed out' } }),
+    })
+    assert.equal(result.killed, 0)
+    assert.equal(result.timeout_killed, 0)
+    assert.ok(result.mutants.length >= 1)
+    assert.ok(result.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === 'runner-unavailable' && row.runner_unavailable_cause === 'result-incomplete'))
+    assert.equal(readFileSync(file, 'utf8'), after)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('C1a-e diff runner failures retain five closed causes and stable why', async () => {
   const cases = [
     [null, 'result-not-object'],

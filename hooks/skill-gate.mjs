@@ -109,6 +109,7 @@ export function requiredSkills(map, path) {
   const result = new Set()
   for (const rule of map.rules) {
     if (!own(rule.when, 'paths')) continue
+    if (own(rule.when, 'roles')) continue
     if (rule.when.paths.some((g) => matchGlob(g, path))) for (const skill of rule.skills) result.add(skill.split('#')[0])
   }
   return [...result].sort()
@@ -173,7 +174,8 @@ function emit(value) { process.stdout.write(`${JSON.stringify(value)}\n`) }
 function errorOut(reason) { process.stderr.write(`skill-gate: ${reason}\n`); process.exitCode = 1 }
 function contextFor(map) {
   const essential = 'Loading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
-  const rows = map.rules.filter((r) => own(r.when, 'paths')).map((r) => `${r.when.paths.join(', ')} → ${r.skills.join(', ')}`).join('\n')
+  const rows = map.rules.filter((r) => own(r.when, 'paths') && !own(r.when, 'roles')).map((r) => `${r.when.paths.join(', ')} → ${r.skills.join(', ')}`).join('\n')
+  if (!rows) return ''
   const budget = Math.max(0, 10000 - essential.length - 1)
   return `${rows.slice(0, budget)}\n${essential}`
 }
@@ -201,8 +203,7 @@ export function main(argv = process.argv.slice(2)) {
   const loaded = loadMap(root)
   if (!loaded.ok) { errorOut(loaded.reason); return 1 }
   if (verb === 'session-start') {
-    emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: contextFor(loaded.map) } })
-    return 0
+    const context = contextFor(loaded.map); if (context) emit({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }); return 0
   }
   if (!target) return 0
   const rel = relative(root, target).split(sep).join('/')

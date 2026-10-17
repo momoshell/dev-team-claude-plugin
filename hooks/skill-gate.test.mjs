@@ -73,7 +73,7 @@ test('RP2 slice satisfies the edit gate via its parent skill', () => {
   assert.equal(allowed.status, 0)
   assert.equal(allowed.stdout, '')
 })
-test('RP3 M1 shipped role packs pin exactly and session start is byte-identical', () => {
+test('RP3 M1 shipped role packs pin exactly and session start is silent', () => {
   // MUTATION: flip rule 5 of skills/skill-map.json from grant to inline and the shipped-map pin fails.
   const dir = fixture()
   const result = invoke(dir, 'session-start', {}, {}, ROOT)
@@ -93,10 +93,7 @@ test('RP3 M1 shipped role packs pin exactly and session start is byte-identical'
     { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/roles/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
-  assert.equal(
-    JSON.parse(result.stdout).hookSpecificOutput.additionalContext,
-    'crew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs, test/**/*.mjs, skills/**/*.mjs, visualizer/**/*.mjs, visualizer/**/*.js, visualizer/**/*.svelte \u2192 dev-team:code-less\ncrew/**/*.mjs, crew/**/*.ts, scripts/**/*.mjs, hooks/**/*.mjs \u2192 dev-team:backend-node\n**/*.test.mjs \u2192 dev-team:qa-test-writing\nvisualizer/**/*.svelte, visualizer/**/*.js, visualizer/**/*.mjs, visualizer/**/*.css \u2192 dev-team:frontend-svelte\nvisualizer/**/*.svelte, visualizer/**/*.css \u2192 dev-team:ui-design, dev-team:ux\ndocs/**/*.md, skills/**/*.md, crew/roles/*.md \u2192 dev-team:prose-plain\nLoading a skill is not applying it: walk each change against the loaded skill.\nDisable with DEV_TEAM_SKILL_GATE=off.'
-  )
+  assert.equal(result.stdout, '')
 })
 test('M2', () => {
   const dir = fixture(); writeMap(dir, { ...JSON.parse(readFileSync(join(dir, MAP_PATH))), surprise: true })
@@ -109,7 +106,10 @@ test('G1', () => {
   assert.equal(matchGlob('crew/**/*.mjs', 'crewx/a.mjs'), false)
   assert.equal(matchGlob('crew/**/*.mjs', 'crew/a.md'), false)
 })
-test('D1', () => { const dir = fixture(); const r = invoke(dir, 'pre-edit'); deny(r); assert.match(r.stdout, /dev-team:backend-node/); assert.match(r.stdout, /dev-team:code-less/) })
+test('D1', () => {
+  // MUTATION: restore role-scoped rules at the edit gate and the deny names dev-team:backend-node again.
+  const dir = fixture(); const r = invoke(dir, 'pre-edit'); deny(r); assert.match(r.stdout, /dev-team:code-less/); assert.doesNotMatch(r.stdout, /dev-team:backend-node/)
+})
 test('D2', () => { const dir = fixture(); post(dir, ['dev-team:code-less', 'dev-team:backend-node']); const r = invoke(dir, 'pre-edit', { agent_id: 'a' }); assert.equal(r.status, 0); assert.equal(r.stdout, '') })
 test('RV2-1 post-skill records from unmapped cwd', () => {
   const dir = fixture()
@@ -120,7 +120,10 @@ test('RV2-1 post-skill records from unmapped cwd', () => {
   const mappedEdit = invoke(dir, 'pre-edit', { agent_id: 'b' })
   assert.equal(mappedEdit.status, 0); assert.equal(mappedEdit.stdout, '')
 })
-test('D3', () => { const dir = fixture(); post(dir, ['dev-team:code-less', 'dev-team:backend-node']); const r = invoke(dir, 'pre-edit', { agent_id: 'a', tool_input: { file_path: 'crew/x.test.mjs' } }); deny(r); assert.match(r.stdout, /dev-team:qa-test-writing/); assert.doesNotMatch(r.stdout, /dev-team:backend-node/) })
+test('D3', () => {
+  // MUTATION: restore role-scoped rules at the edit gate and the deny names dev-team:qa-test-writing again.
+  const dir = fixture(); post(dir, ['dev-team:backend-node']); const r = invoke(dir, 'pre-edit', { agent_id: 'a', tool_input: { file_path: 'crew/x.test.mjs' } }); deny(r); assert.match(r.stdout, /dev-team:code-less/); assert.doesNotMatch(r.stdout, /dev-team:qa-test-writing/)
+})
 test('A1', () => { const dir = fixture(); post(dir, ['dev-team:code-less', 'dev-team:backend-node'], 'X'); deny(invoke(dir, 'pre-edit', { agent_id: 'Y' })); deny(invoke(dir, 'pre-edit', { agent_id: undefined })) })
 test('T1', () => {
   const dir = fixture()
@@ -147,6 +150,17 @@ test('I2', () => {
 test('I3', () => { const dir = fixture(); const r = invoke(dir, 'pre-edit', {}, { DEV_TEAM_SKILL_GATE: 'off' }); assert.equal(r.status, 0); assert.equal(r.stdout, '') })
 test('U1', () => { const dir = fixture(); writeFileSync(join(dir, MAP_PATH), '{'); const r = invoke(dir, 'pre-edit'); assert.equal(r.status, 1); assert.equal(r.stderr.trim(), 'skill-gate: map-unparseable'); assert.equal(r.stdout, '') })
 test('N1', () => { const dir = fixture(); const results = [invoke(dir, 'pre-edit'), invoke(dir, 'session-start')]; for (const r of results) assert.doesNotMatch(r.stdout, /allow/) })
-test('S1', () => { const dir = fixture(); const r = invoke(dir, 'session-start'); const out = JSON.parse(r.stdout).hookSpecificOutput; assert.equal(out.hookEventName, 'SessionStart'); assert.ok(out.additionalContext.length <= 10000); for (const id of ids) assert.ok(out.additionalContext.includes(`dev-team:${id}`)) })
+test('S1', () => {
+  // MUTATION: drop the roles filter in contextFor and the session lists the seat skills again.
+  const dir = fixture(); const r = invoke(dir, 'session-start'); const out = JSON.parse(r.stdout).hookSpecificOutput; assert.equal(out.hookEventName, 'SessionStart'); assert.ok(out.additionalContext.length <= 10000); assert.ok(out.additionalContext.includes('dev-team:code-less')); assert.ok(out.additionalContext.includes('Loading a skill is not applying it')); assert.doesNotMatch(out.additionalContext, /backend-node/); assert.doesNotMatch(out.additionalContext, /qa-test-writing/); assert.doesNotMatch(out.additionalContext, /frontend-svelte/); assert.doesNotMatch(out.additionalContext, /ui-design/); assert.doesNotMatch(out.additionalContext, /dev-team:ux/)
+})
+test('OG2 role-scoped-only edit allowed and role-less edit denied', () => {
+  // MUTATION: neutralise requiredSkills at the pre-edit call site and the role-less deny disappears.
+  const dir = fixture()
+  writeMap(dir, { version: 1, exempt: ['docs/audits/**'], rules: [{ when: { paths: ['crew/**/*.mjs'], roles: ['builder'] }, skills: ['dev-team:code-less'] }] })
+  const allowed = invoke(dir, 'pre-edit'); assert.equal(allowed.status, 0); assert.equal(allowed.stdout, '')
+  writeMap(dir, { version: 1, exempt: ['docs/audits/**'], rules: [{ when: { paths: ['crew/**/*.mjs'] }, skills: ['dev-team:code-less'] }] })
+  const denied = invoke(dir, 'pre-edit'); deny(denied); assert.match(denied.stdout, /dev-team:code-less/)
+})
 test('H1', () => { const hooks = JSON.parse(readFileSync(join(ROOT, MANIFEST))); const h = hooks.hooks; assert.equal(h.PreToolUse[0].matcher, 'Edit|Write|MultiEdit|NotebookEdit'); assert.equal(h.PostToolUse[0].matcher, 'Skill'); for (const [event, verb] of [['SessionStart','session-start'],['PreToolUse','pre-edit'],['PostToolUse','post-skill']]) assert.equal(h[event][0].hooks[0].command, `node "\u0024{CLAUDE_PLUGIN_ROOT}/hooks/skill-gate.mjs" ${verb}`) })
 test('Z1', () => { const source = readFileSync(join(ROOT, SCRIPT), 'utf8'); for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) assert.ok(match[1].startsWith('node:')) })

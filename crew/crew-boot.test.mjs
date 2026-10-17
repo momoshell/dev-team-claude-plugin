@@ -3173,9 +3173,10 @@ test('SR2 builder cannot receive alpha outside matching path', () => {
   // MUTATION: include role-scoped path rules without checking the fence.
   assert.equal(resolveSeatSkills({ map: SR_MAP, role: 'builder', files: ['docs/x.md'] }).skills.includes('skills/alpha/SKILL.md'), false)
 })
-test('SR3 role-scoped path rule remains required and described', () => {
-  // MUTATION: skip every rule that carries a roles condition at the edit gate.
-  assert.deepEqual(requiredSkills(SR_MAP, 'crew/x.mjs'), ['dev-team:alpha'])
+test('SR3 role-scoped path rule is not required by the operator gate', () => {
+  // MUTATION: drop the roles skip in requiredSkills and the operator is gated by a seat rule again.
+  assert.deepEqual(requiredSkills(SR_MAP, 'crew/x.mjs'), [])
+  assert.deepEqual(requiredSkills({ version: 1, exempt: ['docs/audits/**'], rules: [{ when: { paths: ['crew/**/*.mjs'] }, skills: ['dev-team:alpha'] }] }, 'crew/x.mjs'), ['dev-team:alpha'])
 })
 test('SR4 builder reachable union is ordered, deduplicated and unmeasured', () => {
   // MUTATION: reachableRules drops its role-matching path branch.

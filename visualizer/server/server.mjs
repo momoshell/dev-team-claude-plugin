@@ -82,7 +82,7 @@ const CLI_FLAGS = Object.freeze({
 // decides whether a route knows a parameter: a misspelling is a refusal that
 // NAMES it, not a silently ignored default — the contract CLI_FLAGS has given
 // the flag door since #443, on the door a human actually types into (h5 F6).
-const ROUTE_PARAMS = Object.freeze({
+export const ROUTE_PARAMS = Object.freeze({
   '/api/sessions': ['mode', 'status', 'since', 'until'],
   '/api/events': ['adw_id', 'after', 'limit', 'type', 'role', 'phase_id'],
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
@@ -165,16 +165,21 @@ export function sameOrigin(origin, host) {
   try { parsed = new URL(origin) } catch { return false }
   return parsed.host.toLowerCase() === host.toLowerCase()
 }
+export function hostGuard(req, label) {
+  const host = req.headers.host
+  if (typeof host !== 'string' || host === '') return { status: 403, error: `${label} host refused: ${host}` }
+  let parsed
+  try { parsed = new URL('http://' + host) } catch { return { status: 403, error: `${label} host refused: ${host}` } }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const port = parsed.port === '' ? 80 : Number(parsed.port)
+  if (!WRITE_HOSTNAMES.has(hostname) || port !== req.socket?.localPort) return { status: 403, error: `${label} host refused: ${host}` }
+  return null
+}
 export function writeGuard(req) {
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
   if (type !== WRITE_CONTENT_TYPE) return { status: 415, error: 'state-writing requests require content-type: application/json' }
-  const host = req.headers.host
-  if (typeof host !== 'string' || host === '') return { status: 403, error: `write host refused: ${host}` }
-  let parsed
-  try { parsed = new URL('http://' + host) } catch { return { status: 403, error: `write host refused: ${host}` } }
-  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  const port = parsed.port === '' ? 80 : Number(parsed.port)
-  if (!WRITE_HOSTNAMES.has(hostname) || port !== req.socket?.localPort) return { status: 403, error: `write host refused: ${host}` }
+  const refusal = hostGuard(req, 'write')
+  if (refusal) return refusal
   const origin = req.headers.origin
   if (origin != null && origin !== '' && !sameOrigin(origin, req.headers.host)) return { status: 403, error: 'cross-origin request refused' }
   return null
@@ -570,6 +575,10 @@ export function startServer(options = {}) {
       // probes with HEAD read a live board as broken (h5 F13). The Allow VALUES do
       // not change: visualizer-trajectory.test.mjs:196 pins `allow: 'GET'` on
       // /api/journal verbatim and sits outside this lane's fence.
+      if (url.pathname.startsWith('/api/')) {
+        const refusal = hostGuard(req, 'read')
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+      }
       const method = req.method === 'HEAD' ? 'GET' : req.method
       const unknown = refuseUnknownParams(url)
       if (unknown) {

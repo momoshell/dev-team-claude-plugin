@@ -5,5 +5,5 @@ export default defineConfig({
   root: 'visualizer/web',
   plugins: [svelte()],
   build: { outDir: 'dist' },
-  server: { proxy: { '/api': 'http://127.0.0.1:4488' } },
+  server: { proxy: { '/api': { target: 'http://127.0.0.1:4488', changeOrigin: true } } },
 })

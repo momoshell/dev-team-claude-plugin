@@ -1630,7 +1630,7 @@ function closeoutHalf({ lane, checkout, crewDir, deps, report }) {
   const runners = {
     rebase: () => {
       let recoveryBaseRef
-      try { recoveryBaseRef = d.baseBranch({ checkout }).branch } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED, 'rebase') }
+      try { const base = d.baseBranch({ checkout }); recoveryBaseRef = base.ref ?? base.branch } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED, 'rebase') }
       return gitStep({ args: ['rebase', recoveryBaseRef], cwd: laneDir, reason: CLOSEOUT_REFUSALS.REBASE_FAILED, step: 'rebase', deps: d, message: `rebase failed for ${lane}` })
     },
     gate: () => {

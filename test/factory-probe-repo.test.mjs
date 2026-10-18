@@ -1208,6 +1208,45 @@ test('R1 ratified checkout base resolves the profile branch', () => {
   const result = checkoutBaseBranch({ checkout: root, profilePath: path })
   assert.equal(result.branch, 'dispute'); assert.ok(result.basis.includes(path))
 })
+// MUTATION FB1: forcing the absent-profile branch to main must ignore origin/HEAD.
+test('FB1', () => {
+  const root = nextRoot('FB1'), path = join(root, 'absent-profile.json')
+  initGit(root)
+  put(root, 'base.txt', 'base\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '-q', '-m', 'base')
+  git(root, 'checkout', '-b', 'master')
+  git(root, 'checkout', 'main')
+  put(root, 'stale-main.txt', 'stale main\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '-q', '-m', 'advance stale main')
+  git(root, 'checkout', 'master')
+  git(root, 'update-ref', 'refs/remotes/origin/master', git(root, 'rev-parse', 'master').trim())
+  git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/master')
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
+  })
+  // A local master behind origin/master must not override the remote default.
+  put(root, 'remote-ahead.txt', 'remote ahead\n')
+  git(root, 'add', '.')
+  git(root, 'commit', '-q', '-m', 'origin moves on')
+  git(root, 'update-ref', 'refs/remotes/origin/master', 'HEAD')
+  git(root, 'reset', '-q', '--hard', 'HEAD~1')
+  assert.notEqual(git(root, 'rev-parse', 'master').trim(), git(root, 'rev-parse', 'origin/master').trim())
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
+  })
+  git(root, 'checkout', 'main')
+  git(root, 'branch', '-D', 'master')
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'master', basis: 'git symbolic-ref refs/remotes/origin/HEAD', ref: 'origin/master',
+  })
+  git(root, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+  assert.deepEqual(checkoutBaseBranch({ checkout: root, profilePath: path }), {
+    branch: 'main', basis: `default base branch main · no profile at ${path}`,
+  })
+})
+
 test('R2 absent profile alone selects main', () => {
   const root = nextRoot('R2'), path = join(root, 'absent.json')
   assert.match(checkoutBaseBranch({ checkout: root, profilePath: path }).basis, /default base branch main/)

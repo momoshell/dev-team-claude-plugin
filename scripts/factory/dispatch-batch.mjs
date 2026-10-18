@@ -21,7 +21,7 @@ import { openRun } from './emit.mjs'
 import { checkoutBaseBranch, checkoutWorktreeSetup, validateWorktreeSetup, runWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
-import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, isTripwireFile, issueBindingFor, validateRequest } from './make-brief.mjs'
+import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherProfile, isTripwireFile, issueBindingFor, laneFromProfile, profileField, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -1376,7 +1376,8 @@ function renderSurfaceUnmeasured(name, reason) {
 export function scanSurfaceMovement({ lane, checkout: checkoutDir, deps } = {}) {
   const d = normalDeps(deps)
   const checkout = typeof checkoutDir === 'string' && checkoutDir.trim() ? checkoutDir : process.cwd()
-  const surfaceBaseRef = resolveDispatchBase(checkout, d).branch
+  const surfaceBase = resolveDispatchBase(checkout, d)
+  const surfaceBaseRef = surfaceBase.ref ?? surfaceBase.branch
   let name = 'unknown'
   try {
     name = laneNameOf(lane)
@@ -2591,7 +2592,8 @@ export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
 export function createWorktrees({ plans, checkout, created = [], deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
-  const worktreeBaseRef = resolveDispatchBase(root, d).branch
+  const worktreeBase = resolveDispatchBase(root, d)
+  const worktreeBaseRef = worktreeBase.ref ?? worktreeBase.branch
   for (const plan of Array.isArray(plans) ? plans : []) {
     let result
     try {
@@ -3087,6 +3089,8 @@ export function laneHeads({ plans, deps } = {}) {
 
 function laneTestCommand({ dir, deps }) {
   const d = normalDeps(deps)
+  const { lane } = laneFromProfile(profileField(gatherProfile({ checkout: dir, factoryRoot: d.factoryRoot }), 'test_command'))
+  if (lane) return lane
   try {
     const data = JSON.parse(textOf(d.readFileSync(join(dir, 'package.json'), 'utf8')))
     return typeof data?.scripts?.test === 'string' && data.scripts.test.trim() ? data.scripts.test : null
@@ -4462,7 +4466,7 @@ function prepareDispatchContext(options) {
           })
           break
         }
-        const baseRef = dispatchBase.branch
+        const baseRef = dispatchBase.ref ?? dispatchBase.branch
         if (!baseContains({ commit: outcome.commit, base: baseRef, checkout: root, deps: d })) refuse(`lane ${lane.lane} depends on ${dep} whose result ${outcome.commit || 'none'} is not contained in the dispatch base ${baseRef}; merge it before dispatching wave ${waveNumber}`, DEPENDENT_BASE_STALE)
       }
     }

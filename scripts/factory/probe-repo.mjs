@@ -2089,7 +2089,17 @@ export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot }
   try { lstatSync(path); present = true } catch (error) {
     if (error?.code !== 'ENOENT') throw new ProfileRefusal(`cannot inspect base branch profile · ${path}`, 'profile-unreadable')
   }
-  if (!present) return { branch: 'main', basis: `default base branch main · no profile at ${path}` }
+  if (!present) {
+    const remoteDefault = gatherDefaultBranch(resolve(checkout || process.cwd()), true, false)
+    if (remoteDefault.status === 'proposed') {
+      // The default came from origin/HEAD, so its tracking ref is the base: a same-named local
+      // branch may be stale, and a remote-only default has no local branch at all.
+      const tracking = gitOutput(resolve(checkout || process.cwd()), ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${remoteDefault.value}`])
+      if (!nonEmptyString(tracking)) return { branch: remoteDefault.value, basis: remoteDefault.source }
+      return { branch: remoteDefault.value, basis: remoteDefault.source, ref: `origin/${remoteDefault.value}` }
+    }
+    return { branch: 'main', basis: `default base branch main · no profile at ${path}` }
+  }
   let profile
   try { profile = readProfile(path) } catch {
     throw new ProfileRefusal(`cannot read base branch profile · ${path}`, 'profile-unreadable')

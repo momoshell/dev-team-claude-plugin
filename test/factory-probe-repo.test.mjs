@@ -2266,6 +2266,26 @@ test('checkoutSuiteTimeout refuses invalid profile and environment timeout value
   refuse(() => checkoutSuiteTimeout({ checkout, profilePath: join(profilePath, 'nested.json'), env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
 })
 
+// MUTATION S2: in readProfileEntry's read catch (scripts/factory/probe-repo.mjs),
+// insert `if (error?.code === 'ENOENT') return undefined` before the throw and a
+// dangling profile symlink reads as an absent profile in both resolvers.
+test('a dangling profile symlink refuses as unreadable in both profile resolvers', () => {
+  const checkout = nodeFixture('suite-timeout-dangling')
+  const profilePath = join(checkout, 'dangling-profile.json')
+  symlinkSync(join(checkout, 'no-such-target.json'), profilePath)
+  for (const [name, call] of [
+    ['suite timeout', () => checkoutSuiteTimeout({ checkout, profilePath, env: {} })],
+    ['worktree setup', () => checkoutWorktreeSetup({ checkout, profilePath })],
+  ]) {
+    assert.throws(call, (error) => {
+      assert.ok(error instanceof ProfileRefusal)
+      assert.equal(error.reason, 'profile-unreadable')
+      assert.ok(error.message.includes(`${name} profile is unreadable`))
+      return true
+    })
+  }
+})
+
 test('suite timeout probe emits unknown and re-probe retains ratified metadata', () => {
   const checkout = nodeFixture('suite-timeout-reprobe')
   const fresh = probeRepo({ checkout })

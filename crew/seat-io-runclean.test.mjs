@@ -708,7 +708,6 @@ test('warm suite timeout diagnostics preserve output and distinguish other failu
     for (const outcome of [
       { status: null, signal: 'SIGTERM', error: timeoutError() },
       { status: null, error: timeoutError() },
-      { status: null, signal: 'SIGTERM' },
     ]) {
       const io = makeIo(fixture, {
         suiteTimeout: policy,
@@ -762,10 +761,10 @@ test('warm suite timeout diagnostics preserve output and distinguish other failu
   })
 })
 
-// MUTATION F7: drop `&& !overflowed` from either timeout branch in crew/seat-io.mjs
-// (warm `if (warmTimedOut && !overflowed) output +=` or cold
-// `if (coldTimedOut && !overflowed) throw new Error(`) and ENOBUFS plus SIGTERM,
-// which is what spawnSync returns on a maxBuffer overflow, reads as a suite timeout.
+// MUTATION F7: add `|| res.error?.code === 'ENOBUFS'` to either
+// `const warmTimedOut = res.error?.code === 'ETIMEDOUT'` or
+// `const coldTimedOut = res.error?.code === 'ETIMEDOUT'` in crew/seat-io.mjs and
+// a maxBuffer overflow (spawnSync returns ENOBUFS plus SIGTERM) reads as a timeout.
 test('an output overflow stays unmeasured in warm and cold runs and is never a suite timeout', () => {
   withRepo({ dirty: false }, (fixture) => {
     const overflowResult = (stderr) => ({ status: null, stdout: 'partial', stderr, signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) })
@@ -802,6 +801,44 @@ test('an output overflow stays unmeasured in warm and cold runs and is never a s
     } finally {
       if (coldPath) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath)
     }
+  })
+})
+
+// MUTATION S1: add `|| (res.signal === 'SIGTERM' && !res.error)` to either
+// `const warmTimedOut = res.error?.code === 'ETIMEDOUT'` or
+// `const coldTimedOut = res.error?.code === 'ETIMEDOUT'` in crew/seat-io.mjs and
+// an external SIGTERM, which spawnSync reports with no error, reads as a timeout.
+test('a SIGTERM without ETIMEDOUT is never reported as a suite timeout, warm or cold', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const policy = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+    const terminated = { status: null, stdout: 'term stdout', stderr: '', signal: 'SIGTERM' }
+    const warm = makeIo(fixture, {
+      suiteTimeout: policy,
+      suiteTimeoutMs: 1_800_000,
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh' ? terminated : realSpawnSync(bin, argv, options),
+    }).run('true')
+    assert.equal(warm.ok, false)
+    assert.equal(warm.timed_out, undefined)
+    assert.equal(warm.output, 'term stdout\n[killed by SIGTERM]')
+
+    let coldPath = null
+    const cold = makeIo(fixture, {
+      suiteTimeout: policy,
+      suiteTimeoutMs: 1_800_000,
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) !== '/bin/sh') return realSpawnSync(bin, argv, options)
+        coldPath = options.cwd
+        return terminated
+      },
+    })
+    let outcome = null
+    try { outcome = cold.runCold('true') } catch (error) { outcome = error } finally {
+      if (coldPath && existsSync(coldPath)) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath)
+    }
+    assert.equal(outcome instanceof Error ? outcome.message : null, null)
+    assert.equal(outcome.ok, false)
+    assert.match(outcome.output, /\[killed by SIGTERM\]/)
+    assert.doesNotMatch(outcome.output, /suite timeout/)
   })
 })
 

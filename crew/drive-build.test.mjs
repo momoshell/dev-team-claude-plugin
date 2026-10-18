@@ -8,7 +8,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -12093,6 +12093,16 @@ function finishHappyIo(over) {
   }
   return fakeIo(base)
 }
+function finishProofFiles({ where = 'review', discrimination = 'proven', omitDiscrimination = false } = {}) {
+  var files = {}
+  for (var k in FINISH_FILES) files[k] = FINISH_FILES[k]
+  var taskReturn = JSON.parse(files[TD + '/finish-task.json'])
+  taskReturn.details.escalation.where = where
+  if (omitDiscrimination) delete taskReturn.details.gate.discrimination
+  else taskReturn.details.gate.discrimination = discrimination
+  files[TD + '/finish-task.json'] = JSON.stringify(taskReturn)
+  return files
+}
 
 test('FS3: finish happy trace ends at decision with nothing pushed', () => {
   var io = finishHappyIo()
@@ -12126,7 +12136,7 @@ test('FS4: finish brief quotes escalation where and why verbatim', () => {
   var crashTask = TD + '/finish-task.json'
   var crashFiles = {}
   for (var k in FINISH_FILES) crashFiles[k] = FINISH_FILES[k]
-  crashFiles[crashTask] = JSON.stringify({ status: 'escalation', summary: 'crashed', artifacts: [], details: { escalation: { where: 'driver', why: 'acp seat lead is busy [acp-session-busy]' }, commit: null, gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['a.mjs', 'a.test.mjs'] } } })
+  crashFiles[crashTask] = JSON.stringify({ status: 'escalation', summary: 'crashed', artifacts: [], details: { escalation: { where: 'driver', why: 'acp seat lead is busy [acp-session-busy]' }, commit: null, gate: { cmd: FINISH_GATE, discrimination: 'proven' }, resume_checkpoint: { accepted_scope: ['a.mjs', 'a.test.mjs'] } } })
   var crashIo = finishHappyIo({ files: crashFiles })
   var crashRes = driveTask(CTX_FINISH, crashIo)
   assert.equal(crashRes.status, 'done')
@@ -12139,7 +12149,7 @@ test('FS5: finish scope precedence fallback and triage escalations carry no seat
   var precFiles = {}
   for (var k in FINISH_FILES) precFiles[k] = FINISH_FILES[k]
   precFiles[TD + '/plan.accepted.envelope.json'] = JSON.stringify({ status: 'done', summary: 'a', artifacts: [], details: { files_in_scope: ['a.mjs', 'a.test.mjs'] } })
-  precFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: null, gate: { cmd: FINISH_GATE }, resume_checkpoint: { accepted_scope: ['b.mjs'] } } })
+  precFiles[TD + '/finish-task.json'] = JSON.stringify({ status: 'escalation', summary: 'e', artifacts: [], details: { escalation: { where: 'review', why: 'w' }, commit: null, gate: { cmd: FINISH_GATE, discrimination: 'proven' }, resume_checkpoint: { accepted_scope: ['b.mjs'] } } })
   var precIo = finishHappyIo({ files: precFiles })
   var precRes = driveTask(CTX_FINISH, precIo)
   assert.equal(precRes.status, 'done')
@@ -12275,24 +12285,6 @@ test('FS9: finish review cap bounds suite-red late repair to three reviewer verd
   assert.equal(TD + '/finish-report.json' in io.calls.writes, false)
 })
 
-// Mutation killed: raise the choke-point cap in driveFinish review dispatch (verdicts.length >= FINISH_REVIEW_CAP -> >= 999); a fourth reviewer is then assigned and this test goes red.
-test('RV1-1 finish review cap is run-wide across suite-red re-entry', () => {
-  function mkFindings(id) { return [{ id: id, severity: 'should-fix', location: 'a.mjs:1', summary: 'fix it' }] }
-  var runs = finishBaseRuns()
-  runs['suite-cmd:1'] = { ok: false, output: suiteRed('a.test.mjs') }
-  var io = fakeIo({ files: FINISH_FILES, envelopes: { 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(), 'reviewer:1': reviewEnv('revise', mkFindings('F1')), 'reviewer:2': reviewEnv('revise', mkFindings('F2')), 'reviewer:3': reviewEnv('pass') }, runs: runs, cleanRuns: (function() { var m = {}; m[FINISH_GATE] = { ok: false, output: FINISH_RED }; return m })(), changed: ['a.mjs', 'a.test.mjs'] })
-  var res = driveTask(CTX_FINISH, io)
-  assert.equal(res.status, 'escalation')
-  assert.equal(res.details.escalation.where, 'review')
-  assert.ok(res.details.escalation.why.indexOf('[finish-review-cap]') !== -1)
-  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' }).length, 3)
-  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'reviewer' && a.note === 'review' }).length, 3)
-  assert.equal(io.calls.assign.filter(function(a) { return a.role === 'builder' }).length, 4)
-  var heads = res.details.stages.map(function(l) { return String(l).split(':')[0] })
-  assert.equal(heads.indexOf('decision'), -1)
-  assert.equal(TD + '/finish-report.json' in io.calls.writes, false)
-})
-
 test('FS10: finish report carries contracted keys and capped findings', () => {
   var happyIo = finishHappyIo()
   var happyRes = driveTask(CTX_FINISH, happyIo)
@@ -12317,5 +12309,142 @@ test('FS10: finish report carries contracted keys and capped findings', () => {
   assert.equal(capReport.outcome, 'review-capped')
   var hasF3 = capReport.review.open_findings.some(function(f) { return f.id === 'F3' })
   assert.equal(hasF3, true)
+})
+
+test('FX1', () => {
+  // Mutation killed: narrow admission to literal unproven, admitting absent/null/empty/failed/PROVEN/future-value.
+  const cases = [
+    { value: undefined, absent: true }, { value: null }, { value: '' },
+    { value: 'unproven' }, { value: 'failed' }, { value: 'PROVEN' }, { value: 'future-value' },
+  ]
+  for (const { value, absent = false } of cases) {
+    const files = finishProofFiles({ discrimination: value, omitDiscrimination: absent })
+    const io = finishHappyIo({ files })
+    const result = driveTask(CTX_FINISH, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'finish-triage')
+    assert.equal(io.calls.assign.length, 0)
+    const recorded = absent ? 'undefined (absent)' : JSON.stringify(value)
+    assert.ok(result.details.escalation.why.includes(`details.gate.discrimination=${recorded}`))
+  }
+})
+
+test('FX2', () => {
+  // Mutation killed: remove only gate-proof from the triage refusal decision.
+  for (const where of ['gate', 'gate-proof']) {
+    const files = finishProofFiles({ where })
+    const io = finishHappyIo({ files })
+    const result = driveTask(CTX_FINISH, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'finish-triage')
+    assert.equal(io.calls.assign.length, 0)
+    assert.ok(result.details.escalation.why.includes(`escalation.where=${where}`))
+    assert.ok(result.details.escalation.why.includes('details.gate.discrimination="proven"'))
+  }
+  for (const where of ['review', 'driver']) {
+    const io = finishHappyIo({ files: finishProofFiles({ where }) })
+    assert.equal(driveTask(CTX_FINISH, io).status, 'done')
+  }
+})
+
+test('FX3', () => {
+  // Mutation killed: hardcode report discrimination to proven, breaking source-witness carry.
+  const io = finishHappyIo()
+  const result = driveTask(CTX_FINISH, io)
+  assert.equal(result.status, 'done')
+  const report = JSON.parse(io.calls.writes[TD + '/finish-report.json'])
+  assert.deepEqual(report.gate, { cmd: FINISH_GATE, ok: true, discrimination: 'proven' })
+  assert.deepEqual(Object.keys(report).sort(), ['base', 'commit', 'escalation', 'gate', 'lane', 'outcome', 'pushed', 'residuals', 'review', 'run_id', 'run_id_absent', 'schema', 'suite'].sort())
+  assert.equal(composeFinishReport({ gateDiscrimination: 'source-witness' }).gate.discrimination, 'source-witness')
+})
+
+test('FX4', () => {
+  // Mutation killed: filter severity !== 'consider', incorrectly escalating the should-fix advisory sample.
+  const runCapped = (thirdFindings) => {
+    const io = fakeIo({
+      files: FINISH_FILES,
+      envelopes: {
+        'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+        'reviewer:1': reviewEnv('revise', [{ id: 'F1', severity: 'should-fix', location: 'a.mjs:1', summary: 'first' }]),
+        'reviewer:2': reviewEnv('revise', [{ id: 'F2', severity: 'should-fix', location: 'a.mjs:1', summary: 'second' }]),
+        'reviewer:3': reviewEnv('revise', thirdFindings),
+      },
+      runs: finishBaseRuns(),
+      cleanRuns: { [FINISH_GATE]: { ok: false, output: FINISH_RED } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    const result = driveTask({ ...CTX_FINISH, limits: { build_rounds: 3 } }, io)
+    return { io, result }
+  }
+  const blocked = runCapped([
+    { ...D_ASK, id: 'F3', severity: 'must-fix' },
+    { id: 'F4', severity: 'must-fix', location: 'a.mjs:2', summary: 'another blocker' },
+    { id: 'advice', severity: 'consider', location: 'a.mjs:3', summary: 'advice' },
+  ])
+  assert.equal(blocked.result.status, 'escalation')
+  assert.equal(blocked.result.details.escalation.where, 'review')
+  for (const word of ['[finish-review-cap-must-fix]', 'F3', 'F4']) assert.ok(blocked.result.details.escalation.why.includes(word))
+  assert.equal(blocked.io.calls.assign.filter(({ role }) => role === 'reviewer').length, 3)
+  assert.equal(blocked.io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(blocked.io.calls.commits.length, 0)
+  assert.equal(blocked.result.details.stages.some((stage) => stage.split(':')[0] === 'commit'), false)
+  assert.equal(TD + '/finish-report.json' in blocked.io.calls.writes, false)
+
+  const advisory = runCapped([
+    { id: 'F3', severity: 'should-fix', location: 'a.mjs:1', summary: 'advisory' },
+    { id: 'advice', severity: 'consider', location: 'a.mjs:2', summary: 'advice' },
+  ])
+  assert.equal(advisory.result.status, 'done')
+  assert.equal(advisory.result.details.accepted_via, 'review-capped')
+  const report = JSON.parse(advisory.io.calls.writes[TD + '/finish-report.json'])
+  assert.equal(report.outcome, 'review-capped')
+  assert.deepEqual(report.review.open_findings.map(({ id }) => id), ['F3', 'advice'])
+})
+
+test('FX5', () => {
+  // Mutation killed: disable the accepted-plan comparison; its independent cases then finish.
+  const acceptedPaths = [TD + '/plan.accepted.md', TD + '/plan.accepted.envelope.json']
+  for (const path of acceptedPaths) {
+    for (const kind of ['rewrite', 'empty', 'delete', 'unreadable']) {
+      const files = finishProofFiles()
+      let built = false
+      const io = fakeIo({
+        files,
+        envelopes: {
+          'builder:1': () => {
+            built = true
+            if (kind === 'rewrite') files[path] += '\\nchanged bytes\\n'
+            if (kind === 'empty') files[path] = ''
+            if (kind === 'delete') delete files[path]
+            return buildEnv()
+          },
+          'reviewer:1': reviewEnv('pass'),
+        },
+        runs: finishBaseRuns(),
+        cleanRuns: { [FINISH_GATE]: { ok: false, output: FINISH_RED } },
+        changed: ['a.mjs', 'a.test.mjs'],
+      })
+      if (kind === 'unreadable') {
+        const readFile = io.readFile
+        io.readFile = (readPath) => {
+          if (built && readPath === path) throw new Error('EPERM fixture read denied')
+          return readFile.call(io, readPath)
+        }
+      }
+      const result = driveTask(CTX_FINISH, io)
+      assert.equal(result.status, 'escalation', `${kind} ${path}`)
+      assert.equal(result.details.escalation.where, 'finish-gate')
+      assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 0)
+      assert.equal(io.calls.commits.length, 0)
+      assert.equal(TD + '/finish-report.json' in io.calls.writes, false)
+      assert.ok(result.details.escalation.why.includes(path.endsWith('.md') ? 'accepted plan' : 'accepted plan envelope'))
+    }
+  }
+
+  const unchanged = finishHappyIo()
+  assert.equal(driveTask(CTX_FINISH, unchanged).status, 'done')
+  const missingEnvelopeFiles = finishProofFiles()
+  delete missingEnvelopeFiles[TD + '/plan.accepted.envelope.json']
+  assert.equal(driveTask(CTX_FINISH, finishHappyIo({ files: missingEnvelopeFiles })).status, 'done')
 })
 

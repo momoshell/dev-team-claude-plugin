@@ -497,7 +497,7 @@ const CTX_DIRECTED = Object.freeze({
 const FINISH_TASK_PATH = `${TD}/finish-task.json`
 const FINISH_BRIEF_PATH = `${TD}/finish-brief-source.md`
 const FINISH_BRIEF_TEXT = ['# Finish brief', '', '## Acceptance', '', '- (X1) finish the escalated lane', ''].join('\n')
-const FINISH_TASK_JSON = JSON.stringify({ status: 'escalation', summary: 'escalated', artifacts: [], details: { escalation: { where: 'review', why: 'review could not converge' }, commit: null, gate: { cmd: 'node /tmp/fake-task/gate.mjs' }, resume_checkpoint: { accepted_scope: ['a.mjs', 'a.test.mjs'] } } })
+const FINISH_TASK_JSON = JSON.stringify({ status: 'escalation', summary: 'escalated', artifacts: [], details: { escalation: { where: 'review', why: 'review could not converge' }, commit: null, gate: { cmd: 'node /tmp/fake-task/gate.mjs', discrimination: 'proven' }, resume_checkpoint: { accepted_scope: ['a.mjs', 'a.test.mjs'] } } })
 const FINISH_ACCEPTED_ENVELOPE = JSON.stringify({ status: 'done', summary: 'accepted', artifacts: [`${TD}/plan.accepted.md`], details: { plan_path: `${TD}/plan.accepted.md`, files_in_scope: ['a.mjs', 'a.test.mjs'] } })
 const FINISH_FILES = {
   [FINISH_TASK_PATH]: FINISH_TASK_JSON,

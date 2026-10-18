@@ -4315,3 +4315,59 @@ test('GR4', () => {
   assert.equal(proxy.changeOrigin, true)
 })
 
+// MUTATION LH1: disable IPv4 interface equality on the normalization return.
+test('LH1', () => {
+  let calls = 0
+  let address = '192.0.2.23'
+  const source = () => { calls++; return { ethernet: [{ address, family: 'IPv4' }], inactive: undefined } }
+  const before = hostGuard({ headers: { host: '192.0.2.23:4488' }, socket: { localPort: 4488 } }, 'read', source)
+  address = '192.0.2.24'
+  const old = hostGuard({ headers: { host: '192.0.2.23:4488' }, socket: { localPort: 4488 } }, 'read', source)
+  const current = hostGuard({ headers: { host: '192.0.2.24:4488' }, socket: { localPort: 4488 } }, 'read', source)
+  assert.deepEqual([before, old, current], [null, { status: 403, error: 'read host refused: 192.0.2.23:4488' }, null])
+  assert.equal(calls, 3)
+})
+
+// MUTATION LH2: disable IPv6 interface equality on the normalization return.
+test('LH2', () => {
+  const source = () => ({ ethernet: [{ address: '2001:0DB8:0000:0000:0000:0000:0000:0023', family: 'IPv6' }] })
+  const results = ['[2001:db8::23]:4488', '[2001:DB8:0:0:0:0:0:23]:4488'].map(host =>
+    hostGuard({ headers: { host }, socket: { localPort: 4488 } }, 'read', source))
+  assert.deepEqual(results, [null, null])
+})
+
+// MUTATION LH3: neutralize the final refusal decision across the complete matrix.
+test('LH3', () => {
+  const source = () => ({ ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] })
+  const hosts = [
+    '192.0.2.99:4488', '[2001:db8::99]:4488',
+    '192.0.2.23:9999', '[2001:db8::23]:9999', '192.0.2.23',
+    'mac.local:4488', 'evil.example:4488',
+    '0xc0000217:4488', '3221226007:4488',
+    'user@192.0.2.23:4488', '192.0.2.23:4488/path',
+  ]
+  const refusal = host => ({ status: 403, error: `read host refused: ${host}` })
+  const actual = hosts.map(host => hostGuard({ headers: { host }, socket: { localPort: 4488 } }, 'read', source))
+  const expected = hosts.map(refusal)
+  for (const source of [() => ({}), () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }]) {
+    actual.push(hostGuard({ headers: { host: '192.0.2.23:4488' }, socket: { localPort: 4488 } }, 'read', source))
+    expected.push(refusal('192.0.2.23:4488'))
+  }
+  assert.deepEqual(actual, expected)
+})
+
+// MUTATION LH4: widening the read-only label condition admits writes on local literals.
+test('LH4', () => {
+  let calls = 0
+  const source = () => { calls++; return { ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] } }
+  const hosts = ['192.0.2.23:4488', '[2001:db8::23]:4488']
+  const refusal = host => ({ status: 403, error: `write host refused: ${host}` })
+  const request = host => ({ headers: { host, 'content-type': 'application/json' }, socket: { localPort: 4488 } })
+  const actual = hosts.flatMap(host => [
+    hostGuard(request(host), 'write', source),
+    writeGuard(request(host)),
+  ])
+  const expected = hosts.flatMap(host => [refusal(host), refusal(host)])
+  assert.deepEqual(actual, expected)
+  assert.equal(calls, 0)
+})

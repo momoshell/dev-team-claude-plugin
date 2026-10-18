@@ -762,48 +762,40 @@ test('warm suite timeout diagnostics preserve output and distinguish other failu
   })
 })
 
-// MUTATION F7: remove the warm overflow exclusion so ENOBUFS plus SIGTERM becomes a timeout.
-test('warm output overflow stays unmeasured without suite timeout evidence', () => {
+// MUTATION F7: drop `&& !overflowed` from either timeout branch in crew/seat-io.mjs
+// (warm `if (warmTimedOut && !overflowed) output +=` or cold
+// `if (coldTimedOut && !overflowed) throw new Error(`) and ENOBUFS plus SIGTERM,
+// which is what spawnSync returns on a maxBuffer overflow, reads as a suite timeout.
+test('an output overflow stays unmeasured in warm and cold runs and is never a suite timeout', () => {
   withRepo({ dirty: false }, (fixture) => {
-    const overflow = makeIo(fixture, {
-      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
-        ? { status: null, stdout: 'partial', stderr: 'buffer stderr', signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) }
-        : realSpawnSync(bin, argv, options),
+    const overflowResult = (stderr) => ({ status: null, stdout: 'partial', stderr, signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) })
+    const warm = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh' ? overflowResult('buffer stderr') : realSpawnSync(bin, argv, options),
     }).run('true')
-    assert.equal(overflow.ok, false)
-    assert.equal(overflow.truncated, true)
-    assert.equal(overflow.timed_out, undefined)
-    assert.equal(overflow.timeout_s, undefined)
-    assert.equal(overflow.timeout_source, undefined)
-    assert.ok(overflow.output.startsWith('partialbuffer stderr'))
-    assert.equal(overflow.stderr, 'buffer stderr')
-    assert.match(overflow.output, /spawn error: buffer full/)
-    assert.doesNotMatch(overflow.output, /suite timeout/)
-    assert.match(overflow.output, /\[output exceeded \d+ bytes — this run is UNMEASURED, not red\]$/)
-  })
-})
+    assert.equal(warm.ok, false)
+    assert.equal(warm.truncated, true)
+    assert.equal(warm.timed_out, undefined)
+    assert.equal(warm.timeout_s, undefined)
+    assert.equal(warm.timeout_source, undefined)
+    assert.ok(warm.output.startsWith('partialbuffer stderr'))
+    assert.match(warm.output, /spawn error: buffer full/)
+    assert.doesNotMatch(warm.output, /suite timeout/)
+    assert.match(warm.output, /\[output exceeded \d+ bytes — this run is UNMEASURED, not red\]$/)
 
-// MUTATION F7: remove the cold overflow exclusion so ENOBUFS plus SIGTERM gives timeout remedies.
-test('cold output overflow keeps the spawn failure diagnosis and worktree', () => {
-  withRepo({ dirty: false }, (fixture) => {
     let coldPath = null
-    const io = makeIo(fixture, {
+    const cold = makeIo(fixture, {
       spawnSync: (bin, argv, options) => {
-        if (String(bin) === '/bin/sh') {
-          coldPath = options.cwd
-          return { status: null, stdout: 'partial', stderr: '', signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) }
-        }
-        return realSpawnSync(bin, argv, options)
+        if (String(bin) !== '/bin/sh') return realSpawnSync(bin, argv, options)
+        coldPath = options.cwd
+        return overflowResult('')
       },
     })
     try {
-      assert.throws(() => io.runCold('true'), (error) => {
+      assert.throws(() => cold.runCold('true'), (error) => {
         assert.match(error.message, /could not be spawned/)
         assert.match(error.message, /buffer full/)
-        assert.match(error.message, /kept for inspection/)
-        assert.ok(error.message.includes(coldPath))
-        assert.doesNotMatch(error.message, /suite timeout/)
-        assert.doesNotMatch(error.message, /increase profile suite_timeout_s|DEVTEAM_SUITE_TIMEOUT_S/)
+        assert.ok(error.message.includes(`${coldPath} (kept for inspection)`))
+        assert.doesNotMatch(error.message, /suite timeout|suite_timeout_s|DEVTEAM_SUITE_TIMEOUT_S/)
         return true
       })
       assert.ok(existsSync(coldPath))

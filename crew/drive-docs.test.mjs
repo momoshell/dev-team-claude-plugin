@@ -1884,3 +1884,23 @@ test('SP7', () => {
   const loop = source.slice(source.indexOf('## The assignment loop'), source.indexOf('## ReturnEnvelope shape'))
   assert.ok(loop.includes('`submit_envelope`'))
 })
+// MUTATION AW1: corrupt the PR 1860 merge timestamp in ADR-049's amendment.
+test('AW1 ADR-049 Amendment 1 starts the A/B window at PR 1860', () => {
+  const adr = readFileSync(join(REPO_ROOT, 'docs/adr/adr-049-builder-edit-assist.md'), 'utf8')
+  const index = readFileSync(join(REPO_ROOT, 'docs/adr/README.md'), 'utf8')
+  const ledger = readFileSync(join(REPO_ROOT, 'scripts/factory/ledger.mjs'), 'utf8')
+  const heading = '## Amendment 1 (2026-10-18, operator decision) — the A/B window starts at PR 1860'
+  const reverseAt = adr.indexOf('## Reverses if')
+  const amendmentAt = adr.indexOf(heading)
+  assert.ok(reverseAt >= 0 && amendmentAt > reverseAt)
+  assert.ok(adr.includes('The A/B window starts at PR 1860 (commit a0df4a49), merged 2026-10-18T07:28:19Z.'))
+  assert.ok(adr.includes("Only `run_configurations` rows whose `edit_assist_source` is `'rotation'` count."))
+  assert.ok(adr.includes('Rows before this window are request-set flags, not arms, and are not A/B evidence.'))
+  assert.ok(adr.includes("**What does not change.** Stage 1's existing decisions are unchanged."))
+  const floorLine = ledger.split('\n').findIndex((line) => line === 'export const CELL_RATE_FLOOR = 12') + 1
+  assert.ok(adr.includes('`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:' + floorLine + '`)'))
+  const tableRow = index.split('\n').find((line) => line.startsWith('| 049 |'))
+  const listRow = index.split('\n').find((line) => line.startsWith('- **ADR-049'))
+  assert.ok(tableRow.includes('**ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**'))
+  assert.ok(listRow.includes('*ratified* 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860), operator decision'))
+})

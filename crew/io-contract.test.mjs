@@ -5,7 +5,7 @@ import { mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsR
 
 import { join } from 'node:path'
 import { cellFailureKind, emitAdapter, RUN_MAX_BUFFER_BYTES, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
-import { resolveSeatModels } from './crew.mjs'
+import { resolveSeatModels, resolveTier } from './crew.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
@@ -160,8 +160,9 @@ const rosterFixture = () => {
   }
 }
 const ROSTER = rosterFixture()
+const SHIPPED_ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
-function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, adapters, readRoster, ...deps } = {}) {
+function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, adapters, readRoster, readLadder, ...deps } = {}) {
   const source = cell || ROSTER.tiers[tier]?.[role] || ROSTER.tiers.mechanical[role]
   const selectedAgent = agent || source.agent
   const member = {
@@ -176,6 +177,7 @@ function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json
   const logs = []
   const io = seatIo(crew, paths, paths.dir, null, adapters === undefined ? { [role]: { adapter } } : adapters, {}, {
     readRoster: readRoster || (() => ROSTER),
+    ...(readLadder ? { readLadder } : {}),
     logLine: (_path, obj) => logs.push(obj),
     ...deps,
   })
@@ -966,7 +968,7 @@ test('reseat refuses when no adapter can translate the next cell', () => {
       build: { reviewer: { provider: 'google', id: 'gem-10', effort: 'max', agent: 'pi' } },
       judge: {},
     },
-    models: {},
+    models: { 'google/gem-10': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 } },
   }
   const google = makeTierFixture({
     role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi',
@@ -990,7 +992,10 @@ function seatFreshFixture({ effortOnly = false, running = true, inFlight = false
   const member = { transport: 'headless-rpc', agent: 'pi', provider: 'openai', id: 'old-model', model: 'openai-codex/old-model', effort: 'medium', session_id: 'old-session', started: true }
   const crew = { checkout: dir, tier: 'mechanical', members: { builder: member }, seats: { builder: { ...member } } }
   const cell = { provider: 'openai', id: effortOnly ? 'old-model' : 'new-model', agent: 'pi', effort: 'high' }
-  const roster = { tiers: { mechanical: { builder: { ...member } }, build: { builder: cell } } }
+  const roster = {
+    tiers: { mechanical: { builder: { ...member } }, build: { builder: cell } },
+    models: { 'openai/old-model': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 }, 'openai/new-model': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 } },
+  }
   const diskPath = join(dir, 'crew.json'), savedPath = join(seatDir, 'session.json'), cmdPath = join(seatDir, 'cmd.json')
   fsWriteFileSync(diskPath, JSON.stringify(crew))
   fsWriteFileSync(savedPath, JSON.stringify({ sessionId: 'old-session', lastAssignmentId: 'd0', cursor: 'preserved-cursor' }))
@@ -1238,4 +1243,209 @@ test('PV2 assigned return paths retain their dispatch transport', () => {
   assert.deepEqual(assignment, { id: 'd1', returnPath: assignment.returnPath })
   assert.equal(io.dispatchTransport(assignment.returnPath), 'pane')
   assert.equal(io.dispatchTransport('/unknown.json'), null)
+})
+
+// Kill mutation: remove the estimated candidate guard in nextModelRung.
+test('RE3', () => {
+  const cell = { provider: 'openai', id: 'a', agent: 'pi', effort: 'medium' }
+  const roster = { models: {
+    'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+    'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, rate_estimated: true },
+    'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 20 },
+    'other/cheaper': { cost_in_per_mtok: 1.5, cost_out_per_mtok: 1 },
+    'openai/override': { cost_in_per_mtok: 1.5, cost_out_per_mtok: 1, tags: ['override-only'] },
+    'openai/same-price': { cost_in_per_mtok: 1, cost_out_per_mtok: 1 },
+  } }
+  assert.deepEqual(nextModelRung(roster, cell), {
+    rung: 'model:a→c', cell: { provider: 'openai', id: 'c', agent: 'pi', effort: 'medium' },
+  })
+  roster.models['openai/a'].rate_estimated = true
+  assert.equal(nextModelRung(roster, cell), null)
+  roster.models['openai/a'].rate_estimated = false
+  roster.models['openai/b'].rate_estimated = false
+  roster.models['openai/aa'] = { cost_in_per_mtok: 2, cost_out_per_mtok: 10 }
+  assert.equal(nextModelRung(roster, cell).cell.id, 'aa')
+  for (const models of [null, [], { 'openai/a': [] }, { 'openai/a': {} }]) {
+    assert.equal(nextModelRung({ models }, cell), null)
+  }
+  assert.equal(nextModelRung(SHIPPED_ROSTER, { provider: 'meta', id: 'muse-spark-1.3-contributor', agent: 'pi', effort: 'xhigh' }), null)
+})
+
+// Kill mutation: remove nextModelRung's finite output-price ceiling check.
+test('RE4', () => {
+  const cell = { provider: 'openai', id: 'a', agent: 'pi', effort: 'high' }
+  const roster = { models: {
+    'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+    'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 },
+    'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 20 },
+  } }
+  assert.equal(nextModelRung(roster, cell, { ceiling: 9 }), null)
+  assert.equal(nextModelRung(roster, cell, { ceiling: 10 }).cell.id, 'b')
+  assert.equal(nextModelRung(roster, cell).cell.id, 'b')
+  assert.equal(nextModelRung(roster, cell, { ceiling: null }), null)
+  for (const cost of [undefined, null, '10', Infinity, NaN]) {
+    roster.models['openai/b'].cost_out_per_mtok = cost
+    assert.equal(nextModelRung(roster, cell, { ceiling: 10 }), null)
+    assert.equal(nextModelRung(roster, cell).cell.id, 'b')
+  }
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner, { ceiling: 25 }), null)
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner).cell.id, 'gpt-6-astra')
+})
+
+// Kill mutation: read judge's ceiling instead of crew.tier's ceiling.
+test('RE5', () => {
+  const cell = { provider: 'openai', id: 'a', agent: 'pi', effort: 'medium' }
+  const roster = {
+    tiers: { build: { reviewer: cell }, judge: { reviewer: { ...cell } } },
+    models: {
+      'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 },
+      'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 20 },
+    },
+  }
+  let retired = 0
+  const f = makeTierFixture({
+    role: 'reviewer', tier: 'build', cell, transport: 'headless-rpc',
+    readRoster: () => roster,
+    readLadder: () => ({ cost_ceilings: { mechanical: 100, build: 9, judge: 100 } }),
+    headlessRpcIo: () => ({ retire: () => { retired += 1; return { retired: true } } }),
+  })
+  const diskPath = join(f.paths.dir, 'crew.json'), before = JSON.stringify(f.crew)
+  fsWriteFileSync(diskPath, before)
+  const out = f.io.reseat('reviewer')
+  assert.deepEqual([out.applied, out.reason, out.to], [false, 'exhausted', null])
+  assert.match(out.why, /measured.*in-ceiling/)
+  assert.equal(JSON.stringify(f.crew), before)
+  assert.equal(fsReadFileSync(diskPath, 'utf8'), before)
+  assert.equal(retired, 0)
+  assert.deepEqual(f.logs, [])
+})
+
+// Kill mutation: discard the declared fallback lookup.
+test('RE9', () => {
+  const ladder = JSON.parse(fsReadFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    const boot = resolveTier(SHIPPED_ROSTER, tier)
+    const cell = SHIPPED_ROSTER.tiers[tier].builder
+    assert.deepEqual(cell.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }])
+    assert.deepEqual(boot.seats.builder.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }])
+    const out = makeTierFixture({ role: 'builder', tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat('builder')
+    if (tier === 'mechanical') {
+      assert.deepEqual([out.applied, out.to?.provider, out.to?.id, out.to?.effort, out.rung],
+        [true, 'openai', 'gpt-6-luna', 'xhigh', 'mechanical→build'])
+    } else {
+      assert.deepEqual([out.applied, out.to?.provider, out.to?.id, out.to?.effort, out.rung],
+        [true, 'openai', 'gpt-6.1-sol', cell.effort, `declared:${cell.id}→gpt-6.1-sol`])
+    }
+    // The Sol planner and the Opus reviewer have no in-ceiling upgrade on the shipped roster:
+    // the planner already sits on the declared target, and a claude seat cannot take a pi rung.
+    for (const role of ['planner', 'reviewer']) {
+      assert.equal(SHIPPED_ROSTER.tiers[tier][role].fallback, undefined)
+      const seat = makeTierFixture({
+        role, tier, cell: SHIPPED_ROSTER.tiers[tier][role],
+        readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder,
+      }).io.reseat(role)
+      assert.deepEqual([role, seat.applied, seat.reason], [role, false, 'exhausted'])
+      assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers[tier][role], { ceiling: ladder.cost_ceilings[tier] }), null)
+    }
+  }
+  // A seat already on its declared target is never upgraded onto itself again.
+  const twice = makeTierFixture({ role: 'builder', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+  assert.deepEqual([twice.io.reseat('builder').to?.id, twice.crew.seats.builder.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
+  assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
+  // Sol pass 3: a walk from the stale roster cell picked a cheaper model than the live one.
+  const walkRoster = {
+    tiers: { mechanical: { builder: { provider: 'openai', id: 'a', effort: 'medium', agent: 'pi', fallback: [{ provider: 'openai', id: 'b', agent: 'pi' }] } }, build: { builder: { provider: 'openai', id: 'c', effort: 'medium', agent: 'pi' } }, judge: {} },
+    models: {
+      'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+      'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 8 },
+    },
+  }
+  const walk = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: walkRoster.tiers.mechanical.builder, readRoster: () => walkRoster, readLadder: () => ({ cost_ceilings: { mechanical: 10 } }) })
+  assert.deepEqual([1, 2, 3].map(() => [walk.io.reseat('builder').applied, walk.crew.seats.builder.id]), [[true, 'c'], [false, 'c'], [false, 'c']])
+  // Repeated reseats are monotonic: the mechanical tier step never pulls a Sol seat back to Luna.
+  const climb = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: SHIPPED_ROSTER.tiers.mechanical.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+  const steps = [1, 2, 3, 4].map(() => { const out = climb.io.reseat('builder'); return [out.applied, climb.crew.seats.builder.id, climb.crew.seats.builder.effort] })
+  assert.deepEqual(steps, [
+    [true, 'gpt-6-luna', 'xhigh'], [true, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'],
+  ])
+  const cell = (provider, id, effort = 'medium', agent = 'pi') => ({ provider, id, effort, agent })
+  const fixture = () => ({
+    tiers: {
+      mechanical: { builder: { ...cell('openai', 'a'), fallback: [cell('openai', 'b')] } },
+      build: { builder: cell('openai', 'c') }, judge: {},
+    },
+    models: {
+      'openai/a': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'openai/b': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 },
+      'openai/c': { cost_in_per_mtok: 3, cost_out_per_mtok: 20 },
+    },
+  })
+  const make = (roster, deps = {}) => makeTierFixture({
+    role: 'builder', cell: roster.tiers.mechanical.builder,
+    adapter: { modelString: ({ provider, id }) => `${provider}/${id}` },
+    readRoster: () => roster, readLadder: () => ({ cost_ceilings: { mechanical: 10 } }), ...deps,
+  })
+  const roster = fixture()
+  assert.equal(make(roster).io.reseat('builder').to.id, 'b')
+  roster.models['openai/c'].cost_out_per_mtok = 10
+  assert.equal(make(roster).io.reseat('builder').to.id, 'c')
+  roster.models['openai/c'].rate_estimated = true
+  assert.equal(make(roster).io.reseat('builder').to.id, 'b')
+  roster.tiers.build.builder = { ...roster.tiers.mechanical.builder }
+  assert.equal(make(roster).io.reseat('builder').to.id, 'b')
+  delete roster.tiers.build.builder
+  roster.tiers.mechanical.builder.fallback = []
+  assert.equal(make(roster).io.reseat('builder').rung, 'model:a→b')
+
+  const declared = fixture()
+  declared.models['openai/a'].rate_estimated = true
+  declared.tiers.mechanical.builder.fallback[0] = cell('other', 'cheaper')
+  declared.models['other/cheaper'] = { cost_in_per_mtok: 0.5, cost_out_per_mtok: 10 }
+  assert.equal(make(declared).io.reseat('builder').to.effort, 'medium')
+  declared.tiers.mechanical.builder.fallback[0].effort = 'high'
+  assert.deepEqual(make(declared).io.reseat('builder').to, {
+    provider: 'other', id: 'cheaper', agent: 'pi', effort: 'high', model: 'other/cheaper',
+  })
+  declared.tiers.mechanical.builder.fallback[0].agent = 'claude'
+  assert.equal(make(declared).io.reseat('builder').reason, 'agent-change')
+
+  for (const bad of [null, [], {}, { rate_estimated: true, cost_out_per_mtok: 10 },
+    { cost_out_per_mtok: 11 }, { cost_out_per_mtok: Infinity }, { cost_out_per_mtok: '10' }]) {
+    const r = fixture()
+    r.models['openai/a'].rate_estimated = true
+    r.models['openai/b'] = bad
+    const out = make(r).io.reseat('builder')
+    assert.deepEqual([out.applied, out.reason], [false, 'exhausted'])
+  }
+  for (const fallback of [[cell('openai', 'missing'), cell('openai', 'b')],
+    [cell('openai', 'a', 'high')], [null], [[]], { 0: cell('openai', 'b') }]) {
+    const r = fixture()
+    r.models['openai/a'].rate_estimated = true
+    r.tiers.mechanical.builder.fallback = fallback
+    assert.equal(make(r).io.reseat('builder').reason, 'exhausted')
+  }
+  const readers = [
+    ...['EPERM', 'ENOENT', 'EINTR'].map(code => () => { throw Object.assign(new Error(code), { code }) }),
+    ...['', '{bad json'].map(bytes => () => JSON.parse(bytes)),
+    ...[null, {}, [], { cost_ceilings: {} }, { cost_ceilings: { mechanical: Infinity } },
+      { cost_ceilings: { mechanical: NaN } }, { cost_ceilings: { mechanical: '10' } }].map(value => () => value),
+  ]
+  for (const readLadder of readers) {
+    const f = make(fixture(), {
+      readLadder, transport: 'headless-rpc',
+      headlessRpcIo: () => { assert.fail('unsafe target reached retirement') },
+    })
+    const before = JSON.stringify(f.crew), diskPath = join(f.paths.dir, 'crew.json')
+    fsWriteFileSync(diskPath, before)
+    const out = f.io.reseat('builder')
+    assert.deepEqual([out.applied, out.reason], [false, 'exhausted'])
+    assert.equal(JSON.stringify(f.crew), before)
+    assert.equal(fsReadFileSync(diskPath, 'utf8'), before)
+    assert.deepEqual(f.logs, [])
+  }
+  const floor = make(fixture(), { readLadder: () => { assert.fail('explicit floor read failure-upgrade ceiling') } })
+  assert.equal(floor.io.reseat('builder', { tier: 'build' }).to.id, 'c')
+  assert.equal(make(fixture(), { tier: 'unknown' }).io.reseat('builder').reason, 'exhausted')
 })

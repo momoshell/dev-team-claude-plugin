@@ -1814,6 +1814,58 @@ test('build rounds evidence', async (t) => {
     assert.match(readout, /rounds_unmeasured_runs/); assert.match(readout, /build_rounds_absent_reason/)
   })
 })
+// Mutation RE8: hard-code lane_spend_estimated to false for a priced arm.
+test('RE8', { skip: SKIP }, () => {
+  const rates = { cost_in_per_mtok: 1, cost_out_per_mtok: 2, cost_cache_write_per_mtok: 0, cost_cache_read_per_mtok: 0 }
+  for (const scenario of [
+    { name: 'mixed', flag: true, cost: 2 },
+    { name: 'measured', flag: false, cost: 2 },
+    { name: 'estimated-zero', flag: true, zero: true, cost: 0 },
+    { name: 'measured-zero', flag: false, zero: true, cost: 0 },
+    { name: 'missing-model', flag: null, models: {}, reason: 'model-unpriced-or-ambiguous' },
+    { name: 'missing-rate', flag: null, rates: { ...rates, cost_in_per_mtok: null }, reason: 'price-rate-unavailable' },
+    { name: 'missing-usage', flag: null, missingUsage: true, reason: 'usage-unavailable' },
+    { name: 'overflow', flag: null, rates: { ...rates, cost_in_per_mtok: 1e308 }, reason: 'cost-not-finite' },
+  ]) {
+    const ledger = advisorArmTestRun(`re8-${scenario.name}`)
+    const adw_id = `re8-${scenario.name}`
+    try {
+      for (const [index, model] of ['openai-codex/gpt-6.1-sol', 'openai-codex/gpt-6-luna'].entries()) {
+        const session = `s${index}`
+        const usage = { billed_input_tokens: scenario.missingUsage ? null : scenario.zero ? 0 : scenario.name === 'overflow' ? 2e6 : 1e6, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }
+        ledger.startAgentSession({ adw_id, dispatch_id: 'd', role: 'builder', model, claude_session_id: session, transcript_path: null })
+        ledger.endAgentSession({ adw_id, claude_session_id: session, model, context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, ...usage })
+        ledger.recordAdvisorUsage({ adw_id, consult_id: session, role: 'builder', model, usage: scenario.missingUsage ? null : usage, ...(scenario.missingUsage ? { usage_reason: 'usage-unavailable' } : {}) })
+      }
+      const catalog = { models: scenario.models ?? {
+        'openai/gpt-6.1-sol': { ...(scenario.rates ?? rates), rate_estimated: scenario.flag ?? true },
+        'openai/gpt-6-luna': rates,
+      } }
+      let row = advisorArmsReadout(ledger, { catalog }).arms[0]
+      assert.deepEqual([row.lane_spend_usd, row.lane_spend_estimated, row.lane_spend_denominator, row.lane_spend_missing_runs],
+        [scenario.cost ?? null, scenario.flag, scenario.flag === null ? 0 : 1, scenario.flag === null ? 1 : 0], scenario.name)
+      assert.equal(row.lane_spend_absent_reason, scenario.reason ?? null)
+      assert.deepEqual([row.advisor_spend.cost_usd, row.advisor_spend.cost_estimated], [scenario.cost ?? null, scenario.flag], scenario.name)
+      assert.equal(row.advisor_spend.absent_reason, scenario.reason ?? null)
+      // Missing runs do not turn a priced subtotal's label into null.
+      advisorArmTestRun(`${adw_id}-missing`, 'p/m', '["builder"]', ledger)
+      row = advisorArmsReadout(ledger, { catalog }).arms[0]
+      assert.deepEqual([row.lane_spend_usd, row.lane_spend_estimated, row.lane_spend_denominator, row.lane_spend_missing_runs],
+        [scenario.cost ?? null, scenario.flag, scenario.flag === null ? 0 : 1, scenario.flag === null ? 2 : 1], scenario.name)
+      if (scenario.flag !== null) {
+        const measuredRun = `${adw_id}-z-measured`
+        advisorArmTestRun(measuredRun, 'p/m', '["builder"]', ledger)
+        ledger.startAgentSession({ adw_id: measuredRun, dispatch_id: 'd', role: 'builder', model: 'openai-codex/gpt-6-luna', claude_session_id: 's', transcript_path: null })
+        ledger.endAgentSession({ adw_id: measuredRun, claude_session_id: 's', context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null, billed_input_tokens: 1e6, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+        row = advisorArmsReadout(ledger, { catalog }).arms[0]
+        assert.deepEqual([row.lane_spend_usd, row.lane_spend_estimated, row.lane_spend_denominator, row.lane_spend_missing_runs], [scenario.cost + 1, scenario.flag, 2, 1])
+      }
+      const empty = advisorArmsReadout(ledger, { arms: ['empty'], catalog }).arms[0]
+      assert.deepEqual([empty.lane_spend_usd, empty.lane_spend_estimated, empty.advisor_spend.cost_usd, empty.advisor_spend.cost_estimated], [null, null, null, null])
+    } finally { ledger.close() }
+  }
+})
+
 // Kills: counting an unbilled run's null billed_cost_usd as measured $0 lane spend (Number(null) is 0),
 // which inflates lane_spend_denominator; and dropping a billed run (the spend and denominator fall).
 test('A7 lane spend: an unbilled run is missing spend, never a measured zero', () => {

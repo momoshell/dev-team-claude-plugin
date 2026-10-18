@@ -300,10 +300,18 @@
         "source": {
           "type": "string"
         },
+        "rate_estimated": { "const": true },
+        "rate_estimate_reason": { "enum": ["borrowed-rate-upper-bound", "borrowed-rate-unbounded"] },
         "last_verified": {
-          "type": "string",
+          "type": ["string", "null"],
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
         }
+      },
+      "if": { "required": ["rate_estimated"] },
+      "then": { "required": ["rate_estimate_reason"] },
+      "else": {
+        "not": { "required": ["rate_estimate_reason"] },
+        "properties": { "last_verified": { "type": "string" } }
       }
     }
   }

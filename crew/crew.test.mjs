@@ -2484,14 +2484,14 @@ test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet success
   const wonder = shipped.models['meta/muse-wonder-1.0-contributor']
   assert.deepEqual([wonder.cost_in_per_mtok, wonder.cost_out_per_mtok, wonder.cost_cache_read_per_mtok, wonder.cost_cache_write_per_mtok, wonder.context], [4, 20, 0.2, 0, 1048576])
   assert.match(wonder.cache_rate_source, /UPPER BOUND, not a measurement/)
-  assert.equal(wonder.last_verified, '2026-10-16')
+  assert.equal(wonder.last_verified, null)
   // Nor Wonder Full: its row borrows the same rates, and says the error direction is unknown.
   assert.ok(frontier.members.includes('meta/muse-wonder-full-1.0-contributor'))
   assert.match(String(frontier.membership_basis), /meta\/muse-wonder-full-1\.0-contributor is an assertion ratified by the operator on 2026-10-17/)
   const wonderFull = shipped.models['meta/muse-wonder-full-1.0-contributor']
   assert.deepEqual([wonderFull.cost_in_per_mtok, wonderFull.cost_out_per_mtok, wonderFull.cost_cache_read_per_mtok, wonderFull.cost_cache_write_per_mtok, wonderFull.context], [4, 20, 0.2, 0, 1048576])
   assert.match(wonderFull.cache_rate_source, /BORROWED figure, not a measurement and not a bound/)
-  assert.equal(wonderFull.last_verified, '2026-10-17')
+  assert.equal(wonderFull.last_verified, null)
   assert.ok(utility.members.includes('openai/gpt-6-luna'))
   assert.ok(frontier.members.includes('anthropic/claude-fable-5-1'))
   assert.match(String(frontier.membership_basis), /anthropic\/claude-fable-5-1 replace their predecessors/)
@@ -2759,4 +2759,54 @@ test('RV1-1 teardownCore runs pruning after reclaim and never lets either failur
 test('RV1-1 teardown source retains the cache-prune integration catch', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   assert.ok(source.includes("try { (deps.pruneCacheDirs || pruneCacheDirs)({ taskDir: descendantTaskDir, log: io?.log }, deps) } catch {}"))
+})
+
+// Kill mutation: remove the model conditional's required rate_estimate_reason.
+test('RE1', () => {
+  const measured = { cost_in_per_mtok: 1, cost_out_per_mtok: 2, context: 100, tags: [], source: 'fixture', last_verified: '2026-10-17' }
+  assert.deepEqual(fallbackSchemaErrors(measured, 'model'), [])
+  assert.notEqual(fallbackSchemaErrors({ ...measured, last_verified: null }, 'model').length, 0)
+  for (const rate_estimate_reason of ['borrowed-rate-upper-bound', 'borrowed-rate-unbounded']) {
+    const estimated = { ...measured, rate_estimated: true, rate_estimate_reason }
+    for (const last_verified of ['2026-10-17', null]) {
+      assert.deepEqual(fallbackSchemaErrors({ ...estimated, last_verified }, 'model'), [])
+    }
+    const { rate_estimate_reason: omitted, ...missingReason } = estimated
+    assert.notEqual(fallbackSchemaErrors(missingReason, 'model').length, 0)
+    for (const invalid of [
+      { ...estimated, rate_estimated: false },
+      { ...estimated, rate_estimate_reason: 'unratified' },
+      { ...estimated, extra: true },
+      { ...measured, rate_estimate_reason },
+    ]) assert.notEqual(fallbackSchemaErrors(invalid, 'model').length, 0, JSON.stringify(invalid))
+  }
+  for (const entry of [measured, { ...measured, rate_estimated: true, rate_estimate_reason: 'borrowed-rate-upper-bound' }]) {
+    for (const last_verified of ['', '17-10-2026', '2026-1-17', 20261017]) {
+      assert.notEqual(fallbackSchemaErrors({ ...entry, last_verified }, 'model').length, 0)
+    }
+    const { last_verified: omitted, ...missingDate } = entry
+    assert.notEqual(fallbackSchemaErrors(missingDate, 'model').length, 0)
+  }
+  assert.notEqual(fallbackSchemaErrors({ ...measured, rate_estimated: false }, 'model').length, 0)
+  assert.notEqual(fallbackSchemaErrors({ ...measured, extra: true }, 'model').length, 0)
+})
+
+// Kill mutation: change Wonder's upper-bound reason to borrowed-rate-unbounded.
+test('RE2', () => {
+  const shipped = shippedRoster()
+  assert.deepEqual(fallbackSchemaErrors(shipped, null), [])
+  assert.deepEqual(
+    Object.entries(shipped.models).filter(([, entry]) => Object.hasOwn(entry, 'rate_estimated')).map(([key, entry]) => ({
+      key, rate_estimated: entry.rate_estimated, rate_estimate_reason: entry.rate_estimate_reason, last_verified: entry.last_verified,
+      prices: [entry.cost_in_per_mtok, entry.cost_out_per_mtok, entry.cost_cache_read_per_mtok, entry.cost_cache_write_per_mtok, entry.context],
+    })),
+    [
+      { key: 'meta/muse-wonder-1.0-contributor', rate_estimated: true, rate_estimate_reason: 'borrowed-rate-upper-bound', last_verified: null, prices: [4, 20, 0.2, 0, 1048576] },
+      { key: 'meta/muse-wonder-full-1.0-contributor', rate_estimated: true, rate_estimate_reason: 'borrowed-rate-unbounded', last_verified: null, prices: [4, 20, 0.2, 0, 1048576] },
+    ],
+  )
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    assert.deepEqual(shipped.tiers[tier].builder.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }], `${tier}/builder`)
+    assert.equal(shipped.tiers[tier].planner.fallback, undefined, `${tier}/planner`)
+  }
 })

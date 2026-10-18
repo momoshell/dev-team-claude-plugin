@@ -8695,22 +8695,24 @@ export const LANE_SPEND_ABSENT_REASONS = Object.freeze(['no-agent-sessions', 'se
 function laneRunSpend(rows, catalog) {
   const tokenNames = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
   const rateNames = ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok']
-  if (rows.length === 0) return { cost: null, reason: 'no-agent-sessions' }
+  if (rows.length === 0) return { cost: null, estimated: null, reason: 'no-agent-sessions' }
   let total = 0
+  let estimated = false
   for (const row of rows) {
     // Rows without a session id share one identity per model, so a running total can land on more than one row.
-    if (row.claude_session_id == null) return { cost: null, reason: 'session-id-unavailable' }
+    if (row.claude_session_id == null) return { cost: null, estimated: null, reason: 'session-id-unavailable' }
     const priceKey = priceKeyForModel(catalog, row.model)
-    if (priceKey === null) return { cost: null, reason: 'model-unpriced-or-ambiguous' }
-    if (tokenNames.some((name) => typeof row[name] !== 'number' || !Number.isFinite(row[name]))) return { cost: null, reason: 'usage-unavailable' }
+    if (priceKey === null) return { cost: null, estimated: null, reason: 'model-unpriced-or-ambiguous' }
+    if (tokenNames.some((name) => typeof row[name] !== 'number' || !Number.isFinite(row[name]))) return { cost: null, estimated: null, reason: 'usage-unavailable' }
     const price = catalogPrice(catalog, priceKey)
     const rates = rateNames.map((name) => price?.[name])
-    if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, reason: 'price-rate-unavailable' }
+    if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, estimated: null, reason: 'price-rate-unavailable' }
     const cost = tokenNames.reduce((sum, name, index) => sum + row[name] * rates[index], 0) / 1e6
-    if (!Number.isFinite(cost) || !Number.isFinite(total + cost)) return { cost: null, reason: 'cost-not-finite' }
+    if (!Number.isFinite(cost) || !Number.isFinite(total + cost)) return { cost: null, estimated: null, reason: 'cost-not-finite' }
     total += cost
+    estimated ||= price.rate_estimated === true
   }
-  return { cost: total, reason: null }
+  return { cost: total, estimated, reason: null }
 }
 
 function laneBuildRounds(markers) {
@@ -8787,7 +8789,7 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     if (!granted.includes('builder')) { ungranted++; continue }
     if (configuration.advisor_source_evidence != null) backfilled++
     const key = configuration.advisor_model
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_estimated: false, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     // A run still in flight has no outcome yet: it counts toward the rotation, never toward a rate.
     // Its advisor consults are already spent, so its id still feeds advisor spend (run_ids).
     arm.run_ids.push(session.adw_id)
@@ -8801,13 +8803,13 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     arm.changes_needed += runReviews.filter((row) => row.verdict === 'changes-needed').length
     if (session.outcome === 'escalated') arm.escalations++
     const spend = laneRunSpend(agentRowsByRun.get(session.adw_id) ?? [], catalog)
-    if (spend.cost !== null) { arm.billed_runs++; arm.lane_spend_usd += spend.cost }
+    if (spend.cost !== null) { arm.billed_runs++; arm.lane_spend_usd += spend.cost; arm.lane_spend_estimated ||= spend.estimated }
     else { arm.lane_spend_missing_runs++; if (arm.lane_spend_absent_reason === null) arm.lane_spend_absent_reason = spend.reason }
     armsMap.set(key, arm)
   }
   const requested = armOrder ?? [...armsMap.keys()]
   const results = requested.map((key) => {
-    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
+    const arm = armsMap.get(key) ?? { arm: key, runs: 0, in_flight: 0, build_rounds: 0, rounds_denominator: 0, rounds_unmeasured_runs: 0, reviews: 0, changes_needed: 0, escalations: 0, billed_runs: 0, lane_spend_usd: 0, lane_spend_estimated: false, lane_spend_missing_runs: 0, lane_spend_absent_reason: null, run_ids: [] }
     const runs = arm.runs
     const thin = runs < CELL_RATE_FLOOR
     const changesNeeded = arm.changes_needed
@@ -8821,18 +8823,19 @@ export function advisorArmsReadout(ledger, { arms: armOrder = null, catalog = nu
     const priced = advisorRows.map((row) => {
       const priceKey = catalog === null ? null : priceKeyForModel(catalog, row.model, 'pi')
       const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
-      if (!priceKey) return { cost: null, reason: 'model-unpriced-or-ambiguous' }
+      if (!priceKey) return { cost: null, estimated: null, reason: 'model-unpriced-or-ambiguous' }
       const names = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
-      if (names.some((name) => row[name] == null)) return { cost: null, reason: 'usage-unavailable' }
+      if (names.some((name) => row[name] == null)) return { cost: null, estimated: null, reason: 'usage-unavailable' }
       const rates = ['cost_in_per_mtok', 'cost_out_per_mtok', 'cost_cache_write_per_mtok', 'cost_cache_read_per_mtok'].map((name) => price?.[name])
-      if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, reason: 'price-rate-unavailable' }
+      if (rates.some((rate) => typeof rate !== 'number' || !Number.isFinite(rate))) return { cost: null, estimated: null, reason: 'price-rate-unavailable' }
       const cost = Number(row.billed_input_tokens) / 1e6 * rates[0] + Number(row.billed_output_tokens) / 1e6 * rates[1] + Number(row.billed_cache_write_tokens) / 1e6 * rates[2] + Number(row.billed_cache_read_tokens) / 1e6 * rates[3]
-      return Number.isFinite(cost) ? { cost, reason: null } : { cost: null, reason: 'cost-not-finite' }
+      return Number.isFinite(cost) ? { cost, estimated: price.rate_estimated === true, reason: null } : { cost: null, estimated: null, reason: 'cost-not-finite' }
     })
     const pricedRows = priced.filter((row) => row.cost != null)
+    const advisorCost = pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null
     const absentReason = pricedRows.length === advisorRows.length ? null : priced.find((row) => row.reason)?.reason
     const noUsage = advisorRows.length === 0 ? null : 'usage-present'
-    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: roundsDenominator, rounds_unmeasured_runs: arm.rounds_unmeasured_runs, build_rounds_absent_reason: buildRoundsAbsentReason, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: arm.lane_spend_missing_runs, lane_spend_absent_reason: arm.lane_spend_absent_reason, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: pricedRows.length === advisorRows.length && pricedRows.length ? pricedRows.reduce((sum, row) => sum + row.cost, 0) : null, absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
+    return { arm: key, runs, in_flight: arm.in_flight, build_rounds: arm.build_rounds, rounds_denominator: roundsDenominator, rounds_unmeasured_runs: arm.rounds_unmeasured_runs, build_rounds_absent_reason: buildRoundsAbsentReason, reviews, changes_needed: changesNeeded, review_denominator: reviews, escalations: arm.escalations, escalation_denominator: runs, thin, build_rounds_per_run: buildRoundsPerRun, bounce_rate: bounceRate, escalation_rate: escalationRate, lane_spend_usd: arm.billed_runs ? arm.lane_spend_usd : null, lane_spend_estimated: arm.billed_runs ? arm.lane_spend_estimated : null, lane_spend_denominator: arm.billed_runs, lane_spend_missing_runs: arm.lane_spend_missing_runs, lane_spend_absent_reason: arm.lane_spend_absent_reason, advisor_spend: { priced_consults: pricedRows.length, usage_count: advisorRows.length, cost_usd: advisorCost, cost_estimated: advisorCost === null ? null : pricedRows.some((row) => row.estimated), absent_reason: noUsage === null ? 'no-advisor-usage' : absentReason, coverage: ADVISOR_SPEND_COVERAGE, journal_only: null, journal_only_reason: 'journal-only' } }
   })
   let winner = null
   if (armOrder) for (const candidate of results) if (winner === null || candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
@@ -9778,6 +9781,8 @@ export function main(argv) {
             + (billedOutputTokens / 1e6) * price.cost_out_per_mtok
             + (billedCacheReadTokens / 1e6) * cacheReadRate
             + (billedCacheWriteTokens / 1e6) * cacheWriteRate
+          // Finite rates can still overflow; JSON would print Infinity as null with no reason.
+          if (!Number.isFinite(costUsd)) { costUsd = null; absent.cost_usd = 'cost-not-finite' }
         }
         if (row.model_key !== null && priceKey === null) absent.price_key = `the model string ${row.model_key} is translated to no single ${row.agent === null ? 'adapter' : row.agent}-catalog key, and a prefix is never stripped to guess one — unmapped, so this cell is unpriced, never free`
         if (!hasRates) {
@@ -9809,6 +9814,7 @@ export function main(argv) {
           billed_cache_read_tokens: billedCacheReadTokens,
           price_key: priceKey,
           cost_usd: costUsd,
+          cost_estimated: Number.isFinite(costUsd) ? price.rate_estimated === true : null,
           absent,
         }
       })
@@ -9848,7 +9854,7 @@ export function main(argv) {
         // Finite rates can still overflow to Infinity; that is no price, and it says so.
         const overflowed = computed !== null && !Number.isFinite(computed)
         const cost = overflowed ? null : computed
-        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : unsafeTokens ? 'usage-total-unsafe' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
+        return { adw_id: group.adw_id, role: group.role, model: group.model, consult_count: group.consult_count, billed_input_tokens: missingTokens ? null : group.billed_input_tokens, billed_output_tokens: missingTokens ? null : group.billed_output_tokens, billed_cache_write_tokens: missingTokens ? null : group.billed_cache_write_tokens, billed_cache_read_tokens: missingTokens ? null : group.billed_cache_read_tokens, price_key: priceKey, cost_usd: cost, cost_estimated: cost === null ? null : price.rate_estimated === true, absent: cost === null ? { cost_usd: !priceKey ? 'model-unpriced-or-ambiguous' : unsafeTokens ? 'usage-total-unsafe' : missingTokens ? 'usage-unavailable' : overflowed ? 'cost-not-finite' : 'price-rate-unavailable' } : {} }
       })
       const priceSource = catalog === null ? null : {
         path: priceSourcePath,

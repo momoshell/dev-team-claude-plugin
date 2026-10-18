@@ -640,6 +640,48 @@ test('cells CLI reports a measured rate, a measured zero, and an unmeasured deno
   assert.equal(unknown.first_round_pass_rate, null)
   assert.match(unknown.absent.first_round_pass_rate, /UNMEASURED/)
 })
+// Mutation RE7: hard-code a priced cell's cost_estimated to false.
+test('RE7', { skip: SKIP }, () => {
+  const rates = { cost_in_per_mtok: 1, cost_out_per_mtok: 10, cost_cache_write_per_mtok: 100, cost_cache_read_per_mtok: 1000 }
+  for (const scenario of [
+    { name: 'estimated', flag: true, cost: 4321 },
+    { name: 'measured', flag: false, cost: 4321 },
+    { name: 'estimated-zero', flag: true, zero: true, cost: 0 },
+    { name: 'measured-zero', flag: false, zero: true, cost: 0 },
+    { name: 'missing-model', flag: null, models: {}, cost: null },
+    { name: 'missing-rate', flag: null, rates: { ...rates, cost_in_per_mtok: null }, cost: null },
+    { name: 'missing-usage', flag: null, missingUsage: true, cost: null },
+    { name: 'overflow', flag: null, rates: { ...rates, cost_in_per_mtok: 1e308 }, cost: null },
+  ]) {
+    const tokens = scenario.zero ? { in: 0, out: 0, cw: 0, cr: 0 } : { in: 1e6, out: 2e6, cw: 3e6, cr: 4e6 }
+    if (scenario.missingUsage) tokens.in = null
+    if (scenario.name === 'overflow') tokens.in = 2e6
+    const dbPath = seedCellUsage({ tag: `re7-${scenario.name}`, provider: 'openai', model_id: 'gpt-6.1-sol', agent: 'pi', model: 'openai-codex/gpt-6.1-sol', sessions: [tokens] })
+    const ledger = openLedger({ dbPath })
+    try {
+      ledger.recordAdvisorUsage({
+        adw_id: `re7-${scenario.name}-adw-0`, consult_id: 'c', role: 'builder', model: 'openai-codex/gpt-6.1-sol',
+        usage: scenario.missingUsage ? null : { billed_input_tokens: tokens.in, billed_output_tokens: tokens.out, billed_cache_write_tokens: tokens.cw, billed_cache_read_tokens: tokens.cr },
+        ...(scenario.missingUsage ? { usage_reason: 'usage-unavailable' } : {}),
+      })
+    } finally { ledger.close() }
+    const pricePath = join(nextDir(), 're7-prices.json')
+    writeFileSync(pricePath, JSON.stringify({ models: scenario.models ?? {
+      'openai/gpt-6.1-sol': { ...(scenario.rates ?? rates), rate_estimated: scenario.flag ?? true },
+    } }))
+    const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(result.status, 0, result.stderr)
+    const payload = JSON.parse(result.stdout)
+    for (const row of scenario.advisorOnly ? payload.advisor_spend : [payload.rows[0], payload.advisor_spend[0]]) {
+      assert.deepEqual([row.cost_usd, row.cost_estimated], [scenario.cost, scenario.flag], scenario.name)
+      if (scenario.cost === null) assert.ok(row.absent.cost_usd, scenario.name)
+    }
+    if (scenario.name === 'overflow') {
+      for (const row of [payload.rows[0], payload.advisor_spend[0]]) assert.equal(row.absent.cost_usd, 'cost-not-finite')
+    }
+  }
+})
+
 test('cells CLI prices a cell from the named catalog and names the units', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const adwId = 'priced-cell'

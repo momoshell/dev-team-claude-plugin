@@ -902,6 +902,7 @@ test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster 
   const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
+  delete rawRoster.tiers.build.builder.fallback
   rawRoster.tiers.build.reviewer = { ...rawRoster.tiers.build.reviewer, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   const base = capabilityRegister()
   const register = capabilityRegister({ coding_agents: {
@@ -939,6 +940,7 @@ test('ADR047 P1 an unavailable advisor agent refuses only when a granted seat wi
     const value = structuredClone(shipped)
     for (const role of ['planner', 'builder', 'reviewer']) {
       value.tiers.build[role] = { ...value.tiers.build[role], provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
+      delete value.tiers.build[role].fallback
     }
     value.tiers.build.advisor = advisor
     return value

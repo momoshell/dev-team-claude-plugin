@@ -15,7 +15,14 @@
         "provider": "openai",
         "id": "gpt-6-luna",
         "agent": "pi",
-        "effort": "medium"
+        "effort": "medium",
+        "fallback": [
+          {
+            "agent": "pi",
+            "provider": "openai",
+            "id": "gpt-6.1-sol"
+          }
+        ]
       },
       "reviewer": {
         "provider": "anthropic",
@@ -47,7 +54,14 @@
         "provider": "openai",
         "id": "gpt-6-luna",
         "agent": "pi",
-        "effort": "xhigh"
+        "effort": "xhigh",
+        "fallback": [
+          {
+            "agent": "pi",
+            "provider": "openai",
+            "id": "gpt-6.1-sol"
+          }
+        ]
       },
       "reviewer": {
         "provider": "anthropic",
@@ -79,7 +93,14 @@
         "provider": "openai",
         "id": "gpt-6-luna",
         "agent": "pi",
-        "effort": "xhigh"
+        "effort": "xhigh",
+        "fallback": [
+          {
+            "agent": "pi",
+            "provider": "openai",
+            "id": "gpt-6.1-sol"
+          }
+        ]
       },
       "reviewer": {
         "provider": "anthropic",
@@ -395,7 +416,9 @@
         "vendor-diverse"
       ],
       "source": "api.meta.ai/v1/models (Muse Code subscription; rates borrowed from models.dev meta/muse-wonder-1.0)",
-      "last_verified": "2026-10-16"
+      "rate_estimated": true,
+      "rate_estimate_reason": "borrowed-rate-upper-bound",
+      "last_verified": null
     },
     "meta/muse-wonder-full-1.0-contributor": {
       "cost_in_per_mtok": 4,
@@ -410,7 +433,9 @@
         "vendor-diverse"
       ],
       "source": "api.meta.ai/v1/models (Muse Code subscription; rates borrowed from models.dev meta/muse-wonder-1.0)",
-      "last_verified": "2026-10-17"
+      "rate_estimated": true,
+      "rate_estimate_reason": "borrowed-rate-unbounded",
+      "last_verified": null
     }
   }
 }

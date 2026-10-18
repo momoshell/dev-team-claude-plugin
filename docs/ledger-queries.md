@@ -844,3 +844,11 @@ retired and has never held a row (see **Retired tables** above).
 
 
 Repository provenance: `sessions.repo_key` is a nullable target-repository identity, distinct from `repo_slug` (the run's task/checkout label); `repo_key_absent_reason` names why identity was unavailable. Historical sessions remain NULL with no backfill. Unfiltered cells output is unchanged; filtered output excludes sessions with NULL repo keys. cells --repo <owner>__<repo> filters both review and usage rows by sessions.repo_key.
+
+## Catalog-priced spend labels
+
+`median_cost_estimated` in seat priors is true if any priced session contributing to the median uses estimated rates, false if none do, and null when cost is absent; `cost_n` remains the priced-session denominator.
+`cost_estimated` on cells, advisor groups and arm advisor spend is true if any contributing price is estimated, false if none are, and null when cost is absent; usage and priced-consult denominators are unchanged.
+`lane_spend_estimated` is true if any priced run contributing to lane spend uses estimated rates, false if none do, and null when cost is absent; a subtotal still carries its priced-run denominator, missing-run count and first missing cause.
+
+These flags label catalog-derived costs without changing dollar values or claiming billed spend.

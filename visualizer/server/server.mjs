@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
+import { isIP } from 'node:net'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { resolve, join, dirname, basename, sep, relative } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
@@ -165,14 +166,29 @@ export function sameOrigin(origin, host) {
   try { parsed = new URL(origin) } catch { return false }
   return parsed.host.toLowerCase() === host.toLowerCase()
 }
-export function hostGuard(req, label) {
+export function hostGuard(req, label, addressSource = networkInterfaces) {
   const host = req.headers.host
   if (typeof host !== 'string' || host === '') return { status: 403, error: `${label} host refused: ${host}` }
   let parsed
   try { parsed = new URL('http://' + host) } catch { return { status: 403, error: `${label} host refused: ${host}` } }
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
   const port = parsed.port === '' ? 80 : Number(parsed.port)
-  if (!WRITE_HOSTNAMES.has(hostname) || port !== req.socket?.localPort) return { status: 403, error: `${label} host refused: ${host}` }
+  const authority = /^(?:\[([^\]]+)\]|([^:]+))(?::\d+)?$/.exec(host)
+  const literal = authority?.[1] ?? authority?.[2] ?? ''
+  let localAddress = false
+  if (label === 'read' && isIP(literal)) {
+    try {
+      localAddress = Object.values(addressSource()).flatMap(entries => entries ?? []).some(({ address }) => {
+        const ip = isIP(address)
+        if (!ip) return false
+        const normalized = new URL('http://' + (ip === 6 ? '[' + address + ']' : address)).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+        return normalized === hostname
+      })
+    } catch {
+      // Interface lookup/normalization failure must not widen access.
+    }
+  }
+  if ((!WRITE_HOSTNAMES.has(hostname) && !localAddress) || port !== req.socket?.localPort) return { status: 403, error: `${label} host refused: ${host}` }
   return null
 }
 export function writeGuard(req) {

@@ -19,7 +19,7 @@ import { driveTask as defaultDriveTask, LIMITS, VARIANTS, validateScopeEntries }
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { seatIo as defaultSeatIo, settleSeatTeardown } from './seat-io.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
-import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
+import { checkoutProtectedPaths, checkoutSuiteTimeout } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
 import { runOutcome, runScopedPaths, returnsInheritanceRecord, RUN_START_EVENT, persistedAdapters } from './crew.mjs'
 import { slugOrNull } from './slug.mjs'
@@ -336,7 +336,7 @@ export function runChild(argv, injected = {}) {
     // resolves --validation-lane/--lane.
     const validationLane = resolveValidationLane({ validationLane: spec.validation_lane, lane: spec.lane })
     ctx.lane = validationLane.lane
-    ctx.suite = spec.suite || packageSuite()
+    const suiteTimeout = ctx.suiteTimeout = checkoutSuiteTimeout({ checkout, env: injected.env || process.env }); ctx.suite = spec.suite || packageSuite()
     if (strictPreflight) {
       // The shape's DECLARED seats, not the tier three: an envelope shape runs
       // exactly the seats crew/variants.mjs declares (crew/crew.mjs:assertSeats
@@ -407,7 +407,7 @@ export function runChild(argv, injected = {}) {
       err.stage = 'ledger-sidecar'
       result = failure(err)
     } else {
-      io = seatIo(crew, runPaths, checkout, emitter, injected.adapters || persistedAdapters(crew), spec, noCmux)
+      io = seatIo(crew, runPaths, checkout, emitter, injected.adapters || persistedAdapters(crew), spec, { ...noCmux, suiteTimeout, suiteTimeoutMs: suiteTimeout.seconds * 1000 })
       const protectedFloor = probeProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis
@@ -422,6 +422,9 @@ export function runChild(argv, injected = {}) {
       } catch { /* instrumentation is never load-bearing */ }
       try {
         io.log?.({ at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+      } catch { /* instrumentation is never load-bearing */ }
+      try {
+        io.log?.({ at: new Date().toISOString(), event: 'suite-timeout', ...suiteTimeout })
       } catch { /* instrumentation is never load-bearing */ }
       // The lane fence rides the same seam as the protected paths: crew.mjs's
       // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the

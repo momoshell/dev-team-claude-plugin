@@ -46,6 +46,8 @@ import { validTestRerunCommand } from '../../crew/lane-red.mjs'
 
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
+export const SUITE_TIMEOUT_SOURCES = Object.freeze(['default', 'profile', 'env'])
+const [SUITE_TIMEOUT_DEFAULT, SUITE_TIMEOUT_PROFILE, SUITE_TIMEOUT_ENV] = SUITE_TIMEOUT_SOURCES
 export const STATUSES = Object.freeze(['ratified', 'proposed', 'unknown'])
 export const BASE_BRANCH_REFUSALS = Object.freeze(['profile-unreadable', 'profile-field-unknown', 'profile-unratified', 'profile-ratification-invalid', 'profile-ratification-refused', 'base-branch-invalid'])
 // gh failure reasons describe what the evidence actually showed:
@@ -148,6 +150,7 @@ export const FIELD_KINDS = Object.freeze({
   intake_board: 'stable',
   worktree_setup: 'authored_superset',
   test_rerun_command: 'authored_superset',
+  suite_timeout_s: 'authored_superset',
 })
 
 export const INTAKE_BOARD_FIELD = 'intake_board'
@@ -1682,6 +1685,7 @@ export function probeRepo({ checkout, baseline = false, gh = false, now = () => 
       intake_board: gatherIntakeBoard(root, gh === true),
       worktree_setup: cell('unknown', null, null, { reason: 'not_measured' }),
       test_rerun_command: cell('unknown', null, null, { reason: 'not_measured' }),
+      suite_timeout_s: cell('unknown', null, null, { reason: 'not_measured' }),
     },
     meta: {
       probed_at: probedAt,
@@ -2071,16 +2075,60 @@ export function profileWorktreeSetup(profile) {
   return { steps, basis: 'ratified' }
 }
 
+// Only a missing path is an absent profile (undefined). Once lstat finds an
+// entry, every read failure refuses, a dangling symlink's ENOENT included.
+function readProfileEntry(path, what) {
+  try { lstatSync(path) } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw new ProfileRefusal(`probe-repo: ${what} profile is unreadable: ${error.message}`, 'profile-unreadable')
+  }
+  try { return JSON.parse(readFileSync(path, 'utf8')) } catch (error) {
+    throw new ProfileRefusal(`probe-repo: ${what} profile is unreadable: ${error.message}`, 'profile-unreadable')
+  }
+}
+
 export function checkoutWorktreeSetup({ checkout, profilePath = null, factoryRoot } = {}) {
   const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
-  let profile
-  try { lstatSync(path); profile = JSON.parse(readFileSync(path, 'utf8')) }
-  catch (error) {
-    if (error?.code === 'ENOENT') return { steps: [], basis: 'profile-absent' }
-    throw new ProfileRefusal(`probe-repo: worktree setup profile is unreadable: ${error.message}`, 'profile-unreadable')
-  }
+  const profile = readProfileEntry(path, 'worktree setup')
+  if (profile === undefined) return { steps: [], basis: 'profile-absent' }
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) throw new ProfileRefusal('probe-repo: worktree setup profile is unreadable', 'profile-unreadable')
   return profileWorktreeSetup(profile)
+}
+
+export function checkoutSuiteTimeout({ checkout, env = process.env, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  const invalid = (source, value) => {
+    throw new ProfileRefusal(`probe-repo: invalid suite timeout from ${source}: ${JSON.stringify(value)}`, 'suite-timeout-invalid')
+  }
+  const profile = readProfileEntry(path, 'suite timeout')
+  let cell = null
+  if (profile !== undefined) {
+    if (!plainObject(profile) || !plainObject(profile.fields)) {
+      throw new ProfileRefusal(`probe-repo: suite timeout profile is unreadable: ${path}`, 'profile-unreadable')
+    }
+    if (Object.hasOwn(profile.fields, 'suite_timeout_s')) {
+      cell = profile.fields.suite_timeout_s
+      if (!plainObject(cell)) invalid('profile suite_timeout_s', cell)
+      if (cell.status === 'unknown') {
+        if (cell.value !== null || cell.reason !== 'not_measured') invalid('profile suite_timeout_s', cell.value)
+      } else if (cell.status === 'proposed') {
+        if (cell.value === null || cell.value === undefined || !nonEmptyString(cell.source)) invalid('profile suite_timeout_s', cell.value)
+      } else if (cell.status === 'ratified') {
+        if (!validRatifiedCell(cell) || !Number.isInteger(cell.value) || cell.value < 60 || cell.value > 14400) invalid('profile suite_timeout_s', cell.value)
+      } else {
+        invalid('profile suite_timeout_s', cell.value)
+      }
+    }
+  }
+  if (Object.hasOwn(env, 'DEVTEAM_SUITE_TIMEOUT_S')) {
+    const raw = env.DEVTEAM_SUITE_TIMEOUT_S
+    if (typeof raw !== 'string' || !/^\d+$/u.test(raw)) invalid('env DEVTEAM_SUITE_TIMEOUT_S', raw)
+    const seconds = Number(raw)
+    if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 14400) invalid('env DEVTEAM_SUITE_TIMEOUT_S', raw)
+    return { seconds, source: SUITE_TIMEOUT_ENV, basis: 'env DEVTEAM_SUITE_TIMEOUT_S' }
+  }
+  if (cell?.status === 'ratified') return { seconds: cell.value, source: SUITE_TIMEOUT_PROFILE, basis: 'profile suite_timeout_s' }
+  return { seconds: 900, source: SUITE_TIMEOUT_DEFAULT, basis: 'default 900 s' }
 }
 
 export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot } = {}) {
@@ -2338,7 +2386,7 @@ function mergeRatifications(profile, existing) {
     }
     // A malformed ratified authored-superset value is not a set; let it fall
     // through to the stable merge behaviour instead of treating it as one.
-    if (kind === 'authored_superset' && (Array.isArray(oldCell.value) || name === 'test_rerun_command')) {
+    if (kind === 'authored_superset' && (Array.isArray(oldCell.value) || name === 'test_rerun_command' || name === 'suite_timeout_s')) {
       const known = new Set(Array.isArray(oldCell.value) ? oldCell.value.map(canonicalJson) : [])
       const additions = Array.isArray(oldCell.value) && Array.isArray(fresh.value)
         ? fresh.value.filter((entry) => !known.has(canonicalJson(entry)))

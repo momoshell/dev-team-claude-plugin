@@ -21,7 +21,7 @@ Flags:
 |---|---|
 | `--checkout <dir>` | Required. The repo being profiled. |
 | `--baseline` | Additionally run the proposed test command to record a baseline. Costs whatever the suite costs. |
-| `--gh` | Consult `gh` for default branch, PR conventions and the intake board. Off by default — the probe is offline unless you ask. |
+| `--gh` | Consult `gh` for default branch, PR conventions and the intake board. Off by default; the probe is offline unless you ask. |
 | `--out <path>` / `--save` | Where the profile is written. Mutually exclusive. A writer refuses a path **inside** the checkout. |
 
 Exit codes: `0` a profile, `1` an unexpected throw, `2` usage.
@@ -32,12 +32,12 @@ The profile carries `repo_key`, `repo_slug` and these fields:
 
 `toolchain` · `test_command` · `baseline` · `ci` ·
 `protected_paths_candidates` · `conventions` · `default_branch` ·
-`pr_conventions` · `intake_board` · `test_rerun_command`
+`pr_conventions` · `intake_board` · `test_rerun_command` · `suite_timeout_s`
 
-`conventions` also carries `conventions.value.idioms`: five fixed classes — dependency_injection, boolean_helpers, logging_placement, error_retry_shape and comment_density — each reporting a one-sentence rule, the sample_size behind it and up to three function exemplars with file spans, alongside an idiom_scan count of scanned versus extension-skipped tracked files (unsupported extensions never open, so markup outside Svelte script bodies cannot count as code). An unmeasured idiom has rule: null and a closed reason, never a guessed rule or numeric zero. A human ratifies idioms by promoting the conventions cell as a whole; the probe never ratifies them.
+`conventions` also carries `conventions.value.idioms`: five fixed classes, dependency_injection, boolean_helpers, logging_placement, error_retry_shape and comment_density. Each reports a one-sentence rule, the sample_size behind it and up to three function exemplars with file spans. The record also includes an idiom_scan count of scanned versus extension-skipped tracked files (unsupported extensions never open, so markup outside Svelte script bodies cannot count as code). An unmeasured idiom has rule: null and a closed reason, never a guessed rule or numeric zero. A human ratifies idioms by promoting the conventions cell as a whole; the probe never ratifies them.
 
-Every cell carries one of exactly three statuses — **`ratified`**,
-**`proposed`**, **`unknown`** — and a fresh probe emits only the latter two. An
+Every cell carries one of exactly three statuses: **`ratified`**,
+**`proposed`** and **`unknown`**. A fresh probe emits only the latter two. An
 `unknown` cell carries `null` and one closed reason, never a zero and never a
 plausible-looking default. That is what keeps an unmeasured target from
 reading like a cleared one.
@@ -51,12 +51,12 @@ where to ratify it.
 
 The two worth the most attention:
 
-- **`test_command`** — the whole gate rests on it. A wrong command produces a
+- **`test_command`**: the whole gate rests on it. A wrong command produces a
   green lane that proved nothing.
-- **`protected_paths_candidates`** — these set the tier floor. Under-ratifying
+- **`protected_paths_candidates`**: these set the tier floor. Under-ratifying
   lets a lane edit a protected surface at build tier; over-ratifying drags
   every lane through judge.
-- **`test_rerun_command`** — optionally ratify a single-test template such as
+- **`test_rerun_command`**: optionally ratify a single-test template such as
   `cargo test --workspace -- --exact {test}`. It must contain exactly one
   own-word `{test}` placeholder and no shell syntax. Compound cargo suites use
   this fallback when append isolation is unsafe; a safe append remains preferred.
@@ -66,6 +66,15 @@ The two worth the most attention:
   Real `cargo test -- --exact` isolation is unmeasured: the rerun argv was
   proven against a fake executable only, so treat a cargo flake verdict as
   unverified on a foreign checkout until it has been measured there.
+- **`suite_timeout_s`**: optionally ratify the suite timeout in seconds. An
+  absent, unknown or proposed cell uses the default; only a valid human
+  ratification sets the checkout value. Bounds: 60..14400 seconds inclusive;
+  default 900 s. `DEVTEAM_SUITE_TIMEOUT_S` overrides the profile for the process
+  running the lane; malformed or out-of-range input refuses before seats start.
+  This applies to warm, cold and rerun suites, not dispatch's separate
+  300-second baseline. A daemon-forked lane inherits the daemon's environment
+  from when the daemon started, so ratify `suite_timeout_s` for a durable per-checkout
+  value.
 
 ## 4. Only then, dispatch
 

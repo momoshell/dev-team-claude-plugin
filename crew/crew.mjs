@@ -65,7 +65,7 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './seat-io.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
-import { checkoutBaseBranch, checkoutProtectedPaths, checkoutTestRunner, ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
+import { checkoutBaseBranch, checkoutProtectedPaths, checkoutSuiteTimeout, checkoutTestRunner, ProfileRefusal } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
@@ -3929,6 +3929,7 @@ export function resumeCmd(args, deps = {}) {
   catch (error) { refuseResume(RESUME_REFUSALS.stateMissing, error?.message ?? String(error)) }
   const checkpoint = validateResumeState({ args, checkout, taskDir: paths.taskDir, envelope })
   const journal = join(paths.dir, 'journal.jsonl')
+  const suiteTimeout = checkoutSuiteTimeout({ checkout, env: deps.env || process.env })
   const variant = crew.run_configuration?.execution?.effective || DEFAULT_VARIANT
   const emitterFactory = deps.openRun || openRun
   let emitter = null
@@ -3937,10 +3938,11 @@ export function resumeCmd(args, deps = {}) {
     emitter.startRun()
   } catch { emitter = null }
   logLine(journal, { at: new Date().toISOString(), event: 'resume-start', head: checkpoint.head_oid, kind: checkpoint.kind, frozen_where: checkpoint.frozen_where })
+  logLine(journal, { at: new Date().toISOString(), event: 'suite-timeout', ...suiteTimeout })
   const seatIoDep = deps.seatIo || seatIo
-  const io = seatIoDep(crew, paths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew) })
+  const io = seatIoDep(crew, paths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew), suiteTimeout, suiteTimeoutMs: suiteTimeout.seconds * 1000 })
   const ctx = {
-    task: taskSlug, taskDir: paths.taskDir, checkout, journal,
+    task: taskSlug, taskDir: paths.taskDir, checkout, journal, suiteTimeout,
     head: checkpoint.head_oid, roles: crew.roles, variant,
     lane: null, suite: checkpoint.suite.cmd,
     publish: { branch: checkpoint.publish.branch, base: checkpoint.publish.base },
@@ -4051,6 +4053,7 @@ export function runCmd(args, deps = {}) {
   logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug, run_id: runId, task_return: relative(paths.dir, taskReturn) })
   const protectedFloor = checkoutProtectedPaths({ checkout })
   const testRunner = checkoutTestRunner({ checkout, suite: args.suite })
+  const suiteTimeout = checkoutSuiteTimeout({ checkout, env: deps.env || process.env })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
   logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
@@ -4061,6 +4064,7 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  logLine(journal, { at: new Date().toISOString(), event: 'suite-timeout', ...suiteTimeout })
   logLine(journal, { at: new Date().toISOString(), event: BATCH_DIR_EVENT, ...batchDirFromBrief(briefFile) })
   logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration, ...turnCeilingsJournalPatch(crew.turn_ceilings ?? null) })
   if (crew.advisor?.granted?.length) {
@@ -4093,18 +4097,14 @@ export function runCmd(args, deps = {}) {
   }
   // Keep the test lane at 30 s per test: the slowest real test is ~25 ms,
   // giving ~1200× headroom even when the machine is saturated by three crews.
-  // This is well below seatIo.run's 900 s kill, so a hung test is reported by
-  // name as timed out instead of ending as an anonymous SIGTERM.
-  // --test-timeout is per-test: it bounds one hung test, not a pathological
-  // whole-suite case. A wall-clock bound on the lane would be a driver change,
-  // deliberately not done here. Read the suite command from package.json's
-  // scripts.test owner; crew/crew.test.mjs pins that both run entrypoints
-  // derive from it.
+  // --test-timeout bounds one hung test; suite_timeout_s bounds the whole suite.
+  // Read the suite command from package.json's scripts.test owner;
+  // crew/crew.test.mjs pins that both run entrypoints derive from it.
   const ctx = {
     task: taskSlug, briefFile, taskDir: runPaths.taskDir, checkout, journal, head,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
-    testRunner,
+    testRunner, suiteTimeout,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant, execution_source: runConfiguration.execution.source,
     publish: { branch: readBranch(checkout), base: crew.base_branch.branch },
@@ -4149,7 +4149,7 @@ export function runCmd(args, deps = {}) {
   } catch { emitter = null }
   installRunFinalizersDep?.(emitter)
 
-  const io = seatIoDep(crew, runPaths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew) })
+  const io = seatIoDep(crew, runPaths, checkout, emitter, persistedAdapters(crew), args, { readRoster: rosterSnapshotReader(crew), suiteTimeout, suiteTimeoutMs: suiteTimeout.seconds * 1000 })
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.

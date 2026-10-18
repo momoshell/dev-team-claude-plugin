@@ -8287,7 +8287,7 @@ function runTask(ctx, io, crash) {
         if (retriedResumeCold) coldSuite.retried = cold?.ok ? settleRetriedCold(resumeIo, retriedResumeCold) : retriedResumeCold
       } catch (error) { coldSuite = { verdict: 'unproven', why: error?.message ?? String(error) } }
     }
-    stageComplete()
+    if (resumeCtx.suiteTimeout) coldSuite.timeout_s = resumeCtx.suiteTimeout.seconds; stageComplete()
     if (coldSuite.verdict !== 'green') {
       const why = coldSuite.verdict === 'red'
         ? `the resumed full suite was red on two consecutive fresh checkouts: warm checkout ${resumeCtx.checkout || '(unknown checkout)'} at commit ${commitOid || '(unknown commit)'}; first cold checkout ${coldSuite.retried?.path || '(unknown checkout)'} kept at ${coldSuite.retried?.kept || '(unknown)'}; second cold checkout ${coldSuite.path || '(unknown checkout)'} kept at ${coldSuite.kept || '(unknown)'}. Investigate checkout/load dependencies; this does not establish cwd as the cause. Cleanup: ${coldSuite.retried?.kept ? `git worktree remove --force ${coldSuite.retried.kept}` : '(first kept-worktree path unknown)'}; ${coldSuite.kept ? `git worktree remove --force ${coldSuite.kept}` : '(second kept-worktree path unknown)'}. ${coldSuite.output || ''}`
@@ -13501,7 +13501,7 @@ function runTask(ctx, io, crash) {
       resumeColdSuite = coldSuite
     }
   }
-  io.log(recordRow({ at: io.now(), cold_suite: coldSuite }))
+  if (ctx.suiteTimeout) coldSuite.timeout_s = ctx.suiteTimeout.seconds; io.log(recordRow({ at: io.now(), cold_suite: coldSuite }))
   stageComplete()
   if (coldSuite.verdict !== 'green') {
     const why = coldSuite.verdict === 'red'

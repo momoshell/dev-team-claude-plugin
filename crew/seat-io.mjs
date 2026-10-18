@@ -3453,18 +3453,16 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
     },
     run(cmd) {
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
-      // A timeout kill or a spawn failure must be legible in the output a
-      // bounce brief pastes verbatim — never an empty "Failures:" block.
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: suiteTimeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       let output = `${res.stdout || ''}${res.stderr || ''}`
-      if (res.error) output += `\n[spawn error: ${res.error.message}]`
-      if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
-      // An overflow is UNMEASURED, never red: the command may well have passed
-      // and the bytes that would say so are the bytes that were dropped. The
-      // marker is appended LAST so it is what a reader and a test see at the end.
       const overflowed = res.error?.code === 'ENOBUFS'
+      const warmTimedOut = res.error?.code === 'ETIMEDOUT'
+      if (warmTimedOut) output += `\n[killed: exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis})]`
+      else if (res.error) output += `\n[spawn error: ${res.error.message}]`
+      if (res.signal) output += `\n[killed by ${res.signal}]`
+      // ENOBUFS is unmeasured, never red; append its marker last.
       if (overflowed) output += `\n[output exceeded ${RUN_MAX_BUFFER_BYTES} bytes — this run is UNMEASURED, not red]`
-      const result = { ok: res.status === 0, output, status: res.status, stderr: String(res.stderr || '') }
+      const result = { ok: !warmTimedOut && res.status === 0, output, status: res.status, stderr: String(res.stderr || ''), ...(warmTimedOut ? { timed_out: true, timeout_s: suiteTimeout.seconds, timeout_source: suiteTimeout.source } : {}) }
       if (overflowed) result.truncated = true
       return result
     },
@@ -3537,9 +3535,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         try { removeColdTree(spawnSync, checkout, path) } catch (cleanupError) { throw new Error(`runCold: worktree-setup-failed: ${error.message}; cleanup failed: ${cleanupError.message}`) }
         throw new Error(`runCold: worktree-setup-failed: ${error?.message || String(error)}`)
       }
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: suiteTimeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
       let output = `${res.stdout || ''}${res.stderr || ''}`
-      if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
+      const coldTimedOut = res.error?.code === 'ETIMEDOUT'
+      if (coldTimedOut) throw new Error(`runCold: cold suite exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis}) in ${path} (kept for inspection); increase profile suite_timeout_s or set DEVTEAM_SUITE_TIMEOUT_S`)
+      if (res.signal) output += `\n[killed by ${res.signal}]`
       if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)
       const ok = res.status === 0
       if (ok) {
@@ -4003,6 +4003,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     for (const target of [member, crew.seats?.[role]]) if (target) Object.assign(target, { session_id: nextSessionId, started: false })
     return result
   }
+  const suiteTimeout = deps.suiteTimeout || { seconds: 900, source: 'default', basis: 'default 900 s' }
+  const suiteTimeoutMs = deps.suiteTimeoutMs ?? suiteTimeout.seconds * 1000
   return io
 }
 

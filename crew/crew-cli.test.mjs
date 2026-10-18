@@ -7,6 +7,7 @@ import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
+import { defaultProfilePath, probeRepo, writeProfile } from '../scripts/factory/probe-repo.mjs'
 import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, chunkCtxFromArgs } from './crew.mjs'
@@ -31,7 +32,7 @@ const seatSkillsSection = (role) => renderSeatSkills({ root: ROOT, mapResult: lo
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, symlinkSync, cpSync, realpathSync, execSync, spawn, spawnSync, tmpdir, homedir, join, basename, dirname, fileURLToPath, openLedger, USAGE_ABSENT_CAUSES, defaultProfilePath, probeRepo, writeProfile, TURN_CEILING_FLAGS, openRun, _resetNoticeGuardsForTest, SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, runChild, childPackageSuite, CHILD_SUITE_OWNER_PATH, driveTask, resumeWorktreeSha256, seatCommand, skillsPluginDir, writeSeatSkills, piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell, rpcCommand, seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, testCheckout, ROOT, scratchDir, FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree, WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot, composeRolePrompt, globalThis.appendFileSync]
 
 test('ADR047 D1 retired model env refuses before boot side effects', async () => {
   const result = await bootAdvisor({ task: 'adr047-d1', deps: { env: { CREW_ADVISOR_MODEL: 'anthropic/claude-sonnet-5' } } })
@@ -718,11 +719,11 @@ const PROLOGUE_READY_TIMEOUT_MS = 5000
 const prologueSignalDelay = () => new Promise((resolve) => setTimeout(resolve, PROLOGUE_POLL_MS))
 
 
-function prologueSignalFixture() {
+function prologueSignalFixture(taskOverride) {
   const root = scratchDir('crew-run-prologue-signal-')
   const home = join(root, 'home')
   const checkout = join(root, 'checkout')
-  const task = 'run-prologue-signal'
+  const task = taskOverride || 'run-prologue-signal'
   const crewDir = join(home, '.crew', basename(checkout), task)
   const brief = join(root, 'brief.md')
   const readyPath = join(root, 'prologue-ready')
@@ -5291,4 +5292,207 @@ test('chunk flags travel from argv to the driver ctx and refuse a lone --chunk',
   const ordinary = runCmdFixture({})
   assert.equal(ordinary.ctx.chunked, undefined)
   assert.equal(ordinary.ctx.chunk, undefined)
+})
+
+function suiteTimeoutFixture(task) {
+  const fixture = prologueSignalFixture(task)
+  const crewDir = testCrewDir(fixture.home, fixture.checkout, task)
+  const crewPath = join(crewDir, 'crew.json')
+  const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+  crew.base_branch = { branch: 'main', source: 'test' }
+  for (const member of Object.values(crew.members)) member.transport = 'headless-json'
+  writeFileSync(crewPath, JSON.stringify(crew))
+  const factoryRoot = scratchDir('suite-timeout-factory-')
+  const profile = probeRepo({ checkout: fixture.checkout })
+  const profilePath = defaultProfilePath({ repoKey: profile.repo_key, factoryRoot })
+  const setTimeoutProfile = (seconds) => {
+    profile.fields.suite_timeout_s = { status: 'ratified', value: seconds, source: 'human', ratified_by: 'operator', ratified_at: 'today' }
+    mkdirSync(dirname(profilePath), { recursive: true })
+    writeProfile({ profile, out: profilePath, checkout: fixture.checkout })
+  }
+  return { ...fixture, crewDir, factoryRoot, profilePath, setTimeoutProfile }
+}
+
+function withSuiteTimeoutEnv(home, factoryRoot, fn) {
+  const keys = ['HOME', 'DEVTEAM_FACTORY_DIR', 'DEVTEAM_SUITE_TIMEOUT_S']
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  process.env.HOME = home
+  process.env.DEVTEAM_FACTORY_DIR = factoryRoot
+  delete process.env.DEVTEAM_SUITE_TIMEOUT_S
+  try { return fn() }
+  finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+    }
+  }
+}
+
+function journalSuiteTimeouts(fixture) {
+  return readFileSync(join(fixture.crewDir, 'journal.jsonl'), 'utf8').trim().split('\n')
+    .filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'suite-timeout')
+}
+
+// MUTATION: force either entrypoint to run with the default policy instead of resolving the checkout setting.
+test('pane and headless entry points resolve suite timeout policy before seats', () => {
+  const pane = suiteTimeoutFixture('suite-timeout-pane')
+  const child = suiteTimeoutFixture('suite-timeout-child')
+  const previousStdoutWrite = process.stdout.write
+  const previousExitCode = process.exitCode
+  const expected = {
+    profile: { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' },
+    default: { seconds: 900, source: 'default', basis: 'default 900 s' },
+    env: { seconds: 2400, source: 'env', basis: 'env DEVTEAM_SUITE_TIMEOUT_S' },
+  }
+  const done = { status: 'done', summary: 'done', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    withSuiteTimeoutEnv(pane.home, pane.factoryRoot, () => {
+      const invokePane = (env, seen) => {
+        process.stdout.write = () => true
+        return runCmd(
+          { task: 'suite-timeout-pane', checkout: pane.checkout, 'brief-file': pane.brief, execution: 'scout', keep: true },
+          {
+            env,
+            awaitSeatsReady: () => { seen.ready += 1 },
+            seatIo: (...args) => { seen.io += 1; seen.deps = args[6]; return { teardown: () => [] } },
+            drive: (ctx) => { seen.driven += 1; seen.ctx = ctx; return done },
+            openRun: () => ({ startRun() {}, endRun() {} }),
+            installRunFinalizers: () => {},
+            appendCompletion: () => {},
+            writeTerminalLine: () => {},
+          },
+        )
+      }
+      pane.setTimeoutProfile(1800)
+      for (const [index, [label, env]] of [
+        ['profile', {}],
+        ['default', {}],
+        ['env', { DEVTEAM_SUITE_TIMEOUT_S: '2400' }],
+      ].entries()) {
+        if (label === 'default') rmSync(pane.profilePath, { force: true })
+        if (label === 'env') pane.setTimeoutProfile(1800)
+        const seen = { ready: 0, io: 0, driven: 0 }
+        invokePane(env, seen)
+        assert.deepEqual(seen.ctx.suiteTimeout, expected[label])
+        assert.deepEqual(seen.deps.suiteTimeout, expected[label])
+        assert.equal(seen.deps.suiteTimeoutMs, expected[label].seconds * 1000)
+        const rows = journalSuiteTimeouts(pane)
+        assert.equal(rows.length, index + 1)
+        assert.deepEqual({ ...rows.at(-1), at: undefined }, {
+          event: 'suite-timeout', ...expected[label], at: undefined,
+        })
+        assert.deepEqual([seen.ready, seen.io, seen.driven], [1, 1, 1])
+      }
+
+      const invalidEnv = { ready: 0, io: 0, driven: 0 }
+      assert.throws(() => invokePane({ DEVTEAM_SUITE_TIMEOUT_S: 'abc' }, invalidEnv), (error) => error.reason === 'suite-timeout-invalid')
+      assert.deepEqual([invalidEnv.ready, invalidEnv.io, invalidEnv.driven], [0, 0, 0])
+      rmSync(pane.profilePath, { force: true })
+      pane.setTimeoutProfile(59)
+      const invalidProfile = { ready: 0, io: 0, driven: 0 }
+      assert.throws(() => invokePane({ DEVTEAM_SUITE_TIMEOUT_S: '2400' }, invalidProfile), (error) => error.reason === 'suite-timeout-invalid')
+      assert.deepEqual([invalidProfile.ready, invalidProfile.io, invalidProfile.driven], [0, 0, 0])
+    })
+
+    withSuiteTimeoutEnv(child.home, child.factoryRoot, () => {
+      const invokeChild = (env, seen = { rows: [], io: 0, driven: 0 }) => {
+        const result = runChild(
+          { crew_dir: child.crewDir, task: 'suite-timeout-child', brief_file: child.brief, checkout: child.checkout, suite: 'npm test' },
+          {
+            preflight: false, env, openRun: () => null,
+            seatIo: (...args) => {
+              seen.io += 1
+              seen.deps = args[6]
+              return { log: (row) => seen.rows.push(row), teardown: () => [] }
+            },
+            driveTask: (ctx) => { seen.driven += 1; seen.ctx = ctx; return done },
+          },
+        )
+        return { result, seen }
+      }
+      child.setTimeoutProfile(1800)
+      for (const [label, env] of [
+        ['profile', {}],
+        ['default', {}],
+        ['env', { DEVTEAM_SUITE_TIMEOUT_S: '2400' }],
+      ]) {
+        if (label === 'default') rmSync(child.profilePath, { force: true })
+        if (label === 'env') child.setTimeoutProfile(1800)
+        const { result, seen } = invokeChild(env)
+        assert.equal(result.status, 'done')
+        assert.deepEqual(seen.ctx.suiteTimeout, expected[label])
+        assert.deepEqual(seen.deps.suiteTimeout, expected[label])
+        assert.equal(seen.deps.suiteTimeoutMs, expected[label].seconds * 1000)
+        const rows = seen.rows.filter((row) => row.event === 'suite-timeout')
+        assert.equal(rows.length, 1)
+        assert.deepEqual({ ...rows[0], at: undefined }, { event: 'suite-timeout', ...expected[label], at: undefined })
+        assert.deepEqual([seen.io, seen.driven], [1, 1])
+      }
+      const invalid = { DEVTEAM_SUITE_TIMEOUT_S: 'abc' }
+      const refused = { rows: [], io: 0, driven: 0 }
+      let error = null
+      try { invokeChild(invalid, refused) } catch (caught) { error = caught }
+      assert.equal(error?.reason, 'suite-timeout-invalid')
+      assert.deepEqual([refused.io, refused.driven], [0, 0])
+    })
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    process.exitCode = previousExitCode
+    rmSync(pane.root, { recursive: true, force: true })
+    rmSync(pane.factoryRoot, { recursive: true, force: true })
+    rmSync(child.root, { recursive: true, force: true })
+    rmSync(child.factoryRoot, { recursive: true, force: true })
+  }
+})
+
+// MUTATION: reuse a checkpoint timeout or continue into IO after invalid current profile ratification.
+test('resume reloads suite timeout policy and refuses invalid ratification before IO', () => {
+  const fixture = resumeCommandFixture('crew-resume-suite-timeout-')
+  const factoryRoot = scratchDir('crew-resume-suite-timeout-factory-')
+  const previousExitCode = process.exitCode
+  try {
+    withSuiteTimeoutEnv(fixture.home, factoryRoot, () => {
+      const profile = probeRepo({ checkout: fixture.checkout })
+      const profilePath = defaultProfilePath({ repoKey: profile.repo_key, factoryRoot })
+      const writeTimeout = (seconds) => {
+        profile.fields.suite_timeout_s = {
+          status: 'ratified', value: seconds, source: 'human', ratified_by: 'operator', ratified_at: 'today',
+        }
+        mkdirSync(dirname(profilePath), { recursive: true })
+        writeProfile({ profile, out: profilePath, checkout: fixture.checkout })
+      }
+      const done = { status: 'done', summary: 'resumed', artifacts: [], details: {} }
+      writeTimeout(1800)
+      let seen = null
+      let deps = null
+      fixture.setEnvelope(fixture.envelope())
+      resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, {
+        env: {}, openRun: () => ({ startRun() {}, endRun() {} }),
+        seatIo: (...args) => { deps = args[6]; return { teardown: () => [] } },
+        resume: (ctx) => { seen = ctx; return done },
+        writeTerminalLine: () => {}, appendCompletion: () => {},
+      })
+      assert.deepEqual(seen.suiteTimeout, { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' })
+      assert.equal(deps.suiteTimeoutMs, 1_800_000)
+      assert.equal(journalSuiteTimeouts({ ...fixture, crewDir: fixture.dir }).length, 1)
+
+      const beforeJournal = readFileSync(fixture.journal, 'utf8')
+      fixture.setEnvelope(fixture.envelope())
+      rmSync(profilePath, { force: true })
+      writeTimeout(59)
+      let opened = 0
+      assert.throws(() => resumeCmd({ task: fixture.task, checkout: fixture.checkout, keep: true }, {
+        env: { DEVTEAM_SUITE_TIMEOUT_S: '2400' },
+        openRun: () => { opened += 1; return { startRun() {}, endRun() {} } },
+        seatIo: () => { opened += 1; return {} },
+        resume: () => { opened += 1; return done },
+        writeTerminalLine: () => {},
+      }), (error) => error.reason === 'suite-timeout-invalid')
+      assert.equal(opened, 0)
+      assert.equal(readFileSync(fixture.journal, 'utf8'), beforeJournal)
+    })
+  } finally {
+    process.exitCode = previousExitCode
+    rmSync(fixture.root, { recursive: true, force: true })
+    rmSync(factoryRoot, { recursive: true, force: true })
+  }
 })

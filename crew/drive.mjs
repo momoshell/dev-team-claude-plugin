@@ -11227,13 +11227,17 @@ function runTask(ctx, io, crash) {
     if (interrupted) return pendingFailure('unmeasured', `changed-file inventory was interrupted: ${interrupted?.message ?? String(interrupted)}`)
     if (!Array.isArray(changed)) return pendingFailure('unmeasured', 'changed-file inventory was not an array')
     const names = [...new Set(changed)]
-    if (names.some((file) => typeof file !== 'string' || !pendingFrozenInventory.files.includes(file))) {
-      return pendingFailure('boundary', `the cumulative dirty set contains an unrelated file: ${names.filter((file) => typeof file !== 'string' || !pendingFrozenInventory.files.includes(file)).join(', ')}`)
+    const causal = pendingFrozenInventory.causal
+    const allowed = [...pendingFrozenInventory.files, ...causal]
+    if (causal.length > 0 && names.length === 0) return pendingFailure('unmeasured', 'the cumulative dirty set was empty')
+    if (names.some((file) => typeof file !== 'string' || !allowed.includes(file))) {
+      return pendingFailure('boundary', `the cumulative dirty set contains an unrelated file: ${names.filter((file) => typeof file !== 'string' || !allowed.includes(file)).join(', ')}`)
     }
-    const missing = pendingFrozenInventory.files.filter((file) => !names.includes(file))
+    const missing = causal.length > 0 ? [] : pendingFrozenInventory.files.filter((file) => !names.includes(file))
     if (missing.length > 0) return pendingFailure('unmeasured', `the cumulative dirty set omitted snapshotted failing file(s): ${missing.join(', ')}`)
     const verified = []
     for (const file of pendingFrozenInventory.files) {
+      if (causal.length > 0 && !names.includes(file)) continue
       let current
       try { current = io.readFile(`${ctx.checkout}/${file}`) }
       catch (err) { return pendingFailure('unmeasured', `${file} could not be read: ${err?.message ?? String(err)}`) }
@@ -11247,6 +11251,7 @@ function runTask(ctx, io, crash) {
         attempt: pendingFrozenInventory.attempt,
         committed: pendingFrozenInventory.commit,
         files: verified,
+        ...(causal.length > 0 ? { causal: names.filter((file) => causal.includes(file)) } : {}),
         source: FROZEN_INVENTORY_FILE,
         approved: ['VACUITY_SOURCE_SHA256 values', 'VACUITY_EXEMPT frozenVacuitySites rationale citations'],
       },
@@ -13336,6 +13341,7 @@ function runTask(ctx, io, crash) {
       if (frozenRepair.action === 'repair') {
         pendingFrozenInventory = {
           files: frozenRepair.files,
+          causal: committing.filter((file) => ![FROZEN_INVENTORY_FILE, FROZEN_FACTORY_ENV_FILE].includes(file) && suiteOutput.includes(file)),
           committed: frozenRepair.committed,
           attempt: postCommitFrozenRepairs + 1,
           commit: S.commit,
@@ -13345,11 +13351,18 @@ function runTask(ctx, io, crash) {
         failureUpgrade('suite', 'builder')
         io.writeFile(b, [
           '# Frozen inventory repair bounce', '',
-          `The accepted commit ${S.commit} made the full suite red in ${FROZEN_INVENTORY_FILE}. This bounded repair may change data only in the two approved source containers:`,
+          pendingFrozenInventory.causal.length > 0
+            ? `The accepted commit ${S.commit} made the full suite red. This bounded repair may fix defects in the causal files or move only approved frozen data:`
+            : `The accepted commit ${S.commit} made the full suite red in ${FROZEN_INVENTORY_FILE}. This bounded repair may change data only in the two approved source containers:`,
           '- property values inside const VACUITY_SOURCE_SHA256 = Object.freeze({ ... })',
           '- the third rationale argument of frozenVacuitySites(AUDITED_VACUITY_LINES[...], verdict, rationale, ...) inside const VACUITY_EXEMPT = new Map([ ... ])',
           '',
           `Failing test file(s): ${frozenRepair.files.join(', ')}`,
+          ...(pendingFrozenInventory.causal.length > 0 ? [
+            'Causal file(s): ' + pendingFrozenInventory.causal.join(', '),
+            'Fix the defect in the causal files, or move only the approved frozen data.',
+            'Never weaken a census check.',
+          ] : []),
           'Refusals remain terminal: logic, identity, unmeasured, boundary, and repeat changes are not repairable.',
           '', `Plan: ${planPath}`, `Commit: ${S.commit}`,
         ].join('\n'))

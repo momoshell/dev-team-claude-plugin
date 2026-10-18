@@ -1111,15 +1111,15 @@ export function parseDiffMutationReport(output, { generation, cap } = {}) {
     if (!report || typeof report !== 'object') return null
     const ints = ['generation', 'cap', 'configured_cap', 'cap_omitted', 'total_candidates', 'generated', 'killed', 'survived', 'skipped', 'omitted']
     if (!ints.every((key) => Number.isInteger(report[key]) && report[key] >= 0)) return null
-    if (report.generation !== generation || report.cap !== cap || report.configured_cap !== cap) return null
-    if (report.generated > report.cap || report.killed + report.survived > report.generated || report.cap_omitted !== report.omitted) return null
+    if (Object.hasOwn(report, 'timed_out') && (!Number.isSafeInteger(report.timed_out) || report.timed_out < 0)) return null
+    const timedOut = report.timed_out ?? 0
+    if (report.generation !== generation || report.cap !== cap || report.configured_cap !== cap || !Number.isSafeInteger(report.killed + report.survived + timedOut) || report.generated > report.cap || report.killed + report.survived + timedOut > report.generated || report.cap_omitted !== report.omitted) return null
     if (!report.skip_counts || typeof report.skip_counts !== 'object' || Array.isArray(report.skip_counts) || !Array.isArray(report.mutants)) return null
     if (Object.values(report.skip_counts).some((count) => !Number.isInteger(count) || count < 0)) return null
-    const skipTotal = Object.values(report.skip_counts).reduce((total, count) => total + count, 0)
-    if (skipTotal !== report.skipped) return null
+    if (Object.values(report.skip_counts).reduce((total, count) => total + count, 0) !== report.skipped) return null
     if (report.mutants.some((mutant) => {
       if (!mutant || typeof mutant !== 'object' || Array.isArray(mutant)) return true
-      if (!['killed', 'survived', 'skipped'].includes(mutant.outcome)) return true
+      if (!['killed', 'timed-out', 'survived', 'skipped'].includes(mutant.outcome)) return true
       if (mutant.outcome === 'skipped') {
         if (typeof mutant.skip_reason !== 'string' || mutant.skip_reason.length === 0) return true
         if (mutant.skip_reason === 'runner-unavailable') {
@@ -1127,15 +1127,15 @@ export function parseDiffMutationReport(output, { generation, cap } = {}) {
         } else if (Object.hasOwn(mutant, 'runner_unavailable_cause')) return true
         return false
       }
-      if (mutant.outcome === 'killed') return false
+      if (mutant.outcome === 'killed' || mutant.outcome === 'timed-out') return false
       return typeof mutant.id !== 'string' || mutant.id.length === 0
         || typeof mutant.path !== 'string' || mutant.path.length === 0
         || !Number.isInteger(mutant.line) || mutant.line < 1
         || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
     })) return null
-    const executed = report.mutants.filter((mutant) => mutant.outcome === 'killed' || mutant.outcome === 'survived').length
-    if (executed > report.cap || executed !== report.killed + report.survived || report.mutants.length - executed > report.skipped) return null
-    if (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored')) return null
+    if (report.mutants.filter((mutant) => mutant.outcome === 'timed-out').length !== timedOut) return null
+    const executed = report.mutants.filter((mutant) => ['killed', 'survived', 'timed-out'].includes(mutant.outcome)).length
+    if (executed > report.cap || executed !== report.killed + report.survived + timedOut || report.mutants.length - executed > report.skipped || (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored'))) return null
     return report
   } catch { return null }
 }
@@ -10089,11 +10089,11 @@ function runTask(ctx, io, crash) {
       gate_cmd: mutant.gate_cmd ?? gateCmd,
     }))
     const lines = ['## Diff-mutant findings', JSON.stringify(bounded)]
-    // Count over the forwarded mutants: the merged report carries every round's mutants
-    // but only the latest round's tallies.
-    const timeoutKills = report.mutants.filter((mutant) => mutant.outcome === 'killed' && mutant.kill_reason === 'timeout').length
-    const kills = report.mutants.filter((mutant) => mutant.outcome === 'killed').length
-    if (timeoutKills > 0) lines.push(`Timeout kills: ${timeoutKills} of ${kills} kills were per-run timeouts (120s), not red runs; a timeout kill does not prove the gate discriminates.`)
+    // Merged reports retain old rows but only the latest round's tallies.
+    // Count forwarded adjudications so the timeout denominator stays complete.
+    const timedOut = report.mutants.filter((mutant) => mutant.outcome === 'timed-out').length
+    const judged = report.mutants.filter((mutant) => ['killed', 'survived', 'timed-out'].includes(mutant.outcome)).length
+    if (timedOut > 0) lines.push(`Timed out: ${timedOut} of ${judged} mutants exceeded the per-run bound; unproven.`)
     return lines
   }
   const diffMutationDisposition = (survivors) => survivors.length > 0 ? 'review' : 'continue'
@@ -17377,7 +17377,7 @@ export function plannerCoverageReask({ env, dispatch, briefText, round, briefFil
   }
 }
 
-export const DIFF_MUTATION_UNMEASURED_REASONS = Object.freeze(['no-report', 'unsupported-language', 'runner-unavailable', 'tree-not-restored', 'no-mutable-candidate'])
+export const DIFF_MUTATION_UNMEASURED_REASONS = Object.freeze(['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
 
 export function diffMutationMeasurement(reports) {
   const rows = Array.isArray(reports) ? reports.filter((report) => report && typeof report === 'object') : []
@@ -17385,6 +17385,7 @@ export function diffMutationMeasurement(reports) {
   const generated = sum('generated')
   const killed = sum('killed')
   const survived = sum('survived')
+  const timed_out = sum('timed_out')
   // lean: unmeasured_files sums per-round non-mjs file sections, so a file changed in two rounds counts twice; dedupe by path once the report lists skipped paths
   const unmeasured_files = rows.reduce((total, report) => total + (Number.isInteger(report.skip_counts?.['non-mjs']) ? report.skip_counts['non-mjs'] : 0), 0)
   const treeNotRestored = rows.some((report) => report.fatal || (report.skip_counts?.['tree-not-restored'] ?? 0) > 0)
@@ -17392,15 +17393,19 @@ export function diffMutationMeasurement(reports) {
   const reason = measured ? null
     : rows.length === 0 ? 'no-report'
     : treeNotRestored ? 'tree-not-restored'
+    : rows.some((report) => (report.skip_counts?.['baseline-red'] ?? 0) > 0) ? 'baseline-red'
     : rows.some((report) => (report.skip_counts?.['runner-unavailable'] ?? 0) > 0) ? 'runner-unavailable'
+    : timed_out > 0 ? 'run-timeout'
     : unmeasured_files > 0 ? 'unsupported-language'
     : 'no-mutable-candidate'
-  return { measured, reason, generated, killed, survived, unmeasured_files }
+  return { measured, reason, generated, killed, survived, unmeasured_files, ...(timed_out > 0 ? { timed_out } : {}) }
 }
 
 export function diffMutationLines(record) {
   const diff = record && Object.hasOwn(record, 'diff_mutation') ? record.diff_mutation : null
-  return !diff || typeof diff !== 'object' ? [] : diff.measured
-    ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
-    : [`- Diff mutation: unmeasured — ${diff.reason}`]
+  if (!diff || typeof diff !== 'object') return []
+  const timeoutSuffix = diff.timed_out > 0 ? `, ${diff.timed_out} timed out (unproven)` : ''
+  return diff.measured
+    ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${timeoutSuffix}${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
+    : [`- Diff mutation: unmeasured — ${diff.reason}${timeoutSuffix}`]
 }

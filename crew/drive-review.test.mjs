@@ -3407,17 +3407,25 @@ const diffReport = (mutants = [], over = {}) => ({
   generation: 1, cap: 8, configured_cap: 8, cap_omitted: 0,
   total_candidates: mutants.length, generated: mutants.length,
   killed: mutants.filter((row) => row.outcome === 'killed').length,
+  timed_out: mutants.filter((row) => row.outcome === 'timed-out').length,
   survived: mutants.filter((row) => row.outcome === 'survived').length,
   skipped: mutants.filter((row) => row.outcome === 'skipped').length,
   omitted: 0, omitted_reason: DIFF_REPORT_REASON, blind_spot: null, skip_counts: {}, mutants, ...over,
 })
 const diffSurvivor = { id: 'diff-survivor-1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'const value = false', validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd', outcome: 'survived' }
 
-function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], review = reviewEnv('pass'), target = 'const value = true\n', capEnv = undefined, reportFile = undefined, runnerStatus = 0, runnerStderr = '' } = {}) {
+function diffDriverIo({ report = diffReport([diffSurvivor]), reports = null, secondRound = false, mutations = [], review = reviewEnv('pass'), target = 'const value = true\n', capEnv = undefined, reportFile = undefined, runnerStatus = 0, runnerStderr = '' } = {}) {
   const plan = planEnv({ details: {
     ...planEnv().details, files_in_scope: ['a.mjs'], gate_cmd: 'gate-cmd', validation_lane: 'lane-cmd', mutations,
   } })
-  const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': review }
+  const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': secondRound ? reviewEnv('changes-needed') : review }
+  if (secondRound) {
+    envelopes['builder:2'] = () => {
+      files[`${CTX.checkout}/a.mjs`] = 'const value = false\n'
+      return buildEnv()
+    }
+    envelopes['reviewer:2'] = reviewEnv('pass')
+  }
   // The declared mutations name implemented checks, so the red baseline inventories
   // them: a complete baseline missing a declared check reads as a phantom refusal.
   const declaredFails = mutations.filter((entry) => entry && typeof entry.check === 'string').map((entry) => `FAIL ${entry.check}: caught`)
@@ -3427,18 +3435,25 @@ function diffDriverIo({ report = diffReport([diffSurvivor]), mutations = [], rev
   const runs = {
     'gate-cmd:1': { ok: false, output: baselineOutput },
     'gate-cmd:2': { ok: true, output: 'green\nGATE-SUMMARY {"total":1,"failed":0,"errored":0}' },
-    'gate-cmd:3': { ok: false, output: 'FAIL declared: caught\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
+    'gate-cmd:3': secondRound
+      ? { ok: true, output: 'green\nGATE-SUMMARY {"total":1,"failed":0,"errored":0}' }
+      : { ok: false, output: 'FAIL declared: caught\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' },
     'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
   }
   const files = { [`${CTX.checkout}/a.mjs`]: target }
   if (reportFile !== undefined) files[`${TD}/diff-mutation-1.report.json`] = typeof reportFile === 'string' ? reportFile : JSON.stringify(reportFile)
-  const runnerEntry = { ok: runnerStatus === 0, output: '', status: runnerStatus, stderr: runnerStderr }
-  if (report !== null) runnerEntry.output = `DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}`
+  const runnerEntries = (reports ?? [report]).map((proofReport) => ({
+    ok: runnerStatus === 0,
+    output: proofReport === null ? '' : 'DIFF-MUTATION-SUMMARY ' + JSON.stringify(proofReport),
+    status: runnerStatus,
+    stderr: runnerStderr,
+  }))
+
   const options = {
     envelopes, runs, cleanRuns: { 'gate-cmd': { ok: false, output: baselineOutput },
     }, files, writeThrough: true,
     diffListing: 'a.mjs\0', changed: Array.from({ length: 12 }, () => ['a.mjs']),
-    diffReports: [runnerEntry],
+    diffReports: runnerEntries,
   }
   return fakeIo({ ...options, ...(capEnv === undefined ? {} : { env: { CREW_DIFF_MUTATION_CAP: capEnv } }) })
 }
@@ -3461,25 +3476,28 @@ test('B1 green mutant is a typed survivor in the reviewer brief', () => {
   assert.deepEqual(findings, [{ id: diffSurvivor.id, path: diffSurvivor.path, line: diffSurvivor.line, operator: diffSurvivor.operator, replacement: diffSurvivor.replacement, validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd' }])
 })
 
-test('RV1-4 reviewer brief discloses timeout kills beside empty findings', () => {
-  const timeout = { id: 'timed-out', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'killed', kill_reason: 'timeout' }
-  const io = diffDriverIo({ report: diffReport([timeout], { timeout_killed: 1 }) })
+test('RV1-4 reviewer brief discloses unproven timeouts beside empty findings', () => {
+  const timeout = { id: 'timed-out', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'timed-out' }
+  const io = diffDriverIo({ report: diffReport([timeout], { timed_out: 1 }) })
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   const brief = io.calls.writes[`${TD}/review-brief-1.md`]
-  assert.match(brief, /## Diff-mutant findings\n\[\]\nTimeout kills: 1 of 1 kills were per-run timeouts \(120s\), not red runs; a timeout kill does not prove the gate discriminates\./)
+  const section = brief.split('## Diff-mutant findings\n')[1]
+  assert.match(section, /^\[\]\nTimed out: 1 of 1 mutants exceeded the per-run bound; unproven\./)
+  assert.doesNotMatch(section, /\bkill(?:ed|s)?\b/i)
 })
 
-test('RV2-3 timeout kills are counted over the forwarded mutants, not the latest round tally', () => {
-  // The merged brief report takes tallies from the latest round only; an earlier round's
-  // timeout kill reaches the brief as a mutant whose round tally is no longer present.
-  const timeout = { id: 'timed-out', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'killed', kill_reason: 'timeout' }
-  const red = { id: 'red', path: 'a.mjs', line: 2, operator: 'literal', replacement: 'true', outcome: 'killed' }
-  const io = diffDriverIo({ report: diffReport([timeout, red], { timeout_killed: 0 }) })
+test('TO7 reviewer brief counts timeout rows merged from two proof generations', () => {
+  const timeout = { id: 'timed-out-round-1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'false', outcome: 'timed-out' }
+  const red = { id: 'red-round-2', path: 'a.mjs', line: 2, operator: 'literal', replacement: 'true', outcome: 'killed' }
+  const first = diffReport([timeout], { generation: 1, total_candidates: 1, generated: 1, killed: 0, survived: 0, timed_out: 1 })
+  const second = diffReport([red], { generation: 2, total_candidates: 1, generated: 1, killed: 1, survived: 0, timed_out: 0 })
+  const io = diffDriverIo({ reports: [first, second], secondRound: true })
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
-  const brief = io.calls.writes[`${TD}/review-brief-1.md`]
-  assert.match(brief, /Timeout kills: 1 of 2 kills were per-run timeouts/)
+  const brief = io.calls.writes[`${TD}/review-brief-2.md`]
+  assert.match(brief, /Timed out: 1 of 2 mutants exceeded the per-run bound; unproven\./)
+  assert.doesNotMatch(brief.split('## Diff-mutant findings\n')[1], /\bkill(?:ed|s)?\b/i)
 })
 
 test('D1 diff proof leaves declared-anchor proof bytes unchanged', () => {

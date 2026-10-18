@@ -560,7 +560,7 @@ export const DIFF_SKIP_REASONS = Object.freeze([
   'unsafe-target:absent', 'unsafe-target:symlink', 'unsafe-target:non-regular',
   'unsafe-target:canonical-escape', 'unsafe-target:metadata-unreadable',
   'unsafe-target:checkout-unreadable', 'target-changed', 'write-failed',
-  'runner-unavailable', 'out-of-scope',
+  'runner-unavailable', 'out-of-scope', 'baseline-red',
 ])
 
 const DIFF_COMPARISON_ORDER = Object.freeze(['===', '!==', '==', '!=', '<=', '>=', '<', '>'])
@@ -1002,7 +1002,7 @@ function diffFatal(why, beforeDigest = null, afterDigest = null) {
 
 function countDiffReport(records, generated, omitted, config, totalCandidates, fatal = null, initialSkips = []) {
   const killed = records.filter((row) => row.outcome === 'killed').length
-  const timeout_killed = records.filter((row) => row.kill_reason === 'timeout').length
+  const timed_out = records.filter((row) => row.outcome === 'timed-out').length
   const survived = records.filter((row) => row.outcome === 'survived').length
   const skipped = initialSkips.length + records.filter((row) => row.outcome === 'skipped').length
   const skipCounts = {}
@@ -1018,7 +1018,7 @@ function countDiffReport(records, generated, omitted, config, totalCandidates, f
     total_candidates: totalCandidates,
     generated,
     killed,
-    timeout_killed,
+    timed_out,
     survived,
     skipped,
     omitted,
@@ -1076,11 +1076,40 @@ export async function runDiffMutationProof(config, deps = {}) {
   const now = typeof deps.now === 'function' ? deps.now : Date.now
   const totalDeadlineMs = Number.isFinite(deps.totalDeadlineMs) ? Math.max(1, deps.totalDeadlineMs) : DIFF_TOTAL_DEADLINE_MS
   const totalDeadline = now() + totalDeadlineMs
-  const runTimeoutMs = Number.isFinite(deps.runTimeoutMs) ? Math.max(1, deps.runTimeoutMs) : DIFF_RUN_TIMEOUT_MS
+  const runTimeoutFloorMs = Number.isFinite(deps.runTimeoutMs) ? Math.max(1, deps.runTimeoutMs) : DIFF_RUN_TIMEOUT_MS
   const selected = unseenCandidates.slice(0, mutantCap)
   const omitted = Math.max(0, unseenCandidates.length - selected.length)
   let fatal = null
   let generatedCount = selected.length
+  if (selected.length === 0) return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
+  const remaining = () => Math.max(0, totalDeadline - now())
+  const baselineStarted = now()
+  const baselineBound = remaining()
+  const baselineRan = baselineBound > 0
+  const baselineResult = baselineRan
+    ? await runDiffCommand(d, config.validation_lane, config.checkout, baselineBound)
+    : diffRunnerUnavailable('result-incomplete')
+  const baselineElapsed = now() - baselineStarted
+  const baselineMs = Math.max(0, Number.isFinite(baselineElapsed) ? baselineElapsed : 0)
+  const runTimeoutMs = Math.max(runTimeoutFloorMs, 2 * baselineMs)
+  if (!baselineResult.available || !baselineResult.ok) {
+    const why = baselineResult.timeout ? 'baseline-red: timeout'
+      : baselineResult.available ? 'baseline-red: red'
+        : `baseline-red: runner-unavailable (${baselineResult.cause ?? baselineResult.why ?? 'result-incomplete'})`
+    const baselineSkips = selected.map((candidate) => ({
+      ...diffSkip({ candidate, reason: 'baseline-red' }),
+      why,
+    }))
+    if (baselineResult.escaped) {
+      fatal = { ...diffFatal(`${DIFF_DESCENDANT_ESCAPED} during the unmutated validation baseline`), cause: DIFF_DESCENDANT_ESCAPED }
+    }
+    const report = countDiffReport(baselineSkips, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
+    if (baselineRan) {
+      report.baseline_ms = baselineMs
+      report.run_timeout_ms = runTimeoutMs
+    }
+    return report
+  }
   for (const candidate of selected) {
     if (fatal) break
     const initial = `${candidate.path}:${candidate.line}`
@@ -1123,7 +1152,6 @@ export async function runDiffMutationProof(config, deps = {}) {
               d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, line: candidate.line, find: candidate.original, replace: candidate.replacement, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
             }
             d.writeFile(guardWrite.abs, reapplied.bytes)
-            const remaining = () => Math.max(0, totalDeadline - now())
             const validationBound = Math.min(runTimeoutMs, remaining())
             validationResult = remaining() > 0
               ? await runDiffCommand(d, config.validation_lane, config.checkout, validationBound)
@@ -1180,10 +1208,9 @@ export async function runDiffMutationProof(config, deps = {}) {
     }
     if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
     const timedOut = validationResult?.timeout || gateResult?.timeout
-    const outcome = timedOut ? 'killed' : validationResult.ok && gateResult.ok ? 'survived' : 'killed'
+    const outcome = timedOut ? 'timed-out' : validationResult.ok && gateResult.ok ? 'survived' : 'killed'
     records.push({
       ...candidate, outcome,
-      ...(timedOut ? { kill_reason: 'timeout' } : {}),
       validation_lane: config.validation_lane,
       gate_cmd: config.gate_cmd,
       validation_ok: validationResult.ok,
@@ -1193,7 +1220,12 @@ export async function runDiffMutationProof(config, deps = {}) {
       why: timedOut ? 'the validation lane or gate timed out under the mutation' : outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
     })
   }
-  return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
+  const report = countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
+  if (baselineRan) {
+    report.baseline_ms = baselineMs
+    report.run_timeout_ms = runTimeoutMs
+  }
+  return report
 }
 
 function anchorLabel(row) {

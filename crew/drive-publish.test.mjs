@@ -4,10 +4,11 @@
 import { test } from 'node:test'
 import { renderBrief } from '../scripts/factory/make-brief.mjs'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { forAll, git, gitResult, scratchDir } from '../test/helpers.mjs'
+import { runDiffMutationProof } from '../scripts/factory/prove-mutations.mjs'
 import {
   COMMIT_TRAILER, CONVERGE_CTX, CTX, CTX_REPAIR, HONEST_NARRATION, NARRATION_HEADING, NARRATION_RECORD, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES, NARRATION_STAGE_VOCABULARY, NARRATOR_REGISTER, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES, RUN_START_EVENT, TD, TRIAGE_FILES, VARIANTS, applyNarration, bounceDetail, bounceSeatOf, buildEnv, commitIntent, composeCommitMessage, composePrBody, convergeIo, convergeRun, driveTask, fakeIo, issueTrailers, journalRowsSinceRunStart, narrateRecord, narrationDefect, narrationFromResponse, narrationIsRawJson, narrationPrompt, narrationStageDefect, narratorApiRoot, narratorCommand, narratorConfig, narratorIo, narratorModelId, narratorModelsCommand, parseSuiteCounts, planEnv, prAnomalies, publicationIo, readFileSync, refsFromCommitMessage, reviewEnv, shellArg, triageEnv,
 } from './drive-fixtures.mjs'
@@ -3476,6 +3477,90 @@ test('a closing keyword glued to an issue number binds no close', () => {
   assert.deepEqual(issueTrailers('Closes:#900018\nfixes #900019').closes, ['#900018', '#900019'])
 })
 
+test('TO4 fake producer timeout report round-trips through the consumer parser', async () => {
+  const root = scratchDir('diff-timeout-roundtrip-')
+  const checkout = root
+  const file = join(checkout, 'lib/value.mjs')
+  mkdirSync(join(checkout, 'lib'), { recursive: true })
+  const before = 'const value = false\n'
+  const after = 'const value = true\n'
+  writeFileSync(file, after)
+  git(checkout, 'init', '-q')
+  git(checkout, 'add', 'lib/value.mjs')
+  git(checkout, 'commit', '-qm', 'fixture')
+  const patch = [
+    'diff --git a/lib/value.mjs b/lib/value.mjs',
+    '--- a/lib/value.mjs',
+    '+++ b/lib/value.mjs',
+    '@@ -1,1 +1,1 @@',
+    '-const value = false',
+    '+const value = true',
+  ].join('\n')
+  let calls = 0
+  try {
+    const report = await runDiffMutationProof({
+      version: 1, checkout, patch, files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1,
+    }, {
+      runTimeoutMs: 100,
+      now: () => 0,
+      runCommand() {
+        calls += 1
+        return calls === 1
+        ? { ok: true, output: '', status: 0, completed: true }
+        : { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }
+      },
+    })
+    assert.equal(report.timed_out, 1)
+    assert.equal(report.killed, 0)
+    assert.equal(report.mutants[0].outcome, 'timed-out')
+    assert.equal(report.baseline_ms, 0)
+    assert.equal(report.run_timeout_ms, 100)
+    const parsed = parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}`, { generation: 1, cap: 1 })
+    assert.deepEqual(parsed, report)
+    assert.equal(readFileSync(file, 'utf8'), after)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('TO5 parser closes timeout counts and measurement preserves unproven rounds', () => {
+  const base = {
+    generation: 1, cap: 2, configured_cap: 2, cap_omitted: 0, total_candidates: 2,
+    generated: 2, killed: 0, timed_out: 2, survived: 0, skipped: 0, omitted: 0,
+    omitted_reason: 'omitted', blind_spot: null, skip_counts: {},
+    mutants: [{ outcome: 'timed-out' }, { outcome: 'timed-out' }],
+  }
+  const parse = (report) => parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify(report)}`, { generation: 1, cap: 2 })
+  assert.deepEqual(parse(base), base)
+  const legacy = { ...base, total_candidates: 0, generated: 0, mutants: [] }
+  delete legacy.timed_out
+  assert.deepEqual(parse(legacy), legacy)
+  for (const invalid of [
+    { ...base, timed_out: -1 },
+    { ...base, timed_out: '2' },
+    { ...base, timed_out: 1 },
+    { ...base, timed_out: Number.MAX_SAFE_INTEGER + 1 },
+    { ...base, mutants: [{ outcome: 'timed-out' }, { outcome: 'unknown' }] },
+    { ...base, timed_out: undefined },
+  ]) assert.equal(parse(invalid), null)
+  const allTimeout = diffMutationMeasurement([{ generated: 2, killed: 0, survived: 0, timed_out: 2, skip_counts: { 'target-changed': 1 } }])
+  assert.deepEqual(allTimeout, { measured: false, reason: 'run-timeout', generated: 2, killed: 0, survived: 0, unmeasured_files: 0, timed_out: 2 })
+  assert.equal(diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'baseline-red': 2 } }]).reason, 'baseline-red')
+  assert.equal(diffMutationMeasurement([{ generated: 1, killed: 0, survived: 0, timed_out: 1, skip_counts: { 'runner-unavailable': 1 } }]).reason, 'runner-unavailable')
+  const mixed = diffMutationMeasurement([
+    { generated: 2, killed: 1, survived: 0, timed_out: 1, skip_counts: {} },
+    { generated: 1, killed: 0, survived: 0, timed_out: 1, skip_counts: {} },
+  ])
+  assert.deepEqual(mixed, { measured: true, reason: null, generated: 3, killed: 1, survived: 0, unmeasured_files: 0, timed_out: 2 })
+})
+
+test('TO6 Proof rendering discloses unproven timeouts without changing zero-timeout lines', () => {
+  const proofLine = (record) => composePrBody({ intent: 'x', diff_mutation: record }).split('## Proof\n')[1].split('\n').find((line) => line.startsWith('- Diff mutation:'))
+  assert.equal(proofLine({ measured: true, generated: 5, killed: 3, survived: 0, timed_out: 2, unmeasured_files: 4 }), '- Diff mutation: 5 generated, 3 killed, 0 survived, 2 timed out (unproven); 4 changed file(s) unmeasured (unsupported-language)')
+  assert.equal(proofLine({ measured: true, generated: 3, killed: 3, survived: 0, unmeasured_files: 0 }), '- Diff mutation: 3 generated, 3 killed, 0 survived')
+  assert.equal(proofLine({ measured: false, reason: 'run-timeout', generated: 3, killed: 0, survived: 0, unmeasured_files: 0, timed_out: 3 }), '- Diff mutation: unmeasured — run-timeout, 3 timed out (unproven)')
+  assert.equal(proofLine({ measured: false, reason: 'baseline-red', generated: 0, killed: 0, survived: 0, unmeasured_files: 0 }), '- Diff mutation: unmeasured — baseline-red')
+  assert.equal(proofLine({ measured: true, generated: 8, killed: 8, survived: 0, unmeasured_files: 4 }), '- Diff mutation: 8 generated, 8 killed, 0 survived; 4 changed file(s) unmeasured (unsupported-language)')
+})
+
 const DM_T825E2 = { generation: 1, cap: 8, configured_cap: 8, cap_omitted: 0, total_candidates: 0, generated: 0, killed: 0, timeout_killed: 0, survived: 0, skipped: 5, omitted: 0, omitted_reason: 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot', blind_spot: null, skip_counts: { 'non-mjs': 5 }, mutants: [] }
 
 // MUTATION DM1: restore the strict mutants.length equality in parseDiffMutationReport and the verbatim t825e2 report parses to null again. The producer counts parse-time and admission skips in skipped but never lists them in mutants (countDiffReport in scripts/factory/prove-mutations.mjs).
@@ -3488,16 +3573,19 @@ test('DM1 non-mjs-only zero-mutant report parses and measures unsupported-langua
 })
 
 // MUTATION MH3: swap the 'tree-not-restored' and 'runner-unavailable' return values in diffMutationMeasurement and the ordered reasons no longer match.
-test('DM2 unmeasured reasons cover the five brief inputs', () => {
+test('DM2 ordered unmeasured reasons include baseline-red and run-timeout', () => {
   assert.equal(Object.isFrozen(DIFF_MUTATION_UNMEASURED_REASONS), true)
   const reasons = [
     diffMutationMeasurement([]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, fatal: { reason: 'tree-not-restored' }, skip_counts: {} }]).reason,
+    diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'baseline-red': 1 } }]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'runner-unavailable': 1 } }]).reason,
+    diffMutationMeasurement([{ generated: 1, killed: 0, survived: 0, timed_out: 1, skip_counts: {} }]).reason,
     diffMutationMeasurement([DM_T825E2]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'comment-or-blank': 1 } }]).reason,
   ]
-  assert.deepEqual(reasons, ['no-report', 'tree-not-restored', 'runner-unavailable', 'unsupported-language', 'no-mutable-candidate'])
+  assert.deepEqual(reasons, ['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
+  assert.deepEqual(DIFF_MUTATION_UNMEASURED_REASONS, ['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
 })
 
 // MUTATION DM3: invert the measured test (killed + survived < 0) and the t563c tallies read unmeasured.

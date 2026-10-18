@@ -14,11 +14,12 @@ import { ROOT, scratchDir } from './helpers.mjs'
 import { slug } from '../crew/slug.mjs'
 import {
   FIELD_KIND_NAMES, FIELD_KINDS, IDIOM_CLASSES, IDIOM_UNMEASURED_REASONS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
+  SUITE_TIMEOUT_SOURCES,
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
   checkoutIntakeBoard, checkoutProtectedPaths, checkoutTestCommand, checkoutTestRunner, classifyTestRunner, defaultProfilePath, fieldKind, isRatifiable, main,
   probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, profileWorktreeSetup, validateWorktreeSetup, readProfile,
-  requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, isPlainBranchName, BASE_BRANCH_REFUSALS,
+  requireField, writeProfile, checkoutBaseBranch, checkoutWorktreeSetup, checkoutSuiteTimeout, isPlainBranchName, BASE_BRANCH_REFUSALS,
   runWorktreeSetup, removeWorktreeExcludes,
 } from '../scripts/factory/probe-repo.mjs'
 
@@ -227,7 +228,7 @@ function captureMain(args) {
 function everyCell(profile) {
   assert.deepEqual(Object.keys(profile.fields).sort(), [
     'baseline', 'ci', 'conventions', 'default_branch', 'intake_board', 'pr_conventions',
-    'protected_paths_candidates', 'test_command', 'test_rerun_command', 'toolchain', 'worktree_setup',
+    'protected_paths_candidates', 'test_command', 'test_rerun_command', 'toolchain', 'worktree_setup', 'suite_timeout_s',
   ].sort())
   for (const cell of Object.values(profile.fields)) {
     assert.ok(['proposed', 'unknown'].includes(cell.status))
@@ -2175,6 +2176,7 @@ test('RC2', () => {
 
 test('RC3', () => {
   assert.equal(FIELD_KINDS.test_rerun_command, 'authored_superset')
+  assert.equal(FIELD_KINDS.suite_timeout_s, 'authored_superset')
   const profile = probeRepo({ checkout: ROOT })
   assert.deepEqual(profile.fields.test_rerun_command, { status: 'unknown', value: null, reason: 'not_measured' })
 })
@@ -2194,4 +2196,85 @@ test('test rerun command re-probe keeps the ratified template and operator metad
   assert.equal(cell.ratified_by, 'operator')
   assert.equal(cell.ratified_at, '2026-10-12T00:00:00.000Z')
   assert.equal(checkoutTestRunner({ checkout: root, profilePath: out, suite: 'cargo clippy --workspace -- -D warnings && cargo test --workspace' }).rerun, template)
+})
+
+test('checkoutSuiteTimeout resolves default, ratified profile, and environment values', () => {
+  const checkout = nodeFixture('suite-timeout-resolution')
+  const factoryRoot = nextRoot('suite-timeout-factory')
+  const profilePath = join(factoryRoot, 'profiles', probeRepo({ checkout }).repo_key + '.json')
+  const write = (cell) => {
+    mkdirSync(dirname(profilePath), { recursive: true })
+    writeFileSync(profilePath, JSON.stringify({ fields: { suite_timeout_s: cell } }))
+  }
+  const ratified = (value) => ({ status: 'ratified', value, source: 'human', ratified_by: 'operator', ratified_at: 'today' })
+  const expected = (seconds, source, basis) => ({ seconds, source, basis })
+
+  assert.equal(Object.isFrozen(SUITE_TIMEOUT_SOURCES), true)
+  assert.deepEqual(SUITE_TIMEOUT_SOURCES, ['default', 'profile', 'env'])
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: {}, factoryRoot }), expected(900, 'default', 'default 900 s'))
+  write({ status: 'unknown', value: null, reason: 'not_measured' })
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: {}, factoryRoot }), expected(900, 'default', 'default 900 s'))
+  write({ status: 'proposed', value: 1800, source: 'probe' })
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: {}, factoryRoot }), expected(900, 'default', 'default 900 s'))
+  write(ratified(1800))
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: {}, factoryRoot }), expected(1800, 'profile', 'profile suite_timeout_s'))
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: { DEVTEAM_SUITE_TIMEOUT_S: '2400' }, factoryRoot }), expected(2400, 'env', 'env DEVTEAM_SUITE_TIMEOUT_S'))
+  assert.deepEqual(checkoutSuiteTimeout({ checkout, env: { DEVTEAM_SUITE_TIMEOUT_S: '0060' }, factoryRoot }), expected(60, 'env', 'env DEVTEAM_SUITE_TIMEOUT_S'))
+})
+
+test('checkoutSuiteTimeout refuses invalid profile and environment timeout values', () => {
+  const checkout = nodeFixture('suite-timeout-invalid')
+  const profilePath = join(checkout, 'suite-timeout.json')
+  const ratified = (value, metadata = {}) => ({ status: 'ratified', value, source: 'human', ratified_by: 'operator', ratified_at: 'today', ...metadata })
+  const write = (cell) => writeFileSync(profilePath, JSON.stringify({ fields: { suite_timeout_s: cell } }))
+  const refuse = (call, reason, source, value) => assert.throws(call, (error) => {
+    assert.ok(error instanceof ProfileRefusal)
+    assert.equal(error.reason, reason)
+    assert.ok(error.message.includes(source))
+    if (value !== undefined) assert.ok(error.message.includes(JSON.stringify(value)))
+    return true
+  })
+
+  for (const value of ['1800', 1800.5, 59, 14401, null]) {
+    write(ratified(value))
+    refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'suite-timeout-invalid', 'profile suite_timeout_s', value)
+  }
+  write(ratified(1800, { ratified_by: undefined }))
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'suite-timeout-invalid', 'profile suite_timeout_s', 1800)
+  write(ratified(59))
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: { DEVTEAM_SUITE_TIMEOUT_S: '1800' } }), 'suite-timeout-invalid', 'profile suite_timeout_s', 59)
+
+  for (const raw of ['abc', '1e3', '+900', ' 900', '', '59', '14401']) {
+    refuse(() => checkoutSuiteTimeout({ checkout, profilePath: join(checkout, 'absent.json'), env: { DEVTEAM_SUITE_TIMEOUT_S: raw } }), 'suite-timeout-invalid', 'env DEVTEAM_SUITE_TIMEOUT_S', raw)
+  }
+  for (const value of [60, 14400]) {
+    write(ratified(value))
+    assert.equal(checkoutSuiteTimeout({ checkout, profilePath, env: {} }).seconds, value)
+    assert.equal(checkoutSuiteTimeout({ checkout, profilePath: join(checkout, 'absent.json'), env: { DEVTEAM_SUITE_TIMEOUT_S: String(value) } }).seconds, value)
+  }
+
+  writeFileSync(profilePath, '')
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
+  writeFileSync(profilePath, '{')
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
+  writeFileSync(profilePath, 'null')
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
+  writeFileSync(profilePath, JSON.stringify({ fields: [] }))
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
+  writeFileSync(profilePath, JSON.stringify({ fields: { suite_timeout_s: { status: 'unknown', value: null, reason: 'unmeasured' } } }))
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath, env: {} }), 'suite-timeout-invalid', 'profile suite_timeout_s', null)
+  refuse(() => checkoutSuiteTimeout({ checkout, profilePath: join(profilePath, 'nested.json'), env: {} }), 'profile-unreadable', 'suite timeout profile is unreadable')
+})
+
+test('suite timeout probe emits unknown and re-probe retains ratified metadata', () => {
+  const checkout = nodeFixture('suite-timeout-reprobe')
+  const fresh = probeRepo({ checkout })
+  assert.deepEqual(fresh.fields.suite_timeout_s, { status: 'unknown', value: null, reason: 'not_measured' })
+  const out = join(fixtureRoot, 'profiles', 'suite-timeout-reprobe.json')
+  writeProfile({ profile: fresh, out, checkout })
+  const handEdited = readProfile(out)
+  handEdited.fields.suite_timeout_s = { status: 'ratified', value: 1800, source: 'human', ratified_by: 'operator', ratified_at: '2026-10-12T00:00:00.000Z', reason: 'stale' }
+  writeFileSync(out, JSON.stringify(handEdited, null, 2) + '\n')
+  writeProfile({ profile: probeRepo({ checkout }), out, checkout })
+  assert.deepEqual(readProfile(out).fields.suite_timeout_s, { status: 'ratified', value: 1800, source: 'human', ratified_by: 'operator', ratified_at: '2026-10-12T00:00:00.000Z' })
 })

@@ -6161,3 +6161,50 @@ test('FS2: finish topology discriminates reorder missing extra', () => {
   assert.equal(shapeValidationDefect({ ...VARIANTS.finish, stages: stages.filter((s) => s !== 'decision') }, 'finish').defect, 'stage-missing')
   assert.equal(shapeValidationDefect({ ...VARIANTS.finish, stages: [...stages, 'publish'] }, 'finish').defect, 'stage-extra')
 })
+
+// MUTATION: drop timeout_s from normal or resumed coldSuite evidence.
+test('suite timeout policy follows normal and resumed cold verdicts', () => {
+  const suiteTimeout = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+  const runMain = (io) => driveTask({ ...CTX, suiteTimeout }, io)
+  const assertEvidence = (result, io, verdict) => {
+    assert.equal(result.details.cold_suite.verdict, verdict)
+    assert.equal(result.details.cold_suite.timeout_s, 1800)
+    const row = io.calls.logs.find((entry) => entry.cold_suite)
+    assert.equal(row.cold_suite.timeout_s, 1800)
+  }
+  for (const [io, verdict] of [
+    [closeoutIo(), 'green'],
+    [closeoutIo({ cold: { ok: false, output: 'cold red', path: '/cold/red', kept: '/cold/red' } }), 'red'],
+    [closeoutIo({ cold: 'throw' }), 'unproven'],
+    [closeoutIo({ cold: null }), 'unavailable'],
+  ]) assertEvidence(runMain(io), io, verdict)
+
+  const retryIo = closeoutIo()
+  let attempt = 0
+  retryIo.runCold = () => ++attempt === 1
+    ? { ok: false, output: 'first cold red', path: '/cold/first', kept: null }
+    : { ok: true, output: '', path: '/cold/second', kept: null }
+  const retried = runMain(retryIo)
+  assertEvidence(retried, retryIo, 'green')
+  assert.equal(retried.details.cold_suite.retried.path, '/cold/first')
+
+  const resumeIo = fakeIo({ runs: {
+    'gate-cmd': { ok: true, output: GATE_SUMMARY_PREFIX + ' {"total":1,"failed":0,"errored":0}' },
+    'custom-suite': { ok: true, output: '# pass 1\n# fail 0\n' },
+  } })
+  resumeIo.runCold = () => ({ ok: true, output: '', path: '/resume/cold', kept: null })
+  const file = { path: 'a.mjs', state: 'present', bytes: `file:-:${'a'.repeat(64)}` }
+  const checkpoint = {
+    version: RESUME_CHECKPOINT_VERSION, kind: 'suite', frozen_where: 'cold-suite', head_oid: 'abc1234',
+    tree: { index_oid: 'tree1234', files: [file], worktree_sha256: resumeWorktreeSha256([file]) },
+    accepted_scope: ['a.mjs'],
+    returns: Object.fromEntries(['planner', 'builder', 'reviewer'].map((role) => [role, { status: 'done', role, artifacts: [], details: {} }])),
+    decision: { accepted_via: 'review pass', verdict: 'pass', residuals: [], carried_findings: [], accept_findings: [], accept_decision: { where: 'review', outcome: 'accepted', residuals: [] }, panel_contributors: ['reviewer'] },
+    commit: { oid: 'abc1234', pending: false, files: ['a.mjs'], message: 'feat: resume', subject: 'feat: resume' },
+    proof: { gate_cmd: 'gate-cmd', gate_path: '/tmp/fake-task/gate.mjs', summary: { total: 1, failed: 0, errored: 0 }, discrimination: 'proven', generation: 1, repairs: 0 },
+    suite: { cmd: 'custom-suite', warm: null, cold: null }, publish: { branch: null, base: null }, prior_stages: ['review:r1', 'commit'], chunk: null,
+  }
+  const resumed = resumeTask({ ...CTX, suiteTimeout: { seconds: 1800 } }, resumeIo, checkpoint)
+  assert.equal(resumed.details.cold_suite.timeout_s, 1800)
+  assert.equal(resumeIo.calls.logs.some((row) => row.cold_suite), false)
+})

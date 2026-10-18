@@ -670,6 +670,190 @@ test('run shell spawns use the named output buffer while git plumbing stays unbo
   assert.equal(shellSpawns.filter((line) => line.includes('maxBuffer: RUN_MAX_BUFFER_BYTES')).length, 2)
 })
 
+// MUTATION ST3: restore a fixed 900_000 ms timeout at either shell spawn.
+test('suite timeout policy reaches warm, cold, and runClean shell spawns', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const policy = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+    const runWithCapture = (seen) => (bin, argv, options) => {
+      if (String(bin) === '/bin/sh') {
+        seen.push(options.timeout)
+        return { status: 0, stdout: '', stderr: '' }
+      }
+      return realSpawnSync(bin, argv, options)
+    }
+    const configuredTimeouts = []
+    const configured = makeIo(fixture, {
+      suiteTimeout: policy,
+      suiteTimeoutMs: 1_800_000,
+      spawnSync: runWithCapture(configuredTimeouts),
+    })
+    configured.run('true')
+    configured.runCold('true')
+    configured.runClean('true')
+    assert.deepEqual(configuredTimeouts, [1_800_000, 1_800_000, 1_800_000])
+
+    const defaultTimeouts = []
+    const defaults = makeIo(fixture, { spawnSync: runWithCapture(defaultTimeouts) })
+    defaults.run('true')
+    defaults.runCold('true')
+    assert.deepEqual(defaultTimeouts, [900_000, 900_000])
+  })
+})
+
+// MUTATION ST4: classify ETIMEDOUT and SIGTERM as ordinary failures without timeout evidence.
+test('warm suite timeout diagnostics preserve output and distinguish other failures', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const policy = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+    const timeoutError = () => Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' })
+    for (const outcome of [
+      { status: null, signal: 'SIGTERM', error: timeoutError() },
+      { status: null, error: timeoutError() },
+      { status: null, signal: 'SIGTERM' },
+    ]) {
+      const io = makeIo(fixture, {
+        suiteTimeout: policy,
+        suiteTimeoutMs: 1_800_000,
+        spawnSync: (bin) => String(bin) === '/bin/sh'
+          ? { ...outcome, stdout: 'warm stdout', stderr: 'warm stderr' }
+          : realSpawnSync(bin, [], {}),
+      })
+      const result = io.run('true')
+      assert.equal(result.ok, false)
+      assert.equal(result.timed_out, true)
+      assert.equal(result.timeout_s, 1800)
+      assert.equal(result.timeout_source, 'profile')
+      assert.ok(result.output.startsWith('warm stdoutwarm stderr'))
+      assert.ok(result.output.includes('[killed: exceeded the 1800 s suite timeout (source: profile suite_timeout_s)]'))
+      assert.doesNotMatch(result.output, /spawn error|900s run timeout/)
+    }
+
+    const defaultIo = makeIo(fixture, {
+      spawnSync: (bin) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: '', stderr: '', error: timeoutError() }
+        : realSpawnSync(bin, [], {}),
+    })
+    const defaultResult = defaultIo.run('true')
+    assert.equal(defaultResult.timeout_source, 'default')
+    assert.ok(defaultResult.output.includes('900 s suite timeout (source: default 900 s)'))
+
+    const interrupted = makeIo(fixture, {
+      spawnSync: (bin) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: '', stderr: '', signal: 'SIGINT' }
+        : realSpawnSync(bin, [], {}),
+    }).run('true')
+    assert.equal(Object.hasOwn(interrupted, 'timed_out'), false)
+    assert.match(interrupted.output, /killed by SIGINT/)
+
+    const spawnFailure = makeIo(fixture, {
+      spawnSync: (bin) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: '', stderr: '', error: Object.assign(new Error('denied'), { code: 'EPERM' }) }
+        : realSpawnSync(bin, [], {}),
+    }).run('true')
+    assert.match(spawnFailure.output, /spawn error: denied/)
+    assert.equal(Object.hasOwn(spawnFailure, 'timed_out'), false)
+
+    const unknown = makeIo(fixture, {
+      spawnSync: (bin) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: '', stderr: '' }
+        : realSpawnSync(bin, [], {}),
+    }).run('true')
+    assert.deepEqual(unknown, { ok: false, output: '', status: null, stderr: '' })
+
+  })
+})
+
+// MUTATION F7: remove the warm overflow exclusion so ENOBUFS plus SIGTERM becomes a timeout.
+test('warm output overflow stays unmeasured without suite timeout evidence', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const overflow = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: 'partial', stderr: 'buffer stderr', signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) }
+        : realSpawnSync(bin, argv, options),
+    }).run('true')
+    assert.equal(overflow.ok, false)
+    assert.equal(overflow.truncated, true)
+    assert.equal(overflow.timed_out, undefined)
+    assert.equal(overflow.timeout_s, undefined)
+    assert.equal(overflow.timeout_source, undefined)
+    assert.ok(overflow.output.startsWith('partialbuffer stderr'))
+    assert.equal(overflow.stderr, 'buffer stderr')
+    assert.match(overflow.output, /spawn error: buffer full/)
+    assert.doesNotMatch(overflow.output, /suite timeout/)
+    assert.match(overflow.output, /\[output exceeded \d+ bytes — this run is UNMEASURED, not red\]$/)
+  })
+})
+
+// MUTATION F7: remove the cold overflow exclusion so ENOBUFS plus SIGTERM gives timeout remedies.
+test('cold output overflow keeps the spawn failure diagnosis and worktree', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let coldPath = null
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) === '/bin/sh') {
+          coldPath = options.cwd
+          return { status: null, stdout: 'partial', stderr: '', signal: 'SIGTERM', error: Object.assign(new Error('buffer full'), { code: 'ENOBUFS' }) }
+        }
+        return realSpawnSync(bin, argv, options)
+      },
+    })
+    try {
+      assert.throws(() => io.runCold('true'), (error) => {
+        assert.match(error.message, /could not be spawned/)
+        assert.match(error.message, /buffer full/)
+        assert.match(error.message, /kept for inspection/)
+        assert.ok(error.message.includes(coldPath))
+        assert.doesNotMatch(error.message, /suite timeout/)
+        assert.doesNotMatch(error.message, /increase profile suite_timeout_s|DEVTEAM_SUITE_TIMEOUT_S/)
+        return true
+      })
+      assert.ok(existsSync(coldPath))
+    } finally {
+      if (coldPath) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath)
+    }
+  })
+})
+
+// MUTATION: route cold ETIMEDOUT through the generic spawn-error branch or discard its retained path.
+test('cold suite timeout refuses with remedies and retains the kept worktree', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const policy = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+    const runColdFailure = (failure) => {
+      let coldPath = null
+      const io = makeIo(fixture, {
+        suiteTimeout: policy,
+        suiteTimeoutMs: 1_800_000,
+        spawnSync: (bin, argv, options) => {
+          if (String(bin) === '/bin/sh') {
+            coldPath = options.cwd
+            return { status: null, stdout: '', stderr: '', ...failure }
+          }
+          return realSpawnSync(bin, argv, options)
+        },
+      })
+      let thrown = null
+      try {
+        assert.throws(() => io.runCold('true'), (error) => { thrown = error; return true })
+      } finally {
+        if (coldPath) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath)
+      }
+      return { coldPath, thrown }
+    }
+
+    const timeout = runColdFailure({ signal: 'SIGTERM', error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) })
+    assert.ok(timeout.thrown)
+    assert.match(timeout.thrown.message, /cold suite exceeded the 1800 s suite timeout/)
+    assert.match(timeout.thrown.message, /profile suite_timeout_s/)
+    assert.match(timeout.thrown.message, /DEVTEAM_SUITE_TIMEOUT_S/)
+    assert.match(timeout.thrown.message, /kept for inspection/)
+    assert.ok(timeout.thrown.message.includes(timeout.coldPath))
+    assert.doesNotMatch(timeout.thrown.message, /could not be spawned/)
+
+    const missing = runColdFailure({ error: Object.assign(new Error('shell missing'), { code: 'ENOENT' }) })
+    assert.match(missing.thrown.message, /could not be spawned/)
+    assert.doesNotMatch(missing.thrown.message, /suite timeout/)
+  })
+})
+
 test('the teardown family stamps the operational channel at the sink', () => {
   const root = scratchDir('journal-channel-capture-')
   const taskDir = join(root, 'task')

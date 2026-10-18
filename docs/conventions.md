@@ -169,3 +169,7 @@ A mismatched assignment id is never accepted: an otherwise-valid envelope may re
 - **2026-10-04** — Added closed refusal `test-runner-mismatch` from `crew/drive.mjs`. *Why:* The lane changed the closed-refusals documented surface.
 - **2026-10-04** — The pi planner lab is delivered by native builtin:mcp as `mcp__lab__lab` with timeout 960 seconds; its server delegates to the retained `crew/pi/extensions/lab.ts`. A missing server is explicitly withheld as `server-absent`; the existing codemode and fff decisions remain unchanged.
 - **2026-10-17** — Added closed refusal `suite-empty` from `scripts/factory/closeout.mjs`. *Why:* The lane changed the closed-refusals documented surface.
+
+## Diff mutation proof
+
+Diff proof spends the unchanged 720000ms total deadline on one green validation baseline before proof writes. Each mutant command gets max(the 120000ms floor, twice the baseline's measured duration); run timeouts are unproven `timed-out` rows counted by `timed_out`, never kills. A red, timed-out or unavailable baseline emits `baseline-red` skips before proof writes.

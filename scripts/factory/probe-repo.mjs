@@ -2075,14 +2075,22 @@ export function profileWorktreeSetup(profile) {
   return { steps, basis: 'ratified' }
 }
 
+// Only a missing path is an absent profile (undefined). Once lstat finds an
+// entry, every read failure refuses, a dangling symlink's ENOENT included.
+function readProfileEntry(path, what) {
+  try { lstatSync(path) } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw new ProfileRefusal(`probe-repo: ${what} profile is unreadable: ${error.message}`, 'profile-unreadable')
+  }
+  try { return JSON.parse(readFileSync(path, 'utf8')) } catch (error) {
+    throw new ProfileRefusal(`probe-repo: ${what} profile is unreadable: ${error.message}`, 'profile-unreadable')
+  }
+}
+
 export function checkoutWorktreeSetup({ checkout, profilePath = null, factoryRoot } = {}) {
   const path = profilePath || defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
-  let profile
-  try { lstatSync(path); profile = JSON.parse(readFileSync(path, 'utf8')) }
-  catch (error) {
-    if (error?.code === 'ENOENT') return { steps: [], basis: 'profile-absent' }
-    throw new ProfileRefusal(`probe-repo: worktree setup profile is unreadable: ${error.message}`, 'profile-unreadable')
-  }
+  const profile = readProfileEntry(path, 'worktree setup')
+  if (profile === undefined) return { steps: [], basis: 'profile-absent' }
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) throw new ProfileRefusal('probe-repo: worktree setup profile is unreadable', 'profile-unreadable')
   return profileWorktreeSetup(profile)
 }
@@ -2092,11 +2100,7 @@ export function checkoutSuiteTimeout({ checkout, env = process.env, profilePath 
   const invalid = (source, value) => {
     throw new ProfileRefusal(`probe-repo: invalid suite timeout from ${source}: ${JSON.stringify(value)}`, 'suite-timeout-invalid')
   }
-  let profile
-  try { lstatSync(path); profile = JSON.parse(readFileSync(path, 'utf8')) }
-  catch (error) {
-    if (error?.code !== 'ENOENT') throw new ProfileRefusal(`probe-repo: suite timeout profile is unreadable: ${error.message}`, 'profile-unreadable')
-  }
+  const profile = readProfileEntry(path, 'suite timeout')
   let cell = null
   if (profile !== undefined) {
     if (!plainObject(profile) || !plainObject(profile.fields)) {

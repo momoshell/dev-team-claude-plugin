@@ -896,6 +896,7 @@ async function dispatchFixture({
   const logs = []
   const wrote = new Map()
   const rotationFiles = rotationDeps.reservationFiles ?? new Map()
+  const fixtureEnv = { DEVTEAM_LEDGER_DIR: join(home, 'factory-state'), ...env }
   const appended = []
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
   const defaultOutcomeExists = (path) => {
@@ -908,18 +909,19 @@ async function dispatchFixture({
     factoryRoot,
     worktreeSetup,
     ...(baseBranch ? { baseBranch } : {}),
-    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state'), ...env },
+    env: fixtureEnv,
     existsSync: (path) => existsProbe ? existsProbe(path) : defaultOutcomeExists(path),
     readdirSync: (path, options) => {
       if (String(path) === batch) return names.map((lane) => `${lane}${REQUEST_SUFFIX}`)
       if (readdir) return readdir(path, options)
+      if (String(path).split(sep).includes('slots')) return fsReaddirSync(path, options)
       return names.map((lane) => `${lane}${REQUEST_SUFFIX}`)
     },
     readFileSync: (path, encoding) => {
       const text = String(path)
       readObserver(text)
-      if (text.endsWith('/crew.json') && crewRecorderRead && new Error().stack.includes('recordPiCodemode')) return crewRecorderRead(text)
-      if (text.endsWith('advisor-reservations.json')) {
+      if (text.endsWith('/crew.json') && crewRecorderRead && ['recordPiCodemode', 'recordEditAssist'].some((name) => new Error().stack.includes(name))) return crewRecorderRead(text)
+      if (text.endsWith('advisor-reservations.json') || text.endsWith('edit-assist-reservations.json')) {
         if (rotationFiles.has(text)) return rotationFiles.get(text)
         return readFileSync(text, encoding || 'utf8')
       }
@@ -950,7 +952,7 @@ async function dispatchFixture({
       const text = String(path)
       wrote.set(text, String(content))
       if (writeFile) writeFile(path, content)
-      if (text.endsWith('advisor-reservations.json')) rotationFiles.set(text, String(content))
+      if (text.endsWith('advisor-reservations.json') || text.endsWith('edit-assist-reservations.json')) rotationFiles.set(text, String(content))
     },
     appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }); if (appendFile) appendFile(path, content) },
     ...(realpathSync ? { realpathSync } : {}),

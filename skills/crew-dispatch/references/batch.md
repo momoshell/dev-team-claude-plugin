@@ -55,7 +55,7 @@ unchanged journal event reports `lanes: 0, files: 0`.
 
 ### Builder edit assist
 
-A lane request may carry the dispatch-only `edit_assist` key with the closed value `on` or `off`; omission is recorded as `null` with journal source `unset`, never as `off`. The default remains off. Only pi builder RPC/ACP environments receive an explicit value; pane transport and a `CREW_EDIT_ASSIST` variable already in the dispatcher environment are refused. Attribution is recorded in the dispatch record, `crew.json`, the journal, and the run-configuration ledger.
+Unset edit assist rotates only for eligible headless pi builders. Dispatch chooses the least-filled `on` or `off` arm within the builder cell `(agent, provider, model_id, effort)`; ties choose `on` first. Explicit `on` or `off` requests keep source `request`; assignments use source `rotation`. Unsupported or unavailable rotations stay `null` with a closed reason. The arm and source are recorded in `crew.json`, the journal, and the run-configuration ledger, with a 60-second reservation for concurrent dispatches. Only pi builder RPC/ACP environments receive an explicit value; pane transport and a `CREW_EDIT_ASSIST` variable already in the dispatcher environment are refused. This dispatch assignment is separate from the adapter default, which remains off.
 
 ### Pi codemode
 

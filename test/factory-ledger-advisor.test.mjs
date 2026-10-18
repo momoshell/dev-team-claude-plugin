@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 
 import assert from 'node:assert/strict'
+import { DatabaseSync } from 'node:sqlite'
 
 import {
   rmSync, readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, unlinkSync, readdirSync, statSync,
@@ -15,7 +16,7 @@ import { ROOT, scratchDir } from './helpers.mjs'
 import {
   openLedger, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, ESCALATION_CAUSE_RULE_GAP, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, ADVISOR_SPEND_COVERAGE, LANE_SPEND_ABSENT_REASONS, priceKeyForModel, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile,
   advisorArmsReadout, ADVISOR_SOURCES, ADVISOR_SOURCE_BACKFILL_OUTCOMES, advisorSourceBackfill,
-  ADVISOR_ARMS,
+  ADVISOR_ARMS, EDIT_ASSIST_SOURCES,
 } from '../scripts/factory/ledger.mjs'
 
 import { readAdvisorArms as readDispatchAdvisorArms } from '../scripts/factory/dispatch-batch.mjs'
@@ -2146,6 +2147,90 @@ test('EA10 ledger validates, migrates, stores, and replays edit assist', () => {
     upgraded.recordRunConfiguration({ ...input, adw_id: 'ea10-migrated', edit_assist: 'on' })
     assert.equal(upgraded.dumpTable('run_configurations').find(({ adw_id }) => adw_id === 'ea10-migrated').edit_assist, 'on')
   } finally { upgraded.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('AR5', async (t) => {
+  // MUTATION AR5: bypass source enum validation; unknown provenance must refuse before append.
+  await t.test('writer and replay preserve each source', () => {
+    const dir = scratchDir('ar5-ledger-')
+    const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write() {} } })
+    const base = {
+      schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit',
+      requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit',
+      requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+      legacy_variant: null, legacy_tier: null, edit_assist: 'on',
+    }
+    try {
+      assert.deepEqual(EDIT_ASSIST_SOURCES, ['rotation', 'request'])
+      assert.equal(Object.isFrozen(EDIT_ASSIST_SOURCES), true)
+      for (const [id, source] of [['rot', 'rotation'], ['req', 'request'], ['null', null]]) {
+        ledger.recordRunConfiguration({ ...base, adw_id: id, edit_assist_source: source })
+      }
+      const replayDir = scratchDir('ar5-replay-')
+      const replay = openLedger({ dbPath: join(replayDir, 'ledger.db'), stderr: { write() {} } })
+      try {
+        replayJsonl(ledger._jsonlPath, replay)
+        const values = (l) => l.dumpTable('run_configurations').map((row) => [row.adw_id, row.edit_assist_source]).sort()
+        assert.deepEqual(values(ledger), [['null', null], ['req', 'request'], ['rot', 'rotation']])
+        assert.deepEqual(values(replay), [['null', null], ['req', 'request'], ['rot', 'rotation']])
+      } finally { replay.close() }
+    } finally { ledger.close() }
+  })
+  await t.test('invalid source refuses before append', () => {
+    const dir = scratchDir('ar5-refusal-')
+    const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write() {} } })
+    const input = {
+      adw_id: 'invalid-source', schema_version: 1, task_profile: 'implementation', task_profile_source: 'explicit',
+      requested_execution: 'full', effective_execution: 'full', execution_source: 'explicit',
+      requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+      legacy_variant: null, legacy_tier: null, edit_assist: 'on',
+    }
+    try {
+      const existedBefore = existsSync(ledger._jsonlPath)
+      const before = existedBefore ? readFileSync(ledger._jsonlPath, 'utf8') : null
+      assert.throws(() => ledger.recordRunConfiguration({ ...input, edit_assist_source: 'unknown' }), /edit_assist_source/)
+      assert.equal(existsSync(ledger._jsonlPath), existedBefore)
+      if (existedBefore) assert.equal(readFileSync(ledger._jsonlPath, 'utf8'), before)
+    } finally { ledger.close() }
+  })
+  await t.test('upgrade adds nullable source to a legacy row', () => {
+    const dir = scratchDir('ar5-migration-')
+    const dbPath = join(dir, 'ledger.db')
+    const legacyDb = new DatabaseSync(dbPath)
+    legacyDb.exec("CREATE TABLE run_configurations (adw_id TEXT PRIMARY KEY, edit_assist TEXT); INSERT INTO run_configurations VALUES ('legacy', NULL)")
+    legacyDb.close()
+    const ledger = openLedger({ dbPath, stderr: { write() {} } })
+    try { assert.equal(ledger.dumpTable('run_configurations').find((row) => row.adw_id === 'legacy')?.edit_assist_source, null) }
+    finally { ledger.close() }
+  })
+})
+
+test('AR6', async () => {
+  // MUTATION AR6: replace bootRunConfiguration's source expression with null.
+  const axes = {
+    profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+    execution: { requested: 'full', effective: 'full', source: 'explicit' },
+    assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+  }
+  for (const [arm, source, expected] of [['on', 'rotation', 'rotation'], ['on', 'request', 'request'], ['on', 'invalid', null], [null, 'rotation', null]]) {
+    const dir = scratchDir('ar6-emit-')
+    const stateDir = join(dir, 'crew')
+    mkdirSync(stateDir)
+    writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+      schema_version: 3, task: 'ar6', tier: 'build', roles: ['planner'],
+      run_configuration: axes, edit_assist: arm, edit_assist_source: source,
+    }))
+    writeFileSync(join(stateDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start' })}\n${JSON.stringify({ event: 'run-configuration', run_configuration: axes })}\n`)
+    const dbPath = join(dir, 'ledger.db')
+    const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'ar6', dbPath })
+    let ledger
+    try {
+      emitter.startRun()
+      ledger = openLedger({ dbPath, stderr: { write() {} } })
+      const row = ledger.dumpTable('run_configurations').find((candidate) => candidate.adw_id === emitter.adwId)
+      assert.deepEqual([row?.edit_assist, row?.edit_assist_source], [arm, expected])
+    } finally { ledger?.close(); emitter.dispose() }
+  }
 })
 
 // MUTATION S5: remove the rotation source filter; only rotation is eligible.

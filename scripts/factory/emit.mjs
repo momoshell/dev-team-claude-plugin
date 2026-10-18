@@ -90,7 +90,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import {
-  openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES,
+  openLedger, ingestJournal, homeDefaultDbPath, isoMs, SESSION_STATUSES, mkdirpBounded, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, EDIT_ASSIST_SOURCES, PI_CODEMODE_VALUES,
 } from './ledger.mjs'
 import { REPO_KEY_ABSENT_REASONS } from './ledger.mjs'
 
@@ -883,6 +883,7 @@ function openRunInner({
         advisor_granted_json: crew.advisor?.granted == null ? null : JSON.stringify(crew.advisor.granted),
         advisor_source: ADVISOR_SOURCES.includes(crew.advisor_source) ? crew.advisor_source : null,
         edit_assist: EDIT_ASSIST_VALUES.includes(crew.edit_assist) ? crew.edit_assist : null,
+        edit_assist_source: EDIT_ASSIST_VALUES.includes(crew.edit_assist) && EDIT_ASSIST_SOURCES.includes(crew.edit_assist_source) ? crew.edit_assist_source : null,
         pi_codemode: PI_CODEMODE_VALUES.includes(crew.pi_codemode) ? crew.pi_codemode : null,
       }
     } catch {

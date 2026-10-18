@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
 import { appendFileSync as fsAppendFileSync, existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, rmSync, symlinkSync, lstatSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -135,6 +136,8 @@ import {
   seatsDefect,
   mergeSeats,
   readAdvisorArms,
+  readEditAssistArms,
+  EDIT_ASSIST_ROTATION_REASONS,
   ADVISOR_ROTATION_REASONS,
   strongestTierMinimum,
   tierFloor,
@@ -150,7 +153,7 @@ import { slotStore } from '../crew/reclaim.mjs'
 import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
 import { crossCheckCoupling, discoverTripwires, issueBindingFor, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
-import { git, scratchDir } from './helpers.mjs'
+import { ROOT, git, scratchDir } from './helpers.mjs'
 import { defaultProfilePath, ProfileRefusal, repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 import { fileURLToPath } from 'node:url'
 
@@ -576,6 +579,350 @@ test('EA1 requested edit assist is attributed before the run', async () => {
   assert.ok(result.spawned.some(({ background }) => background === true))
 })
 
+const AR_CELL = Object.freeze({ agent: 'pi', provider: 'openai', model_id: 'ar-model', effort: 'high' })
+
+test('edit-assist rotation reasons are closed and frozen', () => {
+  // MUTATION RV1-1: deleting a reason or removing Object.freeze must fail this pin.
+  assert.deepEqual(EDIT_ASSIST_ROTATION_REASONS, [
+    'panes', 'not-pi', 'builder-cell-unrecorded', 'crew-unreadable',
+    'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable',
+    'readout-invalid', 'lease-timeout',
+  ])
+  assert.equal(Object.isFrozen(EDIT_ASSIST_ROTATION_REASONS), true)
+})
+const AR_AXES = {
+  profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+  execution: { requested: 'full', effective: 'full', source: 'explicit' },
+  assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+}
+const AR_AT = '2026-10-17T12:00:00.000Z'
+let arSequence = 0
+
+function arLedger({ create = true } = {}) {
+  const dir = scratchDir('edit-assist-ar-')
+  const dbPath = join(dir, 'ledger.db')
+  if (create) {
+    const ledger = openLedger({ dbPath, stderr: { write() {} } })
+    ledger.dumpTable('run_configurations')
+    ledger.close()
+  }
+  return { dir, dbPath }
+}
+
+function seedArRun(f, id, arm, source = 'rotation', cell = AR_CELL) {
+  const db = new DatabaseSync(f.dbPath)
+  try {
+    db.prepare('INSERT INTO run_configurations (adw_id, edit_assist, edit_assist_source) VALUES (?, ?, ?)').run(id, arm, source)
+    db.prepare('INSERT INTO run_seats (adw_id, role, agent, provider, model_id, effort) VALUES (?, ?, ?, ?, ?, ?)').run(id, 'builder', cell.agent, cell.provider, cell.model_id, cell.effort)
+    db.prepare('INSERT INTO sessions (adw_id, task_slug, started_at, tier) VALUES (?, ?, ?, ?)').run(id, id, AR_AT, 'build')
+  } finally { db.close() }
+}
+
+async function runArWave({ f = arLedger(), names = ['lane-a'], builder = AR_CELL, request = null, panes = false, rotationDeps = {}, onSpawn, onWrite, crewJsonForOverride, crewRecorderRead } = {}) {
+  let latestCrew = null
+  const result = await dispatchFixture({
+    label: 'edit-assist-ar-' + (++arSequence),
+    names,
+    home: f.dir,
+    factoryRoot: f.dir,
+    env: { DEVTEAM_LEDGER_DIR: f.dir, DEVTEAM_LEDGER_DB: f.dbPath },
+    existsProbe: (path) => String(path).startsWith(f.dir) && fsExistsSync(path),
+    crewRecorderRead,
+    crewJsonFor: crewJsonForOverride || ((lane) => JSON.stringify({
+      workspace_id: `ws-${lane}`,
+      members: { builder: { agent: builder.agent, provider: builder.provider, id: builder.model_id, effort: builder.effort } },
+      run_configuration: AR_AXES,
+    })),
+    requests: Object.fromEntries(names.map((name) => [name, requestFor(name, request === null ? {} : { edit_assist: request })])),
+    runFlags: panes ? { panes: true } : {},
+    rotationDeps: { now: () => Date.parse(AR_AT), ...rotationDeps },
+    writeFile: (path, content) => {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, content)
+      if (String(path).endsWith('/crew.json')) latestCrew = JSON.parse(content)
+      onWrite?.(path, content)
+    },
+    appendFile: (path, content) => {
+      mkdirSync(dirname(path), { recursive: true })
+      appendFileSync(path, content)
+    },
+    spawnResult: (args, call) => {
+      if (call.background) onSpawn?.(latestCrew, args)
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const crews = [...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json')).map(([, value]) => JSON.parse(value))
+  const rows = result.appended.filter((row) => row.path.endsWith('/journal.jsonl'))
+    .flatMap((row) => row.content.trim().split('\n').filter(Boolean).map(JSON.parse))
+    .filter((row) => row.event === 'edit-assist')
+  return { crews, rows, result }
+}
+
+function arFacts(value) {
+  return {
+    crews: value.crews.map((crew) => [crew.edit_assist, crew.edit_assist_source]),
+    rows: value.rows.map((row) => [row.edit_assist, row.source]),
+  }
+}
+
+test('AR1', async () => {
+  // MUTATION AR1: reverse the least-filled comparison; 2-on/1-off must choose off.
+  const f = arLedger()
+  seedArRun(f, 'ar1-on-a', 'on')
+  seedArRun(f, 'ar1-on-b', 'on')
+  seedArRun(f, 'ar1-off', 'off')
+  const spawned = []
+  let reservationWasWrittenUnderLease = false
+  const result = await runArWave({
+    f,
+    onSpawn: (crew) => spawned.push([crew?.edit_assist, crew?.edit_assist_source]),
+    onWrite: (path) => {
+      if (String(path).endsWith('/edit-assist-reservations.json')) reservationWasWrittenUnderLease = fsExistsSync(join(f.dir, 'slots', 'edit-assist-rotation-0.json'))
+    },
+  })
+  assert.deepEqual(arFacts(result), { crews: [['off', 'rotation']], rows: [['off', 'rotation']] })
+  assert.deepEqual(spawned, [['off', 'rotation']])
+  assert.equal(reservationWasWrittenUnderLease, true)
+})
+
+test('AR2', async (t) => {
+  // MUTATION AR2: replace the in-flight count with zero; the second lane would also pick on.
+  const prior = await runArWave()
+  assert.deepEqual(arFacts(prior), { crews: [['on', 'rotation']], rows: [['on', 'rotation']] })
+  const result = await runArWave({ names: ['lane-a', 'lane-b'] })
+  assert.deepEqual(arFacts(result), {
+    crews: [['on', 'rotation'], ['off', 'rotation']],
+    rows: [['on', 'rotation'], ['off', 'rotation']],
+  })
+  await t.test('independent child dispatches share the real reservation lease', async () => {
+    const f = arLedger()
+    const fixturePath = join(ROOT, 'test/factory-dispatch-batch-fences.test.mjs')
+    const childCode = (lane) => `
+      import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from 'node:fs'
+      import { join, dirname } from 'node:path'
+      import { pathToFileURL } from 'node:url'
+      const fixtureUrl = pathToFileURL(${JSON.stringify(fixturePath)}).href
+      const fixtureSource = readFileSync(new URL(fixtureUrl), 'utf8')
+        .replace("import { test } from 'node:test'", 'const test = () => {}')
+        .replace(/^((?:import\\b[^\\n]*?|\\}) from )(['"])(\\.[^'"]+)\\2/gm, (_, prefix, quote, path) => prefix + JSON.stringify(new URL(path, fixtureUrl).href))
+        .replaceAll('import.meta.url', JSON.stringify(fixtureUrl))
+      const { dispatchFixture, requestFor } = await import('data:text/javascript;base64,' + Buffer.from(fixtureSource).toString('base64'))
+      const dir = ${JSON.stringify(f.dir)}, dbPath = ${JSON.stringify(f.dbPath)}, resultPath = ${JSON.stringify(join(f.dir, lane + '.json'))}
+      const cell = { agent: 'pi', provider: 'openai', model_id: 'ar-model', effort: 'high' }
+      const axes = ${JSON.stringify(AR_AXES)}
+      const result = await dispatchFixture({
+        label: ${JSON.stringify('ar2-child-' + lane)}, names: [${JSON.stringify(lane)}],
+        home: dir, factoryRoot: dir,
+        env: { DEVTEAM_LEDGER_DIR: dir, DEVTEAM_LEDGER_DB: dbPath },
+        existsProbe: (path) => String(path).startsWith(dir) && existsSync(path),
+        crewJsonFor: (name) => JSON.stringify({ workspace_id: 'ws-' + name, members: { builder: { agent: cell.agent, provider: cell.provider, id: cell.model_id, effort: cell.effort } }, run_configuration: axes }),
+        requests: { [${JSON.stringify(lane)}]: requestFor(${JSON.stringify(lane)}) },
+        rotationDeps: { now: () => Date.now() },
+        writeFile: (path, content) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, content) },
+        appendFile: (path, content) => { mkdirSync(dirname(path), { recursive: true }); appendFileSync(path, content) },
+        spawnResult: () => ({ status: 0, stdout: '', stderr: '' }),
+      })
+      const crew = [...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json')).map(([, value]) => JSON.parse(value)).at(-1)
+      writeFileSync(resultPath, JSON.stringify({ arm: crew?.edit_assist, source: crew?.edit_assist_source }))
+    `
+    const launch = (lane) => new Promise((resolve, reject) => {
+      const child = childSpawn(process.execPath, ['--input-type=module', '-e', childCode(lane)], { cwd: ROOT })
+      let stdout = '', stderr = ''
+      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
+      child.stdout.on('data', (chunk) => { stdout += chunk })
+      child.stderr.on('data', (chunk) => { stderr += chunk })
+      child.once('error', reject)
+      child.once('close', (code) => {
+        if (code !== 0) reject(new Error(`child ${lane} exit=${code}: ${stderr}`))
+        else {
+          try { resolve(JSON.parse(readFileSync(join(f.dir, lane + '.json'), 'utf8'))) }
+          catch { reject(new Error(`child ${lane} produced invalid output: ${stdout} ${stderr}`)) }
+        }
+      })
+    })
+    const children = await Promise.all([launch('child-a'), launch('child-b')])
+    assert.deepEqual(children.map((row) => row.source), ['rotation', 'rotation'])
+    assert.deepEqual(children.map((row) => row.arm).sort(), ['off', 'on'])
+  })
+})
+
+test('AR3', async () => {
+  // MUTATION AR3: drop effort from sameEditAssistCell; high effort rows would bias xhigh.
+  const f = arLedger()
+  const xhigh = { ...AR_CELL, effort: 'xhigh' }
+  for (let i = 0; i < 3; i += 1) seedArRun(f, `ar3-high-${i}`, 'on', 'rotation', AR_CELL)
+  for (let i = 0; i < 5; i += 1) seedArRun(f, `ar3-request-${i}`, 'on', 'request', xhigh)
+  const result = await runArWave({ f, builder: xhigh })
+  assert.deepEqual(arFacts(result), { crews: [['on', 'rotation']], rows: [['on', 'rotation']] })
+  for (const [axis, value] of [['agent', 'claude'], ['provider', 'other'], ['model_id', 'other-model']]) {
+    const foreign = arLedger()
+    seedArRun(foreign, `ar3-${axis}`, 'on', 'rotation', { ...AR_CELL, [axis]: value })
+    assert.equal((await runArWave({ f: foreign })).crews[0]?.edit_assist, 'on', `foreign ${axis} must not count`)
+  }
+
+  const at = Date.parse(AR_AT)
+  const stamp = (delta) => new Date(at + delta).toISOString()
+  const reservation = (id, lane, arm = 'on', cell = AR_CELL, delta = -1000) => ({ id, lane, arm, cell, reserved_at: stamp(delta) })
+  const foreignCell = { ...AR_CELL, provider: 'other-provider' }
+  const configurations = [
+    { adw_id: 'ack', edit_assist: 'on', edit_assist_source: 'rotation' },
+    { adw_id: 'wrong-arm', edit_assist: 'off', edit_assist_source: 'rotation' },
+    { adw_id: 'wrong-cell', edit_assist: 'on', edit_assist_source: 'rotation' },
+    { adw_id: 'before', edit_assist: 'on', edit_assist_source: 'rotation' },
+    { adw_id: 'same', edit_assist: 'on', edit_assist_source: 'rotation' },
+    { adw_id: 'request', edit_assist: 'on', edit_assist_source: 'request' },
+    { adw_id: 'legacy', edit_assist: 'on', edit_assist_source: null },
+  ]
+  const seats = configurations.map((row) => {
+    const cell = row.adw_id === 'wrong-cell' ? foreignCell : AR_CELL
+    return { adw_id: row.adw_id, role: 'builder', ...cell }
+  })
+  const sessions = [
+    { adw_id: 'ack', task_slug: 'ack-lane', started_at: stamp(-500) },
+    { adw_id: 'wrong-arm', task_slug: 'wrong-arm-lane', started_at: stamp(-500) },
+    { adw_id: 'wrong-cell', task_slug: 'wrong-cell-lane', started_at: stamp(-500) },
+    { adw_id: 'before', task_slug: 'before-lane', started_at: stamp(-1000) },
+    { adw_id: 'same', task_slug: 'same-lane', started_at: stamp(-500) },
+  ]
+  const calls = { run_configurations: 0, run_seats: 0, sessions: 0 }
+  let closes = 0
+  const ledger = {
+    stats: () => ({ degraded: false, mirror_errors: 0 }),
+    dumpTable: (name) => { calls[name] += 1; return { run_configurations: configurations, run_seats: seats, sessions }[name] },
+    close: () => { closes += 1 },
+  }
+  const reservations = [
+    reservation('expired', 'expired-lane', 'on', AR_CELL, -60000),
+    reservation('young', 'young-lane', 'on', AR_CELL, -59999),
+    reservation('future', 'future-lane', 'off', AR_CELL, 1000),
+    reservation('acknowledged', 'ack-lane'),
+    reservation('wrong-arm', 'wrong-arm-lane'),
+    reservation('wrong-cell', 'wrong-cell-lane'),
+    reservation('before', 'before-lane', 'on', AR_CELL, -500),
+    reservation('same-a', 'same-lane'),
+    reservation('same-b', 'same-lane'),
+    reservation('foreign-cell', 'foreign-lane', 'on', foreignCell),
+  ]
+  const read = readEditAssistArms({
+    cell: AR_CELL,
+    inFlight: reservations,
+    deps: { env: { DEVTEAM_LEDGER_DB: '/tmp/ar-reader.db' }, existsSync: () => true, now: () => at },
+    open: () => ledger,
+  })
+  assert.deepEqual(read.reservations.map((row) => row.id), ['young', 'future', 'wrong-arm', 'wrong-cell', 'before', 'same-b', 'foreign-cell'])
+  assert.deepEqual(read.readout.arms, [{ arm: 'on', runs: 3, in_flight: 5 }, { arm: 'off', runs: 1, in_flight: 1 }])
+  assert.equal(read.readout.next_arm, 'off')
+  assert.deepEqual(calls, { run_configurations: 1, run_seats: 1, sessions: 1 })
+  assert.equal(closes, 1)
+  let statCalls = 0, degradedClose = 0
+  const degradedLedger = {
+    stats: () => ({ degraded: ++statCalls > 1, mirror_errors: statCalls > 1 ? 1 : 0 }),
+    dumpTable: () => [],
+    close: () => { degradedClose += 1 },
+  }
+  const degraded = readEditAssistArms({ cell: AR_CELL, inFlight: reservations, deps: { env: { DEVTEAM_LEDGER_DB: '/tmp/ar-reader.db' }, existsSync: () => true, now: () => at }, open: () => degradedLedger })
+  assert.equal(degraded.reason, 'ledger-degraded')
+  assert.deepEqual(degraded.reservations, reservations)
+  assert.equal(degradedClose, 1)
+})
+
+test('AR4', async (t) => {
+  // MUTATION AR4: bypass the panes eligibility decision; panes must remain unset.
+  for (const kind of ['ledger-absent', 'ledger-unreadable', 'ledger-read-denied', 'panes', 'not-pi']) {
+    await t.test(kind, async () => {
+      const f = arLedger({ create: !['ledger-absent', 'ledger-read-denied'].includes(kind) })
+      if (kind === 'ledger-unreadable') writeFileSync(f.dbPath, 'not a sqlite database')
+      if (kind === 'ledger-read-denied') mkdirSync(f.dbPath)
+      const result = await runArWave({
+        f,
+        panes: kind === 'panes',
+        builder: kind === 'not-pi' ? { ...AR_CELL, agent: 'claude' } : AR_CELL,
+      })
+      assert.deepEqual(result.rows.map((row) => [row.edit_assist, row.source]), [[null, 'unset']])
+      assert.equal(EDIT_ASSIST_ROTATION_REASONS.includes(result.rows[0]?.reason), true)
+      if (!['ledger-unreadable', 'ledger-read-denied'].includes(kind)) assert.equal(result.rows[0].reason, kind)
+      assert.deepEqual(arFacts(result), { crews: [[null, null]], rows: [[null, 'unset']] })
+    })
+  }
+  await t.test('explicit request bypasses the reader', async () => {
+    let calls = 0
+    const result = await runArWave({
+      f: arLedger(),
+      request: 'off',
+      rotationDeps: { readEditAssistArms: () => { calls += 1; throw new Error('reader called') } },
+    })
+    assert.deepEqual(arFacts(result), { crews: [['off', 'request']], rows: [['off', 'request']] })
+    assert.equal(calls, 0)
+  })
+  await t.test('builder and crew recorder failures abstain without recreating crew', async () => {
+    const missingBuilder = await runArWave({ crewJsonForOverride: (lane) => JSON.stringify({ workspace_id: 'ws-' + lane, members: {}, run_configuration: AR_AXES }) })
+    assert.deepEqual(missingBuilder.rows.map(({ edit_assist, source, reason }) => [edit_assist, source, reason]), [[null, 'unset', 'not-pi']])
+    const malformedBuilder = await runArWave({ builder: { agent: 'pi', provider: '', model_id: 'm', effort: true } })
+    assert.deepEqual(malformedBuilder.rows.map(({ edit_assist, source, reason }) => [edit_assist, source, reason]), [[null, 'unset', 'builder-cell-unrecorded']])
+    const unreadableCrew = await runArWave({ crewRecorderRead: () => '{' })
+    assert.deepEqual(unreadableCrew.rows.map(({ edit_assist, source, reason }) => [edit_assist, source, reason]), [[null, 'unset', 'crew-unreadable']])
+    const crew = unreadableCrew.crews[0]
+    assert.equal(Object.hasOwn(crew, 'edit_assist'), false)
+  })
+  await t.test('empty, corrupt, invalid, and unreadable reservations abstain', async () => {
+    for (const [label, contents] of [['empty', ''], ['corrupt', '{'], ['invalid', '[{}]']]) {
+      const f = arLedger()
+      writeFileSync(join(f.dir, 'edit-assist-reservations.json'), contents)
+      const result = await runArWave({ f })
+      assert.equal(result.rows[0]?.reason, 'ledger-unreadable', label)
+    }
+    const f = arLedger()
+    mkdirSync(join(f.dir, 'edit-assist-reservations.json'))
+    const unreadable = await runArWave({ f })
+    assert.equal(unreadable.rows[0]?.reason, 'ledger-unreadable')
+  })
+  await t.test('failed reservation write and injected reader outcomes stay null', async () => {
+    const denied = Object.assign(new Error('reservation write denied'), { code: 'EPERM' })
+    const failedF = arLedger()
+    const failedWrite = await runArWave({
+      f: failedF,
+      rotationDeps: {
+        writeFileSync: (path, content) => {
+          if (String(path).endsWith('/edit-assist-reservations.json')) throw denied
+          mkdirSync(dirname(path), { recursive: true })
+          return writeFileSync(path, content)
+        },
+      },
+    })
+    assert.deepEqual(failedWrite.rows.map(({ edit_assist, reason }) => [edit_assist, reason]), [[null, 'ledger-unreadable']])
+    const retry = await runArWave({ f: failedF })
+    assert.equal(retry.crews[0]?.edit_assist_source, 'rotation', 'failed reservation writes must release the lease')
+    for (const [name, response] of [
+      ['degraded', { readout: null, reason: 'ledger-degraded', reservations: [] }],
+      ['invalid', undefined],
+    ]) {
+      const result = await runArWave({ rotationDeps: { readEditAssistArms: () => response } })
+      assert.deepEqual(result.rows.map(({ edit_assist, reason }) => [edit_assist, reason]), [[null, name === 'invalid' ? 'readout-invalid' : 'ledger-degraded']])
+    }
+  })
+  await t.test('lease timeout occurs before reading or writing reservations', async () => {
+    const f = arLedger()
+    const pool = slotStore({ dir: f.dir, kind: 'edit-assist-rotation', capacity: 1 })
+    const held = pool.acquire({ owner: 'test-holder' })
+    assert.ok(held.handle)
+    let clock = Date.now()
+    let reads = 0
+    try {
+      const result = await runArWave({
+        f,
+        rotationDeps: {
+          now: () => clock,
+          sleep: (ms) => { clock += ms },
+          readEditAssistArms: () => { reads += 1; return null },
+        },
+      })
+      assert.deepEqual(result.rows.map(({ edit_assist, reason }) => [edit_assist, reason]), [[null, 'lease-timeout']])
+      assert.equal(reads, 0)
+      assert.equal(fsExistsSync(join(f.dir, 'edit-assist-reservations.json')), false)
+    } finally { pool.release(held.handle) }
+  })
+})
+
 test('EA2 absent edit assist stays null and unset', async () => {
   const probe = crewBeforeRun()
   const result = await dispatchFixture({ label: 'ea2-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult })
@@ -584,7 +931,7 @@ test('EA2 absent edit assist stays null and unset', async () => {
   const crewEntry = [...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))
   assert.equal(JSON.parse(crewEntry[1]).edit_assist, null)
   const rows = result.appended.filter(({ path }) => path.endsWith('/journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
-  assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source }) => ({ edit_assist, source })), [{ edit_assist: null, source: 'unset' }])
+  assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source, reason }) => ({ edit_assist, source, reason })), [{ edit_assist: null, source: 'unset', reason: 'not-pi' }])
 })
 
 test('EA3 invalid edit assist is refused as an enum before boot', async () => {
@@ -5164,7 +5511,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readEditAssistArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {

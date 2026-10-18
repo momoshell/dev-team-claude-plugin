@@ -85,6 +85,7 @@ import { modelString as claudeModelString } from '../../crew/adapters/adapter-cl
 import { modelString as piModelString, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES } from '../../crew/adapters/adapter-pi.mjs'
 import { matchGlob, validGlob } from '../../hooks/skill-gate.mjs'
 export { EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES }
+export const EDIT_ASSIST_SOURCES = Object.freeze(['rotation', 'request'])
 // NONCE_PREFIX was imported from the legacy runtime's contract
 // (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
 // sweep guard still honors nonce-prefixed sidecars, so the constant's
@@ -842,6 +843,7 @@ export const TABLES = Object.freeze({
       { name: 'advisor_source', decl: 'TEXT' },
       { name: 'advisor_source_evidence', decl: 'TEXT' },
       { name: 'edit_assist', decl: 'TEXT' },
+      { name: 'edit_assist_source', decl: 'TEXT' },
       { name: 'pi_codemode', decl: 'TEXT' }
     ],
     unique: [['adw_id']],
@@ -3328,6 +3330,7 @@ export function openLedger({
     }
     if (input.advisor_source != null) requireEnum(input.advisor_source, ADVISOR_SOURCES, 'recordRunConfiguration', 'advisor_source')
     if (input.edit_assist != null) requireEnum(input.edit_assist, EDIT_ASSIST_VALUES, 'recordRunConfiguration', 'edit_assist')
+    if (input.edit_assist_source != null) requireEnum(input.edit_assist_source, EDIT_ASSIST_SOURCES, 'recordRunConfiguration', 'edit_assist_source')
     if (input.pi_codemode != null) requireEnum(input.pi_codemode, PI_CODEMODE_VALUES, 'recordRunConfiguration', 'pi_codemode')
     if (input.advisor_granted_json != null) {
       let grant
@@ -3353,6 +3356,7 @@ export function openLedger({
       advisor_source: input.advisor_source ?? null,
       advisor_source_evidence: input.advisor_source_evidence ?? null,
       edit_assist: input.edit_assist ?? null,
+      edit_assist_source: input.edit_assist_source ?? null,
       pi_codemode: input.pi_codemode ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)

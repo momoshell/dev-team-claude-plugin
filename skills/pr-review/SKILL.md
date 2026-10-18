@@ -1,9 +1,9 @@
 ---
 name: pr-review
 description: >-
-  Governs reviewing a change for correctness, contract drift, vacuity and scope,
-  the typed findings shape, and divergence. Load it when reviewing a pull
-  request or change and deciding findings, grades, or reviewer posture.
+  Load when reviewing a pull request or change and deciding findings, grades, or
+  reviewer posture. Governs reviewing a change for correctness, contract drift,
+  vacuity and scope, the typed findings shape, and divergence.
 ---
 
 # Pull-request review

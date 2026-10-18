@@ -1,6 +1,6 @@
 ---
 name: code-less
-description: This repo's worked examples for the ladder in crew/roles/_shared.md — the rungs that recur here, each with the replacement that was accepted.
+description: Use when a change could be smaller, before adding a helper, branch, flag or file. This repo's worked examples for the ladder in crew/roles/_shared.md, the rungs that recur here, each with the replacement that was accepted.
 compatibility: Delivered inline to the builder and granted to the reviewer; the ladder still reaches every seat through `_shared.md`.
 ---
 

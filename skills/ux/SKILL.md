@@ -1,12 +1,12 @@
 ---
 name: ux
 description: >-
-  Records the current visualizer's measured UX boundary: one honest
-  null-with-reason phrase, explicit loading/empty/error states, native-first
-  keyboard operability with visible focus, and reduced-motion handling for the
-  counted animations. Load it before rendering a null, adding a loading or
-  empty branch, adding a custom control, or adding motion to a Svelte
-  component. It records this checkout's evidence rather than generic UX advice.
+  Load before rendering a null, adding a loading or empty branch, adding a custom
+  control, or adding motion to a Svelte component. Records the current visualizer's
+  measured UX boundary: one honest null-with-reason phrase, explicit loading/empty/error
+  states, native-first keyboard operability with visible focus, and reduced-motion
+  handling for the counted animations. It records this checkout's evidence rather
+  than generic UX advice.
 ---
 
 This is the measured UX boundary an agent works inside. The counts below describe the current checkout's 34 visualizer components, not a generic design system: extend the discipline to a new component without inventing rules the exhibits do not support.

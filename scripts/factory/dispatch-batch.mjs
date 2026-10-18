@@ -19,7 +19,7 @@ import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mj
 import { slug } from '../../crew/slug.mjs'
 import { openRun } from './emit.mjs'
 import { checkoutBaseBranch, checkoutWorktreeSetup, validateWorktreeSetup, runWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
-import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
+import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, EDIT_ASSIST_SOURCES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
 import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherProfile, isTripwireFile, issueBindingFor, laneFromProfile, profileField, validateRequest } from './make-brief.mjs'
 
@@ -840,6 +840,143 @@ export const ADVISOR_LEASE_WAIT_MS = 5000
 const ADVISOR_LEASE_POLL_MS = 50
 // lean: reservations expire after 60 seconds; durable boot acknowledgements if pick-to-row latency approaches the bound
 
+// lean: full-table scans per eligible unset builder; snapshot only if dispatch latency grows with ledger size
+// lean: 60-second reservation expiry; durable run-start acknowledgement if assignment latency approaches the bound
+export const EDIT_ASSIST_ROTATION_REASONS = Object.freeze([
+  'panes', 'not-pi', 'builder-cell-unrecorded', 'crew-unreadable',
+  'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable',
+  'readout-invalid', 'lease-timeout',
+])
+export const EDIT_ASSIST_RESERVATION_MAX_AGE_MS = ADVISOR_RESERVATION_MAX_AGE_MS
+
+function validEditAssistCell(cell) {
+  return Boolean(cell && typeof cell === 'object' && !Array.isArray(cell)
+    && typeof cell.agent === 'string' && cell.agent.trim() !== ''
+    && typeof cell.provider === 'string' && cell.provider.trim() !== ''
+    && typeof cell.model_id === 'string' && cell.model_id.trim() !== ''
+    && (cell.effort === null || (typeof cell.effort === 'string' && cell.effort.trim() !== '')))
+}
+
+function sameEditAssistCell(left, right) {
+  return ['agent', 'provider', 'model_id', 'effort'].every((key) => left?.[key] === right?.[key])
+}
+
+function validEditAssistReservation(row) {
+  return Boolean(row && typeof row === 'object' && !Array.isArray(row)
+    && typeof row.id === 'string' && row.id.trim()
+    && typeof row.lane === 'string' && row.lane.trim()
+    && EDIT_ASSIST_VALUES.includes(row.arm)
+    && validEditAssistCell(row.cell)
+    && typeof row.reserved_at === 'string' && Number.isFinite(Date.parse(row.reserved_at)))
+}
+
+export function readEditAssistArms({ deps, cell, inFlight = [], open = openLedger } = {}) {
+  const d = normalDeps(deps)
+  const dbPath = d.env.DEVTEAM_LEDGER_DB || join(factoryStateRoot(d), 'ledger.db')
+  let ledger
+  try {
+    if (!d.existsSync(dbPath)) return { readout: null, reason: 'ledger-absent', reservations: [] }
+    ledger = open({ dbPath, readOnly: true, stderr: { write: () => {} } })
+    const before = ledger.stats()
+    if (before?.degraded) return { readout: null, reason: 'ledger-degraded', reservations: inFlight }
+    const configurations = ledger.dumpTable('run_configurations')
+    const seats = ledger.dumpTable('run_seats')
+    const sessions = ledger.dumpTable('sessions')
+    const after = ledger.stats()
+    if (after?.degraded || after?.mirror_errors > before?.mirror_errors) return { readout: null, reason: 'ledger-degraded', reservations: inFlight }
+    if (![configurations, seats, sessions].every(Array.isArray)) return { readout: null, reason: 'ledger-degraded', reservations: inFlight }
+    const builders = new Map(seats.filter((row) => row?.role === 'builder').map((row) => [row.adw_id, row]))
+    const configs = new Map(configurations.map((row) => [row.adw_id, row]))
+    const counts = EDIT_ASSIST_VALUES.map((arm) => ({ arm, runs: 0, in_flight: 0 }))
+    for (const configuration of configurations) {
+      if (configuration.edit_assist_source !== 'rotation') continue
+      if (!EDIT_ASSIST_VALUES.includes(configuration.edit_assist)) continue
+      const builder = builders.get(configuration.adw_id)
+      const recordedCell = builder && { agent: builder.agent, provider: builder.provider, model_id: builder.model_id, effort: builder.effort }
+      if (!sameEditAssistCell(recordedCell, cell)) continue
+      counts.find((row) => row.arm === configuration.edit_assist).runs += 1
+    }
+    const now = (d.now || Date.now)()
+    const acknowledged = new Set()
+    const liveReservations = inFlight.filter((reservation) => {
+      const reserved = Date.parse(reservation.reserved_at)
+      if (now - reserved >= EDIT_ASSIST_RESERVATION_MAX_AGE_MS) return false
+      const matched = sessions.find((session) => {
+        if (acknowledged.has(session.adw_id) || session.task_slug !== reservation.lane
+          || !Number.isFinite(Date.parse(session.started_at)) || Date.parse(session.started_at) < reserved) return false
+        const configuration = configs.get(session.adw_id)
+        const builder = builders.get(session.adw_id)
+        return configuration?.edit_assist_source === 'rotation'
+          && configuration.edit_assist === reservation.arm
+          && sameEditAssistCell(builder && { agent: builder.agent, provider: builder.provider, model_id: builder.model_id, effort: builder.effort }, reservation.cell)
+      })
+      if (matched) acknowledged.add(matched.adw_id)
+      return !matched
+    })
+    for (const arm of counts) {
+      const in_flight = liveReservations.filter((row) => row.arm === arm.arm && sameEditAssistCell(row.cell, cell)).length
+      arm.in_flight = in_flight
+    }
+    let winner = counts[0]
+    for (const candidate of counts) if (candidate.runs + candidate.in_flight < winner.runs + winner.in_flight) winner = candidate
+    return { readout: { arms: counts, next_arm: winner.arm }, reason: null, reservations: liveReservations }
+  } catch (error) {
+    const message = String(error?.message || error)
+    const reason = error?.reason === 'home_ledger_under_test' ? 'ledger-refused'
+      : /degrad/i.test(message) ? 'ledger-degraded' : 'ledger-unreadable'
+    return { readout: null, reason, reservations: inFlight }
+  } finally {
+    try { ledger?.close() } catch { /* Preserve the ledger read result. */ }
+  }
+}
+
+function rotateEditAssistForLane(d, lane, cell) {
+  const root = factoryStateRoot(d)
+  const reservationPath = join(root, 'edit-assist-reservations.json')
+  try { d.mkdirSync(root, { recursive: true }) } catch { return { readout: null, reason: 'ledger-unreadable' } }
+  let pool
+  try { pool = slotStore({ dir: root, kind: 'edit-assist-rotation', capacity: 1, deps: d }) } catch { return { readout: null, reason: 'ledger-unreadable' } }
+  let handle = null
+  try {
+    const lease = acquireAdvisorLease(d, pool, lane)
+    handle = lease.handle
+    if (!handle) return { readout: null, reason: lease.reason }
+    let reservations
+    try {
+      const text = d.readFileSync(reservationPath, 'utf8')
+      reservations = text.trim() ? JSON.parse(text) : null
+    } catch (error) {
+      if (error?.code === 'ENOENT') reservations = []
+    }
+    if (!Array.isArray(reservations) || reservations.some((row) => !validEditAssistReservation(row))) return { readout: null, reason: 'ledger-unreadable' }
+    let rotation
+    try { rotation = d.readEditAssistArms({ deps: d, cell, inFlight: reservations }) }
+    catch { rotation = null }
+    if (!rotation || typeof rotation !== 'object' || Array.isArray(rotation) || !Array.isArray(rotation.reservations)) return { readout: null, reason: 'readout-invalid' }
+    reservations = rotation.reservations
+    if (reservations.some((row) => !validEditAssistReservation(row))) return { readout: null, reason: 'readout-invalid' }
+    const readout = rotation.readout
+    if (readout == null) {
+      if (!EDIT_ASSIST_ROTATION_REASONS.includes(rotation.reason)) return { readout: null, reason: 'readout-invalid' }
+      return { readout: null, reason: rotation.reason }
+    }
+    const validReadout = typeof readout === 'object' && !Array.isArray(readout)
+      && Array.isArray(readout.arms) && readout.arms.length === EDIT_ASSIST_VALUES.length
+      && readout.arms.every((row, index) => row?.arm === EDIT_ASSIST_VALUES[index]
+        && Number.isInteger(row.runs) && row.runs >= 0 && Number.isInteger(row.in_flight) && row.in_flight >= 0)
+      && EDIT_ASSIST_VALUES.includes(readout.next_arm) && rotation.reason === null
+    if (!validReadout) return { readout: null, reason: 'readout-invalid' }
+    const reserved = { id: d.randomUUID(), lane, arm: readout.next_arm, cell, reserved_at: new Date((d.now || Date.now)()).toISOString() }
+    if (!validEditAssistReservation(reserved)) return { readout: null, reason: 'readout-invalid' }
+    reservations.push(reserved)
+    try { d.writeFileSync(reservationPath, JSON.stringify(reservations) + '\n') }
+    catch { return { readout: null, reason: 'ledger-unreadable' } }
+    return { readout, reason: null, reserved, reservations }
+  } finally {
+    if (handle) { try { pool.release(handle) } catch { /* lease release is best-effort */ } }
+  }
+}
+
 // lean: rescan ledger tables per eligible wave lane; snapshot the wave if dispatch latency grows with wave size
 export function readAdvisorArms({ deps, inFlight = [], open = openLedger } = {}) {
   const d = normalDeps(deps)
@@ -1010,6 +1147,7 @@ export function normalDeps(deps = {}) {
     sleep: deps.sleep,
     slots: deps.slots,
     readAdvisorArms: deps.readAdvisorArms || readAdvisorArms,
+    readEditAssistArms: deps.readEditAssistArms || readEditAssistArms,
     randomUUID: deps.randomUUID || randomUUID,
     factoryRoot: deps.factoryRoot,
     baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
@@ -4087,17 +4225,37 @@ function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
   return { intent }
 }
 
-// The requested builder edit assist reaches crew.json and the journal; both writes are best-effort instrumentation.
-function recordEditAssist({ editAssist, crewPath, crewDir, lane, deps } = {}) {
+function recordEditAssist({ editAssist, crewPath, crewDir, lane, transport, deps } = {}) {
   const d = normalDeps(deps)
-  const value = editAssist ?? null
+  let value = editAssist ?? null
+  let source = value === null ? 'unset' : 'request'
+  let reason = null
+  let crew = null
   try {
-    const crew = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8')))
-    if (crew && typeof crew === 'object' && !Array.isArray(crew)) d.writeFileSync(crewPath, JSON.stringify({ ...crew, edit_assist: value }, null, 2) + '\n')
-  } catch { /* missing or malformed crew is never recreated; instrumentation is best effort */ }
-  const row = { at: new Date().toISOString(), event: 'edit-assist', task: lane, lane, edit_assist: value, source: value === null ? 'unset' : 'request' }
+    const parsed = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8')))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) crew = parsed
+  } catch { /* missing or malformed crew is never recreated */ }
+  if (value === null) {
+    const builder = crew?.members?.builder
+    const cell = builder && { agent: builder.agent, provider: builder.provider, model_id: builder.id, effort: builder.effort }
+    if (transport === PANE_TRANSPORT) reason = 'panes'
+    else if (!crew) reason = 'crew-unreadable'
+    else if (builder?.agent !== 'pi') reason = 'not-pi'
+    else if (!validEditAssistCell(cell)) reason = 'builder-cell-unrecorded'
+
+    if (reason === null) {
+      const rotation = rotateEditAssistForLane(d, lane, cell)
+      value = rotation.readout?.next_arm ?? null
+      if (value === null) reason = EDIT_ASSIST_ROTATION_REASONS.includes(rotation.reason) ? rotation.reason : 'readout-invalid'
+      else source = 'rotation'
+    }
+  }
+  if (crew) {
+    try { d.writeFileSync(crewPath, JSON.stringify({ ...crew, edit_assist: value, edit_assist_source: value === null ? null : source }, null, 2) + '\n') } catch { /* the journal carries the same fact */ }
+  }
+  const row = { at: new Date().toISOString(), event: 'edit-assist', task: lane, lane, edit_assist: value, source, reason }
   try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* instrumentation is never load-bearing */ }
-  return { edit_assist: value }
+  return { edit_assist: value, edit_assist_source: value === null ? null : source, reason }
 }
 
 function recordPiCodemode({ piCodemode, crewPath, crewDir, lane, deps } = {}) {
@@ -4948,7 +5106,7 @@ function launchDispatchWave(compiled, launchedLanes) {
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
     const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
-    recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+    recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, transport, deps: d })
     recordPiCodemode({ piCodemode: item.piCodemode, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
     if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
     if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)

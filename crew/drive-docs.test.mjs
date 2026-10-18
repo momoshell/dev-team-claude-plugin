@@ -175,7 +175,7 @@ test('E1/E2 compose every role prompt with byte-identical control and a final te
   const tail = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
   for (const role of roles) {
     const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
-    const base = `${shared}\n\n${card}`.replace(/crew\/guidelines\/([\w./-]+\.md)/g, (_match, path) => join(REPO_ROOT, 'crew', 'guidelines', path))
+    const base = `${shared}\n\n${card}`.replace(/crew\/guidelines\/([\w./-]+\.md)/g, (_match, path) => join(REPO_ROOT, 'crew', 'guidelines', path)).replace(/(?<![\w./\\-])\.agents\/skills\/([\w./-]+)/g, (_match, path) => join(REPO_ROOT, '.agents', 'skills', path))
     const control = `${base}${section ? `\n\n${section}` : ''}`
     assert.equal(composeRolePrompt(shared, card, section, 'control'), control)
     const treatment = composeRolePrompt(shared, card, section, 'terse-tail')
@@ -195,7 +195,7 @@ test('B1 the lean charter arm is retired: unknown arms fall back to control and 
   const section = 'memory: retained context'
   for (const role of roles) {
     const card = readFileSync(join(rolesDir, `${role}.md`), 'utf8')
-    const base = `${shared}\n\n${card}`.replace(/crew\/guidelines\/([\w./-]+\.md)/g, (_match, path) => join(REPO_ROOT, 'crew', 'guidelines', path))
+    const base = `${shared}\n\n${card}`.replace(/crew\/guidelines\/([\w./-]+\.md)/g, (_match, path) => join(REPO_ROOT, 'crew', 'guidelines', path)).replace(/(?<![\w./\\-])\.agents\/skills\/([\w./-]+)/g, (_match, path) => join(REPO_ROOT, '.agents', 'skills', path))
     const control = `${base}\n\n${section}`
     assert.equal(composeRolePrompt(shared, card, section, 'control'), control)
     assert.equal(composeRolePrompt(shared, card, section, 'lean'), control)

@@ -15,7 +15,7 @@ One question decides it: **did the driver settle this lane's seats?**
 | escalated, or its driver exited while its seats may still be running | **recovery** | first |
 
 A run that reaches `done` tears itself down. The other half is policy in code
-at `crew/crew.mjs:4198` — an escalated lane never auto-tears-down, because its
+at `crew/crew.mjs:4201` — an escalated lane never auto-tears-down, because its
 live workspace IS the escalation context the human needs. So an escalated
 lane's seats are **live until proven otherwise**, and quiet panes are not
 proof. Measured today on `b196-dispatchexec`: it escalated at `review:r3` and
@@ -112,11 +112,11 @@ node crew/crew.mjs teardown --task <slug> --checkout <dir>
 Read the exit status and the JSON, in that order:
 
 - Teardown **exits non-zero when a seat was not proven dead**:
-  `crew/crew.mjs:4865` compares `proven` and `recorded` against `seats` and
+  `crew/crew.mjs:4868` compares `proven` and `recorded` against `seats` and
   sets `process.exitCode = 1`.
 - **Exit 0 is not proof on its own.** That guard reads
   `if (seats && …)`, so a `seats: null` payload — teardown measured NO seats,
-  which `crew/crew.mjs:4752` records deliberately as an ABSENCE rather than a
+  which `crew/crew.mjs:4755` records deliberately as an ABSENCE rather than a
   false zero — never proves the seats dead. `seats: null` exits 4 (TEARDOWN_EXIT_SEATLESS), and a measured failure (exit 1, TEARDOWN_EXIT_UNPROVEN) still outranks 4. This is the recovery
   closeout's own path, because a lane whose driver is gone is the one most
   likely to yield no pane rows: the headless cause is that no seat carries a pane surface — every member ran on a surface-less transport, so the sweep probed nothing. Treat `seats: null` as UNPROVEN and fall back

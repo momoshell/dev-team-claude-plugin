@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, chmodSync, statSync, symlinkSync, lstatSync, readlinkSync } from 'node:fs'
-import { execSync, spawn } from 'node:child_process'
+import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,7 +28,7 @@ import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capab
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, readlinkSync, execSync, spawn, tmpdir, join, dirname, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
+void [test, after, assert, createHash, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, readlinkSync, execSync, spawn, spawnSync, tmpdir, join, dirname, writePiSeatAgentDirs, writeMcpConfigs, mcpConfigDocument, openLedger, writeRosterSnapshot, loadLadder, assertBandFloors, BAND_FLOOR_REFUSALS, bootCmd, BOOT_WORKSPACE_DEADLINE_MS, BOOT_WORKSPACE_POLL_MS, runCmd, stopCmd, RUN_START_EVENT, BATCH_DIR_EVENT, BATCH_DIR_NOT_BATCHED, batchDirFromBrief, RUN_CONFIG_DECLARATIONS, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, awaitSeatsReady, writeTerminalLine, UsageError, memoryConfig, CHARTER_BASELINE_BYTES, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, CHARTER_CEILINGS, CHARTER_BUDGET_REFUSAL, CHARTER_UNMEASURED_CAUSES, charterFileBytes, compiledCharterBytes, charterBudgetRefusals, charterSourceRefusals, assertCharterBudgets, charterBytesRecord, composeRolePrompt, renderSeatSkills, SKILLS_BYTE_BUDGET, SKILL_DELIVERY_STATUSES, runChild, resolveChildValidationLane, daemon, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries, LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX, limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds, piModelString, seatIo, acpIo, testCheckout, ROOT, scratchDir, probeRepo, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, globalThis.realWrite]
 
 // MUTATION: skip the runtime rewrite from the register-relative server path.
 test('LM5', async () => {
@@ -2250,7 +2250,8 @@ test('the shared charter tests for an assignment BEFORE it tells a seat to reply
   assert.match(body, /do\s*\n?\s*NOT reply `ready:`/i)
 })
 
-test('the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
+// MUTATION RP3: remove CHARTER_SKILL_DELTA from the reviewer ceiling; the reviewer byte equality must redden.
+test('RP3 the charter ceilings and source budgets are the delivered bytes, below the 2026-09-05 baseline', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const guided = ['builder', 'planner', 'reviewer']
   const files = ['_shared', ...roles]
@@ -2264,10 +2265,11 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
   const cards = Object.fromEntries(roles.map((role) => [role, readFileSync(join(ROOT, 'crew', 'roles', `${role}.md`), 'utf8')]))
   const rawBytes = (card) => Buffer.byteLength(`${shared}\n\n${card}`, 'utf8')
   const delta = Buffer.byteLength(composeRolePrompt(shared, cards.builder), 'utf8') - rawBytes(cards.builder)
+  const skillsDelta = Buffer.byteLength(join(ROOT, '.agents', 'skills'), 'utf8') - Buffer.byteLength('.agents/skills', 'utf8')
   assert.ok(delta > 0)
   for (const role of roles) {
     const base = CHARTER_SOURCE_BUDGET._shared + 2 + CHARTER_SOURCE_BUDGET[role]
-    assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + (role === 'planner' ? 2 * delta : delta) : base)
+    assert.equal(CHARTER_CEILINGS[role], guided.includes(role) ? base + (role === 'planner' ? 2 * delta : delta) + (role === 'reviewer' ? skillsDelta : 0) : base)
     assert.ok(CHARTER_SOURCE_BUDGET[role] < CHARTER_BASELINE_BYTES[role])
   }
   assert.equal(CHARTER_SOURCE_TOTAL_BUDGET, 49108)
@@ -2287,6 +2289,58 @@ test('the charter ceilings and source budgets are the delivered bytes, below the
     assert.deepEqual(compiled[role], { bytes: expected, reason: null })
     assert.equal(compiled[role].bytes, CHARTER_CEILINGS[role])
   }
+  assert.equal(compiled.reviewer.bytes, CHARTER_CEILINGS.reviewer)
+  for (const role of roles.filter((name) => name !== 'reviewer')) {
+    const expected = `${shared}\n\n${cards[role]}`.replace(/crew\/guidelines\/([\w./-]+\.md)/g, (_match, path) => join(ROOT, 'crew', 'guidelines', path))
+    assert.equal(composeRolePrompt(shared, cards[role]), expected)
+    assert.equal(compiled[role].bytes, Buffer.byteLength(expected, 'utf8'))
+  }
+})
+
+// MUTATION RP1: disabling CHARTER_SKILL_PATH leaves the shipped reviewer loader argument relative.
+test('RP1 the composed reviewer prompt resolves the shipped loader and preserves absolute skill paths', () => {
+  const names = ['_shared', 'reviewer']
+  const sources = Object.fromEntries(names.map((name) => [name, readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8')]))
+  const prompt = composeRolePrompt(sources._shared, sources.reviewer)
+  const loaderArgument = prompt.match(/`node ([^`]*load-guidelines\.mjs)`/)?.[1] ?? ''
+  const expectedArgument = join(ROOT, '.agents', 'skills', 'review-procedure', 'scripts', 'load-guidelines.mjs')
+  assert.equal(loaderArgument, expectedArgument)
+  assert.ok(isAbsolute(loaderArgument))
+  assert.ok(existsSync(loaderArgument))
+  assert.doesNotMatch(prompt, /`\.agents\//)
+  assert.doesNotMatch(prompt, /`node \.agents\//)
+
+  const relative = join('.agents', 'skills', 'review-procedure', 'scripts', 'load-guidelines.mjs')
+  const absolute = join(ROOT, relative)
+  const shared = `shared \`${relative}\` and \`${relative}\``
+  const card = `card \`${relative}\``
+  const expected = `shared \`${absolute}\` and \`${absolute}\`\n\ncard \`${absolute}\``
+  assert.equal(composeRolePrompt(shared, card), expected)
+
+  const foreignAbsolute = join(tmpdir(), 'b1249-distinct-plugin', relative)
+  assert.notEqual(foreignAbsolute, absolute)
+  const absoluteShared = `shared \`${absolute}\``
+  const absoluteCard = `foreign \`${foreignAbsolute}\``
+  assert.equal(composeRolePrompt(absoluteShared, absoluteCard), `${absoluteShared}\n\n${absoluteCard}`)
+})
+
+// MUTATION RP2: disabling CHARTER_SKILL_PATH leaves the loader unusable from a foreign cwd.
+test('RP2 the shipped reviewer loader runs from a foreign git checkout', () => {
+  const names = ['_shared', 'reviewer']
+  const sources = Object.fromEntries(names.map((name) => [name, readFileSync(join(ROOT, 'crew', 'roles', `${name}.md`), 'utf8')]))
+  const prompt = composeRolePrompt(sources._shared, sources.reviewer)
+  const argument = prompt.match(/`node ([^`]*load-guidelines\.mjs)`/)?.[1] ?? ''
+  const foreign = scratchDir('b1249-outside-')
+  git(foreign, 'init')
+  assert.equal(git(foreign, 'rev-parse', '--is-inside-work-tree').trim(), 'true')
+  const result = spawnSync(process.execPath, [argument], { cwd: foreign, encoding: 'utf8' })
+  assert.equal(result.error, undefined, result.error?.message)
+  assert.equal(result.status, 0, `loader exited with signal ${result.signal ?? '(none)'}`)
+  assert.equal(result.signal, null)
+  assert.equal(result.stderr, '')
+  const bundled = readFileSync(join(ROOT, 'crew', 'guidelines', 'review-do-not-flag.md'))
+  assert.notEqual(bundled.byteLength, 0)
+  assert.deepEqual(Buffer.from(result.stdout, 'utf8'), bundled)
 })
 
 test('composed charters resolve authored guideline references to absolute plugin paths', () => {

@@ -104,6 +104,8 @@ const ROLES_DIR = join(HERE, 'roles')
 const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 const CHARTER_GUIDELINES_DIR = join(HERE, 'guidelines')
 const CHARTER_GUIDELINE_PATH = /crew\/guidelines\/([\w./-]+\.md)/g
+const CHARTER_SKILLS_DIR = join(dirname(HERE), '.agents', 'skills')
+const CHARTER_SKILL_PATH = /(?<![\w./\\-])\.agents\/skills\/([\w./-]+)/g
 
 export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT])
 
@@ -2765,13 +2767,14 @@ export const CHARTER_SOURCE_BUDGET = Object.freeze({
 export const CHARTER_SOURCE_TOTAL_BUDGET = 49108
 
 // Delivered installation-aware compiled bytes, per role: CHARTER_SOURCE_BUDGET._shared + 2 + card,
-// plus the installation-path delta per authored guideline citation.
+// plus installation-path deltas per authored guideline citation and skill reference.
 const CHARTER_GUIDELINE_DELTA = Buffer.byteLength(CHARTER_GUIDELINES_DIR, 'utf8') - Buffer.byteLength('crew/guidelines', 'utf8')
+const CHARTER_SKILL_DELTA = Buffer.byteLength(CHARTER_SKILLS_DIR, 'utf8') - Buffer.byteLength('.agents/skills', 'utf8')
 export const CHARTER_CEILINGS = Object.freeze({
   builder: 9376 + CHARTER_GUIDELINE_DELTA,
   lead: 14141,
   planner: 21837 + 2 * CHARTER_GUIDELINE_DELTA,
-  reviewer: 12413 + CHARTER_GUIDELINE_DELTA,
+  reviewer: 12413 + CHARTER_GUIDELINE_DELTA + CHARTER_SKILL_DELTA,
   'tech-lead': 11299,
 })
 
@@ -2977,7 +2980,7 @@ export function renderSeatSkills({ root, mapResult, role, files, filesReason = n
 }
 
 export function composeRolePrompt(shared, card, section = '', charterArm = 'control', skillsSection = '') {
-  const charter = `${shared}\n\n${card}`.replace(CHARTER_GUIDELINE_PATH, (_match, path) => join(CHARTER_GUIDELINES_DIR, path))
+  const charter = `${shared}\n\n${card}`.replace(CHARTER_GUIDELINE_PATH, (_match, path) => join(CHARTER_GUIDELINES_DIR, path)).replace(CHARTER_SKILL_PATH, (_match, path) => join(CHARTER_SKILLS_DIR, path))
   const control = `${charter}${section ? `\n\n${section}` : ''}${skillsSection ? `\n\n${skillsSection}` : ''}`
   const tail = Object.hasOwn(CHARTER_TAILS, charterArm) ? CHARTER_TAILS[charterArm] : ''
   return `${control}${tail}`

@@ -3710,14 +3710,32 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
         const currentCellOrLive = currentCell || live
+        // lean: an override is recognised only while provider and id are null, so after one applied upgrade a resumed run's next upgrade takes the ordinary tier step; persist an override marker on the seat at reseat if resumed lanes bounce again
+        const override = !floorTier && live.provider === null && live.id === null && typeof live.model === 'string' && live.model.length > 0
         let rung = floorTier
           ? { rung: `${crew.tier ?? 'unseated'}→${floorTier}`, cell: floorTarget }
-          : nextRung(roster, crew.tier, role)
+          : override ? null : nextRung(roster, crew.tier, role)
         if (!floorTier) {
           let ladder = null
           try { ladder = readLadder() } catch { ladder = null }
           const tierCeiling = ladder?.cost_ceilings?.[crew.tier]
           const ceiling = Number.isFinite(tierCeiling) ? tierCeiling : null
+          if (override) {
+            const translateOverride = modelStringFor(adapters, role, live.agent ?? m.agent)
+            const matches = Object.keys(roster?.models || {}).filter((key) => {
+              const slash = key.indexOf('/')
+              if (slash < 1 || slash === key.length - 1 || !translateOverride) return false
+              try {
+                return translateOverride({ provider: key.slice(0, slash), id: key.slice(slash + 1) }) === live.model
+              } catch { return false }
+            })
+            if (matches.length === 1) {
+              const slash = matches[0].indexOf('/')
+              const overrideCell = { provider: matches[0].slice(0, slash), id: matches[0].slice(slash + 1), agent: live.agent ?? m.agent, effort: live.effort }
+              rung = nextModelRung(roster, overrideCell, { ceiling })
+            }
+            if (!rung) return { applied: false, reason: 'exhausted', why: `override "${live.model}": the roster cell is not its rung; no unique translated catalog key with an available in-ceiling model rung`, from, to: null }
+          }
           const allowedTarget = (cell) => {
             if (ceiling === null) return false
             if (!cell || typeof cell !== 'object' || Array.isArray(cell)) return false
@@ -3741,7 +3759,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           const liveMoved = !currentCell || live.provider !== currentCell.provider || live.id !== currentCell.id
           const downgrade = rung && liveMoved && priceOf(live) !== null
             && (priceOf(rung.cell) === null || priceOf(rung.cell) <= priceOf(live))
-          if (!rung || sameCell || downgrade || !allowedTarget(rung.cell)) {
+          if (!override && (!rung || sameCell || downgrade || !allowedTarget(rung.cell))) {
             if (!RESEAT_LADDER.includes(crew.tier)) {
               return { applied: false, reason: 'exhausted', why: `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`, from, to: null }
             }

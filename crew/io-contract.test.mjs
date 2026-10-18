@@ -1449,3 +1449,272 @@ test('RE9', () => {
   assert.equal(floor.io.reseat('builder', { tier: 'build' }).to.id, 'c')
   assert.equal(make(fixture(), { tier: 'unknown' }).io.reseat('builder').reason, 'exhausted')
 })
+
+// MUTATION OR1: start override catalog walking from the tier roster cell.
+test('OR1 override follows its own catalog', () => {
+  const roster = {
+    tiers: {
+      mechanical: { reviewer: { provider: 'meta', id: 'mechanical-trap', agent: 'pi', effort: 'medium', fallback: [{ provider: 'meta', id: 'declared-trap', agent: 'pi', effort: 'high' }] } },
+      build: { reviewer: { provider: 'meta', id: 'build-trap', agent: 'pi', effort: 'high' } },
+    },
+    models: {
+      'meta/mechanical-trap': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'meta/build-trap': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+      'meta/declared-trap': { cost_in_per_mtok: 3, cost_out_per_mtok: 8 },
+      'broken/refused': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+      'openai/sol-fixture': { cost_in_per_mtok: 2, cost_out_per_mtok: 7 },
+      'openai/terra-fixture': { cost_in_per_mtok: 3, cost_out_per_mtok: 12 },
+    },
+  }
+  const scenarios = [
+    {
+      model: 'builder-wire:openai/luna-fixture',
+      resultModel: 'builder-wire:openai/sol-fixture',
+      adapter: { modelString({ provider, id }) {
+        if (provider === 'broken') throw new Error('provider refused')
+        return 'builder-wire:' + provider + '/' + id
+      } },
+    },
+    {
+      model: 'openai-codex/luna-fixture',
+      resultModel: 'openai-codex/sol-fixture',
+      adapter: {},
+    },
+  ]
+  for (const scenario of scenarios) {
+    const f = makeTierFixture({
+      role: 'reviewer', tier: 'mechanical', agent: 'pi', cell: roster.tiers.mechanical.reviewer,
+      adapter: scenario.adapter, readRoster: () => roster,
+      readLadder: () => ({ cost_ceilings: { mechanical: 20 } }),
+    })
+    for (const target of [f.crew.members.reviewer, f.crew.seats.reviewer]) {
+      target.provider = null
+      target.id = null
+      target.model = scenario.model
+      target.effort = 'xhigh'
+      target.agent = 'pi'
+    }
+    const diskPath = join(f.paths.dir, 'crew.json')
+    fsWriteFileSync(diskPath, JSON.stringify(f.crew))
+    const result = f.io.reseat('reviewer', { reason: 'lane' })
+    assert.equal(result.applied, true)
+    assert.equal(result.to.provider, 'openai')
+    assert.equal(result.to.id, 'sol-fixture')
+    assert.notEqual(result.to.id, 'build-trap')
+    assert.notEqual(result.to.id, 'terra-fixture')
+    assert.equal(result.to.agent, 'pi')
+    assert.equal(result.to.effort, 'xhigh')
+    assert.equal(result.to.model, scenario.resultModel)
+    assert.equal(f.crew.members.reviewer.model, scenario.resultModel)
+    assert.equal(f.crew.seats.reviewer.model, scenario.resultModel)
+    const saved = JSON.parse(fsReadFileSync(diskPath, 'utf8'))
+    assert.equal(saved.members.reviewer.model, scenario.resultModel)
+    assert.equal(saved.seats.reviewer.model, scenario.resultModel)
+    let command = null
+    const hio = makeHeadlessReseatIo(f.crew, {
+      headlessCommand: (spec) => { command = spec; return { bin: '/bin/worker', args: [] } },
+    }, f.paths)
+    hio.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') })
+    assert.equal(command.model, scenario.resultModel)
+    assert.equal(command.effort, 'xhigh')
+  }
+
+  for (const model of ['', 7]) {
+    const f = makeTierFixture({
+      role: 'reviewer', tier: 'mechanical', agent: 'pi', cell: roster.tiers.mechanical.reviewer,
+      adapter: { modelString: ({ provider, id }) => 'builder-wire:' + provider + '/' + id },
+      readRoster: () => roster, readLadder: () => ({ cost_ceilings: { mechanical: 20 } }),
+    })
+    for (const target of [f.crew.members.reviewer, f.crew.seats.reviewer]) {
+      target.provider = null
+      target.id = null
+      target.model = model
+    }
+    const result = f.io.reseat('reviewer')
+    assert.equal(result.applied, true)
+    assert.equal(result.to.id, 'build-trap')
+  }
+})
+
+// MUTATION OR2: accept more than one catalog key translated to the raw override.
+test('OR2 unresolved or ambiguous override is unchanged', () => {
+  const traps = {
+    'meta/mechanical-trap': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+    'meta/build-trap': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+    'meta/declared-trap': { cost_in_per_mtok: 3, cost_out_per_mtok: 8 },
+  }
+  const scenarios = [
+    {
+      label: 'zero matches',
+      model: 'wire:openai/ghost',
+      adapter: { modelString: ({ provider, id }) => 'wire:' + provider + '/' + id },
+      extra: {
+        'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+        'no-slash': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+        'openai/': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+        '/empty-provider': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+      },
+    },
+    {
+      label: 'provider-looking raw model is exact',
+      model: 'openai-codex/ghost',
+      adapter: { modelString: ({ provider, id }) => provider + '/' + id },
+      extra: { 'openai/ghost': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 } },
+    },
+    {
+      label: 'two aliases',
+      model: 'alias-wire:model',
+      adapter: { modelString: ({ provider, id }) => provider === 'alias' ? 'alias-wire:model' : 'wire:' + provider + '/' + id },
+      extra: {
+        'alias/first': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+        'alias/second': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+      },
+    },
+    {
+      label: 'whitespace is a nonempty exact override',
+      model: '   ',
+      adapter: { modelString: ({ provider, id }) => 'wire:' + provider + '/' + id },
+      extra: { 'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 } },
+    },
+    {
+      label: 'missing agent translator',
+      model: 'external:model',
+      agent: 'unregistered-agent',
+      adapters: null,
+      extra: { 'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 } },
+    },
+  ]
+  for (const scenario of scenarios) {
+    const roster = {
+      tiers: {
+        mechanical: { reviewer: { provider: 'meta', id: 'mechanical-trap', agent: 'pi', effort: 'medium', fallback: [{ provider: 'meta', id: 'declared-trap', agent: 'pi', effort: 'high' }] } },
+        build: { reviewer: { provider: 'meta', id: 'build-trap', agent: 'pi', effort: 'high' } },
+      },
+      models: { ...traps, ...scenario.extra },
+    }
+    let retired = 0
+    const f = makeTierFixture({
+      role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: scenario.agent || 'pi',
+      cell: roster.tiers.mechanical.reviewer, adapter: scenario.adapter, adapters: scenario.adapters,
+      readRoster: () => roster, readLadder: () => ({ cost_ceilings: { mechanical: 20 } }),
+      headlessRpcIo: () => ({ retire: () => { retired += 1; return { retired: true } } }),
+    })
+    for (const target of [f.crew.members.reviewer, f.crew.seats.reviewer]) {
+      target.provider = null
+      target.id = null
+      target.model = scenario.model
+      target.agent = scenario.agent || 'pi'
+    }
+    const diskPath = join(f.paths.dir, 'crew.json')
+    const before = JSON.stringify(f.crew)
+    fsWriteFileSync(diskPath, before)
+    const result = f.io.reseat('reviewer')
+    assert.equal(result.applied, false, scenario.label)
+    assert.equal(result.reason, 'exhausted', scenario.label)
+    assert.equal(result.to, null, scenario.label)
+    assert.equal(result.from.model, scenario.model, scenario.label)
+    assert.ok(result.why.includes(scenario.model), scenario.label)
+    assert.match(result.why, /the roster cell is not its rung/, scenario.label)
+    assert.deepEqual(f.crew.members.reviewer, JSON.parse(before).members.reviewer, scenario.label)
+    assert.deepEqual(f.crew.seats.reviewer, JSON.parse(before).seats.reviewer, scenario.label)
+    assert.equal(JSON.stringify(f.crew), before, scenario.label)
+    assert.equal(fsReadFileSync(diskPath, 'utf8'), before, scenario.label)
+    assert.equal(retired, 0, scenario.label)
+    assert.deepEqual(f.logs, [], scenario.label)
+  }
+})
+
+// MUTATION OR3: let an exhausted override fall through to the tier or declared target.
+test('OR3 override catalog exhausted ignores declared fallback', () => {
+  const scenarios = [
+    { label: 'highest catalog model', candidate: null, ceiling: 20 },
+    { label: 'estimated candidate', candidate: { cost_in_per_mtok: 2, cost_out_per_mtok: 5, rate_estimated: true }, ceiling: 20 },
+    { label: 'candidate above ceiling', candidate: { cost_in_per_mtok: 2, cost_out_per_mtok: 21 }, ceiling: 20 },
+    { label: 'absent ceiling', candidate: { cost_in_per_mtok: 2, cost_out_per_mtok: 5 }, noCeiling: true },
+    { label: 'unreadable ceiling', candidate: { cost_in_per_mtok: 2, cost_out_per_mtok: 5 }, unreadableCeiling: true },
+    { label: 'missing tier cell with declared trap', candidate: null, ceiling: 20, missingTierCell: true },
+  ]
+  for (const scenario of scenarios) {
+    const cell = {
+      provider: 'meta', id: 'mechanical-trap', agent: 'pi', effort: 'medium',
+      fallback: [{ provider: 'meta', id: 'declared-trap', agent: 'pi', effort: 'high' }],
+    }
+    const tiers = scenario.missingTierCell
+      ? { mechanical: {}, build: {} }
+      : {
+        mechanical: { reviewer: cell },
+        build: { reviewer: { provider: 'meta', id: 'build-trap', agent: 'pi', effort: 'high' } },
+      }
+    const models = {
+      'meta/mechanical-trap': { cost_in_per_mtok: 1, cost_out_per_mtok: 2 },
+      'meta/build-trap': { cost_in_per_mtok: 2, cost_out_per_mtok: 5 },
+      'meta/declared-trap': { cost_in_per_mtok: 3, cost_out_per_mtok: 8 },
+      'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+    }
+    if (scenario.candidate) models['openai/sol-fixture'] = scenario.candidate
+    const roster = { tiers, models }
+    let retired = 0
+    const f = makeTierFixture({
+      role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi', cell,
+      adapter: { modelString: ({ provider, id }) => 'wire:' + provider + '/' + id },
+      readRoster: () => roster,
+      readLadder: scenario.unreadableCeiling
+        ? () => { throw Object.assign(new Error('ladder unavailable'), { code: 'EINTR' }) }
+        : () => scenario.noCeiling ? null : { cost_ceilings: { mechanical: scenario.ceiling } },
+      headlessRpcIo: () => ({ retire: () => { retired += 1; return { retired: true } } }),
+    })
+    for (const target of [f.crew.members.reviewer, f.crew.seats.reviewer]) {
+      target.provider = null
+      target.id = null
+      target.model = 'wire:openai/luna-fixture'
+      target.agent = 'pi'
+      target.effort = 'xhigh'
+      if (scenario.missingTierCell) target.fallback = cell.fallback
+    }
+    const diskPath = join(f.paths.dir, 'crew.json')
+    const before = JSON.stringify(f.crew)
+    fsWriteFileSync(diskPath, before)
+    const result = f.io.reseat('reviewer')
+    assert.equal(result.applied, false, scenario.label)
+    assert.equal(result.reason, 'exhausted', scenario.label)
+    assert.equal(result.to, null, scenario.label)
+    assert.equal(result.from.model, 'wire:openai/luna-fixture', scenario.label)
+    assert.ok(result.why.includes('wire:openai/luna-fixture'), scenario.label)
+    assert.match(result.why, /the roster cell is not its rung/, scenario.label)
+    assert.deepEqual(f.crew, JSON.parse(before), scenario.label)
+    assert.equal(JSON.stringify(f.crew), before, scenario.label)
+    assert.equal(fsReadFileSync(diskPath, 'utf8'), before, scenario.label)
+    assert.equal(retired, 0, scenario.label)
+    assert.deepEqual(f.logs, [], scenario.label)
+  }
+})
+
+// MUTATION RV1-1: remove !override && from the ordinary fallback guard.
+test('OR1 override successor equal to its tier cell remains eligible', () => {
+  const cell = { provider: 'openai', id: 'sol-fixture', agent: 'pi', effort: 'medium' }
+  const roster = {
+    tiers: { mechanical: { reviewer: cell } },
+    models: {
+      'openai/luna-fixture': { cost_in_per_mtok: 1, cost_out_per_mtok: 3 },
+      'openai/sol-fixture': { cost_in_per_mtok: 2, cost_out_per_mtok: 7 },
+    },
+  }
+  const f = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', agent: 'pi', cell,
+    adapter: { modelString: ({ provider, id }) => 'wire:' + provider + '/' + id },
+    readRoster: () => roster, readLadder: () => ({ cost_ceilings: { mechanical: 20 } }),
+  })
+  for (const target of [f.crew.members.reviewer, f.crew.seats.reviewer]) {
+    target.provider = null
+    target.id = null
+    target.model = 'wire:openai/luna-fixture'
+    target.effort = 'medium'
+  }
+  fsWriteFileSync(join(f.paths.dir, 'crew.json'), JSON.stringify(f.crew))
+  const result = f.io.reseat('reviewer')
+  assert.equal(result.applied, true)
+  assert.equal(result.to.id, 'sol-fixture')
+  assert.equal(result.to.effort, 'medium')
+  assert.equal(result.to.model, 'wire:openai/sol-fixture')
+})

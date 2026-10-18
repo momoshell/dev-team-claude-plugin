@@ -123,6 +123,15 @@ const frozenSourcePair = () => {
   return { committed, current }
 }
 const frozenAuditedIdentity = (source, member) => source.split('\n').find((line) => line.includes(member)).match(/"([^"]+)"/)[1]
+const frozenFixtureSource = (file) => {
+try {
+const source = readFileSync(join(ROOT, file), 'utf8')
+if (typeof source !== 'string' || source.length === 0) throw new Error('source was empty or not text')
+return source
+} catch (error) {
+assert.fail(`${file} could not be read: ${error?.code || error?.message || 'unknown'}`)
+}
+}
 
 const frozenPlan = () => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', FROZEN_INVENTORY_FILE] } })
 const frozenRed = () => ({ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203\nnot ok 2 - ${CTX.checkout}/crew/reclaim-descendants.test.mjs:365` })
@@ -6738,6 +6747,229 @@ test('A1 moved frozen pins receive one post-commit repair and proceed', () => {
   assert.equal(result.details.frozen_inventory_repairs[0].files.length, 1)
   assert.deepEqual(result.details.frozen_inventory_repairs[0].files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
   assert.equal(result.details.frozen_inventory_repairs[0].files[0].changes.length, 2)
+})
+
+// Mutation CB1: erase the causal snapshot; these reports and completion checks fail.
+test('CB1 bounded frozen repairs admit only named committed causal files', () => {
+const padding = 'x'.repeat(4100)
+for (const census of [FROZEN_INVENTORY_FILE, FROZEN_FACTORY_ENV_FILE]) {
+const otherCensus = census === FROZEN_INVENTORY_FILE ? FROZEN_FACTORY_ENV_FILE : FROZEN_INVENTORY_FILE
+const output = `FAIL file://${CTX.checkout}/a.mjs:1:1 causal defect\n${CTX.checkout}/uncommitted.mjs\n${CTX.checkout}/${otherCensus}\n${padding}\nnot ok 1 - ${CTX.checkout}/${census}:203`
+const fixture = frozenCycleIo({
+suite: [{ ok: false, output }, frozenGreen()],
+builder2: () => {},
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : ['a.mjs'],
+})
+if (census === FROZEN_FACTORY_ENV_FILE) {
+fixture.files[`${CTX.checkout}/${FROZEN_FACTORY_ENV_FILE}`] = frozenFixtureSource(FROZEN_FACTORY_ENV_FILE)
+}
+const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+assert.equal(output.indexOf('/a.mjs:') < output.indexOf(padding), true, census)
+assert.equal(result.status, 'done', JSON.stringify(result.details.escalation) + ` ${census}`)
+assert.equal(fixture.io.calls.commits.length, 2, census)
+assert.equal(fixture.io.calls.run.filter(({ cmd }) => cmd === 'suite-cmd').length, 2, census)
+assert.deepEqual(result.details.frozen_inventory_repairs[0].causal, ['a.mjs'], census)
+assert.deepEqual(result.details.frozen_inventory_repairs[0].files, [], census)
+assert.deepEqual(result.details.frozen_inventory_repairs, fixture.io.calls.logs.filter((row) => row.frozen_inventory_repair).map((row) => row.frozen_inventory_repair), census)
+}
+
+const otherCensusPath = `${CTX.checkout}/${FROZEN_FACTORY_ENV_FILE}`
+const otherCensusFactory = frozenCycleIo({
+suite: [{ ok: false, output: `${CTX.checkout}/a.mjs\n${otherCensusPath}\n${padding}\nnot ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203` }, frozenGreen()],
+builder2(files) { files[otherCensusPath] += '\nconst censusLogicChanged = true\n' },
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2
+? ['a.mjs', FROZEN_FACTORY_ENV_FILE]
+: ['a.mjs', FROZEN_FACTORY_ENV_FILE],
+})
+otherCensusFactory.files[otherCensusPath] = frozenFixtureSource(FROZEN_FACTORY_ENV_FILE)
+const otherCensusResult = driveTask(Object.assign(otherCensusFactory.ctx, { limits: { build_rounds: 2 } }), otherCensusFactory.io)
+assert.equal(otherCensusResult.status, 'escalation')
+assert.equal(otherCensusResult.details.escalation.where, 'suite')
+assert.match(otherCensusResult.details.escalation.why, /\(boundary\)/)
+assert.ok(otherCensusResult.details.escalation.why.includes(FROZEN_FACTORY_ENV_FILE))
+assert.equal(otherCensusFactory.io.calls.commits.length, 1)
+
+const candidateOutput = `FAIL file://${CTX.checkout}/a.mjs:1:1 causal defect\n${padding}\nnot ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203`
+const censusOnly = frozenCycleIo({
+suite: [{ ok: false, output: candidateOutput }, frozenGreen()],
+builder2: (files, path, current) => { files[path] = current },
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : [FROZEN_INVENTORY_FILE],
+})
+const censusOnlyResult = driveTask(Object.assign(censusOnly.ctx, { limits: { build_rounds: 2 } }), censusOnly.io)
+assert.equal(censusOnlyResult.status, 'done', JSON.stringify(censusOnlyResult))
+assert.deepEqual(censusOnlyResult.details.frozen_inventory_repairs[0].causal, [])
+assert.deepEqual(censusOnlyResult.details.frozen_inventory_repairs[0].files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
+
+const mixed = frozenCycleIo({
+suite: [{ ok: false, output: candidateOutput }, frozenGreen()],
+builder2: (files, path, current) => { files[path] = current },
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : ['a.mjs', FROZEN_INVENTORY_FILE],
+})
+const mixedResult = driveTask(Object.assign(mixed.ctx, { limits: { build_rounds: 2 } }), mixed.io)
+assert.equal(mixedResult.status, 'done', JSON.stringify(mixedResult))
+assert.deepEqual(mixedResult.details.frozen_inventory_repairs[0].causal, ['a.mjs'])
+assert.deepEqual(mixedResult.details.frozen_inventory_repairs[0].files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
+
+for (const [label, after] of [
+['empty', () => []],
+['unreadable', () => null],
+['interrupted', () => { throw new Error('inventory interrupted') }],
+]) {
+const fixture = frozenCycleIo({
+suite: [{ ok: false, output: candidateOutput }, frozenGreen()],
+builder2: () => {},
+changed(calls) {
+if (calls.assign.filter(({ role }) => role === 'builder').length < 2) return ['a.mjs']
+return after()
+},
+})
+const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+assert.equal(result.status, 'escalation', label)
+assert.equal(result.details.escalation.where, 'suite', label)
+assert.match(result.details.escalation.why, label === 'empty' ? /cumulative dirty set was empty/ : label === 'unreadable' ? /changed-file inventory was not an array/ : /changed-file inventory was interrupted: inventory interrupted/, label)
+assert.equal(fixture.io.calls.commits.length, 1, label)
+}
+
+const repeated = frozenCycleIo({
+suite: [{ ok: false, output: candidateOutput }, { ok: false, output: candidateOutput }],
+builder2: (files, path, current) => { files[path] = current },
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : ['a.mjs', FROZEN_INVENTORY_FILE],
+})
+const repeatedResult = driveTask(Object.assign(repeated.ctx, { limits: { build_rounds: 2 } }), repeated.io)
+assert.equal(repeatedResult.status, 'escalation')
+assert.equal(repeatedResult.details.escalation.where, 'suite')
+assert.match(repeatedResult.details.escalation.why, /frozen inventory repair refused \(repeat\)/)
+assert.equal(repeated.io.calls.assign.filter(({ role }) => role === 'builder').length, 2)
+assert.equal(repeated.io.calls.commits.length, 2)
+})
+
+// Mutation CB2: bypass the allowed-file boundary; the unrelated dirty path must refuse.
+test('CB2 causal repair keeps boundary and census-classification refusals', () => {
+const candidateOutput = `FAIL file://${CTX.checkout}/a.mjs:1:1 causal defect\nnot ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203`
+const boundary = frozenCycleIo({
+suite: [{ ok: false, output: candidateOutput }, frozenGreen()],
+builder2: () => {},
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : ['a.mjs', 'unrelated.mjs'],
+})
+const boundaryResult = driveTask(Object.assign(boundary.ctx, { limits: { build_rounds: 2 } }), boundary.io)
+assert.equal(boundaryResult.status, 'escalation')
+assert.equal(boundaryResult.details.escalation.where, 'suite')
+assert.match(boundaryResult.details.escalation.why, /boundary.*unrelated\.mjs/)
+assert.equal(boundary.io.calls.commits.length, 1)
+
+const factorySource = frozenFixtureSource(FROZEN_FACTORY_ENV_FILE)
+const inventorySource = frozenFixtureSource(FROZEN_INVENTORY_FILE)
+const identity = frozenAuditedIdentity(inventorySource, 'io.fingerprintTree')
+const cases = [
+{ file: FROZEN_INVENTORY_FILE, kind: 'logic', reason: 'logic' },
+{ file: FROZEN_FACTORY_ENV_FILE, kind: 'logic', reason: 'logic' },
+{ file: FROZEN_INVENTORY_FILE, kind: 'identity', reason: 'identity' },
+{ file: FROZEN_FACTORY_ENV_FILE, kind: 'identity', reason: 'identity' },
+{ file: FROZEN_INVENTORY_FILE, kind: 'unreadable', reason: 'unmeasured' },
+{ file: FROZEN_FACTORY_ENV_FILE, kind: 'unreadable', reason: 'unmeasured' },
+]
+for (const { file, kind, reason } of cases) {
+const factoryPath = `${CTX.checkout}/${FROZEN_FACTORY_ENV_FILE}`
+const fixture = frozenCycleIo({
+suite: [{ ok: false, output: `FAIL file://${CTX.checkout}/a.mjs:1:1 causal defect\nnot ok 1 - ${CTX.checkout}/${file}:203` }, frozenGreen()],
+builder2(files, path, current) {
+if (kind === 'unreadable') {
+delete files[file === FROZEN_INVENTORY_FILE ? path : factoryPath]
+return
+}
+if (file === FROZEN_INVENTORY_FILE) {
+files[path] = kind === 'logic'
+? `${current}\nconst censusLogicChanged = true\n`
+: current.replace(identity, `${identity} /* identity drift */`)
+} else {
+files[factoryPath] = kind === 'logic'
+? factorySource.replace('frozenTempSites(1)', 'frozenTempSites(invalid)')
+: factorySource.replace("['crew/arms.test.mjs', frozenTempSites(1)],", '')
+}
+},
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : ['a.mjs', file],
+})
+if (file === FROZEN_FACTORY_ENV_FILE) fixture.files[factoryPath] = factorySource
+const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+assert.equal(result.status, 'escalation', `${file} ${kind}`)
+assert.equal(result.details.escalation.where, 'suite', `${file} ${kind}`)
+assert.match(result.details.escalation.why, new RegExp(`\\(${reason}\\)`), `${file} ${kind}`)
+assert.equal(fixture.io.calls.commits.length, 1, `${file} ${kind}`)
+}
+})
+
+// Mutation CB3: bypass the omitted-snapshot refusal and the no-cause dirty set is accepted.
+test('CB3 no-causal repair refuses an omitted frozen snapshot', () => {
+for (const [failing, changed] of [
+[[FROZEN_INVENTORY_FILE], []],
+[[FROZEN_INVENTORY_FILE, FROZEN_FACTORY_ENV_FILE], [FROZEN_INVENTORY_FILE]],
+]) {
+const output = failing.map((file, index) => `not ok ${index + 1} - ${CTX.checkout}/${file}:203`).join('\n')
+const fixture = frozenCycleIo({
+suite: [{ ok: false, output }, frozenGreen()],
+builder2: () => {},
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : changed,
+})
+if (failing.includes(FROZEN_FACTORY_ENV_FILE)) {
+fixture.files[`${CTX.checkout}/${FROZEN_FACTORY_ENV_FILE}`] = frozenFixtureSource(FROZEN_FACTORY_ENV_FILE)
+}
+const result = driveTask(Object.assign(fixture.ctx, { limits: { build_rounds: 2 } }), fixture.io)
+const missing = failing.filter((file) => !changed.includes(file))
+assert.equal(result.status, 'escalation')
+assert.equal(result.details.escalation.where, 'suite')
+assert.match(result.details.escalation.why, /cumulative dirty set omitted snapshotted failing file\(s\)/)
+for (const file of missing) assert.ok(result.details.escalation.why.includes(file), file)
+assert.equal(fixture.io.calls.commits.length, 1)
+}
+})
+
+// Mutation CB4: weaken the emitted census directive; the exact builder brief no longer matches.
+test('CB4 causal builder brief states the bounded repair rules and keeps legacy bytes', () => {
+const causalOutput = `FAIL file://${CTX.checkout}/a.mjs:1:1 causal defect\nFAIL file://${CTX.checkout}/named-other.mjs:1:1 causal defect\nnot ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203`
+const causal = frozenCycleIo({
+suite: [{ ok: false, output: causalOutput }, frozenGreen()],
+builder2: () => {},
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs', 'named-other.mjs'] : ['a.mjs'],
+})
+const causalResult = driveTask(Object.assign(causal.ctx, { limits: { build_rounds: 2 } }), causal.io)
+assert.equal(causalResult.status, 'done', JSON.stringify(causalResult))
+assert.equal(causal.io.calls.writes[`${TD}/frozen-inventory-bounce-r1.md`], [
+'# Frozen inventory repair bounce', '',
+'The accepted commit abc1234 made the full suite red. This bounded repair may fix defects in the causal files or move only approved frozen data:',
+'- property values inside const VACUITY_SOURCE_SHA256 = Object.freeze({ ... })',
+'- the third rationale argument of frozenVacuitySites(AUDITED_VACUITY_LINES[...], verdict, rationale, ...) inside const VACUITY_EXEMPT = new Map([ ... ])',
+'', `Failing test file(s): ${FROZEN_INVENTORY_FILE}`,
+'Causal file(s): a.mjs, named-other.mjs',
+'Fix the defect in the causal files, or move only the approved frozen data.',
+'Never weaken a census check.',
+'Refusals remain terminal: logic, identity, unmeasured, boundary, and repeat changes are not repairable.',
+'', `Plan: ${TD}/plan.md`, 'Commit: abc1234',
+].join('\n'))
+
+const legacy = frozenCycleIo({
+suite: [{ ok: false, output: `not ok 1 - ${CTX.checkout}/${FROZEN_INVENTORY_FILE}:203` }, frozenGreen()],
+builder2: (files, path, current) => { files[path] = current },
+changed: (calls) => calls.assign.filter(({ role }) => role === 'builder').length < 2 ? ['a.mjs'] : [FROZEN_INVENTORY_FILE],
+})
+const legacyResult = driveTask(Object.assign(legacy.ctx, { limits: { build_rounds: 2 } }), legacy.io)
+assert.equal(legacyResult.status, 'done', JSON.stringify(legacyResult))
+assert.equal(legacy.io.calls.writes[`${TD}/frozen-inventory-bounce-r1.md`], [
+'# Frozen inventory repair bounce', '',
+`The accepted commit abc1234 made the full suite red in ${FROZEN_INVENTORY_FILE}. This bounded repair may change data only in the two approved source containers:`,
+'- property values inside const VACUITY_SOURCE_SHA256 = Object.freeze({ ... })',
+'- the third rationale argument of frozenVacuitySites(AUDITED_VACUITY_LINES[...], verdict, rationale, ...) inside const VACUITY_EXEMPT = new Map([ ... ])',
+'', `Failing test file(s): ${FROZEN_INVENTORY_FILE}`,
+'Refusals remain terminal: logic, identity, unmeasured, boundary, and repeat changes are not repairable.',
+'', `Plan: ${TD}/plan.md`, 'Commit: abc1234',
+].join('\n'))
+const report = legacyResult.details.frozen_inventory_repairs[0]
+assert.deepEqual(Object.keys(report).sort(), ['approved', 'attempt', 'committed', 'files', 'source'])
+assert.equal(report.attempt, 1)
+assert.equal(report.committed, 'abc1234')
+assert.deepEqual(report.files.map(({ file }) => file), [FROZEN_INVENTORY_FILE])
+assert.equal(report.source, FROZEN_INVENTORY_FILE)
+assert.deepEqual(report.approved, ['VACUITY_SOURCE_SHA256 values', 'VACUITY_EXEMPT frozenVacuitySites rationale citations'])
+assert.deepEqual(legacyResult.details.frozen_inventory_repairs, legacy.io.calls.logs.filter((row) => row.frozen_inventory_repair).map((row) => row.frozen_inventory_repair))
 })
 
 test('A1 post-commit refresh carries the pre-commit whole-gate proof', () => {

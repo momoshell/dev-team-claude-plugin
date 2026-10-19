@@ -4505,3 +4505,68 @@ test('SL5 pane wait journals one pane-unobservable skill-load window and no load
     assert.equal(journal.filter((row) => row.seat_turn_census).length, 1)
   })
 })
+
+test('RS4 started rpc seat honours a closed resume reason without retiring', () => {
+  const f = freshRpcSeat();
+  try {
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') });
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md'), resume: { reason: 'suite-refusal' } });
+    assert.deepEqual(f.events, [['assign'], ['assign']]);
+    const rows = f.logs.filter((row) => row.event === 'seat-session');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].outcome, 'resumed');
+    assert.equal(rows[1].why, 'suite-refusal');
+  } finally { f.cleanup(); }
+});
+
+test('RS4 unknown resume reason renews fresh', () => {
+  const f = freshRpcSeat();
+  try {
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') });
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md'), resume: { reason: 'bogus-reason' } });
+    assert.equal(f.events.filter((e) => e[0] === 'retire').length, 1);
+    const rows = f.logs.filter((row) => row.event === 'seat-session');
+    const last = rows[rows.length - 1];
+    assert.equal(last.outcome, 'fresh');
+    assert.equal(last.why, null);
+  } finally { f.cleanup(); }
+});
+
+test('RS4 busy resumed rpc assign renews fresh and delivers', () => {
+  const f = freshRpcSeat();
+  try {
+    f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md') });
+    const orig = f.transport.assign;
+    let fired = false;
+    f.transport.assign = function () {
+      if (fired === false) {
+        fired = true;
+        f.events.push(['assign']);
+        const err = new Error('rpc seat planner already has an in-flight turn');
+        err.stage = 'rpc-session-busy';
+        throw err;
+      }
+      return orig.apply(f.transport, arguments);
+    };
+    const delivered = f.io.assign({ role: 'planner', briefFile: join(f.paths.taskDir, 'brief.md'), resume: { reason: 'no-envelope' } });
+    assert.ok(delivered && delivered.id);
+    assert.deepEqual(f.events.map((e) => e[0]), ['assign', 'assign', 'retire', 'assign']);
+    const rows = f.logs.filter((row) => row.event === 'seat-session');
+    assert.equal(rows[rows.length - 1].outcome, 'fresh');
+    const disk = JSON.parse(readFileSync(join(f.root, 'crew.json'), 'utf8'));
+    assert.equal(disk.members.planner.started, true);
+  } finally { f.cleanup(); }
+});
+
+test('RS4 pane seat ignores a resume request and respawns', () => {
+  const f = freshPaneSeat();
+  try {
+    f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') });
+    f.io.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md'), resume: { reason: 'suite-refusal' } });
+    assert.deepEqual(f.events.map((e) => e[0]), ['send', 'respawn-pane', 'send']);
+    const rows = f.logs.filter((row) => row.event === 'seat-session');
+    const last = rows[rows.length - 1];
+    assert.equal(last.outcome, 'fresh');
+    assert.equal(last.why, null);
+  } finally { f.cleanup(); }
+});

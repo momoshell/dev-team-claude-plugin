@@ -26,11 +26,12 @@
   "test/factory-ledger-cli.test.mjs:334": "unknown flag --untill",
   "test/factory-ledger-cli.test.mjs:332": "refused.status, 2, refused.stderr",
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
+  "docs/conventions.md:134": "A frozen exported enum's drift guard needs",
+  "docs/conventions.md:57": "first TypeScript file on main, and every file under",
   "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
   "test/factory-emit.test.mjs:1849": "CLI: emit-cli-unknown-flag-refusal",
-  "crew/drive.mjs:564": "export const DECISIONS = Object.freeze",
   "crew/shape-validator.mjs:261": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/shape-validator.mjs:250": "if (!shape || typeof shape !== 'object')",
   "scripts/factory/emit.mjs:1645": "function refuseUnknownFlags(verb, flags)",
@@ -40,6 +41,5 @@
   "scripts/factory/ledger.mjs:8591": "const VERB_FLAGS = Object.freeze",
   "scripts/factory/ledger.mjs:8640": "unknown flag --${name}",
   "scripts/factory/ledger.mjs:10515": "unknown verb: ${verb}",
-  "docs/conventions.md:134": "A frozen exported enum's drift guard needs",
-  "docs/conventions.md:57": "first TypeScript file on main, and every file under"
+  "crew/drive.mjs:569": "export const DECISIONS = Object.freeze"
 }

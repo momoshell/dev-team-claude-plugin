@@ -3,6 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { tokenizeJs } from './js-tokens.mjs'
+import { INFRASTRUCTURE_INTERRUPTIONS, infrastructureInterruptionOf } from './drive.mjs'
 import {
   staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
@@ -8799,6 +8800,7 @@ test('B1 ordinary plan keeps builder assignment unchanged', () => {
     briefFile: `${TD}/plan.md`,
     note: 'build',
     policy: { suiteCommand: 'suite-cmd', gatePath: `${TD}/gate.mjs`, fence: ['a.mjs', 'a.test.mjs'] },
+    resume: null,
     n: 1,
   })
   assert.equal(io.calls.writeLog.some(({ path }) => path === `${TD}/builder-assignment.md`), false)
@@ -8820,6 +8822,7 @@ test('C1 builder leaves an ungranted skill assignment unchanged', () => {
     briefFile: `${TD}/plan.md`,
     note: 'build',
     policy: { suiteCommand: 'suite-cmd', gatePath: `${TD}/gate.mjs`, fence: scope },
+    resume: null,
     n: 1,
   })
   assert.equal(io.calls.writes[`${TD}/builder-assignment.md`], undefined)
@@ -12942,4 +12945,155 @@ test('FX5', () => {
   delete missingEnvelopeFiles[TD + '/plan.accepted.envelope.json']
   assert.equal(driveTask(CTX_FINISH, finishHappyIo({ files: missingEnvelopeFiles })).status, 'done')
 })
+
+test('RS1 classifier names suite-refusal and no-envelope, refuses ordinary and unsigned lookalikes, vocabulary frozen', () => {
+  assert.equal(infrastructureInterruptionOf(suiteRefusalEnv('builder1', 'builder')), 'suite-refusal');
+  assert.equal(infrastructureInterruptionOf(buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } })), null);
+  const unsigned = { assignment_id: 'builder1', role: 'builder', status: 'insufficient', summary: 'lookalike', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', turns: 5, tool_calls: 2, absent_reason: null } };
+  assert.equal(infrastructureInterruptionOf(unsigned), null);
+  assert.equal(Object.isFrozen(INFRASTRUCTURE_INTERRUPTIONS), true);
+  assert.deepEqual(Array.from(INFRASTRUCTURE_INTERRUPTIONS), ['suite-refusal', 'no-envelope']);
+});
+
+test('RS2 builder suite-refusal re-dispatch carries resume suite-refusal', () => {
+  const first = irRun({
+    'planner:1': planEnv(),
+    'builder:1': suiteRefusalEnv('builder1', 'builder'), 'builder:2': buildEnv(),
+    'reviewer:1': reviewEnv('pass'),
+  });
+  assert.equal(first.res.status, 'done');
+  const builders = first.io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(builders.length, 2);
+  assert.equal(builders[0].resume, null);
+  assert.deepEqual(builders[1].resume, { reason: 'suite-refusal' });
+  const plannerCase = irRun({
+    'planner:1': { [Symbol.for('dev-team.crew.transport-settlement')]: 'headless-rpc', assignment_id: 'planner1', role: 'planner', status: 'insufficient', summary: 'rpc fallback', artifacts: [], details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', turns: 5, tool_calls: 2, absent_reason: null } },
+    'planner:2': planEnv(),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  });
+  assert.equal(plannerCase.res.status, 'done');
+  const planners = plannerCase.io.calls.assign.filter((a) => a.role === 'planner');
+  assert.equal(planners.length, 2);
+  assert.deepEqual(planners[1].resume, { reason: 'no-envelope' });
+  const zeroTurn = { 'assignment_id': 'builder1', 'role': 'builder', 'status': 'insufficient', 'summary': 'rpc fallback', 'artifacts': [], 'details': { 'degraded': 'rpc-no-envelope', 'reason': 'zero-turn-non-start', 'turns': 0, 'tool_calls': 0, 'absent_reason': null } };
+  zeroTurn[Symbol.for('dev-team.crew.transport-settlement')] = 'headless-rpc';
+  const third = irRun({
+    'planner:1': planEnv(),
+    'builder:1': zeroTurn, 'builder:2': buildEnv(),
+    'reviewer:1': reviewEnv('pass'),
+  });
+  assert.equal(third.res.status, 'done');
+  const zb = third.io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(zb.length, 2);
+  assert.deepEqual(zb[1].resume, { reason: 'no-envelope' });
+});
+
+test('RS3 whole-build round after suite refusals resumes without freshSession or handoff', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': suiteRefusalEnv('builder1', 'builder'),
+      'builder:2': suiteRefusalEnv('builder2', 'builder'),
+      'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' }),
+  });
+  const trace = [];
+  traceBuilderRenewal(io, trace, { session: 'fresh' });
+  const res = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io);
+  assert.equal(res.status, 'done');
+  const builders = io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(builders.length, 3);
+  assert.deepEqual(builders[2].resume, { reason: 'suite-refusal' });
+  assert.equal(trace.filter((t) => t.indexOf('freshSession') === 0).length, 0);
+  assert.equal(Object.keys(io.calls.writes).filter((p) => p.indexOf('builder-handoff-') !== -1).length, 0);
+  assert.equal(builders[2].briefFile.indexOf('builder-handoff-'), -1);
+  const rows = io.calls.logs.filter((r) => r.event === 'builder-session');
+  const resumed = rows.filter((r) => r.outcome === 'resumed' && r.why === 'suite-refusal' && r.attempt === 2);
+  assert.equal(resumed.length, 1);
+});
+
+test('RS3 genuine builder bounce carries no resume and renews fresh', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } }),
+      'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' }),
+  });
+  const trace = [];
+  traceBuilderRenewal(io, trace, { session: 'fresh' });
+  const res = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io);
+  assert.equal(res.status, 'done');
+  const builders = io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(builders.length, 2);
+  assert.equal(builders[1].resume, null);
+  assert.equal(trace.filter((x) => x.indexOf('freshSession') === 0).length, 1);
+  const grows = io.calls.logs.filter((r) => r.event === 'builder-session' && r.attempt === 2);
+  assert.equal(grows.length, 1);
+  assert.equal(grows[0].outcome, 'fresh');
+});
+
+test('RS3 headless-json builder after suite refusals renews fresh with a handoff', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': suiteRefusalEnv('builder1', 'builder'),
+      'builder:2': suiteRefusalEnv('builder2', 'builder'),
+      'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' }),
+    dispatchTransport: () => 'headless-json',
+  });
+  const trace = [];
+  traceBuilderRenewal(io, trace, { session: 'fresh' });
+  const res = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io);
+  assert.equal(res.status, 'done');
+  const builders = io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(builders.length, 3);
+  assert.equal(builders[2].resume, null);
+  assert.equal(trace.filter((x) => x.indexOf('freshSession') === 0).length, 1);
+  assert.equal(Object.keys(io.calls.writes).some((p) => p.slice(-20) === 'builder-handoff-2.md'), true);
+  const jrows = io.calls.logs.filter((r) => r.event === 'builder-session' && r.attempt === 2);
+  assert.equal(jrows.length, 1);
+  assert.equal(jrows[0].outcome, 'fresh');
+});
+
+test('RS3 scope-fix bounce after a suite refusal renews fresh', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': suiteRefusalEnv('builder1', 'builder'),
+      'builder:2': suiteRefusalEnv('builder2', 'builder'),
+      'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [['returns/d2.builder.json'], ['a.mjs', 'a.test.mjs']],
+  });
+  const trace = [];
+  traceBuilderRenewal(io, trace, { session: 'fresh' });
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io);
+  assert.equal(res.status, 'done');
+  const builders = io.calls.assign.filter((a) => a.role === 'builder');
+  assert.equal(builders.length, 3);
+  assert.equal(builders[2].note, 'scope-fix');
+  assert.equal(builders[2].resume, null);
+  const srows = io.calls.logs.filter((r) => r.event === 'builder-session' && r.attempt === 2);
+  assert.equal(srows.length, 1);
+  assert.equal(srows[0].outcome, 'fresh');
+});
 

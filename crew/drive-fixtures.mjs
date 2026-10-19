@@ -172,7 +172,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       const returnPath = spec.reask?.returnPath ?? `${role}:${counts[role]}`
       calls.sequence.push({ kind: 'assign', role, id, returnPath, reask: spec.reask ?? null })
       calls.dispatch.push({ role, id, returnPath, reask: spec.reask ?? null })
-      calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, ...(spec.reask ? { reask: spec.reask, id, returnPath } : {}), n: counts[role] })
+      calls.assign.push({ role, briefFile, note, policy: spec.policy ?? null, ...(spec.reask ? { reask: spec.reask, id, returnPath } : {}), resume: spec.resume ?? null, n: counts[role] })
       return { id, returnPath }
     },
     dispatchTransport(returnPath) { return dispatchTransport(returnPath) },
@@ -1578,6 +1578,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ["recordRow", "", "at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})"],
   ["recordRow", "", "at gate_discrimination_carry"],
   ["recordRow", "event='mutation-check-coverage'", "at ...reconciliation"],
+  ["recordRow", "event='builder-session'", "at attempt note outcome why"],
   ["recordRow", "event='builder-session'", "at attempt note outcome why"],
   ["recordRow", "event='step:degrade'", "at step reason remaining budget"],
   ["recordRow", "event='step:start'", "at step round files owned builder_attempt"],

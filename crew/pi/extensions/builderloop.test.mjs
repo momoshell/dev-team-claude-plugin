@@ -164,15 +164,16 @@ test('BL4', async () => {
 // tool result that failed to obtain a lane remains unchanged.
 test('BL5', async () => {
   const f = fixture()
-  for (const runner of [
-    async () => { throw new Error('runner crash') },
-    async () => { throw Object.assign(new Error('runner timeout'), { reason: 'timeout' }) },
-  ]) {
-    const loop = loopFor(f, { runner })
-    await assert.doesNotReject(async () => {
-      assert.equal(await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root }), undefined)
-    })
-  }
+  const crashLoop = loopFor(f, { runner: async () => { throw new Error('runner crash') } })
+  await assert.doesNotReject(async () => {
+    assert.equal(await crashLoop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root }), undefined)
+  })
+  const timeoutLoop = loopFor(f, { runner: async () => { throw Object.assign(new Error('runner timeout'), { reason: 'timeout' }) } })
+  await assert.doesNotReject(async () => {
+    const result = await timeoutLoop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+    assert.equal(result.content[0].text, 'original result')
+    assert.equal(appendedText(result), 'Builder fenced Node lane UNMEASURED: node --test in.test.mjs (timed out after 30 s; not a failure)')
+  })
 })
 
 // BL6: crash and timeout rows are distinct durable observations, while a broken
@@ -184,10 +185,17 @@ test('BL6', async () => {
     const loop = loopFor(f, {
       runner: async () => { throw Object.assign(new Error(reason), { reason }) },
     })
-    assert.equal(await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root }), undefined)
+    const result = await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+    if (reason === 'crash') {
+      assert.equal(result, undefined)
+    } else {
+      assert.equal(result.content[0].text, 'original result')
+      assert.equal(appendedText(result), 'Builder fenced Node lane UNMEASURED: node --test in.test.mjs (timed out after 30 s; not a failure)')
+    }
   }
   const failures = rows(f).filter((row) => row.builder_loop_failure)
   assert.deepEqual(failures.map((row) => row.builder_loop_failure.reason), reasons)
+  assert.deepEqual(failures.map((row) => row.builder_loop_failure.deadline_ms), [30000, 30000])
   const throwing = loopFor(f, {
     runner: async () => { throw Object.assign(new Error('crash'), { reason: 'crash' }) },
     deps: { appendFile: () => { throw new Error('journal is unavailable') } },
@@ -195,6 +203,57 @@ test('BL6', async () => {
   await assert.doesNotReject(async () => {
     assert.equal(await throwing.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root }), undefined)
   })
+})
+
+test('LT1', async () => {
+  // kills: UNMEASURED->FAIL header - timeout part must open UNMEASURED and contain neither PASS nor FAIL
+  const f = fixture()
+  const loop = loopFor(f, { runner: async () => { throw Object.assign(new Error('runner timeout'), { reason: 'timeout' }) } })
+  const result = await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  assert.equal(result.content[0].text, 'original result')
+  assert.match(appendedText(result), /^Builder fenced Node lane UNMEASURED: node --test .* \(timed out after \d+ s; not a failure\)/)
+  assert.equal(appendedText(result), 'Builder fenced Node lane UNMEASURED: node --test in.test.mjs (timed out after 30 s; not a failure)')
+  assert.doesNotMatch(appendedText(result), /PASS|FAIL/)
+})
+
+test('LT2', async () => {
+  // kills: metadata.deadline_ms = deadlineMs -> = 0 - journal must record the deadline the runner was given
+  const f = fixture()
+  let captured
+  const loop = loopFor(f, { runner: async (command, options) => { captured = options?.deadlineMs; throw Object.assign(new Error('timeout'), { reason: 'timeout' }) } })
+  await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  assert.equal(captured, 30000)
+  assert.equal(rows(f).at(-1)?.builder_loop_failure?.deadline_ms, 30000)
+})
+
+test('LT3', async () => {
+  // kills: Math.max(DEFAULT_DEADLINE_MS, PER_FILE_DEADLINE_MS * testCount) -> DEFAULT_DEADLINE_MS - 13-file lane must receive 65000
+  const thirteen = Array.from({ length: 13 }, (_, i) => 't' + String(i + 1).padStart(2, '0') + '.test.mjs')
+  const f = fixture()
+  const context = { files_in_scope: ['fixture.mjs', ...thirteen], validation_lane: 'node --test ' + thirteen.join(' '), gate_cmd: 'node task/gate.mjs' }
+  let captured
+  const loop = loopFor(f, { context, runner: async (command, options) => { captured = options?.deadlineMs; return { code: 0, signal: null, tail: '' } } })
+  await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  assert.equal(captured, 65000)
+  const f2 = fixture()
+  let captured2
+  const loop2 = loopFor(f2, { runner: async (command, options) => { captured2 = options?.deadlineMs; return { code: 0, signal: null, tail: '' } } })
+  await loop2.onToolResult(event('edit', join(f2.root, 'fixture.mjs')), { cwd: f2.root })
+  assert.equal(captured2, 30000)
+})
+
+test('LT4', async () => {
+  // kills: Math.min(MAX_DEADLINE_MS, deadlineMs * 2) -> deadlineMs - deadline must double after each timeout, capped at 600000, reset after resolve
+  const thirteen = Array.from({ length: 13 }, (_, i) => 't' + String(i + 1).padStart(2, '0') + '.test.mjs')
+  const f = fixture()
+  const context = { files_in_scope: ['fixture.mjs', ...thirteen], validation_lane: 'node --test ' + thirteen.join(' '), gate_cmd: 'node task/gate.mjs' }
+  const capturedDeadlines = []
+  let calls = 0
+  const loop = loopFor(f, { context, runner: async (command, options) => { capturedDeadlines.push(options?.deadlineMs); calls += 1; if (calls <= 5) throw Object.assign(new Error('timeout'), { reason: 'timeout' }); if (calls === 6) return { code: 1, signal: null, tail: '' }; return { code: 0, signal: null, tail: '' } } })
+  for (let i = 0; i < 7; i += 1) {
+    await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  }
+  assert.deepEqual(capturedDeadlines, [65000, 130000, 260000, 520000, 600000, 600000, 65000])
 })
 
 test('planner context is lazy, current-run only, and requires a done planner envelope', async () => {
@@ -339,7 +398,9 @@ test('a real short timeout removes the detached process group, not merely its pa
       },
     },
   })
-  assert.equal(await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root }), undefined)
+  const result = await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
+  assert.equal(appendedText(result), `Builder fenced Node lane UNMEASURED: node --test ${workerRel} (timed out after 0 s; not a failure)`)
+  assert.equal(rows(f).at(-1)?.builder_loop_failure?.deadline_ms, 40)
   assert.equal(rows(f).at(-1)?.builder_loop_failure?.reason, 'timeout')
   assert.ok(capturedPid)
   assert.throws(() => process.kill(-capturedPid, 0), (error) => error?.code === 'ESRCH')

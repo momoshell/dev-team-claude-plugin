@@ -52,7 +52,7 @@ for the period is unmeasured. Hand-finish fork token totals before b1214 were no
 
 ### 2. Seats
 
-- **Builder: the roster's builder seat** (on today's roster, `openai/gpt-6-luna` on pi). It owns
+- **Builder: the roster's builder seat** (on today's roster, `meta/muse-spark-1.3-contributor` on pi). It owns
   every code change in the run, including test reshapes and anchor edits it cannot leave to `--repair-all`.
 - **Reviewer: the roster's reviewer seat** (`openai/gpt-6.1-sol` on pi). It reviews the whole lane diff
   against `origin/main`, not only the finish delta, because the lane never reached `review:pass`.

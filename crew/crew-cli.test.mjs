@@ -4805,10 +4805,10 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
-  assert.equal(resolved.seats.planner.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.planner.id, 'muse-wonder-1.0-contributor')
   assert.equal(resolved.seats.lead.id, 'claude-opus-5-5')
-  assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
-  assert.equal(resolved.seats.builder.id, 'gpt-6-luna')
+  assert.equal(resolved.seats.reviewer.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.builder.id, 'muse-spark-1.3-contributor')
 })
 
 test('D1-codes workflow refusal set is frozen and every validator code is reachable', () => {

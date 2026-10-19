@@ -2396,23 +2396,25 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet successors, the Sol planner, the Luna builder and the Opus reviewer', () => {
+test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet successors, the Muse planner and builder, and the Sol reviewer', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-10-18')
+  assert.equal(shipped.updated_at, '2026-10-17')
   // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
   assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
-  // Operator, 2026-10-16: the builder runs at xhigh on build and judge; mechanical stays medium.
+  // Operator, 2026-10-16: Spark builds at xhigh on build and judge; mechanical stays medium.
   assert.equal(shipped.tiers.build.builder.effort, 'xhigh')
   assert.equal(shipped.tiers.judge.builder.effort, 'xhigh')
   assert.equal(shipped.tiers.mechanical.builder.effort, 'medium')
   assert.deepEqual(shipped.tiers.judge.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
   assert.equal(shipped.tiers.mechanical.advisor, null)
   for (const tier of ['mechanical', 'build', 'judge']) {
-    // Operator, 2026-10-18: the meta subscription is retired from the roster. Sol plans at high on
-    // every tier, Luna builds, and Opus reviews through claude.
-    assert.deepEqual(shipped.tiers[tier].planner, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' })
-    assert.deepEqual([shipped.tiers[tier].builder.provider, shipped.tiers[tier].builder.id, shipped.tiers[tier].builder.agent], ['openai', 'gpt-6-luna', 'pi'])
-    assert.deepEqual(shipped.tiers[tier].reviewer, { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'high' })
+    // Operator, 2026-10-16: the planner and builder seats move onto the Muse Code subscription.
+    // Operator, 2026-10-17: the judge planner is Wonder Full; mechanical and build keep Wonder.
+    const plannerId = tier === 'judge' ? 'muse-wonder-full-1.0-contributor' : 'muse-wonder-1.0-contributor'
+    assert.deepEqual([shipped.tiers[tier].planner.provider, shipped.tiers[tier].planner.id, shipped.tiers[tier].planner.agent], ['meta', plannerId, 'pi'])
+    assert.deepEqual([shipped.tiers[tier].builder.provider, shipped.tiers[tier].builder.id, shipped.tiers[tier].builder.agent], ['meta', 'muse-spark-1.3-contributor', 'pi'])
+    // Operator, 2026-10-16: Sol reviews on every tier, through pi, at high.
+    assert.deepEqual(shipped.tiers[tier].reviewer, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' })
   }
   for (const tier of ['build', 'judge']) {
     assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')

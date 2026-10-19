@@ -182,7 +182,7 @@ test('RS2', () => {
   // MUTATION RS2: returning [] from the comparison helper must fail both perturbed inputs.
   const changedRoster = structuredClone(roster)
   changedRoster.tiers.mechanical.builder.effort = 'xhigh'
-  const changedMarkdown = crewReadme.replace('pi/gpt-6-luna, medium', 'pi/unseated-sentinel, medium')
+  const changedMarkdown = crewReadme.replace('pi/muse-spark-1.3-contributor, medium', 'pi/unseated-sentinel, medium')
   for (const errors of [seatTableDisagreements(crewReadme, changedRoster), seatTableDisagreements(changedMarkdown, roster)]) {
     assert.ok(errors.some((error) => error.includes('mechanical') && error.includes('builder')), JSON.stringify(errors))
   }
@@ -202,7 +202,7 @@ test('RS2', () => {
   assert.ok(seatTableDisagreements(missingColumn, roster).length > 0)
   const duplicateColumn = table.replace('| tier | advisor | lead |', '| tier | advisor | advisor |')
   assert.ok(seatTableDisagreements(duplicateColumn, roster).length > 0)
-  const malformedWidth = table.replace('claude/claude-opus-5-5, high | — |', 'claude/claude-opus-5-5, high |')
+  const malformedWidth = table.replace('pi/gpt-6.1-sol, high | — |', 'pi/gpt-6.1-sol, high |')
   assert.ok(seatTableDisagreements(malformedWidth, roster).some((error) => error.includes('width')))
   const nullCellMarkdown = table.replace('| `mechanical` | — | — |', '| `mechanical` | pi/gpt-5.6-terra, medium | — |')
   assert.ok(seatTableDisagreements(nullCellMarkdown, roster).some((error) => error.includes('mechanical/advisor')))
@@ -211,7 +211,7 @@ test('RS2', () => {
 test('RS3', () => {
   // MUTATION RS3: inject an unseated pi model pair into the README; membership must reject it.
   assert.deepEqual(modelTokenDisagreements(crewReadme, roster), [])
-  assert.deepEqual(modelTokenDisagreements('pi/gpt-6-luna claude/claude-fable-5-1', roster), [])
+  assert.deepEqual(modelTokenDisagreements('pi/muse-wonder-1.0-contributor claude/claude-fable-5-1', roster), [])
   assert.deepEqual(modelTokenDisagreements('pi/unseated-sentinel', roster), ['pi/unseated-sentinel'])
   assert.deepEqual(modelTokenDisagreements('xpi/unseated-sentinel /pi/unseated-sentinel .claude/unseated-sentinel', roster), [])
 })

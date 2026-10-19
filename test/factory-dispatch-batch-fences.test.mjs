@@ -113,7 +113,7 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { slotStore } from '../crew/reclaim.mjs'
-import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
+import { gatherFences, laneFenceFor, readPremiseBaselineFile, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 import { fileURLToPath } from 'node:url'
 
@@ -2429,4 +2429,43 @@ test('L2A dispatch second-lane setup failure cleans both owners', async () => {
   assert.equal(refusal?.reason, 'worktree-setup-failed')
   assert.equal(calls.filter((call) => call.args.includes('worktree') && call.args.includes('remove')).length, 2)
   assert.equal(body, '# stock\n/operator\n')
+})
+
+// crew/drive.mjs passed 1,048,576 bytes on 2026-10-19: git show of it overflowed
+// spawnSync's default maxBuffer (ENOBUFS) and every committed-blob reader refused.
+function overOneMibRepo(name) {
+  const repo = join(root, name)
+  mkdirSync(join(repo, 'lib'), { recursive: true })
+  const line = 'export const pad = 0 // filler that pushes the committed blob past one MiB\n'
+  const source = line.repeat(Math.ceil((1024 * 1024 + 4096) / line.length))
+  assert.ok(Buffer.byteLength(source) > 1024 * 1024)
+  writeFileSync(join(repo, 'lib', 'big.mjs'), source)
+  for (const args of [['init', '-q', '-b', 'main'], ['config', 'user.email', 'factory@test.invalid'], ['config', 'user.name', 'factory test'], ['add', '-A'], ['commit', '-q', '-m', 'big']]) {
+    const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  return { repo, source }
+}
+
+test('a committed premise file over the default 1 MiB spawn buffer reads in full', () => {
+  // kills: readPremiseBaselineFile `git show` without maxBuffer -> refused as not-a-git-repo
+  const { repo, source } = overOneMibRepo('premise-over-one-mib')
+  assert.equal(readPremiseBaselineFile(repo, 'lib/big.mjs'), source)
+})
+
+test('a fence span over a committed blob past 1 MiB compiles in gatherFences', () => {
+  // kills: committedFenceLineCount `git show` without maxBuffer -> bad-fences refusal
+  const { repo } = overOneMibRepo('fence-span-over-one-mib')
+  const fencesPath = join(repo, 'fences.json')
+  writeFileSync(fencesPath, JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/big.mjs:1-1'] }] }))
+  assert.deepEqual(gatherFences({ fencesPath, checkout: repo }), [{ lane: 'own', files: ['lib/big.mjs:1-1'], reads: [] }])
+})
+
+test('a register span over a committed blob past 1 MiB survives readRegister', () => {
+  // kills: dispatch-batch span reader `git show` without maxBuffer -> span dropped as unreadable
+  const { repo } = overOneMibRepo('register-span-over-one-mib')
+  const fencesPath = join(repo, 'register.json')
+  writeFileSync(fencesPath, JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/big.mjs:1-1'] }] }))
+  const result = readRegister({ fencesPath, checkout: repo, deps: { home: root } })
+  assert.deepEqual(result.fences.map((fence) => fence.files), [['lib/big.mjs:1-1']])
 })

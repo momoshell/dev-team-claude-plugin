@@ -1058,7 +1058,9 @@ function fileSetDependent(words) {
     if (word === '--') break
     const eq = word.indexOf('=')
     const name = eq > 0 ? word.slice(0, eq) : word
-    if (name === '--test-shard' || (name === '--test-isolation' && (eq > 0 ? word.slice(eq + 1) : words[i + 1]) === 'none')) return true
+    const value = eq > 0 ? word.slice(eq + 1) : words[i + 1]
+    // --test-concurrency=1 runs files in order, so a later file may consume an earlier file's fixture.
+    if (name === '--test-shard' || (name === '--test-isolation' && value === 'none') || (name === '--test-concurrency' && value === '1')) return true
     if (eq <= 0 && (LANE_PATH_OPTIONS.includes(name) || LANE_VALUE_OPTIONS.includes(word))) i += 1
   }
   return false
@@ -1093,9 +1095,10 @@ function laneTestFiles(config, d) {
   const testFiles = positionals.map((entry) => entry.startsWith('./') ? entry.slice(2) : entry)
   if (testFiles.length === 0) return { scope: 'full', reason: 'lane-no-test-files', words, testFiles: [], sources: new Map() }
   if (testFiles.length > 1) {
-    // lean: NODE_OPTIONS split on whitespace, quoted values not parsed; use a shell-word tokenizer if quoted options appear
-    const nodeOptions = String(d.env?.NODE_OPTIONS ?? '').trim().split(/\s+/).filter(Boolean)
-    if (fileSetDependent(words) || fileSetDependent(nodeOptions)) return { scope: 'full', reason: 'lane-file-set-dependent', words, testFiles: [], sources: new Map() }
+    const rawNodeOptions = String(d.env?.NODE_OPTIONS ?? '')
+    const nodeOptions = rawNodeOptions.trim().split(/\s+/).filter(Boolean)
+    // A quoted or escaped NODE_OPTIONS is not parsed here, so it cannot be proven split-safe.
+    if (fileSetDependent(words) || fileSetDependent(nodeOptions) || /["'\\]/.test(rawNodeOptions)) return { scope: 'full', reason: 'lane-file-set-dependent', words, testFiles: [], sources: new Map() }
   }
   const sources = new Map()
   for (const file of testFiles) {

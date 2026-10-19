@@ -1625,7 +1625,7 @@ async function fileSetLaneProof(mode, extraEnv = {}) {
     writeFileSync(join(checkout, 'test/a.test.mjs'), [
       "import { test } from 'node:test'",
       "import { healthy } from '../lib/widget.mjs'",
-      'globalThis.laneReady = true',
+      mode.startsWith('--test-concurrency') ? "(await import('node:fs')).writeFileSync(new URL('../lane-marker', import.meta.url), 'ready')" : 'globalThis.laneReady = true',
       "test('a', () => { if (typeof healthy !== 'boolean') throw new Error('not boolean') })",
       '',
     ].join('\n'))
@@ -1635,6 +1635,8 @@ async function fileSetLaneProof(mode, extraEnv = {}) {
       "import { healthy } from '../lib/widget.mjs'",
       mode.startsWith('--test-shard')
         ? "test('b', () => assert.equal(healthy, true))"
+        : mode.startsWith('--test-concurrency')
+          ? "test('b', async () => { const fs = await import('node:fs'); const marker = new URL('../lane-marker', import.meta.url); assert.equal(fs.existsSync(marker), true); fs.rmSync(marker); assert.equal(typeof healthy, 'boolean') })"
         : "test('b', () => { assert.equal(globalThis.laneReady, true); assert.equal(typeof healthy, 'boolean') })",
       '',
     ].join('\n'))
@@ -1682,6 +1684,31 @@ test('RV3-1 inherited isolation-none keeps shared-global lanes intact', async ()
     assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
     assert.match(row.validation_output, /# pass 2\b/)
   }
+})
+
+test('RV4-1 an in-order lane keeps a fixture producer and consumer together', async () => {
+  // MUTATION RV4-1: drop --test-concurrency=1 from the file-set-dependent fallback.
+  for (const mode of ['--test-concurrency=1', '--test-concurrency 1']) {
+    const { lane, commands, result } = await fileSetLaneProof(mode)
+    const row = result.mutants[0]
+    assert.equal(result.fatal, undefined)
+    assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+    assert.equal(row.lane_scope, 'full')
+    assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+    assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+    assert.match(row.validation_output, /# pass 2\b/)
+  }
+})
+
+test('RV4-2 a quoted NODE_OPTIONS keeps the full lane', async () => {
+  // MUTATION RV4-2: drop the quoted NODE_OPTIONS fallback.
+  const { lane, commands, result } = await fileSetLaneProof('', { NODE_OPTIONS: '--test-isolation="none"' })
+  const row = result.mutants[0]
+  assert.equal(result.fatal, undefined)
+  assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+  assert.equal(row.lane_scope, 'full')
+  assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+  assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
 })
 
 test('RV2-3 shell-expanded patterns run verbatim and kill selected-test mutants', async () => {

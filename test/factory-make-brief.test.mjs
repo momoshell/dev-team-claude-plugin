@@ -15,8 +15,8 @@ import {
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractPremiseClaims, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
-  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
-  laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, SYMBOL_INDEX_ENTRY_LIMIT,
+  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PORTABLE_CONVENTIONS_BLOCK, PORTABLE_HOSTILE_ENV_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
+  laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, standingBlocksFor, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere, issueBindingFor, gatherBaseline,
 } from '../scripts/factory/make-brief.mjs'
@@ -399,6 +399,7 @@ test('IB7 declared close after placeholder binds compiled issue literally', () =
 test('pack mode moves boilerplate to sidecars and preserves the inline verdict', () => {
   // Compiler/git/filesystem coverage remains real; only the irrelevant nested baseline suite is replaced.
   const root = fixture('pack-basic', { coupledCaller: true, scripts: FAST_FIXTURE_TEST })
+  put(root, 'scripts/factory/seed.mjs', 'export {}\n')
   const issueBody = 'Issue body line one.\nIssue body line two.'
   const issue = put(root, 'issue-body.md', `${issueBody}\n`)
   const journal = put(root, 'journal.jsonl', '{"event":"plan"}\n{"event":"build"}\n')
@@ -880,6 +881,8 @@ test('creates warns on missing paths in both where/creates directions and accept
 
 test('a directed request renders one block the real parser accepts', () => {
   const root = fixture('directed-happy')
+  put(root, 'crew/crew-boot.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
+  put(root, 'crew/adapter-pi.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
   const { brief } = compile(root, {
     ask: 'Carry the gate in a ` ```directed ` block for widget delivery',
     directed: { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] },
@@ -1982,6 +1985,7 @@ test('BB2', () => {
 
 test('standing blocks render verbatim and no unfilled slot ships', () => {
   const root = fixture('standing')
+  put(root, 'scripts/factory/seed.mjs', 'export {}\n')
   const { brief } = compile(root)
   assert.ok(brief.includes(ACCEPTANCE_GATE_BLOCK))
   assert.ok(brief.includes(CONVENTIONS_BLOCK))
@@ -2008,6 +2012,8 @@ test('standing blocks render verbatim and no unfilled slot ships', () => {
 // reaches every future lane without touching the protected driver.
 test('every compiled brief requires a hostile-environment pass of the lane\'s own tests', () => {
   const root = fixture('hostile-env')
+  put(root, 'crew/crew-boot.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
+  put(root, 'crew/adapter-pi.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
   const { brief } = compile(root)
   const gate = section(brief, '## Acceptance gate')
   assert.ok(gate.includes(HOSTILE_ENV_BLOCK))
@@ -2026,6 +2032,70 @@ test('every compiled brief requires a hostile-environment pass of the lane\'s ow
   assert.ok(brief.indexOf(ACCEPTANCE_GATE_BLOCK) < brief.indexOf(HOSTILE_ENV_BLOCK))
   assert.ok(brief.indexOf(HOSTILE_ENV_BLOCK) < brief.indexOf('## Per-check mutations'))
   assert.equal(brief.replace(inserted, '').includes('CREW_CLAUDE_BIN'), false)
+})
+
+function absentCitedPaths(text, root) {
+  const found = String(text).match(/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g) ?? []
+  return found.filter((rel) => !existsSync(join(root, rel)))
+}
+
+test('FB1 foreign brief carries the portable hostile block', () => {
+  const root = fixture('fb1-foreign', { scripts: FAST_FIXTURE_TEST })
+  const { brief } = compile(root, {}, [], 'fb1.md')
+  const gate = section(brief, '## Acceptance gate')
+  assert.ok(gate.includes(PORTABLE_HOSTILE_ENV_BLOCK))
+  assert.equal(gate.includes(HOSTILE_ENV_BLOCK), false)
+  assert.deepEqual(absentCitedPaths(PORTABLE_HOSTILE_ENV_BLOCK, root), [])
+  assert.ok(absentCitedPaths(HOSTILE_ENV_BLOCK, root).length > 0)
+})
+
+test('FB2 foreign conventions are portable inline and in the pack sidecar', () => {
+  const root = fixture('fb2-foreign', { scripts: FAST_FIXTURE_TEST })
+  const { brief: unpacked } = compile(root, {}, [], 'fb2-unpacked.md')
+  const conventions = section(unpacked, '## Conventions')
+  assert.ok(conventions.includes(PORTABLE_CONVENTIONS_BLOCK))
+  assert.equal(conventions.includes(CONVENTIONS_BLOCK), false)
+  const packDir = join(root, 'pack')
+  mkdirSync(packDir)
+  compile(root, {}, ['--pack', packDir], 'packed.brief.md')
+  const sidecar = readFileSync(join(packDir, 'packed.conventions.md'), 'utf8')
+  assert.ok(sidecar.includes(PORTABLE_CONVENTIONS_BLOCK))
+  assert.equal(sidecar.includes('scripts/factory/'), false)
+  assert.deepEqual(absentCitedPaths(PORTABLE_CONVENTIONS_BLOCK, root), [])
+  assert.ok(absentCitedPaths(CONVENTIONS_BLOCK, root).length > 0)
+})
+
+test('FB3 standingBlocksFor self-hosted and null return repo-specific blocks', () => {
+  assert.equal(standingBlocksFor(ROOT).conventions, CONVENTIONS_BLOCK)
+  assert.ok(standingBlocksFor(ROOT).acceptance.endsWith(HOSTILE_ENV_BLOCK))
+  assert.equal(standingBlocksFor(ROOT).mutations, MUTATION_CONTRACT_BLOCK)
+  assert.deepEqual(standingBlocksFor(null), standingBlocksFor(ROOT))
+})
+
+test('FB4 self-hosted fixture compiles repo-specific blocks verbatim', () => {
+  const root = fixture('fb4-self', { scripts: FAST_FIXTURE_TEST })
+  const seed = "import { test } from 'node:test'\ntest('seed', () => {})\n"
+  put(root, 'crew/crew-boot.test.mjs', seed)
+  put(root, 'crew/adapter-pi.test.mjs', seed)
+  put(root, 'scripts/factory/seed.mjs', 'export {}\n')
+  const { brief: unpacked } = compile(root, {}, [], 'fb4-unpacked.md')
+  const gate = section(unpacked, '## Acceptance gate')
+  const conventions = section(unpacked, '## Conventions')
+  assert.ok(gate.includes(HOSTILE_ENV_BLOCK))
+  assert.ok(conventions.includes(CONVENTIONS_BLOCK))
+  const packDir = join(root, 'pack')
+  mkdirSync(packDir)
+  compile(root, {}, ['--pack', packDir], 'packed.brief.md')
+  const sidecar = readFileSync(join(packDir, 'packed.conventions.md'), 'utf8')
+  assert.ok(sidecar.includes(CONVENTIONS_BLOCK))
+  for (const surface of [gate, conventions, sidecar]) {
+    assert.equal(surface.includes(PORTABLE_HOSTILE_ENV_BLOCK), false)
+    assert.equal(surface.includes(PORTABLE_CONVENTIONS_BLOCK), false)
+  }
+  assert.ok(typeof PORTABLE_HOSTILE_ENV_BLOCK === 'string' && PORTABLE_HOSTILE_ENV_BLOCK.length > 0)
+  assert.ok(typeof PORTABLE_CONVENTIONS_BLOCK === 'string' && PORTABLE_CONVENTIONS_BLOCK.length > 0)
+  assert.notEqual(PORTABLE_HOSTILE_ENV_BLOCK, HOSTILE_ENV_BLOCK)
+  assert.notEqual(PORTABLE_CONVENTIONS_BLOCK, CONVENTIONS_BLOCK)
 })
 
 // The per-check mutation contract must reach a planner mechanically: two lanes lost

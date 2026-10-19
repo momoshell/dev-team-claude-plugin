@@ -12104,7 +12104,7 @@ test('LRF8 Cargo attribution retains root src files and permanent conflicts stay
 
 const flakeTestName = 'app::runs::dispatch::waker::tests::R5_12_a_supervised_wait_heartbeats_before_its_wake_time'
 const flakeTestFile = 'crates/power-api/src/app/runs/dispatch/waker.rs'
-function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --workspace', rerun, rerunCommand = null, isolated, fence = [], publish = false, throwRerun = false } = {}) {
+function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --workspace', rerun, rerunCommand = null, isolated, fence = [], publish = false, throwRerun = false, now } = {}) {
   const temp = scratchDir('flake-driver-')
   writeFileSync(join(temp, 'outside.test.mjs'), '')
   const red = output ?? { ok: false, output: 'failures:\n\n---- ' + flakeTestName + ' stdout ----\n\nthread \'' + flakeTestName + '\' panicked at ' + flakeTestFile + ':2084:10:\nfixture red\n\nfailures:\n    ' + flakeTestName + '\n\ntest result: FAILED. 931 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.29s\n' }
@@ -12112,11 +12112,11 @@ function flakeDriverRun(t, { output, runner = 'cargo', command = 'cargo test --w
   const envelopes = { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }
   const isolatedCommand = isolated ?? (runner === 'node' ? 'node --test --test-reporter=tap ' + shellArg('outside.test.mjs') : command + ' -- --exact ' + shellArg(flakeTestName))
   const runs = { ...validationProbeRun(plan.details.validation_lane, { 'outside.test.mjs': 'file' }), [runner === 'node' ? 'node --test outside.test.mjs' : command]: red, [isolatedCommand]: rerun ?? { ok: true, output: 'test ' + flakeTestName + ' ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' } }
-  const io = publish ? publicationIo({ envelopes, commands: runs }) : fakeIo({ envelopes, runs, changed: ['a.mjs', 'a.test.mjs'], onRun: (cmd) => { if (throwRerun && cmd === isolatedCommand) throw new Error('injected rerun failure') } })
+  const io = publish ? publicationIo({ envelopes, commands: runs }) : fakeIo({ envelopes, runs, changed: ['a.mjs', 'a.test.mjs'], ...(now ? { now } : {}), onRun: (cmd) => { if (throwRerun && cmd === isolatedCommand) throw new Error('injected rerun failure') } })
   const result = driveTask({ ...CTX, checkout: temp, testRunner: { runner, basis: 'brief fixture', rerun: rerunCommand }, ...(publish ? { publish: { branch: 'feature/ship', base: 'main' } } : {}) }, io)
   return { result, calls: io.calls.run.map(row => typeof row === 'string' ? row : row.cmd), logs: io.calls.logs, writes: io.calls.writes }
 }
-const flakeRow = (outcome = 'green', reason = null, file = flakeTestFile, rerun = 'passed') => ({ stage: 'lane', round: 1, outcome, reason, tests: [{ test: flakeTestName, file, rerun }] })
+const flakeRow = (outcome = 'green', reason = null, file = flakeTestFile, rerun = 'passed', rerun_ms = rerun === null ? null : 0) => ({ stage: 'lane', round: 1, outcome, reason, tests: [{ test: flakeTestName, file, rerun, rerun_ms }] })
 test('FL1', (t) => {
   // Mutation: remove ordinary lane retry; the mapped out-of-fence Cargo failure must recover.
   const x = flakeDriverRun(t)
@@ -12167,12 +12167,12 @@ test('FL5', (t) => {
   const x = flakeDriverRun(t, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: { ok: true, output: 'TAP version 13\nok 1 - flaky-one\n1..1\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' } })
   assert.equal(x.result.status, 'done')
   assert.deepEqual(x.calls.filter(c => c.includes('--test-reporter=tap')), ['node --test --test-reporter=tap ' + shellArg('outside.test.mjs')])
-  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [{ stage: 'lane', round: 1, outcome: 'green', reason: null, tests: [{ test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed' }] }])
+  assert.deepEqual(x.logs.filter(r => r.flake).map(r => r.flake), [{ stage: 'lane', round: 1, outcome: 'green', reason: null, tests: [{ test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed', rerun_ms: 0 }] }])
 })
 test('FL7', (t) => {
   // Mutation: omit flakes from done/publication evidence; proof must retain all fields and no-flake bytes.
   const x = flakeDriverRun(t)
-  assert.deepEqual(x.result.details?.flakes, [{ stage: 'lane', test: flakeTestName, file: flakeTestFile, rerun: 'passed' }])
+  assert.deepEqual(x.result.details?.flakes, [{ stage: 'lane', test: flakeTestName, file: flakeTestFile, rerun: 'passed', rerun_ms: 0 }])
   const flakes = [{ stage: 'lane', test: flakeTestName, file: flakeTestFile, rerun: 'passed' }]
   const proof = composePrBody({ intent: 'Fixture intent', review: { verdict: 'pass' }, flakes }).split('## Proof')[1]?.split('## Run')[0]
   assert.ok(proof.includes('- Flake: lane · ' + flakeTestName + ' · ' + flakeTestFile + ' · passed'))
@@ -12186,8 +12186,8 @@ test('LRF9 same-file failures share one run and mixed fences veto the whole even
   const x = flakeDriverRun(t, { output: red, runner: 'node', command: 'node --test outside.test.mjs', rerun: pass })
   assert.equal(x.calls.filter(c => c.includes('--test-reporter=tap')).length, 1)
   assert.deepEqual(x.logs.filter(r => r.flake)[0].flake.tests, [
-    { test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed' },
-    { test: 'flaky-two', file: 'outside.test.mjs', rerun: 'passed' },
+    { test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed', rerun_ms: 0 },
+    { test: 'flaky-two', file: 'outside.test.mjs', rerun: 'passed', rerun_ms: 0 },
   ])
   const mixedRed = { ...red, output: red.output.replace('test at outside.test.mjs:8:1', 'test at fenced.test.mjs:8:1') }
   const fenced = flakeDriverRun(t, { output: mixedRed, runner: 'node', command: 'node --test outside.test.mjs', fence: ['fenced.test.mjs'], rerun: pass })
@@ -12250,20 +12250,139 @@ test('RV2-1 TAP and location grammar keep retry attribution fail-closed', (t) =>
 test('LRF10 isolated rerun records only measured verdicts and contains denied or thrown runs', (t) => {
   const red = { ok: false, output: 'ℹ tests 1\nℹ pass 0\nℹ fail 1\nℹ skipped 0\n\n✖ failing tests:\n\ntest at outside.test.mjs:3:1\n✖ flaky-one\n' }
   const cases = [
-    [{ denied: true }, false, 'unmeasured'],
-    [{ ok: true, output: 'TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 0\n' }, false, 'unmeasured'],
-    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one\nok 2 - flaky-one\n1..2\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n' }, false, 'unmeasured'],
-    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one # SKIP\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 1\n' }, false, 'skipped'],
-    [undefined, true, 'unmeasured'],
+    [{ denied: true }, false, 'unmeasured', null],
+    [{ ok: true, output: 'TAP version 13\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 0\n' }, false, 'unmeasured', 0],
+    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one\nok 2 - flaky-one\n1..2\n# tests 2\n# pass 2\n# fail 0\n# skipped 0\n' }, false, 'unmeasured', 0],
+    [{ ok: true, output: 'TAP version 13\nok 1 - flaky-one # SKIP\n1..1\n# tests 1\n# pass 0\n# fail 0\n# skipped 1\n' }, false, 'skipped', 0],
+    [undefined, true, 'unmeasured', null],
   ]
-  for (const [rerun, throwRerun, verdict] of cases) {
+  for (const [rerun, throwRerun, verdict, rerun_ms] of cases) {
     const x = flakeDriverRun(t, { output: red, runner: 'node', command: 'node --test outside.test.mjs', rerun, throwRerun })
     assert.equal(x.logs.filter(r => r.flake)[0].flake.tests[0].rerun, verdict)
+    assert.equal(x.logs.filter(r => r.flake)[0].flake.tests[0].rerun_ms, rerun_ms)
     assert.equal(x.result.status, 'escalation')
   }
 })
 
-test('RV1-1 lane retry uses implementation-level runner classification', () => {
+const frIso = (file) => 'node --test --test-reporter=tap ' + shellArg(file);
+const FR_INFO = String.fromCharCode(0x2139);
+const FR_CROSS = String.fromCharCode(0x2716);
+function frRed1() { return { ok: false, output: FR_INFO + ' tests 1\n' + FR_INFO + ' pass 0\n' + FR_INFO + ' fail 1\n' + FR_INFO + ' cancelled 0\n' + FR_INFO + ' skipped 0\n\n' + FR_CROSS + ' failing tests:\n\ntest at outside.test.mjs:3:1\n' + FR_CROSS + ' flaky-one (1ms)\n' }; }
+function frPass1() { return { ok: true, output: 'TAP version 13\nok 1 - flaky-one\n1..1\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' }; }
+function frRedTwo() { return { ok: false, output: FR_INFO + ' tests 2\n' + FR_INFO + ' pass 0\n' + FR_INFO + ' fail 1\n' + FR_INFO + ' cancelled 1\n' + FR_INFO + ' skipped 0\n\n' + FR_CROSS + ' failing tests:\n\ntest at outside-a.test.mjs:3:1\n' + FR_CROSS + ' flaky-one (1ms)\n\ntest at outside-b.test.mjs:8:1\n' + FR_CROSS + ' flaky-two (30000ms)\n' }; }
+function frPassOne(name) { return { ok: true, output: 'TAP version 13\nok 1 - ' + name + '\n1..1\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' }; }
+function frRedCancelledOnly() { return { ok: false, output: FR_INFO + ' tests 1\n' + FR_INFO + ' pass 0\n' + FR_INFO + ' fail 0\n' + FR_INFO + ' cancelled 1\n' + FR_INFO + ' skipped 0\n\n' + FR_CROSS + ' failing tests:\n\ntest at outside-a.test.mjs:3:1\n' + FR_CROSS + ' flaky-one (30000ms)\n' }; }
+function frWarmSuiteRun({ red, reruns, fence = [], suiteCmd = 'node --test outside-a.test.mjs outside-b.test.mjs' } = {}) {
+  const temp = scratchDir('fr-warm-');
+  writeFileSync(join(temp, 'outside-a.test.mjs'), '');
+  writeFileSync(join(temp, 'outside-b.test.mjs'), '');
+  writeFileSync(join(temp, 'outside.test.mjs'), '');
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [...planEnv().details.files_in_scope, ...fence], validation_lane: 'lane-cmd' } });
+  const runs = { ...validationProbeRun('lane-cmd', {}), 'lane-cmd': { ok: true, output: '' }, [suiteCmd]: red, ...reruns };
+  const io = fakeIo({ envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs, changed: ['a.mjs', 'a.test.mjs'] });
+  const result = driveTask({ ...CTX, checkout: temp, suite: suiteCmd, testRunner: { runner: 'node', basis: 'gate fixture', rerun: null } }, io);
+  return { result, calls: io.calls.run.map((r) => typeof r === 'string' ? r : r.cmd), flakes: io.calls.logs.filter((r) => r.flake).map((r) => r.flake) };
+}
+function frSuitePublishRun({ diffOutput = null, cold = false } = {}) {
+  const temp = scratchDir('fr-suite-');
+  writeFileSync(join(temp, 'outside.test.mjs'), '');
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: [...planEnv().details.files_in_scope, 'outside.test.mjs'], validation_lane: 'lane-cmd' } });
+  const ISOLATED = frIso('outside.test.mjs');
+  const commands = { 'node --test outside.test.mjs': cold ? { ok: true, output: '# pass 1\n# fail 0\n# skipped 0\n' } : frRed1(), [ISOLATED]: frPass1(), ...(diffOutput !== null ? { 'git diff --name-only -z': { ok: true, output: diffOutput } } : {}) };
+  const io = publicationIo({ envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, commands, ...(cold ? { coldResult: (state, command) => command === ISOLATED ? { ...frPass1(), path: '/cold/isolated', kept: null } : { ...frRed1(), path: '/cold/red', kept: '/cold/red' } } : {}) });
+  const result = driveTask({ ...CTX, checkout: temp, suite: 'node --test outside.test.mjs', testRunner: { runner: 'node', basis: 'gate fixture', rerun: null }, publish: { branch: 'feature/ship', base: 'main' } }, io);
+  return { result, runCalls: io.calls.run.map((r) => typeof r === 'string' ? r : r.cmd), coldCalls: io.calls.runCold.map((r) => r.cmd), flakes: io.calls.logs.filter((r) => r.flake).map((r) => r.flake) };
+}test('FR1', (tt) => {
+  const x = frWarmSuiteRun({ red: frRedTwo(), reruns: { [frIso('outside-a.test.mjs')]: frPassOne('flaky-one'), [frIso('outside-b.test.mjs')]: frPassOne('flaky-two') } });
+  const flake = x.flakes.find((f) => f.stage === 'suite');
+  assert.ok(flake, 'expected a suite-stage flake row');
+  const issued = x.calls.filter((c) => c.includes('--test-reporter=tap'));
+  assert.deepEqual(issued, [frIso('outside-a.test.mjs'), frIso('outside-b.test.mjs')]);
+  assert.equal(flake.reason, null);
+  assert.equal(flake.outcome, 'green');
+  assert.deepEqual(flake.tests.map((e) => e.rerun), ['passed', 'passed']);
+  assert.equal(x.result.status, 'done');
+  const y = frWarmSuiteRun({ red: frRedCancelledOnly(), reruns: { [frIso('outside-a.test.mjs')]: frPassOne('flaky-one') } });
+  const yf = y.flakes.find((f) => f.stage === 'suite');
+  assert.ok(yf, 'expected a suite-stage flake row for fail 0 + cancelled 1');
+  const yIssued = y.calls.filter((c) => c.includes('--test-reporter=tap'));
+  assert.deepEqual(yIssued, [frIso('outside-a.test.mjs')]);
+  assert.equal(yf.reason, null);
+  assert.equal(yf.outcome, 'green');
+  assert.equal(yf.tests[0].rerun, 'passed');
+});
+test('FR2', (tt) => {
+  const ISOLATED = frIso('outside.test.mjs');
+  const x = frSuitePublishRun({});
+  const flake = x.flakes.find((f) => f.stage === 'suite');
+  assert.ok(flake, 'expected a suite-stage flake row');
+  assert.ok(x.runCalls.includes(ISOLATED), 'expected isolated rerun for in-scope file absent from diff, reason ' + flake.reason);
+  assert.equal(flake.tests[0].rerun, 'passed');
+  assert.equal(flake.reason, null);
+  assert.equal(flake.outcome, 'green');
+  const cold = frSuitePublishRun({ cold: true });
+  const cf = cold.flakes.find((f) => f.stage === 'cold-suite');
+  assert.ok(cf, 'expected a cold-suite flake row');
+  assert.ok(cold.coldCalls.includes(ISOLATED), 'expected isolated cold rerun, reason ' + cf.reason);
+  assert.equal(cf.tests[0].rerun, 'passed');
+  assert.equal(cf.reason, null);
+  assert.equal(cf.outcome, 'green');
+});
+test('FR3', (tt) => {
+  const ISOLATED = frIso('outside.test.mjs');
+  const warm = frSuitePublishRun({ diffOutput: 'outside.test.mjs\0a.mjs\0' });
+  const wf = warm.flakes.find((f) => f.stage === 'suite');
+  assert.ok(wf, 'expected a suite-stage flake row');
+  assert.equal(warm.runCalls.includes(ISOLATED), false);
+  assert.equal(wf.reason, 'in-fence');
+  assert.equal(wf.tests[0].rerun, null);
+  assert.notEqual(warm.result.status, 'done');
+  const cold = frSuitePublishRun({ diffOutput: 'outside.test.mjs\0a.mjs\0', cold: true });
+  const cf = cold.flakes.find((f) => f.stage === 'cold-suite');
+  assert.ok(cf, 'expected a cold-suite flake row');
+  assert.equal(cold.coldCalls.includes(ISOLATED), false);
+  assert.equal(cf.reason, 'in-fence');
+  assert.equal(cf.tests[0].rerun, null);
+});
+test('FR4', (tt) => {
+  const ISOLATED = frIso('outside.test.mjs');
+  const x = frWarmSuiteRun({ red: frRed1(), reruns: { [ISOLATED]: frPass1() }, fence: ['outside.test.mjs'], suiteCmd: 'node --test outside.test.mjs' });
+  const flake = x.flakes.find((f) => f.stage === 'suite');
+  assert.ok(flake, 'expected a suite-stage flake row');
+  assert.equal(x.calls.includes(ISOLATED), false);
+  assert.equal(flake.reason, 'in-fence');
+  assert.equal(flake.tests[0].rerun, null);
+});test('FR5', (tt) => {
+  const nodeRed = { ok: false, output: FR_INFO + ' tests 1\n' + FR_INFO + ' pass 0\n' + FR_INFO + ' fail 1\n' + FR_INFO + ' skipped 0\n\n' + FR_CROSS + ' failing tests:\n\ntest at outside.test.mjs:3:1\n' + FR_CROSS + ' flaky-one (0.6ms)\n  fixture red\n' };
+  const tapPass = { ok: true, output: 'TAP version 13\nok 1 - flaky-one\n1..1\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' };
+  let clock = 0;
+  const measured = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: tapPass, now: () => (clock += 7) });
+  const entry = measured.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.ok(entry, 'expected a flake test entry');
+  assert.equal(entry.rerun_ms, 7);
+  assert.deepEqual(measured.result.details.flakes, [{ stage: 'lane', test: 'flaky-one', file: 'outside.test.mjs', rerun: 'passed', rerun_ms: 7 }]);
+  const fenced = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: tapPass, fence: ['outside.test.mjs'], now: () => (clock += 7) });
+  const fe = fenced.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.equal(fe.rerun_ms, null);
+  assert.equal(fe.rerun, null);
+  const denied = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: { denied: true }, now: () => (clock += 7) });
+  const de = denied.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.equal(de.rerun_ms, null);
+  assert.equal(de.rerun, 'unmeasured');
+  const interrupted = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: { ok: false, interrupted: true, output: '' }, now: () => (clock += 7) });
+  const ie = interrupted.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.equal(ie.rerun_ms, null);
+  assert.equal(ie.rerun, 'unmeasured');
+  const threw = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: tapPass, throwRerun: true, now: () => (clock += 7) });
+  const te = threw.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.equal(te.rerun_ms, null);
+  assert.equal(te.rerun, 'unmeasured');
+  let back = 0;
+  const neg = flakeDriverRun(tt, { output: nodeRed, runner: 'node', command: 'node --test outside.test.mjs', rerun: tapPass, now: () => (back -= 7) });
+  const ne = neg.logs.filter((r) => r.flake)[0].flake.tests[0];
+  assert.equal(ne.rerun, 'passed');
+  assert.equal(ne.rerun_ms, null);
+});test('RV1-1 lane retry uses implementation-level runner classification', () => {
   const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
   assert.match(source, /classifyTestRunner\(lane\)/)
 })

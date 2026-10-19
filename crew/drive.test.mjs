@@ -6092,7 +6092,7 @@ test('FL6 warm Cargo suite failure retries before suite-red recovery', () => {
   const result = driveTask({ ...CTX, testRunner: { runner: 'cargo', basis: 'fixture Cargo suite' } }, io)
   assert.equal(result.status, 'done')
   assert.deepEqual(io.calls.run.map(row => typeof row === 'string' ? row : row.cmd).filter(command => command.includes('-- --exact')), [isolated])
-  assert.deepEqual(io.calls.logs.filter(row => row.flake).map(row => row.flake), [{ stage: 'suite', round: 1, outcome: 'green', reason: null, tests: [{ test: name, file, rerun: 'passed' }] }])
+  assert.deepEqual(io.calls.logs.filter(row => row.flake).map(row => row.flake), [{ stage: 'suite', round: 1, outcome: 'green', reason: null, tests: [{ test: name, file, rerun: 'passed', rerun_ms: 0 }] }])
   assert.equal(io.calls.logs.filter(row => row.suite_red).length, 0)
 })
 

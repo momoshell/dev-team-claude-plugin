@@ -6,9 +6,9 @@
   "crew/drive.mjs:2250": "export function planAcceptContractLines() {",
   "crew/drive.mjs:1330": "function verdictOf(env) {",
   "crew/drive.mjs:9215": "const plannedScopeFiles = planEnv.details?.files_in_scope",
-  "crew/drive.mjs:9337": "const declared = planEnv.details?.mutations",
   "crew/drive.mjs:9025": "if (planAdversary.trigger === 'none') {",
   "crew/drive.mjs:9070": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
   "crew/drive.mjs:9072": "const v = verdictOf(check)",
-  "crew/drive.mjs:7522": "function settleAccept(c, where, contextPaths = []) {"
+  "crew/drive.mjs:7522": "function settleAccept(c, where, contextPaths = []) {",
+  "crew/drive.mjs:9350": "const declared = planEnv.details?.mutations"
 }

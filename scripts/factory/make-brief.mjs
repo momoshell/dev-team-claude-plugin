@@ -228,6 +228,12 @@ discriminates (#168), resolve the repo from \`process.cwd()\`, name in a comment
 the mutation each check kills, never assert the checkout is clean. If your
 gate shells out to the suite, strip ANSI before parsing it (#240).`)
 
+export const PORTABLE_ACCEPTANCE_GATE_BLOCK = Object.freeze(`Planner authors it; **RED at baseline**, printing
+\`GATE-SUMMARY {"total":n,"failed":n,"errored":n}\` with \`errored: 0\` at baseline (#153). Prove the gate
+discriminates (#168), resolve the repo from \`process.cwd()\`, name in a comment
+the mutation each check kills, never assert the checkout is clean. If your
+gate shells out to the suite, strip ANSI before parsing it (#240).`)
+
 // #672: a lane's gate runs in the SAME environment as its build, so a test that
 // only passes on the author's machine is invisible to it. b254-retryvis shipped a
 // green gate and a green suite and CI still failed on a worker binary the author
@@ -439,8 +445,154 @@ so the range hole was never touched. If the sentence beside your check has two
 verbs, declare two entries or write a narrower sentence.
 Rationale: #409.`)
 
+export const PORTABLE_MUTATION_CONTRACT_BLOCK = Object.freeze(`A per-check mutation declaration is MACHINE-APPLIED: the driver find-and-replaces
+on a scratch copy of the built tree, re-runs the gate, and requires that one check
+to redden. A prose field (\`"kills": "leaving the loop unconditional"\`) cannot be
+applied and is refused — the driver's mutation validator is the single enforcement point. Each entry in \`details.mutations\` is EITHER a mutation OR an
+exemption, never both, and at most 32 entries in all (\`MUTATIONS_MAX\`).
+
+A mutation entry carries exactly:
+
+    { "check": "C1", "file": "lib/widget.mjs", "find": "<literal text present in the file>", "replace": "<literal replacement>" }
+
+- \`check\` — a stable token matching \`/^[A-Za-z0-9][A-Za-z0-9._-]*$/\` (letters,
+  digits, dot, underscore, hyphen; starting with a letter or digit), unique across
+  all entries. The gate MUST print \`FAIL <check>\` on that check's failing line
+  (\`CHECK_FAIL_PREFIX\`), matched as an exact token — the label you declare and the
+  label the gate prints are one string.
+  Nothing may FOLLOW that label except a colon. The driver's failure-line matcher decides, and it accepts the bare line or a
+  single colon delimiter — nothing else. Literally:
+
+      FAIL <check>                  ← accepted, the bare line
+      FAIL <check>: <why>           ← accepted, the ONE delimiter is a colon
+      FAIL <check> — <why>          ← REJECTED, an em dash is not a delimiter
+      FAIL <check> <why>            ← REJECTED, a space is not a delimiter
+
+  Every failing check MUST print:
+      FAIL <check>: expected <x>, found <y> at <where>
+  A status-only reason (node:test's not ok or failing as the found value) is REJECTED.
+  A check wrapping a node:test reports the assertion's expected and actual values from a caught AssertionError (.expected/.actual) or the TAP reporter's expected:/actual: diagnostics.
+
+  The reason, not merely the prohibition: a label may not be EXTENDED by what follows
+  it. Were a space or a dash a legal delimiter, \`FAIL cache\` would match a
+  \`FAIL cache-v2\` line and one check's red would be credited to another — the
+  whole-gate false positive #330 exists to remove. Two planners in one day each wrote
+  a human-readable separator instead, costing four gate generations across three lanes
+  and escalating one lane whose code was correct (#387).
+- \`file\` — required, repo-relative, a file and not a directory, and inside
+  \`files_in_scope\`.
+- \`find\` — required, non-empty LITERAL text naming the token sequence to bind in
+  that file; not a regex, not a description. The exact-then-normalized rule below
+  decides whether it binds; byte-identical whitespace is not required.
+- \`replace\` — required string, and must DIFFER from \`find\`; an identical pair
+  mutates nothing. A pair whose whitespace-NORMALIZED forms are equal is refused for
+  the same reason: it binds the same token sequence and rewrites the same tokens. The
+  driver says so in those words — \`find and replace differ only in whitespace — that
+  mutates no token\`.
+
+A declared \`find\` **binds by TOKEN SEQUENCE**, not by the bytes you typed. The driver
+tries an exact match first and, only on a miss, a whitespace-normalized one, so
+**whitespace and line wrapping are not load-bearing** and a re-wrapped line still binds.
+Normalization is **whitespace-only**. It is not a regex, not a symbol lookup, not
+fuzzy: a find whose TOKENS differ from the built source does not bind.
+The anchor must be **unique** after normalization.
+The four ways an anchor fails to reach the built tree, by name: **\`unapplied\`** (the
+declared file does not exist in the built tree), **\`anchor-absent\`** (the find text
+is nowhere in the file under either attempt), **\`anchor-ambiguous\`** (the normalized
+find matches more than one span), or **\`anchor-unsafe\`** (the normalized match
+crosses a line carrying a \`//\` comment inside the span, so a verbatim replacement
+would land in that comment — declare a find that starts after the comment). None of
+the four is a gate defect — each says the plan predicted source the builder did not
+write, and **\`survived\` remains the only gate defect**. Cite **#733**, **#742**.
+
+An exemption entry carries exactly \`{ "check": "<token>", "exempt": "<non-empty reason>" }\`
+and no \`file\`, \`find\` or \`replace\`.
+
+The human sentence saying what a mutation kills belongs in a comment beside the
+check in the gate file and in \`plan.md\`, never in the entry. Worked example — the
+gate carries, above the check that prints \`FAIL C1\`:
+
+    // MUTATION C1: neutralise the cache lookup in the widget's render path and
+    // no compiled output carries the cached value any more.
+
+and the declaration is \`{ "check": "C1", "file": "lib/widget.mjs", "find": "renderWidget().cache", "replace": "renderWidget().nothing" }\`.
+Rationale: #330.
+
+NEVER PUT A \`#\` IN A CHECK LABEL, AND NEVER NAME A TEST AFTER THE ISSUE IT CLOSES.
+\`CHECK_LABEL\` refuses a declared \`check\` containing \`#\` outright, so \`{ "check": "#945" }\`
+is refused at plan time. The same character is silently fatal one level down:
+Node's tap reporter ESCAPES a # inside a test title, so a test named "#945 the valve opens"
+is emitted as \`ok 1 - \\#945 the valve opens\` and a gate matching the title \`#945\` never
+matches it. The check then reports a failure whose cause is the NAME, not the code, and it
+reads to an operator exactly like a real red. A lane spent its last lead consult diagnosing
+that and escalated (#958). Declared acceptance ids win: when the brief's \`## Acceptance\` declares ids such as \`(E392.1)\`, label each check AND each test name a
+gate adjudicates with EXACTLY those ids. Use \`A1\`, \`B2\`, \`C3\` only when none is declared, and put the issue number in the check's PROSE. Only \`#\` was measured, on
+Node v26.7.0, through \`node:test/reporters\`' tap; which other characters that reporter
+escapes is not enumerated here and may be version-dependent.
+
+A gate that shells out to \`node --test\` MUST pass \`--test-reporter=tap\`. node
+--test picks its reporter by context and the summary lines differ in their
+leading character; measured on this checkout, same file and same environment,
+the two shapes are LITERALLY:
+
+    ℹ pass 7      ← default reporter, no --test-reporter flag
+    ℹ fail 0
+    # pass 7      ← --test-reporter=tap
+    # fail 0
+
+That leading character is \`ℹ\` (U+2139 INFORMATION SOURCE), not the ASCII
+letter \`i\`, so a gate greping \`^# fail (\\d+)$\` parses NOTHING under the
+default reporter and reports no failures for a suite it never read. Pin the
+reporter rather than widening the regex: the default is context-dependent and a
+future Node release may change it again, so a tolerant regex accepting both
+shapes still silently depends on the reporter for every shape it does not
+anticipate. Match the LAST summary line, not the first — an earlier echoed
+\`# fail 0\` otherwise satisfies the check while a later real nonzero summary
+passes it.
+
+Colour is the other half: \`FORCE_COLOR\` OVERRIDES \`NO_COLOR\`, so a
+colour-neutral child must DELETE \`FORCE_COLOR\` (and \`CLICOLOR_FORCE\`) from its
+environment rather than only setting \`NO_COLOR=1\`. Under \`FORCE_COLOR=3
+NO_COLOR=1\` the measured line is \`ESC[34mℹ pass 7ESC[39m\` (ESC = 0x1b), so an
+\`^\`-anchored grep matches nothing. Strip ANSI before parsing either shape
+(#240). Rationale: #399.
+
+A declared mutation must exercise the check's NARROWEST claimed property, not
+merely redden the check. The per-check proof asks only "does this mutation redden
+this check?"; it cannot ask "does this mutation exercise what this check
+CLAIMS?", and on 2026-08-20 four checks certified \`killed\` were each weaker
+than their own prose. Read your own mutation as an adversary: what is the cheapest
+implementation that violates the sentence beside the check and still passes it?
+Two measured counter-examples, both certified \`killed\`:
+
+- A mutation landing IN A COMMENT. \`C1\` claimed "≥3 tests are named for the
+  re-ask, one naming the bound"; its declared mutation rewrote a \`re-ask\`
+  occurrence inside a COMMENT — text the check never reads — so it reddened
+  nothing the check counts and the real mutation had to be found by hand.
+  Mutate the text the check actually parses; if no such \`find\` exists, the
+  check is reading something other than what its prose claims.
+- A negative-claim fixture INDISTINGUISHABLE from what already exists. \`G15\`
+  claimed "an unknown adapter's overlay cannot silently widen another
+  adapter", and injected an overlay carrying an extension the target ALREADY
+  had, then asserted only that a third adapter stayed empty. An implementation
+  merging every overlay into the target passes it: the duplicate dedupes and
+  the third adapter is untouched. State a negative claim positively — the
+  injected fixture must be DISTINCTIVE, a value nothing else in the fixture
+  carries so its arrival is unambiguous, and the protected side must be
+  compared BEFORE-AND-AFTER, never merely observed to be empty.
+
+A COMPOUND CLAIM needs one mutation per half. \`G15\` ("cannot widen" AND
+"another adapter") and \`L11\` ("every anchor" AND "one a resolver reads") each
+had a half no declared mutation probed: \`L11\`'s check added every discovered RANGE
+citation to its own resolved set, while its mutation used the single-line form,
+so the range hole was never touched. If the sentence beside your check has two
+verbs, declare two entries or write a narrower sentence.
+Rationale: #409.`)
+
 const HOSTILE_CITED_PATHS = Object.freeze(['crew/crew-boot.test.mjs', 'crew/adapter-pi.test.mjs'])
 const CONVENTIONS_CITED_PATHS = Object.freeze(['scripts/factory'])
+const ACCEPTANCE_CITED_PATHS = Object.freeze(['crew/drive.mjs'])
+const MUTATION_CITED_PATHS = Object.freeze(['crew/drive.mjs', 'scripts/factory/make-brief.mjs'])
 
 function citedPresent(checkout, cited) {
   if (typeof checkout !== 'string' || checkout === '') return true
@@ -450,8 +602,10 @@ function citedPresent(checkout, cited) {
 export function standingBlocksFor(checkout) {
   const hostile = citedPresent(checkout, HOSTILE_CITED_PATHS) ? HOSTILE_ENV_BLOCK : PORTABLE_HOSTILE_ENV_BLOCK
   const conventions = citedPresent(checkout, CONVENTIONS_CITED_PATHS) ? CONVENTIONS_BLOCK : PORTABLE_CONVENTIONS_BLOCK
-  const acceptance = [ACCEPTANCE_GATE_BLOCK, hostile].join('\n\n')
-  return { acceptance, mutations: MUTATION_CONTRACT_BLOCK, conventions }
+  const gateBlock = citedPresent(checkout, ACCEPTANCE_CITED_PATHS) ? ACCEPTANCE_GATE_BLOCK : PORTABLE_ACCEPTANCE_GATE_BLOCK
+  const mutations = citedPresent(checkout, MUTATION_CITED_PATHS) ? MUTATION_CONTRACT_BLOCK : PORTABLE_MUTATION_CONTRACT_BLOCK
+  const acceptance = [gateBlock, hostile].join('\n\n')
+  return { acceptance, mutations, conventions }
 }
 
 function standingBlocks() {
@@ -2933,9 +3087,18 @@ function keyList(discovery) {
   return [...keys].filter(Boolean).sort()
 }
 
-function generatedGrep(discovery) {
+const GREP_ROOTS = Object.freeze(['crew/', 'test/', 'scripts/', 'docs/'])
+function grepRoots(checkout = null) {
+  if (typeof checkout !== 'string' || checkout === '') return GREP_ROOTS.join(' ')
+  try {
+    const present = GREP_ROOTS.filter((root) => existsSync(join(checkout, root)))
+    return present.length > 0 ? present.join(' ') : '.'
+  } catch { return GREP_ROOTS.join(' ') }
+}
+
+function generatedGrep(discovery, checkout = null) {
   const keys = keyList(discovery)
-  return `grep -rn "${keys.join('\\|')}" crew/ test/ scripts/ docs/`
+  return `grep -rn "${keys.join('\\|')}" ${grepRoots(checkout)}`
 }
 
 function renderWhere(where, creates = []) {
@@ -2949,7 +3112,7 @@ function renderWhere(where, creates = []) {
   ].join('\n')
 }
 
-function renderTripwires(discovery) {
+function renderTripwires(discovery, checkout = null) {
   const lines = []
   lines.push(`candidates: ${discovery.candidates.length ? discovery.candidates.join(', ') : '(none)'}`)
   lines.push('tripwire tests:')
@@ -2964,7 +3127,7 @@ function renderTripwires(discovery) {
     const count = typeof broad === 'string' ? '?' : broad.count
     lines.push(`- ${key} · ${count} hits`)
   }
-  lines.push(`declare every hit: ${generatedGrep(discovery)}`)
+  lines.push(`declare every hit: ${generatedGrep(discovery, checkout)}`)
   return lines.join('\n')
 }
 
@@ -3397,7 +3560,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
   const symbolIndex = symbolIndexFor({ checkout: resolve(checkout || process.cwd()), writeSurface, coupling })
   if (packOmission !== 'tripwires') {
     writeFileSync(paths.vocabulary, `${keyList(discovery).join('\n')}\n`)
-    writeFileSync(paths.rows, `${renderTripwires(discovery)}\n`)
+    writeFileSync(paths.rows, `${renderTripwires(discovery, checkout)}\n`)
   } else {
     rmSync(paths.vocabulary, { force: true })
     rmSync(paths.rows, { force: true })
@@ -3437,20 +3600,20 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
   }
 }
 
-function renderTripwirePointer(discovery, pack) {
-  if (pack == null) return renderTripwires(discovery)
+function renderTripwirePointer(discovery, pack, checkout = null) {
+  if (pack == null) return renderTripwires(discovery, checkout)
   if (pack?.vocabulary == null || pack?.rows == null) return 'tripwires: omitted by brief-tripwires experiment'
   const counts = pack.counts || {}
   const paths = pack
   return [
     `tripwires: ${counts.candidates ?? 0} candidate(s) · ${counts.tripwires ?? 0} tripwire test(s) · ${counts.broadKeys ?? 0} broad key(s) · ${counts.keys ?? 0} vocabulary key(s)`,
-    `vocabulary: ${paths.vocabulary} — consume it once with: grep -rn -f ${paths.vocabulary} crew/ test/ scripts/ docs/`,
+    `vocabulary: ${paths.vocabulary} — consume it once with: grep -rn -f ${paths.vocabulary} ${grepRoots(checkout)}`,
     `rows: ${paths.rows} — the inventory of tests that may assert what you change (every candidate, tripwire test with its keys, and broad key); fence what it names. Look rows up, do not read it whole: grep -n -F -- '- <file> · ' ${paths.rows} for a file you touch, or grep -n -F '<key>' ${paths.rows}`,
   ].join('\n')
 }
 
-function renderTripwireSlot(discovery, pack) {
-  return renderTripwirePointer(discovery, pack)
+function renderTripwireSlot(discovery, pack, checkout = null) {
+  return renderTripwirePointer(discovery, pack, checkout)
 }
 
 function renderCoupledPointer(coupling, pack) {
@@ -3612,14 +3775,14 @@ function renderBriefSections(gathered) {
     briefSection('where', null, ['## Where', renderWhere(where, creates)]),
     briefSection('premise check', null, ['## Premise check', renderPremiseCheck(premise)]),
     ...(pack == null ? [] : [briefSection('context pack', null, renderContextPack(pack))]),
-    briefSection('tripwires', null, ['## Tripwires', renderTripwireSlot(discovery, pack)]),
+    briefSection('tripwires', null, ['## Tripwires', renderTripwireSlot(discovery, pack, gathered.checkout ?? null)]),
     briefSection('coupled sources', null, ['## Coupled sources', renderCoupledPointer(coupling, pack)]),
     briefSection('baseline', null, ['## Baseline', formatBaseline(baseline, profile, supplied)]),
     briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
     briefSection('fences', null, ['## Fences', renderFences(fences, writeSurface, pack)]),
     briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green — measured by the driver's suite stage, never by a seat.`], request.done_means),
     briefSection('acceptance gate', null, ['## Acceptance gate', blocks.acceptance]),
-    briefSection('per-check mutations', null, ['## Per-check mutations', standingBlocks().mutations]),
+    briefSection('per-check mutations', null, ['## Per-check mutations', blocks.mutations]),
     briefSection('validation lane', null, ['## Validation lane', renderValidation(baseline, discovery, pack)]),
     briefSection('conventions', null, [
       '## Conventions',
@@ -3627,7 +3790,7 @@ function renderBriefSections(gathered) {
       ...(conventionsWarning ? [conventionsWarning] : []),
       ...(pack == null ? [
         renderConventions(profile?.conventions),
-        generatedGrep(discovery),
+        generatedGrep(discovery, gathered.checkout ?? null),
         blocks.conventions,
       ] : []),
       '',

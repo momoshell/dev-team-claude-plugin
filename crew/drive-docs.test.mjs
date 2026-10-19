@@ -235,14 +235,53 @@ test('charter-arm is a value-bearing boot-only input and not a boolean', () => {
   assert.equal(BOOT_ONLY_FLAGS.includes('charter-arm'), false)
 })
 
+// MUTATION CH1: replace the equivalent judgment verdict with same.
+test('CH1 reviewer charter documents diff_mutant_judgments with verdict equivalent', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/reviewer.md'), 'utf8')
+  assert.ok(source.includes('diff_mutant_judgments'))
+  assert.ok(source.includes('{ "id": "<survivor id>", "verdict": "equivalent", "reason": "<why>" }'))
+  assert.ok(source.includes('1 to 1000 characters'))
+  assert.ok(source.includes('`journalDiffJudgments` in `crew/drive.mjs` refuses anything else'))
+})
+
+// MUTATION CH2: claim a suite result exists in the reviewer timing sentence.
+test('CH2 no charter claims a journalled suite result', () => {
+  const sentences = {
+    lead: "Run no tests. Read the gate proof and any suite result — which may not exist yet — from the task dir and the journal rather than re-buying them.",
+    reviewer: "Run no tests. The gate proof is already journalled — read it from the task dir and the journal rather than re-buying it; no suite result exists yet.",
+    'tech-lead': "Run no tests. At plan check neither a gate proof nor a suite result exists yet; judge the plan against the code it cites.",
+  }
+  for (const [role, sentence] of Object.entries(sentences)) {
+    const source = readFileSync(join(REPO_ROOT, 'crew/roles', `${role}.md`), 'utf8')
+    assert.equal(source.includes('suite result are already journalled'), false, role)
+    assert.ok(source.includes(sentence), role)
+    assert.equal(Buffer.byteLength(source), CHARTER_SOURCE_BUDGET[role], role)
+  }
+})
+
+// MUTATION CH3: rename prior_findings_closed in the prose contract.
+test('CH3 tech-lead contract names details.findings', () => {
+  const source = readFileSync(join(REPO_ROOT, 'crew/roles/tech-lead.md'), 'utf8')
+  assert.equal(source.includes('Your envelope contract is `check_path` and'), false)
+  assert.ok(source.includes('Your envelope contract is `check_path`, `verdict`, `findings` and `prior_findings_closed`'))
+  assert.ok(source.includes('the plan check reads `details.findings`'))
+})
+
+// MUTATION CH4: map consider to major instead of minor.
+test('CH4 falsification maps review severities to plan-check severities', () => {
+  const source = readFileSync(join(REPO_ROOT, 'skills/pr-review/references/falsification.md'), 'utf8')
+  assert.ok(source.includes('`must-fix` → `blocker`, `should-fix` → `major`, `consider` → `minor`'))
+  assert.ok(Buffer.byteLength(source) <= 6373)
+})
+
 test('the turn-economy rule is stated once and still reaches every seat', () => {
   const roles = ['builder', 'lead', 'planner', 'reviewer', 'tech-lead']
   const rules = {
     builder: "Run the acceptance gate and the test files you are changing — never the full suite, which the driver's own suite stage owns and re-runs after you.",
     planner: 'Run your own acceptance gate at baseline, exactly once. Run nothing else — the driver owns the validation lane and the suite.',
-    lead: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
-    reviewer: 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
-    'tech-lead': 'Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.',
+    lead: 'Run no tests. Read the gate proof and any suite result — which may not exist yet — from the task dir and the journal rather than re-buying them.',
+    reviewer: 'Run no tests. The gate proof is already journalled — read it from the task dir and the journal rather than re-buying it; no suite result exists yet.',
+    'tech-lead': 'Run no tests. At plan check neither a gate proof nor a suite result exists yet; judge the plan against the code it cites.',
   }
   const rolesDir = join(REPO_ROOT, 'crew', 'roles')
   const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).map((name) => readFileSync(join(rolesDir, name), 'utf8'))

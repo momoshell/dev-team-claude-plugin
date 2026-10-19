@@ -5666,7 +5666,7 @@ function renderPlanRevisionBrief({ round, check, taskDir, briefFile, growth, han
   const checkPath = check.details?.check_path || `${taskDir}/plan-check.md`
   return [
     `# Plan revision (round ${round})`, '',
-    `Revise plan.md per the check at ${checkPath}. Close every must-fix. Original brief: ${briefFile}`,
+    `Revise plan.md per the check at ${checkPath}. Close every blocker and major. Original brief: ${briefFile}`,
     ...(handoffPath ? [`Handoff: ${handoffPath}`] : []),
     ...applyPrescriptionLines('the plan check'),
     '',
@@ -12141,7 +12141,7 @@ function runTask(ctx, io, crash) {
         ...carriedHead,
         `# Review (round ${roundNo})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
-        `Run no test or gate command; read the gate proof at ${acceptedGatePath} and the suite result in ${journal}.`,
+        `Run no test or gate command; read the gate proof at ${acceptedGatePath}; the full suite runs after review, so no suite result exists yet.`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
         'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
         'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',

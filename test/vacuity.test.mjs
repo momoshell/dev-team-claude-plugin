@@ -201,7 +201,7 @@ const VACUITY_EXEMPT = new Map([
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
-  'crew/io-contract.test.mjs': 'e3190b3ddc4ce86d3933fb07e39fe0dd57b0979ac038b69690e5516bad026df2',
+  'crew/io-contract.test.mjs': '56292028165513ba6d5c8ceba75a023f3dcef64d3f8eddb13e0f9822da40d2cd',
   'crew/memory.test.mjs': '45453b430c297cfd38c2361137cb1de5fec7f1ce44905ebc968b3d56cd13cc0b',
   'crew/pi/extensions/advisor.test.mjs': '38d6276bcf9068f78feacaa39dd4bd0193cc0e853742e7ec92a1c19010c48e49',
   'crew/pi/extensions/lab.test.mjs': '0b25b3f6537eb23790f7f5922a1b5248b9fbe56b6038f09f9158afe5012131ad',
@@ -211,7 +211,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-emit.test.mjs': 'f61a1ccdb34677289554b81acbff45da425c97d1225a20325c24754da97b06d3',
   'test/factory-make-brief.test.mjs': '44b7890e75f1ce9560a9f74d80e18255ae7458c130276b20dd7877e359c96b41',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': 'd8be062ce8eddd9b189756e293e80bfd84f87e783cf3788cdf7c77b29c52d363',
+  'test/visualizer-server.test.mjs': '3719972d4e21845bca0a0c9b9df055677700a567ea72cdbcdf4d215ebf86ed46',
   'test/visualizer-shape.test.mjs': '3c85e3ffb2128727d5fbdcbb6f87b46660b72fd021f66b73caff202346fa4fc0',
 })
 

@@ -1741,7 +1741,9 @@ test('roster endpoint serves the runtime roster read-only and degrades honestly'
       assert.ok(models.has(seat.model_key))
       assert.equal(typeof models.get(seat.model_key).cost_in_per_mtok, 'number')
       assert.equal(typeof models.get(seat.model_key).cost_out_per_mtok, 'number')
-      assert.equal(typeof models.get(seat.model_key).last_verified, 'string')
+      // An estimated (borrowed) rate was never verified, so its last_verified is null by design.
+      const model = models.get(seat.model_key)
+      assert.equal(model.last_verified === null ? model.rate_estimated : typeof model.last_verified, model.last_verified === null ? true : 'string')
     }
     // Borrowed rates reach the client labelled, never as plain measured prices.
     assert.ok(Object.values(onDisk.models).some((entry) => entry.rate_estimated === true))

@@ -282,25 +282,26 @@ test('S9: at exactly NODE_FLOOR the CLI is NOT below floor (exit 0, not 2)', () 
   assert.equal(res.status, 0, `expected exit 0 at exactly NODE_FLOOR, got ${res.status}: ${res.stderr}`)
 })
 
-test('AC-8(c): the sessions verb surfaces degraded:true when reachable (an open-time failure, not the below-floor early-exit path)', () => {
+test('AC-8(c): the sessions verb refuses a degraded mirror with exit 2 and empty stdout (an open-time failure, not the below-floor early-exit path)', () => {
   // The below-floor early-exit path in main() refuses (exit 2) BEFORE ever
-  // opening a ledger or reaching the `sessions` verb's JSON output — so
-  // degraded:true can only be OBSERVED in that output via a DIFFERENT
-  // degradation cause: an open-time failure. This file runs in full on
-  // every matrix leg, so the fake-version seam pins the floor check open
-  // on every runtime; the open then fails one of two ways,
-  // both open-time failures: on >= NODE_FLOOR runtimes the blocking-file
-  // trick below makes the lazy open's mkdirSync throw (ENOTDIR); on
-  // below-floor runtimes the node:sqlite require itself fails despite the
-  // (faked) floor check passing, which degrades identically by design.
+  // opening a ledger or reaching the `sessions` verb — so the refusal below
+  // is observed via a DIFFERENT degradation cause: an open-time failure.
+  // This file runs in full on every matrix leg, so the fake-version seam
+  // pins the floor check open on every runtime; the open then fails one of
+  // two ways, both open-time failures: on >= NODE_FLOOR runtimes the
+  // blocking-file trick below makes the lazy open's mkdirSync throw
+  // (ENOTDIR); on below-floor runtimes the node:sqlite require itself fails
+  // despite the (faked) floor check passing, which degrades identically by
+  // design. The sessions readout is unanswerable on a degraded mirror, not
+  // empty: stdout stays empty and stderr names the degraded reason.
   const blockingFile = join(fixture, 'blocking-file')
   writeFileSync(blockingFile, 'not a directory')
   const dbPath = join(blockingFile, 'sub', 'ledger.db')
   const res = run(['sessions'], { DEVTEAM_LEDGER_DB: dbPath, DEVTEAM_LEDGER_FAKE_NODE_VERSION: NODE_FLOOR })
-  assert.equal(res.status, 0, `expected the CLI to still succeed (degraded, not refused): ${res.stderr}`)
-  const payload = JSON.parse(res.stdout)
-  assert.equal(payload.degraded, true)
-  assert.ok(payload.degraded_reason, 'degraded_reason must be surfaced once reachable')
+  assert.equal(res.status, 2, `expected the sessions verb to refuse a degraded mirror with exit 2: ${res.stderr}`)
+  assert.equal(String(res.stdout).trim(), '', `expected empty stdout on sessions refusal, found ${String(res.stdout).slice(0, 120)}`)
+  assert.match(String(res.stderr), /the ledger mirror is degraded/)
+  assert.match(String(res.stderr), /the ledger mirror is degraded.*\(.+\)/)
 })
 
 test('AC-8(d): exactly one stderr line is written to the injected sink for the whole handle lifetime', () => {

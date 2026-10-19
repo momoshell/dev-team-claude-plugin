@@ -1026,3 +1026,102 @@ test('EA5 edit-assist CLI prints rows, requires --since and refuses degraded mir
   assert.match(degraded.stderr, /the ledger mirror is degraded/)
   assert.equal(degraded.stdout.trim(), '')
 })
+
+// MUTATION VL3: stub the doctor quickCheck result to ok and doctor reports a page-corrupt ledger healthy again.
+function corruptBtreePage(dbPath, table) {
+  const { DatabaseSync } = require('node:sqlite')
+  try { const db = new DatabaseSync(dbPath); db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close() } catch {}
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  const row = db.prepare('SELECT rootpage FROM sqlite_master WHERE name = ?').get(table)
+  db.close()
+  assert.ok(row && row.rootpage && row.rootpage >= 2, `fixture: no corruptible rootpage for ${table}`)
+  const buf = readFileSync(dbPath)
+  const rawSize = buf.readUInt16BE(16)
+  const pageSize = rawSize === 1 ? 65536 : rawSize
+  const start = (row.rootpage - 1) * pageSize
+  for (let i = start; i < Math.min(start + pageSize, buf.length); i += 1) buf[i] = buf[i] ^ 0xff
+  writeFileSync(dbPath, buf)
+}
+
+function quickCheckRows(dbPath) {
+  const { DatabaseSync } = require('node:sqlite')
+  try {
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    const rows = db.prepare('PRAGMA quick_check').all()
+    db.close()
+    return rows.map((r) => String(Object.values(r)[0]))
+  } catch (err) { return [String(err && err.message || err)] }
+}
+
+test('VL3 doctor on a page-corrupt-but-readable ledger exits 2 with quick_check naming the failure', { skip: SKIP }, () => {
+  const dir = scratchDir('vl3-doctor-qc-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  ledger.startSession({ adw_id: 'vl3-1', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const setup = new DatabaseSync(dbPath)
+  setup.exec('CREATE TABLE gate_extra (id INTEGER PRIMARY KEY, v TEXT)')
+  const ins = setup.prepare('INSERT INTO gate_extra (v) VALUES (?)')
+  for (let i = 0; i < 200; i += 1) ins.run('x'.repeat(200))
+  setup.close()
+  corruptBtreePage(dbPath, 'gate_extra')
+  const qc = quickCheckRows(dbPath)
+  assert.ok(!(qc.length === 1 && qc[0] === 'ok'), `fixture: quick_check still ok after corrupting gate_extra page: ${JSON.stringify(qc)}`)
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  const payload = JSON.parse(res.stdout)
+  assert.equal(res.status, 2, `expected doctor exit 2 on quick_check failure: ${res.stderr}`)
+  assert.equal(payload.degraded, true)
+  assert.match(String(payload.degraded_reason || ''), /quick_check/i)
+  const check = Array.isArray(payload.quick_check) ? payload.quick_check.map(String) : []
+  assert.ok(check.length > 0 && !(check.length === 1 && check[0] === 'ok'), `expected payload quick_check non-ok, found ${JSON.stringify(payload.quick_check)}`)
+  assert.equal(typeof payload.row_counts?.sessions, 'number')
+})
+
+// MUTATION VL4: restore rowCounts[table] = rows.length and an unreadable table counts as 0 again.
+test('VL4 doctor with an unreadable table reports null row count and exits 2', { skip: SKIP }, () => {
+  const dir = scratchDir('vl4-doctor-row-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  ledger.recordIntakeBrake({ checkout: 'c', path: 'p', transition: 'engaged', actor: 'gate', outcome: 'ok', detail: 'd', created_at: '2026-01-02T00:00:00.000Z' })
+  ledger.close()
+  corruptBtreePage(dbPath, 'intake_brakes')
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.row_counts?.intake_brakes, null, `expected null row count for unreadable table, found ${JSON.stringify(payload.row_counts?.intake_brakes)}`)
+  assert.equal(payload.degraded, true)
+  assert.equal(res.status, 2)
+})
+
+// MUTATION VL10: drop the unread-tables reason and a table that fails to read while
+// quick_check passes reports degraded with degraded_reason null.
+test('VL10 doctor names the unread table when quick_check still passes', { skip: SKIP }, () => {
+  const dir = scratchDir('vl10-doctor-unread-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  ledger.startSession({ adw_id: 'vl10-1', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const setup = new DatabaseSync(dbPath)
+  const column = setup.prepare("SELECT name FROM pragma_table_info('sessions') WHERE upper(type) LIKE '%INT%'").get()?.name
+  assert.ok(column, 'fixture: sessions has no integer column to overflow')
+  setup.prepare(`UPDATE sessions SET ${column} = ?`).run(9007199254740993n)
+  setup.close()
+  assert.deepEqual(quickCheckRows(dbPath), ['ok'])
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  const payload = JSON.parse(res.stdout)
+  assert.equal(res.status, 2, res.stderr)
+  assert.equal(payload.row_counts?.sessions, null)
+  assert.equal(payload.degraded_reason, 'table read failed: sessions')
+})
+
+test('VL3 healthy doctor exits 0 with quick_check ok', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.degraded, false)
+  assert.deepEqual((Array.isArray(payload.quick_check) ? payload.quick_check : []).map(String), ['ok'])
+})

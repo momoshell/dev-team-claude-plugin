@@ -7214,6 +7214,23 @@ export function openLedger({
     }
   }
 
+  // Integrity readback for doctor and the visualizer feed: PRAGMA
+  // quick_check reports page-level corruption that per-table SELECTs can
+  // miss, and on whole-page corruption it throws instead of returning
+  // rows — a throw is a non-ok result, never an exception. Callers decide
+  // what degradation means, so this records nothing in stats().
+  function quickCheck() {
+    const conn = ensureDb()
+    if (!conn) return { ok: false, results: [stats.degraded_reason || 'ledger unavailable'] }
+    try {
+      const rows = conn.prepare('PRAGMA quick_check').all()
+      const results = rows.map((row) => String(Object.values(row)[0]))
+      return { ok: results.length === 1 && results[0] === 'ok', results }
+    } catch (err) {
+      return { ok: false, results: [err?.message || String(err)] }
+    }
+  }
+
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordEscalationProposal, recordSessionRequest, recordRunConfiguration, recordAdvisorSourceBackfill, recordRunSeat, recordShadowPick, recordRunObservation, startPhase, endPhase, recordEvent, recordEnvelope,
@@ -7225,6 +7242,7 @@ export function openLedger({
     listSessions, listEvents, getSession, phantomSessions, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runObservationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, contextCensusRows, contextSessions, contextEvents, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellAttempts, cellReviews, screenerAdoptions, evalCells, routingChoices, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, endedRuns, escalationWindow, seatReclaims, journalFacts, plannerSymbolsHoldout, charterLeanHoldout, turnEconomy, turnBreakdown, suiteRefusals, skillLoads, editAssist, shadowPicks, eligibleTasks, runSet, configurationReadout, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
+    quickCheck,
     readConnection,
     close,
     installFinalizer: installFinalizerOn,
@@ -9479,6 +9497,7 @@ export function main(argv) {
 
     if (verb === 'sessions') {
       const sessions = projectSessions(ledger.listSessions())
+      if (ledger.stats().degraded) refuse(`sessions: the ledger mirror is degraded — this readout is unanswerable, not empty (${ledger.stats().degraded_reason ?? 'unknown'})`)
       const s = ledger.stats()
       const payload = {
         schema: 1,
@@ -10432,10 +10451,23 @@ export function main(argv) {
     if (verb === 'doctor') {
       ledger.dumpTable('sessions')
       const s = ledger.stats()
+      const quickCheck = ledger.quickCheck()
+      const unreadTables = []
       const rowCounts = {}
       for (const table of Object.keys(TABLES)) {
-        rowCounts[table] = s.degraded ? null : ledger.dumpTable(table).length
+        if (s.degraded) { rowCounts[table] = null; continue }
+        const errorsBefore = ledger.stats().mirror_errors
+        const rows = ledger.dumpTable(table)
+        const mirrorFailed = ledger.stats().mirror_errors > errorsBefore
+        if (mirrorFailed) unreadTables.push(table)
+        rowCounts[table] = mirrorFailed ? null : rows.length
       }
+      const doctorDegraded = s.degraded || !quickCheck.ok || unreadTables.length > 0
+      // A table can fail to read while quick_check still says ok (an oversized integer
+      // node:sqlite refuses to return), so the unread tables are a reason of their own.
+      const doctorReason = s.degraded_reason
+        || (!quickCheck.ok ? `quick_check failed: ${quickCheck.results[0] || 'unknown'}` : null)
+        || (unreadTables.length > 0 ? `table read failed: ${unreadTables.join(', ')}` : null)
       const pragmas = ledger._pragmas()
       const fts5 = ledger._probeFts5()
       const drift = ledger.jsonlDrift()
@@ -10443,8 +10475,9 @@ export function main(argv) {
         schema: 1,
         node_version: process.versions.node,
         node_floor: NODE_FLOOR,
-        degraded: s.degraded,
-        degraded_reason: s.degraded_reason,
+        degraded: doctorDegraded,
+        degraded_reason: doctorReason,
+        quick_check: quickCheck.results,
         db_path: dbPath,
         row_counts: rowCounts,
         retired_tables: RETIRED_TABLES,
@@ -10463,7 +10496,7 @@ export function main(argv) {
         stderr.write(`ledger: JSONL/mirror key collapse — ${drift.collapsed_lines_total} JSONL line(s) share a unique key with different content and are NOT in the mirror; replay does not repair this\n`)
       }
       stderr.write('ledger: doctor readout printed above\n')
-      if (s.degraded) return 2
+      if (doctorDegraded) return 2
       return 0
     }
 

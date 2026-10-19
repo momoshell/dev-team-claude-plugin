@@ -191,11 +191,13 @@ export function hostGuard(req, label, addressSource = networkInterfaces) {
   if ((!WRITE_HOSTNAMES.has(hostname) && !localAddress) || port !== req.socket?.localPort) return { status: 403, error: `${label} host refused: ${host}` }
   return null
 }
+function isLoopbackPeer(remoteAddress) { if (typeof remoteAddress !== 'string' || !remoteAddress) return false; let address = remoteAddress.toLowerCase(); if (address === '::1') return true; if (address.startsWith('::ffff:')) address = address.slice('::ffff:'.length); const parts = address.split('.'); return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255) && Number(parts[0]) === 127 }
 export function writeGuard(req) {
   const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
   if (type !== WRITE_CONTENT_TYPE) return { status: 415, error: 'state-writing requests require content-type: application/json' }
   const refusal = hostGuard(req, 'write')
   if (refusal) return refusal
+  if (!isLoopbackPeer(req.socket?.remoteAddress)) return { status: 403, error: `write peer refused: ${typeof req.socket?.remoteAddress === 'string' && req.socket.remoteAddress ? req.socket.remoteAddress : 'missing remote address'}` }
   const origin = req.headers.origin
   if (origin != null && origin !== '' && !sameOrigin(origin, req.headers.host)) return { status: 403, error: 'cross-origin request refused' }
   return null
@@ -914,6 +916,8 @@ export function startServer(options = {}) {
           return json(res, 400, { schema, error: 'engaged must be a boolean and actor must be a non-empty string of at most 120 characters' })
         }
         const path = join(config.checkout, STOP_SWITCH_PATH)
+        const targetMode = pluginWriteTargetMode({ target: path, home: config.home ?? homedir() })
+        if (!targetMode.writable) return json(res, 409, { schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root })
         const transition = input.engaged ? 'engaged' : 'cleared'
         const at = new Date().toISOString()
         let wrote = false

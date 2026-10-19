@@ -45,6 +45,10 @@ A mismatched assignment id is never accepted: an otherwise-valid envelope may re
 
 - **YYYY-MM-DD** — decision/convention. *Why:* reason. [deprecated — supersedes: <prior entry>]
 
+## Diff mutation proof
+
+Diff proof spends the unchanged 720000ms total deadline on one green baseline (validation lane, then gate_cmd) before proof writes. Each mutant command gets max(the 120000ms floor, twice the baseline's measured duration across both baseline commands); run timeouts are unproven `timed-out` rows counted by `timed_out`, never kills. A red or unavailable baseline emits `baseline-red` skips and a timed-out baseline emits `baseline-timeout` skips, before proof writes.
+
 ## Entries
 
 - **2026-08-29** — **Every lifecycle step code can do, code does** — programmatic, repeatable, measurable. Judgment stays with seats (plan, adversarial check, review, the lead's decisions); mechanics (rebase, proof, push, PR body, merge check, reaping) are code that emits one record per step and runs identically every time. A step done by hand twice is the trigger to file the lane that removes it. *Why:* operator ratification on #679 (ADR-034), after fifteen lanes were closed out by hand on one day at ~12 model-token steps each, no two alike.
@@ -170,7 +174,3 @@ A mismatched assignment id is never accepted: an otherwise-valid envelope may re
 - **2026-10-04** — The pi planner lab is delivered by native builtin:mcp as `mcp__lab__lab` with timeout 960 seconds; its server delegates to the retained `crew/pi/extensions/lab.ts`. A missing server is explicitly withheld as `server-absent`; the existing codemode and fff decisions remain unchanged.
 - **2026-10-17** — Added closed refusal `suite-empty` from `scripts/factory/closeout.mjs`. *Why:* The lane changed the closed-refusals documented surface.
 - **2026-10-19** — **Every capability-role seat (lead, planner, builder, reviewer, tech-lead) holds the fff MCP search grant on both adapters** (`crew/capabilities.json` by_agent overlays; the planner pi seat keeps lab beside it), and a granted seat's search record names the withholding it actually has: pi seats loading `crew/pi/extensions/readgate.ts` record `direct-and-listed-wrappers-refused`, and all claude seats record `direct-and-listed-wrappers-refused`, enforced on pane and headless-json; the claude ACP launch does not set `CREW_FFF`, so there the hook is inert and the record over-claims (known gap), while a granted pi seat without readgate records `builtin-search-withheld` — its built-in grep/find are denied but no bash refusal exists, so the record must not claim one. The value is decided from the resolved grants, never the role name, and readgate is deliberately NOT extended to new seats (it also caps whole-file reads). The advisor is excluded: its consult launches `--no-tools`. *Why:* fff was builder-only at two layers (register + `resolveFffSearch`), so non-builder seats searched with builtins or shell while the record-keeping assumed a refusal only readgate/hook seats have.
-
-## Diff mutation proof
-
-Diff proof spends the unchanged 720000ms total deadline on one green baseline (validation lane, then gate_cmd) before proof writes. Each mutant command gets max(the 120000ms floor, twice the baseline's measured duration across both baseline commands); run timeouts are unproven `timed-out` rows counted by `timed_out`, never kills. A red or unavailable baseline emits `baseline-red` skips and a timed-out baseline emits `baseline-timeout` skips, before proof writes.

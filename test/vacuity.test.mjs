@@ -172,7 +172,7 @@ function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone =
 }
 
 const VACUITY_EXEMPT = new Map([
-  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-18: the fingerprintTree method-presence site at crew/io-contract.test.mjs:484 is a precondition for the behavioral call below it; the runClean, reseat and teardown presence sites beside it were removed as standalone assertions')],
+  ['crew/io-contract.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/io-contract.test.mjs'], 'flagged', 'audited 2026-09-18: the fingerprintTree method-presence site at crew/io-contract.test.mjs:485 is a precondition for the behavioral call below it; the runClean, reseat and teardown presence sites beside it were removed as standalone assertions')],
   ['crew/memory.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/memory.test.mjs'], 'flagged', 'audited 2026-09-18: the seven namespace and handle method-presence sites removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
   ['crew/pi/extensions/advisor.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/advisor.test.mjs'], 'by-design', 'audited 2026-09-18: the source absence pin is an import firewall at crew/pi/extensions/advisor.test.mjs:343; the entrypoint presence site beside it was removed as a standalone method-presence assertion')],
   ['crew/pi/extensions/lab.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['crew/pi/extensions/lab.test.mjs'], 'flagged', 'audited 2026-09-18: the extension entrypoint presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
@@ -201,7 +201,7 @@ const VACUITY_EXEMPT = new Map([
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
-  'crew/io-contract.test.mjs': '56292028165513ba6d5c8ceba75a023f3dcef64d3f8eddb13e0f9822da40d2cd',
+  'crew/io-contract.test.mjs': '6c353ed0458b91348531c3b2689e83c95e32b2743f7c6f9eaca1598783f7013b',
   'crew/memory.test.mjs': '45453b430c297cfd38c2361137cb1de5fec7f1ce44905ebc968b3d56cd13cc0b',
   'crew/pi/extensions/advisor.test.mjs': '38d6276bcf9068f78feacaa39dd4bd0193cc0e853742e7ec92a1c19010c48e49',
   'crew/pi/extensions/lab.test.mjs': '0b25b3f6537eb23790f7f5922a1b5248b9fbe56b6038f09f9158afe5012131ad',

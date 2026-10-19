@@ -68,7 +68,8 @@ test('FA6 builder piped grep and node -e scans fire fff-search-evasion', () => {
   assert.ok(grep.content[0].text.startsWith('reminder (fff-search-evasion): '))
   assert.ok(grep.content[0].text.includes('mcp__fff__grep'))
   f.hooks.beforeAgentStart({ prompt: assignment('fa6-b') })
-  const scanned = f.hooks.toolResult(bash("node -e \"const t=require('fs').readFileSync('crew/drive.mjs','utf8');console.log(t.indexOf('RUN_START_EVENT'))\"" ))
+  const command = `const t=require('fs').readFileSync(${JSON.stringify(join(ROOT, 'crew/drive.mjs'))},'utf8');console.log(t.indexOf('RUN_START_EVENT'))`
+  const scanned = f.hooks.toolResult(bash(`node -e '${command.replaceAll("'", "'\\''")}'`))
   assert.ok(scanned)
   assert.ok(scanned.content[0].text.startsWith('reminder (fff-search-evasion): '))
   assert.ok(scanned.content[0].text.includes('mcp__fff__grep'))

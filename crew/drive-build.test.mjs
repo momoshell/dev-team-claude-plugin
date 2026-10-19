@@ -10898,7 +10898,7 @@ const WS_REC_TD = '/Users/momoshell/.crew/dt-b1275-mutantnarrow/b1275-mutantnarr
 const WS_STREAM = TD + '/headless-rpc/builder/stream.jsonl'
 const wsRewritten = WS_FIXTURE.replaceAll(WS_REC_TD, TD).replaceAll(WS_REC_CO, CTX.checkout)
 const wsRewrittenLines = wsRewritten.split('\n')
-const wsFrame = (args) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', arguments: args }] } } })
+const wsFrame = (args) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status: 'ok', arguments: args }] } } })
 
 // Pins the recorded-fixture derivation: five entries, last-access order, merged inclusive ranges.
 test('WS1 recorded fixture derives the pinned five-entry read set', () => {
@@ -10984,7 +10984,7 @@ test('WS4 absence reasons are closed frozen and rendered unavailable', () => {
     ['stream-rewound', builderReadSet('{"a":1}\n', 5, opts)],
   ]
   for (const [want, got] of cases) {
-    assert.deepEqual(got, { absent: want, entries: [], totalPaths: 0, droppedReads: 0 })
+    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null })
   }
   assert.ok(builderReadSetLines(cases[4][1]).join('\n').includes('unavailable: stream-rewound'))
   assert.equal(builderStreamLineCount(null), 0)
@@ -13320,3 +13320,31 @@ test('RS3 scope-fix bounce after a suite refusal renews fresh', () => {
   assert.equal(srows[0].outcome, 'fresh');
 });
 
+
+test('WS6 a cancelled or failed nested read is not a read', () => {
+  // kills: dropping the nested-call status === 'ok' filter
+  const frame = (status) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status, arguments: { path: 'crew/drive.mjs', offset: 120 } }] } } })
+  const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
+  for (const status of ['cancelled', 'error']) {
+    assert.deepEqual(builderReadSet(`${frame(status)}\n`, 0, opts), { absent: null, entries: [], totalPaths: 0, droppedReads: 0 })
+  }
+  assert.equal(builderReadSet(`${frame('ok')}\n`, 0, opts).totalPaths, 1)
+})
+
+test('WS7 a requested read counts only once a successful tool result answers it', () => {
+  // kills: counting assistant toolCall parts without a matching non-error toolResult
+  const request = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'read', arguments: { path: 'lib/a.mjs' } }] } })
+  const result = (isError) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', toolCallId: 't1', isError } })
+  const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
+  assert.equal(builderReadSet(`${request}\n`, 0, opts).totalPaths, 0)
+  assert.equal(builderReadSet(`${request}\n${result(true)}\n`, 0, opts).totalPaths, 0)
+  assert.deepEqual(builderReadSet(`${request}\n${result(false)}\n`, 0, opts).entries, [{ path: 'lib/a.mjs', whole: true, ranges: [], rangesTotal: 0 }])
+})
+
+test('WS8 an unreadable frame before the tail makes the read set unavailable; a torn tail does not', () => {
+  // kills: skipping an unparseable interior frame instead of returning stream-unparseable
+  const good = JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status: 'ok', arguments: { path: 'lib/a.mjs' } }] } } })
+  const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
+  assert.deepEqual(builderReadSet(`{"type":"response"}\n{not json\n${good}\n`, 0, opts), { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null })
+  assert.equal(builderReadSet(`${good}\n{"type":"message_end","mess`, 0, opts).totalPaths, 1)
+})

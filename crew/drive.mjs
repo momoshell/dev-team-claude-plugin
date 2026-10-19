@@ -17475,7 +17475,7 @@ export const READ_SET_MAX_RANGES = 8
 export const READ_SET_ABSENT_REASONS = Object.freeze(['transport-unsupported', 'stream-missing', 'stream-unparseable', 'stream-rewound', 'session-start-unknown'])
 
 function readSetAbsent(reason) {
-  return { absent: reason, entries: [], totalPaths: 0, droppedReads: 0 }
+  return { absent: reason, entries: [], totalPaths: null, droppedReads: null }
 }
 
 export function builderStreamLineCount(streamText) {
@@ -17497,19 +17497,27 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
   const td = typeof taskDir === 'string' ? taskDir.replace(/\/+$/, '') : ''
   const kept = new Map()
   let droppedReads = 0
-  let parseable = 0
   let seq = 0
-  for (const line of span) {
-    if (line.trim() === '') continue
-    let parsed = null
-    try { parsed = JSON.parse(line) } catch { continue }
-    parseable += 1
-    const message = parsed?.message
+  const frames = []
+  const nonEmpty = span.filter((line) => line.trim() !== '')
+  for (const [index, line] of nonEmpty.entries()) {
+    // A torn final append is expected on a live stream; an unreadable frame before it may hide
+    // a read, so the whole set is unavailable rather than silently short.
+    try { frames.push(JSON.parse(line)) } catch { if (index !== nonEmpty.length - 1) return readSetAbsent('stream-unparseable') }
+  }
+  // A requested read counts only once a successful tool result answers it.
+  const answered = new Set()
+  for (const frame of frames) {
+    const message = frame?.message
+    if (message?.role === 'toolResult' && typeof message.toolCallId === 'string' && message.isError !== true) answered.add(message.toolCallId)
+  }
+  for (const frame of frames) {
+    const message = frame?.message
     const calls = []
-    if (Array.isArray(message?.nestedCalls?.calls)) calls.push(...message.nestedCalls.calls)
+    if (Array.isArray(message?.nestedCalls?.calls)) calls.push(...message.nestedCalls.calls.filter((call) => call?.status === 'ok'))
     if (Array.isArray(message?.content)) {
       for (const part of message.content) {
-        if (part !== null && typeof part === 'object' && part.type === 'toolCall') calls.push(part)
+        if (part !== null && typeof part === 'object' && part.type === 'toolCall' && answered.has(part.id)) calls.push(part)
       }
     }
     for (const call of calls) {
@@ -17544,7 +17552,7 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
       entry.ranges.push([start, end])
     }
   }
-  if (parseable === 0) return readSetAbsent('stream-unparseable')
+  if (frames.length === 0) return readSetAbsent('stream-unparseable')
   const entries = []
   for (const entry of kept.values()) {
     if (entry.whole) { entries.push({ path: entry.path, whole: true, ranges: [], rangesTotal: 0, last: entry.last }); continue }

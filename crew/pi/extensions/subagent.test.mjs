@@ -764,7 +764,9 @@ test('the granted pi seat activates the agent tool and transports the allowlist'
     deny: 'Edit', taskDir: '/tmp/task', bootBrief: 'boot', effort: undefined,
   })
   assert.equal(bare.match(/--tools "([^"]*)"/)?.[1], adapter.PI_BUILTIN_TOOLS.join(','))
-  assert.equal(bare.includes('CREW_PI_AGENTS'), false)
+  // The bare seat unsets an inherited CREW_PI_AGENTS (-u) but never assigns one.
+  assert.doesNotMatch(bare, /CREW_PI_AGENTS=/)
+  assert.match(bare, /-u CREW_PI_AGENTS /)
 })
 
 test('the register resolves the shipped bundle end to end', () => {

@@ -945,3 +945,55 @@ test('AT5 fifo failure signals the group, clears the reservation, and refuses ac
     assert.equal(second.start().pid, 99002)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants them', () => {
+  // MUTATION: replace piSeatSpawnEnv(process.env, launch?.env || {}) with the raw spread and the inherited keys return.
+  const prior = {}
+  for (const key of ['CREW_PI_AGENTS', 'CREW_ADVISOR_ENDPOINT', 'CREW_EDIT_ASSIST', 'AS_SPAWN_SENTINEL']) prior[key] = process.env[key]
+  process.env.CREW_PI_AGENTS = 'evil-agents'
+  process.env.CREW_ADVISOR_ENDPOINT = 'evil-endpoint'
+  process.env.CREW_EDIT_ASSIST = 'evil-assist'
+  process.env.AS_SPAWN_SENTINEL = 'keep-me'
+  const startCapture = (launchEnv) => {
+    const root = scratchDir('acp-spawn-env-')
+    const acpRoot = join(root, 'acp')
+    let captured = null
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: launchEnv },
+      dir: acpRoot,
+      cwd: root,
+      role: 'builder',
+      deps: {
+        pid: 900,
+        spawn: (bin, args, options) => { captured = options; return { pid: 901, unref() {} } },
+        openSync: () => 7,
+        writeSync: () => {},
+        closeSync: () => {},
+        existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
+        kill: () => {},
+        now: () => Date.now(),
+        sleep: () => {},
+        log: () => {},
+      },
+    })
+    api.start()
+    api.close()
+    const env = captured.env
+    rmSync(root, { recursive: true, force: true })
+    return env
+  }
+  try {
+    const ungranted = startCapture({})
+    assert.equal(ungranted.CREW_PI_AGENTS, undefined)
+    assert.equal(ungranted.CREW_ADVISOR_ENDPOINT, undefined)
+    assert.equal(ungranted.CREW_EDIT_ASSIST, undefined)
+    assert.equal(ungranted.AS_SPAWN_SENTINEL, 'keep-me')
+    const granted = startCapture({ CREW_PI_AGENTS: 'grant-agents', CREW_ADVISOR: '1' })
+    assert.equal(granted.CREW_PI_AGENTS, 'grant-agents')
+    assert.equal(granted.CREW_ADVISOR, '1')
+    assert.equal(granted.CREW_ADVISOR_ENDPOINT, undefined)
+    assert.equal(granted.AS_SPAWN_SENTINEL, 'keep-me')
+  } finally {
+    for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+  }
+})

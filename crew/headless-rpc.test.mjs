@@ -4789,3 +4789,40 @@ test('FO8 a long lane slug keeps the runtime key directory under NAME_MAX', () =
   assert.equal(keyDir.startsWith(slug.slice(0, 48) + '-'), true)
   assert.notEqual(p, seatCommandPath(join('/lanes', slug + 'y'), 'builder', '/run'))
 })
+
+test('RS rpc spawn withholds inherited pi seat keys unless the seat env grants them', () => {
+  // MUTATION: replace piSeatSpawnEnv(process.env, command.env || {}) with the raw spread and the inherited keys return.
+  const prior = {}
+  for (const key of ['CREW_PI_AGENTS', 'CREW_ADVISOR_ENDPOINT', 'CREW_EDIT_ASSIST', 'RS_SPAWN_SENTINEL']) prior[key] = process.env[key]
+  process.env.CREW_PI_AGENTS = 'evil-agents'
+  process.env.CREW_ADVISOR_ENDPOINT = 'evil-endpoint'
+  process.env.CREW_EDIT_ASSIST = 'evil-assist'
+  process.env.RS_SPAWN_SENTINEL = 'keep-me'
+  try {
+    let captured = null
+    const ungranted = fixture({ spawn: (bin, args, options) => { captured = options; return { pid: 701, unref() {} } } })
+    try {
+      const briefFile = join(ungranted.dir, 'builder.md')
+      writeFileSync(briefFile, 'brief')
+      ungranted.io.assign({ id: 'd1', role: 'builder', briefFile })
+      assert.equal(captured.env.CREW_PI_AGENTS, undefined)
+      assert.equal(captured.env.CREW_ADVISOR_ENDPOINT, undefined)
+      assert.equal(captured.env.CREW_EDIT_ASSIST, undefined)
+      assert.equal(captured.env.RS_SPAWN_SENTINEL, 'keep-me')
+    } finally { ungranted.cleanup() }
+    const grantValue = JSON.stringify([{ name: 'scout', def: '/scout.json' }])
+    const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [] }
+    let grantedCaptured = null
+    const granted = fixture({ grants, spawn: (bin, args, options) => { grantedCaptured = options; return { pid: 701, unref() {} } } })
+    try {
+      const briefFile = join(granted.dir, 'builder.md')
+      writeFileSync(briefFile, 'brief')
+      granted.io.assign({ id: 'd1', role: 'builder', briefFile })
+      assert.equal(grantedCaptured.env.CREW_PI_AGENTS, grantValue)
+      assert.equal(grantedCaptured.env.CREW_ADVISOR_ENDPOINT, undefined)
+      assert.equal(grantedCaptured.env.RS_SPAWN_SENTINEL, 'keep-me')
+    } finally { granted.cleanup() }
+  } finally {
+    for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
+  }
+})

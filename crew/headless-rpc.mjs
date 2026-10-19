@@ -19,7 +19,7 @@ import { sleptMilliseconds } from './headless.mjs'
 import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, createSkillLoadTracker, skillLoadWindowEdits, SKILL_LOAD_ABSENT_REASONS, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
+import { piRpcSeatParts, advisorLaunchCell, piSeatSpawnEnv } from './adapters/adapter-pi.mjs'
 import { TRANSCRIPT_STALE_MS } from './seat-io.mjs'
 
 export const WAIT_POLL_MS = 5000
@@ -1410,7 +1410,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         neverLoadBearing(() => log({ at: new Date(now()).toISOString(), event: 'cmd-history', role, written: false, reason: 'append-failed' }))
       }
       store.advance(handle, PHASES.SPAWNING)
-      child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd: checkout || crew.checkout, env: { ...process.env, ...(command.env || {}) } })
+      child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd: checkout || crew.checkout, env: piSeatSpawnEnv(process.env, command.env || {}) })
       child.unref?.()
       store.advance(handle, PHASES.RUNNING, { pid: child.pid })
       // Opening is the probe: injected supervisors may model the FIFO without

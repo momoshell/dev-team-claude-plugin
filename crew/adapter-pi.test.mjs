@@ -751,7 +751,7 @@ test('A1', () => {
     role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
   }
-  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
   assert.equal(seatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
   assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
@@ -991,4 +991,16 @@ test('NP7 the grant decides CREW_FFF for rpc, pane and acp, and readgate points 
     const result = gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/np/checkout' })
     assert.equal(result?.block, true, program); assert.match(result.reason, new RegExp(replacement))
   }
+})
+
+test('pane seat unsets inherited CREW_PI_AGENTS while a granted seat keeps its assignment', () => {
+  // MUTATION: remove '-u', 'CREW_PI_AGENTS', from seatCommand and an ungranted pane seat inherits the value again.
+  const base = { role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot', env: {} }
+  const prefix = 'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1'
+  const ungranted = seatCommand(base)
+  assert.equal(ungranted.startsWith(prefix), true)
+  const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false }
+  const granted = seatCommand({ ...base, grants })
+  assert.equal(granted.startsWith(prefix), true)
+  assert.equal(granted.includes("CREW_PI_AGENTS='[{\"name\":\"scout\",\"def\":\"/scout.json\"}]'"), true)
 })

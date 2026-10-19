@@ -456,7 +456,7 @@ export function acpLaunch(spec = {}) {
   return {
     bin,
     args: [],
-    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...fffEnvironment(grants) },
     mode: 'acceptEdits',
     sessionParams: {
       cwd,

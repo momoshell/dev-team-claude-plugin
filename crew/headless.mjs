@@ -1358,9 +1358,17 @@ function isNodeTestInvocation(text) {
 // Node will execute. Fail-closed over the WHOLE command line, not only the part
 // after `--test`: a preload sits BEFORE it (`node --require=./x.mjs --test a.test.mjs`)
 // and a non-option prefix operand is a script Node runs instead of the tests.
+// The command word sits after the same prefixes isNodeTestInvocation drops: the
+// builder charter teaches `FORCE_COLOR=0 node --test <file>`, and reading
+// `FORCE_COLOR=0` as the command word made every such run a refused suite run
+// (12 of 12 builder aborts on 2026-10-19). A NODE_* assignment can preload code
+// (NODE_OPTIONS=--require=…), so it stays unvouched.
 export function testTargets(command, taskDir = null) {
-  const tokens = shellWords(command)
-  if (tokens === null || tokens.length === 0) return null
+  const words = shellWords(command)
+  if (words === null) return null
+  const tokens = dropPrefixes(words)
+  if (tokens.length === 0) return null
+  if (words.slice(0, words.length - tokens.length).some((word) => /^NODE_/.test(word))) return null
   const targets = []
   const rest = tokens.slice(1)
   for (let index = 0; index < rest.length; index += 1) {

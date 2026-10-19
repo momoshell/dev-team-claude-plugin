@@ -3758,6 +3758,24 @@ test('RV1-2 whole-invocation grammar fails closed across unsafe flags and fence 
     assert.deepEqual(testTargets(command), [target], command)
     assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'admit', command)
   }
+  // MUTATION TP1: reading the env assignment as the command word refuses the charter's own spelling.
+  for (const command of [
+    `FORCE_COLOR=0 node --test ${target}`,
+    `CI=1 FORCE_COLOR=0 node --test --test-timeout=30000 ${target}`,
+    `time node --test ${target}`,
+  ]) {
+    assert.deepEqual(testTargets(command), [target], command)
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'admit', command)
+  }
+  // MUTATION TP2: dropping a NODE_* assignment with the other prefixes vouches for a preload.
+  for (const command of [
+    `NODE_OPTIONS=--require=./x.mjs node --test ${target}`,
+    `FORCE_COLOR=0 NODE_TEST_CONTEXT=child node --test ${target}`,
+    'FORCE_COLOR=0 node --test "**/*.test.mjs"',
+  ]) {
+    assert.equal(testTargets(command), null, command)
+    assert.equal(suiteRunPolicy({ role: 'builder', command, fence, gatePath }).decision, 'refuse', command)
+  }
   assert.equal(recogniseSuiteInvocation(`nodemon --test ${target}`, { gatePath, suiteCommand: 'npm test' }), null)
   assert.equal(suiteRunPolicy({ role: 'builder', command: `nodemon --test ${target}`, fence, gatePath }).decision, 'unrecognised')
 
@@ -4618,7 +4636,9 @@ test('the suite corpus changes only builder decisions from the historical captur
   assert.equal(oldLines.length - 2, 488)
   // One dispatch-time count treated a grep joined by && as a pipeline sink; the
   // connector-aware scanner correctly leaves it opaque, yielding 177/17 instead of 176/18.
-  assert.deepEqual(transitions, { 'refuse->unrecognised': 177, 'refuse->admit': 17, changed: 194 })
+  // 2026-10-19: testTargets drops the same command prefixes isNodeTestInvocation does
+  // (`time node --test <file>`), moving 7 more rows to admit and 10 to unrecognised.
+  assert.deepEqual(transitions, { 'refuse->unrecognised': 187, 'refuse->admit': 24, changed: 211 })
 })
 
 // MUTATION: treat tail/head/grep as a sink regardless of the preceding connector → the full command admits.

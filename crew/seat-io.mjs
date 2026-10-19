@@ -22,7 +22,7 @@ import {
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { acpIo as defaultAcpIo } from './acp-io.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
-import { chunkLedgerChecks, operationalRow, recordRow } from './drive.mjs'
+import { chunkLedgerChecks, operationalRow, recordRow, INFRASTRUCTURE_INTERRUPTIONS } from './drive.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { readEnvelopeWithRepair } from './envelope-repair.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
@@ -3161,21 +3161,23 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
     }
   }
-  const withAssignmentSession = (role, requestedId, send) => {
+  const withAssignmentSession = (role, requestedId, send, requestedResume = null) => {
     const member = crew.members?.[role]
     let renewal = { session: 'fresh', why: null }
     let recordable = false
     let result = null
     try {
       if (!member) throw new Error(`role ${role} is not seated in this crew`)
-      if (member.started) renewal = io.freshSession(role)
+      const resumeReason = member.started && member.transport === HEADLESS_RPC_TRANSPORT && INFRASTRUCTURE_INTERRUPTIONS.includes(requestedResume) ? requestedResume : null
+      if (member.started && !resumeReason) renewal = io.freshSession(role)
+      if (resumeReason) renewal = { session: 'resumed', why: resumeReason }
       recordable = true
       if (member.transport === DEFAULT_TRANSPORT && renewal.session !== 'fresh') throw Object.assign(new Error(renewal.why), { stage: renewal.why })
       // A restarted driver reloads crew.json: without a durable `started` its next
       // assignment would skip renewal and send into this session (Sol, b1155). So the
       // flag is persisted BEFORE delivery, and a failed write refuses the delivery. An
       // absent crew.json has nothing a restart could reload, so it is not a failure.
-      if (!member.started) {
+      const persistStarted = () => { if (member.started) return;
         const persisted = updateCrewJson(paths, (disk) => {
           let changed = false
           for (const target of [disk.members?.[role], disk.seats?.[role]]) if (target && target.started !== true) { target.started = true; changed = true }
@@ -3185,15 +3187,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           throw Object.assign(new Error(`crew.json started write failed (${persisted?.reason ?? 'unknown'}): delivery refused so a restart cannot resume this session`), { stage: 'session-persist-failed' })
         }
       }
-      result = send()
+      persistStarted()
+      try {
+        result = send()
+      } catch (sendErr) {
+        if (!resumeReason || !REASK_BUSY_STAGES.has(sendErr?.stage)) throw sendErr
+        renewal = io.freshSession(role)
+        if (renewal.session !== 'fresh') throw sendErr
+        persistStarted()
+        result = send()
+      }
       for (const target of [member, crew.seats?.[role]]) if (target) target.started = true
       return result
     } finally {
       if (recordable) {
         const why = renewal.session === 'fresh' ? null
+          : renewal.session === 'resumed' ? renewal.why
           : renewal.session === 'held' ? 'worker-adoptable'
             : SEAT_SESSION_KEPT_REASONS.includes(renewal.why) ? renewal.why : 'retire-refused'
-        const outcome = why === null ? 'fresh' : 'kept'
+        const outcome = renewal.session === 'resumed' ? 'resumed' : why === null ? 'fresh' : 'kept'
         try { io.log(recordRow({ at: now(), event: 'seat-session', role, id: result?.id ?? requestedId ?? null, transport: member?.transport ?? null, outcome, why })) }
         catch { /* the journal is diagnostics, never load-bearing for delivery */ }
       }
@@ -3233,7 +3245,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
               }
             }
             return transport.assign(spec)
-          })
+          }, spec.resume?.reason ?? null)
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
           const assignedAt = now()
@@ -3263,7 +3275,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           withAssignmentSession(role, id, () => {
             sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
             return { id, returnPath }
-          })
+          }, spec.resume?.reason ?? null)
         } catch (sendErr) {
           // Nothing was delivered: release the path so the same correction can be retried.
           seatFor.delete(returnPath)

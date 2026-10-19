@@ -398,6 +398,11 @@ function runtimeTransportNoEnvelopeCarrier(env) {
   return env?.[RUNTIME_NO_ENVELOPE_CARRIER] === true
 }
 
+export const INFRASTRUCTURE_INTERRUPTIONS = Object.freeze(['suite-refusal', 'no-envelope'])
+export function infrastructureInterruptionOf(env) {
+  return suiteRefusalOf(env) ? 'suite-refusal' : runtimeTransportNoEnvelopeCarrier(env) ? 'no-envelope' : null
+}
+
 function handledEnvelopeRefusalWhy(env) {
   return handledEnvelopeRefusalOf(env) ? env.summary : null
 }
@@ -6514,7 +6519,7 @@ function runTask(ctx, io, crash) {
   const failureUpgrade = (kind, role, env = null) => {
     let entry
     try {
-      const infrastructure = suiteRefusalOf(env) ? 'suite-refusal' : runtimeTransportNoEnvelopeCarrier(env) ? 'no-envelope' : null
+      const infrastructure = infrastructureInterruptionOf(env)
       if (infrastructure) {
         entry = { outcome: 'infrastructure', why: `infrastructure failure: ${infrastructure}` }
       } else if (upgradeSpent) {
@@ -6931,7 +6936,7 @@ function runTask(ctx, io, crash) {
     return null
   }
 
-  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null, reask = null, onDispatch = null } = {}) {
+  function dispatchOnce(role, briefFile, note, { reviewSemantics = true, strictIdentity = shape.strict_identity === true, briefBuilder = null, reask = null, resume = null, onDispatch = null } = {}) {
     let brief = briefFile
     const pending = pendingEnforcement.get(role)
     if (pending) {
@@ -6945,7 +6950,7 @@ function runTask(ctx, io, crash) {
       ].join('\n'))
     }
     restoreAcceptedPlan(S.stages.at(-1)?.split(':')[0] ?? note)
-    const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}) })
+    const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}), ...(resume ? { resume } : {}) })
     let dispatchTransport = null
     try { dispatchTransport = io.dispatchTransport?.(returnPath) ?? null } catch { dispatchTransport = null }
     onDispatch?.({ id, returnPath })
@@ -7034,10 +7039,11 @@ function runTask(ctx, io, crash) {
   function assignAndWait(role, briefFile, note, opts = {}) {
     let suiteReasks = 0
     let nonStartReasks = 0
+    let resume = opts.resume ?? null
     let identity = null
     const callerOnDispatch = opts.onDispatch
     for (;;) {
-      const dispatchOpts = { ...opts, onDispatch: (current) => { identity = current; callerOnDispatch?.(current) } }
+      const dispatchOpts = { ...opts, resume, onDispatch: (current) => { identity = current; callerOnDispatch?.(current) } }
       const env = dispatchOnce(role, briefFile, note, dispatchOpts)
       const refusal = suiteRefusalOf(env)
       const refusalDetail = handledEnvelopeRefusalOf(env)
@@ -7060,6 +7066,7 @@ function runTask(ctx, io, crash) {
           onDispatch: (current) => { identity = current; callerOnDispatch?.(current) },
           briefBuilder: ({ id, runId }) => `${preamble}\n\n${typeof opts.briefBuilder === 'function' ? opts.briefBuilder({ id, role, runId }) : `Original brief: ${briefFile}`}\n`,
           reask: { id: identity.id, returnPath: retryPath },
+          resume: null,
         }
         try {
           return dispatchOnce(role, retryBrief, note, correctionOpts)
@@ -7070,6 +7077,8 @@ function runTask(ctx, io, crash) {
       }
       const nonStart = zeroTurnNonStartOf(env)
       const plannerNoEnvelope = role === 'planner' ? plannerNoEnvelopeOf(env) : null
+      const interruption = infrastructureInterruptionOf(env)
+      resume = interruption ? { reason: interruption } : null
       if (!refusal && !nonStart && !plannerNoEnvelope) return env
       if (refusal) {
         if (suiteReasks >= SUITE_REASK_MAX) return env
@@ -10739,7 +10748,7 @@ function runTask(ctx, io, crash) {
   function builderExemplarLines(exemplars) {
     return ['## Plan exemplars', ...exemplars.flatMap((item) => [item.function, ...item.exemplars.map((span) => `- ${span.path}:${span.start}-${span.end}`)]), 'match these: signature style, parameter types and names, logging placement; or record why not in details.exemplar_deviations']
   }
-  function prepareBuilderAssignment(briefPath, note) {
+  function prepareBuilderAssignment(briefPath, note, resumeReason = null) {
     let wrappedPath = briefPath
     if (builderAttempts <= 1) {
       if (Array.isArray(planEnv.details?.exemplars) && planEnv.details.exemplars.length > 0) {
@@ -10754,6 +10763,10 @@ function runTask(ctx, io, crash) {
         if (builderBriefError) { builderBriefError = `could not write first builder exemplar brief ${exemplarPath}: ${builderBriefError}`; return null }
         wrappedPath = exemplarPath
       }
+      return wrappedPath
+    }
+    if (resumeReason) {
+      try { io.log(recordRow({ at: io.now(), event: 'builder-session', attempt: builderAttempts, note, outcome: 'resumed', why: resumeReason })) } catch { /* journal diagnostics are not load-bearing */ }
       return wrappedPath
     }
     let renewal = { session: 'kept', why: 'io.freshSession is unavailable' }
@@ -11291,6 +11304,7 @@ function runTask(ctx, io, crash) {
   builderEnv = null
   let buildBrief = suiteBuildBrief
   let buildNote = suiteBuildNote
+  let pendingBuilderResume = null
   let suiteRedNoop = false
   let reviews = 0
   // The finish block runs ONLY when `accepted` is set — at review:pass or at
@@ -11614,10 +11628,17 @@ function runTask(ctx, io, crash) {
       wholeBuildRound += 1
     }
     let env = seededStepEnv
+    let builderInterruption = null
     if (!seededBuild) {
-      const preparedBuildBrief = prepareBuilderAssignment(buildBrief, buildNote)
+      const builderResume = pendingBuilderResume
+      pendingBuilderResume = null
+      const preparedBuildBrief = prepareBuilderAssignment(buildBrief, buildNote, builderResume)
       if (builderBriefError) { stageComplete(); return escalate('build', builderBriefError) }
-      env = assignAndWait('builder', preparedBuildBrief, buildNote)
+      let builderDispatch = null
+      env = assignAndWait('builder', preparedBuildBrief, buildNote, { ...(builderResume ? { resume: { reason: builderResume } } : {}), onDispatch: (dispatch) => { builderDispatch = dispatch } })
+      let builderTransport = null
+      try { builderTransport = io.dispatchTransport?.(builderDispatch?.returnPath) ?? null } catch { builderTransport = null }
+      builderInterruption = builderTransport === 'headless-rpc' ? infrastructureInterruptionOf(env) : null
     }
     if (seededBuild) { seededStepEnv = null; wholeBuildRound = 2 }
     const refusalWhy = handledEnvelopeRefusalWhy(env)
@@ -11715,6 +11736,7 @@ function runTask(ctx, io, crash) {
         if (!gateRes || gateRes.ok) laneRes = io.run(lane)
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('build', 'builder', env)
+        pendingBuilderResume = builderInterruption
         io.writeFile(b, driverBounceLines({ round, env, gateCmd, gateRes, laneRes, planPath }).join('\n'))
         buildBrief = b; buildNote = 'build-fix'
         continue
@@ -11730,6 +11752,7 @@ function runTask(ctx, io, crash) {
       if (finalRound()) grantBuilderAllowance('build', round) // the lead-granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder', env)
+      pendingBuilderResume = builderInterruption
       const matched = matchAnswers(questions, c.answers)
       if (questions.length > 0) io.log(recordRow({ at: io.now(), question_answers: { role: 'builder', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } }))
       io.writeFile(b, [

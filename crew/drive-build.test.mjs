@@ -6,7 +6,7 @@ import { tokenizeJs } from './js-tokens.mjs'
 import {
   staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
-  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
+  B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, suiteRefusalEnv, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
 import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
@@ -1273,6 +1273,28 @@ test('a second bounce records spent and never calls reseat again', () => {
   assert.equal(io.calls.reseat.length, 1)
 })
 
+// Mutation killed (TL3): moving the infrastructure branch below upgradeSpent
+// records a later infrastructure failure as spent instead of infrastructure.
+test('TL3 infrastructure after a lane upgrade is not recorded as spent', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'builder:2': suiteRefusalEnv('builder2', 'builder'), 'builder:3': suiteRefusalEnv('builder3', 'builder'),
+      'builder:4': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' },
+      'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: {}, to: {}, rung: 'mechanical→build' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ kind, outcome }) => [kind, outcome]), [['lane', 'applied'], ['build', 'infrastructure']])
+  assert.equal(io.calls.reseat.length, 1)
+})
+
 // The budget is spent by an APPLIED upgrade, never by a refused attempt. The
 // mutation this kills: moving `upgradeSpent = true` back above the io.reseat
 // call, which is what the factory's own boot shape would have hit — builder and
@@ -1387,6 +1409,115 @@ test('an escalation carries failure-upgrade modifiers', () => {
   assert.equal(res.status, 'escalation')
   assert.ok(res.details.modifiers.length >= 1)
   assert.equal(res.details.modifiers[0].modifier, FAILURE_UPGRADE)
+})
+
+// Mutation killed (IR1): replacing suiteRefusalOf(env) with false in the
+// infrastructure branch makes a suite-refusal build bounce reseat and spend
+// the one-shot budget again.
+const irReseatOk = () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' })
+const irNoEnvelopeCarrier = (id, { signed = true } = {}) => ({
+  ...(signed ? { [Symbol.for('dev-team.crew.transport-settlement')]: 'headless-rpc' } : {}),
+  assignment_id: id, role: 'builder', status: 'insufficient', summary: 'rpc fallback', artifacts: [],
+  details: { degraded: 'rpc-no-envelope', reason: 'no-envelope', turns: 5, tool_calls: 2, absent_reason: null },
+})
+const irRun = (envelopes, limits = { build_rounds: 3 }) => {
+  const io = fakeIo({
+    emit: true, envelopes,
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'], reseat: irReseatOk,
+  })
+  return { res: driveTask({ ...CTX, limits }, io), io }
+}
+const irBuildMods = (res) => (res.details?.modifiers ?? []).filter((m) => m.modifier === FAILURE_UPGRADE && m.kind === 'build')
+const irModSig = (res) => irBuildMods(res).map((m) => `${m.outcome}:${m.why ?? ''}`)
+
+test('IR1 suite-refusal build bounce records infrastructure without reseating', () => {
+  const { res, io } = irRun({
+    'planner:1': planEnv(),
+    'builder:1': suiteRefusalEnv('builder1', 'builder'), 'builder:2': suiteRefusalEnv('builder2', 'builder'),
+    'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(irModSig(res), ['infrastructure:infrastructure failure: suite-refusal'])
+  assert.deepEqual(irBuildMods(res), [{
+    modifier: FAILURE_UPGRADE, kind: 'build', role: 'builder',
+    outcome: 'infrastructure', why: 'infrastructure failure: suite-refusal',
+  }])
+  assert.equal(io.calls.reseat.length, 0)
+  assert.deepEqual(
+    io.calls.logs.filter((l) => l.modifier?.modifier === FAILURE_UPGRADE && l.modifier?.kind === 'build').map((l) => l.modifier.outcome),
+    ['infrastructure'],
+  )
+  assert.deepEqual(io.calls.emits.filter((e) => e.kind === 'modifier' && e.bounce === 'build').map((e) => e.outcome), ['infrastructure'])
+})
+
+// Mutation killed (IR2): replacing runtimeTransportNoEnvelopeCarrier(env)
+// with false makes an rpc no-envelope build bounce reseat again.
+test('IR2 no-envelope carrier through the lead-consult path records infrastructure without reseating', () => {
+  const { res, io } = irRun({
+    'planner:1': planEnv(),
+    'builder:1': irNoEnvelopeCarrier('builder1'), 'builder:2': buildEnv(),
+    'lead:1': leadEnv('bounce'), 'reviewer:1': reviewEnv('pass'),
+  }, { build_rounds: 1 })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(irModSig(res), ['infrastructure:infrastructure failure: no-envelope'])
+  assert.deepEqual(irBuildMods(res), [{
+    modifier: FAILURE_UPGRADE, kind: 'build', role: 'builder',
+    outcome: 'infrastructure', why: 'infrastructure failure: no-envelope',
+  }])
+  assert.equal(io.calls.reseat.length, 0)
+})
+
+// Mutation killed (IR3): appending upgradeSpent = true to the infrastructure
+// entry makes the genuine round-2 bounce record spent instead of applying.
+test('IR3 infrastructure round leaves the budget unspent for the genuine round', () => {
+  const { res, io } = irRun({
+    'planner:1': planEnv(),
+    'builder:1': suiteRefusalEnv('builder1', 'builder'), 'builder:2': suiteRefusalEnv('builder2', 'builder'),
+    'builder:3': buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } }),
+    'builder:4': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(irModSig(res), ['infrastructure:infrastructure failure: suite-refusal', 'applied:'])
+  assert.equal(io.calls.reseat.length, 1)
+})
+
+// Mutation killed (IR4): classifying every envelope as infrastructure (tail
+// : null to : no-envelope) stops seat-authored bounces from upgrading. Green
+// at baseline by design; must stay green.
+test('IR4 seat-authored bounces still upgrade through both build paths', () => {
+  const lookalike = irRun({
+    'planner:1': planEnv(),
+    'builder:1': irNoEnvelopeCarrier('builder1', { signed: false }),
+    'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  })
+  assert.equal(lookalike.res.status, 'done')
+  assert.deepEqual(irModSig(lookalike.res), ['applied:'])
+  assert.equal(lookalike.io.calls.reseat.length, 1)
+  const leadPath = irRun({
+    'planner:1': planEnv(),
+    'builder:1': buildEnv({ status: 'insufficient', summary: 'genuine final-round gap' }),
+    'builder:2': buildEnv(), 'lead:1': leadEnv('bounce'), 'reviewer:1': reviewEnv('pass'),
+  }, { build_rounds: 1 })
+  assert.equal(leadPath.res.status, 'done')
+  assert.deepEqual(irModSig(leadPath.res), ['applied:'])
+  assert.equal(leadPath.io.calls.reseat.length, 1)
+})
+
+// Mutation killed (TL1): replacing runtimeTransportNoEnvelopeCarrier(env) with
+// transportNoEnvelopeCarrier(env) classifies an unsigned shape-only counterfeit as infrastructure.
+test('TL1 unsigned no-envelope carrier still upgrades with an otherwise authentic shape', () => {
+  const { res, io } = irRun({
+    'planner:1': planEnv(),
+    'builder:1': irNoEnvelopeCarrier('builder1', { signed: false }), 'builder:2': buildEnv(),
+    'lead:1': leadEnv('bounce'), 'reviewer:1': reviewEnv('pass'),
+  }, { build_rounds: 1 })
+  assert.equal(res.status, 'done')
+  assert.deepEqual(irBuildMods(res), [{
+    modifier: FAILURE_UPGRADE, kind: 'build', role: 'builder', outcome: 'applied',
+    from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung',
+  }])
+  assert.equal(io.calls.reseat.length, 1)
 })
 
 test('bounced lane run commits the planner subject, round-2 builder body, and issue refs', () => {

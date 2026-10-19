@@ -632,7 +632,7 @@ export function variantFromFirstMessage(message) {
 // the producer, this is the register; the ledger never imports crew (the
 // subsystem direction is one-way, crew -> factory), so a test holds them equal.
 export const MODIFIER_ATTEMPT_OUTCOMES = Object.freeze([
-  'applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent',
+  'applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent', 'infrastructure',
 ])
 
 // Per-event-type closed payload key allowlist. gate_pass/gate_fail, decision

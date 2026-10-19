@@ -733,7 +733,7 @@ export { envelopeFieldMetadataDefect } from './shape-validator.mjs'
 // below. Any other reviewed subset is refused before it can reach stage().
 export function shapeDefect(shape, variantName) { return shapeValidationDefect(shape, variantName).detail }
 
-export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent'])
+export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent', 'infrastructure'])
 
 // The compounding valve: on the FIRST round of a consult the lead may answer
 // decision='second-opinion' with details.from=<a seated judgment member>.
@@ -6511,10 +6511,13 @@ function runTask(ctx, io, crash) {
   // of the io, it cannot change mid-run, and re-asking would record the same
   // fact once per bounce.
   let upgradeSpent = false
-  const failureUpgrade = (kind, role) => {
+  const failureUpgrade = (kind, role, env = null) => {
     let entry
     try {
-      if (upgradeSpent) {
+      const infrastructure = suiteRefusalOf(env) ? 'suite-refusal' : runtimeTransportNoEnvelopeCarrier(env) ? 'no-envelope' : null
+      if (infrastructure) {
+        entry = { outcome: 'infrastructure', why: `infrastructure failure: ${infrastructure}` }
+      } else if (upgradeSpent) {
         entry = { outcome: 'spent', why: 'the task failure-upgrade budget was already spent' }
       } else if (typeof io.reseat !== 'function') {
         upgradeSpent = true
@@ -11698,7 +11701,7 @@ function runTask(ctx, io, crash) {
         let laneRes = null
         if (!gateRes || gateRes.ok) laneRes = io.run(lane)
         const b = art(`build-bounce-r${round}.md`)
-        failureUpgrade('build', 'builder')
+        failureUpgrade('build', 'builder', env)
         io.writeFile(b, driverBounceLines({ round, env, gateCmd, gateRes, laneRes, planPath }).join('\n'))
         buildBrief = b; buildNote = 'build-fix'
         continue
@@ -11713,7 +11716,7 @@ function runTask(ctx, io, crash) {
       }
       if (finalRound()) grantBuilderAllowance('build', round) // the lead-granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
-      failureUpgrade('build', 'builder')
+      failureUpgrade('build', 'builder', env)
       const matched = matchAnswers(questions, c.answers)
       if (questions.length > 0) io.log(recordRow({ at: io.now(), question_answers: { role: 'builder', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } }))
       io.writeFile(b, [

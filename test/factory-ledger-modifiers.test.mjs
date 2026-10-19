@@ -8,7 +8,7 @@ import {
 
 import { MODIFIER_OUTCOMES, MUTATION_CORRECTION_OUTCOMES, MUTATION_CORRECTION_REFUSALS } from '../crew/drive.mjs'
 
-import { fixture } from './factory-ledger.test.mjs'
+import { fixture, openTestLedger, SKIP } from './factory-ledger.test.mjs'
 
 
 
@@ -32,4 +32,24 @@ test('ADVISOR_AB_INCOMPLETE_REASONS is the exact frozen vocabulary', () => {
 test('F1', () => {
   assert.deepEqual(MUTATION_ANCHOR_CORRECTIONS, MUTATION_CORRECTION_OUTCOMES)
   assert.deepEqual(MUTATION_ANCHOR_REFUSALS, MUTATION_CORRECTION_REFUSALS)
+})
+
+// Mutation killed (IR5): dropping 'infrastructure' from
+// MODIFIER_ATTEMPT_OUTCOMES makes the register unequal to the driver enum
+// and recordModifierAttempt refuses the row.
+test('IR5 infrastructure outcome is registered and recordable as a failure-upgrade row', { skip: SKIP }, () => {
+  assert.ok(MODIFIER_OUTCOMES.includes('infrastructure'))
+  assert.ok(MODIFIER_ATTEMPT_OUTCOMES.includes('infrastructure'))
+  assert.deepEqual([...MODIFIER_ATTEMPT_OUTCOMES], [...MODIFIER_OUTCOMES])
+  const ledger = openTestLedger()
+  try {
+    const row = ledger.recordModifierAttempt({ role: 'builder', modifier: 'failure-upgrade', bounce: 'build', outcome: 'infrastructure', why: 'infrastructure failure: suite-refusal' })
+    assert.equal(row.outcome, 'infrastructure')
+    const rows = ledger.dumpTable('modifier_attempts')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].outcome, 'infrastructure')
+    assert.equal(rows[0].why, 'infrastructure failure: suite-refusal')
+  } finally {
+    ledger.close()
+  }
 })

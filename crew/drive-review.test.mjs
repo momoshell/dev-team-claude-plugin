@@ -3500,6 +3500,45 @@ test('TO7 reviewer brief counts timeout rows merged from two proof generations',
   assert.doesNotMatch(brief.split('## Diff-mutant findings\n')[1], /\bkill(?:ed|s)?\b/i)
 })
 
+test('NJ1 reviewer brief discloses not-judged mutants beside timeouts', () => {
+  const skipped = { id: 's1', path: 'a.mjs', line: 1, operator: 'literal', replacement: 'x', outcome: 'skipped', skip_reason: 'comment-or-blank' };
+  const report = diffReport([skipped], { omitted: 1, cap_omitted: 1, skip_counts: { 'comment-or-blank': 1 } });
+  const io = diffDriverIo({ report });
+  const result = driveTask(CTX, io);
+  assert.equal(result.status, 'done');
+  const brief = io.calls.writes[TD + '/review-brief-1.md'];
+  const section = brief.split('## Diff-mutant findings\n')[1];
+  assert.ok(section.includes('Not judged: 2 selected or capped mutants were never adjudicated; unproven.'));
+  const zeroIo = diffDriverIo({ report: diffReport([]) });
+  const zeroResult = driveTask(CTX, zeroIo);
+  assert.equal(zeroResult.status, 'done');
+  const zeroBrief = zeroIo.calls.writes[TD + '/review-brief-1.md'];
+  assert.doesNotMatch(zeroBrief.split('## Diff-mutant findings\n')[1], /Not judged:/);
+  const timeout = { id: 't1', path: 'a.mjs', line: 2, operator: 'literal', replacement: 'y', outcome: 'timed-out' };
+  const mixed = diffReport([timeout, skipped], { omitted: 1, cap_omitted: 1, skip_counts: { 'comment-or-blank': 1 } });
+  const mixedIo = diffDriverIo({ report: mixed });
+  const mixedResult = driveTask(CTX, mixedIo);
+  assert.equal(mixedResult.status, 'done');
+  const mixedSection = mixedIo.calls.writes[TD + '/review-brief-1.md'].split('## Diff-mutant findings\n')[1];
+  assert.match(mixedSection, /Timed out: 1 of 1 mutants exceeded the per-run bound; unproven\./);
+  assert.ok(mixedSection.includes('Not judged: 2 selected or capped mutants were never adjudicated; unproven.'));
+});
+
+// MUTATION DT1: drop the { timeoutMs: DIFF_RUNNER_TIMEOUT_MS } argument at the diff runner launch and the runner is again bounded by the suite timeout.
+test('DT1 diff runner launch carries its own timeout bound', () => {
+  const io = diffDriverIo({ report: diffReport([diffSurvivor]) });
+  const seen = [];
+  const run = io.run.bind(io);
+  io.run = (cmd, opts) => {
+    const text = String(cmd);
+    if (text.includes('--diff-config')) seen.push(opts);
+    return run(cmd, opts);
+  };
+  const result = driveTask(CTX, io);
+  assert.equal(result.status, 'done');
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], { timeoutMs: 900000 });
+});
 test('D1 diff proof leaves declared-anchor proof bytes unchanged', () => {
   const mutation = { check: 'declared', file: 'a.mjs', find: 'true', replace: 'false' }
   const noDiff = diffDriverIo({ mutations: [mutation], report: diffReport([]) })

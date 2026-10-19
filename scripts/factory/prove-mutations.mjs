@@ -560,7 +560,7 @@ export const DIFF_SKIP_REASONS = Object.freeze([
   'unsafe-target:absent', 'unsafe-target:symlink', 'unsafe-target:non-regular',
   'unsafe-target:canonical-escape', 'unsafe-target:metadata-unreadable',
   'unsafe-target:checkout-unreadable', 'target-changed', 'write-failed',
-  'runner-unavailable', 'out-of-scope', 'baseline-red',
+  'runner-unavailable', 'out-of-scope', 'baseline-red', 'baseline-timeout',
 ])
 
 const DIFF_COMPARISON_ORDER = Object.freeze(['===', '!==', '==', '!=', '<=', '>=', '<', '>'])
@@ -1086,22 +1086,26 @@ export async function runDiffMutationProof(config, deps = {}) {
   const baselineStarted = now()
   const baselineBound = remaining()
   const baselineRan = baselineBound > 0
-  const baselineResult = baselineRan
+  let baselineResult = baselineRan
     ? await runDiffCommand(d, config.validation_lane, config.checkout, baselineBound)
     : diffRunnerUnavailable('result-incomplete')
+  if (baselineResult.available && baselineResult.ok) {
+    baselineResult = remaining() > 0 ? await runDiffCommand(d, config.gate_cmd, config.checkout, remaining()) : diffRunnerUnavailable('result-incomplete')
+  }
   const baselineElapsed = now() - baselineStarted
   const baselineMs = Math.max(0, Number.isFinite(baselineElapsed) ? baselineElapsed : 0)
   const runTimeoutMs = Math.max(runTimeoutFloorMs, 2 * baselineMs)
   if (!baselineResult.available || !baselineResult.ok) {
-    const why = baselineResult.timeout ? 'baseline-red: timeout'
+    const baselineReason = baselineResult.timeout ? 'baseline-timeout' : 'baseline-red'
+    const why = baselineResult.timeout ? 'baseline-timeout: timeout'
       : baselineResult.available ? 'baseline-red: red'
         : `baseline-red: runner-unavailable (${baselineResult.cause ?? baselineResult.why ?? 'result-incomplete'})`
     const baselineSkips = selected.map((candidate) => ({
-      ...diffSkip({ candidate, reason: 'baseline-red' }),
+      ...diffSkip({ candidate, reason: baselineReason }),
       why,
     }))
     if (baselineResult.escaped) {
-      fatal = { ...diffFatal(`${DIFF_DESCENDANT_ESCAPED} during the unmutated validation baseline`), cause: DIFF_DESCENDANT_ESCAPED }
+      fatal = { ...diffFatal(`${DIFF_DESCENDANT_ESCAPED} during the unmutated baseline`), cause: DIFF_DESCENDANT_ESCAPED }
     }
     const report = countDiffReport(baselineSkips, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
     if (baselineRan) {

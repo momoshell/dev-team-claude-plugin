@@ -172,4 +172,4 @@ A mismatched assignment id is never accepted: an otherwise-valid envelope may re
 
 ## Diff mutation proof
 
-Diff proof spends the unchanged 720000ms total deadline on one green validation baseline before proof writes. Each mutant command gets max(the 120000ms floor, twice the baseline's measured duration); run timeouts are unproven `timed-out` rows counted by `timed_out`, never kills. A red, timed-out or unavailable baseline emits `baseline-red` skips before proof writes.
+Diff proof spends the unchanged 720000ms total deadline on one green baseline (validation lane, then gate_cmd) before proof writes. Each mutant command gets max(the 120000ms floor, twice the baseline's measured duration across both baseline commands); run timeouts are unproven `timed-out` rows counted by `timed_out`, never kills. A red or unavailable baseline emits `baseline-red` skips and a timed-out baseline emits `baseline-timeout` skips, before proof writes.

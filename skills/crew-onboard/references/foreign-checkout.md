@@ -71,8 +71,7 @@ The two worth the most attention:
   ratification sets the checkout value. Bounds: 60..14400 seconds inclusive;
   default 900 s. `DEVTEAM_SUITE_TIMEOUT_S` overrides the profile for the process
   running the lane; malformed or out-of-range input refuses before seats start.
-  This applies to warm, cold and rerun suites, not dispatch's separate
-  300-second baseline. A daemon-forked lane inherits the daemon's environment
+  This applies to warm, cold and rerun suites and to other `io.run` shell calls, except the diff-mutation runner, which carries its own 720 s deadline plus a 180 s reap margin; it does not apply to dispatch's separate 300-second baseline. A daemon-forked lane inherits the daemon's environment
   from when the daemon started, so ratify `suite_timeout_s` for a durable per-checkout
   value.
 

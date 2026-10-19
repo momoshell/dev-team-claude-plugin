@@ -375,7 +375,7 @@ function wideResumeCheckpoint({ kind = 'publish', message = 'feat: resume\n\n ',
 
 function runWideResume(finalDiff, options = {}) {
   const checkpoint = options.checkpoint || wideResumeCheckpoint(options)
-  const io = withPublicationDiff(publicationIo({ changed: WIDE_PROMPT_FENCE }), { ...options, finalDiff })
+  const io = withPublicationDiff(publicationIo({ changed: WIDE_PROMPT_FENCE, ...(Object.hasOwn(options, 'journalText') ? { journalText: options.journalText } : {}), ...(Object.hasOwn(options, 'journal') ? { journal: options.journal } : {}) }), { ...options, finalDiff })
   const result = resumeTask({ ...CTX, task: options.task || 'resume-publish', publish: { branch: 'feature/ship', base: 'main' }, files_in_scope: WIDE_PROMPT_FENCE }, io, checkpoint)
   return { checkpoint, io, result }
 }
@@ -3505,7 +3505,7 @@ test('TO4 fake producer timeout report round-trips through the consumer parser',
       now: () => 0,
       runCommand() {
         calls += 1
-        return calls === 1
+        return calls <= 2
         ? { ok: true, output: '', status: 0, completed: true }
         : { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }
       },
@@ -3579,13 +3579,14 @@ test('DM2 ordered unmeasured reasons include baseline-red and run-timeout', () =
     diffMutationMeasurement([]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, fatal: { reason: 'tree-not-restored' }, skip_counts: {} }]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'baseline-red': 1 } }]).reason,
+    diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'baseline-timeout': 1 } }]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'runner-unavailable': 1 } }]).reason,
     diffMutationMeasurement([{ generated: 1, killed: 0, survived: 0, timed_out: 1, skip_counts: {} }]).reason,
     diffMutationMeasurement([DM_T825E2]).reason,
     diffMutationMeasurement([{ generated: 0, killed: 0, survived: 0, skip_counts: { 'comment-or-blank': 1 } }]).reason,
   ]
-  assert.deepEqual(reasons, ['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
-  assert.deepEqual(DIFF_MUTATION_UNMEASURED_REASONS, ['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
+  assert.deepEqual(reasons, ['no-report', 'tree-not-restored', 'baseline-red', 'baseline-timeout', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
+  assert.deepEqual(DIFF_MUTATION_UNMEASURED_REASONS, ['no-report', 'tree-not-restored', 'baseline-red', 'baseline-timeout', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
 })
 
 // MUTATION DM3: invert the measured test (killed + survived < 0) and the t563c tallies read unmeasured.
@@ -3603,7 +3604,8 @@ test('MH1 selected-but-unran candidates are unmeasured runner-unavailable', () =
   const rec = diffMutationMeasurement([{ generated: 3, killed: 0, survived: 0, skip_counts: { 'runner-unavailable': 3 } }])
   assert.equal(rec.measured, false)
   assert.equal(rec.reason, 'runner-unavailable')
-  assert.ok(composePrBody({ intent: 'x', diff_mutation: rec }).includes('- Diff mutation: unmeasured \u2014 runner-unavailable'))
+  assert.equal(rec.not_judged, 3)
+  assert.ok(composePrBody({ intent: 'x', diff_mutation: rec }).includes('- Diff mutation: unmeasured \u2014 runner-unavailable, 3 not judged (unproven)'))
 })
 
 // MUTATION MH4: drop the !treeNotRestored term from the measured predicate and a fatal round combined with a measured round reads measured again.
@@ -3651,6 +3653,39 @@ test('DM6 published pr-body Proof holds one Diff mutation line', () => {
   const proof = end < 0 ? rest : rest.slice(0, end)
   assert.equal(proof.split('\n').filter((line) => line.startsWith('- Diff mutation:')).length, 1)
 })
+
+
+// MUTATION delete the timed-out row guard and case 4 parses; delete the killed row guard and case 3 parses
+test('DM8 parser rejects relabelled tallies with both row guards', () => {
+  const relabelled = (over) => ({ generation: 1, cap: 2, configured_cap: 2, cap_omitted: 0, total_candidates: 2, generated: 2, killed: 1, survived: 0, timed_out: 1, skipped: 0, omitted: 0, skip_counts: {}, ...over });
+  const cases = [
+    relabelled({ mutants: [{ outcome: 'timed-out' }, { outcome: 'timed-out' }] }),
+    relabelled({ mutants: [{ outcome: 'killed' }, { outcome: 'killed' }] }),
+    relabelled({ killed: 1, survived: 1, timed_out: 0, mutants: [{ outcome: 'killed' }, { outcome: 'killed' }] }),
+    relabelled({ killed: 0, survived: 1, timed_out: 1, mutants: [{ outcome: 'timed-out' }, { outcome: 'timed-out' }] }),
+  ];
+  for (const [i, report] of cases.entries()) {
+    const parsed = parseDiffMutationReport('DIFF-MUTATION-SUMMARY ' + JSON.stringify(report), { generation: 1, cap: 2 });
+    assert.equal(parsed, null, 'case ' + (i + 1));
+  }
+});
+
+// MUTATION DM7: read every journal row instead of journalRowsSinceRunStart and an earlier run's proof is published as this run's.
+test('DM7 resumed publish carries the current run diff-mutation proof', () => {
+  const measuredReport = { generated: 2, killed: 1, survived: 1, skipped: 0, omitted: 0, skip_counts: {}, mutants: [] };
+  const runStart = JSON.stringify({ event: RUN_START_EVENT }) + '\n';
+  const proofRow = (report) => JSON.stringify({ at: 1, diff_mutation_proof: report }) + '\n';
+  const bodyOf = (io) => io.calls.writes[TD + '/pr-body.md'] ?? '';
+  const withProof = runWideResume(FINAL_CODE_FILES, { journalText: runStart + proofRow(measuredReport) });
+  assert.equal(withProof.result.status, 'done');
+  assert.ok(bodyOf(withProof.io).includes('- Diff mutation: 2 generated, 1 killed, 1 survived'), 'measured row prints its measured line');
+  const withoutProof = runWideResume(FINAL_CODE_FILES, { journalText: runStart });
+  assert.equal(withoutProof.result.status, 'done');
+  assert.ok(bodyOf(withoutProof.io).includes('- Diff mutation: unmeasured \u2014 no-report'), 'no row reads no-report');
+  const staleProof = runWideResume(FINAL_CODE_FILES, { journalText: runStart + proofRow(measuredReport) + runStart });
+  assert.equal(staleProof.result.status, 'done');
+  assert.ok(bodyOf(staleProof.io).includes('- Diff mutation: unmeasured \u2014 no-report'), 'earlier run proof is not published as this run');
+});
 
 // Real-git rebase settlement harness for b1222-rebaseround
 // Origin and lane change the same interior line of docs guide,

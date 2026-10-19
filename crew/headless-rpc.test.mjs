@@ -281,6 +281,93 @@ test('BW4 builder wait caps repeated extensions for short and long bases', () =>
   }
 })
 
+// MUTATION ST1: lower the stall comparison to silentMs >= 0 and the watchdog fires
+// at the first poll (silent_ms far below 900000, never exactly 900000) and stalls
+// the seat that judges 899999ms without an envelope, then writes at 904999ms.
+// MUTATION N1-boundary: use silentMs >= TRANSCRIPT_STALE_MS - 1; scenario B stalls at 899999ms.
+// MUTATION N1-envelope: remove !exists(returnPath) &&; scenario B stalls over its envelope at 904999ms.
+test('ST1 a silent acknowledged rpc turn aborts as rpc-stall at the threshold', () => {
+  const update = builderWaitCapture('tool_execution_update')
+  assert.ok(update, 'recorded capture includes a tool execution update')
+  let clock = 0
+  const logs = []
+  const f = fixture({
+    now: () => clock, monotonic: () => clock,
+    log: (row) => logs.push(row),
+    writeSync: (_fd, raw) => {
+      const command = JSON.parse(raw)
+      f.writes.push(command)
+      if (command.type === 'abort') f.writeStream(builderWaitCapture('agent_settled'))
+    },
+    onSleep: ({ ms }) => { clock += ms },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    clock = 0
+    f.writeStream(update)
+    let value = null, error = null
+    try { value = f.io.wait(run.returnPath, 3600) } catch (caught) { error = caught }
+    assert.ok(error, `expected a thrown rpc-stall, found envelope ${JSON.stringify(value)}`)
+    assert.equal(error.stage, 'rpc-stall')
+    assert.ok(String(error.message).startsWith('rpc stall: seat builder'), error.message)
+    assert.equal(error.silentMs, 900_000)
+    const rows = logs.filter((row) => row.event === 'rpc-stall')
+    assert.equal(rows.length, 1, JSON.stringify(logs.map((x) => x.event)))
+    assert.equal(rows[0].reason, 'transcript-stall')
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].silent_ms, 900_000)
+    assert.equal(rows[0].threshold_ms, 900_000)
+    assert.ok(Number.isFinite(rows[0].last_frame_at))
+    assert.ok(f.writes.some((w) => w.type === 'abort'), 'expected an abort command')
+  } finally { f.cleanup() }
+  // The literal boundary: the first sleep after the clock reset advances ms - 1,
+  // so every later judgment lands at 4_999 + 5_000k ms. Judge 899_999ms without
+  // an envelope, then return the envelope at 904_999ms with zero rpc-stall rows.
+  let clock2 = 0, run2 = null, skewed = false, written = false
+  const logs2 = []
+  const g = fixture({
+    now: () => clock2, monotonic: () => clock2,
+    log: (row) => logs2.push(row),
+    onSleep: ({ ms }) => {
+      clock2 += skewed ? ms - 1 : ms
+      skewed = false
+      if (run2 && !written && clock2 > 899_999) {
+        written = true
+        writeFileSync(run2.returnPath, JSON.stringify(ordinaryRpcEnvelope(run2.id)))
+      }
+    },
+  })
+  try {
+    run2 = g.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    clock2 = 0
+    skewed = true
+    g.writeStream(update)
+    let value = null, error = null
+    try { value = g.io.wait(run2.returnPath, 3600) } catch (caught) { error = caught }
+    assert.equal(error, null, `expected the envelope after the just-under-threshold poll to complete, found ${error?.stage} (${error?.message})`)
+    assert.equal(value?.status, 'done')
+    assert.equal(logs2.filter((row) => row.event === 'rpc-stall').length, 0)
+  } finally { g.cleanup() }
+})
+
+test('an acknowledged rpc turn with no frame ever observed ends rpc-timeout, never rpc-stall', () => {
+  let clock = 0
+  const logs = []
+  const f = fixture({ now: () => clock, monotonic: () => clock, log: (row) => logs.push(row), onSleep: ({ ms }) => { clock += ms } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    clock = 0
+    const sessionPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json')
+    let session = {}
+    try { session = JSON.parse(readFileSync(sessionPath, 'utf8')) } catch { session = {} }
+    writeFileSync(sessionPath, JSON.stringify({ ...session, lastAssignmentId: run.id }))
+    let value = null, error = null
+    try { value = f.io.wait(run.returnPath, 3600) } catch (caught) { error = caught }
+    assert.ok(error, `expected rpc-timeout, found envelope ${JSON.stringify(value)}`)
+    assert.equal(error.stage, 'rpc-timeout')
+    assert.equal(logs.filter((row) => row.event === 'rpc-stall').length, 0)
+  } finally { f.cleanup() }
+})
 // Recorded raw RPC frames are repeated unchanged so the wait tests exercise vendor-shaped input.
 function builderWaitCapture(type) {
   const line = recordedRpcBoundaryCapture().split('\n').find((entry) => {
@@ -1422,8 +1509,8 @@ test('the same signal code distinguishes driver retirement from external death',
   let exitPath
   const rows = []
   const retired = fixture({
-    now: () => clock,
-    sleep: (ms) => { clock += ms },
+    now: () => clock, monotonic: () => clock,
+    onSleep: ({ ms, appendStream }) => { clock += ms; appendStream(builderWaitCapture('message_update')) },
     kill: (_pid, signal) => { if (signal !== 0) writeFileSync(exitPath, '143') },
     log: (row) => rows.push(row),
   })
@@ -3381,7 +3468,7 @@ test('b416 K2 RPC policy survives parse, zero-deadline opaque, and zero-deadline
   }
   {
     let clock = 0; const rows = []
-    const f = fixture({ role: 'reviewer', now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+    const f = fixture({ role: 'reviewer', now: () => clock, monotonic: () => clock, onSleep: ({ ms, appendStream }) => { clock += ms; appendStream(builderWaitCapture('message_update')) }, log: (row) => rows.push(row) })
     try {
       const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
       b416RpcStream(f, 'reviewer', [{ type: 'tool_execution_start', toolCallId: 'opaque-timeout', toolName: 'bash', args: { command: 'bash tools/run-everything.sh' } }])
@@ -3392,7 +3479,7 @@ test('b416 K2 RPC policy survives parse, zero-deadline opaque, and zero-deadline
   }
   {
     let clock = 0; const rows = []
-    const f = fixture({ role: 'reviewer', now: () => clock, sleep: (ms) => { clock += ms }, log: (row) => rows.push(row) })
+    const f = fixture({ role: 'reviewer', now: () => clock, monotonic: () => clock, onSleep: ({ ms, appendStream }) => { clock += ms; appendStream(builderWaitCapture('message_update')) }, log: (row) => rows.push(row) })
     try {
       const run = f.io.assign({ role: 'reviewer', briefFile: '/brief.md', policy })
       b416RpcStream(f, 'reviewer', [{ type: 'tool_execution_start', toolCallId: 'forbidden-timeout', toolName: 'bash', args: { command: 'node --test crew/headless-rpc.test.mjs' } }])

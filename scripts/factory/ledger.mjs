@@ -357,7 +357,7 @@ export function escalationCause(input = {}) {
     return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
   }
   // Rule 13: these locations are infrastructure failures owned by the driver.
-  if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
+  if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr', 'rpc-stall']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }
   // No rule matched: a readable location with no rule is a rule gap; no usable location is unmeasured — never a guess, never an actor.

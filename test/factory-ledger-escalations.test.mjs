@@ -209,6 +209,13 @@ test('pre-existing rule families keep their outcomes beside the new exact rules'
   for (const [input, output] of cases) assert.deepEqual(escalationCause(input), output, JSON.stringify(input))
 })
 
+// MUTATION ST5: rename 'rpc-stall' in ledger Rule 13's set and the location
+// falls through to a rule gap instead of infrastructure.
+test('ST5 an rpc-stall escalates as driver-owned infrastructure', () => {
+  assert.deepEqual(escalationCause({ where: 'rpc-stall', why: 'rpc stall: seat planner wrote no frame for 900s mid-turn (transcript-stall)' }), { cause: 'infrastructure', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'rpc-stall', why: '' }), { cause: 'infrastructure', actor: 'driver' })
+})
+
 test('heterogeneous harden, build, plan and lane locations stay rule-gap', () => {
   for (const where of ['harden', 'build', 'plan', 'lane']) {
     assert.deepEqual(escalationCause({ where, why: 'heterogeneous sample' }), { cause: 'rule-gap', actor: null }, where)

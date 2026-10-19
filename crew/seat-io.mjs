@@ -179,6 +179,9 @@ export const SEAT_RETRY_KINDS = Object.freeze([RETRY_KIND_TIMEOUT, RETRY_KIND_AB
 // REASK_MAX names, and the SAME `reasked` set the unusable-envelope re-ask
 // spends from.
 export const SEAT_RETRY_MAX = REASK_MAX
+// Stall-resumes per assignment: the driver recovering from its own
+// infrastructure (a hung tool), kept apart from the one grace REASK_MAX names.
+const STALL_RESUME_MAX = 2
 export const SEAT_RETRY_EVENTS = Object.freeze({
   [RETRY_KIND_TIMEOUT]: 'seat-timeout-reask',
   [RETRY_KIND_ABORTED]: 'seat-abort-reask',
@@ -2228,6 +2231,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // delivery (bounded only by its own #567 re-send set) and never charges here;
   // the pane re-send after silence following a started turn is a re-ask and does.
   const reasked = new Map()   // assignment -> the cause that spent its one shared re-ask grace
+  const stallResumes = new Map()   // assignment (graceKey role:id) -> stall-resumes spent
   const graceKey = (info, returnPath) => `${info?.role || 'unknown'}:${info?.id ?? returnPath}`
   const graceIsSpent = (info, returnPath, err) => {
     const key = graceKey(info, returnPath)
@@ -3028,6 +3032,76 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     err.seatRetry = { attempted: true, delivered: true, recovered: false, failure: secondKind, second: secondErr?.stage || null }
     return { envelope: null, error: err }
   }
+  // Stall recovery uses the same session and remaining window, independently
+  // of the lost-seat grace. Secondary failures still get ordinary recovery.
+  const resumeStalledSeat = ({ returnPath, info, transport, err, timeoutS, waitStartedAt }) => {
+    const role = info?.role || 'unknown'
+    const stallId = typeof info?.id === 'string' && info.id.trim() ? info.id : null
+    const stallKey = graceKey(info, returnPath)
+    let currentErr = err
+    let currentPath = returnPath
+    const note = (attempt, outcome, extra = {}) => {
+      try { io.log(recordRow({ at: now(), event: 'seat-stall-resume', role, id: stallId, attempt, of: STALL_RESUME_MAX, reason: 'transcript-stall', outcome, ...extra })) }
+      catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+    }
+    if (stallId === null) {
+      note((stallResumes.get(stallKey) ?? 0) + 1, 'declined', { why: 'the stalled seat has no recorded assignment id, so a resume could not name a return path that is its own' })
+      return { envelope: null, error: err, returnPath: currentPath }
+    }
+    while (currentErr?.stage === 'rpc-stall' && (stallResumes.get(stallKey) ?? 0) < STALL_RESUME_MAX) {
+      const attempt = (stallResumes.get(stallKey) ?? 0) + 1
+      stallResumes.set(stallKey, attempt)
+      let remainingS = timeoutS - (now() - waitStartedAt) / 1000
+      if (!(remainingS > 0)) {
+        note(attempt, 'declined', { why: 'no time left in the original wait window' })
+        const ceiling = new Error(`rpc timeout: seat ${role} stalled with no time left in its ${timeoutS}s window (${currentErr?.message || 'rpc stall'})`)
+        ceiling.stage = 'rpc-timeout'
+        ceiling.role = role
+        return { envelope: null, error: ceiling, returnPath: currentPath }
+      }
+      const stallPath = join(paths.returnsDir, `${stallId}.stall${attempt}.${role}.json`)
+      const briefPath = join(paths.taskDir, `stall-${stallId}.${role}.${attempt}.md`)
+      const silentS = Number.isFinite(currentErr?.silentMs) ? Math.round(currentErr.silentMs / 1000) : null
+      let collectPath = stallPath
+      try {
+        writeFileSync(briefPath, [
+          `# Stall resume ${stallId}: the previous attempt stopped writing`,
+          '',
+          `The previous tool call wrote nothing for ${silentS !== null ? `${silentS} seconds` : `at least ${TRANSCRIPT_STALE_MS / 1000} seconds`} and was stopped. It must not be repeated as it was — choose a different way to get the same information.`,
+          'This resumes the SAME assignment in the SAME session. Work already written may be partial; read the state before you trust it.',
+          `Original brief: ${info?.brief}`,
+          `Stalled attempt's return path: ${returnPath}`,
+          'Read the original brief first before continuing the assignment.',
+          `Write your ReturnEnvelope as valid JSON to ${stallPath}.`,
+          `Then print exactly: CREW-DONE ${role} ${stallId}`,
+        ].join('\n'))
+        // Delivery polls do not add stall-attempt outcomes.
+        const assigned = withAssignmentSession(role, stallId, () => assignWithReask(transport, info, headlessReaskSpec(info, { role, briefFile: briefPath, id: stallId, returnPath: stallPath })), 'stall')
+        collectPath = assigned?.returnPath || stallPath
+        bindHeadlessIdentity(info, assigned)
+      } catch (sendErr) {
+        note(attempt, 'undelivered', { why: sendErr?.message || String(sendErr) })
+        return { envelope: null, error: currentErr, returnPath: currentPath }
+      }
+      const resumedAt = now()
+      remainingS = timeoutS - (resumedAt - waitStartedAt) / 1000
+      try {
+        const env = withHeadlessWatch(info, () => transport.wait(collectPath, Math.max(0, remainingS)), { returnPath: collectPath, timeoutS: Math.max(0, remainingS), waitStartedAt: resumedAt })
+        if (env != null) {
+          note(attempt, 'recovered')
+          return { envelope: env, error: currentErr }
+        }
+        note(attempt, 'failed', { why: `resumed wait returned no envelope at ${collectPath}` })
+        return { envelope: null, error: currentErr, returnPath: currentPath }
+      } catch (secondErr) {
+        note(attempt, 'failed', { failure: cellFailureKind(secondErr), second: secondErr?.stage || null })
+        if (secondErr?.stage !== 'rpc-stall') return { envelope: null, error: secondErr, returnPath: collectPath }
+        currentErr = secondErr
+        currentPath = collectPath
+      }
+    }
+    return { envelope: null, error: currentErr, returnPath: currentPath }
+  }
   // The stash stack is NOT per-worktree: `git rev-parse --git-path refs/stash` resolves to the SAME file in the common git dir from every linked worktree,
   // so `git stash pop` restores whatever lane pushed LAST (#471). The entry a
   // push created is identified by the unique message it carries and restored by
@@ -3168,7 +3242,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     let result = null
     try {
       if (!member) throw new Error(`role ${role} is not seated in this crew`)
-      const resumeReason = member.started && member.transport === HEADLESS_RPC_TRANSPORT && INFRASTRUCTURE_INTERRUPTIONS.includes(requestedResume) ? requestedResume : null
+      const resumeReason = member.started && member.transport === HEADLESS_RPC_TRANSPORT && (requestedResume === 'stall' || INFRASTRUCTURE_INTERRUPTIONS.includes(requestedResume)) ? requestedResume : null
       if (member.started && !resumeReason) renewal = io.freshSession(role)
       if (resumeReason) renewal = { session: 'resumed', why: resumeReason }
       recordable = true
@@ -3336,10 +3410,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         return env
       } catch (err) {
         let failure = err
-        if (cellFailureKind(err) === 'unusable-envelope') {
+        // Judge the resumed wait's error and collect path without spending grace.
+        let judgedErr = err
+        let judgedPath = returnPath
+        const retryTransportName = transport ? (crew.members?.[info?.role || 'unknown']?.transport || 'unknown') : DEFAULT_TRANSPORT
+        if (err?.stage === 'rpc-stall' && transport && retryTransportName === HEADLESS_RPC_TRANSPORT && typeof transport.assign === 'function' && typeof transport.wait === 'function') {
+          const recovery = resumeStalledSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
+          if (recovery.envelope != null) {
+            noteCellFailure(info?.role, info?.id, cellFailureKind(err), recovery.error || err)
+            settled = recovery.envelope
+            return recovery.envelope
+          }
+          judgedErr = recovery.error || err
+          failure = judgedErr
+          judgedPath = recovery.returnPath || returnPath
+        }
+        if (cellFailureKind(judgedErr) === 'unusable-envelope') {
           let recovery = null
           try {
-            recovery = reaskUnusableEnvelope({ returnPath, info, transport, err, timeoutS })
+            recovery = reaskUnusableEnvelope({ returnPath: judgedPath, info, transport, err: judgedErr, timeoutS })
           } catch (reaskErr) {
             // A replacement worker that dies has a stronger, measured outcome
             // than the first run's parse defect. Keep that stage for the journal;
@@ -3351,20 +3440,19 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             // One cell failure is still recorded — the wasted turn is a real
             // cell defect — but the RUN continues as if the first envelope had
             // been readable.
-            noteCellFailure(info?.role, info?.id, 'unusable-envelope', recovery.error || err)
+            noteCellFailure(info?.role, info?.id, 'unusable-envelope', recovery.error || judgedErr)
             settled = recovery.envelope
             return recovery.envelope
           }
-          if (recovery) failure = recovery.error || err
+          if (recovery) failure = recovery.error || judgedErr
         }
-        const retryKind = cellFailureKind(err)
-        const provenDeath = err?.reclaim?.root_liveness === LIVENESS.DEAD
-        const noEnvelopeBytes = retryKind === SEAT_DIED_STAGE && (() => { try { return fsReadFileSync(returnPath).length === 0 } catch (readError) { return readError?.code === 'ENOENT' } })()
-        const retryTransportName = transport ? (crew.members?.[info?.role || 'unknown']?.transport || 'unknown') : DEFAULT_TRANSPORT
+        const retryKind = cellFailureKind(judgedErr)
+        const provenDeath = judgedErr?.reclaim?.root_liveness === LIVENESS.DEAD
+        const noEnvelopeBytes = retryKind === SEAT_DIED_STAGE && (() => { try { return fsReadFileSync(judgedPath).length === 0 } catch (readError) { return readError?.code === 'ENOENT' } })()
         const canRetryDeath = retryKind === SEAT_DIED_STAGE && SEAT_RETRY_KINDS.includes(retryKind) && provenDeath && noEnvelopeBytes
           && typeof info?.id === 'string' && !!info.id.trim()
           && !!transport && REASK_TRANSPORTS.has(retryTransportName) && typeof transport.assign === 'function' && typeof transport.wait === 'function'
-          && !graceIsSpent(info, returnPath, err) && err?.graceSpent !== true
+          && !graceIsSpent(info, returnPath, judgedErr) && judgedErr?.graceSpent !== true
         // The first death's evidence is journalled BEFORE the re-ask, so a
         // recovered retry still says what the corpse wasted (RV1-1). The row is
         // written once per death: when the re-ask hands back this same error
@@ -3375,25 +3463,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         let journalledDeath = null
         if (canRetryDeath) {
           try {
-            const context = err.waitContext || { returnPath, timeoutS, waitStartedAt }
-            io.log(recordRow(seatDiedRow(info, context.returnPath, err, context.timeoutS, context.waitStartedAt)))
-            journalledDeath = err
+            const context = judgedErr.waitContext || { returnPath, timeoutS, waitStartedAt }
+            io.log(recordRow(seatDiedRow(info, context.returnPath, judgedErr, context.timeoutS, context.waitStartedAt)))
+            journalledDeath = judgedErr
           } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
         }
         if (SEAT_RETRY_KINDS.includes(retryKind) && (retryKind !== SEAT_DIED_STAGE || (provenDeath && noEnvelopeBytes))) {
           let recovery = null
           try {
-            recovery = retryLostSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
+            recovery = retryLostSeat({ returnPath: judgedPath, info, transport, err: judgedErr, timeoutS, waitStartedAt })
           } catch (retryErr) {
             if (retryErr?.stage !== SEAT_DIED_STAGE) throw retryErr
             failure = retryErr
           }
           if (recovery?.envelope != null) {
-            noteCellFailure(info?.role, info?.id, cellFailureKind(err), recovery.error || err)
+            noteCellFailure(info?.role, info?.id, cellFailureKind(judgedErr), recovery.error || judgedErr)
             settled = recovery.envelope
             return recovery.envelope
           }
-          if (recovery) failure = recovery.error || err
+          if (recovery) failure = recovery.error || judgedErr
         }
         // The pane arm is byte-identical to what it has always written; only a
         // refusal carrying reclaim evidence (#815) widens the row, and it widens

@@ -86,6 +86,7 @@ exit is terminal: each records an `escalate:<where>` stage row and its
 | `rpc-session-busy` | The RPC session was already handling another turn. | Confirm the in-flight assignment's terminal state before retrying. |
 | `rpc-session-not-in-flight` | An RPC operation named no in-flight assignment. | Reconcile the assignment record with the transport's current state. |
 | `rpc-spawn-failed` | The RPC worker could not be spawned. | Read the spawn refusal and verify the configured binary. |
+| `rpc-stall` | A headless-rpc seat wrote no frame for at least the 900s stale threshold mid-turn, was aborted, and the bounded stall-resumes (2, same session, grace untouched) did not recover it. | Read the `rpc-stall` and `seat-stall-resume` journal rows for `silent_ms` and each attempt's outcome; inspect the seat's stream for the hung tool call before re-dispatching. |
 | `rpc-timeout` | The RPC transport exceeded its wait budget. | Inspect the stream and journal before deciding whether the worker is live. |
 | `rpc-unresolvable-reservation` | An RPC reservation could not be resolved. | Preserve the reservation evidence and reconcile its owner. |
 | `seat-died` | A seat's measured process death interrupted its turn. | Read the seat record and reclaim evidence before retrying. |

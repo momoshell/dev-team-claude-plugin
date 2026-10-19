@@ -331,6 +331,8 @@ export function ladderView({ roster, ladder, reference, cells } = {}) {
       measured_pending: measured.pending,
       cost_out_per_mtok: costKnown ? cost : null,
       cost_pending: costKnown ? null : `${key} has no finite cost_out_per_mtok in the roster model catalog — unpriced`,
+      rate_estimated: model?.rate_estimated === true,
+      rate_estimate_reason: model?.rate_estimate_reason ?? null,
       seated_at: seated.get(key) || [],
     }
   })
@@ -802,6 +804,7 @@ function costCeilingCheck(moves, roster, ladder) {
   if (!seatedMoves.length) return check('cost_ceiling', true, 'cost ceiling is not applicable to cell:null moves; no model was changed')
   const catalog = record(roster?.models) ? roster.models : {}
   const failures = []
+  const notes = []
   for (const move of seatedMoves) {
     const key = moveKey(move)
     const ceiling = ladder.cost_ceilings[move?.tier]
@@ -813,16 +816,19 @@ function costCeilingCheck(moves, roster, ladder) {
       failures.push(`expected cost_out_per_mtok at or below ${ceiling} for tiers.${move?.tier}.${move?.role}, found no model, at crew/model-ladder.json cost_ceilings.${move?.tier}`)
       continue
     }
-    const cost = catalog[key]?.cost_out_per_mtok
+    const model = catalog[key]
+    const cost = model?.cost_out_per_mtok
     if (!finite(cost)) {
       failures.push(`expected a finite cost_out_per_mtok for tiers.${move.tier}.${move.role}, found none (${key}), at crew/model-ladder.json cost_ceilings.${move.tier}`)
       continue
     }
+    if (model?.rate_estimated === true && model?.rate_estimate_reason !== 'borrowed-rate-upper-bound') { failures.push(`expected a measured cost_out_per_mtok at or below ${ceiling} for tiers.${move.tier}.${move.role}, found an estimated rate that may err low: ${cost} (${key}, ${model?.rate_estimate_reason ?? 'no estimate reason'}), at crew/model-ladder.json cost_ceilings.${move.tier}`); continue }
     if (cost > ceiling) failures.push(`expected cost_out_per_mtok at or below ${ceiling} for tiers.${move.tier}.${move.role}, found ${cost} (${key}), at crew/model-ladder.json cost_ceilings.${move.tier}`)
+    else if (model?.rate_estimated === true && model?.rate_estimate_reason === 'borrowed-rate-upper-bound') notes.push(`${key} rate is an estimated upper bound`)
   }
   return failures.length
     ? check('cost_ceiling', false, failures.join('; '))
-    : check('cost_ceiling', true, 'all moved seats stay at or below their ratified cost_out_per_mtok ceiling')
+    : check('cost_ceiling', true, `all moved seats stay at or below their ratified cost_out_per_mtok ceiling${notes.length ? `; ${notes.join('; ')}` : ''}`)
 }
 
 function cellLabel(cell) {

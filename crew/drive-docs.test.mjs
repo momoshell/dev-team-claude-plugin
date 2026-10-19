@@ -8,10 +8,11 @@ import { statSync } from 'node:fs'
 import { relative } from 'node:path'
 import assert from 'node:assert/strict'
 import {
-  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PLAN_CHECK_SEVERITIES, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, existsSync, join, mkdirSync, protectedHits, readFileSync, readdirSync, rmSync, scratchDir, spawnSync,
+  FINDING_DISPOSITIONS, FINDING_SEVERITIES, GATE_CUSTODIAN, MAX_QUESTIONS, PLAN_CHECK_SEVERITIES, PROTECTED_PATHS, REPO_ROOT, RESIDUAL_TYPES, applyPrescriptionLines, existsSync, join, mkdirSync, protectedHits, readFileSync, readdirSync, rmSync, scratchDir,
   carriedSilenceDefect, findingIdDefect, parseQuestions, patchTargets,
 } from './drive-fixtures.mjs'
 import { assertAnchorsPinned } from '../skills/qa-test-writing/anchor-pin.mjs'
+import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { bootCmd, composeRolePrompt, FLAG_VALUE_CONTRACT, KNOWN_FLAGS, BOOLEAN_FLAGS, BOOT_ONLY_FLAGS, compiledCharterBytes, charterBudgetRefusals, CHARTER_CEILINGS, CHARTER_SOURCE_BUDGET, CHARTER_SOURCE_TOTAL_BUDGET, renderSeatSkills, loadDeliveryMap } from './crew.mjs'
 
 // The boot writes each role's mapped plugin skills after the charter; that section's
@@ -689,65 +690,19 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   }
 })
 
-test('the codemod stages before it applies and fails loudly without ast-grep', () => {
-  const script = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/scripts/codemod.mjs')
-  const fake = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/test-fixtures/fake-ast-grep.mjs')
-  const log = join(scratchDir('b19-drive-'), 'invocations.log')
-  const stage = join(scratchDir('b19-stage-'), 'proposal.json')
-  const run = (args, env) => spawnSync(process.execPath, [script, ...args], {
-    cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, ...env },
-  })
-  const invocations = () => existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).length : 0
-  const refused = run(['apply'], { AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage })
-  assert.notEqual(refused.status, 0)
-  assert.match(`${refused.stdout || ''}${refused.stderr || ''}`, /--resolve/)
-  assert.equal(invocations(), 0)
-  const proposed = run([
-    'propose', '--pattern', 'driveProbe($A)', '--rewrite', 'driveProbed($A)', '--lang', 'js', 'crew/roles/planner.md',
-  ], {
-    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
-    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n',
-  })
-  assert.equal(proposed.status, 0)
-  assert.ok(invocations() >= 1)
-  const failedProbeStage = join(scratchDir('b19-probe-failure-'), 'proposal.json')
-  const failedProbe = run([
-    'propose', '--pattern', 'probeFailure($A)', '--rewrite', 'probeFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
-  ], {
-    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: failedProbeStage,
-    FAKE_AST_GREP_VERSION_EXIT: '7',
-  })
-  assert.equal(failedProbe.status, 3)
-  assert.equal(existsSync(failedProbeStage), false)
-  const failedProposeStage = join(scratchDir('b19-propose-failure-'), 'proposal.json')
-  const failedPropose = run([
-    'propose', '--pattern', 'runFailure($A)', '--rewrite', 'runFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
-  ], {
-    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: failedProposeStage,
-    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_RUN_EXIT: '7',
-  })
-  assert.equal(failedPropose.status, 3)
-  assert.equal(existsSync(failedProposeStage), false)
-  const applyLog = `${stage}.log`
-  const failedCheck = run(['apply', '--resolve', 'the check must still match'], {
-    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
-    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_RUN_EXIT: '7',
-  })
-  assert.equal(failedCheck.status, 3)
-  assert.equal(existsSync(applyLog), false)
-  const failedUpdate = run(['apply', '--resolve', 'the update is approved'], {
-    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
-    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_UPDATE_EXIT: '7',
-  })
-  assert.equal(failedUpdate.status, 3)
-  assert.equal(existsSync(applyLog), false)
-  const missing = run([
-    'propose', '--pattern', 'a($A)', '--rewrite', 'b($A)', '--lang', 'js', 'crew/roles/planner.md',
-  ], { AST_GREP_BIN: '/nonexistent', CODEMOD_STAGE: join(scratchDir('b19-missing-'), 'proposal.json') })
-  assert.equal(missing.status, 3)
-  const missingOutput = `${missing.stdout || ''}${missing.stderr || ''}`
-  assert.match(missingOutput, /ast-grep/)
-  assert.match(missingOutput, /install/i)
+// Mutation killed: name the removed skill in any tracked file outside docs/audits/, tasks or ADR-049 and this reddens; the ADR-049 control reddens if the search breaks.
+test('the removed codemod skill is named nowhere outside the ADR and audit archives', () => {
+  const needle = 'ast-grep' + '-codemod'
+  const adr = 'docs/adr/adr-049-builder-edit-assist' + '.md'
+  const skill = '.agents/skills/ast-grep' + '-codemod'
+  assert.ok(gitGrepHits({ needle, paths: [adr], cwd: REPO_ROOT }).count > 0)
+  assert.deepEqual(gitGrepHits({ needle, paths: ['.', ':(exclude)docs/audits/', ':(exclude).claude/dev-team/tasks/', ':(exclude)' + adr], cwd: REPO_ROOT }).lines, [])
+  for (const file of ['SKILL' + '.md', '.git' + 'ignore', 'scripts/codemod' + '.mjs', 'test-fixtures/fake-ast-grep' + '.mjs']) {
+    assert.equal(existsSync(join(REPO_ROOT, skill, file)), false)
+  }
+  const text = readFileSync(join(REPO_ROOT, adr), 'utf8')
+  assert.equal(text.includes('the operator removed the skill on 2026-10-19'), true)
+  assert.equal(text.includes('codemod.mjs:7' + '-9'), false)
 })
 
 test('implementation-file sections name existing files in both docs', () => {

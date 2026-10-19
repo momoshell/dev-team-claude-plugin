@@ -4357,6 +4357,31 @@ test('GR4', () => {
   assert.equal(proxy.changeOrigin, true)
 })
 
+// MUTATION VP1: flip originHost === host to !== and the dev page origin is no longer rewritten. MUTATION VP2: drop the originHost === host guard and a foreign origin is rewritten too.
+test('vite dev proxy rewrites same-origin requests and leaves foreign origins untouched', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/vite.config.mjs'), 'utf8')
+    .replace(/^import .*$/gm, '')
+    .replace(/^export default /m, 'module.exports = ')
+  const module = { exports: {} }
+  runInNewContext(source, { defineConfig: (config) => config, svelte: () => ({}), module, URL })
+  const proxy = module.exports.server.proxy['/api']
+  assert.equal(proxy.target, 'http://127.0.0.1:4488')
+  assert.equal(proxy.changeOrigin, true)
+  const run = (headers) => {
+    let handler = null
+    proxy.configure({ on: (event, fn) => { if (event === 'proxyReq') handler = fn } })
+    const proxyReq = { headers: {}, setHeader(k, v) { this.headers[k.toLowerCase()] = v } }
+    handler(proxyReq, { headers })
+    return proxyReq.headers
+  }
+  const own = run({ origin: 'http://localhost:5173', host: 'localhost:5173' })
+  assert.equal(own.origin, 'http://127.0.0.1:4488')
+  assert.equal(sameOrigin(own.origin, '127.0.0.1:4488'), true)
+  const foreign = run({ origin: 'http://evil.example', host: 'localhost:5173' })
+  assert.deepEqual(foreign, {})
+  assert.equal(sameOrigin('http://evil.example', '127.0.0.1:4488'), false)
+})
+
 // MUTATION LH1: disable IPv4 interface equality on the normalization return.
 test('LH1', () => {
   let calls = 0

@@ -61,19 +61,20 @@ An absence check MUST be demonstrated red by ADDING the thing it forbids, not me
 
 ### The absence-check shape (copy this)
 
-Call the shared helper `scripts/factory/absence.mjs` instead of hand-rolling `git grep`.
-
-The gate lives outside the repo tree, so import the helper by absolute path; the gate lives in the task dir, not the repo tree, and the repo root comes from `process.cwd()`:
+Copy this self-contained shape; it imports nothing from the checkout, so it runs in any repo:
 
 ```js
-    import { join } from 'node:path'
-    import { pathToFileURL } from 'node:url'
-
-    // the gate lives in the task dir, not the repo tree, so the import is by path
+    import { execFileSync } from 'node:child_process'
     const REPO = process.cwd()
-    const { absenceFailure } = await import(pathToFileURL(join(REPO, 'scripts/factory/absence.mjs')).href)
-    const failure = absenceFailure({ needle: NEEDLE, paths: ['crew/', 'scripts/'], cwd: REPO })
-    if (failure) return failure
+    let hits
+    try {
+      hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
+        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    } catch (err) {
+      if (err?.status !== 1) throw err
+      hits = String(err.stdout ?? '').trim()
+    }
+    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
 ```
 
 Wrong — the throw lands precisely when the criterion is met:
@@ -97,7 +98,7 @@ Right — exit 1 with empty stdout is the pass; every other failure still throws
     }
     if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
 
-The shared helper applies this catch-and-rethrow shape for you; pair it with the positive control below.
+This repo's `scripts/factory/absence.mjs` implements the same shape; pair either with the positive control below.
 
 Exit 1 does not prove the search looked where you meant. A pathspec naming a
 directory that does not exist also exits 1 with empty stdout **and empty

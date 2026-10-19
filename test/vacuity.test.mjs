@@ -211,8 +211,8 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-emit.test.mjs': 'f61a1ccdb34677289554b81acbff45da425c97d1225a20325c24754da97b06d3',
   'test/factory-make-brief.test.mjs': '5ab157f281cc7855bafc600e8d4dd3385eeaa9d3b384d0281973fa64bbe4472f',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': '31eaa92b3642c6f71529492de077896537035290c12aaf3902dcbcad0a8f83b6',
-  'test/visualizer-shape.test.mjs': '3c85e3ffb2128727d5fbdcbb6f87b46660b72fd021f66b73caff202346fa4fc0',
+  'test/visualizer-server.test.mjs': 'c03c5ab0511f045df1006a0a9736063dd6861c6a11b45b3535fb6b4d4fca2b49',
+  'test/visualizer-shape.test.mjs': 'e5401b33e72c5e998dd8407c13bc6acaf71e6467f8f59e03867294cb54d29bf1',
 })
 
 const SKELETONREAD_FILE = 'crew/pi/extensions/skeletonread.test.mjs'

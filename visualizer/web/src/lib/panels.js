@@ -406,7 +406,7 @@ export function cellHealthPanel(payload = {}, clock = {}) {
       key: row?.key ?? null,
       title: `${cellDisplayPart(row?.provider)}/${cellDisplayPart(row?.model_id)} · ${cellDisplayPart(row?.agent)} · ${cellDisplayPart(row?.effort)}`,
       model_label: `${cellDisplayPart(row?.provider)}/${cellDisplayPart(row?.model_id)}`,
-      price_label: priceParts.length ? priceParts.join(' · ') : null,
+      price_label: priceParts.length ? priceParts.join(' · ') + (row?.price?.rate_estimated === true ? ' (estimated)' : '') : null,
       price_pending: row?.price_pending ?? (row?.price == null ? 'not in the roster model catalog' : null),
       roles_label: roles.length ? roles.join(', ') : '—',
       tiers_label: tiers.length ? tiers.map((tier) => assuranceMeta(tier).label).join(', ') : '—',

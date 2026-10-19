@@ -78,8 +78,7 @@ tool vocabulary on its own, but it does justify a cheap fix and an instrument.
   (`TOOL_KINDS`, `crew/pi/extensions/acp-server.ts:94`). builderloop's eligibility checks `toolName` for `edit` or `write`
   (`crew/pi/extensions/builderloop.ts:810`).
 - **An operator codemod.** `.agents/skills/ast-grep-codemod` proposes a structural rewrite and applies it only with a
-  human `--resolve` reason. It shells out to the `ast-grep` binary
-  (`.agents/skills/ast-grep-codemod/scripts/codemod.mjs:7-9`).
+  human `--resolve` reason. It shells out to the `ast-grep` binary, but the operator removed the skill on 2026-10-19.
 
 ## Options
 

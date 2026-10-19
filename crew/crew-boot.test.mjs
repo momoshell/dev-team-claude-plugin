@@ -22,6 +22,7 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir, git } from '../test/helpers.mjs'
 import { loadMap, resolveSeatSkills, reachableSeatSkills, requiredSkills } from '../hooks/skill-gate.mjs'
 import { probeRepo, ProfileRefusal, checkoutBaseBranch } from '../scripts/factory/probe-repo.mjs'
+import { absenceFailure } from '../scripts/factory/absence.mjs'
 import { roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister } from './crew-test-helpers.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
@@ -3556,4 +3557,44 @@ test('b1215: runCmd opens with replaceEnded:true so a restart mints a fresh side
   }
   assert.ok(captured, 'expected runCmd to open a run')
   assert.equal(captured.replaceEnded, true)
+})
+
+test('gates copy-this block runs without the checkout helper and planner points at the shape', async () => {
+  // MUTATION: restore the checkout import in the copy-this block and the foreign-repo run fails.
+  const src = readFileSync(join(ROOT, 'skills/qa-test-writing/references/gates.md'), 'utf8')
+  const heading = src.indexOf('### The absence-check shape (copy this)')
+  assert.notEqual(heading, -1)
+  const fenceStart = src.indexOf('```js\n', heading)
+  assert.notEqual(fenceStart, -1)
+  const bodyStart = fenceStart + 6
+  const fenceEnd = src.indexOf('\n```', bodyStart)
+  assert.notEqual(fenceEnd, -1)
+  const lines = src.slice(bodyStart, fenceEnd).split('\n').map((l) => l.startsWith('    ') ? l.slice(4) : l)
+  const header = lines.filter((l) => /^import /.test(l)).join('\n')
+  const body = lines.filter((l) => !/^import /.test(l)).join('\n')
+  const program = header + "\nconst result = await (async (NEEDLE, PATHS) => {\n" + body + "\nreturn null\n})(process.env.FR1_NEEDLE, ['crew/'])\nprocess.stdout.write(JSON.stringify(result ?? null))\n"
+  const repo = scratchDir('gates-copy-this-')
+  try {
+    git(repo, 'init', '-q')
+    mkdirSync(join(repo, 'crew'), { recursive: true })
+    writeFileSync(join(repo, 'crew', 'keep.md'), 'control text\n')
+    git(repo, 'add', '-A')
+    assert.equal(existsSync(join(repo, 'scripts', 'factory')), false)
+    const needle = 'FR1-' + 'NEEDLE-absent'
+    const run = () => spawnSync(process.execPath, ['--input-type=module', '-e', program], { cwd: repo, encoding: 'utf8', env: { ...process.env, FR1_NEEDLE: needle } })
+    const first = run()
+    assert.equal(first.status, 0)
+    assert.equal(String(first.stdout).trim(), 'null')
+    writeFileSync(join(repo, 'crew', 'hit.md'), needle + '\n')
+    git(repo, 'add', '-A')
+    const second = run()
+    assert.equal(second.status, 0)
+    const out = JSON.parse(second.stdout)
+    assert.equal(typeof out, 'string')
+    assert.ok(out.includes(needle))
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+  }
+  assert.equal(absenceFailure({ needle: 'scripts/factory/' + 'absence.mjs', paths: ['crew/roles/planner.md'], cwd: ROOT }), null)
+  assert.equal(readFileSync(join(ROOT, 'crew/roles/planner.md')).length, 16848)
 })

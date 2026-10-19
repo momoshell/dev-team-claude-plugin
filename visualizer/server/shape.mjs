@@ -1271,6 +1271,8 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
         context: model.context ?? null,
         source: model.source ?? null,
         last_verified: model.last_verified ?? null,
+        rate_estimated: model.rate_estimated === true,
+        rate_estimate_reason: model.rate_estimate_reason ?? null,
       },
       price_pending: null,
     }

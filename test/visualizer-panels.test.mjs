@@ -3565,3 +3565,14 @@ test('VL8 partly measured teardown window is not clean and states runs measured'
  assert.equal(okPosture.tone, 'ok')
  assert.equal(okPosture.label, 'Factory is operating cleanly')
 })
+
+// MUTATION EL2: blank the ' (estimated)' suffix in price_label and the estimated row reads as measured.
+test('estimated cell prices label as estimated and chips render the flag', () => {
+ const est = cellHealthPanel({ cells: [{ key: 'k', provider: 'meta', model_id: 'm', agent: 'pi', effort: 'high', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 4, cost_out_per_mtok: 20, rate_estimated: true }, price_pending: null }] }).rows[0]
+ const meas = cellHealthPanel({ cells: [{ key: 'k2', provider: 'openai', model_id: 'm2', agent: 'pi', effort: 'high', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 }, price_pending: null }] }).rows[0]
+ assert.equal(est.price_label, 'in $4/Mtok \u00b7 out $20/Mtok (estimated)')
+ assert.doesNotMatch(meas.price_label, /estimated/)
+ const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+ const line = source.split('\n').find((l) => l.includes('chip.cost_out_per_mtok'))
+ assert.match(line, /chip\.rate_estimated \? ' \(estimated\)'/)
+})

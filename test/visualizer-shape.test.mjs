@@ -1160,3 +1160,25 @@ test('J1: the recovery copy exhibit stays unsettled with cited gone evidence', (
   assert.equal(run.runtime.heartbeat_state, 'overdue')
   assert.equal(run.reconciliation_command, 'node scripts/factory/closeout.mjs reconcile b660-restoreproof.recovery-copy --dry-run')
 })
+
+// MUTATION EL1: invert model.rate_estimated === true in priceFor and both price flags flip.
+test('estimated price flags survive shaping with reasons', () => {
+  const result = shapeCellHealth({
+    rows: [],
+    roster: {
+      tiers: [{ tier: 'build', seats: [
+        { role: 'planner', provider: 'meta', id: 'est-model', agent: 'pi', effort: 'high' },
+        { role: 'builder', provider: 'openai', id: 'meas-model', agent: 'pi', effort: 'high' },
+      ] }],
+      models: [
+        { key: 'meta/est-model', provider: 'meta', id: 'est-model', cost_in_per_mtok: 4, cost_out_per_mtok: 20, rate_estimated: true, rate_estimate_reason: 'borrowed-rate-unbounded' },
+        { key: 'openai/meas-model', provider: 'openai', id: 'meas-model', cost_in_per_mtok: 2, cost_out_per_mtok: 12 },
+      ],
+    },
+    since: start, until: null, label: 'test',
+  })
+  const est = result.cells.find((cell) => cell.model_id === 'est-model').price
+  const meas = result.cells.find((cell) => cell.model_id === 'meas-model').price
+  assert.deepEqual([est.rate_estimated, est.rate_estimate_reason], [true, 'borrowed-rate-unbounded'])
+  assert.deepEqual([meas.rate_estimated, meas.rate_estimate_reason], [false, null])
+})

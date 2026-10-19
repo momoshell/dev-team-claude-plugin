@@ -626,3 +626,25 @@ test('applyMoves preserves the source schema while repository and local previews
   assert.ok(local.tiers)
   assert.equal(Object.hasOwn(local, 'assurances'), false)
 })
+
+// MUTATION EC1: flip !== 'borrowed-rate-upper-bound' to === and the unbounded judge seat passes; MUTATION EC2: notes.push to failures.push fails the upper-bound seat; MUTATION EL3: invert chip rate_estimated === true flips both chip flags.
+test('estimated rates fail closed on ceilings and ride chips as flags', async () => {
+  const shippedText = readFileSync(join(ROOT, 'crew', 'roster.json'), 'utf8')
+  const shipped = JSON.parse(shippedText)
+  const judgeSeat = shipped.tiers.judge.planner
+  const mechSeat = shipped.tiers.mechanical.planner
+  const judge = await stageMoves({ rosterText: shippedText, rosterPath: 'crew/roster.json', moves: [{ tier: 'judge', role: 'planner', cell: { ...judgeSeat, effort: 'xhigh' } }], ladder: ratifiedLadder, readBreaker: () => null })
+  const judgeCheck = judge.checks.find((entry) => entry.check === 'cost_ceiling')
+  assert.equal(judgeCheck.ok, false)
+  assert.match(judgeCheck.message, /estimated/)
+  assert.match(judgeCheck.message, /borrowed-rate-unbounded/)
+  const mech = await stageMoves({ rosterText: shippedText, rosterPath: 'crew/roster.json', moves: [{ tier: 'mechanical', role: 'planner', cell: { ...mechSeat, effort: 'high' } }], ladder: ratifiedLadder, readBreaker: () => null })
+  const mechCheck = mech.checks.find((entry) => entry.check === 'cost_ceiling')
+  assert.equal(mechCheck.ok, true)
+  assert.match(mechCheck.message, /estimated upper bound/)
+  const view = ladderView({ roster: shipped, ladder: ratifiedLadder, reference: { path: null, present: false, scores: null }, cells: { rows: [], absent: null } })
+  const est = view.chips.find((chip) => chip.key === 'meta/muse-wonder-full-1.0-contributor')
+  const meas = view.chips.find((chip) => chip.key === 'anthropic/claude-opus-5-5')
+  assert.deepEqual([est.rate_estimated, est.rate_estimate_reason], [true, 'borrowed-rate-unbounded'])
+  assert.deepEqual([meas.rate_estimated, meas.rate_estimate_reason], [false, null])
+})

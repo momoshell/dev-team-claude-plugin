@@ -1856,7 +1856,7 @@ test('DR2 ordinary review brief says the full suite runs after review', () => {
   assert.equal(result.status, 'done')
   const brief = io.calls.writes[`${TD}/review-brief-1.md`]
   assert.equal(brief.includes('the suite result in'), false)
-  assert.ok(brief.includes('the full suite runs after review, so no suite result exists yet'))
+  assert.ok(brief.includes('the full suite runs after review, so no suite result exists for this cycle yet'))
 })
 
 test('non-continuation keeps the ordinary assignment and review brief write set byte-identical', () => {
@@ -1877,7 +1877,7 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
   assert.equal(io.calls.writes[`${TD}/review-brief-1.md`], [
     '# Review (round 1)', '',
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
-    `Run no test or gate command; read the gate proof at ${TD}/gate.mjs; the full suite runs after review, so no suite result exists yet.`,
+    `Run no test or gate command; read the gate proof at ${TD}/gate.mjs; the full suite runs after review, so no suite result exists for this cycle yet.`,
     'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
     'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
     'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',

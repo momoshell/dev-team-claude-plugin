@@ -30,7 +30,7 @@ files in the task directory.
   "role": "<your-role>",
   "status": "done" | "insufficient" | "blocked",
   "summary": "<3-5 lines: what you produced, headline outcome>",
-  "artifacts": ["<absolute path of every file you wrote for the crew>", ...],
+  "artifacts": ["<every task-dir file you wrote, absolute path>", ...],
   "details": { <role-specific fields per your charter> }
 }
 
@@ -79,8 +79,8 @@ shortest working diff — once the problem is understood. A deliberate ceiling
 - Your final chat message per assignment is the CREW-DONE line, preceded at
   most by a 3-5 line summary. The deliverable lives ONLY in files — never
   restate a document you wrote into chat.
-- `artifacts` lists every file you wrote, absolute paths. A file not listed
-  does not exist as far as the crew is concerned.
+- `artifacts` lists task-dir files, absolute paths, never the return file;
+  repo edits come from git. Unlisted files do not exist.
 - Task-dir writes go under the task directory named in your assignment.
   Repo writes are role-gated: only the builder edits repo files.
 - If a permission prompt or unexpected interactive stop appears, do not fight

@@ -117,6 +117,16 @@ test('escalationCause matches a seat failure on its stage, not on its prose', ()
   assert.deepEqual(escalationCause({ where: 'rpc-parse-error', why: 'rpc parse failed: malformed input' }), { cause: 'envelope-unusable', actor: 'driver' })
 })
 
+test('a spent provider ladder escalates as infrastructure, not budget', () => {
+  const annotated = (kind, status) => `headless budget-refused: seat lead produced no valid envelope at /x\n[provider ${kind} status ${status}: 3 of 3 retry attempts spent over 1980000ms]`
+  for (const [kind, status] of [['server_error', 'null'], ['rate_limit', '429'], ['stream-stall', 'null']]) {
+    assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: annotated(kind, status) }), { cause: 'infrastructure', actor: 'driver' }, `${kind} ${status}`)
+  }
+  assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: annotated('authentication_failed', '401') }), { cause: 'budget', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: annotated('provider-unclassified', '418') }), { cause: 'budget', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: 'headless budget-refused: seat lead produced no valid envelope at /x' }), { cause: 'budget', actor: 'driver' })
+})
+
 test('the plan round cap is bounded to its own sentence', () => {
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 7 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 12 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })

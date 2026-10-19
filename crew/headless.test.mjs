@@ -1931,6 +1931,12 @@ function withoutTerminalStatus(tail) {
     if (!line.trim()) return line
     let event
     try { event = JSON.parse(line) } catch { return line }
+    // No recorded kind means NEITHER signal: the synthetic frame's error now
+    // classifies too (crew/headless.mjs, parseStream), so it goes with the status.
+    if (event?.type === 'assistant' && event.message?.model === '<synthetic>') {
+      const { error: _error, ...withoutError } = event
+      return JSON.stringify(withoutError)
+    }
     if (event?.type !== 'result') return line
     const { api_error_status: _dropped, ...rest } = event
     return JSON.stringify(rest)
@@ -2013,6 +2019,12 @@ function writeBudgetRefusal(runDir) {
     if (!line.trim()) return line
     let event
     try { event = JSON.parse(line) } catch { return line }
+    // No recorded kind means NEITHER signal: the synthetic frame's error now
+    // classifies too (crew/headless.mjs, parseStream), so it goes with the status.
+    if (event?.type === 'assistant' && event.message?.model === '<synthetic>') {
+      const { error: _error, ...withoutError } = event
+      return JSON.stringify(withoutError)
+    }
     if (event?.type !== 'result') return line
     const { api_error_status: _status, ...withoutStatus } = event
     return JSON.stringify(withoutStatus)
@@ -2306,6 +2318,48 @@ test('a refusal with no recorded status reports no condition', () => {
   const stream = parseStream('/fixture/no-status.jsonl', () => refusedNoStatus, () => true)
   assert.equal(stream.budgetRefused, true)
   assert.equal(stream.providerFailure, null)
+})
+
+// Recorded 2026-10-19 ECONNREFUSED terminal frames, copied byte-for-byte from
+// /Users/momoshell/.crew/batch-2026-10-19-r851/econnrefused-terminal-frames.jsonl
+// (assistant frame carries error server_error; result frame carries api_error_status null).
+const ECONNREFUSED_ASSISTANT = '{"type":"assistant","message":{"diagnostics":null,"id":"ad17496e-edc2-47cb-9e8f-e47e07c4620b","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null,"fallback_credit":null},"content":[{"type":"text","text":"API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)"}],"context_management":null},"parent_tool_use_id":null,"session_id":"bc64fd9a-4439-4686-bbaa-a415c4033565","uuid":"9546b24a-3360-41b1-86fc-05a44de89aec","timestamp":"2026-10-19T21:48:14.370Z","error":"server_error","is_api_error_message":true}'
+const ECONNREFUSED_RESULT = '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"bc64fd9a-4439-4686-bbaa-a415c4033565","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":null,"result":"API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)","type":"result","duration_ms":220746,"uuid":"127baf68-fc85-433a-aae7-1e055d69adb1","queued_turn_count":0,"result_index":0}'
+const ECONNREFUSED_TAIL = `${ECONNREFUSED_ASSISTANT}\n${ECONNREFUSED_RESULT}\n`
+
+test('recorded ECONNREFUSED frames derive server_error with null status', () => {
+  const stream = parseStream('/fixture/econnrefused.jsonl', () => ECONNREFUSED_TAIL, () => true)
+  assert.deepEqual(stream.providerFailure, { kind: PROVIDER_FAILURE_KINDS.SERVER_ERROR, status: null })
+  assert.equal(stream.budgetRefused, true)
+  assert.equal(stream.terminalReason, 'api_error')
+})
+
+test('a recorded status wins over the synthetic error', () => {
+  const result = JSON.parse(ECONNREFUSED_RESULT)
+  result.api_error_status = 429
+  const stream = parseStream('/fixture/econnrefused-429.jsonl', () => `${ECONNREFUSED_ASSISTANT}\n${JSON.stringify(result)}\n`, () => true)
+  assert.deepEqual(stream.providerFailure, { kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429 })
+})
+
+test('a synthetic frame with no error, or an unmapped error, reports no condition', () => {
+  const noErr = JSON.parse(ECONNREFUSED_ASSISTANT)
+  delete noErr.error
+  const unmapped = JSON.parse(ECONNREFUSED_ASSISTANT)
+  unmapped.error = 'some_unmapped_error'
+  for (const frame of [noErr, unmapped]) {
+    const stream = parseStream('/fixture/econnrefused-no-kind.jsonl', () => `${JSON.stringify(frame)}\n${ECONNREFUSED_RESULT}\n`, () => true)
+    assert.equal(stream.providerFailure, null)
+    assert.equal(stream.budgetRefused, true)
+  }
+})
+
+test('the derived ECONNREFUSED server_error routes to the backoff ladder', () => {
+  const stream = parseStream('/fixture/econnrefused.jsonl', () => ECONNREFUSED_TAIL, () => true)
+  const decision = providerRetryDecision({ kind: stream.providerFailure.kind, status: stream.providerFailure.status, attempts: 0, waitedMs: 0, at: 0 })
+  assert.equal(decision.retry, true)
+  assert.equal(decision.action, 'backoff')
+  assert.equal(decision.wait_ms, 60000)
+  assert.equal(decision.waited_on, 'backoff-ladder')
 })
 
 // The mirror mutation: a status present WITHOUT the refusal conjunction is
@@ -2876,6 +2930,12 @@ test('#887 refuses a classified 401 immediately and leaves an unclassified refus
       if (!line.trim()) return line
       let event
       try { event = JSON.parse(line) } catch { return line }
+      // No recorded kind means NEITHER signal: the synthetic frame's error now
+      // classifies too (crew/headless.mjs, parseStream), so it goes with the status.
+      if (event?.type === 'assistant' && event.message?.model === '<synthetic>') {
+        const { error: _error, ...withoutError } = event
+        return JSON.stringify(withoutError)
+      }
       if (event?.type !== 'result') return line
       const { api_error_status: _status, ...withoutStatus } = event
       return JSON.stringify(withoutStatus)

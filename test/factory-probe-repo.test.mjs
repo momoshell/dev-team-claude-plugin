@@ -1476,6 +1476,8 @@ test('IP3', () => {
     '',
   ].join('\n'))
   initGit(root, { commit: true })
+  // The guard that keeps background maintenance from racing the snapshot below.
+  assert.equal(git(root, 'config', '--local', '--get', 'maintenance.auto').trim(), 'false')
   const before = snapshot(root)
   const entry = idiomEntry(root, 'dependency_injection')
   assert.deepEqual(snapshot(root), before)

@@ -1174,6 +1174,7 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null, timeou
     fail = cargoMatches.reduce((total, match) => total + Number(match[2]), 0)
   }
 
+  if (pass + fail === 0) return unknownBaseline(selectedLane, 'suite-empty', basis, reap)
   if (fail > 0) return { lane: selectedLane, pass, fail, status: 'red', reason: null, laneBasis: basis, reap }
   if (result.status !== 0) return { lane: selectedLane, pass, fail, status: 'unknown', reason: 'nonzero-exit', laneBasis: basis, reap }
   return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis, reap }

@@ -4250,6 +4250,10 @@ function recordEditAssist({ editAssist, crewPath, crewDir, lane, transport, deps
       else source = 'rotation'
     }
   }
+  else if (crew && crew?.members?.builder?.agent !== 'pi') {
+    value = null
+    reason = 'not-pi'
+  }
   if (crew) {
     try { d.writeFileSync(crewPath, JSON.stringify({ ...crew, edit_assist: value, edit_assist_source: value === null ? null : source }, null, 2) + '\n') } catch { /* the journal carries the same fact */ }
   }

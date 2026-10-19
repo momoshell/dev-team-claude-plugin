@@ -3753,7 +3753,7 @@ test('BD5', () => {
 
 // MUTATION: inline all proposal rationale; BD6 pins omission while retaining a parseable block.
 test('BD6', () => {
-  const root = fixture('bd6')
+  const root = fixture('bd6', { scripts: FAST_FIXTURE_TEST })
   mkdirSync(join(root, 'pack'))
   const { brief } = compile(root, {}, ['--pack', join(root, 'pack'), '--profile', join(root, 'missing-profile')])
   assert.doesNotMatch(section(brief, '## Proposed tier'), /^because:/m)
@@ -3773,7 +3773,7 @@ test('BD6', () => {
 
 // MUTATION: suppress the proposal sidecar write; BD7 compares exact bytes.
 test('BD7', () => {
-  const root = fixture('bd7')
+  const root = fixture('bd7', { scripts: FAST_FIXTURE_TEST })
   mkdirSync(join(root, 'pack'))
   const pack = join(root, 'pack')
   const missing = join(root, 'missing-profile')
@@ -4129,6 +4129,24 @@ test('gatherBaseline names output past its buffer as output-overflow, not timeou
   assert.equal(baseline.reason, 'output-overflow')
   assert.ok(['already-dead', 'proven', 'failed', 'unproven'].includes(baseline.reap.outcome))
   assert.equal(baseline.reap.reason, 'probe-dead')
+})
+
+// MUTATION ZT1: change gatherBaseline's suite-empty guard to pass + fail === -1.
+test('ZT1 gatherBaseline reads a node 0/0 suite as unknown suite-empty, never green', () => {
+  const baseline = gatherBaseline({ checkout: ROOT, lane: 'printf "pass 0\\nfail 0\\n"' })
+  assert.equal(baseline.status, 'unknown')
+  assert.equal(baseline.reason, 'suite-empty')
+  assert.equal(baseline.pass, null)
+  assert.equal(baseline.fail, null)
+})
+
+// MUTATION ZT2: change gatherBaseline's suite-empty guard to pass + fail === -1.
+test('ZT2 gatherBaseline reads a cargo 0/0 suite as unknown suite-empty, never green', () => {
+  const baseline = gatherBaseline({ checkout: ROOT, lane: 'printf "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\\n"' })
+  assert.equal(baseline.status, 'unknown')
+  assert.equal(baseline.reason, 'suite-empty')
+  assert.equal(baseline.pass, null)
+  assert.equal(baseline.fail, null)
 })
 
 // MUTATION FB2: replacing cargoMatches with an empty array must lose all Cargo counts.

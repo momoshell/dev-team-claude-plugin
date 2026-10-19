@@ -48,7 +48,7 @@ that it could not put one there, and spent the run's escalation saying so.
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
   binds them once, from the accepted plan envelope (`crew/drive.mjs:9224`,
-  `crew/drive.mjs:9346`), and the planner is never assigned again. For a
+  `crew/drive.mjs:9359`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that

@@ -30,6 +30,8 @@ const MAX_METADATA_BYTES = 512
 const MAX_METADATA_TESTS = 64
 const TAIL_BYTES = 4 * 1024
 const DEFAULT_DEADLINE_MS = 30_000
+const PER_FILE_DEADLINE_MS = 5_000
+const MAX_DEADLINE_MS = 600_000
 const DEFAULT_GRACE_MS = 250
 const DEFAULT_POLL_MS = 25
 const DEFAULT_POLL_MAX = 400
@@ -726,16 +728,27 @@ function laneResultPart(result, args) {
   return { type: 'text', text }
 }
 
+function scaledDeadlineMs(testCount) {
+  return Math.max(DEFAULT_DEADLINE_MS, PER_FILE_DEADLINE_MS * testCount)
+}
+
+function unmeasuredLanePart(args, deadlineMs) {
+  const tests = Array.isArray(args) ? args.slice(1).map((value) => String(value)) : []
+  const seconds = Math.floor(deadlineMs / 1000)
+  return { type: 'text', text: `Builder fenced Node lane UNMEASURED: node --test ${tests.join(' ')} (timed out after ${seconds} s; not a failure)` }
+}
+
 function failureReason(error) {
   const reason = error?.reason || error?.builderLoopReason
   return FAILURE_REASONS.has(reason) ? reason : 'crash'
 }
 
-function preserveAfterFailure(error, recordFailure, metadata) {
+function preserveAfterFailure(error, recordFailure, metadata, { content, args, deadlineMs } = {}) {
   const reason = failureReason(error)
   metadata.reason = reason
   try { recordFailure(metadata) } catch { /* instrumentation is best effort */ }
-  return undefined
+  if (reason !== 'timeout') return undefined
+  return { content: [...content, unmeasuredLanePart(args, deadlineMs)] }
 }
 
 function metadataFor({ role, target, tests }) {
@@ -790,6 +803,7 @@ export function createBuilderLoop(value = {}) {
   })
 
   let last = null
+  let nextDeadlineMs = null
   const corpus = []
   let corpusBytes = 0
   let currentId = null
@@ -904,12 +918,19 @@ export function createBuilderLoop(value = {}) {
     if (!eligible(event, current, cwd)) return undefined
     const command = fencedNodeTestCommand(current)
     const target = targetRelative(cwd, event?.input?.path)
+    const explicitDeadlineMs = runnerDeps?.deadlineMs ?? runnerDeps?.timeoutMs
+    const deadlineMs = explicitDeadlineMs !== undefined
+      ? positiveNumber(explicitDeadlineMs, DEFAULT_DEADLINE_MS)
+      : (nextDeadlineMs ?? scaledDeadlineMs(command.args.length - 1))
     const metadata = metadataFor({ role, target: target || '', tests: command.args.slice(1) })
+    metadata.deadline_ms = deadlineMs
     try {
-      const result = await runTests(command, { cwd, signal: ctx?.signal, deps: runnerDeps })
+      const result = await runTests(command, { cwd, signal: ctx?.signal, deps: runnerDeps, deadlineMs })
+      nextDeadlineMs = null
       return { content: [...event.content, laneResultPart(result, command.args)] }
     } catch (error) {
-      return preserveAfterFailure(error, recordFailure, metadata)
+      if (failureReason(error) === 'timeout') nextDeadlineMs = Math.min(MAX_DEADLINE_MS, deadlineMs * 2)
+      return preserveAfterFailure(error, recordFailure, metadata, { content: event.content, args: command.args, deadlineMs })
     }
   }
 

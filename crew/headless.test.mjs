@@ -5596,6 +5596,29 @@ test('seat skills leak detector reads a recorded claude init frame', () => {
   assert.equal(rows[0].transport, 'headless-json')
 })
 
+test('SI6 seat skills leak detector accepts its recorded role-scoped grant', () => {
+  // MUTATION: rename the allowed crew-skills-<role>: prefix.
+  const text = readFileSync(new URL('../tasks/headless-worker/captures/i-granted-seat-init.jsonl', import.meta.url), 'utf8')
+  const rows = []
+  const row = journalSeatSkillsLeak({ text, grants: { skills: ['/repo/skills/code-less/SKILL.md'] }, role: 'reviewer', dispatch_id: 'd1', at: 7, log: (entry) => rows.push(entry) })
+  assert.equal(row, null)
+  assert.deepEqual(rows, [])
+})
+
+test('SI7 seat skills leak detector rejects other plugin and role prefixes', () => {
+  // MUTATION: exempt colon-carrying names in the extras filter.
+  const text = readFileSync(new URL('../tasks/headless-worker/captures/i-granted-seat-init.jsonl', import.meta.url), 'utf8')
+  const frame = JSON.parse(text)
+  frame.skills.push('dev-team:code-less')
+  const grants = { skills: ['/repo/skills/code-less/SKILL.md'] }
+  const rows = []
+  const row = journalSeatSkillsLeak({ text: JSON.stringify(frame) + '\n', grants, role: 'reviewer', dispatch_id: 'd1', at: 7, log: (entry) => rows.push(entry) })
+  assert.deepEqual(row?.extra_skills, ['dev-team:code-less'])
+  const otherRole = journalSeatSkillsLeak({ text, grants, role: 'builder', dispatch_id: 'd2', at: 8, log: (entry) => rows.push(entry) })
+  assert.deepEqual(otherRole?.extra_skills, ['crew-skills-reviewer:code-less'])
+  assert.deepEqual(rows, [row, otherRole])
+})
+
 test('headless-json journals a seat skills leak once from a granted seat init frame', () => {
   // MUTATION: remove the journalSkillsLeak(run) calls in recordOutcome/recordCeilingOutcome and a completed granted seat emits no leak row.
   const f = b416JsonFixture({ grants: { skills: ['/repo/skills/alpha/SKILL.md'] } })

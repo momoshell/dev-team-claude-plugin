@@ -1131,7 +1131,7 @@ test('BG1', () => {
     assert.equal(command.includes('/repo/crew/pi/extensions/reminders.ts'), false)
     if (role === 'reviewer') {
       assert.equal(command.split('--skill "/repo/skills/code-less/SKILL.md"').length - 1, 1)
-      assert.equal(command.includes('--no-skills'), false)
+      assert.equal(command.includes('--no-skills'), true)
     } else {
       assert.equal(command.includes('--skill "'), false)
       assert.equal(command.includes('--no-skills'), true)
@@ -1198,7 +1198,7 @@ test('BG2', () => {
     if (role === 'reviewer') {
       assert.equal(command.args.filter((value) => value === '--skill').length, 1)
       assert.equal(command.args.filter((value) => value === '/repo/skills/code-less/SKILL.md').length, 1)
-      assert.equal(command.args.includes('--no-skills'), false)
+      assert.equal(command.args.includes('--no-skills'), true)
     } else {
       assert.equal(command.args.filter((value) => value === '--skill').length, 0)
       assert.equal(command.args.filter((value) => value === '/repo/skills/code-less/SKILL.md').length, 0)
@@ -2996,7 +2996,7 @@ test('register-backed grants flow into one emitted pi command', () => {
     assert.match(command, /--tools "[^"]*,task"/)
     assert.ok(command.includes(`-e "${join(root, 'crew/pi/extensions/builderloop.ts')}"`))
     assert.ok(command.includes(`--skill "${join(root, 'crew/pi/skills/scout.md')}"`))
-    assert.doesNotMatch(command, /--no-skills/)
+    assert.match(command, /--no-skills/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

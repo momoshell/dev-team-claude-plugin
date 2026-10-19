@@ -253,6 +253,16 @@ export function rpcDeliveryCorpusReport(lanePaths, deps = {}) {
   }
 }
 
+export const PERSISTED_ENV_KEYS = Object.freeze(['DEVTEAM_WORKER', 'CREW_ROLE', 'CREW_TASK_DIR', 'CREW_FFF', 'PI_CODING_AGENT_DIR', 'CREW_ADVISOR', 'CREW_EDIT_ASSIST', 'CREW_PI_AGENTS'])
+export const PERSISTED_ENV_WITHHELD_REASON = 'inherited-process-env'
+export function persistedLaunchRecord(command) {
+  const sourceEnv = command?.env && typeof command.env === 'object' && !Array.isArray(command.env) ? command.env : {}
+  const envKeys = Object.keys(sourceEnv).sort()
+  const env = Object.fromEntries(PERSISTED_ENV_KEYS.filter((key) => Object.hasOwn(sourceEnv, key)).map((key) => [key, sourceEnv[key]]))
+  const envWithheld = envKeys.filter((key) => !PERSISTED_ENV_KEYS.includes(key)).map((key) => ({ key, reason: PERSISTED_ENV_WITHHELD_REASON }))
+  return { ...command, env, envKeys, envWithheld }
+}
+
 // The optional ceiling steer's own FIFO write bound (#1542). Advice never borrows the
 // prompt's delivery window: a full FIFO costs the turn two retries, not 30 seconds.
 // Declared here, not beside FIFO_RETRY_MS, so the lines pinned above it do not move.
@@ -1357,7 +1367,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (!reservation.ok) throw staged(reservation.reason === 'unresolvable' ? 'rpc-unresolvable-reservation' : 'rpc-session-busy', `rpc seat ${role} is busy`, role)
     const handle = reservation.handle
     try {
-      saveJson(cmdPath, command)
+      saveJson(cmdPath, persistedLaunchRecord(command))
       // cmd.json keeps only the latest launch; keep one append-only history
       // line per launch beside it. Env VALUES never land here (the launch env
       // carries tokens): sorted key names only. Instrumentation only — a

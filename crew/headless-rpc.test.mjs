@@ -9,6 +9,7 @@ import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
   briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, TRANSPORT_SETTLEMENT, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
   rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  persistedLaunchRecord, PERSISTED_ENV_KEYS, PERSISTED_ENV_WITHHELD_REASON,
 } from './headless-rpc.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { attachAdvisor } from './pi/extensions/advisor.ts'
@@ -107,6 +108,52 @@ test('EA7 edit assist reaches only the builder RPC command environment', () => {
       const command = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', role, 'cmd.json'), 'utf8'))
       assert.equal(command.env.CREW_EDIT_ASSIST, expected)
     } finally { f.cleanup(); rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+
+test('persisted launch record keeps only allowlisted env values', () => {
+  const input = {
+    bin: 'pi',
+    args: ['--mode', 'rpc'],
+    env: { Z_SECRET: 'z-value', CREW_ROLE: 'builder', DEVTEAM_WORKER: '1', A_SECRET: 'a-value', CREW_FFF: '0' },
+  }
+  const record = persistedLaunchRecord(input)
+  assert.deepEqual(record.env, { DEVTEAM_WORKER: '1', CREW_ROLE: 'builder', CREW_FFF: '0' })
+  assert.deepEqual(record.envKeys, ['A_SECRET', 'CREW_FFF', 'CREW_ROLE', 'DEVTEAM_WORKER', 'Z_SECRET'])
+  assert.deepEqual(record.envWithheld, [{ key: 'A_SECRET', reason: 'inherited-process-env' }, { key: 'Z_SECRET', reason: 'inherited-process-env' }])
+  assert.deepEqual(record.bin, 'pi')
+  assert.deepEqual(record.args, ['--mode', 'rpc'])
+  assert.deepEqual(input.env, { Z_SECRET: 'z-value', CREW_ROLE: 'builder', DEVTEAM_WORKER: '1', A_SECRET: 'a-value', CREW_FFF: '0' })
+  assert.equal(Object.isFrozen(PERSISTED_ENV_KEYS), true)
+  assert.equal(PERSISTED_ENV_WITHHELD_REASON, 'inherited-process-env')
+})
+
+test('persisted cmd.json withholds canary env value while spawn keeps full env', () => {
+  const canaryKey = 'CREW_TEST_PERSISTED_ENV_CANARY'
+  const canaryValue = 'persisted-env-canary-value-9f2c-never-persist'
+  const prior = process.env[canaryKey]
+  process.env[canaryKey] = canaryValue
+  let captured = null
+  const f = fixture({ spawn: (bin, args, options) => { captured = options; return { pid: 701, unref() {} } } })
+  try {
+    const briefFile = join(f.dir, 'builder.md')
+    writeFileSync(briefFile, 'brief')
+    f.io.assign({ id: 'd1', role: 'builder', briefFile })
+    const raw = readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8')
+    const command = JSON.parse(raw)
+    assert.equal(raw.includes(canaryValue), false)
+    assert.equal(command.env.CREW_ROLE, 'builder')
+    assert.equal(command.env.DEVTEAM_WORKER, '1')
+    assert.equal(command.env.CREW_TASK_DIR, f.paths.taskDir)
+    assert.equal(command.env[canaryKey], undefined)
+    assert.deepEqual(command.envWithheld.filter((entry) => entry.key === canaryKey), [{ key: canaryKey, reason: 'inherited-process-env' }])
+    assert.deepEqual(command.envKeys, [...command.envKeys].sort())
+    assert.equal(captured.env[canaryKey], canaryValue)
+    assert.equal(captured.env.CREW_ROLE, 'builder')
+    assert.equal(captured.env.CREW_TASK_DIR, f.paths.taskDir)
+  } finally {
+    if (prior === undefined) { delete process.env[canaryKey] } else { process.env[canaryKey] = prior }
+    f.cleanup()
   }
 })
 
@@ -4455,7 +4502,7 @@ test('CH1 two launches append two ordered cmd-history lines beside latest cmd.js
     assert.equal(lines.length, 2)
     assert.deepEqual(lines.map((line) => line.assignment_id), [first.id, second.id])
     const cmd = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
-    assert.deepEqual(cmd, rpcCommand(f.specs.at(-1)))
+    assert.deepEqual(cmd, persistedLaunchRecord(rpcCommand(f.specs.at(-1))))
     void second
   } finally { f.cleanup() }
 })

@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL, EDIT_ASSIST_EXCLUDED, EDIT_ASSIST_DEFINITION,
+  openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SESSIONS_READ_REASONS, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL, EDIT_ASSIST_EXCLUDED, EDIT_ASSIST_DEFINITION,
 } from '../scripts/factory/ledger.mjs'
 import { SKILL_LOAD_ABSENT_REASONS as LEDGER_SKILL_LOAD_ABSENT_REASONS, SKILL_LOADS_DEFINITION } from '../scripts/factory/ledger.mjs'
 import { SKILL_LOAD_ABSENT_REASONS as CREW_SKILL_LOAD_ABSENT_REASONS } from '../crew/headless.mjs'
@@ -3231,4 +3231,24 @@ test('skillLoadWindow replayJsonl restores a measured window with its delivery s
     assert.equal(replayedRow.granted_skills_json, sourceRow.granted_skills_json)
     assert.equal(replayedRow.seat_skills_json, sourceRow.seat_skills_json)
   } finally { source.close(); target.close() }
+})
+
+// Mutation killed: sessions_read_reason stays null in the listSessions catch; a throwing read then prints 0 at exit 0.
+test('closed-handle listSessions records sessions-read-failed and healthy reads stay null', () => {
+  assert.deepEqual([...SESSIONS_READ_REASONS], ['sessions-read-failed'])
+  assert.ok(Object.isFrozen(SESSIONS_READ_REASONS))
+  const dir = scratchDir('sessions-read-reason-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: 'sessions-read-closed', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const rows = ledger.listSessions()
+  assert.deepEqual(rows, [])
+  assert.equal(ledger.stats().sessions_read_reason, 'sessions-read-failed')
+  const healthy = openTestLedger()
+  try {
+    healthy.startSession({ adw_id: 'sessions-read-healthy', repo_slug: 'r', task_slug: 't' })
+    assert.equal(healthy.listSessions().length, 1)
+    assert.equal(healthy.stats().sessions_read_reason, null)
+  } finally { healthy.close() }
 })

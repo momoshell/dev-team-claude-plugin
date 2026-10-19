@@ -1125,3 +1125,20 @@ test('VL3 healthy doctor exits 0 with quick_check ok', { skip: SKIP }, () => {
   assert.equal(payload.degraded, false)
   assert.deepEqual((Array.isArray(payload.quick_check) ? payload.quick_check : []).map(String), ['ok'])
 })
+
+// Mutation killed: sessions verb without the sessions_read_reason refusal; a throwing read prints empty sessions at exit 0.
+test('sessions CLI refuses a throwing sessions read as sessions-read-failed', () => {
+  const dir = scratchDir('sessions-read-failed-cli-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: 'sessions-read-cli', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const raw = new DatabaseSync(dbPath)
+  raw.exec("ALTER TABLE sessions ADD COLUMN gate_bad TEXT GENERATED ALWAYS AS (json_extract(adw_id, '$.x')) VIRTUAL")
+  raw.close()
+  const res = spawnSync(process.execPath, [SCRIPT, 'sessions'], { encoding: 'utf8', env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath } })
+  assert.equal(res.status, 2)
+  assert.equal(res.stdout, '')
+  assert.match(String(res.stderr), /sessions-read-failed/)
+})

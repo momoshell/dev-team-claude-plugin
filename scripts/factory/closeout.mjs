@@ -33,7 +33,7 @@ import { promptDocumentHits, promptSurfacePaths } from '../../crew/protected-pat
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedgerDbPath, ingestJournal as defaultIngestJournal, openLedger as defaultOpenLedger } from './ledger.mjs'
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
-import { checkoutBaseBranch, checkoutTestCommand, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
+import { checkoutBaseBranch, checkoutSuiteTimeout, checkoutTestCommand, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
 import { failingTestFiles } from '../../crew/lane-red.mjs'
 
@@ -101,6 +101,7 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
   SUITE_RED: 'suite-red',
   SUITE_UNREADABLE: 'suite-unreadable',
   SUITE_EMPTY: 'suite-empty',
+  SUITE_TIMEOUT: 'suite-timeout',
   ANCHOR_ROT: 'anchor-rot',
   ANCHOR_AMBIGUOUS: 'anchor-ambiguous',
   ISSUE_CLOSE_FAILED: 'issue-close-failed',
@@ -192,7 +193,7 @@ export function normalDeps(deps = {}) {
     // The suite's TAP output passed Node's 1 MiB default on 2026-09-18 (1,047,788 bytes at
     // 5,618 tests), and a child that overruns it is killed with ENOBUFS — which merge-check
     // read as a RED SUITE. A cap this measurement can outgrow is a cap that lies about it.
-    spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER })),
+    spawn: deps.spawn || ((options) => spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8', maxBuffer: SPAWN_MAX_BUFFER, timeout: options.timeout })),
     worktreeSetup: deps.worktreeSetup || ((options) => checkoutWorktreeSetup({ ...options, factoryRoot: deps.factoryRoot })),
     newest: deps.newest || newestMtime,
     now: deps.now || (() => Date.now()),
@@ -207,6 +208,7 @@ export function normalDeps(deps = {}) {
     factoryRoot: deps.factoryRoot,
     baseBranch: deps.baseBranch || (({ checkout }) => checkoutBaseBranch({ checkout, factoryRoot: deps.factoryRoot })),
     testCommand: deps.testCommand || (({ checkout }) => checkoutTestCommand({ checkout, factoryRoot: deps.factoryRoot })),
+    suiteTimeout: deps.suiteTimeout || (({ checkout }) => checkoutSuiteTimeout({ checkout, factoryRoot: deps.factoryRoot })),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
   d.promptMeasurePath = deps.promptMeasurePath || defaultPromptMeasurePath(d)
@@ -946,7 +948,7 @@ function prView({ lane, checkout, deps, step = 'pr-open' }) {
   const d = normalDeps(deps)
   const result = runCommand({
     file: 'gh',
-    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,headRefOid,body,baseRefName'],
+    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,headRefOid,body,baseRefName,mergeCommit'],
     cwd: checkout,
   }, d)
   if (!commandOk(result)) refuse(`cannot read PR for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.PR_UNREADABLE, step)
@@ -987,13 +989,37 @@ function mergeOne({ lane, scratch, deps }) {
   return { lane, merged: true }
 }
 
-function suiteCommand({ cwd, env = colourNeutralEnv(), command = null } = {}) {
-  if (command) return { file: '/bin/sh', args: ['-c', command], cwd, env }
+export function parseVitestSuiteCounts(text) {
+  let suite = null
+  for (const line of String(text || '').split('\n')) {
+    const match = /^\s*Tests\s+(.+?)\s*$/.exec(line)
+    if (!match) continue
+    const totalMatch = /^(.*?)\s*\((\d+)\)$/.exec(match[1])
+    const segments = (totalMatch ? totalMatch[1] : match[1]).split('|').map((part) => part.trim())
+    const counts = { pass: 0, fail: 0, skipped: 0 }
+    let measured = 0
+    let valid = segments.length > 0
+    for (const segment of segments) {
+      const part = /^(\d+)\s+(passed|failed|skipped|todo)$/.exec(segment)
+      if (!part) { valid = false; break }
+      measured += Number(part[1])
+      if (part[2] === 'passed') counts.pass += Number(part[1])
+      else if (part[2] === 'failed') counts.fail += Number(part[1])
+      else counts.skipped += Number(part[1])
+    }
+    suite = valid && (!totalMatch || Number(totalMatch[2]) === measured) ? counts : null
+  }
+  return suite
+}
+
+function suiteCommand({ cwd, env = colourNeutralEnv(), command = null, timeout = undefined } = {}) {
+  if (command) return { file: '/bin/sh', args: ['-c', command], cwd, env, timeout }
   return {
     file: 'node',
     args: ['--test', '--test-reporter=tap', '--test-timeout=30000', '**/*.test.mjs'],
     cwd,
     env,
+    timeout,
   }
 }
 
@@ -1001,8 +1027,16 @@ function runSuite({ cwd, checkout = cwd, deps, env, reason = CLOSEOUT_REFUSALS.S
   const d = normalDeps(deps)
   const resolved = d.testCommand({ checkout })
   const command = typeof resolved?.command === 'string' && resolved.command.trim() ? resolved.command.trim() : null
-  const result = runCommand(suiteCommand({ cwd, env, command }), d)
-  const suite = parseSuiteCounts(stripAnsi(textOf(result?.stdout)))
+  const timeoutResolution = d.suiteTimeout({ checkout })
+  const timeoutSeconds = timeoutResolution?.seconds
+  const timeoutBasis = typeof timeoutResolution?.basis === 'string' && timeoutResolution.basis.trim() ? timeoutResolution.basis.trim() : 'unknown timeout basis'
+  const timeoutMs = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? Math.round(timeoutSeconds * 1000) : undefined
+  const result = runCommand(suiteCommand({ cwd, env, command, timeout: timeoutMs }), d)
+  if (result?.error?.code === 'ETIMEDOUT') {
+    refuse(`suite timed out in ${cwd} after ${timeoutSeconds} s (${timeoutBasis})`, CLOSEOUT_REFUSALS.SUITE_TIMEOUT, step)
+  }
+  const stripped = stripAnsi(textOf(result?.stdout))
+  const suite = parseSuiteCounts(stripped) ?? parseVitestSuiteCounts(stripped)
   // A run whose OUTPUT could not be read is unmeasured, and saying "the suite is red" about
   // it is a claim nobody made: ENOBUFS killed the child mid-stream, so `fail` is unknown.
   if (!suite) {
@@ -1417,12 +1451,15 @@ function worktreeHead({ lane, laneDir, d, step }) {
 }
 
 function provenBy({ oid, pr, branch, root, fetchFailure, d }) {
-  // A failed fetch leaves the tracking ref unverified (it may predate a force-push), so only the PR head can prove.
   if (fetchFailure === null) {
     const ancestor = runCommand({ file: 'git', args: ['merge-base', '--is-ancestor', oid, `refs/remotes/origin/${branch}`], cwd: root }, d)
     if (commandOk(ancestor)) return 'ancestor'
+    const mergeCommitOid = typeof pr.mergeCommit?.oid === 'string' ? pr.mergeCommit.oid : null
+    if (pr.state === MERGED_STATE && pr.headRefOid && pr.headRefOid === oid && pr.baseRefName === branch && mergeCommitOid !== null) {
+      const mergeAncestor = runCommand({ file: 'git', args: ['merge-base', '--is-ancestor', mergeCommitOid, `refs/remotes/origin/${branch}`], cwd: root }, d)
+      if (commandOk(mergeAncestor)) return 'head-ref-oid'
+    }
   }
-  if (pr.headRefOid && pr.headRefOid === oid && pr.baseRefName === branch) return 'head-ref-oid'
   return null
 }
 

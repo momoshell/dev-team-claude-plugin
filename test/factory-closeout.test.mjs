@@ -87,7 +87,7 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, testCommand = undefined, realCopy = false, copyError = null, filterProbe = null, existsSyncOverride = undefined } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, testCommand = undefined, suiteTimeout = undefined, realCopy = false, copyError = null, filterProbe = null, existsSyncOverride = undefined } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   const HARNESS_DEFAULTS = [
@@ -103,6 +103,7 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     factoryRoot: scratch('closeout-factory-root-'),
     ...(baseBranch ? { baseBranch } : {}),
     ...(testCommand ? { testCommand } : {}),
+    ...(suiteTimeout ? { suiteTimeout } : {}),
     existsSync: existsSyncOverride || ((p) => {
       if (typeof p === 'string' && /\/dt-[^/]+$/.test(p)) return true
       return existsSync(p)
@@ -1934,7 +1935,7 @@ test('H1 reap preserves its existing ordered step contract', () => {
   assert.deepEqual(result.report.closed, [1031])
   assert.equal(spawned(calls, 'issue close').length, 1)
   // Mutation killed: dropping --json while retaining the field list breaks the PR view argv.
-  assert.deepEqual(spawned(calls, 'gh pr view')[0].args, ['pr', 'view', 'ordinary-lane', '--json', 'number,state,headRefName,headRefOid,body,baseRefName'])
+  assert.deepEqual(spawned(calls, 'gh pr view')[0].args, ['pr', 'view', 'ordinary-lane', '--json', 'number,state,headRefName,headRefOid,body,baseRefName,mergeCommit'])
   assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.proof, 'ancestor')
   assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.base_ref, 'origin/main')
 })
@@ -2927,6 +2928,98 @@ test('unparseable suite output still refuses suite-unreadable', () => {
   assert.equal(result.refusal.step, 'suite')
 })
 
+// Mutation killed: parseVitestSuiteCounts pass accumulation zeroed; a green vitest suite must measure green.
+test('mergeCheck measures a green vitest suite without counting Test Files', () => {
+  const { deps } = harness({
+    testCommand: () => ({ command: 'yarn vitest run', basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['yarn vitest', { status: 0, stdout: 'Test Files  9 passed (9)\n  Tests  2 passed (2)\n', stderr: '' }],
+      ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal, null)
+  assert.deepEqual(result.report.suite, { pass: 2, fail: 0, skipped: 0 })
+})
+
+// Mutation killed: todo folding removed; an ANSI-wrapped skipped count must fold into skipped.
+test('mergeCheck measures ANSI-wrapped vitest skipped counts', () => {
+  const { deps } = harness({
+    testCommand: () => ({ command: 'yarn vitest run', basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['yarn vitest', { status: 0, stdout: '\u001b[32mTests  1 passed | 1 skipped (2)\u001b[0m\n', stderr: '' }],
+      ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.refusal, null)
+  assert.deepEqual(result.report.suite, { pass: 1, fail: 0, skipped: 1 })
+})
+
+// Mutation killed: vitest fallback dropped; a failed vitest suite must refuse suite-red, not suite-unreadable.
+test('mergeCheck refuses a failed vitest suite as suite-red and a total mismatch as suite-unreadable', () => {
+  const vitestDeps = (stdout, status) => harness({
+    testCommand: () => ({ command: 'yarn vitest run', basis: 'fixture' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['yarn vitest', { status, stdout, stderr: '' }],
+    ],
+  }).deps
+  const red = mergeCheck({ lanes: [lane], checkout: ROOT, deps: vitestDeps('Tests  1 failed | 1 passed (2)\n', 1) })
+  assert.equal(red.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  assert.equal(red.refusal.step, 'suite')
+  const mismatch = mergeCheck({ lanes: [lane], checkout: ROOT, deps: vitestDeps('Tests  1 passed (2)\n', 0) })
+  assert.equal(mismatch.refusal.reason, CLOSEOUT_REFUSALS.SUITE_UNREADABLE)
+  assert.equal(mismatch.refusal.step, 'suite')
+})
+
+// Mutation killed: ETIMEDOUT refusal disabled; a killed suite must refuse suite-timeout naming seconds and basis.
+test('mergeCheck refuses a timed-out suite as suite-timeout naming seconds and basis', () => {
+  let suiteOptions = null
+  const err = Object.assign(new Error('spawnSync /bin/sh ETIMEDOUT'), { code: 'ETIMEDOUT' })
+  const { deps } = harness({
+    testCommand: () => ({ command: 'yarn vitest run', basis: 'fixture' }),
+    suiteTimeout: () => ({ seconds: 123, basis: 'env DEVTEAM_SUITE_TIMEOUT_S' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+      ['yarn vitest', (argv, options) => { suiteOptions = options; return { status: null, signal: 'SIGTERM', error: err, stdout: '', stderr: '' } }],
+    ],
+  })
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(suiteOptions?.timeout, 123000)
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_TIMEOUT)
+  assert.equal(result.refusal.step, 'suite')
+  assert.match(String(result.refusal.message), /123/)
+  assert.match(String(result.refusal.message), /env DEVTEAM_SUITE_TIMEOUT_S/)
+})
+
+// Mutation killed: default spawn drops options.timeout; the real child must die at the injected timeout.
+test('mergeCheck refuses suite-timeout through the real default spawn', () => {
+  const seen = []
+  const inner = harness({
+    testCommand: () => ({ command: 'sleep 5', basis: 'fixture' }),
+    suiteTimeout: () => ({ seconds: 1, basis: 'injected one-second timeout' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ],
+  })
+  const realSpawn = normalDeps({}).spawn
+  const deps = { ...inner.deps, spawn: (options) => {
+    if (options.file === '/bin/sh') { seen.push(options); return realSpawn(options) }
+    return inner.deps.spawn(options)
+  } }
+  const started = Date.now()
+  const result = mergeCheck({ lanes: [lane], checkout: ROOT, deps })
+  const elapsed = Date.now() - started
+  assert.equal(seen[0]?.timeout, 1000)
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_TIMEOUT)
+  assert.equal(result.refusal.step, 'suite')
+  assert.match(String(result.refusal.message), /injected one-second timeout/)
+  assert.ok(elapsed < 4500, `expected the child killed before 4500ms, took ${elapsed}ms`)
+})
+
 // Mutation killed: CREW_PATH -> 'crew/crew.mjs'; teardown not module-resolved.
 test('teardown spawns the module-resolved crew.mjs', () => {
   const fixture = laneFixture('closeout-teardown-path-')
@@ -3028,10 +3121,12 @@ function reapScenario(mode) {
   const laneTip = reapGit(root, 'rev-parse', 'HEAD')
   reapGit(root, 'checkout', '-q', 'main')
   const baseTip = reapGit(root, 'rev-parse', 'HEAD')
+  let squashOid = null
   if (mode === 'ancestor') reapGit(root, 'merge', '-q', '--no-ff', '--no-edit', lane)
   else if (mode === 'squash') {
     reapGit(root, 'merge', '-q', '--squash', lane)
     reapGit(root, 'commit', '-q', '-m', 'squash lane')
+    squashOid = reapGit(root, 'rev-parse', 'HEAD')
   } else {
     writeFileSync(join(root, 'other.txt'), 'other\n')
     reapGit(root, 'add', '.')
@@ -3042,7 +3137,7 @@ function reapScenario(mode) {
   const laneDir = join(base, `dt-${lane}`)
   reapGit(root, 'worktree', 'add', '-q', laneDir, lane)
   const head = mode === 'unproven' ? '0'.repeat(40) : laneTip
-  return { base, root, lane, laneDir, laneTip, head }
+  return { base, root, lane, laneDir, laneTip, head, squashOid }
 }
 
 function reapRun(sc, opts = {}) {
@@ -3053,7 +3148,7 @@ function reapRun(sc, opts = {}) {
     const args = options.args || []
     if (options.file === 'gh') {
       ghCalls.push(args)
-      return { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: sc.head, baseRefName: opts.baseRefName ?? 'main', body: '' }), stderr: '' }
+      return { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: sc.head, baseRefName: opts.baseRefName ?? 'main', body: '', mergeCommit: sc.squashOid ? { oid: sc.squashOid } : null }), stderr: '' }
     }
     if (options.file === 'git') {
       if (args.join(' ') === `rev-parse --verify --quiet refs/heads/${sc.lane}`) {
@@ -3123,11 +3218,27 @@ test('reap refuses an unmerged lane hidden by a same-named merged tag', () => {
 })
 
 // Mutation killed: making fetch failure itself refuse blocks a provable squash lane.
-test('reap fetch failure alone does not refuse when headRefOid proves', () => {
+test('reap fetch failure refuses even when headRefOid matches', () => {
   const sc = reapScenario('squash')
   const { result } = reapRun(sc, { breakOrigin: true })
-  assert.equal(result.code, 0)
-  assert.equal(reapBranchExists(sc), false)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: returning head-ref-oid without the merge-commit ancestor check accepts a force-pushed-away squash.
+test('reap refuses a force-pushed base even when headRefOid matches the merge commit', () => {
+  const sc = reapScenario('squash')
+  reapForcePushBase(sc)
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(String(result.refusal.message || ''), /not an ancestor/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
 })
 
 // Mutation killed: disabling the already-done guards makes a second reap refuse.

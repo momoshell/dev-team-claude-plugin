@@ -799,6 +799,7 @@ test('A1 diff hunk conditional produces an adjudicated flipped mutant', async ()
     ...diffDeps(commands),
     runCommand(command) {
       commands.push(command)
+      if (commands.length <= 2) return { ok: true, output: 'lane', status: 0, completed: true }
       return command === 'node gate.mjs --strict'
         ? { ok: false, output: 'FAIL flipped\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}', status: 1, completed: true }
         : { ok: true, output: 'lane', status: 0, completed: true }
@@ -808,7 +809,7 @@ test('A1 diff hunk conditional produces an adjudicated flipped mutant', async ()
   const conditional = result.mutants.find((row) => row.operator === 'conditional')
   assert.ok(conditional)
   assert.equal(conditional.outcome, 'killed')
-  assert.deepEqual(commands.slice(0, 3), ['npm run lint -- --color=never', 'npm run lint -- --color=never', 'node gate.mjs --strict'])
+  assert.deepEqual(commands.slice(0, 4), ['npm run lint -- --color=never', 'node gate.mjs --strict', 'npm run lint -- --color=never', 'node gate.mjs --strict'])
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -852,7 +853,7 @@ test('F1 mutant cap is enforced and prints its blind spot', async () => {
   assert.equal(result.omitted, result.total_candidates - 8)
   assert.equal(result.cap_omitted, result.omitted)
   assert.match(result.blind_spot, /each mutant runs both the accepted validation lane and gate/)
-  assert.equal(commands.length, 17)
+  assert.equal(commands.length, 18)
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -864,9 +865,14 @@ test('A4 a hanging diff gate is unproven and restored', async () => {
   const hang = join(root, 'hang.pid')
   const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: hangCommand(hang), cap: 1, generation: 1 }
   // The runner's first table waits for the hang's own marker, so shell startup can never beat the bound.
-  const runCommand = (command, cwd, options) => command === 'lane'
-    ? { ok: true, output: '', status: 0, completed: true }
-    : mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
+  let baselineCallsA4 = 0
+  const runCommand = (command, cwd, options) => {
+    baselineCallsA4 += 1
+    if (baselineCallsA4 <= 2) return { ok: true, output: '', status: 0, completed: true }
+    return command === 'lane'
+      ? { ok: true, output: '', status: 0, completed: true }
+      : mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
+  }
   let pid = null
   try {
     const result = await mod.runDiffMutationProof(config, { runCommand, runTimeoutMs: 350 })
@@ -1157,9 +1163,9 @@ test('A5 a grandchild that escapes the poll and rewrites the target makes the pr
     readyAtFirstTable = existsSync(ready)
     nodeGoneAtFirstTable = Boolean(nodePid()) && pidDead(nodePid())
   })
-  let baseline = true
+  let baselineCalls = 0
   const runCommand = (cmd, cwd, options) => {
-    if (baseline) { baseline = false; return { ok: true, output: '', status: 0, completed: true } }
+    if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
     return cmd === 'gate'
       ? { ok: false, output: '', status: 1, completed: true }
       : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 50, snapshot: orderedSnapshot() })
@@ -1194,9 +1200,9 @@ test('A2 a hanging diff validation is unproven and restored', async () => {
   const hang = join(root, 'hang.pid')
   const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: hangCommand(hang), gate_cmd: 'gate', cap: 1, generation: 1 }
   // The runner's first table waits for the hang's own marker, so shell startup can never beat the bound.
-  let baseline = true
+  let baselineCalls = 0
   const runCommand = (command, cwd, options) => {
-    if (baseline) { baseline = false; return { ok: true, output: '', status: 0, completed: true } }
+    if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
     return mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
   }
   let pid = null
@@ -1226,9 +1232,9 @@ test('RV1-2 total deadline skips later mutants without killing them', async () =
   }, {
     now: () => clock,
     totalDeadlineMs: 1,
-    runCommand: () => { calls++; clock = 2; return { ok: true, output: '', status: 0, completed: true } },
+    runCommand: () => { calls++; if (calls === 2) clock = 2; return { ok: true, output: '', status: 0, completed: true } },
   })
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
   assert.equal(result.killed, 0)
   assert.ok(result.mutants.length >= 2)
   assert.ok(result.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === 'runner-unavailable'))
@@ -1250,7 +1256,7 @@ test('MH2 a timeout on a deadline-capped bound is skipped, never killed', async 
       totalDeadlineMs: 1000,
       runCommand: (() => {
         let calls = 0
-        return () => ++calls === 1
+        return () => ++calls <= 2
           ? { ok: true, output: '', status: 0, completed: true }
           : { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT', message: 'timed out' } }
       })(),
@@ -1291,7 +1297,7 @@ test('TO1 validation and gate timeouts are unproven and restore mutant bytes', a
         runCommand(command) {
           commands.push(command)
           calls += 1
-          if (calls === 1 || (timeoutAt === 'gate' && command === 'lane')) return { ok: true, output: '', status: 0, completed: true }
+          if (calls <= 2 || (timeoutAt === 'gate' && command === 'lane')) return { ok: true, output: '', status: 0, completed: true }
           if (command === (timeoutAt === 'validation' ? 'lane' : 'gate')) return { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }
           return { ok: true, output: '', status: 0, completed: true }
         },
@@ -1302,7 +1308,7 @@ test('TO1 validation and gate timeouts are unproven and restore mutant bytes', a
       assert.equal(result.timed_out, 1)
       assert.equal(timedOut.validation_ok, timeoutAt === 'validation' ? false : true)
       assert.equal(timedOut.gate_ok, timeoutAt === 'validation' ? null : false)
-      assert.deepEqual(commands, timeoutAt === 'validation' ? ['lane', 'lane'] : ['lane', 'lane', 'gate'])
+      assert.deepEqual(commands, timeoutAt === 'validation' ? ['lane', 'gate', 'lane'] : ['lane', 'gate', 'lane', 'gate'])
       assert.equal(readFileSync(file, 'utf8'), after)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
@@ -1323,8 +1329,8 @@ test('TO2 green baseline sets adaptive timeout bounds from its measured duration
         ...(floorMs === undefined ? {} : { runTimeoutMs: floorMs }),
         runCommand(command, cwd, options) {
           calls += 1
-          if (calls === 1) {
-            clock += baselineMs
+          if (calls <= 2) {
+            if (calls === 1) clock += baselineMs
             return { ok: true, output: '', status: 0, completed: true }
           }
           bounds.push(options.timeout)
@@ -1348,14 +1354,16 @@ test('TO2 green baseline sets adaptive timeout bounds from its measured duration
 test('TO3 non-green, timed-out, malformed, throwing, and escaped baselines skip before proof writes', async () => {
   assert.equal(Object.isFrozen(mod.DIFF_SKIP_REASONS), true)
   assert.ok(mod.DIFF_SKIP_REASONS.includes('baseline-red'))
+  assert.ok(mod.DIFF_SKIP_REASONS.includes('baseline-timeout'))
+  assert.deepEqual([...mod.DIFF_SKIP_REASONS].slice(-2), ['baseline-red', 'baseline-timeout'])
   const cases = [
-    ['red', { ok: false, output: 'red', status: 1, completed: true }, 'baseline-red: red', null],
-    ['timeout', { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }, 'baseline-red: timeout', null],
-    ['malformed', null, 'baseline-red: runner-unavailable (result-not-object)', null],
-    ['thrown', 'throw', 'baseline-red: runner-unavailable (runner-threw)', null],
-    ['escaped', { ok: false, output: '', status: null, completed: false, reap_survivors: 1 }, 'baseline-red: runner-unavailable (descendant-escaped)', 'descendant-escaped'],
+    ['red', { ok: false, output: 'red', status: 1, completed: true }, 'baseline-red', 'baseline-red: red', null],
+    ['timeout', { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }, 'baseline-timeout', 'baseline-timeout: timeout', null],
+    ['malformed', null, 'baseline-red', 'baseline-red: runner-unavailable (result-not-object)', null],
+    ['thrown', 'throw', 'baseline-red', 'baseline-red: runner-unavailable (runner-threw)', null],
+    ['escaped', { ok: false, output: '', status: null, completed: false, reap_survivors: 1 }, 'baseline-red', 'baseline-red: runner-unavailable (descendant-escaped)', 'descendant-escaped'],
   ]
-  for (const [label, result, why, fatalCause] of cases) {
+  for (const [label, result, expectedReason, why, fatalCause] of cases) {
     const { root, checkout, file } = fixture()
     const before = WIDGET
     const after = before.replace(FIND, REPLACE)
@@ -1375,7 +1383,7 @@ test('TO3 non-green, timed-out, malformed, throwing, and escaped baselines skip 
         writeFile(path, bytes) { writes.push(path); writeFileSync(path, bytes) },
       })
       assert.ok(report.mutants.length > 0, label)
-      assert.ok(report.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === 'baseline-red' && row.why === why), label)
+      assert.ok(report.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === expectedReason && row.why === why), label)
       assert.ok(report.mutants.every((row) => !Object.hasOwn(row, 'runner_unavailable_cause')), label)
       assert.equal(report.killed, 0)
       assert.equal(report.timed_out, 0)
@@ -1387,6 +1395,37 @@ test('TO3 non-green, timed-out, malformed, throwing, and escaped baselines skip 
       assert.equal(report.fatal?.cause ?? null, fatalCause, label)
       if (fatalCause) assert.equal(report.fatal.reason, 'tree-not-restored')
     } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+  for (const [gateLabel, gateResult, expectedGateReason, expectedGateWhy] of [
+    ['gate-red', { ok: false, output: 'gate red', status: 1, completed: true }, 'baseline-red', 'baseline-red: red'],
+    ['gate-timeout', { ok: false, output: '', status: null, completed: false, error: { code: 'ETIMEDOUT' } }, 'baseline-timeout', 'baseline-timeout: timeout'],
+  ]) {
+    const { root: grot, checkout: gcheckout, file: gfile } = fixture()
+    const gbefore = WIDGET
+    const gafter = gbefore.replace(FIND, REPLACE)
+    writeFileSync(gfile, gafter)
+    const gwrites = []
+    const gcommands = []
+    try {
+      const greport = await mod.runDiffMutationProof({
+        version: 1, checkout: gcheckout, patch: diffPatch('lib/widget.mjs', gbefore, gafter), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 2, generation: 1,
+      }, {
+        now: () => 0,
+        runCommand(command) {
+          gcommands.push(command)
+          if (command === 'lane') return { ok: true, output: '', status: 0, completed: true }
+          return gateResult
+        },
+        writeFile(path, bytes) { gwrites.push(path); writeFileSync(path, bytes) },
+      })
+      assert.ok(greport.mutants.length > 0, gateLabel)
+      assert.ok(greport.mutants.every((row) => row.outcome === 'skipped' && row.skip_reason === expectedGateReason && row.why === expectedGateWhy), gateLabel)
+      assert.equal(greport.killed, 0, gateLabel)
+      assert.equal(greport.timed_out, 0, gateLabel)
+      assert.deepEqual(gcommands, ['lane', 'gate'], gateLabel)
+      assert.deepEqual(gwrites, [], gateLabel)
+      assert.equal(readFileSync(gfile, 'utf8'), gafter, gateLabel)
+    } finally { rmSync(grot, { recursive: true, force: true }) }
   }
   const { root, checkout, file } = fixture()
   const before = WIDGET
@@ -1425,9 +1464,9 @@ test('E1 a non-empty diff serializes the runner cause on a skipped mutant', asyn
     version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: 'lane', gate_cmd: 'gate', cap: 8, generation: 1,
   }, {
     runCommand: (() => {
-      let baseline = true
+      let baselineCalls = 0
       return () => {
-        if (baseline) { baseline = false; return { ok: true, output: '', status: 0, completed: true } }
+        if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
         return null
       }
     })(),
@@ -1457,9 +1496,9 @@ test('E2 diff config input stays byte-identical while the sibling report is writ
     readFile: (path) => path === configPath ? input : null,
     writeFile: (path, bytes) => path === reportPath ? reports.set(path, String(bytes)) : writeFileSync(path, bytes),
     runCommand: (() => {
-      let baseline = true
+      let baselineCalls = 0
       return () => {
-        if (baseline) { baseline = false; return { ok: true, output: '', status: 0, completed: true } }
+        if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
         return null
       }
     })(),
@@ -1488,9 +1527,9 @@ test('E4 main records the in-flight mutant beside the config, before the mutant 
   const code = await mod.main(['--diff-config', configPath], {
     writeFile: (path, bytes) => { order.push(path); writeFileSync(path, bytes) },
     runCommand: (() => {
-      let baseline = true
+      let baselineCalls = 0
       return () => {
-        if (baseline) { baseline = false; return { ok: true, output: '', status: 0, completed: true } }
+        if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
         return { ok: false, output: '', status: 1, completed: true }
       }
     })(),

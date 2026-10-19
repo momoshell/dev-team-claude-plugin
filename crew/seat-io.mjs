@@ -3452,17 +3452,20 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         throw err
       }
     },
-    run(cmd) {
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: suiteTimeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
+    run(cmd, opts = {}) {
+      const timeoutMs = Number.isFinite(opts?.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : suiteTimeoutMs
+      const callerTimeout = Number.isFinite(opts?.timeoutMs) && opts.timeoutMs > 0
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: timeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       let output = `${res.stdout || ''}${res.stderr || ''}`
       const overflowed = res.error?.code === 'ENOBUFS'
       const warmTimedOut = res.error?.code === 'ETIMEDOUT'
-      if (warmTimedOut) output += `\n[killed: exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis})]`
+      if (warmTimedOut && callerTimeout) output += `\n[killed: exceeded the ${timeoutMs / 1000} s caller timeout]`
+      else if (warmTimedOut) output += `\n[killed: exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis})]`
       else if (res.error) output += `\n[spawn error: ${res.error.message}]`
       if (res.signal) output += `\n[killed by ${res.signal}]`
       // ENOBUFS is unmeasured, never red; append its marker last.
       if (overflowed) output += `\n[output exceeded ${RUN_MAX_BUFFER_BYTES} bytes — this run is UNMEASURED, not red]`
-      const result = { ok: !warmTimedOut && res.status === 0, output, status: res.status, stderr: String(res.stderr || ''), ...(warmTimedOut ? { timed_out: true, timeout_s: suiteTimeout.seconds, timeout_source: suiteTimeout.source } : {}) }
+      const result = { ok: !warmTimedOut && res.status === 0, output, status: res.status, stderr: String(res.stderr || ''), ...(warmTimedOut ? (callerTimeout ? { timed_out: true, timeout_s: timeoutMs / 1000, timeout_source: 'caller' } : { timed_out: true, timeout_s: suiteTimeout.seconds, timeout_source: suiteTimeout.source }) : {}) }
       if (overflowed) result.truncated = true
       return result
     },

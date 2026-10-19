@@ -1134,6 +1134,7 @@ export function parseDiffMutationReport(output, { generation, cap } = {}) {
         || typeof mutant.operator !== 'string' || typeof mutant.replacement !== 'string'
     })) return null
     if (report.mutants.filter((mutant) => mutant.outcome === 'timed-out').length !== timedOut) return null
+    if (report.mutants.filter((mutant) => mutant.outcome === 'killed').length !== report.killed) return null
     const executed = report.mutants.filter((mutant) => ['killed', 'survived', 'timed-out'].includes(mutant.outcome)).length
     if (executed > report.cap || executed !== report.killed + report.survived + timedOut || report.mutants.length - executed > report.skipped || (report.fatal !== undefined && (!report.fatal || report.fatal.reason !== 'tree-not-restored'))) return null
     return report
@@ -8335,6 +8336,8 @@ function runTask(ctx, io, crash) {
         try { pushed = resumeIo.run(`git push -u origin ${shellArg(publishBranch)}`) }
         catch (error) { pushed = { ok: false, output: error?.message ?? String(error) } }
         if (!pushed?.ok) return refusePublish(PUBLISH_REFUSALS.pushRejected, `the branch push was rejected${pushed?.output ? `: ${String(pushed.output).slice(-2000)}` : ''}`)
+        let resumeDiffRows = []
+        try { resumeDiffRows = journalRowsSinceRunStart(resumeIo.readFile(resumeCtx.journal || journal)).map((row) => row?.diff_mutation_proof).filter((row) => row && typeof row === 'object' && !Array.isArray(row)) } catch { resumeDiffRows = [] }
         const bodyRecord = {
           intent: commitIntent(checkpoint.commit.message),
           ...(resumePromptClaim ? { prompt_claim: resumePromptClaim.claim } : {}),
@@ -8346,6 +8349,7 @@ function runTask(ctx, io, crash) {
           review: { verdict: checkpoint.decision.verdict, residuals: checkpoint.decision.residuals, carried: checkpoint.decision.carried_findings },
           ...(S.flakes.length > 0 ? { flakes: [...S.flakes] } : {}),
           suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null }, anomalies: [],
+          diff_mutation: diffMutationMeasurement(resumeDiffRows),
         }
         const bodyPath = art('pr-body.md')
         let resumeRegisterText = ''
@@ -9961,7 +9965,7 @@ function runTask(ctx, io, crash) {
     }
     let runner
     try {
-      runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`${PROVE_MUTATIONS_COMMAND} --diff-config ${shellArg(configPath)}`))
+      runner = phaseSlot(SUITE_SLOT_PHASES.gate, () => io.run(`${PROVE_MUTATIONS_COMMAND} --diff-config ${shellArg(configPath)}`, { timeoutMs: DIFF_RUNNER_TIMEOUT_MS }))
     } catch (err) { runner = { ok: false, output: '', error: err?.message ?? String(err) } }
     const runnerOutput = runner?.output ?? `${runner?.stdout || ''}${runner?.stderr || ''}`
     let reportSource = 'stdout-sentinel'
@@ -10094,6 +10098,10 @@ function runTask(ctx, io, crash) {
     const timedOut = report.mutants.filter((mutant) => mutant.outcome === 'timed-out').length
     const judged = report.mutants.filter((mutant) => ['killed', 'survived', 'timed-out'].includes(mutant.outcome)).length
     if (timedOut > 0) lines.push(`Timed out: ${timedOut} of ${judged} mutants exceeded the per-run bound; unproven.`)
+    // lean: omitted is the merged report's latest-round tally, so earlier generations' capped mutants are not counted here (the PR line sums them); pass every report's omitted once diffFindingLines receives the report list
+    const skippedRows = report.mutants.filter((mutant) => mutant.outcome === 'skipped').length
+    const notJudged = skippedRows + (Number.isInteger(report.omitted) ? report.omitted : 0)
+    if (notJudged > 0) lines.push(`Not judged: ${notJudged} selected or capped mutants were never adjudicated; unproven.`)
     return lines
   }
   const diffMutationDisposition = (survivors) => survivors.length > 0 ? 'review' : 'continue'
@@ -17377,7 +17385,8 @@ export function plannerCoverageReask({ env, dispatch, briefText, round, briefFil
   }
 }
 
-export const DIFF_MUTATION_UNMEASURED_REASONS = Object.freeze(['no-report', 'tree-not-restored', 'baseline-red', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
+export const DIFF_MUTATION_UNMEASURED_REASONS = Object.freeze(['no-report', 'tree-not-restored', 'baseline-red', 'baseline-timeout', 'runner-unavailable', 'run-timeout', 'unsupported-language', 'no-mutable-candidate'])
+export const DIFF_RUNNER_TIMEOUT_MS = 720_000 + 180_000
 
 export function diffMutationMeasurement(reports) {
   const rows = Array.isArray(reports) ? reports.filter((report) => report && typeof report === 'object') : []
@@ -17386,6 +17395,7 @@ export function diffMutationMeasurement(reports) {
   const killed = sum('killed')
   const survived = sum('survived')
   const timed_out = sum('timed_out')
+  const not_judged = generated - killed - survived - timed_out + sum('omitted')
   // lean: unmeasured_files sums per-round non-mjs file sections, so a file changed in two rounds counts twice; dedupe by path once the report lists skipped paths
   const unmeasured_files = rows.reduce((total, report) => total + (Number.isInteger(report.skip_counts?.['non-mjs']) ? report.skip_counts['non-mjs'] : 0), 0)
   const treeNotRestored = rows.some((report) => report.fatal || (report.skip_counts?.['tree-not-restored'] ?? 0) > 0)
@@ -17394,18 +17404,20 @@ export function diffMutationMeasurement(reports) {
     : rows.length === 0 ? 'no-report'
     : treeNotRestored ? 'tree-not-restored'
     : rows.some((report) => (report.skip_counts?.['baseline-red'] ?? 0) > 0) ? 'baseline-red'
+    : rows.some((report) => (report.skip_counts?.['baseline-timeout'] ?? 0) > 0) ? 'baseline-timeout'
     : rows.some((report) => (report.skip_counts?.['runner-unavailable'] ?? 0) > 0) ? 'runner-unavailable'
     : timed_out > 0 ? 'run-timeout'
     : unmeasured_files > 0 ? 'unsupported-language'
     : 'no-mutable-candidate'
-  return { measured, reason, generated, killed, survived, unmeasured_files, ...(timed_out > 0 ? { timed_out } : {}) }
+  return { measured, reason, generated, killed, survived, unmeasured_files, ...(timed_out > 0 ? { timed_out } : {}), ...(not_judged > 0 ? { not_judged } : {}) }
 }
 
 export function diffMutationLines(record) {
   const diff = record && Object.hasOwn(record, 'diff_mutation') ? record.diff_mutation : null
   if (!diff || typeof diff !== 'object') return []
   const timeoutSuffix = diff.timed_out > 0 ? `, ${diff.timed_out} timed out (unproven)` : ''
+  const notJudgedSuffix = diff.not_judged > 0 ? `, ${diff.not_judged} not judged (unproven)` : ''
   return diff.measured
-    ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${timeoutSuffix}${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
-    : [`- Diff mutation: unmeasured — ${diff.reason}${timeoutSuffix}`]
+    ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${timeoutSuffix}${notJudgedSuffix}${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
+    : [`- Diff mutation: unmeasured — ${diff.reason}${timeoutSuffix}${notJudgedSuffix}`]
 }

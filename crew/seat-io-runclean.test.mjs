@@ -691,12 +691,16 @@ test('suite timeout policy reaches warm, cold, and runClean shell spawns', () =>
     configured.runCold('true')
     configured.runClean('true')
     assert.deepEqual(configuredTimeouts, [1_800_000, 1_800_000, 1_800_000])
+    configured.run('true', { timeoutMs: 900001 })
+    assert.equal(configuredTimeouts.at(-1), 900001)
 
     const defaultTimeouts = []
     const defaults = makeIo(fixture, { spawnSync: runWithCapture(defaultTimeouts) })
     defaults.run('true')
     defaults.runCold('true')
     assert.deepEqual(defaultTimeouts, [900_000, 900_000])
+    defaults.run('true', { timeoutMs: 900001 })
+    assert.equal(defaultTimeouts.at(-1), 900001)
   })
 })
 
@@ -734,6 +738,19 @@ test('warm suite timeout diagnostics preserve output and distinguish other failu
     const defaultResult = defaultIo.run('true')
     assert.equal(defaultResult.timeout_source, 'default')
     assert.ok(defaultResult.output.includes('900 s suite timeout (source: default 900 s)'))
+    const callerIo = makeIo(fixture, {
+      suiteTimeout: policy,
+      suiteTimeoutMs: 1_800_000,
+      spawnSync: (bin) => String(bin) === '/bin/sh'
+        ? { status: null, stdout: '', stderr: '', error: timeoutError() }
+        : realSpawnSync(bin, [], {}),
+    })
+    const callerResult = callerIo.run('true', { timeoutMs: 900001 })
+    assert.equal(callerResult.timed_out, true)
+    assert.equal(callerResult.timeout_source, 'caller')
+    assert.equal(callerResult.timeout_s, 900.001)
+    assert.ok(callerResult.output.includes('[killed: exceeded the 900.001 s caller timeout]'))
+    assert.doesNotMatch(callerResult.output, /suite timeout/)
 
     const interrupted = makeIo(fixture, {
       spawnSync: (bin) => String(bin) === '/bin/sh'

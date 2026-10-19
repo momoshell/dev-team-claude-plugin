@@ -3483,3 +3483,77 @@ test('CellHealthPanel binds the unmeasured-aware totals badge', () => {
  assert.match(source, /\.state-badge\.unmeasured/)
  assert.match(source, /Cell health unavailable/)
 })
+
+// MUTATION VL5: stub ledger.quickCheck() to ok in ledger-feed.mjs health() and /api/health reports a page-corrupt ledger clean again.
+test('VL5 feed health reports degraded on a page-corrupt-but-readable ledger and clean on a healthy one', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, async () => {
+ const { DatabaseSync } = await import('node:sqlite')
+ const corruptPage = (dbPath, table) => {
+  try { const db = new DatabaseSync(dbPath); db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close() } catch {}
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  const row = db.prepare('SELECT rootpage FROM sqlite_master WHERE name = ?').get(table)
+  db.close()
+  assert.ok(row && row.rootpage && row.rootpage >= 2, `fixture: no corruptible rootpage for ${table}`)
+  const buf = readFileSync(dbPath)
+  const rawSize = buf.readUInt16BE(16)
+  const pageSize = rawSize === 1 ? 65536 : rawSize
+  const start = (row.rootpage - 1) * pageSize
+  for (let i = start; i < Math.min(start + pageSize, buf.length); i += 1) buf[i] = buf[i] ^ 0xff
+  writeFileSync(dbPath, buf)
+ }
+ const dir = scratchDir('vl5-feed-health-')
+ const dbPath = join(dir, 'ledger.db')
+ const ledger = openLedger({ dbPath, stderr: { write() {} } })
+ ledger.startSession({ adw_id: 'vl5-1', repo_slug: 'r', task_slug: 't' })
+ ledger.close()
+ const setup = new DatabaseSync(dbPath)
+ setup.exec('CREATE TABLE gate_extra (id INTEGER PRIMARY KEY, v TEXT)')
+ const ins = setup.prepare('INSERT INTO gate_extra (v) VALUES (?)')
+ for (let i = 0; i < 200; i += 1) ins.run('x'.repeat(200))
+ setup.close()
+ corruptPage(dbPath, 'gate_extra')
+ const feed = createLedgerFeed({ ledgerDb: dbPath, triageDb: join(dir, 'viz.db'), crewRoot: join(dir, 'crew') })
+ try {
+  const health = feed.health()
+  assert.equal(health.degraded, true, `expected feed health degraded:true on quick_check failure, found ${JSON.stringify(health.degraded)}`)
+ } finally { feed.close() }
+ const healthyDir = scratchDir('vl5-feed-healthy-')
+ const healthyDb = join(healthyDir, 'ledger.db')
+ const healthyLedger = openLedger({ dbPath: healthyDb, stderr: { write() {} } })
+ healthyLedger.startSession({ adw_id: 'vl5-ok', repo_slug: 'r', task_slug: 't' })
+ healthyLedger.close()
+ const healthyFeed = createLedgerFeed({ ledgerDb: healthyDb, triageDb: join(healthyDir, 'viz.db'), crewRoot: join(healthyDir, 'crew') })
+ try {
+  assert.equal(healthyFeed.health().degraded, false)
+ } finally { healthyFeed.close() }
+})
+
+// MUTATION VL7: remove the teardownSummary clean-false posture branch and teardown-only dirt reports ok again.
+test('VL7 teardown-only dirt reaches watch posture with teardown counts', () => {
+ const run = operationsRunSummary({ runs: 2, settled: { running: 0, ok: 2, fail: 0, aborted: 0 } })
+ const tea = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 0, failed: 1, unproven: 1 }, runs: [{ state: 'measured' }, { state: 'measured' }] })
+ assert.equal(tea.clean, false)
+ const health = operationsHealthSummary({ cells: [{ key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: [] }] })
+ const posture = operationsPosture({ runSummary: run, teardownSummary: tea, healthSummary: health, brake: { state: 'clear' }, errors: [] })
+ assert.equal(posture.tone, 'watch')
+ assert.equal(posture.label, 'Factory needs attention')
+ assert.match(posture.message, /1 failed/)
+ assert.match(posture.message, /1 unproven/)
+})
+
+// MUTATION VL8: drop the measuredRuns === totalRuns clean clause and a partly measured window reports clean again.
+test('VL8 partly measured teardown window is not clean and states runs measured', () => {
+ const run = operationsRunSummary({ runs: 2, settled: { running: 0, ok: 2, fail: 0, aborted: 0 } })
+ const health = operationsHealthSummary({ cells: [{ key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: [] }] })
+ const partial = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 2, failed: 0, unproven: 0 }, runs: [{ state: 'measured' }, { state: 'not-measured', not_measured_why: 'gate reason' }] })
+ assert.equal(partial.clean, false)
+ assert.equal(partial.measuredRuns, 1)
+ assert.equal(partial.totalRuns, 2)
+ const posture = operationsPosture({ runSummary: run, teardownSummary: partial, healthSummary: health, brake: { state: 'clear' }, errors: [] })
+ assert.equal(posture.tone, 'watch')
+ assert.match(posture.message, /1 of 2 runs/)
+ const full = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 2, failed: 0, unproven: 0 }, runs: [{ state: 'measured' }, { state: 'measured' }] })
+ assert.equal(full.clean, true)
+ const okPosture = operationsPosture({ runSummary: run, teardownSummary: full, healthSummary: health, brake: { state: 'clear' }, errors: [] })
+ assert.equal(okPosture.tone, 'ok')
+ assert.equal(okPosture.label, 'Factory is operating cleanly')
+})

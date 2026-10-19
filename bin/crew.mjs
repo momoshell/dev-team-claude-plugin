@@ -96,7 +96,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const [verb, ...rest] = argv
   if (verb === 'where') return where(home)
   if (verb === 'update') return update(home, rest)
-  if (verb === 'viz') return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home })
+  if (verb === 'viz') { const vizEnv = env.DEVTEAM_INTAKE_CHECKOUT ? env : { ...env, DEVTEAM_INTAKE_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = ENTRY[verb]
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
   return run(process.execPath, [join(home, 'crew', 'crew.mjs'), ...argv])

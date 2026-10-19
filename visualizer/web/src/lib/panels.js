@@ -886,6 +886,7 @@ export function operationsTeardownSummary(teardowns = {}) {
   const source = Array.isArray(teardowns?.runs) ? teardowns.runs : []
   const measured = teardowns?.measured === true
   const measuredRuns = source.filter((run) => run?.state === 'measured').length
+  const totalRuns = source.length
   const why = source.map((run) => run?.not_measured_why).find((value) => typeof value === 'string' && value.trim()) || 'no seat_teardowns rows were recorded in the window, so teardown is not measured, never a clean zero'
   return {
     absent: null,
@@ -898,7 +899,7 @@ export function operationsTeardownSummary(teardowns = {}) {
     measuredRuns,
     totalRuns: source.length,
     coverage: percent(measuredRuns, source.length),
-    clean: measured ? (totals.failed ?? 0) === 0 && (totals.unproven ?? 0) === 0 : null
+    clean: measured ? (totals.failed ?? 0) === 0 && (totals.unproven ?? 0) === 0 && measuredRuns === totalRuns : null
   }
 }
 
@@ -936,6 +937,7 @@ export function operationsPosture({ loading = false, degraded = false, errors = 
     label: 'Factory needs attention',
     message: `${runSummary.fail} task${runSummary.fail === 1 ? '' : 's'} did not complete cleanly and ${healthSummary.affected} model cell${healthSummary.affected === 1 ? '' : 's'} recorded failures in the active windows.`,
   }
+  if (teardownSummary?.clean === false) return { tone: 'watch', label: 'Factory needs attention', message: `Teardown is not clean: ${teardownSummary.failed ?? 0} failed and ${teardownSummary.unproven ?? 0} unproven teardown(s); ${teardownSummary.measuredRuns ?? 0} of ${teardownSummary.totalRuns ?? 0} runs measured in the active window.` }
   return { tone: 'ok', label: 'Factory is operating cleanly', message: 'No recorded failures or teardown leaks in the active windows.' }
 }
 

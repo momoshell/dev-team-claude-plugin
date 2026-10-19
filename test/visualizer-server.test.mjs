@@ -4039,36 +4039,76 @@ test('pluginWriteTargetMode resolves a missing-parent symlink ancestor into the 
 })
 
 test('writeGuard allows loopback Host spellings with matching port', () => {
-  const goodLoopback = writeGuard({headers: {'content-type': 'application/json', host: '127.0.0.1:4488'}, socket: {localPort: 4488}})
+  const goodLoopback = writeGuard({headers: {'content-type': 'application/json', host: '127.0.0.1:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(goodLoopback, null)
-  const goodBracket = writeGuard({headers: {'content-type': 'application/json', host: '[::1]:4488'}, socket: {localPort: 4488}})
+  const goodBracket = writeGuard({headers: {'content-type': 'application/json', host: '[::1]:4488'}, socket: {localPort: 4488, remoteAddress: '::1'}})
   assert.equal(goodBracket, null)
-  const goodLocal = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:4488'}, socket: {localPort: 4488}})
+  const goodLocal = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(goodLocal, null)
-  const badPort = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:9999'}, socket: {localPort: 4488}})
+  const badPort = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:9999'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(badPort.status, 403)
   assert.equal(badPort.error.includes('localhost:9999'), true)
-  const evil = writeGuard({headers: {'content-type': 'application/json', origin: 'http://evil.example:4488', host: 'evil.example:4488'}, socket: {localPort: 4488}})
+  const evil = writeGuard({headers: {'content-type': 'application/json', origin: 'http://evil.example:4488', host: 'evil.example:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(evil.status, 403)
   assert.equal(evil.error.includes('evil.example'), true)
-  const missing = writeGuard({headers: {'content-type': 'application/json'}, socket: {localPort: 4488}})
+  const missing = writeGuard({headers: {'content-type': 'application/json'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(missing.status, 403)
 })
 
 test('writeGuard treats the implicit HTTP port as 80, not a wildcard', () => {
-  const bare80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 80}})
+  const bare80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
   assert.equal(bare80, null)
-  const explicit80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:80'}, socket: {localPort: 80}})
+  const explicit80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:80'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
   assert.equal(explicit80, null)
-  const wrongExplicit = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:8080'}, socket: {localPort: 80}})
+  const wrongExplicit = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:8080'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
   assert.equal(wrongExplicit.status, 403)
   assert.equal(wrongExplicit.error, 'write host refused: localhost:8080')
-  const bareNon80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 4488}})
+  const bareNon80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
   assert.equal(bareNon80.status, 403)
   assert.equal(bareNon80.error, 'write host refused: localhost')
   assert.equal(sameOrigin('http://localhost', 'localhost'), true)
-  const sameOriginPair = writeGuard({headers: {'content-type': 'application/json', host: 'localhost', origin: 'http://localhost'}, socket: {localPort: 80}})
+  const sameOriginPair = writeGuard({headers: {'content-type': 'application/json', host: 'localhost', origin: 'http://localhost'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
   assert.equal(sameOriginPair, null)
+})
+
+test('VL1 brake POST under the plugin install tree returns 409 and writes/removes nothing', async () => {
+  const dir = scratchDir('visualizer-brake-plugin-target-')
+  const home = join(dir, 'home')
+  const checkout = join(home, '.claude', 'plugins', 'cache', 'pkg', 'checkout')
+  mkdirSync(join(checkout, '.factory'), { recursive: true })
+  const stop = join(checkout, '.factory', 'STOP')
+  writeFileSync(stop, 'pre-existing\n')
+  let server
+  try {
+    server = await startInProcess({}, { home, checkout, ledgerDb: join(dir, 'ledger.db'), triageDb: join(dir, 'viz.db'), crewRoot: join(dir, 'crew') })
+    const cleared = await json(server.base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: false, actor: 'gate' }) })
+    assert.equal(cleared.status, 409)
+    assert.match(String(cleared.json.error || ''), /version-pinned/)
+    assert.equal(cleared.json.reason, 'installed-plugin-read-only')
+    assert.ok(cleared.json.basis)
+    assert.ok(cleared.json.plugin_root)
+    assert.equal(existsSync(stop), true)
+    rmSync(stop, { force: true })
+    const engaged = await json(server.base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'gate' }) })
+    assert.equal(engaged.status, 409)
+    assert.equal(existsSync(stop), false)
+  } finally {
+    if (server) await stopInProcess(server)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('VL6 writeGuard refuses non-loopback peers and admits loopback spellings', () => {
+  const req = (remoteAddress, host = '127.0.0.1:4488') => ({ headers: { 'content-type': 'application/json', host }, socket: { localPort: 4488, ...(remoteAddress === undefined ? {} : { remoteAddress }) } })
+  const lan = writeGuard(req('192.168.1.9'))
+  assert.equal(lan.status, 403)
+  assert.match(String(lan.error), /peer/)
+  assert.equal(String(lan.error).includes('192.168.1.9'), true)
+  assert.equal(writeGuard(req(undefined)).status, 403)
+  assert.equal(writeGuard(req('not-an-ip')).status, 403)
+  for (const [addr, host] of [['127.0.0.1', '127.0.0.1:4488'], ['127.5.6.7', '127.0.0.1:4488'], ['::1', '[::1]:4488'], ['::ffff:127.0.0.1', '127.0.0.1:4488']]) {
+    assert.equal(writeGuard(req(addr, host)), null)
+  }
 })
 
 test('state-writing routes refuse DNS-rebinding Host before writing state', async () => {
@@ -4364,7 +4404,7 @@ test('LH4', () => {
   const source = () => { calls++; return { ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] } }
   const hosts = ['192.0.2.23:4488', '[2001:db8::23]:4488']
   const refusal = host => ({ status: 403, error: `write host refused: ${host}` })
-  const request = host => ({ headers: { host, 'content-type': 'application/json' }, socket: { localPort: 4488 } })
+  const request = host => ({ headers: { host, 'content-type': 'application/json' }, socket: { localPort: 4488, remoteAddress: '127.0.0.1' } })
   const actual = hosts.flatMap(host => [
     hostGuard(request(host), 'write', source),
     writeGuard(request(host)),

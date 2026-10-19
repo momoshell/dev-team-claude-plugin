@@ -903,3 +903,183 @@ test('TF11', async () => {
   const notice = patch.content[0].text.lastIndexOf('\n[test output filtered:')
   assert.equal(patch.content[0].text.slice(0, notice), lane.dropPassingLines(tfCapture.tap))
 })
+
+function deferredLane() {
+  const calls = []
+  const pending = []
+  let active = 0
+  let maxActive = 0
+  const runner = (command, options) => {
+    calls.push({ command, options })
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    return new Promise((resolve, reject) => {
+      pending.push({ resolve: (value) => { active -= 1; resolve(value) }, reject: (error) => { active -= 1; reject(error) } })
+    })
+  }
+  return { calls, pending, runner, maxActive: () => maxActive }
+}
+
+const laneTick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+test('GL1', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const ps = [
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'a' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'b' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'c' }), { cwd: f.root }),
+  ]
+  await laneTick()
+  assert.equal(d.calls.length, 1)
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'FIRST' })
+  await laneTick()
+  await laneTick()
+  assert.equal(d.calls.length, 2)
+  d.pending.shift().resolve({ code: 1, signal: null, tail: 'SECOND' })
+  await laneTick()
+  const results = await Promise.all(ps)
+  assert.equal(d.calls.length, 2)
+  assert.equal(d.maxActive(), 1)
+  assert.ok(results[0])
+})
+
+test('GL2', async () => {
+  const deadlines = []
+  const runner = async (command, options) => {
+    deadlines.push(options && options.deadlineMs)
+    throw Object.assign(new Error('timeout'), { reason: 'timeout' })
+  }
+  const f = fixture()
+  const loop = loopFor(f, { runner })
+  await Promise.all([
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'a' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'b' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'c' }), { cwd: f.root }),
+  ])
+  assert.deepEqual(deadlines, [30000, 60000])
+  await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'd' }), { cwd: f.root })
+  assert.deepEqual(deadlines, [30000, 60000, 120000])
+})
+
+test('GL3', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const ps = [
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'a' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'b' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'c' }), { cwd: f.root }),
+  ]
+  await laneTick()
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'FIRSTPASS' })
+  await laneTick()
+  await laneTick()
+  d.pending.shift().resolve({ code: 1, signal: null, tail: 'FOLLOWFAIL' })
+  const results = await Promise.all(ps)
+  assert.match(appendedText(results[0]), /^Builder fenced Node lane PASS:/)
+  for (const result of results.slice(1)) {
+    assert.match(appendedText(result), /^Builder fenced Node lane FAIL:/)
+    assert.match(appendedText(result), /coalesced/)
+    assert.match(appendedText(result), /covered 2 edits/)
+    assert.equal(appendedText(result).includes('FIRSTPASS'), false)
+  }
+})
+
+test('GL4', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const ps = [
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'a' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'b' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'c' }), { cwd: f.root }),
+  ]
+  await laneTick()
+  d.pending.shift().reject(Object.assign(new Error('timeout'), { reason: 'timeout' }))
+  await laneTick()
+  await laneTick()
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'FOLLOWPASS' })
+  const results = await Promise.all(ps)
+  assert.match(appendedText(results[0]), /^Builder fenced Node lane UNMEASURED:/)
+  for (const result of results.slice(1)) {
+    assert.match(appendedText(result), /^Builder fenced Node lane PASS:/)
+    assert.match(appendedText(result), /coalesced/)
+    assert.match(appendedText(result), /covered 2 edits/)
+  }
+})
+
+test('a crashing in-flight lane still runs its joined follow-up and journals a single failure', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const ps = [
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'owner' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'joined' }), { cwd: f.root }),
+  ]
+  await laneTick()
+  assert.equal(d.calls.length, 1)
+  d.pending.shift().reject(Object.assign(new Error('boom'), { reason: 'crash' }))
+  await laneTick()
+  await laneTick()
+  assert.equal(d.calls.length, 2)
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'RECOVERED' })
+  const results = await Promise.all(ps)
+  assert.equal(results[0], undefined)
+  assert.match(appendedText(results[1]), /^Builder fenced Node lane PASS:/)
+  assert.match(appendedText(results[1]), /covered 1 edits/)
+  assert.equal(rows(f).filter((row) => row.builder_loop_failure).length, 1)
+})
+
+test('an interrupted follow-up resolves its joined trigger empty and frees the lane', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const ps = [
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'owner' }), { cwd: f.root }),
+    loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'joined' }), { cwd: f.root }),
+  ]
+  await laneTick()
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'FIRST' })
+  await laneTick()
+  await laneTick()
+  assert.equal(d.calls.length, 2)
+  d.pending.shift().reject(Object.assign(new Error('interrupted'), { reason: 'interrupted' }))
+  const results = await Promise.all(ps)
+  assert.match(appendedText(results[0]), /^Builder fenced Node lane PASS:/)
+  assert.equal(results[1], undefined)
+  const freshP = loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'fresh' }), { cwd: f.root })
+  await laneTick()
+  assert.equal(d.calls.length, 3)
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'FRESH' })
+  const fresh = await freshP
+  assert.match(appendedText(fresh), /^Builder fenced Node lane PASS:/)
+  assert.equal(appendedText(fresh).includes('coalesced'), false)
+})
+
+test('a trigger arriving during the follow-up chains a third run with a single-edit cover', async () => {
+  const f = fixture()
+  const d = deferredLane()
+  const loop = loopFor(f, { runner: d.runner })
+  const first = loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'first' }), { cwd: f.root })
+  const second = loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'second' }), { cwd: f.root })
+  await laneTick()
+  assert.equal(d.calls.length, 1)
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'RUN1' })
+  await laneTick()
+  await laneTick()
+  assert.equal(d.calls.length, 2)
+  const third = loop.onToolResult(event('edit', join(f.root, 'fixture.mjs'), { text: 'third' }), { cwd: f.root })
+  await laneTick()
+  d.pending.shift().resolve({ code: 1, signal: null, tail: 'RUN2' })
+  await laneTick()
+  await laneTick()
+  assert.equal(d.calls.length, 3)
+  d.pending.shift().resolve({ code: 0, signal: null, tail: 'RUN3' })
+  const r = await Promise.all([first, second, third])
+  assert.match(appendedText(r[0]), /^Builder fenced Node lane PASS:/)
+  assert.match(appendedText(r[1]), /covered 1 edits/)
+  assert.match(appendedText(r[2]), /covered 1 edits/)
+  assert.equal(d.maxActive(), 1)
+})

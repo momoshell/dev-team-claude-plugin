@@ -452,19 +452,22 @@ export function acpLaunch(spec = {}) {
     ...allowedTools(tools, grants).split(',').filter(Boolean),
     ...(hasFffGrant(grants) ? ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep'] : []),
   ])]
+  const acpTools = hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools
   return {
     bin,
     args: [],
-    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin },
+    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
     mode: 'acceptEdits',
     sessionParams: {
       cwd,
       mcpServers: [],
       _meta: { claudeCode: { options: {
         model,
+        settingSources: ['project'], settings: PANE_USAGE_SETTINGS,
         ...(hasMcpServers ? { mcpServers } : {}),
         ...(hasMcpServers ? { strictMcpConfig: true } : {}),
-        allowedTools: hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools,
+        allowedTools: acpTools,
+        tools: acpTools,
         ...(hasSkills ? { plugins: [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] } : {}),
         disallowedTools: deniedTools(deny, grants).split(',').filter(Boolean),
         additionalDirectories: spec.writableDirs,

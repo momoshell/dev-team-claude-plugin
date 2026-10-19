@@ -187,7 +187,7 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   const grants = { tools: [], extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }], skills: ['/skill.md'], advisor: true }
   const granted = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'openai-codex/x', promptFile: '/tmp/prompt.md', deny: 'Task', cwd: '/tmp', env: { SENTINEL: 'yes' }, grants, advisorCell: { endpoint: 'http://127.0.0.1:4567', model: 'openai-codex/advisor' } })
   const advisorExtension = join(ROOT, 'crew/pi/extensions/advisor.ts')
-  assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--skill', '/skill.md'])
+  assert.deepEqual(granted.args, [bridge, '--model', 'openai-codex/x', '--append-system-prompt', '/tmp/prompt.md', '--tools', `${toolSet},agent`, '--no-context-files', '--no-extensions', '-e', extension, '-e', advisorExtension, '--no-skills', '--skill', '/skill.md'])
   assert.deepEqual(granted.env, { SENTINEL: 'yes', CREW_FFF: '0', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]), CREW_PI_BIN: '/opt/pi/dist/cli.js', CREW_ACP_GATED_TOOLS: 'bash,edit,write,powershell' })
   const unseatedAdvisor = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, grants: { ...grants, advisor: true } })
   assert.deepEqual(Object.keys(unseatedAdvisor.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
@@ -201,6 +201,19 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
   for (const name of ['Task', 'Agent', 'Workflow']) assert.doesNotThrow(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: name }))
   for (const bin of ['pi', './pi']) assert.throws(() => acpLaunch({ bin }), /absolute/)
   assert.throws(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', deny: 'Read,NoSuchTool' }), /NoSuchTool/)
+})
+
+test('SI4 granted pi RPC seats disable skill discovery before explicit grants', () => {
+  // MUTATION: drop --no-skills from piRpcSeatParts.
+  const { args } = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', env: {}, grants: { skills: ['/granted/code-less.md'] } })
+  assert.equal(args.filter((arg) => arg === '--no-skills').length, 1)
+  assert.deepEqual(args.slice(-3), ['--no-skills', '--skill', '/granted/code-less.md'])
+})
+
+test('SI5 granted pi pane seats disable skill discovery before explicit grants', () => {
+  // MUTATION: drop --no-skills from seatCommand.
+  const command = seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt', tools: 'Read', deny: '', taskDir: '/tmp/task', bootBrief: 'brief', env: {}, grants: { skills: ['/granted/code-less.md'] } })
+  assert.match(command, /(?:^| )--no-skills --skill "\/granted\/code-less\.md"(?: |$)/)
 })
 
 test('builder ACP roster approvals bypass lead while reviewer gated writes consult lead', () => {
@@ -526,7 +539,7 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
   assert.match(command, /--no-extensions/)
   assert.match(command, /-e "\/checkout\/crew\/pi\/extensions\/builderloop\.ts"/)
   assert.match(command, /--skill "\/checkout\/crew\/pi\/skills\/scout\.md"/)
-  assert.doesNotMatch(command, /--no-skills/)
+  assert.match(command, /--no-skills/)
   assert.match(command, /PI_CODING_AGENT_DIR="\/checkout\/crew\/pi"/)
   assert.doesNotMatch(command, /--provider/)
 })

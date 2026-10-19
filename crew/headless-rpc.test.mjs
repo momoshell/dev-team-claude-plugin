@@ -1105,7 +1105,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   assert.deepEqual(completeGrant.args, [
     '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
     '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,agent', '--exclude-tools', 'edit',
-    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(ROOT, 'crew/pi/extensions/advisor.ts'), '--skill', '/skill.md',
+    '--no-context-files', '--no-extensions', '-e', '/repo/crew/pi/extensions/subagent.ts', '-e', join(ROOT, 'crew/pi/extensions/advisor.ts'), '--no-skills', '--skill', '/skill.md',
   ])
   assert.deepEqual(completeGrant.env, {
     X: '1', CREW_FFF: '0', CREW_ADVISOR: '1', CREW_PI_AGENTS: JSON.stringify([{ name: 'scout', def: '/scout.json' }]),
@@ -1116,7 +1116,7 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   const skilled = rpcCommand({ ...common, grants: { ...bareGrants, skills: ['/skill.md'] } })
   const skillAt = skilled.args.indexOf('--skill')
   assert.deepEqual(skilled.args.slice(skillAt, skillAt + 2), ['--skill', '/skill.md'])
-  assert.equal(skilled.args.includes('--no-skills'), false)
+  assert.equal(skilled.args.includes('--no-skills'), true)
   for (const command of [c, bare, granted, skilled]) {
     assert.equal(command.args.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
   }

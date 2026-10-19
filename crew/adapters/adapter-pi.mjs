@@ -337,7 +337,7 @@ export function piRpcSeatParts(spec = {}) {
       '--append-system-prompt', promptFile, '--tools', activatedTools.join(','),
       ...(piDeny.length ? ['--exclude-tools', piDeny.join(',')] : []),
       '--no-context-files', '--no-extensions', ...extensions.flatMap((extension) => ['-e', extension]),
-      ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
+      '--no-skills', ...skills.flatMap((skill) => ['--skill', skill]),
     ],
     env: {
       ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV)),
@@ -442,8 +442,8 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // (crew/crew.mjs), which refuses at boot a register that grants fan-out to a
   // seat whose defaults withhold it.
   // --no-extensions disables discovery while explicit -e paths remain usable;
-  // --no-skills is the matching closed posture when no skill is granted. These
-  // flags make a seat a function of this checkout rather than user-global pi
+  // --no-skills closes discovery for every seat; granted paths follow explicitly.
+  // These flags make a seat a function of this checkout rather than user-global pi
   // state, and are enforced by crew/adapter-pi.test.mjs.
   //
   // `deny` (the claude-named disallowedTools list, e.g. "Edit,NotebookEdit")
@@ -505,7 +505,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
     '--no-extensions',
     ...extensions.flatMap((extension) => ['-e', piExtensionOperand(extension)]),
-    ...(skills.length ? skills.flatMap((skill) => ['--skill', `"${skill}"`]) : ['--no-skills']),
+    '--no-skills', ...skills.flatMap((skill) => ['--skill', `"${skill}"`]),
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')

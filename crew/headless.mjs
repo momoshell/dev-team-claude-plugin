@@ -1781,7 +1781,8 @@ export function journalSeatSkillsLeak({ text, grants, role, dispatch_id, at, tra
   try {
     if (!Array.isArray(grants?.skills) || grants.skills.length === 0) return null
     if (typeof text !== 'string' || !text.trim()) return null
-    const allowed = new Set(grants.skills.map(skillDirName))
+    const grantedNames = grants.skills.map(skillDirName)
+    const allowed = new Set([...grantedNames, ...grantedNames.map((name) => `crew-skills-${role}:${name}`)])
     let listed = null
     for (const line of text.split('\n')) {
       if (!line.trim()) continue

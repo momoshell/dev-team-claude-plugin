@@ -408,8 +408,8 @@ test('Claude ACP launch carries SDK tools directories and frozen binaries', () =
   assert.equal(ACP_BINARY, 'claude-agent-acp')
   assert.deepEqual(launch.args, [])
   assert.equal(launch.mode, 'acceptEdits')
-  assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude' })
-  assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', allowedTools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
+  assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' })
+  assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', settingSources: ['project'], settings: PANE_USAGE_SETTINGS, allowedTools: ['Read', 'Write', 'Bash'], tools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
   assert.deepEqual(launch.policy, { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] })
   assert.equal(Object.hasOwn(launch.sessionParams, 'additionalDirectories'), false)
   const empty = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', env: {} }).sessionParams._meta.claudeCode.options
@@ -472,6 +472,7 @@ test('AM4 Claude ACP omits MCP config without grants', () => {
     assert.equal(bare.disallowedTools.includes('mcp__*'), true)
     const { mcpServers, strictMcpConfig, ...normalizedGranted } = granted
     normalizedGranted.allowedTools = normalizedGranted.allowedTools.filter(tool => !ACP_MCP_NAMES.includes(tool))
+    normalizedGranted.tools = normalizedGranted.tools.filter(tool => !ACP_MCP_NAMES.includes(tool))
     const normalizedBare = { ...bare, disallowedTools: bare.disallowedTools.filter(tool => tool !== 'mcp__*') }
     assert.deepEqual(normalizedBare, normalizedGranted)
   }
@@ -518,6 +519,7 @@ test('ACS3 Claude ACP keeps no-skill options unchanged', () => {
     const granted = claudeAcpLaunch(spec).sessionParams._meta.claudeCode.options
     const { plugins, ...withoutPlugins } = granted
     withoutPlugins.allowedTools = withoutPlugins.allowedTools.filter((tool) => tool !== 'Skill')
+    withoutPlugins.tools = withoutPlugins.tools.filter((tool) => tool !== 'Skill')
     assert.deepEqual(withoutPlugins, bare)
   })
 })
@@ -526,8 +528,43 @@ test('ACS4 Claude ACP appends exactly one Skill to granted allowedTools', () => 
   // MUTATION: drop the conditional Skill append from acpLaunch's allowedTools.
   withAcpSkillFixture(true, (spec) => {
     for (const tools of ['Read,Write', 'Skill,Read,Skill,Write']) {
-      const actual = claudeAcpLaunch({ ...spec, tools }).sessionParams._meta.claudeCode.options.allowedTools
-      assert.deepEqual({ last: actual.at(-1), count: actual.filter((tool) => tool === 'Skill').length }, { last: 'Skill', count: 1 })
+      const options = claudeAcpLaunch({ ...spec, tools }).sessionParams._meta.claudeCode.options
+      for (const actual of [options.allowedTools, options.tools]) {
+        assert.deepEqual({ last: actual.at(-1), count: actual.filter((tool) => tool === 'Skill').length }, { last: 'Skill', count: 1 })
+      }
+    }
+  })
+})
+
+test('SI1 Claude ACP isolates settings for granted and ungranted seats', () => {
+  // MUTATION: replace acpLaunch's project settings sources and pinned settings path with user state.
+  withAcpSkillFixture(true, (spec) => {
+    for (const skills of [[], spec.grants.skills]) {
+      const options = claudeAcpLaunch({ ...spec, grants: { ...spec.grants, skills } }).sessionParams._meta.claudeCode.options
+      assert.deepEqual(options.settingSources, ['project'])
+      assert.equal(options.settings, CLAUDE_USAGE_SETTINGS)
+    }
+  })
+})
+
+test('SI2 Claude ACP restricts SDK tools to the allowlist for granted and ungranted seats', () => {
+  // MUTATION: set acpLaunch's tools to [].
+  withAcpSkillFixture(true, (spec) => {
+    for (const skills of [[], spec.grants.skills]) {
+      const options = claudeAcpLaunch({ ...spec, grants: { ...spec.grants, skills } }).sessionParams._meta.claudeCode.options
+      assert.deepEqual(options.allowedTools, skills.length ? ['Read', 'Write', 'Bash', 'Skill'] : ['Read', 'Write', 'Bash'])
+      assert.deepEqual(options.tools, options.allowedTools)
+    }
+  })
+})
+
+test('SI3 Claude ACP disables inherited instructions and memory for every seat', () => {
+  // MUTATION: set both CLAUDE_CODE_DISABLE_* env values in acpLaunch to '0'.
+  withAcpSkillFixture(true, (spec) => {
+    for (const skills of [[], spec.grants.skills]) {
+      const { env } = claudeAcpLaunch({ ...spec, grants: { ...spec.grants, skills }, env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: '0', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } })
+      assert.equal(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1')
+      assert.equal(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1')
     }
   })
 })

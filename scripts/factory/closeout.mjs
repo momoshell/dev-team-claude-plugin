@@ -10,6 +10,7 @@ import {
   mkdtempSync as fsMkdtempSync,
   readFileSync as fsReadFileSync,
   readdirSync as fsReaddirSync,
+  realpathSync as fsRealpathSync,
   renameSync as fsRenameSync,
   rmSync as fsRmSync,
   statSync as fsStatSync,
@@ -34,6 +35,7 @@ import { CELL_RATE_FLOOR, TABLES as LEDGER_TABLES, defaultDbPath as defaultLedge
 import { probeDriverIdentity as defaultProbeDriverIdentity } from './lane-watch.mjs'
 import { checkoutBaseBranch, checkoutTestCommand, checkoutWorktreeSetup, runColdWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { PLUGIN_ROOT, pluginProvenance } from '../../crew/provenance.mjs'
+import { failingTestFiles } from '../../crew/lane-red.mjs'
 
 const LEDGER_PATH = fileURLToPath(new URL('./ledger.mjs', import.meta.url))
 const CREW_PATH = fileURLToPath(new URL('../../crew/crew.mjs', import.meta.url))
@@ -126,11 +128,12 @@ export const CLOSEOUT_REFUSALS = Object.freeze({
 })
 
 export class CloseoutRefusal extends Error {
-  constructor(message, reason, step) {
+  constructor(message, reason, step, detail = null) {
     super(message)
     this.name = 'CloseoutRefusal'
     this.reason = reason
     this.step = step
+    this.detail = detail ?? null
   }
 }
 
@@ -178,6 +181,7 @@ export function normalDeps(deps = {}) {
     existsSync: deps.existsSync || fsExistsSync,
     readFileSync: deps.readFileSync || fsReadFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
+    realpathSync: deps.realpathSync || fsRealpathSync,
     statSync: deps.statSync || fsStatSync,
     mkdirSync: deps.mkdirSync || fsMkdirSync,
     mkdtempSync: deps.mkdtempSync || fsMkdtempSync,
@@ -239,6 +243,7 @@ export function runSteps({ verb, lane, steps, deps } = {}) {
       refusal = err instanceof CloseoutRefusal ? err : new CloseoutRefusal(err?.message || String(err), CLOSEOUT_REFUSALS.INTERNAL, step.name)
       outcome = STEP_OUTCOMES.REFUSED
       reason = refusal.reason
+      detail = refusal.detail ?? null
     }
     const row = {
       event: STEP_EVENT, verb, lane, step: step.name,
@@ -957,6 +962,24 @@ function prView({ lane, checkout, deps, step = 'pr-open' }) {
   return pr
 }
 
+const STACKED_SUITE_ADVISORY = 'advisory: a lane is named only when it changed the failing test file; a lane that changed only the code under test is not named'
+
+function stackedSuiteDetail({ output, scratch, batch, mergeBaseRef, deps }) {
+  const d = normalDeps(deps)
+  const parsed = failingTestFiles(textOf(output), 'node', d.realpathSync(scratch))
+  if (parsed.length === 0) return { advisory: STACKED_SUITE_ADVISORY, failing: null, reason: 'no-failing-test-parsed' }
+  const changed = new Map()
+  for (const lane of batch) {
+    const result = runCommand({ file: 'git', args: ['diff', '--name-only', `${mergeBaseRef}...${lane}`], cwd: scratch }, d)
+    // lean: failed diff indistinguishable from no changes; record a per-lane diff reason if attribution noise becomes material
+    changed.set(lane, commandOk(result) ? textOf(result?.stdout).split('\n').map((line) => line.trim()).filter(Boolean) : [])
+  }
+  const failing = parsed.map((entry) => entry.file === null
+    ? { test: entry.test, file: null, lanes: null, reason: 'test-location-unmapped' }
+    : { test: entry.test, file: entry.file, lanes: batch.filter((lane) => changed.get(lane).includes(entry.file)), reason: null })
+  return { advisory: STACKED_SUITE_ADVISORY, failing, reason: null }
+}
+
 function mergeOne({ lane, scratch, deps }) {
   const d = normalDeps(deps)
   const result = runCommand({ file: 'git', args: ['merge', '--no-ff', '--no-edit', lane], cwd: scratch }, d)
@@ -987,7 +1010,10 @@ function runSuite({ cwd, checkout = cwd, deps, env, reason = CLOSEOUT_REFUSALS.S
   }
   if (suite.pass + suite.fail === 0) refuse(`the suite in ${cwd} ran no tests: ${JSON.stringify(suite)}`, CLOSEOUT_REFUSALS.SUITE_EMPTY, step)
   if (!commandOk(result) || suite.fail > 0) {
-    refuse(`suite failed in ${cwd}: ${JSON.stringify(suite)}`, reason, step)
+    const refusalError = new CloseoutRefusal(`suite failed in ${cwd}: ${JSON.stringify(suite)}`, reason, step)
+    refusalError.suiteOutput = textOf(result?.stdout)
+    refusalError.suiteCounts = suite
+    throw refusalError
   }
   return suite
 }
@@ -1006,6 +1032,7 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const prs = new Map()
   let scratch = null
+  let mergeBaseRef = null
   const report = { merged: 0, suite: null, pins_moved: [], refusals: [] }
   const runners = {
     'pr-open': () => {
@@ -1017,7 +1044,6 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
       return { prs: batch.length }
     },
     'scratch-worktree': () => {
-      let mergeBaseRef
       try { mergeBaseRef = `origin/${d.baseBranch({ checkout: root }).branch}` } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BASE_BRANCH_UNRESOLVED, 'scratch-worktree') }
       try { scratch = d.mkdtempSync(join(tmpdir(), 'closeout-scratch-')) } catch (error) {
         refuse(`cannot create scratch worktree: ${error?.message || String(error)}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'scratch-worktree')
@@ -1028,7 +1054,16 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
     },
     merge: () => {
       // Keep the complete batch: a scratch merge that omits a lane is not a merge-check.
-      for (const lane of batch) mergeOne({ lane, scratch, deps: d })
+      const merged = []
+      for (const [index, lane] of batch.entries()) {
+        try { mergeOne({ lane, scratch, deps: d }) } catch (error) {
+          if (batch.length > 1 && error instanceof CloseoutRefusal && error.reason === CLOSEOUT_REFUSALS.MERGE_CONFLICT) {
+            error.detail = { conflicted: lane, merged: [...merged], not_attempted: batch.slice(index + 1) }
+          }
+          throw error
+        }
+        merged.push(lane)
+      }
       try { runColdWorktreeSetup({ checkout: root, laneDir: scratch, lookup: d.worktreeSetup, deps: d }) } catch (error) {
         if (error?.reason === 'worktree-setup-failed' || error?.code === 'worktree-setup-failed') refuse(`worktree-setup-failed: ${error.message}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'merge')
         throw error
@@ -1037,7 +1072,14 @@ export function mergeCheck({ lanes, checkout, deps } = {}) {
       return { merged: batch.length }
     },
     suite: () => {
-      report.suite = runSuite({ cwd: scratch, checkout: root, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(scratch, '.dev-team', 'factory') } })
+      try {
+        report.suite = runSuite({ cwd: scratch, checkout: root, deps: d, env: { ...colourNeutralEnv(), DEVTEAM_LEDGER_DIR: join(scratch, '.dev-team', 'factory') } })
+      } catch (error) {
+        if (batch.length > 1 && error instanceof CloseoutRefusal && error.reason === CLOSEOUT_REFUSALS.SUITE_RED && error.suiteCounts?.fail > 0) {
+          error.detail = stackedSuiteDetail({ output: error.suiteOutput, scratch, batch, mergeBaseRef, deps: d })
+        }
+        throw error
+      }
       return { suite: report.suite }
     },
     'anchor-repair': () => {

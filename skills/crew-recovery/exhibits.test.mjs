@@ -346,6 +346,16 @@ test('ES3', () => {
   }
 })
 
+test('SM6 closeout names the stacked merge-check before merging a wave', () => {
+  // MUTATION SM6: removing the stacked merge-check line leaves wave merges without their measured gate.
+  const text = readText(join(HERE, 'references/closeout.md'))
+  const sectionAt = text.indexOf('## Normal closeout — teardown last')
+  assert.notEqual(sectionAt, -1, 'closeout.md is missing the normal section')
+  const nextAt = text.indexOf('\n## ', sectionAt + 1)
+  const section = nextAt === -1 ? text.slice(sectionAt) : text.slice(sectionAt, nextAt)
+  assert.ok(section.includes('node scripts/factory/closeout.mjs merge-check <laneA> <laneB>'), 'normal section must name the stacked merge-check')
+})
+
 test('MP1', () => {
   // MUTATION MP1: renaming DIFF_MUTATION_UNMEASURED_REASONS breaks the in-lane proof pin.
   const text = readText(join(HERE, 'references/mutation-proof.md'))

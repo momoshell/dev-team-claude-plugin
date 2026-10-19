@@ -3347,3 +3347,89 @@ test('reap refuses worktree removal when the worktree HEAD moved after the proof
   assert.equal(spawned(calls, 'worktree remove').length, 0)
   assert.equal(spawned(calls, 'branch -D').length, 0)
 })
+
+test('SM1 stacked merge conflict names the conflicting, merged and not-attempted lanes', () => {
+  // MUTATION SM1: dropping the conflicting-lane annotation leaves the stacked merge row with null detail.
+  const { deps } = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    [' merge --no-ff ', (argv) => (argv.includes('lane-b') ? { status: 1, stdout: '', stderr: 'conflict' } : { status: 0, stdout: '', stderr: '' })],
+  ] })
+  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.MERGE_CONFLICT)
+  assert.equal(rows(result).at(-1).step, 'merge')
+  assert.deepEqual(rows(result).at(-1).detail, { conflicted: 'lane-b', merged: ['lane-a'], not_attempted: [] })
+})
+
+test('SM2 stacked red suite attributes a realpath-mapped failing test to the lane that changed it', () => {
+  // MUTATION SM2: mapping the TAP location against the unresolved scratch leaves the failing file unmapped.
+  const { deps } = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', (argv, options) => ({ status: 1, stdout: `TAP version 13\nnot ok 1 - my failing test\n  location: '${realpathSync(options.cwd)}/test/x.test.mjs:10:5'\n# pass 1\n# fail 1\n`, stderr: '' })],
+    ['diff --name-only', (argv) => (argv.includes('lane-a') ? { status: 0, stdout: 'test/x.test.mjs\n', stderr: '' } : { status: 0, stdout: '', stderr: '' })],
+  ] })
+  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  assert.deepEqual(rows(result).at(-1).detail, { advisory: 'advisory: a lane is named only when it changed the failing test file; a lane that changed only the code under test is not named', failing: [{ test: 'my failing test', file: 'test/x.test.mjs', lanes: ['lane-a'], reason: null }], reason: null })
+})
+
+test('SM3 stacked red suite leaves unmapped failing tests with null file and null lanes', () => {
+  // MUTATION SM3: recording an unmapped failing test with an empty lanes list invents a measured attribution.
+  const { deps } = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', { status: 1, stdout: 'TAP version 13\nnot ok 1 - first failing test\n  details: no location here\nnot ok 2 - second failing test\n  location: \'/outside/the/scratch/test/y.test.mjs:1:1\'\n# pass 1\n# fail 2\n', stderr: '' }],
+    ['diff --name-only', { status: 0, stdout: '', stderr: '' }],
+  ] })
+  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps })
+  const detail = rows(result).at(-1).detail
+  assert.equal(detail.failing.length, 2)
+  assert.deepEqual(detail.failing[0], { test: 'first failing test', file: null, lanes: null, reason: 'test-location-unmapped' })
+  assert.deepEqual(detail.failing[1], { test: 'second failing test', file: null, lanes: null, reason: 'test-location-unmapped' })
+  assert.notDeepEqual(detail.failing[0].lanes, [])
+  assert.notDeepEqual(detail.failing[1].lanes, [])
+})
+
+test('SM4 stacked red suite with unparseable failures reports failing null with a closed reason', () => {
+  // MUTATION SM4: emitting an empty failing list for unparseable output invents a measured zero.
+  const { deps } = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', { status: 1, stdout: '# pass 0\n# fail 1\n', stderr: 'failed' }],
+    ['diff --name-only', { status: 0, stdout: '', stderr: '' }],
+  ] })
+  const result = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps })
+  assert.equal(result.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  assert.deepEqual(rows(result).at(-1).detail, { advisory: 'advisory: a lane is named only when it changed the failing test file; a lane that changed only the code under test is not named', failing: null, reason: 'no-failing-test-parsed' })
+})
+
+test('SM5 stacked suite diff spawns are exactly one per lane and absent when green or single-lane', () => {
+  // MUTATION SM5: attributing without a per-lane diff, or diffing on green or single-lane runs, breaks the spawn contract.
+  const red = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', (argv, options) => ({ status: 1, stdout: `TAP version 13\nnot ok 1 - my failing test\n  location: '${realpathSync(options.cwd)}/test/x.test.mjs:10:5'\n# pass 1\n# fail 1\n`, stderr: '' })],
+    ['diff --name-only', (argv) => (argv.includes('lane-a') ? { status: 0, stdout: 'test/x.test.mjs\n', stderr: '' } : { status: 0, stdout: '', stderr: '' })],
+  ] })
+  const redResult = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps: red.deps })
+  assert.equal(redResult.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  const diffs = spawned(red.calls, 'diff --name-only')
+  assert.equal(diffs.length, 2)
+  assert.deepEqual(diffs[0].args, ['diff', '--name-only', 'origin/main...lane-a'])
+  assert.deepEqual(diffs[1].args, ['diff', '--name-only', 'origin/main...lane-b'])
+  const suiteCwd = spawned(red.calls, '--test')[0].cwd
+  assert.equal(diffs[0].cwd, suiteCwd)
+  assert.equal(diffs[1].cwd, suiteCwd)
+  const green = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', { status: 0, stdout: '# pass 1\n# fail 0\n# skipped 0\n', stderr: '' }],
+    ['anchor-pin.mjs', { status: 0, stdout: '', stderr: '' }],
+  ] })
+  const greenResult = mergeCheck({ lanes: ['lane-a', 'lane-b'], checkout: ROOT, deps: green.deps })
+  assert.equal(greenResult.code, 0)
+  assert.equal(spawned(green.calls, 'diff --name-only').length, 0)
+  const single = harness({ baseBranch: () => ({ branch: 'main' }), answers: [
+    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'OPEN', body: '' }), stderr: '' }],
+    ['--test', { status: 1, stdout: '# pass 2\n# fail 1\n', stderr: 'failed' }],
+  ] })
+  const singleResult = mergeCheck({ lanes: ['lane-a'], checkout: ROOT, deps: single.deps })
+  assert.equal(singleResult.refusal.reason, CLOSEOUT_REFUSALS.SUITE_RED)
+  assert.equal(spawned(single.calls, 'diff --name-only').length, 0)
+  assert.equal(rows(singleResult).at(-1).detail, null)
+})

@@ -1016,7 +1016,7 @@ test('EA5 edit-assist CLI prints rows, requires --since and refuses degraded mir
   assert.equal(payload.rows[0].failed_edits, 1)
   assert.equal(payload.rows[0].round_trips, null)
   assert.equal(payload.rows[0].round_trips_absent_reason, 'successful-edit-stream-unrecorded')
-  assert.deepEqual(Object.keys(payload.excluded).sort(), ['arm-disagreement', 'arm-unset', 'builder-cell-mixed', 'builder-seat-absent', 'edits-unmeasured'])
+  assert.deepEqual(Object.keys(payload.excluded).sort(), ['arm-disagreement', 'arm-unset', 'builder-cell-mixed', 'builder-seat-absent', 'edits-unmeasured', 'failure-stream-uninstrumented'])
   assert.equal(run(['edit-assist'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
   assert.equal(run(['edit-assist', '--since', '2026-10-16T00:00:00Z', '--until', '2026-10-16T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath }).status, 2)
   const corruptDb = join(scratchDir('ea-cli-corrupt-'), 'ledger.db')

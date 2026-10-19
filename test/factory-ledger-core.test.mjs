@@ -13,7 +13,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { ROOT, scratchDir } from './helpers.mjs'
 
 import {
-  openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL,
+  openLedger, replayJsonl, isoMs, TABLES, SEAT_STOP_REASONS, SEAT_PERMISSION_POLICIES, PATH_DEPENDENT_TABLES, MIGRATIONS, applyMigrations, DRIVER_GONE_THRESHOLD_MS, DRIVER_STATES, RUN_OBSERVATION_SOURCES, RUN_OBSERVATION_COLUMNS, RUN_OBSERVATION_WRITE_VERB, SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSE_UNCLASSIFIED, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError, MODIFIER_KINDS, INTAKE_DISPATCH_OUTCOMES, SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, MUTATION_ANCHOR_CORRECTIONS, MUTATION_ANCHOR_REFUSALS, CELL_FAILURE_ATTRIBUTIONS, RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage, REQUEST_MAX_CHARS, USAGE_ABSENT_CAUSES, usageAbsentCause, AGENT_SESSION_ABSENT_REASONS, AGENT_SESSION_ABSENT_REASON_KEYS, CELL_RATE_FLOOR, SCREENER_PROPOSAL_OUTCOMES, CELL_PRICE_UNITS, REVIEW_VERDICTS, PHASE_SLOT_WAIT_KINDS, PHASE_SLOT_WAIT_DEPTH_ABSENT, PHASE_SLOT_WAIT_ABSENT, NARRATION_OUTCOMES, EVAL_ENVELOPE_STATUSES, EVAL_ABSENT_REASONS, EVAL_PAYLOAD_KEYS, SEAT_REASK_EVENTS, ingestJournal, ingestExternalFenceRegister, JOURNAL_FACT_KEYS, JOURNAL_FACT_EVENTS, PLANNER_SYMBOLS_ARMS, PLANNER_SYMBOLS_SAMPLE_FLOOR, bootstrapPercentile, chunkProgress, upsertChunkRun, CHUNK_PROGRESS_SQL, EDIT_ASSIST_EXCLUDED, EDIT_ASSIST_DEFINITION,
 } from '../scripts/factory/ledger.mjs'
 import { SKILL_LOAD_ABSENT_REASONS as LEDGER_SKILL_LOAD_ABSENT_REASONS, SKILL_LOADS_DEFINITION } from '../scripts/factory/ledger.mjs'
 import { SKILL_LOAD_ABSENT_REASONS as CREW_SKILL_LOAD_ABSENT_REASONS } from '../crew/headless.mjs'
@@ -3145,6 +3145,29 @@ test('EA2 EA3 editAssist per-cell rates use measured edit_calls with anchor subs
   } finally { ledger.close() }
 })
 
+// MUTATION US1: make the failure-stream guard match only agent === '__never__'.
+test('US1 editAssist excludes a non-pi builder lane as failure-stream-uninstrumented', () => {
+  const dir = scratchDir('ea-nonpi-')
+  const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
+  try {
+    const adw = 'ea-nonpi'
+    ledger.startSession({ adw_id: adw, repo_slug: 'r', task_slug: adw })
+    ledger.recordRunConfiguration({ adw_id: adw, schema_version: 1, task_profile: 'build', task_profile_source: 'test', requested_execution: 'x', effective_execution: 'x', execution_source: 'test', requested_assurance: 'x', effective_assurance: 'x', assurance_source: 'test', legacy_variant: 'x', legacy_tier: 'x', edit_assist: 'off' })
+    ledger.recordRunSeat({ adw_id: adw, role: 'builder', agent: 'claude', provider: 'prov', model_id: 'm1', model: 'm1', effort: 'high', transport: 'headless-rpc', source: 'roster', policy_state: 'passed' })
+    ledger.recordSeatTurnCensus({ adw_id: adw, role: 'builder', dispatch_id: 'd1', edit_calls: 40, at_ms: 1 })
+    const out = ledger.editAssist({ since: '2020-01-01T00:00:00.000Z', until: '2100-01-01T00:00:00.000Z' })
+    assert.equal(out.rows.length, 0)
+    assert.equal(out.excluded['failure-stream-uninstrumented'], 1)
+  } finally { ledger.close() }
+})
+
+// MUTATION US2: drop failure-stream-uninstrumented from EDIT_ASSIST_EXCLUDED, or remove its freeze.
+test('US2 EDIT_ASSIST_EXCLUDED and definition name failure-stream-uninstrumented in position', () => {
+  assert.deepEqual([...EDIT_ASSIST_EXCLUDED], ['arm-unset', 'arm-disagreement', 'builder-seat-absent', 'builder-cell-mixed', 'failure-stream-uninstrumented', 'edits-unmeasured'])
+  assert.equal(Object.isFrozen(EDIT_ASSIST_EXCLUDED), true)
+  assert.ok(EDIT_ASSIST_DEFINITION.includes('builder-cell-mixed|failure-stream-uninstrumented|edits-unmeasured'))
+})
+
 test('EA4 editAssist excludes lanes in precedence with closed reasons', () => {
   const dir = scratchDir('ea-excluded-')
   const ledger = openLedger({ dbPath: join(dir, 'ledger.db') })
@@ -3163,7 +3186,7 @@ test('EA4 editAssist excludes lanes in precedence with closed reasons', () => {
     cfg('x-nocensus', 'on'); seat('x-nocensus')
     cfg('x-nullcensus', 'on'); seat('x-nullcensus'); ledger.recordSeatTurnCensus({ adw_id: 'x-nullcensus', role: 'builder', dispatch_id: 'd1', edit_calls: null, at_ms: 1 })
     const out = ledger.editAssist({ since: '2020-01-01T00:00:00.000Z', until: '2100-01-01T00:00:00.000Z' })
-    assert.deepEqual(out.excluded, { 'arm-unset': 1, 'arm-disagreement': 1, 'builder-seat-absent': 1, 'builder-cell-mixed': 0, 'edits-unmeasured': 2 })
+    assert.deepEqual(out.excluded, { 'arm-unset': 1, 'arm-disagreement': 1, 'builder-seat-absent': 1, 'builder-cell-mixed': 0, 'failure-stream-uninstrumented': 0, 'edits-unmeasured': 2 })
     assert.equal(out.rows.length, 0)
     // builder-cell-mixed is defensive and untestable-by-construction: run_seats unique (adw_id, role)
     // allows only one builder row per lane through the writer, so two builder rows cannot be inserted

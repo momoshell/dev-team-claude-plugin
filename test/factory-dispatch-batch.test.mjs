@@ -568,7 +568,14 @@ function crewBeforeRun() {
 // MUTATION EA1-order: call recordEditAssist after the run spawn; the run must already see edit_assist.
 test('EA1 requested edit assist is attributed before the run', async () => {
   const probe = crewBeforeRun()
-  const result = await dispatchFixture({ label: 'ea1-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult, requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: 'on' } } })
+  const result = await dispatchFixture({
+    label: 'ea1-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult,
+    crewJsonFor: (lane) => JSON.stringify({
+      workspace_id: `ws-${lane}`,
+      members: { builder: { agent: AR_CELL.agent, provider: AR_CELL.provider, id: AR_CELL.model_id, effort: AR_CELL.effort } },
+    }),
+    requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: 'on' } },
+  })
   assert.equal(probe.seen.at(-1), 'on')
   const crewEntry = [...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))
   assert.ok(crewEntry)
@@ -577,6 +584,21 @@ test('EA1 requested edit assist is attributed before the run', async () => {
   const rows = result.appended.filter(({ path }) => path.endsWith('/journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
   assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source }) => ({ edit_assist, source })), [{ edit_assist: 'on', source: 'request' }])
   assert.ok(result.spawned.some(({ background }) => background === true))
+})
+
+// MUTATION NP1: neutralise recordEditAssist's requested-arm not-pi guard with else if (false).
+test('NP1 EA6 requested edit assist for a non-pi builder is not applied', async () => {
+  const probe = crewBeforeRun()
+  const result = await dispatchFixture({ label: 'ea6-edit-assist', names: ['lane-a'], writeFile: probe.writeFile, spawnResult: probe.spawnResult, requests: { 'lane-a': { ...requestFor('lane-a'), edit_assist: 'on' } } })
+  assert.equal(probe.seen.at(-1), null)
+  const crewEntry = [...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))
+  assert.ok(crewEntry)
+  const crew = JSON.parse(crewEntry[1])
+  assert.equal(crew.edit_assist, null)
+  assert.equal(crew.edit_assist_source, null)
+  const rows = result.appended.filter(({ path }) => path.endsWith('/journal.jsonl')).flatMap(({ content }) => content.split('\n').filter(Boolean).map(JSON.parse))
+  assert.deepEqual(rows.filter(({ event }) => event === 'edit-assist').map(({ edit_assist, source, reason }) => ({ edit_assist, source, reason })), [{ edit_assist: null, source: 'request', reason: 'not-pi' }])
+  assert.equal(dispatchRecordFor(result).edit_assist, 'on')
 })
 
 const AR_CELL = Object.freeze({ agent: 'pi', provider: 'openai', model_id: 'ar-model', effort: 'high' })

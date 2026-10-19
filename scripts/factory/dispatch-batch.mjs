@@ -2886,7 +2886,7 @@ function registerScopeCandidate({ checkout, lane, index, authored } = {}) {
       return { parsed, observation: observation(SCOPE_ENTRY_INVALID, 'span has no readable committed base blob') }
     }
     let shown
-    try { shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000 }) } catch (error) {
+    try { shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000, maxBuffer: 64 * 1024 * 1024 }) } catch (error) {
       return { parsed, observation: observation(SCOPE_ENTRY_INVALID, `committed base is unreadable: ${error?.message || String(error)}`) }
     }
     if (!shown || shown.status !== 0 || shown.error || shown.signal || typeof shown.stdout !== 'string' || shown.stdout.includes('\\0')) {

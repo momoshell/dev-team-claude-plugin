@@ -1209,7 +1209,7 @@ function committedFenceLineCount({ checkout, parsed, entry, context } = {}) {
   }
   let shown
   try {
-    shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000 })
+    shown = spawnSync('git', ['-C', root, 'show', ref], { encoding: 'utf8', timeout: 10_000, maxBuffer: 64 * 1024 * 1024 })
   } catch (error) {
     refuseUsage(`${context}: fence ${entry} path ${parsed.path} cannot read its committed base blob: ${error?.message || String(error)}`, SCOPE_ENTRY_SHAPE)
   }
@@ -2674,6 +2674,7 @@ export function readPremiseBaselineFile(checkout, path) {
     result = spawnSync('git', ['-C', checkout, 'show', `HEAD:${path}`], {
       encoding: 'utf8',
       timeout: 10_000,
+      maxBuffer: 64 * 1024 * 1024,
     })
   } catch {
     refuseUsage(`cannot read committed premise file: ${path}`, NOT_A_GIT_REPO)

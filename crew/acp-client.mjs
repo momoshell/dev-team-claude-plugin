@@ -2,11 +2,11 @@ import { spawn as cpSpawn, spawnSync as cpSpawnSync } from 'node:child_process'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   mkdirSync as fsMkdirSync, openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
-  unlinkSync as fsUnlinkSync, constants as fsConstants,
+  unlinkSync as fsUnlinkSync, constants as fsConstants, rmdirSync as fsRmdirSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { splitFrames, seatCommandPath } from './headless-rpc.mjs'
+import { splitFrames, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate } from './headless-rpc.mjs'
 import { shq } from './headless.mjs'
 import { reclaimStore, PHASES, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 
@@ -34,11 +34,11 @@ export function acpRefuse(reason, message) {
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
 }
 
-export function acpSeatPaths(dir, role) {
+export function acpSeatPaths(dir, role, root) {
   const seat = join(dir, role)
   return Object.freeze({
     dir: seat, stream: join(seat, 'stream.jsonl'), stderr: join(seat, 'stderr'),
-    exit: join(seat, 'exit'), pgid: join(seat, 'pgid'), fifo: seatCommandPath(dirname(dir), role),
+    exit: join(seat, 'exit'), pgid: join(seat, 'pgid'), fifo: seatCommandPath(dirname(dir), role, root),
   })
 }
 
@@ -60,13 +60,14 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   const write = deps.writeFileSync || fsWriteFileSync
   const mkdir = deps.mkdirSync || fsMkdirSync
   const unlink = deps.unlinkSync || fsUnlinkSync
+  const rmdir = deps.rmdirSync || fsRmdirSync
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const spawnSyncFn = deps.spawnSync || cpSpawnSync
   const now = deps.now || (() => Date.now())
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
   const pid = deps.pid ?? process.pid
   const journal = deps.log || (() => {})
-  const paths = acpSeatPaths(dir, role)
+  const paths = acpSeatPaths(dir, role, deps.seatCommandRoot)
   const store = reclaimStore({
     dir, actor: `acp:${pid}`, deps,
     evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
@@ -122,7 +123,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
 
   function start() {
     mkdir(paths.dir, { recursive: true })
-    mkdir(dirname(paths.fifo), { recursive: true })
+    mkdir(dirname(paths.fifo), { recursive: true, mode: 0o700 })
+    if (!seatCommandRootPrivate(deps.seatCommandRoot)) throw acpRefuse('acp-spawn-failed', `acp command dir ${dirname(dirname(dirname(paths.fifo)))} is not private to this user`)
     offset = streamEnd()
     rest = Buffer.alloc(0)
     const reservation = store.reserve(role, {
@@ -131,6 +133,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     })
     if (!reservation.ok) throw acpRefuse(reservation.reason === 'unresolvable' ? 'acp-unresolvable-reservation' : 'acp-session-busy', `acp seat ${role} is busy`)
     handle = reservation.handle
+    // A won reservation proves no live worker holds the pre-move pipe inside task/.
+    try { const stale = inCrewSeatCommandPath(dirname(dir), role); if (exists(stale)) unlink(stale) } catch {}
     const args = launch?.args || []
     const shell = `trap ':' TERM INT; rm -f ${shq(paths.exit)}; mkfifo ${shq(paths.fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${paths.pgid}.tmp`)}; mv ${shq(`${paths.pgid}.tmp`)} ${shq(paths.pgid)}; ${shq(launch?.bin)} ${args.map(shq).join(' ')} <${shq(paths.fifo)} >>${shq(paths.stream)} 2>>${shq(paths.stderr)}; printf '%s' $? >${shq(`${paths.exit}.tmp`)}; mv ${shq(`${paths.exit}.tmp`)} ${shq(paths.exit)}`
     store.advance(handle, PHASES.SPAWNING)
@@ -377,6 +381,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const proof = proveDead()
     if (proof.liveness === LIVENESS.DEAD && handle) { try { store.clear(handle) } catch {} }
     try { if (proof.liveness === LIVENESS.DEAD && exists(paths.fifo)) unlink(paths.fifo) } catch {}
+    try { rmdir(dirname(paths.fifo)) } catch {}
+    try { rmdir(dirname(dirname(paths.fifo))) } catch {}
     const result = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
     closeResult = result
     log({ at: now(), acp_teardown: { role, ...result } })
@@ -392,6 +398,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     if (proof.liveness === LIVENESS.DEAD) {
       if (handle) { try { store.clear(handle) } catch {} }
       try { if (exists(paths.fifo)) unlink(paths.fifo) } catch {}
+      try { rmdir(dirname(paths.fifo)) } catch {}
+      try { rmdir(dirname(dirname(paths.fifo))) } catch {}
     }
     closeResult = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
     log({ at: now(), acp_teardown: { role, ...closeResult } })

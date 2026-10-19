@@ -3469,6 +3469,7 @@ function e1RpcFixture() {
       existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
       readdirSync, mkdirSync, writeFileSync, readFileSync, now: () => 0, sleep: () => {},
       log: (row) => rows.push(row),
+      seatCommandRoot: join(dir, 'seat-runtime'),
     },
   })
   const assigned = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })

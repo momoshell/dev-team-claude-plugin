@@ -478,6 +478,7 @@ function wireFixture({ rejectMode = false } = {}) {
   const sent = []; const logs = []; const heartbeats = []
   const clientDeps = {
     pid: 901, spawn() { return { pid: 902, unref() {} } }, openSync: () => 7, closeSync() {},
+    seatCommandRoot: join(root, 'seat-runtime'),
     existsSync: (path) => path.endsWith('cmd.fifo') || fsExistsSync(path),
     kill() { writeFileSync(join(paths.taskDir, 'acp', 'reviewer', 'exit'), '0') },
     now: (() => { let n = 0; return () => ++n })(), sleep() {},

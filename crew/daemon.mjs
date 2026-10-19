@@ -15,13 +15,13 @@ import {
   statSync as fsStatSync,
 } from 'node:fs'
 import { basename, dirname, join, relative, normalize, resolve as resolvePath } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { fork as cpFork, spawnSync as cpSpawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
-import { splitFrames, seatCommandPath, legacySeatCommandPath, steerFrame } from './headless-rpc.mjs'
+import { splitFrames, seatCommandPath, seatCommandRootPrivate, inCrewSeatCommandPath, legacySeatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
 import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
@@ -463,6 +463,7 @@ export function daemon(options = {}) {
   const concurrency = options.concurrency === undefined ? DEFAULT_CONCURRENCY : options.concurrency
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('concurrency must be an integer >= 1')
   const injected = options.deps || {}
+  const seatCommandRoot = injected.seatCommandRoot
   const env = injected.env || process.env
   const budgetOption = options.budget
   if (budgetOption !== undefined && budgetOption !== null && !isPlainObject(budgetOption)) {
@@ -1385,13 +1386,15 @@ export function daemon(options = {}) {
     if (member.transport !== 'headless-rpc') {
       throw runError('not-capable', `no command channel is implemented for transport ${JSON.stringify(member.transport)}`)
     }
-    // A worker live across the #1496 upgrade still reads its legacy in-task pipe.
-    const fifo = [seatCommandPath(run.crew_dir, role), legacySeatCommandPath(join(run.crew_dir, 'task'), role)].find((path) => exists(path))
+    // A non-private shared-/tmp crew-rpc tree may hold a co-tenant's planted node; refuse it as spawn does.
+    const runtimeFifo = seatCommandPath(run.crew_dir, role, seatCommandRoot)
+    const runtimePrivate = seatCommandRootPrivate(seatCommandRoot)
+    const fifo = [runtimePrivate && runtimeFifo, inCrewSeatCommandPath(run.crew_dir, role), legacySeatCommandPath(join(run.crew_dir, 'task'), role)].find((path) => path && exists(path))
     const seatDir = join(run.crew_dir, 'task', 'headless-rpc', role)
     if (exists(join(seatDir, 'exit'))) throw runError('not-live', `seat ${role} has exited`)
     const workerPid = rpcPid(join(seatDir, 'pgid'))
     if (workerPid == null || processAlive(kill, workerPid) === false) throw runError('not-live', `seat ${role} has no running worker`)
-    if (!fifo) throw runError('not-live', `seat ${role} has no command channel`)
+    if (!fifo) throw runError('not-live', runtimePrivate ? `seat ${role} has no command channel` : `seat ${role} command dir ${join(seatCommandRoot ?? tmpdir(), 'crew-rpc')} is not private to this user`)
     const id = `send-${uuid()}`
     const line = `${JSON.stringify({ ...steerFrame(params.message), id })}\n`
     const size = Buffer.byteLength(line, 'utf8')

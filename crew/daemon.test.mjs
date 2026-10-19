@@ -16,7 +16,7 @@ import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild, specExecution } from './child.mjs'
 import { DEFAULT_TRANSPORT, emitAdapter, seatIo, settleSeatTeardown } from './seat-io.mjs'
-import { splitFrames } from './headless-rpc.mjs'
+import { splitFrames, seatCommandPath, inCrewSeatCommandPath } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
@@ -122,14 +122,16 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
     psSnapshot: () => ({ ok: true, rows: new Map([...alive].map((value) => [value, { pid: value, ppid: 1, pgid: value, start: procStart.get(value) ?? `start-${value}`, stat: 'S' }])) }),
     setInterval: () => null,
     clearInterval: () => {},
+    seatCommandRoot: join(root, 'seat-runtime'),
     feedRetention,
     ...(usageWindowImpl ? { usageWindow: usageWindowImpl } : {}),
     ...(nowImpl ? { now: nowImpl } : {}),
     ...(nodeVersionImpl ? { nodeVersion: nodeVersionImpl } : {}),
   }
   const d = daemon({ root, concurrency, ...(budget === undefined ? {} : { budget }), deps })
+  const seatCommandRoot = join(root, 'seat-runtime')
   return {
-    dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive, procStart,
+    dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive, procStart, seatCommandRoot,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
@@ -210,9 +212,10 @@ function stageRpcSeat(f, role) {
   const dir = join(f.taskDir, 'headless-rpc', role)
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'pgid'), '900')
-  const fifoDir = join(f.crewDir, 'rpc', role)
-  mkdirSync(fifoDir, { recursive: true })
-  writeFileSync(join(fifoDir, 'cmd.fifo'), '')
+  const fifo = seatCommandPath(f.crewDir, role, f.seatCommandRoot)
+  mkdirSync(dirname(fifo), { recursive: true })
+  chmodSync(join(f.seatCommandRoot, 'crew-rpc'), 0o700)
+  writeFileSync(fifo, '')
   return dir
 }
 function instrumentCursorReads(f, positions) {
@@ -3388,7 +3391,7 @@ test('C1', async () => {
     assert.equal(result.transport, 'headless-rpc')
     assert.equal(result.interjection, 'boundary')
     assert.equal(typeof result.command_id, 'string')
-    const frame = JSON.parse(readFileSync(join(f.crewDir, 'rpc', 'builder', 'cmd.fifo'), 'utf8').trim())
+    const frame = JSON.parse(readFileSync(seatCommandPath(f.crewDir, 'builder', f.seatCommandRoot), 'utf8').trim())
     assert.equal(frame.type, 'steer')
     assert.equal(frame.message, 'guidance')
     assert.equal(frame.id, result.command_id)
@@ -3496,7 +3499,7 @@ test('send with no role picks the single steerable seat and refuses when there a
     const seat = stageRpcSeat(single, 'builder')
     const result = await single.d.send({ run, message: 'guidance' })
     assert.equal(result.role, 'builder')
-    assert.equal(JSON.parse(readFileSync(join(single.crewDir, 'rpc', 'builder', 'cmd.fifo'), 'utf8').trim()).message, 'guidance')
+    assert.equal(JSON.parse(readFileSync(seatCommandPath(single.crewDir, 'builder', single.seatCommandRoot), 'utf8').trim()).message, 'guidance')
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
   await each(async (multiple) => {
     const { run_id: run } = multiple.d.enqueue({ crew_dir: multiple.crewDir })
@@ -3515,6 +3518,10 @@ test('run-end teardown kills a real piped seat and its recorded pgid is gone', {
   const binDir = join(f.dir, 'worker-bin')
   const pgidPath = join(f.taskDir, 'headless-rpc', 'builder', 'pgid')
   const savedPath = process.env.PATH
+  const savedTmpdir = process.env.TMPDIR
+  const isolatedTmp = join(f.dir, 'tmp')
+  mkdirSync(isolatedTmp, { recursive: true })
+  process.env.TMPDIR = isolatedTmp
   teardownPgidPaths.add(pgidPath)
   mkdirSync(binDir)
   writeFileSync(join(binDir, 'pi'), `#!/usr/bin/env node
@@ -3566,6 +3573,8 @@ setInterval(() => {}, 1000)
   } finally {
     if (savedPath === undefined) delete process.env.PATH
     else process.env.PATH = savedPath
+    if (savedTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = savedTmpdir
     killRecordedGroup(pgidPath)
     f.cleanup()
   }
@@ -3923,11 +3932,58 @@ test('F1 daemon child refuses boot and run execution disagreement', () => {
   } finally { f.cleanup() }
 })
 
+test('FO4 daemon send writes the runtime FIFO and falls back to the in-crew legacy pipe', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    stageRpcSeat(f, 'builder')
+    const runtime = seatCommandPath(f.crewDir, 'builder', f.seatCommandRoot)
+    const first = await f.d.send({ run, message: 'guidance', role: 'builder' })
+    const frame = JSON.parse(readFileSync(runtime, 'utf8').trim())
+    assert.equal(frame.message, 'guidance')
+    assert.equal(frame.id, first.command_id)
+    assert.equal(runtime.startsWith(f.crewDir), false)
+    rmSync(runtime)
+    const legacy = join(f.crewDir, 'rpc', 'builder', 'cmd.fifo')
+    mkdirSync(dirname(legacy), { recursive: true })
+    writeFileSync(legacy, '')
+    const second = await f.d.send({ run, message: 'again', role: 'builder' })
+    assert.equal(JSON.parse(readFileSync(legacy, 'utf8').trim()).message, 'again')
+    assert.equal(second.command_id !== first.command_id, true)
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('RV5-1 daemon send refuses a non-private runtime node and delivers to the live worker\'s legacy pipe', async () => {
+  // Kill mutation: remove runtimePrivate && from daemon send's runtime candidate.
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    stageRpcSeat(f, 'builder')
+    const runtime = seatCommandPath(f.crewDir, 'builder', f.seatCommandRoot)
+    chmodSync(join(f.seatCommandRoot, 'crew-rpc'), 0o755)
+    const legacy = inCrewSeatCommandPath(f.crewDir, 'builder')
+    mkdirSync(dirname(legacy), { recursive: true })
+    writeFileSync(legacy, '')
+    const result = await f.d.send({ run, message: 'private guidance', role: 'builder' })
+    assert.equal(result.delivered, 'command-channel')
+    assert.equal(readFileSync(runtime, 'utf8'), '')
+    const frame = JSON.parse(readFileSync(legacy, 'utf8').trim())
+    assert.equal(frame.message, 'private guidance')
+    assert.equal(frame.id, result.command_id)
+
+    rmSync(legacy)
+    await assert.rejects(() => f.d.send({ run, message: 'do not leak', role: 'builder' }), (err) => {
+      assert.equal(err.code, 'not-live')
+      assert.equal(err.message, `seat builder command dir ${join(f.seatCommandRoot, 'crew-rpc')} is not private to this user`)
+      return true
+    })
+    assert.equal(readFileSync(runtime, 'utf8'), '')
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
 test('RV3-1 send delivers to a pre-upgrade worker on its legacy in-task pipe', async () => {
   await each(async (f) => {
     const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
     const dir = stageRpcSeat(f, 'builder')
-    rmSync(join(f.crewDir, 'rpc', 'builder', 'cmd.fifo'))
+    rmSync(seatCommandPath(f.crewDir, 'builder', f.seatCommandRoot))
     writeFileSync(join(dir, 'cmd.fifo'), '')
     const result = await f.d.send({ run, message: 'guidance', role: 'builder' })
     assert.equal(result.delivered, 'command-channel')

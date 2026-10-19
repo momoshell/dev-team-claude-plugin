@@ -157,6 +157,7 @@ function replay(name, options = {}) {
     now: () => { clock += 1000; return clock },
     sleep: () => {},
     log: (row) => journal.push(row),
+    seatCommandRoot: join(root, 'seat-runtime'),
   }
 
   api = acpClient({
@@ -393,6 +394,7 @@ test('RV1-1 reused seat reads only records appended after its launch', () => {
       closeSync: () => {},
       existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
       kill: () => { writeFileSync(join(seatDir, 'exit'), '0') },
+      seatCommandRoot: join(root, 'seat-runtime'),
       now: () => { clock += 1; return clock },
       sleep: () => {
         if (!freshInitializePending) return
@@ -426,20 +428,22 @@ test('the client has only built-in or relative imports and the package has no ru
 
 test('E1', () => {
   const root = scratchDir('acp-e1-parity-')
+  const parityRuntime = scratchDir('acp-runtime-')
   try {
     const acpRoot = join(root, 'acp')
-    assert.equal(acpSeatPaths(acpRoot, 'builder').fifo, seatCommandPath(root, 'builder'))
-    assert.equal(acpSeatPaths(acpRoot, 'builder').fifo.startsWith(join(acpRoot, 'builder')), false)
+    assert.equal(acpSeatPaths(acpRoot, 'builder', parityRuntime).fifo, seatCommandPath(root, 'builder', parityRuntime))
+    assert.equal(acpSeatPaths(acpRoot, 'builder', parityRuntime).fifo.startsWith(join(acpRoot, 'builder')), false)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 
   const deadRoot = scratchDir('acp-e1-dead-')
+  const deadRuntime = scratchDir('acp-runtime-')
   try {
     const acpRoot = join(deadRoot, 'acp')
     mkdirSync(join(acpRoot, 'builder'), { recursive: true })
     writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
-    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const fifo = acpSeatPaths(acpRoot, 'builder', deadRuntime).fifo
     const api = acpClient({
       launch: { bin: '/bin/false', args: [], env: {} },
       dir: acpRoot,
@@ -456,25 +460,33 @@ test('E1', () => {
         now: () => Date.now(),
         sleep: () => {},
         log: () => {},
+        seatCommandRoot: deadRuntime,
       },
     })
+    const stale = join(deadRoot, 'rpc', 'builder', 'cmd.fifo')
+    mkdirSync(dirname(stale), { recursive: true })
+    writeFileSync(stale, '')
     api.start()
+    assert.equal(existsSync(stale), false)
     assert.equal(existsSync(dirname(fifo)), true)
     writeFileSync(fifo, '')
     const result = api.close()
     assert.equal(result.outcome, 'proven')
     assert.equal(existsSync(fifo), false)
+    assert.equal(existsSync(dirname(fifo)), false)
+    assert.equal(existsSync(dirname(dirname(fifo))), false)
   } finally {
     rmSync(deadRoot, { recursive: true, force: true })
   }
 
   let clock = 0
   const heldRoot = scratchDir('acp-e1-held-')
+  const heldRuntime = scratchDir('acp-runtime-')
   try {
     const acpRoot = join(heldRoot, 'acp')
     mkdirSync(join(acpRoot, 'builder'), { recursive: true })
     writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
-    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const fifo = acpSeatPaths(acpRoot, 'builder', heldRuntime).fifo
     const api = acpClient({
       launch: { bin: '/bin/false', args: [], env: {} },
       dir: acpRoot,
@@ -491,6 +503,7 @@ test('E1', () => {
         now: () => clock++,
         sleep: () => {},
         log: () => {},
+        seatCommandRoot: heldRuntime,
       },
     })
     api.start()
@@ -501,6 +514,53 @@ test('E1', () => {
     assert.equal(existsSync(fifo), true)
   } finally {
     rmSync(heldRoot, { recursive: true, force: true })
+  }
+})
+
+// MUTATION RV1-1: deleting the rmdir binding leaves the empty runtime dirs after close and reprove.
+test('RV1-1 runtime cleanup removes role and lane dirs only after proven ACP death', () => {
+  for (const delayed of [false, true]) {
+    const root = scratchDir('acp-runtime-cleanup-')
+    const acpRoot = join(root, 'acp')
+    const runtimeRoot = join(root, 'seat-runtime')
+    const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
+    let clock = 0
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: acpRoot, cwd: root,
+      deps: {
+        pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
+        writeSync: () => {}, closeSync: () => {}, kill: () => true,
+        spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+        now: () => clock++, sleep: () => {}, seatCommandRoot: runtimeRoot,
+      },
+    })
+    try {
+      api.start()
+      writeFileSync(paths.fifo, '')
+      if (!delayed) writeFileSync(paths.exit, '0')
+      const closed = api.close()
+      if (delayed) {
+        assert.notEqual(closed.outcome, 'proven')
+        for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), true)
+        writeFileSync(paths.exit, '0')
+        assert.equal(api.reprove(50).outcome, 'proven')
+      } else assert.equal(closed.outcome, 'proven')
+      for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('FO5 ACP production layout resolves under the runtime root outside the crew dir', () => {
+  const crewRoot = scratchDir('acp-fo5-')
+  const runtimeRoot = scratchDir('acp-fo5-runtime-')
+  try {
+    const fifo = acpSeatPaths(join(crewRoot, 'task', 'acp'), 'builder', runtimeRoot).fifo
+    assert.equal(fifo, seatCommandPath(join(crewRoot, 'task'), 'builder', runtimeRoot))
+    assert.equal(fifo.startsWith(runtimeRoot), true)
+    assert.equal(fifo.startsWith(crewRoot), false)
+  } finally {
+    rmSync(crewRoot, { recursive: true, force: true })
   }
 })
 
@@ -527,6 +587,7 @@ function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {})
     pid: 99001, spawn: () => ({ pid: 99002, unref() {} }), openSync: () => 7,
     writeSync, closeSync: () => {}, existsSync: (p) => existsSync(p) || String(p).endsWith('cmd.fifo'),
     kill: () => writeFileSync(join(seatDir, 'exit'), '0'), now: clock, sleep, log: (row) => journal.push(row),
+    seatCommandRoot: join(root, 'seat-runtime'),
   } })
   api.start(); api.initialize(); api.newSession()
   return { api, root, received, journal, prompt(text) { return api.prompt([{ type: 'text', text }]) }, cleanup() { api.close(); rmSync(root, { recursive: true, force: true }) } }
@@ -629,7 +690,7 @@ test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
   let out
   try {
     writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
-    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))}}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
     out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
     assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
     assert.equal(out.stderr, '')
@@ -688,12 +749,13 @@ test('RV1-2 retains EPIPE and the number of partial bytes written', () => {
 
 test('RV1-1', () => {
   const root = scratchDir('acp-rv1-1-')
+  const rvRuntime = scratchDir('acp-runtime-')
   let clock = 0
   try {
     const acpRoot = join(root, 'acp')
     mkdirSync(join(acpRoot, 'builder'), { recursive: true })
     writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
-    const fifo = acpSeatPaths(acpRoot, 'builder').fifo
+    const fifo = acpSeatPaths(acpRoot, 'builder', rvRuntime).fifo
     const api = acpClient({
       launch: { bin: '/bin/false', args: [], env: {} },
       dir: acpRoot,
@@ -710,6 +772,7 @@ test('RV1-1', () => {
         now: () => clock++,
         sleep: () => {},
         log: () => {},
+        seatCommandRoot: rvRuntime,
       },
     })
     api.start()
@@ -727,6 +790,7 @@ test('BZ1 — post-SIGKILL polling and the zombie census each prove death', () =
   // reddens — only the census can prove it.
   const scenario = (kill, spawnSync) => {
     const root = scratchDir('acp-bz1-')
+    const bzRuntime = scratchDir('acp-runtime-')
     const acpRoot = join(root, 'acp')
     mkdirSync(join(acpRoot, 'builder'), { recursive: true })
     writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
@@ -743,10 +807,11 @@ test('BZ1 — post-SIGKILL polling and the zombie census each prove death', () =
       now: () => clock++,
       sleep: () => {},
       log: () => {},
+      seatCommandRoot: bzRuntime,
     }
     const api = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps })
     api.start()
-    writeFileSync(acpSeatPaths(acpRoot, 'builder').fifo, '')
+    writeFileSync(acpSeatPaths(acpRoot, 'builder', bzRuntime).fifo, '')
     const result = api.close()
     let secondError = null
     if (result.outcome === 'proven') {
@@ -793,7 +858,7 @@ test('BZ1 real-process witness — a TERM-ignoring sleep proves dead after SIGKI
       dir: acpRoot,
       cwd: root,
       role: 'builder',
-      deps: { pid: process.pid, log: () => {} },
+      deps: { pid: process.pid, log: () => {}, seatCommandRoot: join(root, 'seat-runtime') },
     })
     api.start()
     const result = api.close()
@@ -805,6 +870,7 @@ test('reprove re-proves an unproven close once death is observable', () => {
   // MUTATION: revert `return probeBounded(ACP_KILL_PROOF_MS, pgid)` to the baseline single probe and the
   // final proven assertion reddens; break the reservation clear and the second start keeps throwing busy.
   const root = scratchDir('acp-reprove-')
+  const reproveRuntime = scratchDir('acp-runtime-')
   try {
     const acpRoot = join(root, 'acp')
     mkdirSync(join(acpRoot, 'builder'), { recursive: true })
@@ -829,12 +895,15 @@ test('reprove re-proves an unproven close once death is observable', () => {
       now: () => clock++,
       sleep: () => {},
       log: () => {},
+      seatCommandRoot: reproveRuntime,
     }
     const first = acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps })
     first.start()
-    writeFileSync(acpSeatPaths(acpRoot, 'builder').fifo, '')
+    const fifo = acpSeatPaths(acpRoot, 'builder', reproveRuntime).fifo
+    writeFileSync(fifo, '')
     const closed = first.close()
     assert.notEqual(closed.outcome, 'proven')
+    assert.equal(existsSync(fifo), true)
     let busy = null
     try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { busy = err }
     assert.equal(busy?.reason, 'acp-session-busy')
@@ -843,6 +912,9 @@ test('reprove re-proves an unproven close once death is observable', () => {
     dead = true
     const reproven = first.reprove(50)
     assert.equal(reproven.outcome, 'proven')
+    assert.equal(existsSync(fifo), false)
+    assert.equal(existsSync(dirname(fifo)), false)
+    assert.equal(existsSync(dirname(dirname(fifo))), false)
     let secondError = null
     try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { secondError = err }
     assert.equal(secondError, null)
@@ -863,6 +935,7 @@ test('AT5 fifo failure signals the group, clears the reservation, and refuses ac
     now: () => { clock += 1000; return clock },
     sleep: () => {},
     log: () => {},
+    seatCommandRoot: join(root, 'seat-runtime'),
   }
   try {
     const first = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...baseDeps, openSync: () => { throw Object.assign(new Error('no fifo'), { code: 'ENOENT' }) } } })

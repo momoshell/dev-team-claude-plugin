@@ -6,8 +6,8 @@ survives. Adapted from KiroCrew's review prompts (Apache-2.0; licence and
 NOTICE in `THIRD-PARTY-NOTICES.md`), rewritten for this repo's seats, severity
 enum and carriers. Nothing here overrides the verdict contract in
 `crew/roles/reviewer.md`: line 1 of a review is still the verdict. Severities
-by seat: review uses `must-fix`, `should-fix`, `consider`; a plan check uses
-`blocker`, `major`, `minor`.
+by seat, review to plan check:
+`must-fix` → `blocker`, `should-fix` → `major`, `consider` → `minor`.
 
 ## The diff is not evidence
 
@@ -24,7 +24,7 @@ would aim at.
 
 ## Falsify before you write
 
-Your first job with a candidate is to kill it. Go and find the code that makes
+Your job with a candidate is to kill it. Go and find the code that makes
 it a non-issue — the guard upstream, the caller that cannot reach it, the type
 that makes the case impossible, the convention that already covers it. A
 candidate survives only if you re-derived, from code you opened in this pass:

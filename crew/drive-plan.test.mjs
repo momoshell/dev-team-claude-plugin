@@ -437,6 +437,24 @@ test('a plan bounce spends the failure upgrade for the planner', () => {
   assert.deepEqual(io.calls.reseat[0].role, 'planner')
 })
 
+// MUTATION DR1: omit majors from the plan-revision closure instruction.
+test('DR1 plan-revision bounce closes blockers and majors, not must-fixes', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': adversarialPlanEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': adversarialPlanEnv(), 'tech-lead:2': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  const brief = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.ok(brief.includes('Close every blocker and major.'))
+  assert.equal(brief.includes('Close every must-fix'), false)
+})
+
 test('the plan-revision brief names the check and says to apply it verbatim', () => {
   const io = fakeIo({
     envelopes: {
@@ -1827,6 +1845,20 @@ test('gateless review convergence parks instead of claiming a green acceptance g
   assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
 })
 
+// MUTATION DR2: tell the reviewer to read a suite result before the suite runs.
+test('DR2 ordinary review brief says the full suite runs after review', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: false }, io)
+  assert.equal(result.status, 'done')
+  const brief = io.calls.writes[`${TD}/review-brief-1.md`]
+  assert.equal(brief.includes('the suite result in'), false)
+  assert.ok(brief.includes('the full suite runs after review, so no suite result exists yet'))
+})
+
 test('non-continuation keeps the ordinary assignment and review brief write set byte-identical', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
@@ -1845,7 +1877,7 @@ test('non-continuation keeps the ordinary assignment and review brief write set 
   assert.equal(io.calls.writes[`${TD}/review-brief-1.md`], [
     '# Review (round 1)', '',
     `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
-    `Run no test or gate command; read the gate proof at ${TD}/gate.mjs and the suite result in ${TD}/journal.jsonl.`,
+    `Run no test or gate command; read the gate proof at ${TD}/gate.mjs; the full suite runs after review, so no suite result exists yet.`,
     'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
     'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
     'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',

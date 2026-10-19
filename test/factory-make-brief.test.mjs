@@ -1980,7 +1980,7 @@ test('BB2', () => {
   assert.ok(CONVENTIONS_BLOCK.includes('Commit nothing'))
 })
 
-test('standing blocks and unfilled slots render verbatim', () => {
+test('standing blocks render verbatim and no unfilled slot ships', () => {
   const root = fixture('standing')
   const { brief } = compile(root)
   assert.ok(brief.includes(ACCEPTANCE_GATE_BLOCK))
@@ -1993,7 +1993,7 @@ test('standing blocks and unfilled slots render verbatim', () => {
   assert.ok(brief.includes('Co-Authored-By'))
   assert.ok(brief.includes('Never push'))
   assert.ok(brief.includes('ReturnEnvelope'))
-  assert.ok(brief.split(SLOT_MARKER).length - 1 >= 2)
+  assert.equal(brief.split(SLOT_MARKER).length - 1, 0)
   // Every other standing block is byte-identical to fc13fa1; b76 touched only the
   // mutation contract, b161 moved the conventions block's floor, and b1240 re-pinned
   // both digests for the cite/commit-rule fix.
@@ -2568,6 +2568,26 @@ test('absence cases return neither proposal with reasons and render no proposal'
   assert.match(body, /```proposal\n\{\n  "recommended_assurance": null,\n  "recommended_model_band": null,\n  "minimum_assurance": null\n\}\n```/)
 })
 
+// MUTATION MB1: append SLOT_MARKER to the compiled Acceptance section.
+test('MB1 compiled brief ships no unfilled slot and no crew-decides section', () => {
+  const proposal = proposeTier({
+    where: [{ path: 'lib/source.mjs', kind: 'file' }],
+    discovery: { candidates: ['lib/source.mjs'], tripwires: [], broadKeys: [] },
+  })
+  const brief = renderBrief({
+    request: { ask: 'an ask', done_means: 'done means', out_of_scope: 'out of scope' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    proposal,
+  })
+  assert.equal(brief.includes('UNFILLED SLOT'), false)
+  assert.equal(brief.includes('## What the crew decides'), false)
+  assert.ok(section(brief, '## Acceptance').endsWith('never by a seat.'))
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.ok(source.includes("export const SLOT_MARKER = 'UNFILLED SLOT'"))
+  assert.equal(source.includes('so the orchestrator can fill it'), false)
+})
+
 test('shape and strength proposals ship inside the Proposed tier section', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /export function proposeTier/)
@@ -2586,7 +2606,7 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
   assert.deepEqual(brief.match(/^## .+$/gm), [
     '## Intent', '## The ask', '## Proposed tier', '## Where', '## Premise check', '## Tripwires',
     '## Coupled sources', '## Baseline', '## Out of scope', '## Fences',
-    '## What the crew decides', '## Acceptance', '## Acceptance gate',
+    '## Acceptance', '## Acceptance gate',
     '## Per-check mutations', '## Validation lane', '## Conventions',
   ])
   assert.equal((brief.match(/proposed strength:/g) || []).length, 1)
@@ -3306,7 +3326,7 @@ test('B1 present quoted code compiles unchanged', () => {
   assert.equal(section(brief, '## Premise check').trim(), 'verified · premise · lib/widget.mjs:2-5')
   assert.equal(clean.result.stderr.trim().split('\n').at(-1), 'make-brief: premise verified 1/1')
   assert.equal(section(brief, '## The ask'), ask)
-  assert.equal(section(brief, '## Acceptance'), `The widget behavior is correct. · Full suite green — measured by the driver's suite stage, never by a seat. · ${SLOT_MARKER}`)
+  assert.equal(section(brief, '## Acceptance'), `The widget behavior is correct. · Full suite green — measured by the driver's suite stage, never by a seat.`)
   assert.equal(section(brief, '## Out of scope'), 'The surrounding dispatch remains unchanged.')
   assert.equal(canonicalisePremiseText('  first  \n\n    last\t\n'), 'first  \n\n  last\t')
 

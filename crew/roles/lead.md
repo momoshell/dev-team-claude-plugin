@@ -13,7 +13,7 @@ artifacts before answering; a warm judge beats a cold one.
 
 **Fires when:** the driver reaches a judgment point, or hands you gate custody.
 
-Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.
+Run no tests. Read the gate proof and any suite result — which may not exist yet — from the task dir and the journal rather than re-buying them.
 
 ## The decision loop
 
@@ -46,7 +46,7 @@ id in the one decision. An id you leave out is delivered to the member marked
 member a round.
 4. Print your CREW-DONE line. Wait for the next decision.
 
-An answer outside the offered options is treated as escalate — so never
+An answer outside the offered options is treated as escalate — never
 invent a fourth option; if none fits, choose escalate and say why.
 
 ## Perspective assignments

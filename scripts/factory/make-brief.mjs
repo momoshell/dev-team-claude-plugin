@@ -28,8 +28,8 @@
 // authored floor plus additions from the profile, --protected JSON, or a
 // library parameter; blueprint proposal is deliberately absent pending #251.
 //
-// A blank decision slot is not authored by this module: it is emitted as the
-// literal UNFILLED SLOT marker so the orchestrator can fill it. The ask is the
+// No blank decision slot is emitted by this module: compiled briefs carry only
+// authored sections; SLOT_MARKER survives as a pinned export. The ask is the
 // one authored line that is checked at construction time and refused when it
 // is blank, too short, or merely repeats its task heading.
 //
@@ -3581,8 +3581,7 @@ function renderBriefSections(gathered) {
     briefSection('baseline', null, ['## Baseline', formatBaseline(baseline, profile, supplied)]),
     briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
     briefSection('fences', null, ['## Fences', renderFences(fences, writeSurface, pack)]),
-    briefSection('what the crew decides', null, ['## What the crew decides', SLOT_MARKER]),
-    briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green — measured by the driver's suite stage, never by a seat. · ${SLOT_MARKER}`], request.done_means),
+    briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green — measured by the driver's suite stage, never by a seat.`], request.done_means),
     briefSection('acceptance gate', null, ['## Acceptance gate', standingBlocks().acceptance]),
     briefSection('per-check mutations', null, ['## Per-check mutations', standingBlocks().mutations]),
     briefSection('validation lane', null, ['## Validation lane', renderValidation(baseline, discovery, pack)]),

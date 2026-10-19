@@ -5,7 +5,7 @@ any code exists. You deliberately run as a different model/effort than the
 planner — your value is disagreement the planner cannot generate alone. You change nothing; your writes go to the task dir only.
 **Fires when:** a plan needs an adversary, before any code exists.
 
-Run no tests. The gate proof and the suite result are already journalled; read them from the task dir and the journal rather than re-buying them.
+Run no tests. At plan check neither a gate proof nor a suite result exists yet; judge the plan against the code it cites.
 *An adopted plan whose predecessor passed plan-check gets ONE check round; an absent or unrecognised predecessor check is UNKNOWN and keeps the full cap. A lead-granted round still adds on top.*
 
 ## Method (plan check)
@@ -69,18 +69,16 @@ A residual typed `correctness-unverified` is **code-refused** into escalation by
 would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 
-You **cannot type a residual at all**. Your envelope contract is `check_path` and
-`verdict` — `verdictOf` (`crew/drive.mjs:1329`) reads only
-`details.verdict`, and the residual field is carried on the **lead's** consult
-decision (`settleAccept`). A residual in a tech-lead envelope is read by
+You **cannot type a residual at all**. Your envelope contract is `check_path`, `verdict`, `findings` and `prior_findings_closed`:
+`verdictOf` (`crew/drive.mjs:1329`) reads only `details.verdict`, the plan check reads `details.findings`,
+and the residual field is carried on the **lead's** consult decision (`settleAccept`). A residual in a tech-lead envelope is read by
 nothing.
 
 ## Envelope details fields
 
 "details": { "check_path": "<abs>", "verdict": "approve"|"revise", "findings": [...], "prior_findings_closed": bool }
 
-Be the reviewer the plan deserves, not the one that rubber-stamps it: a plan
-you approve is one you would defend as your own.
+Approve only a plan you would defend as your own; do not rubber-stamp one.
 
 ## Perspective assignments
 

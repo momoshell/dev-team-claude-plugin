@@ -3524,7 +3524,15 @@ test('VL5 feed health reports degraded on a page-corrupt-but-readable ledger and
  const healthyFeed = createLedgerFeed({ ledgerDb: healthyDb, triageDb: join(healthyDir, 'viz.db'), crewRoot: join(healthyDir, 'crew') })
  try {
   assert.equal(healthyFeed.health().degraded, false)
+  assert.equal(healthyFeed.health().quick_check_absent_reason, null)
  } finally { healthyFeed.close() }
+ // MUTATION VL11: drop quick_check_absent_reason and a missing ledger's null quick_check carries no reason.
+ const missingDir = scratchDir('vl11-feed-missing-')
+ const missingFeed = createLedgerFeed({ ledgerDb: join(missingDir, 'absent.db'), triageDb: join(missingDir, 'viz.db'), crewRoot: join(missingDir, 'crew') })
+ try {
+  const health = missingFeed.health()
+  assert.deepEqual([health.quick_check, health.quick_check_absent_reason], [null, 'ledger-unavailable'])
+ } finally { missingFeed.close() }
 })
 
 // MUTATION VL7: remove the teardownSummary clean-false posture branch and teardown-only dirt reports ok again.

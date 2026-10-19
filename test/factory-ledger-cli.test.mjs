@@ -1093,6 +1093,28 @@ test('VL4 doctor with an unreadable table reports null row count and exits 2', {
   assert.equal(res.status, 2)
 })
 
+// MUTATION VL10: drop the unread-tables reason and a table that fails to read while
+// quick_check passes reports degraded with degraded_reason null.
+test('VL10 doctor names the unread table when quick_check still passes', { skip: SKIP }, () => {
+  const dir = scratchDir('vl10-doctor-unread-')
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write() {} } })
+  ledger.startSession({ adw_id: 'vl10-1', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const { DatabaseSync } = require('node:sqlite')
+  const setup = new DatabaseSync(dbPath)
+  const column = setup.prepare("SELECT name FROM pragma_table_info('sessions') WHERE upper(type) LIKE '%INT%'").get()?.name
+  assert.ok(column, 'fixture: sessions has no integer column to overflow')
+  setup.prepare(`UPDATE sessions SET ${column} = ?`).run(9007199254740993n)
+  setup.close()
+  assert.deepEqual(quickCheckRows(dbPath), ['ok'])
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  const payload = JSON.parse(res.stdout)
+  assert.equal(res.status, 2, res.stderr)
+  assert.equal(payload.row_counts?.sessions, null)
+  assert.equal(payload.degraded_reason, 'table read failed: sessions')
+})
+
 test('VL3 healthy doctor exits 0 with quick_check ok', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const dbPath = ledger._dbPath

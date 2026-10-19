@@ -389,7 +389,8 @@ export function createLedgerFeed({ ledgerDb, triageDb, crewRoot = null, crewStat
     probeColumns()
     const triageHealth = triage.health()
     const quickCheck = ledger && typeof ledger.quickCheck === 'function' ? ledger.quickCheck() : null
-    return { degraded: degraded || triageHealth.degraded || (quickCheck ? !quickCheck.ok : false), ledger_db: ledgerDb, triage_db: triageHealth.path, ledger_feed_readonly: true, triage_sidecar_writable: true, quick_check: quickCheck ? quickCheck.results : null, probe: { ...probe } }
+    const quickCheckAbsent = quickCheck ? null : ledger ? 'quick-check-unsupported' : 'ledger-unavailable'
+    return { degraded: degraded || triageHealth.degraded || (quickCheck ? !quickCheck.ok : false), ledger_db: ledgerDb, triage_db: triageHealth.path, ledger_feed_readonly: true, triage_sidecar_writable: true, quick_check: quickCheck ? quickCheck.results : null, quick_check_absent_reason: quickCheckAbsent, probe: { ...probe } }
   }
   return {
     listRuns,

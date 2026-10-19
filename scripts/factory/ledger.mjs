@@ -10452,18 +10452,22 @@ export function main(argv) {
       ledger.dumpTable('sessions')
       const s = ledger.stats()
       const quickCheck = ledger.quickCheck()
-      let tableDegraded = false
+      const unreadTables = []
       const rowCounts = {}
       for (const table of Object.keys(TABLES)) {
         if (s.degraded) { rowCounts[table] = null; continue }
         const errorsBefore = ledger.stats().mirror_errors
         const rows = ledger.dumpTable(table)
         const mirrorFailed = ledger.stats().mirror_errors > errorsBefore
-        if (mirrorFailed) tableDegraded = true
+        if (mirrorFailed) unreadTables.push(table)
         rowCounts[table] = mirrorFailed ? null : rows.length
       }
-      const doctorDegraded = s.degraded || !quickCheck.ok || tableDegraded
-      const doctorReason = s.degraded_reason || (!quickCheck.ok ? `quick_check failed: ${quickCheck.results[0] || 'unknown'}` : null)
+      const doctorDegraded = s.degraded || !quickCheck.ok || unreadTables.length > 0
+      // A table can fail to read while quick_check still says ok (an oversized integer
+      // node:sqlite refuses to return), so the unread tables are a reason of their own.
+      const doctorReason = s.degraded_reason
+        || (!quickCheck.ok ? `quick_check failed: ${quickCheck.results[0] || 'unknown'}` : null)
+        || (unreadTables.length > 0 ? `table read failed: ${unreadTables.join(', ')}` : null)
       const pragmas = ledger._pragmas()
       const fts5 = ledger._probeFts5()
       const drift = ledger.jsonlDrift()

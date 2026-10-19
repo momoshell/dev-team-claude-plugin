@@ -85,12 +85,23 @@ test('S3 strict anti-replay checks scoped identity and flat paths need no run_id
   assert.equal((await flat.call(flat.envelope({ run_id: undefined }))).details.submitted, true)
 })
 
-test('S4 outside-task artifacts refuse with the shared shape reason and why', async () => {
+test('S4 outside-task artifacts submit; dot-segment artifacts refuse', async () => {
   const f = fixture({ name: 's4' })
-  const result = await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
-  assert.equal(result.details.reason, 'artifacts')
-  assert.match(result.details.why, /outside|task/i)
-  assert.equal(existsSync(f.returnPath), false)
+  const value = f.envelope({ artifacts: ['/outside/secret'] })
+  const result = await f.call(value)
+  assert.equal(result.details.submitted, true)
+  assert.ok(existsSync(f.returnPath))
+  assert.deepEqual(JSON.parse(readFileSync(f.returnPath, 'utf8')).artifacts, ['/outside/secret'])
+  const g = fixture({ name: 's4-return' })
+  const selfValue = g.envelope({ artifacts: [g.returnPath] })
+  const selfResult = await g.call(selfValue)
+  assert.equal(selfResult.details.submitted, true)
+  assert.deepEqual(JSON.parse(readFileSync(g.returnPath, 'utf8')).artifacts, [g.returnPath])
+  const h = fixture({ name: 's4-dot' })
+  const dot = await h.call(h.envelope({ artifacts: ['/tmp/./x'] }))
+  assert.equal(dot.details.reason, 'artifacts')
+  assert.equal(dot.details.submitted, undefined)
+  assert.equal(existsSync(h.returnPath), false)
 })
 
 test('S5 third consecutive refusal writes the last defective object with override detail only', async () => {
@@ -108,6 +119,9 @@ test('S6 settle nudges once, skips existing return and rearms on next assignment
   const first = f.settle()
   assert.equal(first.continue, true)
   assert.equal(first.entries[0].customType, 'submit_nudge')
+  assert.ok(first.entries[0].content.includes('if the work is unfinished, finish it and submit done'))
+  assert.ok(first.entries[0].content.includes('insufficient only for a gap you cannot close yourself'))
+  assert.equal(first.entries[0].content.includes('call submit_envelope now'), false)
   assert.equal(f.settle(), undefined)
   const next = { ...f.assignment, id: 'd2', returnPath: join(f.root, 'returns', 'run-2', 'd2.planner.json') }
   mkdirSync(dirname(next.returnPath), { recursive: true })

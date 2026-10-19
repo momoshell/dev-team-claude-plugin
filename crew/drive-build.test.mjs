@@ -245,6 +245,19 @@ test('EC1 unchanged suite-red-fix retains its commit and green recheck completes
   assert.equal(fixture.io.calls.logs.filter((row) => row.suite_red_noop).length, 1)
 })
 
+test('suite-red review brief names this-cycle sentence then the bounce brief', () => {
+  const fixture = noopSuiteCycle({ suite: [{ ok: false, output: suiteRed('a.test.mjs') }, { ok: true, output: 'green' }] })
+  const result = driveTask(fixture.ctx, fixture.io)
+  assert.equal(result.status, 'done')
+  const briefs = fixture.io.calls.writeLog.filter(({ path }) => path === `${TD}/review-brief-1.md`).map(({ content }) => content)
+  assert.equal(briefs.length, 2)
+  assert.ok(briefs[0].includes('the full suite runs after review, so no suite result exists for this cycle yet.'))
+  assert.equal(briefs[0].includes('earlier suite failure'), false)
+  const bounces = Object.entries(fixture.io.calls.writes).filter(([, v]) => String(v).startsWith('# Suite-red scope admission bounce')).map(([p]) => p)
+  assert.equal(bounces.length, 1)
+  assert.ok(briefs[1].includes(`The earlier suite failure is in ${bounces[0]}.`))
+})
+
 test('EC1 publication: unchanged suite-red-fix recheck rebases twice, runs cold suite and publishes retained commit', () => {
   const io = publicationIo({
     envelopes: {

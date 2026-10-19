@@ -1240,7 +1240,7 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
   if (!Array.isArray(env.artifacts)) return refuse('artifacts', 'artifacts must be an array')
   for (const artifact of env.artifacts) {
     if (typeof artifact !== 'string' || !artifact) return refuse('artifacts', `artifacts must be paths, found ${JSON.stringify(artifact)}`)
-    if (taskDir && !artifact.startsWith(`${taskDir}/`)) return refuse('artifacts', `artifact ${JSON.stringify(artifact)} is outside the task dir`)
+    if (taskDir && !artifact.startsWith(`${taskDir}/`)) return refuse('artifacts', `artifact ${JSON.stringify(artifact)} is outside the task dir ${taskDir}; list only absolute paths of files you wrote inside ${taskDir}, never the return file`)
     if (artifact.split('/').some((segment) => segment === '.' || segment === '..')) return refuse('artifacts', `artifact ${JSON.stringify(artifact)} must not contain . or .. segments`)
   }
   if (!env.details || typeof env.details !== 'object' || Array.isArray(env.details)) return refuse('details', 'details must be an object')
@@ -12141,7 +12141,7 @@ function runTask(ctx, io, crash) {
         ...carriedHead,
         `# Review (round ${roundNo})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
-        `Run no test or gate command; read the gate proof at ${acceptedGatePath}; the full suite runs after review, so no suite result exists yet.`,
+        `Run no test or gate command; read the gate proof at ${acceptedGatePath}; the full suite runs after review, so no suite result exists for this cycle yet.${suiteBuildNote === 'suite-red-fix' ? ` The earlier suite failure is in ${suiteBuildBrief}.` : ''}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
         'A typed finding may carry vacuity_claim "mutation-survived" when a mutation test proves the behavior remains live after the relevant call is removed.',
         'A typed finding may carry vacuity_claim "source-text-only" when source text proves the behavior is present but no executable witness can prove it.',

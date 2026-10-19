@@ -35,14 +35,14 @@ export function createSubmitTool(state: any, io: any = {}) {
   return {
     name: 'submit_envelope',
     label: 'Submit return envelope',
-    description: 'Validate and atomically submit this assignment ReturnEnvelope.',
+    description: 'Validate and atomically submit this assignment ReturnEnvelope. artifacts: absolute paths of task-dir files you wrote, never the return file; repo edits are read from git.',
     parameters: { type: 'object', properties: { envelope: { type: 'object', additionalProperties: true } }, required: ['envelope'], additionalProperties: true },
     async execute(_toolCallId: string, params: any) {
       const assignment = state.assignment
       if (!assignment) return textResult('refused: no active assignment', { reason: 'no-assignment' })
       const envelope = params?.envelope
       const identityDefect = strictIdentityDefect(envelope, assignment)
-      const shapeDefect = identityDefect ? null : envelopeDefect(envelope, { envelope_fields: [] }, { taskDir: assignment.taskDir })
+      const shapeDefect = identityDefect ? null : envelopeDefect(envelope, { envelope_fields: [] })
       const defect = identityDefect || shapeDefect
       const attempt = state.failures + 1
       const journal = (outcome: string, reason: string | null) => logLine(
@@ -105,7 +105,7 @@ export function attachSubmit(pi: any, io: any = {}) {
       event: 'submit_nudge', submit_nudge: { id: assignment.id, role: assignment.role },
     })
     return {
-      entries: [{ type: 'custom_message', customType: 'submit_nudge', content: `no envelope was submitted for ASSIGNMENT ${assignment.id}; call submit_envelope now`, display: true }],
+      entries: [{ type: 'custom_message', customType: 'submit_nudge', content: `no envelope was submitted for ASSIGNMENT ${assignment.id}; if the work is unfinished, finish it and submit done — use insufficient only for a gap you cannot close yourself; then call submit_envelope`, display: true }],
       continue: true,
     }
   })

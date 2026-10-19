@@ -58,6 +58,8 @@ You do not need the operator's pinned worktree or a `crew` launcher on your
 PATH (`bin/crew.mjs`). Both are the operator's own setup for running lanes from
 a frozen copy. A clone run with `node crew/crew.mjs` is enough.
 
+An optional operator setup keeps a stable worktree at ~/Dev/dev-team-stable installed user-scope through a local link-mode marketplace, with ~/.local/bin/crew linked to its bin/crew.mjs; `crew update`, which fast-forwards that home to origin/main, rebuilds what changed, and refuses unless it is on branch stable and clean and, without --force, runs no process.
+
 [`skills/crew-onboard/`](skills/crew-onboard/SKILL.md) covers the rest:
 deciding what a target can use, and profiling and ratifying a foreign checkout
 before its first lane.
@@ -67,11 +69,7 @@ before its first lane.
 - **`crew/`** — the runtime: a cmux driver (verified-send, context-aware ops),
   the deterministic task-loop driver (fully unit-tested via dependency
   injection), the CLI, and the seat charters. Self-contained apart from
-  `scripts/factory/`, which it imports from three production modules:
-  `crew/breaker.mjs` takes `NODE_FLOOR`/`openLedger` from `ledger.mjs` on the
-  boot-refusal path, `crew/child.mjs` takes `emit.mjs` and `probe-repo.mjs`, and
-  `crew/crew.mjs` takes `emit.mjs`, `probe-repo.mjs`, `make-brief.mjs` and
-  `reap-stale.mjs`.
+  `scripts/factory/`, which six non-test modules import: `crew/breaker.mjs`, `crew/child.mjs`, `crew/crew.mjs`, `crew/factoryctl.mjs`, `crew/provenance.mjs` and `crew/seat-io.mjs`; `crew/crew.mjs` also imports `hooks/skill-gate.mjs`.
 - **`scripts/factory/`** — the run-trace mirror: a never-throwing emitter
   facade over a SQLite WAL ledger (instrumentation is never load-bearing).
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
@@ -83,6 +81,9 @@ before its first lane.
   and the foreign-checkout procedure. Commands are thin entry points that name
   the skill owning each procedure: `/dispatch`, `/close-out`, `/status`,
   `/onboard`, `/review`.
+- **`bin/crew.mjs`** — the crew launcher: where, update, viz, ctl, ledger.
+- **`hooks/`** — the skill-map selector crew.mjs uses for seat skills; the plugin registers no hook.
+- **`visualizer/`** — the local factory visualizer (see Visualizer below).
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
   architecture decision register (**grep it before minting an ADR number**);
   [`docs/decisions-needed.md`](docs/decisions-needed.md) is the open

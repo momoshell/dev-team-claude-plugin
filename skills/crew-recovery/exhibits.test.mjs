@@ -59,6 +59,7 @@ export function scanStages(source) {
 export function scanEscalates(source) {
   const emitted = new Set()
   for (const match of source.matchAll(new RegExp('\\bescalate\\(\\s*' + QUOTE + '([a-z][a-z0-9-]*)' + QUOTE, 'g'))) emitted.add(match[1])
+  for (const match of source.matchAll(/\bescalationResult\(\s*\{\s*where:\s*['"`]([a-z][a-z0-9-]*)['"`]/g)) emitted.add(match[1])
   for (const match of source.matchAll(/\bescalate\(\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)/g)) {
     const object = new RegExp('export const ' + match[1] + ' = Object\\.freeze\\(\\{([\\s\\S]*?)\\}\\)').exec(source)
     const member = object && new RegExp('\\b' + match[2] + ':\\s*' + QUOTE + '([a-z][a-z0-9-]*)' + QUOTE).exec(object[1])
@@ -66,6 +67,17 @@ export function scanEscalates(source) {
   }
   return emitted
 }
+
+export function scanWhereLiterals(source) {
+  const emitted = new Set()
+  for (const match of source.matchAll(/\bwhere:/g)) {
+    const rhs = stageRhs(source, match.index + match[0].length)
+    for (const literal of rhs.matchAll(new RegExp(QUOTE + '([a-z][a-z0-9-]*)' + QUOTE, 'g'))) emitted.add(literal[1])
+  }
+  return emitted
+}
+
+const WHERE_FILES = ['crew/daemon.mjs', 'crew/child.mjs', 'crew/crew.mjs']
 
 function readText(path) {
   const text = readFileSync(path, 'utf8')
@@ -94,6 +106,7 @@ test("escalations.md's driver table equals the escalate() producers", () => {
 test("escalations.md's crash table equals the err.stage producers", () => {
   const emitted = new Set()
   for (const rel of STAGE_FILES) for (const stage of scanStages(readFileSync(join(ROOT, rel), 'utf8'))) emitted.add(stage)
+  for (const rel of WHERE_FILES) for (const stage of scanWhereLiterals(readFileSync(join(ROOT, rel), 'utf8'))) if (stage !== 'driver') emitted.add(stage)
   emitted.add(SEAT_REFUSAL_STAGE)
   emitted.add(SEAT_DIED_STAGE)
   const text = readText(join(HERE, 'references/escalations.md'))
@@ -281,4 +294,63 @@ test('plan-chunks escalation names both producers and the --chunked remedy', () 
   assert.ok(row.includes('validateChunks'), 'plan-chunks row must name the validateChunks producer')
   assert.ok(row.includes('chunk-without-chunked'), 'plan-chunks row must name the chunk-without-chunked producer')
   assert.ok(row.includes('--chunked'), 'plan-chunks row must name the --chunked remedy')
+})
+
+test('ES1', () => {
+  // MUTATION ES1: replacing the escalationResult where-scan drops reversion and plan-scope-request.
+  const source = readFileSync(join(ROOT, DRIVE), 'utf8')
+  const emitted = scanEscalates(source)
+  assert.ok(emitted.has('reversion'), 'expected reversion in the emitted set, found: ' + [...emitted].sort().join(','))
+  assert.ok(emitted.has('plan-scope-request'), 'expected plan-scope-request in the emitted set, found: ' + [...emitted].sort().join(','))
+  for (const name of VARIANT_NAMES) if (name !== 'stepped') emitted.add(name)
+  emitted.add('driver')
+  const prose = readText(join(HERE, 'references/escalations.md'))
+  const documented = new Set([...prose.matchAll(/^\|\s*`escalate:([a-z][a-z0-9_-]*)`\s*\|/gm)].map((match) => match[1]))
+  assert.deepEqual([...documented].sort(), [...emitted].sort())
+})
+
+test('ES2', () => {
+  // MUTATION ES2: dropping crew/daemon.mjs from the where-scan file list loses signalled and spawn-error.
+  const emitted = new Set()
+  for (const rel of WHERE_FILES) for (const stage of scanWhereLiterals(readFileSync(join(ROOT, rel), 'utf8'))) if (stage !== 'driver') emitted.add(stage)
+  for (const stage of ['signalled', 'spawn-error', 'child-preflight', 'resume']) {
+    assert.ok(emitted.has(stage), 'expected the where-scan to emit ' + stage + ', found: ' + [...emitted].sort().join(','))
+  }
+  const text = readText(join(HERE, 'references/escalations.md'))
+  const start = text.indexOf('## Crash stages')
+  assert.notEqual(start, -1, 'escalations.md is missing the crash stages section')
+  const documented = new Set([...text.slice(start).matchAll(/^\|\s*`([a-z][a-z0-9-]*)`\s*\|/gm)].map((match) => match[1]))
+  for (const stage of ['signalled', 'spawn-error', 'child-preflight', 'resume']) {
+    assert.ok(documented.has(stage), 'expected a crash-table row for ' + stage + ', found none among ' + documented.size + ' rows')
+  }
+  const full = new Set()
+  for (const rel of STAGE_FILES) for (const stage of scanStages(readFileSync(join(ROOT, rel), 'utf8'))) full.add(stage)
+  for (const stage of emitted) full.add(stage)
+  full.add(SEAT_REFUSAL_STAGE)
+  full.add(SEAT_DIED_STAGE)
+  assert.deepEqual([...documented].sort(), [...full].sort())
+})
+
+test('ES3', () => {
+  // MUTATION ES3: dropping the leading pipe of a driver-table row breaks contiguity.
+  const prose = readText(join(HERE, 'references/escalations.md'))
+  const lines = prose.split('\n')
+  const header = '| Stage | Meaning | Operator\'s first move |'
+  const start = lines.indexOf(header)
+  assert.notEqual(start, -1, 'escalations.md is missing the driver table header')
+  let last = -1
+  lines.forEach((line, index) => { if (line.startsWith('| `escalate:')) last = index })
+  assert.notEqual(last, -1, 'escalations.md has no driver-table rows')
+  for (let index = start; index <= last; index += 1) {
+    assert.ok(lines[index].startsWith('|'), 'driver table line ' + (index + 1) + ' must start with \'|\': ' + lines[index])
+  }
+})
+
+test('MP1', () => {
+  // MUTATION MP1: renaming DIFF_MUTATION_UNMEASURED_REASONS breaks the in-lane proof pin.
+  const text = readText(join(HERE, 'references/mutation-proof.md'))
+  assert.ok(text.includes('## Diff mutation proof (in-lane)'), 'mutation-proof.md is missing the Diff mutation proof (in-lane) section')
+  for (const token of ['timed-out', 'run-timeout', 'baseline-red', 'DIFF_MUTATION_UNMEASURED_REASONS', 'diff_mutant_judgments']) {
+    assert.ok(text.includes(token), 'mutation-proof.md must name ' + token)
+  }
 })

@@ -106,3 +106,7 @@ kill. Each declaration reports
 ends the run. The summary states how many declarations were read and how many
 bound, because a kill count without its denominator is not a proof. Exit 0 means
 every declaration was killed or exempt, 1 that something survived, 2 a refusal.
+
+## Diff mutation proof (in-lane)
+
+Each diff mutant ends killed, survived, timed-out or skipped. A timeout is never a kill: the PR Proof line prints it as timed out (unproven). With nothing killed or survived the line reads unmeasured with a reason from DIFF_MUTATION_UNMEASURED_REASONS in crew/drive.mjs (examples run-timeout, baseline-red). A survivor reaches the reviewer under the Diff-mutant findings heading and is answered in details.diff_mutant_judgments.

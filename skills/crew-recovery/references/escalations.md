@@ -37,7 +37,6 @@ investigating.
 | `escalate:finish-gate` | The lane gate changed during a finish run. | Save the gate diff; mutation re-proof of a changed check is split 2. |
 | `escalate:review_only` | The read-only `review_only` shape could not return a structured review. The driver reports this stage as `envelope`: `crew/drive.mjs` maps `review_only` onto `envelope` before escalating, so this row documents the variant, not a token you will read in a journal. | Read the review envelope and confirm the run made no checkout writes. "No findings" is a measured outcome, so an absent or empty envelope is the failure — never a clean review. |
 | `escalate:review_panel` | The read-only three-seat `review_panel` shape failed closed when a required partner or adjudicator was absent or failed, identity or coverage was invalid, adjudications were not an exact closed one-to-one cover, or any checkout write was observed. | Preserve each seat's evidence and the shared changed-files denominator. Dismissed findings remain provenance in the panel record, not actionable findings; do not fall back to reviewer A. |
-
 | `escalate:verify_only` | The read-only `verify_only` shape could not return a complete verification report. The driver reports malformed or missing envelopes as `envelope`, so this row documents the variant, not a token you will read in a journal. | Complete `failed`, `blocked`, and `not run` rows are measured outcomes, not failures of the report; absent or incomplete reports fail. Read the evidence and confirm the final checkout is clean. |
 | `escalate:harden` | The post-review hardening round did not settle. | Read the hardening bounce and the builder's last envelope before re-dispatching. |
 | `escalate:review-unresolved` | Review rounds ended with findings neither accepted nor refuted. | Preserve every finding and rebuttal; a human chooses the disposition. |
@@ -46,8 +45,10 @@ investigating.
 | `escalate:publish` | Publishing the pull request was refused. | Read the refusal; the branch and commit are already durable. |
 | `escalate:converge-pr` | The converge-on-PR path could not settle its gate or review. | Read `details.escalation.where` for the inner stage that produced it. |
 | `escalate:driver` | The crash exit had no `err.stage` to name. | Read `details.escalation.why` and the journal tail; this is the unattributed path. |
+| `escalate:reversion` | Builder edits reverted to the pre-build baseline; terminal — the workspace is preserved for human inspection. | Preserve the workspace and the named paths, then read the escalation `why`. |
+| `escalate:plan-scope-request` | The `escalatePlanScopeRequest` producer in `crew/drive.mjs` for a plan scope request; it has no caller today, so this row documents the producer, not a token you will read in a journal. | Read the escalation `why` and the scope-request question before re-dispatching. |
 
-The tables are pinned to the emitted sets by `skills/crew-recovery/exhibits.test.mjs`. Its scan collects every quoted kebab literal on the right of a `.stage =` assignment or `stage:` property (so each ternary branch counts) and the first literal argument of `staged(` and `fail(`, across its listed transport files and every non-test `crew/acp-*.mjs` module, and resolves `escalate(<CONST>.<member>, …)` through the exported frozen object of that name in `crew/drive.mjs`. A new producer in those shapes fails that test; a template-built stage (the families below) or an identifier-valued producer does not.
+The tables are pinned to the emitted sets by `skills/crew-recovery/exhibits.test.mjs`. Its driver scan collects `escalate('...')` literals and `escalate(<CONST>.<member>, …)` resolved through the exported frozen object of that name, AND `escalationResult({where:'...'})` literals, all in `crew/drive.mjs`. Its crash scan collects every quoted kebab literal on the right of a `.stage =` assignment or `stage:` property (so each ternary branch counts) and the first literal argument of `staged(` and `fail(`, across its listed transport files and every non-test `crew/acp-*.mjs` module, plus every quoted kebab literal right of `where:` in `crew/daemon.mjs`, `crew/child.mjs`, `crew/crew.mjs` (excluding `driver`). A new producer in those shapes fails that test; a template-built stage (the families below) or an identifier-valued producer does not.
 
 ## Crash stages
 
@@ -65,6 +66,7 @@ exit is terminal: each records an `escalate:<where>` stage row and its
 | `acp-session-busy` | The role's ACP session was still occupied: a retained client could not be reproven, or a prior prompt did not settle after cancellation. | Confirm the prior turn has settled before assigning again; inspect the session record for the unsettled prompt. |
 | `acp-steer-unsupported` | An in-turn steer was attempted on an ACP seat; the ACP transport does not support interjection. | Do not steer an ACP seat. Wait for the turn to end, then assign the follow-up as a new turn. |
 | `build` | A resumed stepped lane was handed a step checkpoint that fails the checkpoint validator; the message names the defect. | Read the checkpoint named in the run request against the defect, then dispatch fresh rather than resume. |
+| `child-preflight` | The child run failed before it could name a stage (`err.stage || 'child-preflight'` in `crew/child.mjs`). | Preserve the journal and read the escalation `why` before reassigning. |
 | `envelope-refusal` | A seat's envelope failed an anti-replay identity check and was refused. The summary carries the operands — which field, its expected value and the value found — so an ABSENT identity reads differently from a genuinely mismatched one. | Read the operands first. `found=undefined` means the seat never named that field, which is not a replay; a real value that differs is. Eight lanes were lost to this before the two were distinguishable (#1227), every one with its work complete on disk. |
 | `headless-no-envelope` | A headless turn ended without a usable envelope. | Read the transport outcome and the seat's stream before deciding whether to retry. |
 | `headless-parse-error` | The headless stream could not be parsed. | Preserve the malformed frame evidence and inspect the transport record. |
@@ -75,6 +77,7 @@ exit is terminal: each records an `escalate:<where>` stage row and its
 | `pane-parse-error` | A pane response could not be parsed. | Read the raw pane evidence and verify the expected response shape. |
 | `reclaim-clock-invalid` | Reclaim metadata carried an invalid clock value. | Preserve the record and inspect the clock source before reclaiming. |
 | `reclaim-lock-unavailable` | The reclaim lock could not be acquired. | Check the lock record and holder liveness before retrying. |
+| `resume` | The resume path's driver crashed while adopting the checkpoint (`where: 'resume'` in `crew/crew.mjs`). | Preserve the journal and read the escalation `why` and the resume checkpoint before retrying. |
 | `rpc-assignment-id-exhausted` | The RPC transport exhausted assignment identifiers. | Preserve the RPC journal and restart only after checking in-flight work. |
 | `rpc-command-error` | The RPC transport reported a command error. | Read the command response and transport journal before reassigning. |
 | `rpc-no-envelope` | The RPC turn ended without an envelope. | Inspect the RPC stream and return path for the missing record. |
@@ -89,6 +92,8 @@ exit is terminal: each records an `escalate:<where>` stage row and its
 | `seat-refused` | A seat refused the assignment or its envelope. | Read the refusal and the re-ask budget before assigning again. |
 | `session-persist-failed` | A seat's first assignment could not record `started` in crew.json, so delivery was refused rather than let a restarted driver resume that session without renewal; the message names the crew.json failure reason. | Fix the crew.json read/write failure it names (permissions, lock, malformed file), then re-run the lane. |
 | `slot-claim-unresolvable` | A seat could not resolve its claimed slot. | Inspect the slot claim and the current crew topology. |
+| `signalled` | The daemon's child was signalled after start (`where: started ? 'signalled' : 'spawn-error'` in `crew/daemon.mjs`). | Read the daemon record's `why` and the child exit before retrying. |
+| `spawn-error` | The daemon's child failed to spawn (`where: started ? 'signalled' : 'spawn-error'` in `crew/daemon.mjs`). | Read the spawn refusal and verify the configured binary before retrying. |
 | `substrate-gone` | The seat substrate disappeared during the turn. | Re-derive liveness from the control plane before acting. |
 | `variant` | The selected variant could not be resolved. | Read the variant refusal and verify the requested shape. |
 

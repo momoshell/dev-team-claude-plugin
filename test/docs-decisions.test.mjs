@@ -1,7 +1,7 @@
 // The owner-decision register is a historical, measurement-bearing record.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 
@@ -366,4 +366,59 @@ test('OD5', () => {
   assert.ok(installing.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
   assert.ok(installing.includes('/plugin install dev-team@dev-team'))
   assert.ok(installing.includes('README.md#install'))
+})
+
+test('RD1', () => {
+  // MUTATION RD1: replacing dispatch-batch rotation with dispatch-batch assignment hides the edit-assist drift.
+  const row = crewReadme.split('\n').find((line) => line.startsWith('| Builder edit assist |'))
+  assert.ok(row, 'missing Builder edit assist row')
+  assert.ok(row.includes('rotation'), 'edit-assist row must name rotation')
+  assert.equal(row.includes('off unless CREW_EDIT_ASSIST is set'), false)
+})
+
+test('RD2', () => {
+  // MUTATION RD2: renaming DEVTEAM_SUITE_TIMEOUT_S breaks the suite-timeout pin.
+  const row = crewReadme.split('\n').find((line) => line.startsWith('| Suite |'))
+  assert.ok(row, 'missing Suite row')
+  for (const token of ['DEVTEAM_SUITE_TIMEOUT_S', 'suite_timeout_s', 'suite-timeout-invalid']) {
+    assert.ok(row.includes(token), 'Suite row must name ' + token)
+  }
+})
+
+test('RD3', () => {
+  // MUTATION RD3: replacing keeps with drops hides the reseat drift.
+  const line = crewReadme.split('\n').find((line) => line.includes('keeps a raw override'))
+  assert.ok(line, 'missing reseat sentence')
+  assert.ok(line.includes('exhausted'), 'reseat sentence must name exhausted')
+})
+
+test('RM1', () => {
+  // MUTATION RM1: renaming a factory importer in the crew bullet hides the drift.
+  const names = readdirSync(join(ROOT, 'crew')).filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs') && !name.endsWith('-fixtures.mjs') && !name.endsWith('-test-helpers.mjs'))
+  const derived = names.filter((name) => {
+    const text = read(join('crew', name))
+    return /from\s+['"]\.\.\/scripts\/factory\//.test(text) || /import\(['"]\.\.\/scripts\/factory\//.test(text)
+  }).map((name) => name.replace(/\.mjs$/, '')).sort()
+  assert.deepEqual(derived, ['breaker', 'child', 'crew', 'factoryctl', 'provenance', 'seat-io'])
+  for (const name of derived) {
+    assert.ok(readme.includes('`crew/' + name + '.mjs`'), 'crew/ bullet must name crew/' + name + '.mjs')
+  }
+  assert.ok(readme.includes('hooks/skill-gate.mjs'), 'crew/ bullet must name hooks/skill-gate.mjs')
+  assert.equal(readme.includes('three production modules'), false)
+})
+
+test('RM2', () => {
+  // MUTATION RM2: renaming visualizer/ in What is in this repo hides the drift.
+  const section = docSection(readme, "## What's in this repo")
+  for (const token of ['`bin/crew.mjs`', '`hooks/`', '`visualizer/`']) {
+    assert.ok(section.includes(token), "What's in this repo must name " + token)
+  }
+})
+
+test('RM3', () => {
+  // MUTATION RM3: renaming crew update in Install hides the operator-setup drift.
+  const install = docSection(readme, '## Install')
+  for (const token of ['crew update', 'dev-team-stable', 'link-mode']) {
+    assert.ok(install.includes(token), 'Install must name ' + token)
+  }
 })

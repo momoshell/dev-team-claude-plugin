@@ -87,10 +87,12 @@ function answerFor(argv, answers, options = {}) {
   return { status: 0, stdout: '', stderr: '' }
 }
 
-function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, testCommand = undefined, realCopy = false, copyError = null, filterProbe = null } = {}) {
+function harness({ home = null, answers = [], newest = () => 1000, now = null, log = null, openLedger = null, ingestJournal = null, promptMeasurePath = null, baseBranch = undefined, testCommand = undefined, realCopy = false, copyError = null, filterProbe = null, existsSyncOverride = undefined } = {}) {
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   const HARNESS_DEFAULTS = [
+    // A present lane worktree sits on a commit; the default merge-base answer proves it merged.
+    ['rev-parse --verify --quiet HEAD', { status: 0, stdout: `${'c'.repeat(40)}\n`, stderr: '' }],
     ['worktree', (argv, options) => argv.includes('list') ? ({ status: 0, stdout: 'worktree ' + options.cwd + '\0', stderr: '' }) : ({ status: 0, stdout: '', stderr: '' })],
     ['--git-path info/exclude', { status: 0, stdout: join(scratch('closeout-exclude-default-'), 'exclude') + '\n', stderr: '' }],
   ]
@@ -101,6 +103,10 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
     factoryRoot: scratch('closeout-factory-root-'),
     ...(baseBranch ? { baseBranch } : {}),
     ...(testCommand ? { testCommand } : {}),
+    existsSync: existsSyncOverride || ((p) => {
+      if (typeof p === 'string' && /\/dt-[^/]+$/.test(p)) return true
+      return existsSync(p)
+    }),
     mkdtempSync: (prefix) => scratchDir(basename(prefix), { parent: dirname(prefix) }),
     now: now || (() => { clock += 5; return clock }),
     sleep: () => {},
@@ -503,7 +509,8 @@ test('reap closes every Closes issue and archives only unarchived recovery copie
   mkdirSync(`${crewDir}${ARCHIVE_MARK}2026-09-04T10-50-36-577Z.recovery-copy`, { recursive: true })
   const { deps, calls } = harness({
     home,
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', headRefName: lane, body: 'Closes #758, #800' }), stderr: '' }]],
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', headRefName: lane, body: 'Closes #758, #800' }), stderr: '' }]],
   })
   const result = reap({ lanes: [lane], checkout, deps })
   assert.equal(result.code, 0)
@@ -522,7 +529,7 @@ test('reap closes every Closes issue and archives only unarchived recovery copie
 test('reap closes only the Closes set and leaves Refs referenced and open', () => {
   const { deps, calls } = harness({
     home: scratch('closeout-reap-trailers-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes: #806\nRefs: #904' }), stderr: '' }]],
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes: #806\nRefs: #904' }), stderr: '' }]],
   })
   const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   const closes = spawned(calls, 'issue close')
@@ -539,7 +546,7 @@ test('reap closes only the Closes set and leaves Refs referenced and open', () =
 test('reap reports both sets by name and never infers a close', () => {
   const { deps, calls } = harness({
     home: scratch('closeout-reap-no-trailers-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'no trailer here\n' }), stderr: '' }]],
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'no trailer here\n' }), stderr: '' }]],
   })
   const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   assert.equal(spawned(calls, 'issue close').length, 0)
@@ -561,7 +568,7 @@ test('A1 measured turns are emitted before destructive reap steps', () => {
   const { deps, calls } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
     ],
   })
@@ -592,7 +599,7 @@ test('W1 boot before run-start widens ingest and public window while preserving 
     ingestSince = options.since
     return { applied: 1, skipped: 0, ignored: 0, failed: 0, complete: true }
   }, answers: [
-    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
     ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
   ] })
   const result = reap({ lanes: [lane], checkout: fixture.checkout, deps })
@@ -613,7 +620,7 @@ test('W2 boot selection resets at each run-start and chooses the eligible preced
     { at: eligible, event: 'boot' }, { at: second, event: 'run-start' },
   ] })
   const { deps } = harness({ home: fixture.home, answers: [
-    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
     ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
   ] })
   const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
@@ -631,7 +638,7 @@ test('W2 rejects a boot after the prior start when its timestamp is earlier than
     { at: second, event: 'run-start' },
   ] })
   const { deps } = harness({ home: fixture.home, answers: [
-    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
     ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
   ] })
   const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
@@ -643,7 +650,7 @@ test('W3 no eligible boot falls back to run-start source', () => {
   const start = '2026-09-04T06:04:46.127Z'
   const fixture = turnsFixture('closeout-reap-no-boot-', { rows: [{ at: start, event: 'run-start' }] })
   const { deps } = harness({ home: fixture.home, answers: [
-    ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+    ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
     ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\\n`, stderr: '' }],
   ] })
   const window = rows(reap({ lanes: [lane], checkout: fixture.checkout, deps })).find((row) => row.step === 'turns').detail.window
@@ -671,7 +678,7 @@ test('A1 reap ingests census and reports measured lane economy', () => {
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
         cwd: ROOT, env: options.env, encoding: 'utf8',
       })],
@@ -710,7 +717,7 @@ test('RV1-1 reap ingestion is bounded to the latest run start', () => {
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
         cwd: ROOT, env: options.env, encoding: 'utf8',
       })],
@@ -750,7 +757,7 @@ test('A2 every turns rate carries a finite dispatches_measured denominator', () 
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
     ],
   })
@@ -776,7 +783,7 @@ test('A5 numeric epoch extends the reap ceiling and is ingested', () => {
   const { deps, calls } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', (_argv, options) => spawnSync(process.execPath, [join(ROOT, 'scripts/factory/ledger.mjs'), ...options.args.slice(1)], {
         cwd: ROOT, env: options.env, encoding: 'utf8',
       })],
@@ -803,7 +810,7 @@ test('A7 unreadable journal keeps reap successful', () => {
     home: fixture.home,
     openLedger: () => { throw Object.assign(new Error('journal ledger denied'), { code: 'EACCES' }) },
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(turnsPayload())}\n`, stderr: '' }],
     ],
   })
@@ -824,7 +831,7 @@ test('A8 degraded mirror keeps reap successful', () => {
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
     ],
   })
@@ -845,7 +852,7 @@ test('B1 degraded turns stay non-load-bearing and later reap steps still run', (
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
     ],
   })
@@ -868,7 +875,7 @@ test('B2 degraded turns contain no invented numeric count, denominator, or rate'
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 1, stdout: '', stderr: reason }],
     ],
   })
@@ -896,7 +903,7 @@ test('C1 empty turns retain absent reason, nulls, and successful reap', () => {
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
     ],
   })
@@ -919,7 +926,7 @@ test('D1 a missing ledger executable is unavailable without refusing reap', () =
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', () => { throw Object.assign(new Error('spawn ENOENT: ledger.mjs'), { code: 'ENOENT' }) }],
     ],
   })
@@ -949,7 +956,7 @@ test('E1 turns query uses the latest run start and a ceiling-rounded exclusive u
   const { deps, calls } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: `${JSON.stringify(payload)}\n`, stderr: '' }],
     ],
   })
@@ -983,7 +990,8 @@ test('RV1-2 reap archives recovery copies under the dispatched lane worktree roo
   mkdirSync(`${crewDir}.recovery-copy`, { recursive: true })
   const { deps, calls } = harness({
     home,
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }]],
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }]],
   })
   const result = reap({ lanes: [lane], checkout, deps })
   assert.equal(result.code, 0)
@@ -1617,7 +1625,11 @@ test('main returns exit code 1 for a named refusal', () => {
 
   const success = harness({
     home: scratch('closeout-main-success-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'MERGED', body: '' }), stderr: '' }]],
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }],
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 900, state: 'MERGED', body: '' }), stderr: '' }],
+    ],
     log: () => {},
   })
   assert.equal(main(['reap', 'lane-a'], success.deps), 0)
@@ -1644,7 +1656,7 @@ test('merge-check removes the scratch worktree on the success path', () => {
 test('reap closes each issue with a comment naming the PR', () => {
   const { deps, calls } = harness({
     home: scratch('closeout-named-comment-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes #758, #800' }), stderr: '' }]],
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: 'Closes #758, #800' }), stderr: '' }]],
   })
   const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
   const closes = spawned(calls, 'issue close')
@@ -1694,7 +1706,7 @@ test('CP1 reap records measured plugin provenance and honest absence', () => {
 
 test('CP2 unreadable provenance never changes reap steps or outcome', () => {
   const home = scratch('cp2-home-')
-  const { deps } = harness({ home, answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1, state: 'MERGED', body: '' }) }]] })
+  const { deps } = harness({ home, answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1, state: 'MERGED', body: '' }) }]] })
   const injected = normalDeps({ ...deps, pluginProvenance: () => ({ plugin_sha: 'a'.repeat(40) }), readFileSync: (path, ...args) => {
     if (path.endsWith('crew.json')) throw new Error('unreadable')
     return deps.readFileSync(path, ...args)
@@ -1710,7 +1722,7 @@ test('reap emits one JSON line per step with step, ms and outcome', () => {
   const logged = []
   const { deps } = harness({
     home: scratch('closeout-reap-log-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }]],
+    answers: [['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }]],
     log: (line) => logged.push(line),
   })
   const result = reap({ lanes: ['lane-a'], checkout: ROOT, deps })
@@ -1905,15 +1917,26 @@ test('G1 an unnamed measure stays pending with one closed reason', () => {
 })
 
 test('H1 reap preserves its existing ordered step contract', () => {
+  const tip = 'a'.repeat(40)
   const { deps, calls } = harness({
     home: scratch('closeout-prompt-h1-'),
-    answers: [['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1008, state: 'MERGED', body: 'Closes #1031' }), stderr: '' }]],
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 1008, state: 'MERGED', headRefOid: '0'.repeat(40), body: 'Closes #1031' }), stderr: '' }],
+      ['fetch', { status: 0, stdout: '', stderr: '' }],
+      ['rev-parse', { status: 0, stdout: `${tip}\n`, stderr: '' }],
+      ['merge-base', { status: 0, stdout: '', stderr: '' }],
+    ],
   })
   const result = reap({ lanes: ['ordinary-lane'], checkout: ROOT, deps })
   assert.deepEqual([...REAP_STEPS], ['pr-merged', 'turns', 'issues', 'worktree', 'branch', 'prune', 'archive'])
   assert.deepEqual(rows(result).map((row) => row.step), [...REAP_STEPS])
   assert.deepEqual(result.report.closed, [1031])
   assert.equal(spawned(calls, 'issue close').length, 1)
+  // Mutation killed: dropping --json while retaining the field list breaks the PR view argv.
+  assert.deepEqual(spawned(calls, 'gh pr view')[0].args, ['pr', 'view', 'ordinary-lane', '--json', 'number,state,headRefName,headRefOid,body,baseRefName'])
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.proof, 'ancestor')
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.base_ref, 'origin/main')
 })
 
 // 2026-09-18: the suite's own TAP output crossed Node's 1 MiB spawn default (1,047,788 bytes
@@ -2450,6 +2473,7 @@ test('P3 foreign checkout reap reads turns with the plugin ledger CLI', () => {
   reap({ lanes: [lane], checkout, deps: { home, log() {}, promptMeasurePath: join(home, 'pending.json'), openLedger: () => ({ degraded: false, close() {} }), ingestJournal: () => ({ complete: true }), renameSync() {}, rmSync() {}, spawn: (call) => {
     calls.push(call)
     if (call.file === 'gh') return { status: 0, stdout: JSON.stringify({ number: 1, state: 'MERGED', body: '' }) }
+    if (call.file === 'git' && call.args[0] === 'rev-parse') return { status: 1, stdout: '', stderr: '' }
     return { status: 0, stdout: JSON.stringify({ schema: 1, absent: null, turns: 20, dispatches_measured: 2 }) }
   } } })
   const turns = calls.find((call) => call.args[0] === fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url)) && call.args[1] === 'turns')
@@ -2479,7 +2503,7 @@ test('L2A reap removes the lane exclude pairs after its worktree removal and rep
   const { deps, calls } = harness({
     home: scratch('closeout-reap-excludes-home-'),
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['worktree remove', (argv, options) => { seen.laneDir = options.args.at(-1); writeFileSync(exclude, 'stock\n# worktree-setup-owner: ' + JSON.stringify(seen.laneDir) + '\n/node_modules\n/kept\n'); return { status: 0, stdout: '', stderr: '' } }],
       ['info/exclude', () => ({ status: 0, stdout: seen.laneDir ? exclude + '\n' : '', stderr: '' })],
     ],
@@ -2500,7 +2524,7 @@ test('L2A a failed reap exclude cleanup is reported in the worktree detail and r
   const { deps } = harness({
     home: scratch('closeout-reap-excludes-fault-home-'),
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['worktree remove', (argv, options) => { writeFileSync(exclude, '# worktree-setup-owner: ' + JSON.stringify(options.args.at(-1)) + '\n/node_modules\n'); return { status: 0, stdout: '', stderr: '' } }],
       ['info/exclude', { status: 0, stdout: exclude + '\n', stderr: '' }],
     ],
@@ -2675,7 +2699,7 @@ test('RA1 reap over archive-only lane reads the sole archive dir', () => {
   const { deps } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
     ],
   })
@@ -2705,7 +2729,7 @@ test('RA2 newest archive wins when two archive dirs exist', () => {
   const { deps, calls } = harness({
     home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
     ],
   })
@@ -2733,7 +2757,7 @@ test('RA3 live dir wins beside an archive dir', () => {
   const { deps, calls } = harness({
     home: fixture.home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
     ],
   })
@@ -2765,7 +2789,7 @@ test('RA4 recovery-copy and other-lane archives are ignored', () => {
   const { deps, calls } = harness({
     home,
     answers: [
-      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 1, stdout: '', stderr: '' }], ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 895, state: 'MERGED', body: '' }), stderr: '' }],
       ['ledger.mjs turns', { status: 0, stdout: JSON.stringify(payload) + '\n', stderr: '' }],
     ],
   })
@@ -2975,3 +2999,351 @@ test('RA5 archived crew.json supplies plugin provenance', () => {
   assert.equal(result.plugin_sha_changed, false)
 })
 
+// b1259 reap proof against fetched origin, not a stale local branch. Real git with a
+// bare local origin; only gh is stubbed and git delegates to spawnSync, like the gate.
+function reapGit(cwd, ...args) {
+  const r = spawnSync('git', ['-c', 'user.email=reap@example.invalid', '-c', 'user.name=Reap Test', '-c', 'protocol.file.allow=always', ...args], { cwd, encoding: 'utf8' })
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr || r.stdout}`)
+  return String(r.stdout || '').trim()
+}
+
+function reapScenario(mode) {
+  const base = scratch('closeout-reap-proof-')
+  const origin = join(base, 'origin.git')
+  reapGit(base, 'init', '--bare', '-q', '-b', 'main', origin)
+  const seed = join(base, 'seed')
+  reapGit(base, 'init', '-q', '-b', 'main', seed)
+  writeFileSync(join(seed, 'base.txt'), 'base\n')
+  reapGit(seed, 'add', '.')
+  reapGit(seed, 'commit', '-q', '-m', 'base')
+  reapGit(seed, 'remote', 'add', 'origin', origin)
+  reapGit(seed, 'push', '-q', 'origin', 'main')
+  const root = join(base, 'root')
+  reapGit(base, 'clone', '-q', origin, root)
+  const lane = 'lane-a'
+  reapGit(root, 'checkout', '-q', '-b', lane)
+  writeFileSync(join(root, 'lane.txt'), 'lane\n')
+  reapGit(root, 'add', '.')
+  reapGit(root, 'commit', '-q', '-m', 'lane')
+  const laneTip = reapGit(root, 'rev-parse', 'HEAD')
+  reapGit(root, 'checkout', '-q', 'main')
+  const baseTip = reapGit(root, 'rev-parse', 'HEAD')
+  if (mode === 'ancestor') reapGit(root, 'merge', '-q', '--no-ff', '--no-edit', lane)
+  else if (mode === 'squash') {
+    reapGit(root, 'merge', '-q', '--squash', lane)
+    reapGit(root, 'commit', '-q', '-m', 'squash lane')
+  } else {
+    writeFileSync(join(root, 'other.txt'), 'other\n')
+    reapGit(root, 'add', '.')
+    reapGit(root, 'commit', '-q', '-m', 'other')
+  }
+  reapGit(root, 'push', '-q', 'origin', 'main')
+  reapGit(root, 'reset', '-q', '--hard', baseTip)
+  const laneDir = join(base, `dt-${lane}`)
+  reapGit(root, 'worktree', 'add', '-q', laneDir, lane)
+  const head = mode === 'unproven' ? '0'.repeat(40) : laneTip
+  return { base, root, lane, laneDir, laneTip, head }
+}
+
+function reapRun(sc, opts = {}) {
+  if (opts.breakOrigin) reapGit(sc.root, 'remote', 'set-url', 'origin', join(sc.base, 'missing.git'))
+  const ghCalls = []
+  let tipReads = 0
+  const spawn = (options) => {
+    const args = options.args || []
+    if (options.file === 'gh') {
+      ghCalls.push(args)
+      return { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: sc.head, baseRefName: opts.baseRefName ?? 'main', body: '' }), stderr: '' }
+    }
+    if (options.file === 'git') {
+      if (args.join(' ') === `rev-parse --verify --quiet refs/heads/${sc.lane}`) {
+        const reply = opts.tipResults?.[tipReads++]
+        if (reply) return reply
+      }
+      if (opts.breakBranch && args[0] === 'branch') return { status: 1, stdout: '', stderr: 'branch-delete-boom-xyz' }
+      return spawnSync('git', args, { cwd: options.cwd, encoding: 'utf8' })
+    }
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  const result = reap({ lanes: [sc.lane], checkout: sc.root, deps: { spawn, log: () => {}, home: sc.base, baseBranch: () => ({ branch: 'main' }), promptMeasurePath: join(sc.base, 'queue.json') } })
+  return { result, ghCalls }
+}
+
+function reapBranchExists(sc) {
+  return spawnSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${sc.lane}`], { cwd: sc.root, encoding: 'utf8' }).status === 0
+}
+
+// Mutation killed: forcing the ancestor proof to false lets a stale-local lane through.
+test('reap proves ancestor against fetched origin despite stale local main', () => {
+  const sc = reapScenario('ancestor')
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 0)
+  assert.deepEqual(rows(result).map((row) => row.step), [...REAP_STEPS])
+  assert.equal(reapBranchExists(sc), false)
+  assert.equal(existsSync(sc.laneDir), false)
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.proof, 'ancestor')
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.base_ref, 'origin/main')
+})
+
+// Mutation killed: forcing the headRefOid proof to false refuses a squash merge.
+test('reap proves squash merge via headRefOid', () => {
+  const sc = reapScenario('squash')
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 0)
+  assert.equal(reapBranchExists(sc), false)
+  assert.equal(existsSync(sc.laneDir), false)
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.proof, 'head-ref-oid')
+})
+
+// Mutation killed: forcing the ancestor proof to true wrongly reaps an unproven lane.
+test('reap refuses unproven lane at pr-merged with worktree intact', () => {
+  const sc = reapScenario('unproven')
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(String(result.refusal.message || ''), /not an ancestor/)
+  assert.equal(rows(result).at(-1).step, 'pr-merged')
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: using short lane/origin names in merge-base proves a merged tag, not the branch.
+test('reap refuses an unmerged lane hidden by a same-named merged tag', () => {
+  const sc = reapScenario('unproven')
+  reapGit(sc.root, 'tag', sc.lane, reapGit(sc.root, 'rev-parse', 'refs/remotes/origin/main'))
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, new RegExp(sc.lane))
+  assert.match(result.refusal.message, /not an ancestor/)
+  assert.equal(reapGit(sc.root, 'rev-parse', '--verify', `refs/heads/${sc.lane}`), sc.laneTip)
+  assert.equal(existsSync(sc.laneDir), true)
+})
+
+// Mutation killed: making fetch failure itself refuse blocks a provable squash lane.
+test('reap fetch failure alone does not refuse when headRefOid proves', () => {
+  const sc = reapScenario('squash')
+  const { result } = reapRun(sc, { breakOrigin: true })
+  assert.equal(result.code, 0)
+  assert.equal(reapBranchExists(sc), false)
+})
+
+// Mutation killed: disabling the already-done guards makes a second reap refuse.
+test('reap second run is idempotent with already_done worktree and branch', () => {
+  const sc = reapScenario('ancestor')
+  assert.equal(reapRun(sc).result.code, 0)
+  const second = reapRun(sc).result
+  assert.equal(second.code, 0)
+  assert.deepEqual(rows(second).map((row) => row.step), [...REAP_STEPS])
+  assert.equal(rows(second).find((row) => row.step === 'worktree').detail.already_done, true)
+  assert.equal(rows(second).find((row) => row.step === 'branch').detail.already_done, true)
+})
+
+// Mutation killed: dropping childFailure from gitStep hides git stderr.
+test('reap branch refusal carries git stderr', () => {
+  const sc = reapScenario('ancestor')
+  const { result } = reapRun(sc, { breakBranch: true })
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'branch')
+  assert.match(String(result.refusal.message || ''), /branch-delete-boom-xyz/)
+})
+
+// Mutation killed: treating a failed tip lookup as absence deletes an unproven lane.
+test('RV2-1 reap refuses a transient first lane-tip lookup failure before teardown', () => {
+  const sc = reapScenario('unproven')
+  const { result } = reapRun(sc, { tipResults: [{ status: null, error: new Error('spawnSync git EAGAIN'), stdout: '', stderr: '' }] })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /EAGAIN/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapGit(sc.root, 'rev-parse', `refs/heads/${sc.lane}`), sc.laneTip)
+})
+
+// Mutation killed: skipping the proven-tip comparison force-deletes a different tip.
+test('reap refuses a branch-step tip different from the proven tip', () => {
+  const sc = reapScenario('ancestor')
+  const changedTip = 'b'.repeat(40)
+  const { result } = reapRun(sc, { tipResults: [null, { status: 0, stdout: changedTip }] })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'branch')
+  assert.ok(result.refusal.message.includes(sc.laneTip))
+  assert.ok(result.refusal.message.includes(changedTip))
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.tip, sc.laneTip)
+  assert.equal(reapGit(sc.root, 'rev-parse', `refs/heads/${sc.lane}`), sc.laneTip)
+})
+
+// Mutation killed: exempting an absent proof from the tip comparison deletes a new branch.
+test('reap refuses a branch appearing after an already-absent proof', () => {
+  const tip = 'b'.repeat(40)
+  let reads = 0
+  const { deps, calls } = harness({
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', body: '' }) }],
+      ['rev-parse --verify --quiet refs/heads/', () => ++reads === 1 ? { status: 1, stdout: '' } : { status: 0, stdout: tip }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'branch')
+  assert.match(result.refusal.message, /from null/)
+  assert.ok(result.refusal.message.includes(tip))
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.tip, null)
+  assert.equal(spawned(calls, 'branch -D').length, 0)
+})
+
+// Mutation killed: accepting any unexpected tip result as absence allows teardown or hides failure.
+test('reap refuses unknown interrupted denied and malformed lane-tip results at both steps', () => {
+  const tip = 'a'.repeat(40)
+  const failures = [
+    { status: null, error: Object.assign(new Error('spawnSync git EPERM'), { code: 'EPERM' }), stdout: '' },
+    { status: null, stdout: '' },
+    { status: null, signal: 'SIGTERM', stdout: '' },
+    { status: 128, stderr: 'fatal: lookup failed', stdout: '' },
+    { status: 0, stdout: '' },
+    { status: 0, stdout: 'not-a-sha' },
+    { status: 1, stdout: tip },
+    { status: 1, stdout: '', stderr: 'fatal: unknown lookup failure' },
+    { status: 1, error: new Error('EAGAIN'), stdout: '' },
+    { status: 1, signal: 'SIGTERM', stdout: '' },
+    { status: 0, error: new Error('EAGAIN'), stdout: tip },
+    { status: 0, signal: 'SIGTERM', stdout: tip },
+  ]
+  for (const step of ['pr-merged', 'branch']) {
+    for (const failure of failures) {
+      let reads = 0
+      const { deps, calls } = harness({
+        baseBranch: () => ({ branch: 'main' }),
+        answers: [
+          ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: tip, body: '' }) }],
+          ['rev-parse --verify --quiet refs/heads/', () => ++reads === 1 && step === 'branch' ? { status: 0, stdout: tip } : failure],
+        ],
+      })
+      const result = reap({ lanes: [lane], checkout: ROOT, deps })
+      assert.equal(result.code, 1)
+      assert.equal(result.refusal.reason, 'branch-failed')
+      assert.equal(result.refusal.step, step)
+      assert.match(result.refusal.message, /cannot read lane tip/)
+      assert.equal(spawned(calls, 'branch -D').length, 0)
+      if (step === 'pr-merged') assert.equal(spawned(calls, 'worktree remove').length, 0)
+    }
+  }
+})
+
+// Mutation killed: a SHA-1-only validator rejects a valid SHA-256 lane tip.
+test('reap accepts and records a valid SHA-256 lane tip', () => {
+  const tip = 'a'.repeat(64)
+  const { deps, calls } = harness({
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: tip, body: '' }) }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 0, stdout: ` ${tip}\n` }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.code, 0)
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.tip, tip)
+  assert.equal(spawned(calls, 'branch -D').length, 1)
+})
+
+// Mutation killed: dropping the fetch-failure suffix hides why an unproven lane failed.
+test('reap unproven refusal carries fetch stderr when fetch failed', () => {
+  const sc = reapScenario('unproven')
+  const { result } = reapRun(sc, { breakOrigin: true })
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.match(String(result.refusal.message || ''), /fatal:/)
+})
+
+// Rewrites origin/main to the pre-merge commit, as a force-push would.
+function reapForcePushBase(sc) {
+  const seed = join(sc.base, 'seed')
+  reapGit(seed, 'push', '-q', '--force', 'origin', 'main')
+}
+
+// Mutation killed: a refspec-less fetch leaves refs/remotes/origin/main at the pre-force-push tip.
+test('reap proves ancestry against the fetched base, not a stale tracking ref', () => {
+  const sc = reapScenario('ancestor')
+  sc.head = '0'.repeat(40)
+  reapGit(sc.root, 'config', '--unset-all', 'remote.origin.fetch')
+  reapForcePushBase(sc)
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /lane tip [0-9a-f]{40} is not an ancestor/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapGit(sc.root, 'rev-parse', `refs/heads/${sc.lane}`), sc.laneTip)
+})
+
+// Mutation killed: trusting the tracking ref after a failed fetch proves against a force-pushed-away base.
+test('reap does not prove ancestry from a tracking ref a failed fetch left stale', () => {
+  const sc = reapScenario('ancestor')
+  sc.head = '0'.repeat(40)
+  reapForcePushBase(sc)
+  const { result } = reapRun(sc, { breakOrigin: true })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /git fetch failed: .*fatal:/s)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: accepting headRefOid without the PR base deletes a lane merged into another branch.
+test('reap refuses a PR head merged into a branch other than the default', () => {
+  const sc = reapScenario('unproven')
+  sc.head = sc.laneTip
+  const { result } = reapRun(sc, { baseRefName: 'develop' })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /on base develop/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: proving only the lane branch removes a worktree whose detached HEAD holds unmerged work.
+test('reap refuses a detached worktree holding an unmerged commit when the branch is gone', () => {
+  const sc = reapScenario('ancestor')
+  reapGit(sc.laneDir, 'checkout', '-q', '--detach')
+  writeFileSync(join(sc.laneDir, 'unmerged.txt'), 'unmerged\n')
+  reapGit(sc.laneDir, 'add', '.')
+  reapGit(sc.laneDir, 'commit', '-q', '-m', 'unmerged')
+  const unmerged = reapGit(sc.laneDir, 'rev-parse', 'HEAD')
+  reapGit(sc.root, 'branch', '-D', sc.lane)
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.ok(result.refusal.message.includes(`worktree HEAD ${unmerged} is not an ancestor`))
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapGit(sc.laneDir, 'rev-parse', 'HEAD'), unmerged)
+})
+
+// Mutation killed: skipping the worktree HEAD re-read removes a worktree that moved after its proof.
+test('reap refuses worktree removal when the worktree HEAD moved after the proof', () => {
+  const tip = 'a'.repeat(40)
+  const moved = 'd'.repeat(40)
+  let reads = 0
+  const { deps, calls } = harness({
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', body: '' }) }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 0, stdout: tip }],
+      ['rev-parse --verify --quiet HEAD', () => ++reads === 1 ? { status: 0, stdout: tip } : { status: 0, stdout: moved }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'worktree-failed')
+  assert.equal(result.refusal.step, 'worktree')
+  assert.ok(result.refusal.message.includes(`from ${tip} to ${moved}`))
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.head, tip)
+  assert.equal(spawned(calls, 'worktree remove').length, 0)
+  assert.equal(spawned(calls, 'branch -D').length, 0)
+})

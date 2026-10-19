@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { psSnapshot } from '../crew/seat-io.mjs'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { scratchDir, git } from './helpers.mjs'
 import * as mod from '../scripts/factory/prove-mutations.mjs'
-import { parseDiffMutationReport } from '../crew/drive.mjs'
+import { laneCommandInputs, parseDiffMutationReport } from '../crew/drive.mjs'
 
 // Each child side effect below lands after its runner's old fixed bound on purpose: the
 // tests order on the event, so a bigger delay costs time, never a verdict.
@@ -786,6 +786,26 @@ function diffDeps(results, writes = []) {
   }
 }
 
+function diffShellDeps(checkout, commands, extraEnv = {}) {
+  const env = { ...process.env, ...extraEnv, FORCE_COLOR: '0' }
+  delete env.NODE_TEST_CONTEXT
+  return {
+    ...diffDeps(commands),
+    env,
+    now: () => 0,
+    runCommand(command) {
+      commands.push(command)
+      if (command === 'gate') return { ok: true, output: '', status: 0, completed: true }
+      const result = spawnSync('/bin/sh', ['-c', command], { cwd: checkout, env, encoding: 'utf8', timeout: 5000 })
+      return {
+        ok: result.status === 0, status: result.status, completed: Number.isInteger(result.status),
+        output: String(result.stdout ?? '') + String(result.stderr ?? ''),
+        timeout: result.error?.code === 'ETIMEDOUT',
+      }
+    },
+  }
+}
+
 test('A1 diff hunk conditional produces an adjudicated flipped mutant', async () => {
   const { root, checkout, file } = fixture()
   const before = 'if (false) return true\n'
@@ -809,7 +829,7 @@ test('A1 diff hunk conditional produces an adjudicated flipped mutant', async ()
   const conditional = result.mutants.find((row) => row.operator === 'conditional')
   assert.ok(conditional)
   assert.equal(conditional.outcome, 'killed')
-  assert.deepEqual(commands.slice(0, 4), ['npm run lint -- --color=never', 'node gate.mjs --strict', 'npm run lint -- --color=never', 'node gate.mjs --strict'])
+  assert.deepEqual(commands.slice(0, 3), ['npm run lint -- --color=never', 'node gate.mjs --strict', 'node gate.mjs --strict'])
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -1166,8 +1186,9 @@ test('A5 a grandchild that escapes the poll and rewrites the target makes the pr
   let baselineCalls = 0
   const runCommand = (cmd, cwd, options) => {
     if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
+    // Gate-first order runs the gate before the lane, so the gate stays green here to still reach the escaping lane.
     return cmd === 'gate'
-      ? { ok: false, output: '', status: 1, completed: true }
+      ? { ok: true, output: '', status: 0, completed: true }
       : mod.normalDeps().runCommand(cmd, cwd, { ...options, pollMs: 50, snapshot: orderedSnapshot() })
   }
   let pid = null
@@ -1200,9 +1221,11 @@ test('A2 a hanging diff validation is unproven and restored', async () => {
   const hang = join(root, 'hang.pid')
   const config = { version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'], validation_lane: hangCommand(hang), gate_cmd: 'gate', cap: 1, generation: 1 }
   // The runner's first table waits for the hang's own marker, so shell startup can never beat the bound.
+  // Gate-first order runs the gate before the lane, so the gate is faked green here to still reach the hanging lane.
   let baselineCalls = 0
   const runCommand = (command, cwd, options) => {
     if (++baselineCalls <= 2) return { ok: true, output: '', status: 0, completed: true }
+    if (command === 'gate') return { ok: true, output: '', status: 0, completed: true }
     return mod.normalDeps().runCommand(command, cwd, { ...options, pollMs: 50, snapshot: gatedSnapshot([() => existsSync(hang)]) })
   }
   let pid = null
@@ -1306,9 +1329,9 @@ test('TO1 validation and gate timeouts are unproven and restore mutant bytes', a
       assert.ok(timedOut, timeoutAt)
       assert.equal(result.killed, 0)
       assert.equal(result.timed_out, 1)
-      assert.equal(timedOut.validation_ok, timeoutAt === 'validation' ? false : true)
-      assert.equal(timedOut.gate_ok, timeoutAt === 'validation' ? null : false)
-      assert.deepEqual(commands, timeoutAt === 'validation' ? ['lane', 'gate', 'lane'] : ['lane', 'gate', 'lane', 'gate'])
+      assert.equal(timedOut.validation_ok, timeoutAt === 'validation' ? false : null)
+      assert.equal(timedOut.gate_ok, timeoutAt === 'validation' ? true : false)
+      assert.deepEqual(commands, timeoutAt === 'validation' ? ['lane', 'gate', 'gate', 'lane'] : ['lane', 'gate', 'gate'])
       assert.equal(readFileSync(file, 'utf8'), after)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
@@ -1558,4 +1581,513 @@ test('E3 the driver parser rejects missing and unknown runner causes', () => {
   ]) {
     assert.equal(parseDiffMutationReport(`DIFF-MUTATION-SUMMARY ${JSON.stringify({ ...base, mutants: [mutant] })}`, { generation: 1, cap: 1 }), null)
   }
+})
+test('RV2-1 rebuilt lanes protect dash-prefixed positional test files', async () => {
+  // MUTATION RV2-1: remove the rebuilt end-of-options separator.
+  // Node's process runner strips ./ again in child argv; keep this one-file probe in-process.
+  for (const positional of ['./-fixture.test.mjs', '-- -fixture.test.mjs']) {
+    const { root, checkout, file } = fixture()
+    try {
+      const after = WIDGET.replace(FIND, REPLACE)
+      writeFileSync(file, after)
+      writeFileSync(join(checkout, '-fixture.test.mjs'), [
+        "import { test } from 'node:test'",
+        "import assert from 'node:assert/strict'",
+        "import { widget } from './lib/widget.mjs'",
+        "test('unrelated', () => assert.equal(typeof widget('x'), 'string'))",
+        '',
+      ].join('\n'))
+      git(checkout, 'add', '-A')
+      git(checkout, 'commit', '-q', '-m', 'lane')
+      const lane = `node --test --test-reporter=tap ${positional}`
+      const commands = []
+      const result = await mod.runDiffMutationProof({
+        version: 1, checkout, patch: diffPatch('lib/widget.mjs', WIDGET, after), files_in_scope: ['lib/'],
+        validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+      }, diffShellDeps(checkout, commands, { NODE_OPTIONS: '--test-isolation=none' }))
+      const row = result.mutants[0]
+      assert.equal(result.fatal, undefined)
+      assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+      assert.equal(row.lane_scope, 'staged')
+      assert.deepEqual(commands.slice(2), ['gate', "'node' '--test' '--test-reporter=tap' '--' '-fixture.test.mjs'"])
+      assert.match(row.validation_output, /# pass 1\b/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+async function fileSetLaneProof(mode, extraEnv = {}) {
+  const { root, checkout, file } = fixture()
+  try {
+    const before = 'export const healthy = false\n'
+    const after = 'export const healthy = true\n'
+    writeFileSync(file, after)
+    mkdirSync(join(checkout, 'test'), { recursive: true })
+    writeFileSync(join(checkout, 'test/a.test.mjs'), [
+      "import { test } from 'node:test'",
+      "import { healthy } from '../lib/widget.mjs'",
+      mode.startsWith('--test-concurrency') ? "(await import('node:fs')).writeFileSync(new URL('../lane-marker', import.meta.url), 'ready')" : 'globalThis.laneReady = true',
+      "test('a', () => { if (typeof healthy !== 'boolean') throw new Error('not boolean') })",
+      '',
+    ].join('\n'))
+    writeFileSync(join(checkout, 'test/b.test.mjs'), [
+      "import { test } from 'node:test'",
+      "import assert from 'node:assert/strict'",
+      "import { healthy } from '../lib/widget.mjs'",
+      mode.startsWith('--test-shard')
+        ? "test('b', () => assert.equal(healthy, true))"
+        : mode.startsWith('--test-concurrency')
+          ? "test('b', async () => { const fs = await import('node:fs'); const marker = new URL('../lane-marker', import.meta.url); assert.equal(fs.existsSync(marker), true); fs.rmSync(marker); assert.equal(typeof healthy, 'boolean') })"
+        : "test('b', () => { assert.equal(globalThis.laneReady, true); assert.equal(typeof healthy, 'boolean') })",
+      '',
+    ].join('\n'))
+    git(checkout, 'add', '-A')
+    git(checkout, 'commit', '-q', '-m', 'lane')
+    const lane = `node --test --test-reporter=tap ${mode ? mode + ' ' : ''}test/a.test.mjs test/b.test.mjs`
+    const commands = []
+    const result = await mod.runDiffMutationProof({
+      version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+      validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+    }, diffShellDeps(checkout, commands, extraEnv))
+    return { lane, commands, result }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}
+
+test('RV2-2 file-set-dependent lanes retain shard kills and isolation-none survivors', async () => {
+  // MUTATION RV2-2: disable the file-set-dependent mode fallback.
+  for (const [mode, outcome, extraEnv] of [
+    ['--test-shard 2/2', 'killed'],
+    ['--test-shard=2/2', 'killed'],
+    ['--test-isolation none', 'survived'],
+    ['--test-isolation=none', 'survived'],
+    ['', 'survived', { NODE_OPTIONS: '--test-isolation=none' }],
+  ]) {
+    const { lane, commands, result } = await fileSetLaneProof(mode, extraEnv)
+    const row = result.mutants[0]
+    assert.equal(result.fatal, undefined)
+    assert.equal(row.outcome, outcome, JSON.stringify(result.mutants))
+    assert.equal(row.lane_scope, 'full')
+    assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+    assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+    assert.match(row.validation_output, mode.startsWith('--test-shard') ? /# fail 1\b/ : /# pass 2\b/)
+  }
+})
+
+test('RV3-1 inherited isolation-none keeps shared-global lanes intact', async () => {
+  // MUTATION RV3-1: remove the NODE_OPTIONS source from the file-set-dependent fallback.
+  for (const NODE_OPTIONS of ['--test-isolation=none', '--test-isolation none']) {
+    const { lane, commands, result } = await fileSetLaneProof('', { NODE_OPTIONS })
+    const row = result.mutants[0]
+    assert.equal(result.fatal, undefined)
+    assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+    assert.equal(row.lane_scope, 'full')
+    assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+    assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+    assert.match(row.validation_output, /# pass 2\b/)
+  }
+})
+
+test('RV4-1 an in-order lane keeps a fixture producer and consumer together', async () => {
+  // MUTATION RV4-1: drop --test-concurrency=1 from the file-set-dependent fallback.
+  for (const mode of ['--test-concurrency=1', '--test-concurrency 1']) {
+    const { lane, commands, result } = await fileSetLaneProof(mode)
+    const row = result.mutants[0]
+    assert.equal(result.fatal, undefined)
+    assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+    assert.equal(row.lane_scope, 'full')
+    assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+    assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+    assert.match(row.validation_output, /# pass 2\b/)
+  }
+})
+
+test('RV4-2 a quoted NODE_OPTIONS keeps the full lane', async () => {
+  // MUTATION RV4-2: drop the quoted NODE_OPTIONS fallback.
+  const { lane, commands, result } = await fileSetLaneProof('', { NODE_OPTIONS: '--test-isolation="none"' })
+  const row = result.mutants[0]
+  assert.equal(result.fatal, undefined)
+  assert.equal(row.outcome, 'survived', JSON.stringify(result.mutants))
+  assert.equal(row.lane_scope, 'full')
+  assert.equal(row.lane_scope_reason, 'lane-file-set-dependent')
+  assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+})
+
+test('RV2-3 shell-expanded patterns run verbatim and kill selected-test mutants', async () => {
+  // MUTATION RV2-3: disable the shell-expansion fallback before rebuilding options.
+  for (const option of ['--test-name-pattern "$PATTERN"', '--test-name-pattern="$PATTERN"']) {
+    const { root, checkout, file } = fixture()
+    try {
+      const before = 'export const healthy = false\n'
+      const after = 'export const healthy = true\n'
+      writeFileSync(file, after)
+      mkdirSync(join(checkout, 'test'), { recursive: true })
+      writeFileSync(join(checkout, 'test/a.test.mjs'), [
+        "import { test } from 'node:test'",
+        "import assert from 'node:assert/strict'",
+        "import { healthy } from '../lib/widget.mjs'",
+        "test('widget', () => assert.equal(healthy, true))",
+        '',
+      ].join('\n'))
+      git(checkout, 'add', '-A')
+      git(checkout, 'commit', '-q', '-m', 'lane')
+      const lane = `node --test --test-reporter=tap ${option} test/a.test.mjs`
+      const commands = []
+      const result = await mod.runDiffMutationProof({
+        version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+        validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+      }, diffShellDeps(checkout, commands, { PATTERN: 'widget' }))
+      const row = result.mutants[0]
+      assert.equal(result.fatal, undefined)
+      assert.equal(row.outcome, 'killed', JSON.stringify(result.mutants))
+      assert.equal(row.lane_scope, 'full')
+      assert.equal(row.lane_scope_reason, 'lane-shell-expansion')
+      assert.deepEqual(commands, [lane, 'gate', 'gate', lane])
+      assert.match(row.validation_output, /# fail 1\b/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+test('RV2-4 prefixed positional files retain staged closure and remainder inputs', async () => {
+  // MUTATION RV2-4: normalize a leading ./ with slice(3) instead of slice(2).
+  const { root, checkout, file } = fixture()
+  try {
+    const after = WIDGET.replace(FIND, REPLACE)
+    writeFileSync(file, after)
+    mkdirSync(join(checkout, 'test'), { recursive: true })
+    writeFileSync(join(checkout, 'test/a.test.mjs'), "import { widget } from '../lib/widget.mjs'\n")
+    writeFileSync(join(checkout, 'test/b.test.mjs'), 'export const unrelated = true\n')
+    writeFileSync(join(checkout, 'test/c.test.mjs'), 'export const unrelated = true\n')
+    git(checkout, 'add', '-A')
+    git(checkout, 'commit', '-q', '-m', 'lane')
+    const lane = 'node --test ./test/a.test.mjs ./test/b.test.mjs ./test/c.test.mjs'
+    const commands = []
+    const result = await mod.runDiffMutationProof({
+      version: 1, checkout, patch: diffPatch('lib/widget.mjs', WIDGET, after), files_in_scope: ['lib/'],
+      validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+    }, { ...diffDeps(commands), now: () => 0 })
+    const row = result.mutants[0]
+    assert.equal(row.outcome, 'survived')
+    assert.equal(row.lane_scope, 'staged')
+    assert.equal(row.lane_scope_reason, null)
+    assert.deepEqual(commands.slice(3).map((command) => laneCommandInputs(command).inputs), [
+      ['test/a.test.mjs'],
+      ['test/b.test.mjs', 'test/c.test.mjs'],
+    ])
+    assert.deepEqual(row.validation_lane, commands.slice(3))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RV1-1 rebuilt lanes preserve spaced scalar and loader arguments', async () => {
+  // MUTATION RV1-1: rejoin decoded executable and option words without shellArg.
+  for (const equals of [false, true]) {
+    const { root, checkout, file } = fixture()
+    const after = WIDGET.replace(FIND, REPLACE)
+    writeFileSync(file, after)
+    mkdirSync(join(checkout, 'test'), { recursive: true })
+    mkdirSync(join(checkout, 'node bin'))
+    symlinkSync(process.execPath, join(checkout, 'node bin/node'))
+    writeFileSync(join(checkout, 'test/loader file.mjs'), 'globalThis.loaderReady = true\n')
+    writeFileSync(join(checkout, 'test/a.test.mjs'), [
+      "import { test } from 'node:test'",
+      "import assert from 'node:assert/strict'",
+      "import { widget } from '../lib/widget.mjs'",
+      "test('foo bar', () => { assert.equal(globalThis.loaderReady, true); assert.equal(typeof widget('x'), 'string') })",
+      '',
+    ].join('\n'))
+    git(checkout, 'add', '-A')
+    git(checkout, 'commit', '-q', '-m', 'lane')
+    const options = equals
+      ? "--test-name-pattern='foo bar' --import='./test/loader file.mjs'"
+      : "--test-name-pattern 'foo bar' --import './test/loader file.mjs'"
+    const lane = `'./node bin/node' --test --test-reporter=tap ${options} test/a.test.mjs`
+    const commands = []
+    const result = await mod.runDiffMutationProof({
+      version: 1, checkout, patch: diffPatch('lib/widget.mjs', WIDGET, after), files_in_scope: ['lib/'],
+      validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+    }, diffShellDeps(checkout, commands))
+    assert.equal(result.fatal, undefined)
+    assert.equal(result.mutants[0].outcome, 'survived', JSON.stringify(result.mutants))
+    assert.equal(result.mutants[0].lane_scope, 'staged')
+    assert.equal(result.mutants[0].validation_ok, true)
+    assert.match(result.mutants[0].validation_output, /# pass 1\b/)
+    assert.equal(commands.length, 4)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-2 mixed explicit test inputs cannot be omitted from mutant validation', async () => {
+  // MUTATION RV1-2: filter positional inputs to .test.mjs before rebuilding the lane.
+  for (const extra of ['extra.mjs', 'extra.test.js']) {
+    const { root, checkout, file } = fixture()
+    const after = WIDGET.replace(FIND, REPLACE)
+    writeFileSync(file, after)
+    mkdirSync(join(checkout, 'test'), { recursive: true })
+    writeFileSync(join(checkout, 'test/a.test.mjs'), [
+      "import { test } from 'node:test'",
+      "import { widget } from '../lib/widget.mjs'",
+      "test('a', () => { widget('x') })",
+      '',
+    ].join('\n'))
+    const imports = extra.endsWith('.js')
+      ? "const { test } = require('node:test'); const assert = require('node:assert/strict'); const { readFileSync } = require('node:fs')"
+      : "import { test } from 'node:test'; import assert from 'node:assert/strict'; import { readFileSync } from 'node:fs'"
+    writeFileSync(join(checkout, 'test', extra), `${imports}\ntest('extra', () => assert.equal(readFileSync('lib/widget.mjs', 'utf8'), ${JSON.stringify(after)}))\n`)
+    git(checkout, 'add', '-A')
+    git(checkout, 'commit', '-q', '-m', 'lane')
+    const lane = `node --test test/a.test.mjs test/${extra}`
+    const commands = []
+    const result = await mod.runDiffMutationProof({
+      version: 1, checkout, patch: diffPatch('lib/widget.mjs', WIDGET, after), files_in_scope: ['lib/'],
+      validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+    }, diffShellDeps(checkout, commands))
+    assert.equal(result.fatal, undefined)
+    assert.equal(result.mutants[0].outcome, 'killed', JSON.stringify(result.mutants))
+    assert.equal(result.mutants[0].stop_point, 'remaining-lane')
+    assert.equal(result.mutants[0].validation_ok, false)
+    assert.deepEqual(commands.slice(2), ['gate', "'node' '--test' '--' 'test/a.test.mjs'", `'node' '--test' '--' 'test/${extra}'`])
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('RV1-3 staged verdict vocabularies retain literal members and frozen state', () => {
+  // MUTATION RV1-3: erase a lane-scope member or remove its Object.freeze.
+  for (const [actual, expected] of [
+    [mod.DIFF_LANE_SCOPES, ['staged', 'full']],
+    [mod.DIFF_LANE_SCOPE_REASONS, ['lane-not-node-test', 'lane-glob-input', 'lane-directory-input', 'lane-file-unreadable', 'lane-no-test-files', 'lane-file-set-dependent', 'lane-shell-expansion']],
+    [mod.DIFF_STOP_POINTS, ['gate', 'closure-file', 'remaining-lane', 'none-survived']],
+  ]) {
+    assert.deepEqual(actual, expected)
+    assert.equal(Object.isFrozen(actual), true)
+  }
+})
+
+test('RV1-4 reaching files beyond the closure cap run together in the remainder', async () => {
+  // MUTATION RV1-4: raise the closure-file cap from three to four.
+  const { root, checkout, file } = fixture()
+  const after = WIDGET.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  mkdirSync(join(checkout, 'test'), { recursive: true })
+  const files = ['test/a.test.mjs', 'test/b.test.mjs', 'test/c.test.mjs', 'test/d.test.mjs', 'test/e.test.mjs']
+  for (const name of files) writeFileSync(join(checkout, name), "import { widget } from '../lib/widget.mjs'\n")
+  git(checkout, 'add', '-A')
+  git(checkout, 'commit', '-q', '-m', 'lane')
+  const commands = []
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', WIDGET, after), files_in_scope: ['lib/'],
+    validation_lane: `node --test ${files.join(' ')}`, gate_cmd: 'gate', cap: 1, generation: 1,
+  }, { ...diffDeps(commands), now: () => 0 })
+  assert.equal(result.mutants[0].outcome, 'survived')
+  assert.equal(commands[2], 'gate')
+  assert.deepEqual(commands.slice(3).map((command) => laneCommandInputs(command).inputs), [
+    ['test/a.test.mjs'],
+    ['test/b.test.mjs'],
+    ['test/c.test.mjs'],
+    ['test/d.test.mjs', 'test/e.test.mjs'],
+  ])
+  assert.deepEqual(result.mutants[0].validation_lane, commands.slice(3))
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('MN1 gate red stops before the lane and records a gate kill', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = before.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const commands = []
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => 0,
+    runCommand(command) {
+      commands.push(command)
+      if (commands.length <= 2) return { ok: true, output: '', status: 0, completed: true }
+      return { ok: false, output: 'FAIL X\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}', status: 1, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  assert.deepEqual(commands, ['lane', 'gate', 'gate'])
+  const row = result.mutants.find((entry) => entry.outcome === 'killed')
+  assert.ok(row)
+  assert.equal(row.stop_point, 'gate')
+  assert.equal(row.validation_ok, null)
+  assert.deepEqual(row.validation_lane, [])
+  rmSync(root, { recursive: true, force: true })
+})
+test('MN2 closure red stops after the first reaching file', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = before.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  writeFileSync(join(checkout, 'lib/helper.mjs'), "import {\n  widget\n} from './widget.mjs'\nexport const helper = widget\n")
+  mkdirSync(join(checkout, 'test'), { recursive: true })
+  writeFileSync(join(checkout, 'test/a.test.mjs'), "import { helper } from '../lib/helper.mjs'\nimport { test } from 'node:test'\ntest('a', () => {})\n")
+  writeFileSync(join(checkout, 'test/b.test.mjs'), "import { helper } from '../lib/helper.mjs'\nimport { test } from 'node:test'\ntest('b', () => {})\n")
+  writeFileSync(join(checkout, 'test/c.test.mjs'), 'export const lonely = 1\n')
+  git(checkout, 'add', '-A')
+  git(checkout, 'commit', '-q', '-m', 'lane')
+  const lane = 'node --test test/a.test.mjs test/b.test.mjs test/c.test.mjs'
+  const commands = []
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => 0,
+    runCommand(command) {
+      commands.push(command)
+      if (commands.length <= 2) return { ok: true, output: '', status: 0, completed: true }
+      if (command === 'gate') return { ok: true, output: '', status: 0, completed: true }
+      if (command.includes('a.test.mjs')) return { ok: false, output: 'FAIL a', status: 1, completed: true }
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  assert.equal(commands.length, 4)
+  assert.equal(commands[0], lane)
+  assert.equal(commands[1], 'gate')
+  assert.equal(commands[2], 'gate')
+  assert.ok(commands[3].includes('a.test.mjs'))
+  assert.ok(!commands[3].includes('b.test.mjs'))
+  assert.ok(!commands[3].includes('c.test.mjs'))
+  const row = result.mutants.find((entry) => entry.outcome === 'killed')
+  assert.ok(row)
+  assert.equal(row.stop_point, 'closure-file')
+  assert.equal(row.stopped_file, 'test/a.test.mjs')
+  rmSync(root, { recursive: true, force: true })
+})
+test('MN3 all green runs every lane file and records none-survived', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = before.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  writeFileSync(join(checkout, 'lib/helper.mjs'), "import {\n  widget\n} from './widget.mjs'\nexport const helper = widget\n")
+  mkdirSync(join(checkout, 'test'), { recursive: true })
+  writeFileSync(join(checkout, 'test/a.test.mjs'), "import { helper } from '../lib/helper.mjs'\nimport { test } from 'node:test'\ntest('a', () => {})\n")
+  writeFileSync(join(checkout, 'test/b.test.mjs'), "import { helper } from '../lib/helper.mjs'\nimport { test } from 'node:test'\ntest('b', () => {})\n")
+  writeFileSync(join(checkout, 'test/c.test.mjs'), 'export const lonely = 1\n')
+  git(checkout, 'add', '-A')
+  git(checkout, 'commit', '-q', '-m', 'lane')
+  const lane = 'node --test test/a.test.mjs test/b.test.mjs test/c.test.mjs'
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: lane, gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => 0,
+    runCommand: () => ({ ok: true, output: '', status: 0, completed: true }),
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  const row = result.mutants.find((entry) => entry.outcome === 'survived')
+  assert.ok(row)
+  assert.equal(row.stop_point, 'none-survived')
+  assert.ok(Array.isArray(row.validation_lane))
+  const union = new Set()
+  for (const cmd of row.validation_lane) {
+    for (const name of ['test/a.test.mjs', 'test/b.test.mjs', 'test/c.test.mjs']) if (cmd.includes(name)) union.add(name)
+  }
+  assert.deepEqual([...union].sort(), ['test/a.test.mjs', 'test/b.test.mjs', 'test/c.test.mjs'])
+  const last = row.validation_lane.at(-1)
+  assert.ok(last.includes('test/c.test.mjs'))
+  assert.ok(!last.includes('test/a.test.mjs'))
+  assert.ok(!last.includes('test/b.test.mjs'))
+  rmSync(root, { recursive: true, force: true })
+})
+test('MN4 opaque lane runs verbatim as full scope', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = before.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  const commands = []
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => 0,
+    runCommand(command) {
+      commands.push(command)
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  assert.deepEqual(commands, ['lane', 'gate', 'gate', 'lane'])
+  const row = result.mutants.find((entry) => entry.outcome === 'survived')
+  assert.ok(row)
+  assert.deepEqual(row.validation_lane, ['lane'])
+  assert.equal(row.lane_scope, 'full')
+  assert.ok(mod.DIFF_LANE_SCOPE_REASONS.includes(row.lane_scope_reason))
+  assert.equal(Object.isFrozen(mod.DIFF_LANE_SCOPE_REASONS), true)
+  rmSync(root, { recursive: true, force: true })
+})
+test('MN5 faster closure files run first on later mutants', async () => {
+  const { root, checkout, file } = fixture()
+  const before = 'const first = false\nconst second = false\n'
+  const after = 'const first = true\nconst second = true\n'
+  writeFileSync(file, after)
+  mkdirSync(join(checkout, 'test'), { recursive: true })
+  writeFileSync(join(checkout, 'test/b.test.mjs'), "import { widget } from '../lib/widget.mjs'\nimport { test } from 'node:test'\ntest('b', () => {})\n")
+  writeFileSync(join(checkout, 'test/c.test.mjs'), "import { widget } from '../lib/widget.mjs'\nimport { test } from 'node:test'\ntest('c', () => {})\n")
+  git(checkout, 'add', '-A')
+  git(checkout, 'commit', '-q', '-m', 'lane')
+  const lane = 'node --test test/b.test.mjs test/c.test.mjs'
+  let clock = 0
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: lane, gate_cmd: 'gate', cap: 2, generation: 1,
+  }, {
+    now: () => clock,
+    runCommand(command) {
+      const singleB = command.includes('b.test.mjs') && !command.includes('c.test.mjs')
+      const singleC = command.includes('c.test.mjs') && !command.includes('b.test.mjs')
+      if (singleB) clock += 10
+      else if (singleC) clock += 1
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  const rows = result.mutants.filter((entry) => entry.outcome === 'survived')
+  assert.equal(rows.length, 2)
+  assert.ok(rows[0].validation_lane[0].includes('b.test.mjs'))
+  assert.ok(rows[0].validation_lane[1].includes('c.test.mjs'))
+  assert.ok(rows[1].validation_lane[0].includes('c.test.mjs'))
+  assert.ok(!rows[1].validation_lane[0].includes('b.test.mjs'))
+  assert.ok(rows[1].validation_lane[1].includes('b.test.mjs'))
+  rmSync(root, { recursive: true, force: true })
+})
+test('MN6 verdict time is measured and skips carry no time', async () => {
+  const { root, checkout, file } = fixture()
+  const before = WIDGET
+  const after = before.replace(FIND, REPLACE)
+  writeFileSync(file, after)
+  let clock = 100
+  const commands = []
+  const result = await mod.runDiffMutationProof({
+    version: 1, checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => clock,
+    runCommand(command) {
+      commands.push(command)
+      if (commands.length === 3) clock += 42
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  const row = result.mutants.find((entry) => entry.outcome === 'survived')
+  assert.ok(row)
+  assert.equal(row.verdict_ms, 42)
+  rmSync(root, { recursive: true, force: true })
+  const second = fixture()
+  writeFileSync(second.file, after)
+  const skipped = await mod.runDiffMutationProof({
+    version: 1, checkout: second.checkout, patch: diffPatch('lib/widget.mjs', before, after), files_in_scope: ['lib/'],
+    validation_lane: 'lane', gate_cmd: 'gate', cap: 1, generation: 1,
+  }, {
+    now: () => 0,
+    runCommand(command) {
+      if (command === 'lane') return { ok: false, output: 'red', status: 1, completed: true }
+      return { ok: true, output: '', status: 0, completed: true }
+    },
+    writeFile: (abs, bytes) => writeFileSync(abs, bytes),
+  })
+  const skip = skipped.mutants.find((entry) => entry.outcome === 'skipped')
+  assert.ok(skip)
+  assert.equal(skip.verdict_ms, null)
 })

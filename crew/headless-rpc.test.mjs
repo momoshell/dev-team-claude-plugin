@@ -149,6 +149,8 @@ test('persisted cmd.json withholds canary env value while spawn keeps full env',
     assert.deepEqual(command.envWithheld.filter((entry) => entry.key === canaryKey), [{ key: canaryKey, reason: 'inherited-process-env' }])
     assert.deepEqual(command.envKeys, [...command.envKeys].sort())
     assert.equal(captured.env[canaryKey], canaryValue)
+    assert.equal(captured.env.CREW_ROLE, 'builder')
+    assert.equal(captured.env.CREW_TASK_DIR, f.paths.taskDir)
   } finally {
     if (prior === undefined) { delete process.env[canaryKey] } else { process.env[canaryKey] = prior }
     f.cleanup()

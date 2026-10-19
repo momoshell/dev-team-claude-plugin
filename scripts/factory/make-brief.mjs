@@ -264,6 +264,26 @@ export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a No
   insufficient\` if incomplete. A silent seat is indistinguishable from a dead
   one.`)
 
+export const PORTABLE_HOSTILE_ENV_BLOCK = Object.freeze(`Your gate runs in the SAME environment as your build, so an advantage your box
+happens to have is invisible to both: a resolved binary, a real home directory,
+a populated search path. Run the test files this change touched once more with
+those advantages removed — an empty home directory and no locally installed
+binary to resolve — using this repo's own test runner, and require it green.
+Not the whole suite: one extra run of your own files. A test that only passes
+on the author's machine is invisible to a gate that shares that machine.
+
+A new test that reaches a binary-resolution seam must do one of exactly two
+things: STUB the resolution so the test never consults the local machine, or
+SKIP with a named reason when the binary is absent. Doing neither, on a path
+that resolves a binary, is the reviewable signal.`)
+
+export const PORTABLE_CONVENTIONS_BLOCK = Object.freeze(`- Follow this repo's own existing conventions rather than inventing new ones.
+- Commit nothing: the driver commits on green. Never push, never open a PR.
+  No \`Co-Authored-By\` trailers.
+- If interrupted, write your ReturnEnvelope first on resume — \`status:
+  insufficient\` if incomplete. A silent seat is indistinguishable from a dead
+  one.`)
+
 // The per-check mutation contract quoted from its single enforcement point,
 // `validateMutations` in crew/drive.mjs. Two lanes lost a plan round each to a
 // format documented nowhere a planner reads (#330, #345); a standing block is the
@@ -419,9 +439,23 @@ so the range hole was never touched. If the sentence beside your check has two
 verbs, declare two entries or write a narrower sentence.
 Rationale: #409.`)
 
+const HOSTILE_CITED_PATHS = Object.freeze(['crew/crew-boot.test.mjs', 'crew/adapter-pi.test.mjs'])
+const CONVENTIONS_CITED_PATHS = Object.freeze(['scripts/factory'])
+
+function citedPresent(checkout, cited) {
+  if (typeof checkout !== 'string' || checkout === '') return true
+  try { return cited.every((rel) => existsSync(join(checkout, rel)) !== false) } catch { return true }
+}
+
+export function standingBlocksFor(checkout) {
+  const hostile = citedPresent(checkout, HOSTILE_CITED_PATHS) ? HOSTILE_ENV_BLOCK : PORTABLE_HOSTILE_ENV_BLOCK
+  const conventions = citedPresent(checkout, CONVENTIONS_CITED_PATHS) ? CONVENTIONS_BLOCK : PORTABLE_CONVENTIONS_BLOCK
+  const acceptance = [ACCEPTANCE_GATE_BLOCK, hostile].join('\n\n')
+  return { acceptance, mutations: MUTATION_CONTRACT_BLOCK, conventions }
+}
+
 function standingBlocks() {
-  const acceptance = [ACCEPTANCE_GATE_BLOCK, HOSTILE_ENV_BLOCK].join('\n\n')
-  return { acceptance, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }
+  return standingBlocksFor(null)
 }
 
 export class BriefUsageError extends Error {
@@ -3151,10 +3185,10 @@ function readAndKeepGreenFiles(writeSurface, discovery) {
     .sort()
 }
 
-function conventionsFile(discovery, writeSurface, profile, tripwiresOmitted = false) {
+function conventionsFile(discovery, writeSurface, profile, tripwiresOmitted = false, checkout = null) {
   const surface = renderWriteSurface(writeSurface, discovery, tripwiresOmitted).split('\n')[1]
     || 'read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): (none)'
-  return [surface, renderConventions(profile?.conventions), CONVENTIONS_BLOCK].join('\n')
+  return [surface, renderConventions(profile?.conventions), standingBlocksFor(checkout).conventions].join('\n')
 }
 
 export function issueBindingFor(request) {
@@ -3370,7 +3404,7 @@ export function writePack({ packDir, taskName, checkout, request, discovery, wri
     paths.vocabulary = null
     paths.rows = null
   }
-  writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile, packOmission === 'tripwires')}\n`)
+  writeFileSync(paths.conventions, `${conventionsFile(discovery, writeSurface, profile, packOmission === 'tripwires', checkout)}\n`)
   writeFileSync(paths.proposal, `${renderProposedTier(proposal ?? proposeTier({ where: where ?? request?.where ?? [], discovery }))}\n`)
   if (packOmission !== 'symbols' && symbolIndex.length > 0) {
     writeFileSync(paths.symbols, `${renderSymbolSidecar(symbolIndex)}\n`)
@@ -3566,6 +3600,7 @@ function renderBriefSections(gathered) {
   const writeSurface = { ...(baseWriteSurface || {}), __discovery: discovery }
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
+  const blocks = standingBlocksFor(gathered.checkout ?? null)
   const tierLines = pack == null ? [renderProposedTier(proposal)] : [`proposal rationale: ${pack.proposal} — read it once with: cat ${pack.proposal}`, ...renderProposedTier(proposal).split('\n').filter((line) => line.startsWith(MISCLASSIFIED_PREFIX))]
   const conventionsWarning = renderConventionsWarning(profile?.conventions)
   const sections = [
@@ -3583,7 +3618,7 @@ function renderBriefSections(gathered) {
     briefSection('out of scope', 'out_of_scope', ['## Out of scope', request.out_of_scope], request.out_of_scope),
     briefSection('fences', null, ['## Fences', renderFences(fences, writeSurface, pack)]),
     briefSection('acceptance', 'done_means', ['## Acceptance', `${request.done_means} · Full suite green — measured by the driver's suite stage, never by a seat.`], request.done_means),
-    briefSection('acceptance gate', null, ['## Acceptance gate', standingBlocks().acceptance]),
+    briefSection('acceptance gate', null, ['## Acceptance gate', blocks.acceptance]),
     briefSection('per-check mutations', null, ['## Per-check mutations', standingBlocks().mutations]),
     briefSection('validation lane', null, ['## Validation lane', renderValidation(baseline, discovery, pack)]),
     briefSection('conventions', null, [
@@ -3593,7 +3628,7 @@ function renderBriefSections(gathered) {
       ...(pack == null ? [
         renderConventions(profile?.conventions),
         generatedGrep(discovery),
-        standingBlocks().conventions,
+        blocks.conventions,
       ] : []),
       '',
     ]),
@@ -3865,6 +3900,7 @@ function compile(flags) {
   })
   const rendered = renderBriefResult({
     request,
+    checkout,
     where,
     creates,
     discovery,

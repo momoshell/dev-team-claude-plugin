@@ -13,6 +13,6 @@
   "scripts/factory/dispatch-batch.mjs:46": "DEPENDENCY_CYCLE = 'dependency-cycle'",
   "crew/drive.mjs:35": "plan_rounds: 2, // planner attempts",
   "crew/drive.mjs:60": "builder: 2400, reviewer: 1800",
-  "scripts/factory/make-brief.mjs:1726": "a recorded baseline is a fact about a commit and is never consumed",
-  "crew/drive.mjs:813": "export const GATE_REAP_SHELL = '/bin/bash'"
+  "crew/drive.mjs:813": "export const GATE_REAP_SHELL = '/bin/bash'",
+  "scripts/factory/make-brief.mjs:1760": "a recorded baseline is a fact about a commit and is never consumed"
 }

@@ -1738,6 +1738,7 @@ export const JOURNAL_FACT_KEYS = Object.freeze({
   narration: 'recordNarrationMeasurement',
   screener_proposal: 'recordScreenerProposal',
   advisor_usage: 'recordAdvisorUsage',
+  advisor_cell_failure: 'recordCellFailure',
   acp_turn: 'recordSeatTurn',
   acp_tool_call: 'recordSeatToolCall',
   acp_permission_policy: 'recordSeatPermission',
@@ -7437,6 +7438,22 @@ function journalFactArgs(writer, row, adwId, reask = null, seatSkillsSnapshot = 
       model: payload.model,
       usage: payload.usage,
       usage_reason: payload.usage_reason ?? null,
+      ...(createdAt === undefined ? {} : { created_at: createdAt }),
+    }
+  }
+  if (writer === JOURNAL_FACT_KEYS.advisor_cell_failure) {
+    const failure = value('advisor_cell_failure')
+    return {
+      adw_id: rowAdwId,
+      role: 'advisor',
+      provider: failure.provider ?? null,
+      model_id: failure.model_id ?? null,
+      agent: failure.agent ?? null,
+      effort: failure.effort ?? null,
+      model: failure.model ?? null,
+      kind: failure.kind,
+      detail: failure.detail ?? null,
+      attribution: null,
       ...(createdAt === undefined ? {} : { created_at: createdAt }),
     }
   }

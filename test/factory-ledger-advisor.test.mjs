@@ -2392,3 +2392,39 @@ test('A9', () => {
     assert.match(json.stderr + text.stderr, /degraded/)
   }
 })
+
+test('advisor cell failure journal facts ingest as advisor-role cell failures', () => {
+  assert.equal(JOURNAL_FACT_KEYS.advisor_cell_failure, 'recordCellFailure')
+  const dir = nextDir()
+  const journalPath = join(dir, 'journal.jsonl')
+  const at1 = '2024-01-01T00:00:00.000Z'
+  const at2 = '2024-01-01T00:00:01.000Z'
+  const line1 = { at: at1, role: 'builder', advisor_cell_failure: { consult_id: 'c-timeout', run_started_at: at1, role: 'builder', provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', model: 'openai/gpt-6-luna', kind: 'timeout', detail: 'consult timed out' } }
+  const line2 = { at: at2, role: 'builder', advisor_cell_failure: { consult_id: 'c-transport', run_started_at: at2, role: 'builder', provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', model: 'openai/gpt-6-luna', kind: 'transport-error', detail: 'pi child transport failed' } }
+  writeFileSync(journalPath, [line1, line2].map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const ledger = openTestLedger()
+  try {
+    const report = ingestJournal(journalPath, ledger, { adw_id: 'advisor-failure-test' })
+    assert.equal(report.applied, 2)
+    assert.equal(report.failed, 0)
+    const rows = ledger.dumpTable('cell_failures')
+    assert.equal(rows.length, 2)
+    const timeout = rows.find((row) => row.kind === 'timeout')
+    const transport = rows.find((row) => row.kind === 'transport-error')
+    assert.deepEqual({ adw_id: timeout.adw_id, role: timeout.role, provider: timeout.provider, model_id: timeout.model_id, agent: timeout.agent, effort: timeout.effort, model: timeout.model, kind: timeout.kind, detail: timeout.detail, attribution: timeout.attribution, created_at: timeout.created_at }, { adw_id: 'advisor-failure-test', role: 'advisor', provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', model: 'openai/gpt-6-luna', kind: 'timeout', detail: 'consult timed out', attribution: null, created_at: at1 })
+    assert.deepEqual({ adw_id: transport.adw_id, role: transport.role, provider: transport.provider, model_id: transport.model_id, agent: transport.agent, effort: transport.effort, model: transport.model, kind: transport.kind, detail: transport.detail, attribution: transport.attribution, created_at: transport.created_at }, { adw_id: 'advisor-failure-test', role: 'advisor', provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', model: 'openai/gpt-6-luna', kind: 'transport-error', detail: 'pi child transport failed', attribution: null, created_at: at2 })
+    const replay = ingestJournal(journalPath, ledger, { adw_id: 'advisor-failure-test' })
+    assert.equal(replay.applied, 0)
+    assert.equal(ledger.dumpTable('cell_failures').length, 2)
+  } finally { ledger.close() }
+  const badDir = nextDir()
+  const badPath = join(badDir, 'journal.jsonl')
+  writeFileSync(badPath, JSON.stringify({ at: at1, role: 'builder', advisor_cell_failure: { consult_id: 'c-bad', run_started_at: at1, role: 'builder', provider: 'openai', model_id: 'gpt-6-luna', agent: 'pi', effort: 'medium', model: 'openai/gpt-6-luna', kind: 'not-a-kind', detail: 'nope' } }) + '\n')
+  const badLedger = openTestLedger()
+  try {
+    const bad = ingestJournal(badPath, badLedger, { adw_id: 'advisor-failure-test' })
+    assert.equal(bad.failed, 1)
+    assert.equal(bad.complete, false)
+    assert.equal(badLedger.dumpTable('cell_failures').length, 0)
+  } finally { badLedger.close() }
+})

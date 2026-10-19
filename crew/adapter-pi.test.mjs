@@ -126,6 +126,17 @@ test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP'
   assert.equal(acpLaunch({ ...spec, role: 'builder', editAssist: null, bin: '/bin/pi', cwd: '/tmp' }).env[PI_EDIT_ASSIST_ENV], undefined)
 })
 
+// MUTATION: drop && key !== 'CREW_PI_AGENTS' from the piRpcSeatParts passthrough filter, or drop the grants agents spread, and this test reddens.
+test('PI_AGENTS inherited value is stripped and the grant-built value wins across rpc and ACP', () => {
+  const evil = '[{"name":"evil","def":"/x.json"}]'
+  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { SENTINEL: 'yes', CREW_PI_AGENTS: evil } })
+  assert.deepEqual(rpc.env, { SENTINEL: 'yes', CREW_FFF: '0' })
+  const acp = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'sonnet', promptFile: '/tmp/p', cwd: '/tmp', env: { SENTINEL: 'yes', CREW_PI_AGENTS: evil } })
+  assert.equal(acp.env.CREW_PI_AGENTS, undefined)
+  const granted = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { CREW_PI_AGENTS: evil }, grants: { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [] } })
+  assert.equal(granted.env.CREW_PI_AGENTS, JSON.stringify([{ name: 'scout', def: '/scout.json' }]))
+})
+
 const SKELETONREAD_EXTENSION = join(ROOT, 'crew/pi/extensions/skeletonread.ts')
 const RETRIEVE_TOOL = PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/skeletonread.ts'][0]
 

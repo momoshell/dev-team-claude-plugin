@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join } from 'node:path'
 import { scratchDir } from '../../../test/helpers.mjs'
 import { assignmentPrompt, assignmentLine, parseAssignment } from '../../driver.mjs'
-import { attachSubmit } from './submit.ts'
+import { attachSubmit, SUBMIT_REFUSAL_REASONS } from './submit.ts'
 import { PI_FIRST_PARTY_EXTENSION_TOOLS, piActivatedTools, seatCommand } from '../../adapters/adapter-pi.mjs'
 import { grantsFor, loadCapabilities } from '../../capabilities.mjs'
 import { rpcCommand } from '../../headless-rpc.mjs'
@@ -137,4 +137,55 @@ test('S7 shipped planner, builder, and tech-lead grants activate submit in pane 
     assert.ok(rpc.args[rpc.args.indexOf('--tools') + 1].split(',').includes('submit_envelope'))
   }
   assert.equal(existsSync(new URL('./submit.ts', import.meta.url)), true)
+})
+
+test('RR1 submit_envelope journal rows carry top-level ISO at within bracketing reads', async () => {
+  // kills: journal closure `new Date().toISOString()` -> 'not-a-date'
+  const f = fixture({ name: 'rr1' })
+  const before = new Date().toISOString()
+  await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
+  await f.call(f.envelope())
+  const after = new Date().toISOString()
+  const rows = readFileSync(journalPath(f), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'submit_envelope')
+  assert.equal(rows.length, 2)
+  for (const row of rows) {
+    assert.equal(new Date(row.at).toISOString(), row.at)
+    assert.ok(row.at >= before && row.at <= after)
+  }
+})
+
+test('RR2 refused row carries defect why, submitted row why null, overridden row carries why', async () => {
+  // kills: journal `outcome === \'refused\' || outcome === \'overridden\' ? why : null` -> `why: null`
+  const f = fixture({ name: 'rr2' })
+  const refused = await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
+  assert.equal(refused.details.reason, 'artifacts')
+  const ok = await f.call(f.envelope())
+  assert.equal(ok.details.submitted, true)
+  const rows = readFileSync(journalPath(f), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'submit_envelope')
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0].submit_envelope.reason, 'artifacts')
+  assert.equal(rows[0].submit_envelope.why, refused.details.why)
+  assert.match(rows[0].submit_envelope.why, /\/outside\/secret/)
+  assert.equal(rows[1].submit_envelope.why, null)
+  const g = fixture({ name: 'rr2-override' })
+  await g.call(g.envelope({ assignment_id: 'bad' }))
+  await g.call(g.envelope({ assignment_id: 'bad' }))
+  const third = await g.call(g.envelope({ assignment_id: 'bad' }))
+  assert.equal(third.details.submit_overridden, true)
+  const grows = readFileSync(journalPath(g), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'submit_envelope')
+  assert.equal(grows.length, 3)
+  assert.equal(grows[2].submit_envelope.outcome, 'overridden')
+  assert.equal(grows[2].submit_envelope.reason, 'assignment-id-mismatch')
+  assert.equal(grows[2].submit_envelope.why, third.details.why)
+})
+
+test('RR3 SUBMIT_REFUSAL_REASONS is frozen closed list and refused reasons are members', async () => {
+  // kills: drop 'details' from SUBMIT_REFUSAL_REASONS
+  assert.deepEqual(SUBMIT_REFUSAL_REASONS, ['status-kind', 'assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'no-envelope', 'summary', 'artifacts', 'details'])
+  assert.equal(Object.isFrozen(SUBMIT_REFUSAL_REASONS), true)
+  const f = fixture({ name: 'rr3' })
+  await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
+  const rows = readFileSync(journalPath(f), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'submit_envelope')
+  assert.equal(rows.length, 1)
+  assert.equal(SUBMIT_REFUSAL_REASONS.includes(rows[0].submit_envelope.reason), true)
 })

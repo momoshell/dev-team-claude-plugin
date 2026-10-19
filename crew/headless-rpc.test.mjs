@@ -4439,3 +4439,76 @@ test('a settled no-envelope RPC turn journals exactly one census row and one ski
     assert.equal(rows.filter((r) => r.event === 'skill-load-window').length, 1)
   } finally { f.cleanup() }
 })
+
+test('CH1 two launches append two ordered cmd-history lines beside latest cmd.json', () => {
+  // kills: history filename -> cmd-history-off.jsonl
+  const f = fixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, first)
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    assert.equal(f.io.retire('builder').retired, true)
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 2)
+    const text = readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd-history.jsonl'), 'utf8')
+    const lines = text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(lines.length, 2)
+    assert.deepEqual(lines.map((line) => line.assignment_id), [first.id, second.id])
+    const cmd = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.deepEqual(cmd, rpcCommand(f.specs.at(-1)))
+    void second
+  } finally { f.cleanup() }
+})
+
+test('CH2 cmd-history line carries launch values from injected clock with env keys not values', () => {
+  // kills: history `env_keys: Object.keys(command.env || {}).sort()` -> same plus `env: command.env`
+  const key = 'CH2_SENTINEL_KEY'
+  const value = 'sentinel-value-ch2-9f3k'
+  const saved = process.env[key]
+  process.env[key] = value
+  const f = fixture({ now: () => 1_700_000_000_000 })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const text = readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd-history.jsonl'), 'utf8')
+    const lines = text.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(lines.length, 1)
+    const line = lines[0]
+    assert.equal(line.at, '2023-11-14T22:13:20.000Z')
+    assert.equal(line.role, 'builder')
+    assert.equal(line.assignment_id, run.id)
+    assert.equal(line.session_id, 'session-1')
+    assert.equal(line.resume, false)
+    assert.equal(line.bin, '/bin/pi')
+    assert.deepEqual(line.args, rpcCommand(f.specs.at(-1)).args)
+    assert.deepEqual(line.env_keys, [...line.env_keys].sort())
+    assert.ok(line.env_keys.includes(key))
+    assert.equal(text.includes(value), false)
+  } finally {
+    f.cleanup()
+    if (saved === undefined) delete process.env[key]
+    else process.env[key] = saved
+  }
+})
+
+test('CH3 failed cmd-history append never fails the launch and journals append-failed', () => {
+  // kills: `reason: 'append-failed' }));` -> same plus `throw new Error('append rethrown')`
+  const rows = []
+  const throwing = (path, ...rest) => {
+    if (String(path).endsWith('cmd-history.jsonl')) throw new Error('append denied')
+    return writeFileSync(path, ...rest)
+  }
+  const f = fixture({ writeFileSync: throwing, log: (row) => rows.push(row) })
+  try {
+    let run = null
+    assert.doesNotThrow(() => { run = f.io.assign({ role: 'builder', briefFile: '/brief.md' }) })
+    const cmd = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.ok(cmd && Array.isArray(cmd.args))
+    const hits = rows.filter((row) => row.event === 'cmd-history')
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0].written, false)
+    assert.equal(hits[0].reason, 'append-failed')
+    assert.equal(hits[0].role, 'builder')
+    assert.equal(new Date(hits[0].at).toISOString(), hits[0].at)
+    void run
+  } finally { f.cleanup() }
+})

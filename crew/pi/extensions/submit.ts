@@ -31,6 +31,7 @@ function atomicWrite(assignment: any, envelope: any, io: any = {}) {
   }
 }
 
+export const SUBMIT_REFUSAL_REASONS = Object.freeze(['status-kind', 'assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'no-envelope', 'summary', 'artifacts', 'details'])
 export function createSubmitTool(state: any, io: any = {}) {
   return {
     name: 'submit_envelope',
@@ -45,10 +46,13 @@ export function createSubmitTool(state: any, io: any = {}) {
       const shapeDefect = identityDefect ? null : envelopeDefect(envelope, { envelope_fields: [] }, { taskDir: assignment.taskDir })
       const defect = identityDefect || shapeDefect
       const attempt = state.failures + 1
-      const journal = (outcome: string, reason: string | null) => logLine(
-        join(dirname(process.env.CREW_TASK_DIR || assignment.taskDir), 'journal.jsonl'),
-        { event: 'submit_envelope', submit_envelope: { id: assignment.id, role: assignment.role, outcome, reason, attempt } },
-      )
+      const journal = (outcome: string, reason: string | null, why: string | null = null) => {
+        const listed = reason !== null && SUBMIT_REFUSAL_REASONS.includes(reason) ? reason : null
+        logLine(
+          join(dirname(process.env.CREW_TASK_DIR || assignment.taskDir), 'journal.jsonl'),
+          { at: new Date().toISOString(), event: 'submit_envelope', submit_envelope: { id: assignment.id, role: assignment.role, outcome, reason: listed, ...(reason !== null && listed === null ? { reason_unmeasured: 'unlisted-defect' } : {}), why: outcome === 'refused' || outcome === 'overridden' ? why : null, attempt } },
+        )
+      }
       if (defect) {
         state.failures = attempt
         const failures = state.failures
@@ -59,10 +63,10 @@ export function createSubmitTool(state: any, io: any = {}) {
             journal('write-error', defect.reason)
             return textResult(`submission write failed: ${error?.message || String(error)}`, { reason: 'write-error' })
           }
-          journal('overridden', defect.reason)
+          journal('overridden', defect.reason, defect.why)
           return textResult(`submitted after three refusals; driver may refuse this envelope (${defect.reason})`, { reason: defect.reason, why: defect.why, submit_overridden: true })
         }
-        journal('refused', defect.reason)
+        journal('refused', defect.reason, defect.why)
         return textResult(`refused: ${defect.why}`, { reason: defect.reason, why: defect.why, attempt })
       }
       state.failures = 0

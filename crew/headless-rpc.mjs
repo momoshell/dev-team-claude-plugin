@@ -1358,6 +1358,16 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const handle = reservation.handle
     try {
       saveJson(cmdPath, command)
+      // cmd.json keeps only the latest launch; keep one append-only history
+      // line per launch beside it. Env VALUES never land here (the launch env
+      // carries tokens): sorted key names only. Instrumentation only — a
+      // failed append is stated in the log, never thrown into the launch.
+      try {
+        const at = new Date(now()).toISOString()
+        write(seatFile(role, 'cmd-history.jsonl'), `${JSON.stringify({ at, role, assignment_id: assignmentId, session_id: sessionId, resume, bin: command.bin || bin || 'pi', args, env_keys: Object.keys(command.env || {}).sort() })}\n`, { flag: 'a' })
+      } catch {
+        neverLoadBearing(() => log({ at: new Date(now()).toISOString(), event: 'cmd-history', role, written: false, reason: 'append-failed' }))
+      }
       store.advance(handle, PHASES.SPAWNING)
       child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd: checkout || crew.checkout, env: { ...process.env, ...(command.env || {}) } })
       child.unref?.()

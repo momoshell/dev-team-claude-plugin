@@ -151,6 +151,7 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+export const SESSIONS_READ_REASONS = Object.freeze(['sessions-read-failed'])
 export const DRIVER_STATES = Object.freeze(['alive', 'gone', 'unknown'])
 export const RUN_OBSERVATION_SOURCES = Object.freeze(['daemon', 'process_group', 'cmux', 'heartbeat'])
 export const RUN_OBSERVATION_COLUMNS = Object.freeze(['observed_at', 'observer', 'driver_state', 'source', 'reason_code', 'detail'])
@@ -2711,6 +2712,7 @@ export function openLedger({
     // degraded_message verbatim as the run-set's absent prose. Both null while
     // not degraded.
     degraded_reason: null, degraded_message: null,
+    sessions_read_reason: null,
     unenforced_unique_indexes: [],
   }
   const seqAllocators = new Map() // `${adw_id}:${kind}` -> next seq
@@ -5230,8 +5232,11 @@ export function openLedger({
     const conn = ensureDb()
     if (!conn) return []
     try {
-      return conn.prepare(`SELECT * FROM sessions WHERE ${excludeSynthetic()} ORDER BY adw_id`).all()
+      const rows = conn.prepare(`SELECT * FROM sessions WHERE ${excludeSynthetic()} ORDER BY adw_id`).all()
+      stats.sessions_read_reason = null
+      return rows
     } catch {
+      stats.sessions_read_reason = SESSIONS_READ_REASONS[0]
       return []
     }
   }
@@ -9497,6 +9502,7 @@ export function main(argv) {
 
     if (verb === 'sessions') {
       const sessions = projectSessions(ledger.listSessions())
+      if (ledger.stats().sessions_read_reason) refuse(`sessions: the ledger sessions read failed — this readout is unanswerable, not empty (${ledger.stats().sessions_read_reason})`)
       if (ledger.stats().degraded) refuse(`sessions: the ledger mirror is degraded — this readout is unanswerable, not empty (${ledger.stats().degraded_reason ?? 'unknown'})`)
       const s = ledger.stats()
       const payload = {

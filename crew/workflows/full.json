@@ -6,7 +6,7 @@
       "agent": "pi",
       "provider": "meta",
       "id": "muse-wonder-1.0-contributor",
-      "effort": "medium",
+      "effort": "high",
       "skills": [],
       "extensions": [
         "crew/pi/extensions/subagent.ts",

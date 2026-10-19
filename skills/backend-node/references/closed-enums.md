@@ -41,7 +41,7 @@ Exhibit: `crew/drive-review.test.mjs:1629`.
 A mutation that adds a member must also make the literal expectation fail.
 Exhibit: `crew/drive-review.test.mjs:1630`.
 
-Read `docs/conventions.md:130` for the repo decision; this file owns the test
+Read `docs/conventions.md:134` for the repo decision; this file owns the test
 shape that keeps the decision observable.
 
 Unknown values should take the existing refusal path rather than being silently

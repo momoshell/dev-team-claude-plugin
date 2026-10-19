@@ -1944,3 +1944,11 @@ test('AW1 ADR-049 Amendment 1 starts the A/B window at PR 1860', () => {
   assert.ok(tableRow.includes('**ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**'))
   assert.ok(listRow.includes('*ratified* 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860), operator decision'))
 })
+
+test('docs/conventions.md keeps ## Entries as its single, final section', () => {
+  // kills: a section appended after ## Entries -> the document stage throws "not an append-only Entries document"
+  // (c4b69feb put "## Diff mutation proof" after Entries; b1274-leftovers-a crashed at document on 2026-10-19).
+  const headings = readFileSync(join(REPO_ROOT, DOCUMENT_APPEND_TARGET), 'utf8').split('\n').map((line) => line.replace(/\r$/, '')).filter((line) => /^## /.test(line))
+  assert.equal(headings.filter((line) => line === '## Entries').length, 1)
+  assert.equal(headings.at(-1), '## Entries')
+})

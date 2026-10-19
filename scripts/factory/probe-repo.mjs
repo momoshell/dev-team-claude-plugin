@@ -508,6 +508,7 @@ function gatherBaseline(root, testCommand, enabled) {
       cwd: root,
       timeout: 300_000,
       encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
       env: colourNeutralEnv(),
     })
   } catch {

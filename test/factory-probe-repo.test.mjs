@@ -710,6 +710,13 @@ test('baseline reports parsed counts only after a green command', () => {
   assert.equal(typeof profile.meta.baseline_duration_ms, 'number')
 })
 
+// MUTATION: drop maxBuffer from gatherBaseline's spawnSync in scripts/factory/probe-repo.mjs and this test reddens.
+test('baseline measures a green suite whose stdout passes the 1 MiB default', () => {
+  const root = nodeFixture('large-baseline', 'node -e "console.log(\'x\'.repeat(2097152)); console.log(\'pass 2\'); console.log(\'fail 0\')"')
+  const profile = probeRepo({ checkout: root, baseline: true })
+  assert.deepEqual(profile.fields.baseline, { status: 'proposed', value: { tests: 2, passed: 2, failed: 0 }, source: 'baseline command' })
+})
+
 test('baseline failure, parse failure, and disabled measurement stay unknown/null', () => {
   const red = nodeFixture('red', 'node -e "console.error(\'fail\'); process.exit(3)"')
   const redCell = probeRepo({ checkout: red, baseline: true }).fields.baseline

@@ -1194,6 +1194,15 @@ test('A1/B1/C1/D1 rpcCommand composes configDir env without changing argv', () =
   } finally { bareFixture.cleanup() }
 })
 
+// MUTATION: drop && key !== 'CREW_PI_AGENTS' from the piRpcSeatParts passthrough filter in crew/adapters/adapter-pi.mjs and this test reddens.
+test('inherited CREW_PI_AGENTS is stripped from rpcCommand and the persisted launch record', () => {
+  const spec = { bin: '/bin/pi', model: 'm', sessionDir: '/tmp/s', sessionId: 's1', promptFile: '/tmp/p', env: { X: '1', CREW_PI_AGENTS: '[{"name":"evil","def":"/x.json"}]' } }
+  assert.deepEqual(rpcCommand(spec).env, { X: '1', CREW_FFF: '0' })
+  const persisted = persistedLaunchRecord(rpcCommand(spec))
+  assert.equal(persisted.env.CREW_PI_AGENTS, undefined)
+  assert.deepEqual(persisted.env, { CREW_FFF: '0' })
+})
+
 test('E1 shipped adapter namespaces fall back to the pi RPC command', () => {
   assert.equal(piAdapter.rpcCommand, undefined)
   assert.equal(claudeAdapter.rpcCommand, undefined)

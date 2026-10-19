@@ -1050,7 +1050,7 @@ test('resolveAdapters boots headless claude and refuses the unshipped pi pair', 
 })
 
 test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reject malformed overrides', async () => {
-  const resolvedPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi' })
+  const resolvedPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { exists: (path) => path === '/opt/homebrew/bin/fff-mcp' ? true : existsSync(path) })
   assert.equal(resolvedPlanner.planner.name, 'pi')
   assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
     join(ROOT, 'crew/pi/extensions/subagent.ts'),
@@ -1059,7 +1059,7 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
     'builtin:codemode',
     'builtin:mcp',
   ])
-  assert.deepEqual(resolvedPlanner.planner.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }])
+  assert.deepEqual(resolvedPlanner.planner.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }, { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
   const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })
   assert.equal(headlessPlanner.planner.transport, 'headless-rpc')

@@ -16,7 +16,7 @@ import { composeRolePrompt, renderSeatSkills } from './crew.mjs'
 import { loadMap } from '../hooks/skill-gate.mjs'
 import { runChild, packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH } from './child.mjs'
 import { driveTask, resumeWorktreeSha256 } from './drive.mjs'
-import { seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
+import { FFF_HOOK_PATH, seatCommand, skillsPluginDir, writeSeatSkills } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, translateDeny, PI_BUILTIN_TOOLS, piRpcSeatParts, advisorLaunchCell } from './adapters/adapter-pi.mjs'
 import { rpcCommand } from './headless-rpc.mjs'
 import { seatIo, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT } from './seat-io.mjs'
@@ -1005,7 +1005,7 @@ test('the default claude planner pane command is pinned byte for byte across the
   writeSeatSkills({ taskDir, role: 'planner', grants: grantedReal })
     assert.equal(
       seatCommand({ ...seat, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write,Task" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
+      `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=1 CREW_FFF_NODE="${process.execPath}" CREW_FFF_HOOK="${FFF_HOOK_PATH}" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write,Task" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
     // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
     // (no Task, no plugin dir), so the granted assertion above is not vacuous.
@@ -1013,8 +1013,8 @@ test('the default claude planner pane command is pinned byte for byte across the
       seatCommand({ ...seat, model: 'opus', grants: EMPTY_GRANTS }),
       `env DEVTEAM_WORKER=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CREW_ROLE=planner CREW_TASK_DIR="${taskDir}" CREW_FFF=0 CREW_FFF_NODE="" CREW_FFF_HOOK="" claude --model opus --permission-mode bypassPermissions --strict-mcp-config --mcp-config "${taskDir}/mcp/planner.json" --disable-slash-commands --setting-sources project --settings "${CLAUDE_USAGE_SETTINGS}" --tools "Read,Glob,Grep,Bash,Write" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit,mcp__*" --append-system-prompt-file "${taskDir}/role-planner.md" "${seat.bootBrief}"`,
     )
-    // Neither planner overlay grants a skill, so deleting by_agent changes
-    // nothing: the stripped command equals the granted pin byte for byte.
+    // Deleting by_agent now DOES change the command: it removes the fff grant,
+    // so the stripped command carries Task with CREW_FFF=0 and mcp__* denied.
     const stripped = JSON.parse(JSON.stringify(register))
     delete stripped.roles.planner.by_agent
     const strippedGrants = pinnedGrants(loadCapabilities({ register: stripped }), 'claude')
@@ -4688,7 +4688,7 @@ test('E1 runtime RPC tools activate every granted extension tool', () => {
 })
 
 test('F1 durable seat state records its resolved extensions', async () => {
-  const rows = await bootSeatRows({ task: 'grant-snapshot-f1', args: { 'agent-planner': 'pi' } })
+  const rows = await bootSeatRows({ task: 'grant-snapshot-f1', args: { 'agent-planner': 'pi' }, existsSync: (path) => path === '/opt/homebrew/bin/fff-mcp' ? true : existsSync(path) })
   const member = rows.crew.members.planner
   assert.deepEqual(member.grant_snapshot, {
     schema_version: 1, role: 'planner', agent: 'pi',
@@ -4701,7 +4701,7 @@ test('F1 durable seat state records its resolved extensions', async () => {
     'builtin:codemode',
     'builtin:mcp',
   ])
-  assert.deepEqual(member.grant_snapshot.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }])
+  assert.deepEqual(member.grant_snapshot.grants.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [join(ROOT, 'crew/mcp/lab-server.mjs')] }, url: null }, { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   assert.equal(Object.hasOwn(member, 'config_dir'), false)
 })
 

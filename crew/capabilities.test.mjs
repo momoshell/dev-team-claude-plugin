@@ -671,10 +671,34 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
   ]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
-  assert.deepEqual(grants.mcp_servers, [{ name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null }])
+  assert.deepEqual(grants.mcp_servers, [{ name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null }, { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   for (const path of expected) assert.equal(existsSync(path), true)
   assert.doesNotThrow(() => assertGrantsBacked('planner', grants, loaded, { agent: 'pi' }))
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
+})
+
+
+test('every capability-role seat holds the literal fff server on both agents beside unchanged readgate membership', () => {
+  // MUTATION: drop the fff server from any role overlay and the grant pin fails.
+  const loaded = loadCapabilities()
+  const fff = { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }
+  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+    for (const agent of ['pi', 'claude']) {
+      const grants = grantsFor(loaded, role, { agent })
+      assert.ok(grants.mcp_servers.some((server) => JSON.stringify(server) === JSON.stringify(fff)), role + ' ' + agent)
+      assert.doesNotThrow(() => assertGrantsBacked(role, grants, loaded, { agent }))
+    }
+  }
+  assert.deepEqual(grantsFor(loaded, 'planner', { agent: 'pi' }).mcp_servers, [
+    { name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null },
+    { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null },
+  ])
+  for (const role of ['planner', 'builder', 'tech-lead']) {
+    assert.equal(grantsFor(loaded, role, { agent: 'pi' }).extensions.some((path) => path.endsWith('crew/pi/extensions/readgate.ts')), true, role)
+  }
+  for (const role of ['lead', 'reviewer']) {
+    assert.equal(grantsFor(loaded, role, { agent: 'pi' }).extensions.some((path) => path.endsWith('crew/pi/extensions/readgate.ts')), false, role)
+  }
 })
 
 test('the shipped register grants code-less to the reviewer only on both agents', () => {

@@ -21,10 +21,10 @@ Run no tests. At plan check neither a gate proof nor a suite result exists yet; 
 3. Put the planner's consult_questions inside `plan-check.md`, each with a
    recommendation and the reasoning; the driver reads no `answers` field from a
    tech-lead envelope, so an answer written anywhere else is dropped
-   (`crew/drive.mjs:9022` gates the whole plan check on the adversary trigger,
-   `crew/drive.mjs:9067` is the assignment, and the path consumes
+   (`crew/drive.mjs:9025` gates the whole plan check on the adversary trigger,
+   `crew/drive.mjs:9070` is the assignment, and the path consumes
    `check.details?.check_path` (`crew/drive.mjs:5667`) and the verdict
-   (`crew/drive.mjs:9069`)).
+   (`crew/drive.mjs:9072`)).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
@@ -47,8 +47,8 @@ that it could not put one there, and spent the run's escalation saying so.
 
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
-  binds them once, from the accepted plan envelope (`crew/drive.mjs:9212`,
-  `crew/drive.mjs:9334`), and the planner is never assigned again. For a
+  binds them once, from the accepted plan envelope (`crew/drive.mjs:9215`,
+  `crew/drive.mjs:9337`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that
@@ -65,7 +65,7 @@ that it could not put one there, and spent the run's escalation saying so.
 ### The refusal path, so nobody has to re-derive it
 
 A residual typed `correctness-unverified` is **code-refused** into escalation by
-`settleAccept` (`crew/drive.mjs:7519`) and lands at the same human an escalation
+`settleAccept` (`crew/drive.mjs:7522`) and lands at the same human an escalation
 would have reached. Recording it is still right: that is a fact about the FIELD,
 not a way to route around the human.
 

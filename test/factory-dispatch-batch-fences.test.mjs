@@ -861,6 +861,10 @@ async function dispatchFixture({
   discover = () => ({ status: 0, stdout: '[]', stderr: '' }),
   spawnAsync = null,
   assertQuiet = null,
+  loadavg = null,
+  cpus = null,
+  now = null,
+  sleep = null,
   headFor = null,
   readObserver = () => {},
   home = root,
@@ -983,6 +987,10 @@ async function dispatchFixture({
       return spawnAsync(call)
     } } : {}),
     ...(assertQuiet ? { assertQuiet } : {}),
+    ...(loadavg ? { loadavg } : {}),
+    ...(cpus ? { cpus } : {}),
+    ...(now ? { now } : {}),
+    ...(sleep ? { sleep } : {}),
     ...(random ? { random } : {}),
     ...(readAdvisorArms ? { readAdvisorArms } : {}),
     slots: rotationDeps.slots || (({ dir, kind, capacity }) => {

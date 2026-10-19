@@ -113,6 +113,8 @@ import {
   resolveRequestedTier,
   readDispatchOperatorSpelling,
   aliasUsageFromDispatchRecords,
+  parseLoadGate,
+  cliLoadDefaults,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { laneFenceFor, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
@@ -486,6 +488,90 @@ test('ACP D3 retains unflagged argv and refuses bare ACP', async () => {
   assert.ok(boot)
   assert.equal(boot.args.includes('--acp'), false)
   refusal(() => parseCliArgs(['--acp']), 'batch-unreadable')
+})
+
+test('load gate CLI parses max-load and load-wait verbatim', () => {
+  assert.deepEqual(parseCliArgs(['--max-load', '0.5', '--load-wait', '1800']), { 'max-load': '0.5', 'load-wait': '1800' })
+  assert.deepEqual(parseCliArgs(['--max-load', 'off']), { 'max-load': 'off' })
+  assert.deepEqual(parseLoadGate({}), null)
+  assert.deepEqual(parseLoadGate({ 'max-load': 'off' }), null)
+  assert.deepEqual(parseLoadGate({ 'max-load': '0.5', 'load-wait': '1800' }), { threshold: 0.5, waitMs: 1800000 })
+})
+
+test('load gate refuses malformed max-load and load-wait as batch-unreadable', () => {
+  for (const flags of [{ 'max-load': '0' }, { 'max-load': '-1' }, { 'max-load': 'abc' }, { 'max-load': 'Infinity' }, { 'max-load': '0.5', 'load-wait': '-1' }, { 'max-load': '0.5', 'load-wait': '1.5' }, { 'max-load': '0.5', 'load-wait': 'abc' }]) {
+    refusal(() => parseLoadGate(flags), 'batch-unreadable')
+  }
+  refusal(() => parseCliArgs(['--max-load', 'abc']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--max-load', '0.5', '--load-wait', 'abc']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--max-load', '0']), 'batch-unreadable')
+})
+
+// Mutation killed: removing the safe-millisecond check admits overflowing digit-only wait budgets.
+test('host-load RV1-1 rejects overflowing wait budgets before CLI or programmatic dispatch', async () => {
+  for (const wait of ['9'.repeat(309), '1' + '0'.repeat(306), '9007199254741']) {
+    const flags = { 'max-load': '0.5', 'load-wait': wait }
+    refusal(() => parseLoadGate(flags), 'batch-unreadable')
+    refusal(() => parseCliArgs(['--max-load', '0.5', '--load-wait', wait]), 'batch-unreadable')
+    const spawned = []
+    await assert.rejects(dispatchFixture({ label: 'load-wait-overflow', names: ['lane-a'], runFlags: flags, spawnedOut: spawned }), (error) => error instanceof BatchRefusal && error.reason === 'batch-unreadable' && error.message.includes('--load-wait'))
+    assert.deepEqual(spawned, [])
+  }
+  assert.deepEqual(parseLoadGate({ 'max-load': '0.5', 'load-wait': '9007199254740' }), { threshold: 0.5, waitMs: 9007199254740000 })
+})
+
+// Mutation killed: omitting the authored load flags from resumeCommand replaces them with CLI defaults.
+test('host-load RV1-2 deferred resumes preserve authored load flags without forwarding to crew', async () => {
+  for (const policy of [{ 'max-load': '0.25', 'load-wait': '0' }, { 'max-load': 'off', 'load-wait': '5' }]) {
+    const result = await dispatchFixture({
+      label: 'load-policy-resume', names: ['lane-a', 'lane-b'],
+      requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+      runFlags: { ...policy, wave: '1' },
+      loadavg: () => [2], cpus: () => new Array(16).fill({}), now: () => 0,
+      sleep: () => { throw new Error('quiet lane must not sleep') },
+    })
+    const deferred = result.logs.find((line) => line.startsWith('dispatch-batch: deferred lane=lane-b '))
+    assert.ok(deferred, 'wave one must print a resume command for the deferred lane')
+    const resumed = cliLoadDefaults(parseCliArgs(deferred.split('resume=')[1].split(' ').slice(2)))
+    assert.deepEqual({ 'max-load': resumed['max-load'], 'load-wait': resumed['load-wait'] }, policy)
+    const commands = result.spawned.filter(({ args }) => args.includes('boot') || args.includes('run'))
+    assert.equal(commands.length, 2)
+    for (const { args } of commands) {
+      assert.equal(args.includes('--max-load'), false)
+      assert.equal(args.includes('--load-wait'), false)
+    }
+  }
+})
+
+// Mutation killed: dropping blank load flags from resumeCommand restores the CLI defaults instead of off/zero.
+test('host-load RV2-1 deferred resumes serialize blank load flags as off and zero', async () => {
+  for (const blank of ['', ' \t ']) {
+    for (const { argv, policy, gate } of [
+      { argv: ['--max-load', '0.25', '--load-wait', blank], policy: { 'max-load': '0.25', 'load-wait': '0' }, gate: { threshold: 0.25, waitMs: 0 } },
+      { argv: ['--max-load', blank, '--load-wait', '5'], policy: { 'max-load': 'off', 'load-wait': '5' }, gate: null },
+    ]) {
+      const flags = cliLoadDefaults(parseCliArgs(argv))
+      assert.deepEqual(parseLoadGate(flags), gate)
+      const result = await dispatchFixture({
+        label: 'blank-load-policy-resume', names: ['lane-a', 'lane-b'],
+        requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+        runFlags: { ...flags, wave: '1' },
+        loadavg: () => [2], cpus: () => new Array(16).fill({}), now: () => 0,
+        sleep: () => { throw new Error('quiet lane must not sleep') },
+      })
+      const deferred = result.logs.find((line) => line.startsWith('dispatch-batch: deferred lane=lane-b '))
+      assert.ok(deferred, 'wave one must print a resume command for the deferred lane')
+      const resumed = cliLoadDefaults(parseCliArgs(deferred.split('resume=')[1].split(' ').slice(2)))
+      assert.deepEqual({ 'max-load': resumed['max-load'], 'load-wait': resumed['load-wait'] }, policy)
+      assert.deepEqual(parseLoadGate(resumed), gate)
+    }
+  }
+})
+
+test('load gate CLI defaults apply 0.5 and 1800 only when absent', () => {
+  assert.deepEqual(cliLoadDefaults({}), { 'max-load': '0.5', 'load-wait': '1800' })
+  assert.deepEqual(cliLoadDefaults({ 'max-load': 'off', 'load-wait': '5' }), { 'max-load': 'off', 'load-wait': '5' })
+  assert.deepEqual(cliLoadDefaults({ 'max-load': '0.25' }), { 'max-load': '0.25', 'load-wait': '1800' })
 })
 
 test('ACP D4 resumes ACP on deferred waves', async () => {

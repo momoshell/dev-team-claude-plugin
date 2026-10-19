@@ -64,6 +64,10 @@ const CHUNK_DEPS_UNORDERED = 'chunk-deps-unordered'
 const CHUNK_SCOPE_OUTSIDE_PARENT = 'chunk-scope-outside-parent'
 const CHUNK_DEPS_UNSETTLED = 'chunk-deps-unsettled'
 const BASE_BRANCH_UNRESOLVED = 'base-branch-unresolved'
+export const HOST_LOAD_SATURATED = 'host-load-saturated'
+export const HOST_LOAD_UNMEASURED = 'host-load-unmeasured'
+export const BOOT_LOAD_EVENT = 'boot-load'
+export const LOAD_POLL_MS = 30000
 
 export const FENCE_ADMISSION_EVENT = 'fence-admitted'
 export const FENCE_OBSERVATION_EVENT = 'fence-observation'
@@ -103,6 +107,8 @@ export const REFUSAL_REASONS = Object.freeze([
   CHUNK_SCOPE_OUTSIDE_PARENT,
   CHUNK_DEPS_UNSETTLED,
   BASE_BRANCH_UNRESOLVED,
+  HOST_LOAD_SATURATED,
+  HOST_LOAD_UNMEASURED,
 ])
 export const WARNING_ROWS_UNPERSISTED_PREFIX = 'dispatch-batch: WARNING rows-unpersisted:'
 
@@ -1145,6 +1151,8 @@ export function normalDeps(deps = {}) {
     now: deps.now,
     random: deps.random || Math.random,
     sleep: deps.sleep,
+    loadavg: deps.loadavg,
+    cpus: deps.cpus,
     slots: deps.slots,
     readAdvisorArms: deps.readAdvisorArms || readAdvisorArms,
     readEditAssistArms: deps.readEditAssistArms || readEditAssistArms,
@@ -1375,6 +1383,38 @@ export function parsePlannerSymbolsHoldoutFraction(value) {
     refuse(`invalid --planner-symbols-holdout-fraction ${JSON.stringify(value)}; expected a canonical finite number in [0,1]`, BATCH_UNREADABLE)
   }
   return fraction
+}
+
+export function parseLoadGate(runFlags) {
+  const waitRaw = runFlags?.['load-wait']
+  let waitSeconds = 0
+  if (waitRaw !== undefined && waitRaw !== null && String(waitRaw).trim() !== '') {
+    const waitText = String(waitRaw).trim()
+    if (!/^\d+$/.test(waitText)) {
+      refuse(`invalid --load-wait ${JSON.stringify(waitRaw)}; expected an integer >= 0 (seconds)`, BATCH_UNREADABLE)
+    }
+    waitSeconds = Number(waitText)
+    if (!Number.isSafeInteger(waitSeconds * 1000)) refuse(`invalid --load-wait ${JSON.stringify(waitRaw)}; expected an integer >= 0 within the safe millisecond range`, BATCH_UNREADABLE)
+  }
+  const raw = runFlags?.['max-load']
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null
+  const text = String(raw).trim()
+  if (text === 'off') return null
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) {
+    refuse(`invalid --max-load ${JSON.stringify(raw)}; expected a finite number > 0 or off`, BATCH_UNREADABLE)
+  }
+  const threshold = Number(text)
+  if (!Number.isFinite(threshold) || threshold <= 0) refuse(`invalid --max-load ${JSON.stringify(raw)}; expected a finite number > 0 or off`, BATCH_UNREADABLE)
+  return { threshold, waitMs: waitSeconds * 1000 }
+}
+
+// 0.5 = operator raw-8 on a 16-core host, per-core so it travels; 1800 matches SLOT_WAIT_CEILING_MS (crew/host-load.mjs:92).
+export function cliLoadDefaults(flags = {}) {
+  return {
+    ...flags,
+    'max-load': flags['max-load'] ?? '0.5',
+    'load-wait': flags['load-wait'] ?? '1800',
+  }
 }
 
 export function selectPlannerSymbolsArm(fraction, random = Math.random) {
@@ -4395,6 +4435,45 @@ export function bootRetryRow({ lane, first, teardown, at = new Date().toISOStrin
   }
 }
 
+export function waitForHostLoad({ lane, pendingLanes = [lane], gate, deps } = {}) {
+  if (!gate) return null
+  const d = normalDeps(deps)
+  const now = d.now || Date.now
+  const sleep = d.sleep || ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms))
+  const started = now()
+  let polls = 0
+  for (;;) {
+    const record = hostLoad({ policy: { threshold: gate.threshold }, loadavg: d.loadavg, cpus: d.cpus })
+    polls += 1
+    const waited_ms = now() - started
+    if (record && record.verdict === 'quiet') {
+      return { record, waited_ms, polls }
+    }
+    if (!record || (record.verdict !== 'saturated' && record.verdict !== 'quiet')) {
+      refuse(`host load unmeasurable for lane ${lane}: ${record?.why || 'unknown reason'} (threshold=${gate.threshold}) — refusing to boot without a measured host load`, HOST_LOAD_UNMEASURED)
+    }
+    d.log(`dispatch-batch: host-load lane=${lane} load_1m=${record.load_1m} cores=${record.cores} per_core=${record.per_core} threshold=${gate.threshold} waited_ms=${waited_ms}`)
+    if (waited_ms >= gate.waitMs) refuse(`host load saturated for lane ${lane}: per_core=${record.per_core} threshold=${gate.threshold} waited_ms=${waited_ms}; not yet booted: ${pendingLanes.join(', ')}`, HOST_LOAD_SATURATED)
+    sleep(LOAD_POLL_MS)
+  }
+}
+
+export function bootLoadRow({ lane, record, waited_ms, polls, at = new Date().toISOString() } = {}) {
+  return {
+    at,
+    event: BOOT_LOAD_EVENT,
+    task: lane,
+    lane,
+    threshold: record?.threshold ?? null,
+    basis: record?.basis ?? null,
+    load_1m: record?.load_1m ?? null,
+    cores: record?.cores ?? null,
+    per_core: record?.per_core ?? null,
+    waited_ms,
+    polls,
+  }
+}
+
 function preflightRunOptions({ execution, runFlags = {}, lanes = [] } = {}) {
   // Both execution checks are PER LANE now: --execution stays the batch default and a lane's own
   // request key wins, so a scout rides in a batch of full lanes (#634). The closed name set
@@ -4471,6 +4550,8 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, ex
   add('execution', execution)
   add('assurance', ASSURANCE_ALIASES[tier])
   add('baseline', runFlags.baseline)
+  add('max-load', runFlags['max-load'] != null && String(runFlags['max-load']).trim() === '' ? 'off' : runFlags['max-load'])
+  add('load-wait', runFlags['load-wait'] != null && String(runFlags['load-wait']).trim() === '' ? '0' : runFlags['load-wait'])
   add('planner-symbols-holdout-fraction', runFlags['planner-symbols-holdout-fraction'])
   add('charter-terse-holdout-fraction', runFlags['charter-terse-holdout-fraction'])
   add('brief-tripwires-holdout-fraction', runFlags['brief-tripwires-holdout-fraction'])
@@ -4536,6 +4617,7 @@ function prepareDispatchContext(options) {
   const plannerSymbolsHoldoutFraction = parsePlannerSymbolsHoldoutFraction(runFlags['planner-symbols-holdout-fraction'])
   const charterTerseHoldoutFraction = parseCharterTerseHoldoutFraction(runFlags['charter-terse-holdout-fraction'])
   const briefTripwiresHoldoutFraction = parseBriefTripwiresHoldoutFraction(runFlags['brief-tripwires-holdout-fraction'])
+  parseLoadGate(runFlags)
   if (plannerSymbolsHoldoutFraction !== null && briefTripwiresHoldoutFraction !== null) {
     refuse('cannot combine --planner-symbols-holdout-fraction with --brief-tripwires-holdout-fraction because pack omission is scalar', BATCH_UNREADABLE)
   }
@@ -5018,8 +5100,10 @@ function launchDispatchWave(compiled, launchedLanes) {
     unstarted,
   } = compiled
 
+  const loadGate = parseLoadGate(runFlags)
   const arrivals = []
-  for (const item of settled) {
+  for (const [index, item] of settled.entries()) {
+    const loadWait = loadGate ? waitForHostLoad({ lane: item.lane, pendingLanes: settled.slice(index).map((entry) => entry.lane), gate: loadGate, deps: d }) : null
     let firstFailure = null
     let teardown = null
     for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {
@@ -5044,6 +5128,9 @@ function launchDispatchWave(compiled, launchedLanes) {
       // log line above carries the same fact, so a journal that cannot be appended
       // never fails a lane.
       try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
+    }
+    if (loadWait) {
+      try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(bootLoadRow({ lane: item.lane, record: loadWait.record, waited_ms: loadWait.waited_ms, polls: loadWait.polls }))}\n`) } catch { /* instrumentation is never load-bearing */ }
     }
     let crew
     try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
@@ -5205,6 +5292,7 @@ export function parseCliArgs(argv) {
   const positional = []
   const valueFlags = new Set([
     'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'assurance', 'execution', 'variant', ACP_FLAG, 'wave', 'planner-symbols-holdout-fraction', 'charter-terse-holdout-fraction', 'brief-tripwires-holdout-fraction',
+    'max-load', 'load-wait',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
     TURN_CENSUS_FLAG,
@@ -5237,13 +5325,14 @@ export function parseCliArgs(argv) {
     else flags[name] = value
     index += 1
   }
+  parseLoadGate(flags)
   if (positional.length > 0) refuse(`unexpected argument: ${positional[0]}`, BATCH_UNREADABLE)
   return flags
 }
 
 export async function main(argv, deps = {}) {
   try {
-    const flags = parseCliArgs(argv)
+    const flags = cliLoadDefaults(parseCliArgs(argv))
     if (typeof flags.batch !== 'string' || flags.batch.trim() === '') {
       refuse('--batch <directory> is required', BATCH_UNREADABLE)
     }

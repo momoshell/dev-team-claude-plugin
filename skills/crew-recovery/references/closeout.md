@@ -71,6 +71,8 @@ and it happens in the same turn as the push and PR: nothing is still writing
 to the tree, so the commit is safe and the live workspace stays readable until
 the PR exists.
 
+Before merging a wave, run `node scripts/factory/closeout.mjs merge-check <laneA> <laneB> …` over every lane in the wave, in merge order, because lanes that pass alone can still turn main red together.
+
 ## Recovery closeout — teardown first
 
 The driver is gone but the seats may not be. Invert the order to

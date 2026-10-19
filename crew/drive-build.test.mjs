@@ -13,7 +13,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor, builderReadSet, builderReadSetLines, builderStreamLineCount, READ_SET_MAX_PATHS, READ_SET_MAX_RANGES, READ_SET_ABSENT_REASONS } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
@@ -10889,6 +10889,229 @@ test('HW2 fresh builder handoff names and preserves the working-tree diff artifa
   assert.match(handoff, /Changes already in the working tree \(reference only — already applied, do not apply\): \S*builder-wip-2\.diff/)
   assert.doesNotMatch(handoff, /\.patch/)
   assert.equal(io.calls.writes[`${TD}/builder-wip-2.diff`], 'DIFF LINE ONE\nDIFF LINE TWO\n')
+})
+
+
+const WS_FIXTURE = readFileSync(join(ROOT, 'test/fixtures/working-set/pi-rpc-builder-reads.jsonl'), 'utf8')
+const WS_REC_CO = '/Users/momoshell/Dev/dt-b1275-mutantnarrow'
+const WS_REC_TD = '/Users/momoshell/.crew/dt-b1275-mutantnarrow/b1275-mutantnarrow/task'
+const WS_STREAM = TD + '/headless-rpc/builder/stream.jsonl'
+const wsRewritten = WS_FIXTURE.replaceAll(WS_REC_TD, TD).replaceAll(WS_REC_CO, CTX.checkout)
+const wsRewrittenLines = wsRewritten.split('\n')
+const wsFrame = (args) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', arguments: args }] } } })
+
+// Pins the recorded-fixture derivation: five entries, last-access order, merged inclusive ranges.
+test('WS1 recorded fixture derives the pinned five-entry read set', () => {
+  assert.deepEqual(builderReadSet(WS_FIXTURE, 0, { checkout: WS_REC_CO, taskDir: WS_REC_TD, transport: 'headless-rpc' }), {
+    absent: null,
+    totalPaths: 5,
+    droppedReads: 4,
+    entries: [
+      { path: 'crew/drive.mjs', whole: false, ranges: [[14300, 14384]], rangesTotal: 1 },
+      { path: 'test/factory-prove-mutations.test.mjs', whole: false, ranges: [[1, 90], [730, 1094]], rangesTotal: 2 },
+      { path: 'scripts/factory/prove-mutations.mjs', whole: false, ranges: [[1, 120], [548, 615], [1040, 1444]], rangesTotal: 3 },
+      { path: WS_REC_TD + '/review.md', whole: true, ranges: [], rangesTotal: 0 },
+      { path: WS_REC_TD + '/build-bounce-r1.md', whole: true, ranges: [], rangesTotal: 0 },
+    ],
+  })
+})
+
+// Pins limit-only, touching-merge, offset-only and whole-dominates derivations plus their rendering.
+test('WS2 limit-only touching offset-only and whole reads derive exact ranges', () => {
+  const text = [
+    wsFrame({ path: 'a.mjs', limit: 5 }),
+    wsFrame({ path: 'a.mjs', offset: 6, limit: 5 }),
+    wsFrame({ path: 'b.mjs', offset: 7 }),
+    wsFrame({ path: 'c.mjs' }),
+    wsFrame({ path: 'c.mjs', offset: 2, limit: 3 }),
+    wsFrame({ path: 'd.mjs', limit: 5 }),
+  ].join('\n') + '\n'
+  const got = builderReadSet(text, 0, { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' })
+  assert.deepEqual(got, {
+    absent: null,
+    totalPaths: 4,
+    droppedReads: 0,
+    entries: [
+      { path: 'd.mjs', whole: false, ranges: [[1, 5]], rangesTotal: 1 },
+      { path: 'c.mjs', whole: true, ranges: [], rangesTotal: 0 },
+      { path: 'b.mjs', whole: false, ranges: [[7, null]], rangesTotal: 1 },
+      { path: 'a.mjs', whole: false, ranges: [[1, 10]], rangesTotal: 1 },
+    ],
+  })
+  const rendered = builderReadSetLines(got).join('\n')
+  const wholeLine = rendered.split('\n').find((l) => l.includes('c.mjs')) || ''
+  assert.ok(wholeLine.includes('whole file (range unknown)'))
+  assert.equal(/\d+-\d+/.test(wholeLine), false)
+  assert.ok(rendered.includes('- d.mjs: 1-5'))
+  assert.ok(rendered.includes('- b.mjs: 7-end'))
+  assert.ok(rendered.includes('- a.mjs: 1-10'))
+})
+
+// Pins both caps: 45 paths keep the 40 most recent, 10 merged ranges show 8.
+test('WS3 path and range caps keep the most recent with exact totals', () => {
+  const text = Array.from({ length: 45 }, (_, i) => wsFrame({ path: 'f' + i + '.mjs' })).join('\n') + '\n'
+  const got = builderReadSet(text, 0, { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' })
+  assert.equal(got.entries.length, 40)
+  assert.equal(got.totalPaths, 45)
+  assert.equal(got.entries[0].path, 'f44.mjs')
+  assert.equal(got.entries.at(-1).path, 'f5.mjs')
+  assert.ok(builderReadSetLines(got).join('\n').includes('Showing 40 of 45 paths.'))
+  const rtext = Array.from({ length: 10 }, (_, i) => wsFrame({ path: 'r.mjs', offset: i * 20 + 1, limit: 10 })).join('\n') + '\n'
+  const rgot = builderReadSet(rtext, 0, { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' })
+  const entry = rgot.entries[0]
+  assert.equal(entry.ranges.length, 8)
+  assert.equal(entry.rangesTotal, 10)
+  assert.deepEqual(entry.ranges[0], [1, 10])
+  assert.deepEqual(entry.ranges.at(-1), [141, 150])
+  const rrendered = builderReadSetLines(rgot).join('\n')
+  assert.ok(rrendered.includes('Previous builder session read set (reference only'))
+  assert.ok(rrendered.includes('reads made through bash are not captured'))
+  assert.ok(rrendered.includes('(showing 8 of 10 ranges; 2 more)'))
+  assert.equal(READ_SET_MAX_PATHS, 40)
+  assert.equal(READ_SET_MAX_RANGES, 8)
+})
+
+// Pins the closed frozen absence enum, each reason by its own condition, and measured-empty.
+test('WS4 absence reasons are closed frozen and rendered unavailable', () => {
+  assert.deepEqual(READ_SET_ABSENT_REASONS, ['transport-unsupported', 'stream-missing', 'stream-unparseable', 'stream-rewound', 'session-start-unknown'])
+  assert.equal(Object.isFrozen(READ_SET_ABSENT_REASONS), true)
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const cases = [
+    ['session-start-unknown', builderReadSet('{"a":1}\n', null, opts)],
+    ['transport-unsupported', builderReadSet('{"a":1}\n', 0, { ...opts, transport: 'cmux' })],
+    ['stream-missing', builderReadSet(null, 0, opts)],
+    ['stream-unparseable', builderReadSet('not json\n{bad\n', 0, opts)],
+    ['stream-rewound', builderReadSet('{"a":1}\n', 5, opts)],
+  ]
+  for (const [want, got] of cases) {
+    assert.deepEqual(got, { absent: want, entries: [], totalPaths: 0, droppedReads: 0 })
+  }
+  assert.ok(builderReadSetLines(cases[4][1]).join('\n').includes('unavailable: stream-rewound'))
+  assert.equal(builderStreamLineCount(null), 0)
+  const empty = builderReadSet('{"type":"response"}\n{"type":"message_end","message":{"role":"system","content":""}}\n', 0, opts)
+  assert.deepEqual(empty, { absent: null, entries: [], totalPaths: 0, droppedReads: 0 })
+  const emptyRendered = builderReadSetLines(empty).join('\n')
+  assert.ok(emptyRendered.includes('(none — the previous builder session made no captured reads)'))
+  assert.equal(emptyRendered.includes('unavailable:'), false)
+})
+
+// Pins per-session spans across three genuine bounces: handoff-2 lists session 1
+// without the pre-session frame, handoff-3 lists session 2 only.
+test('WS5 fresh handoffs carry only their own session reads', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } }),
+      'builder:2': buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } }),
+      'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' }),
+  })
+  io.freshSession = () => ({ session: 'fresh' })
+  const prior = wsRewrittenLines[1].replace('scripts/factory/prove-mutations.mjs', 'prior/only.mjs')
+  io.calls.files[WS_STREAM] = prior + '\n'
+  let builders = 0
+  const assign = io.assign
+  io.assign = (spec) => {
+    if (spec.role === 'builder') {
+      builders += 1
+      if (builders === 1) io.calls.files[WS_STREAM] = prior + '\n' + wsRewritten
+      else if (builders === 2) io.calls.files[WS_STREAM] += wsRewrittenLines[1] + '\n'
+    }
+    return assign(spec)
+  }
+  const res = driveTask({ ...CTX, limits: { build_rounds: 3 } }, io)
+  assert.equal(res.status, 'done')
+  const handoff2 = io.calls.writes[TD + '/builder-handoff-2.md']
+  assert.ok(handoff2)
+  assert.equal(handoff2.includes('prior/only.mjs'), false)
+  assert.ok(handoff2.indexOf('Previous builder session read set') > handoff2.indexOf('Untracked files'))
+  const want2 = [
+    '- crew/drive.mjs: 14300-14384',
+    '- test/factory-prove-mutations.test.mjs: 1-90, 730-1094',
+    '- scripts/factory/prove-mutations.mjs: 1-120, 548-615, 1040-1444',
+    '- ' + TD + '/review.md: whole file (range unknown)',
+  ]
+  let at = -1
+  for (const line of want2) {
+    const found = handoff2.indexOf(line, at + 1)
+    assert.ok(found > at, line)
+    at = found
+  }
+  assert.ok(handoff2.includes('Dropped 4 read(s) outside the checkout and task dir.'))
+  const handoff3 = io.calls.writes[TD + '/builder-handoff-3.md']
+  assert.ok(handoff3)
+  assert.ok(handoff3.includes('- scripts/factory/prove-mutations.mjs: 1-120'))
+  assert.equal(handoff3.includes('crew/drive.mjs: 14300-14384'), false)
+})
+
+// Pins that resumed dispatches write no handoff and their reads stay in the same session span.
+test('WS5-resume resumed session reads stay in span with no handoff on resume', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': suiteRefusalEnv('builder1', 'builder'),
+      'builder:2': suiteRefusalEnv('builder2', 'builder'),
+      'builder:3': buildEnv({ status: 'insufficient', summary: 'genuine plan gap', details: { blockers: ['plan gap'] } }),
+      'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'build-rung' }),
+  })
+  io.freshSession = () => ({ session: 'fresh' })
+  let builders = 0
+  const assign = io.assign
+  io.assign = (spec) => {
+    if (spec.role === 'builder') {
+      builders += 1
+      if (builders === 1) io.calls.files[WS_STREAM] = wsRewritten
+    }
+    return assign(spec)
+  }
+  const res = driveTask({ ...CTX, limits: { build_rounds: 4 } }, io)
+  assert.equal(res.status, 'done')
+  const handoffs = Object.keys(io.calls.writes).filter((p) => p.includes('builder-handoff-'))
+  assert.equal(handoffs.length, 1)
+  assert.ok(io.calls.writes[handoffs[0]].includes('- crew/drive.mjs: 14300-14384'))
+})
+
+// Pins the stepped handoff through the shared dispatchOnce transport recording.
+test('WS5-stepped stepped handoff carries the session read set', () => {
+  const { io } = steppedAcceptanceIo()
+  io.freshSession = () => ({ session: 'fresh' })
+  let builders = 0
+  const assign = io.assign
+  io.assign = (spec) => {
+    if (spec.role === 'builder') {
+      builders += 1
+      if (builders === 1) io.calls.files[WS_STREAM] = wsRewritten
+    }
+    return assign(spec)
+  }
+  addStepCheckpointWitness(io)
+  driveTask({ ...CTX, head: 'abcdef123456', variant: 'stepped', limits: { build_rounds: 2 } }, io)
+  const handoff = io.calls.writes[TD + '/builder-handoff-2.md']
+  assert.ok(handoff.includes('- crew/drive.mjs: 14300-14384'))
+})
+
+// Pins that a non-rpc builder transport reports transport-unsupported instead of reads.
+test('WS5-unsupported non-rpc transport reports unavailable', () => {
+  const io = builderBounceFixture()
+  io.dispatchTransport = () => 'headless-json'
+  io.freshSession = () => ({ session: 'fresh' })
+  io.calls.files[WS_STREAM] = wsRewritten
+  driveTask(CTX, io)
+  const second = io.calls.assign.filter(({ role }) => role === 'builder')[1]
+  const handoff = io.calls.writes[second.briefFile]
+  assert.ok(handoff.includes('unavailable: transport-unsupported'))
+  assert.equal(handoff.includes('14300-14384'), false)
 })
 
 // MUTATION FB5: replace the full-diff write with void diffPath.

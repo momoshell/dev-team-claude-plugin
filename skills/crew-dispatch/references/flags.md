@@ -48,7 +48,7 @@ assignment to carry the count.
 
 `parseCliArgs` accepts these `dispatch-batch` flags:
 
-- Value flags: `--batch --fences --checkout --parent --out --execution --variant --assurance --tier --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes --max-turns-planner --max-turns-tech-lead --max-turns-builder --max-turns-reviewer --max-turns-lead`.
+- Value flags: `--batch --fences --checkout --parent --out --execution --variant --assurance --tier --wave --plan-rounds --build-rounds --review-rounds --wait-builder --wait-planner --wait-reviewer --wait-lead --wait-tech-lead --validation-lane --suite --baseline --memory-dir --memory-backend --memory-budget-bytes --max-turns-planner --max-turns-tech-lead --max-turns-builder --max-turns-reviewer --max-turns-lead --max-load --load-wait`.
 - Boolean flags: `--dry-run --force --no-keep --headless-all --panes`.
 - Repeatable: `--adopt`.
 - Prefix-matched per-seat forms: `--agent-<role> --model-<role> --effort-<role> --allow-shortfall-<role>`.
@@ -122,6 +122,19 @@ sha256 of the adopted plan.
 Batch forwarding of `--assurance` and every `--max-turns-<role>` value is
 BOOT-only: the options are passed to each lane's boot command, never its run
 command, and deferred waves re-emit the authored values on their resume line.
+
+### Host-load gate
+
+`--max-load 0.5` per core is the CLI default — raw 8 on this 16-core host, and
+per-core so the number travels to hosts with different core counts. `--load-wait 1800`
+is the CLI default wait budget in seconds, matching SLOT_WAIT_CEILING_MS. off disables the gate: `--max-load off` leaves the gate off, and a programmatic
+dispatchBatch without max-load leaves the gate off, so the 193 hermetic fixtures
+boot with no host-load read at all. The gate is dispatcher-side only and is never
+forwarded to boot or run commands.
+
+the gate decides whether a LANE boots; slots queue SUITES inside lanes that are already running. A suite queued behind a slot adds no load, so the gate can admit a lane while both slots are full.
+
+CREW_LOAD_THRESHOLD is a separate, opt-in boot refusal inside crew boot, with the same basis (`os.loadavg()[0] / os.cpus().length`).
 
 ## Batch dispatch: what `--dry-run` is and is not for
 

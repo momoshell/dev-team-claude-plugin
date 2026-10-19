@@ -77,6 +77,10 @@ test('documented dispatcher assurance and turn-ceiling values are accepted', () 
   })
 })
 
+test('documented host-load gate flags are accepted verbatim', () => {
+  assert.deepEqual(parseCliArgs(['--max-load', '0.5', '--load-wait', '1800']), { 'max-load': '0.5', 'load-wait': '1800' })
+})
+
 test('documented variant keys and context equal the runtime contract', () => {
   const block = firstJsonBlock(VARIANTS_DOC)
   assert.deepEqual(Object.keys(block).sort(), [...VARIANT_NAMES].sort())

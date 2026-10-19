@@ -146,6 +146,13 @@ import {
   resolveRequestedTier,
   scanSurfaceMovement,
   createWorktrees,
+  parseLoadGate,
+  waitForHostLoad,
+  bootLoadRow,
+  BOOT_LOAD_EVENT,
+  LOAD_POLL_MS,
+  HOST_LOAD_SATURATED,
+  HOST_LOAD_UNMEASURED,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, validateChunks, WAITS_S } from '../crew/drive.mjs'
 import { promptSurfacePaths } from '../crew/protected-paths.mjs'
@@ -5533,7 +5540,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'env', 'existsSync', 'factoryRoot', 'home', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readEditAssistArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'cpus', 'env', 'existsSync', 'factoryRoot', 'home', 'loadavg', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readEditAssistArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {
@@ -8080,6 +8087,111 @@ test('RV1-1 setupWorktree refuses declared symlinks removed or replaced by a lat
       deps: { spawn, appendFileSync: () => {} },
     }), /readiness: declared symlink is dangling or changed/)
   }
+})
+
+test('host load gate waits through two saturated polls then boots quiet', () => {
+  const loads = [16, 16, 4]
+  let calls = 0
+  let clock = 0
+  const sleeps = []
+  const logs = []
+  const deps = { loadavg: () => [loads[Math.min(calls++, loads.length - 1)]], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms }, log: (line) => logs.push(String(line)) }
+  const out = waitForHostLoad({ lane: 'lane-a', pendingLanes: ['lane-a'], gate: { threshold: 0.5, waitMs: 1800000 }, deps })
+  assert.equal(out.polls, 3)
+  assert.equal(out.waited_ms, 60000)
+  assert.deepEqual(sleeps, [30000, 30000])
+  assert.deepEqual({ load_1m: out.record.load_1m, cores: out.record.cores, per_core: out.record.per_core, verdict: out.record.verdict }, { load_1m: 4, cores: 16, per_core: 0.25, verdict: 'quiet' })
+  assert.equal(logs.length, 2)
+  assert.ok(logs[0].includes('lane=lane-a') && logs[0].includes('load_1m=16') && logs[0].includes('per_core=1') && logs[0].includes('threshold=0.5') && logs[0].includes('waited_ms=0'))
+  assert.ok(logs[1].includes('lane=lane-a') && logs[1].includes('waited_ms=30000'))
+  assert.equal(LOAD_POLL_MS, 30000)
+})
+
+test('host load gate timeout refuses saturated naming current and pending lanes', () => {
+  let clock = 0
+  const sleeps = []
+  const deps = { loadavg: () => [16], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms }, log: () => {} }
+  assert.throws(() => waitForHostLoad({ lane: 'lane-a', pendingLanes: ['lane-a', 'lane-b'], gate: { threshold: 0.5, waitMs: 30000 }, deps }), (error) => error instanceof BatchRefusal && error.reason === 'host-load-saturated' && String(error.message).includes('lane-a') && String(error.message).includes('lane-b'))
+  assert.deepEqual(sleeps, [30000])
+  assert.equal(HOST_LOAD_SATURATED, 'host-load-saturated')
+})
+
+test('host load gate refuses unmeasurable load with no sleep', () => {
+  const sleeps = []
+  assert.throws(() => waitForHostLoad({ lane: 'lane-a', pendingLanes: ['lane-a'], gate: { threshold: 0.5, waitMs: 30000 }, deps: { loadavg: () => [], cpus: () => [{}], now: () => 0, sleep: (ms) => sleeps.push(ms), log: () => {} } }), (error) => error instanceof BatchRefusal && error.reason === 'host-load-unmeasured')
+  assert.deepEqual(sleeps, [])
+  assert.equal(HOST_LOAD_UNMEASURED, 'host-load-unmeasured')
+})
+
+test('host load journal row carries the measured record', () => {
+  const row = bootLoadRow({ lane: 'lane-a', record: { threshold: 0.5, basis: 'os.loadavg()[0] / os.cpus().length', load_1m: 4, cores: 16, per_core: 0.25 }, waited_ms: 60000, polls: 3, at: '2026-10-19T00:00:00.000Z' })
+  assert.deepEqual(row, { at: '2026-10-19T00:00:00.000Z', event: 'boot-load', task: 'lane-a', lane: 'lane-a', threshold: 0.5, basis: 'os.loadavg()[0] / os.cpus().length', load_1m: 4, cores: 16, per_core: 0.25, waited_ms: 60000, polls: 3 })
+  assert.equal(BOOT_LOAD_EVENT, 'boot-load')
+  assert.ok(REFUSAL_REASONS.includes('host-load-saturated'))
+  assert.ok(REFUSAL_REASONS.includes('host-load-unmeasured'))
+})
+
+test('host load gate on quiet lane boots once and journals one boot-load row', async () => {
+  const result = await dispatchFixture({ label: 'load-quiet-boot', names: ['lane-a'], runFlags: { 'max-load': '0.5', 'load-wait': '1800' }, loadavg: () => [4], cpus: () => new Array(16).fill({}), now: () => 0, sleep: () => { throw new Error('quiet lane must not sleep') } })
+  const boots = result.spawned.filter(({ args }) => (args || []).map(String).includes('boot'))
+  assert.equal(boots.length, 1)
+  const rows = result.appended.flatMap(({ content }) => String(content).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))).filter((row) => row.event === 'boot-load')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].lane, 'lane-a')
+  assert.equal(rows[0].waited_ms, 0)
+  assert.equal(rows[0].polls, 1)
+  assert.equal(rows[0].threshold, 0.5)
+  assert.equal(rows[0].per_core, 0.25)
+})
+
+test('host load gate on saturated lane waits one poll then boots', async () => {
+  let calls = 0
+  let clock = 0
+  const sleeps = []
+  const result = await dispatchFixture({ label: 'load-wait-boot', names: ['lane-a'], runFlags: { 'max-load': '0.5', 'load-wait': '1800' }, loadavg: () => [(calls++ === 0 ? 16 : 4)], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } })
+  const boots = result.spawned.filter(({ args }) => (args || []).map(String).includes('boot'))
+  assert.equal(boots.length, 1)
+  assert.deepEqual(sleeps, [30000])
+  const rows = result.appended.flatMap(({ content }) => String(content).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))).filter((row) => row.event === 'boot-load')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].polls, 2)
+  assert.equal(rows[0].waited_ms, 30000)
+})
+
+test('host load gate off makes no load read and journals no boot-load row', async () => {
+  let loadCalls = 0
+  const result = await dispatchFixture({ label: 'load-off-hermetic', names: ['lane-a'], loadavg: () => { loadCalls += 1; return [4] }, cpus: () => new Array(16).fill({}) })
+  const boots = result.spawned.filter(({ args }) => (args || []).map(String).includes('boot'))
+  assert.equal(boots.length, 1)
+  assert.equal(loadCalls, 0)
+  const rows = result.appended.flatMap(({ content }) => String(content).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))).filter((row) => row.event === 'boot-load')
+  assert.equal(rows.length, 0)
+  assert.equal(parseLoadGate({}), null)
+})
+
+// Mutation killed: moving the load gate after bootOnce boots a lane before the saturated refusal.
+test('host-load RV1-3 saturated refusal happens before either lane boots', async () => {
+  let clock = 0
+  const spawned = []
+  const error = await (async () => { try { await dispatchFixture({ label: 'load-saturated-forever', names: ['lane-a', 'lane-b'], spawnedOut: spawned, runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => [16], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms } }); assert.fail('expected a saturated refusal') } catch (err) { return err } })()
+  assert.ok(error instanceof BatchRefusal)
+  assert.equal(error.reason, 'host-load-saturated')
+  assert.ok(String(error.message).includes('lane-a'))
+  assert.ok(String(error.message).includes('lane-b'))
+  assert.equal(spawned.filter(({ args }) => args.includes('boot')).length, 0)
+})
+
+// Mutation killed: changing parseLoadGate's absent waitSeconds from 0 to 1 adds a saturated poll sleep.
+test('host-load RV1-4 an absent programmatic wait budget refuses immediately without sleeping', () => {
+  const gate = parseLoadGate({ 'max-load': '0.5' })
+  assert.deepEqual(gate, { threshold: 0.5, waitMs: 0 })
+  let clock = 0
+  const sleeps = []
+  assert.throws(() => waitForHostLoad({
+    lane: 'lane-a', gate,
+    deps: { loadavg: () => [16], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms }, log: () => {} },
+  }), (error) => error instanceof BatchRefusal && error.reason === 'host-load-saturated')
+  assert.deepEqual(sleeps, [])
 })
 
 test('setupWorktree refuses a source symlink that resolves outside the checkout', async () => {

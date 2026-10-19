@@ -19,10 +19,10 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { createHash } from 'node:crypto'
 import { psSnapshot, statIsZombie, verifyGroup } from '../../crew/seat-io.mjs'
-import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, parseGateSummary, scopeMatcher, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
+import { applyMutationAnchor, baselineGateDefect, bindMutationDeclarations, checkFailureLine, DIFF_RUNNER_UNAVAILABLE_CAUSES, laneCommandInputs, laneCommandShape, LANE_PATH_OPTIONS, LANE_VALUE_OPTIONS, parseGateSummary, scopeMatcher, shellArg, validateMutationCorrections, validateMutations } from '../../crew/drive.mjs'
 
 export { DIFF_RUNNER_UNAVAILABLE_CAUSES }
 
@@ -268,6 +268,7 @@ export function normalDeps(deps = {}) {
   return {
     runGate: deps.runGate || runGateDefault,
     runCommand: deps.runCommand || runCommandDefault,
+    env: deps.env || process.env,
     makeWorktree: deps.makeWorktree || makeWorktreeDefault,
     removeWorktree: deps.removeWorktree || removeWorktreeDefault,
     readFile: deps.readFile || readFileOrNull,
@@ -552,6 +553,10 @@ export const DIFF_MUTATION_CAP_DEFAULT = 8
 export const DIFF_MUTATION_CAP_MIN = 1
 export const DIFF_MUTATION_CAP_MAX = 64
 export const DIFF_MUTATION_OMITTED_REASON = 'mutants beyond the configured cap are omitted because each mutant runs both the accepted validation lane and gate and large diffs otherwise multiply suite cost; omitted mutants are a blind spot'
+export const DIFF_CLOSURE_FILE_CAP = 3
+export const DIFF_LANE_SCOPES = Object.freeze(['staged', 'full'])
+export const DIFF_LANE_SCOPE_REASONS = Object.freeze(['lane-not-node-test', 'lane-glob-input', 'lane-directory-input', 'lane-file-unreadable', 'lane-no-test-files', 'lane-file-set-dependent', 'lane-shell-expansion'])
+export const DIFF_STOP_POINTS = Object.freeze(['gate', 'closure-file', 'remaining-lane', 'none-survived'])
 export const DIFF_CONFIG_KEYS = Object.freeze(['version', 'checkout', 'patch', 'files_in_scope', 'validation_lane', 'gate_cmd', 'cap', 'generation'])
 export const DIFF_SKIP_REASONS = Object.freeze([
   'empty-patch', 'malformed-diff', 'malformed-header', 'malformed-hunk',
@@ -593,6 +598,7 @@ function diffSkip({ path = null, reason, line = null, candidate = null, cause = 
     replacement: candidate?.replacement ?? null,
     skip_reason: reason,
     why: reason,
+    verdict_ms: null,
     ...(cause ? { runner_unavailable_cause: cause } : {}),
   }
 }
@@ -984,7 +990,7 @@ export async function runDiffCommand(d, command, checkout, timeout = DIFF_RUN_TI
   try {
     return normalizeDiffCommandResult(await d.runCommand(command, checkout, {
       timeout,
-      env: colourNeutralEnv(process.env),
+      env: colourNeutralEnv(d.env),
     }))
   } catch { return diffRunnerUnavailable('runner-threw') }
 }
@@ -1046,6 +1052,134 @@ export function validateDiffConfig(config) {
   return errors
 }
 
+function fileSetDependent(words) {
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i]
+    if (word === '--') break
+    const eq = word.indexOf('=')
+    const name = eq > 0 ? word.slice(0, eq) : word
+    if (name === '--test-shard' || (name === '--test-isolation' && (eq > 0 ? word.slice(eq + 1) : words[i + 1]) === 'none')) return true
+    if (eq <= 0 && (LANE_PATH_OPTIONS.includes(name) || LANE_VALUE_OPTIONS.includes(word))) i += 1
+  }
+  return false
+}
+
+function laneTestFiles(config, d) {
+  const parsed = laneCommandInputs(config.validation_lane)
+  const words = parsed.shape.words
+  if (parsed.shape.shape !== 'node-test') return { scope: 'full', reason: 'lane-not-node-test', words, testFiles: [], sources: new Map() }
+  if (parsed.globs.length > 0) return { scope: 'full', reason: 'lane-glob-input', words, testFiles: [], sources: new Map() }
+  // lean: expansion markers force a full lane even when quoted; retain raw shell tokens if narrowing these lanes matters
+  if (/[$`\\~*?\[{]/.test(config.validation_lane)) return { scope: 'full', reason: 'lane-shell-expansion', words, testFiles: [], sources: new Map() }
+  for (const input of parsed.inputs) {
+    let stat = null
+    try { stat = d.lstat(join(config.checkout, input)) } catch { return { scope: 'full', reason: 'lane-file-unreadable', words, testFiles: [], sources: new Map() } }
+    try { if (stat && typeof stat.isDirectory === 'function' && stat.isDirectory()) return { scope: 'full', reason: 'lane-directory-input', words, testFiles: [], sources: new Map() } } catch { return { scope: 'full', reason: 'lane-file-unreadable', words, testFiles: [], sources: new Map() } }
+  }
+  let endOfOptions = false
+  const positionals = []
+  for (let i = 1; i < words.length; i += 1) {
+    const word = words[i]
+    if (!endOfOptions && word === '--') { endOfOptions = true; continue }
+    if (!endOfOptions && word.startsWith('-')) {
+      const eq = word.indexOf('=')
+      const name = eq > 0 ? word.slice(0, eq) : word
+      if (LANE_PATH_OPTIONS.includes(name)) { if (eq <= 0) i += 1; continue }
+      if (LANE_VALUE_OPTIONS.includes(word)) { i += 1; continue }
+      continue
+    }
+    positionals.push(word)
+  }
+  const testFiles = positionals.map((entry) => entry.startsWith('./') ? entry.slice(2) : entry)
+  if (testFiles.length === 0) return { scope: 'full', reason: 'lane-no-test-files', words, testFiles: [], sources: new Map() }
+  if (testFiles.length > 1) {
+    // lean: NODE_OPTIONS split on whitespace, quoted values not parsed; use a shell-word tokenizer if quoted options appear
+    const nodeOptions = String(d.env?.NODE_OPTIONS ?? '').trim().split(/\s+/).filter(Boolean)
+    if (fileSetDependent(words) || fileSetDependent(nodeOptions)) return { scope: 'full', reason: 'lane-file-set-dependent', words, testFiles: [], sources: new Map() }
+  }
+  const sources = new Map()
+  for (const file of testFiles) {
+    let text = null
+    try { text = d.readFile(join(config.checkout, file)) } catch { return { scope: 'full', reason: 'lane-file-unreadable', words, testFiles: [], sources: new Map() } }
+    if (text === null || text === undefined) return { scope: 'full', reason: 'lane-file-unreadable', words, testFiles: [], sources: new Map() }
+    sources.set(file, text)
+  }
+  return { scope: 'staged', reason: null, words, testFiles, sources }
+}
+function buildLaneCommand(words, files) {
+  const optionWords = []
+  let endOfOptions = false
+  for (let i = 1; i < words.length; i += 1) {
+    const word = words[i]
+    if (!endOfOptions && word === '--') { endOfOptions = true; continue }
+    if (!endOfOptions && word.startsWith('-')) {
+      const eq = word.indexOf('=')
+      const name = eq > 0 ? word.slice(0, eq) : word
+      if (LANE_PATH_OPTIONS.includes(name)) {
+        if (eq > 0) { optionWords.push(word); continue }
+        optionWords.push(word)
+        const value = words[i + 1]
+        if (value !== undefined) { optionWords.push(value); i += 1 }
+        continue
+      }
+      if (LANE_VALUE_OPTIONS.includes(word)) {
+        optionWords.push(word)
+        const value = words[i + 1]
+        if (value !== undefined) { optionWords.push(value); i += 1 }
+        continue
+      }
+      optionWords.push(word)
+      continue
+    }
+  }
+  return [words[0], ...optionWords, '--', ...files].map((word) => shellArg(word)).join(' ')
+}
+function importSpecifiers(source) {
+  const specs = []
+  const text = String(source ?? '')
+  const patterns = [/\b(?:import|export)\b[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/g, /\bimport\s*['"]([^'"]+)['"]/g, /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g]
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0
+    for (const match of text.matchAll(pattern)) {
+      const spec = match[1]
+      if (typeof spec === 'string' && spec.startsWith('.') && !specs.includes(spec)) specs.push(spec)
+    }
+  }
+  return specs
+}
+function closureReaches(startFile, targetPath, readSource) {
+  const target = String(targetPath).replace(/^\.\//, '')
+  const start = String(startFile).replace(/^\.\//, '')
+  if (start === target) return true
+  const visited = new Set()
+  const queue = [start]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (visited.has(current)) continue
+    visited.add(current)
+    let text = null
+    try { text = readSource(current) } catch { text = null }
+    if (text === null || text === undefined) continue
+    for (const spec of importSpecifiers(text)) {
+      const base = join(dirname(current), spec)
+      const candidates = [base, `${base}.mjs`, `${base}.js`, `${base}/index.mjs`, `${base}/index.js`]
+      for (const candidate of candidates) {
+        if (String(candidate).replace(/^\.\//, '') === target) return true
+      }
+      for (const candidate of candidates) {
+        const norm = String(candidate).replace(/^\.\//, '')
+        if (visited.has(norm)) continue
+        let src = null
+        try { src = readSource(norm) } catch { src = null }
+        if (src !== null && src !== undefined) queue.push(norm)
+      }
+    }
+  }
+  return false
+}
+function orderClosureFiles(files, laneFiles, times) {
+  return [...files].sort((a, b) => (times.get(a) ?? Number.POSITIVE_INFINITY) - (times.get(b) ?? Number.POSITIVE_INFINITY) || laneFiles.indexOf(a) - laneFiles.indexOf(b))
+}
 export async function runDiffMutationProof(config, deps = {}) {
   const d = normalDeps(deps)
   const validation = validateDiffConfig(config)
@@ -1082,6 +1216,7 @@ export async function runDiffMutationProof(config, deps = {}) {
   let fatal = null
   let generatedCount = selected.length
   if (selected.length === 0) return countDiffReport(records, generatedCount, omitted, config, generated.candidates.length, fatal, admissionSkips)
+  const fileTimesMs = new Map()
   const remaining = () => Math.max(0, totalDeadline - now())
   const baselineStarted = now()
   const baselineBound = remaining()
@@ -1132,8 +1267,18 @@ export async function runDiffMutationProof(config, deps = {}) {
     const applied = applyDiffCandidate(original, candidate)
     if (applied.reason) { records.push(diffSkip({ candidate, reason: applied.reason })); continue }
     let writeAttempted = false
-    let validationResult = null
     let gateResult = null
+    let remainingResult = null
+    let validationResults = []
+    let validationCommands = []
+    let runFiles = []
+    let laneScope = 'staged'
+    let laneScopeReason = null
+    let stopPoint = null
+    let stoppedFile = null
+    let closureRedFile = null
+    let lanePlan = null
+    let mutantStarted = 0
     let restoreFailure = null
     let runtimeSkip = null
     let runtimeSkipCause = null
@@ -1156,20 +1301,56 @@ export async function runDiffMutationProof(config, deps = {}) {
               d.writeFile(deps.inflightPath, `${JSON.stringify({ generation: config.generation, path: candidate.path, line: candidate.line, find: candidate.original, replace: candidate.replacement, mutant_sha256: bytesDigest(reapplied.bytes), original_sha256: bytesDigest(original) })}\n`)
             }
             d.writeFile(guardWrite.abs, reapplied.bytes)
-            const validationBound = Math.min(runTimeoutMs, remaining())
-            validationResult = remaining() > 0
-              ? await runDiffCommand(d, config.validation_lane, config.checkout, validationBound)
-              : diffRunnerUnavailable('result-incomplete')
-            if (validationResult.timeout && validationBound < runTimeoutMs) deadlineCapped = true
-            if (!validationResult.escaped && (!validationResult.available || !validationResult.timeout)) {
-              const gateBound = Math.min(runTimeoutMs, remaining())
-              gateResult = remaining() > 0
-                ? await runDiffCommand(d, config.gate_cmd, config.checkout, gateBound)
-                : diffRunnerUnavailable('result-incomplete')
-              if (gateResult.timeout && gateBound < runTimeoutMs) deadlineCapped = true
+            mutantStarted = now()
+            const step = async (command) => {
+              const bound = Math.min(runTimeoutMs, remaining())
+              const result = remaining() > 0 ? await runDiffCommand(d, command, config.checkout, bound) : diffRunnerUnavailable('result-incomplete')
+              if (result.timeout && bound < runTimeoutMs) deadlineCapped = true
+              return result
             }
-            escapedResult = [validationResult, gateResult].find((result) => result?.escaped) || null
-            const firstUnavailable = !validationResult.available ? validationResult : gateResult && !gateResult.available ? gateResult : null
+            gateResult = await step(config.gate_cmd)
+            if (gateResult.available && !gateResult.timeout && !gateResult.escaped && gateResult.ok) {
+              lanePlan = laneTestFiles(config, d)
+              if (lanePlan.scope === 'full') {
+                laneScope = 'full'
+                laneScopeReason = lanePlan.reason
+              } else {
+                laneScope = 'staged'
+                laneScopeReason = null
+                const readSource = (rel) => {
+                  const key = String(rel).replace(/^\.\//, '')
+                  if (lanePlan.sources.has(key)) return lanePlan.sources.get(key)
+                  try { return d.readFile(join(config.checkout, key)) } catch { return null }
+                }
+                const target = String(candidate.path).replace(/^\.\//, '')
+                const closureFiles = lanePlan.testFiles.filter((entry) => closureReaches(entry, target, readSource))
+                const ordered = orderClosureFiles(closureFiles, lanePlan.testFiles, fileTimesMs).slice(0, DIFF_CLOSURE_FILE_CAP)
+                for (const file of ordered) {
+                  const command = buildLaneCommand(lanePlan.words, [file])
+                  validationCommands.push(command)
+                  const started = now()
+                  const single = await step(command)
+                  const elapsed = now() - started
+                  try { fileTimesMs.set(file, Math.max(0, Number.isFinite(elapsed) ? elapsed : 0)) } catch {}
+                  validationResults.push(single)
+                  runFiles.push(file)
+                  if (!single.available || single.timeout || single.escaped) break
+                  if (!single.ok) { closureRedFile = file; break }
+                }
+              }
+              const abortedBeforeRemaining = validationResults.some((entry) => !entry.available || entry.timeout || entry.escaped)
+              if (!closureRedFile && !abortedBeforeRemaining) {
+                const runSet = new Set(runFiles)
+                const remainingFiles = (lanePlan.testFiles || []).filter((entry) => !runSet.has(entry))
+                if (laneScope === 'full' || remainingFiles.length > 0) {
+                  validationCommands.push(laneScope === 'full' ? config.validation_lane : buildLaneCommand(lanePlan.words, remainingFiles))
+                  remainingResult = await step(laneScope === 'full' ? config.validation_lane : buildLaneCommand(lanePlan.words, remainingFiles))
+                  validationResults.push(remainingResult)
+                }
+              }
+            }
+            escapedResult = [gateResult, ...validationResults].find((result) => result?.escaped) || null
+            const firstUnavailable = [gateResult, ...validationResults].find((result) => result && !result.available) || null
             if (firstUnavailable && !escapedResult) {
               runtimeSkip = firstUnavailable.why
               runtimeSkipCause = firstUnavailable.cause
@@ -1211,16 +1392,29 @@ export async function runDiffMutationProof(config, deps = {}) {
       break
     }
     if (runtimeSkip) { records.push(diffSkip({ candidate, reason: runtimeSkip, cause: runtimeSkipCause })); continue }
-    const timedOut = validationResult?.timeout || gateResult?.timeout
-    const outcome = timedOut ? 'timed-out' : validationResult.ok && gateResult.ok ? 'survived' : 'killed'
+    const timedOut = [gateResult, ...validationResults].some((entry) => entry?.timeout)
+    const survived = gateResult.ok && validationResults.length > 0 && validationResults.every((entry) => entry.ok)
+    const outcome = timedOut ? 'timed-out' : survived ? 'survived' : 'killed'
+    const verdictMs = Math.max(0, now() - mutantStarted)
+    if (!timedOut) {
+    if (!gateResult.ok) { stopPoint = 'gate' }
+    else if (closureRedFile) { stopPoint = 'closure-file'; stoppedFile = closureRedFile }
+    else if (remainingResult && !remainingResult.ok) { stopPoint = 'remaining-lane' }
+    else { stopPoint = 'none-survived' }
+    }
     records.push({
       ...candidate, outcome,
-      validation_lane: config.validation_lane,
+      validation_lane: [...validationCommands],
       gate_cmd: config.gate_cmd,
-      validation_ok: validationResult.ok,
+      lane_scope: laneScope,
+      lane_scope_reason: laneScopeReason,
+      stop_point: stopPoint,
+      stopped_file: stoppedFile,
+      validation_ok: validationResults.length === 0 ? null : validationResults.every((entry) => entry.ok),
       gate_ok: gateResult?.ok ?? null,
-      validation_output: validationResult.output,
+      validation_output: validationResults.map((entry) => entry.output ?? '').join('\n'),
       gate_output: gateResult?.output ?? '',
+      verdict_ms: verdictMs,
       why: timedOut ? 'the validation lane or gate timed out under the mutation' : outcome === 'survived' ? 'the validation lane and gate stayed GREEN under the mutation' : 'a completed validation lane or gate run went RED under the mutation',
     })
   }

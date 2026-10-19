@@ -182,7 +182,7 @@ const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
 const CLAUDE_FFF_TOOLS = Object.freeze(['mcp__fff__grep', 'mcp__fff__find_files', 'mcp__fff__multi_grep'])
 const PI_SEARCH_TOOLS = Object.freeze(['grep', 'find'])
 const CLAUDE_SEARCH_TOOLS = Object.freeze(['Glob', 'Grep'])
-export const FFF_SEARCH_WITHHOLDINGS = Object.freeze(['direct-and-listed-wrappers-refused'])
+export const FFF_SEARCH_WITHHOLDINGS = Object.freeze(['direct-and-listed-wrappers-refused', 'builtin-search-withheld'])
 export const FFF_SEARCH_WITHHOLDING_LIMITS = Object.freeze(['arbitrary-shell-indirection-not-refused'])
 
 export function normalizeFffSearchWithholdingLimit(value) {
@@ -192,7 +192,7 @@ export function normalizeFffSearchWithholdingLimit(value) {
   return value
 }
 
-function searchRecord(tools, fff, reasonOrOptions = undefined) {
+export function searchRecord(tools, fff, reasonOrOptions = undefined) {
   const reason = typeof reasonOrOptions === 'string' ? reasonOrOptions : undefined
   const options = reasonOrOptions && typeof reasonOrOptions === 'object' ? reasonOrOptions : undefined
   const withholding = options?.withholding
@@ -237,7 +237,7 @@ function resolveLabServer(grants, exists) {
 }
 
 function resolveFffSearch(role, adapter, grants, exists) {
-  const declared = role === 'builder' && ['pi', 'claude'].includes(adapter) && grants.mcp_servers.some((server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN)
+  const declared = ['pi', 'claude'].includes(adapter) && grants.mcp_servers.some((server) => server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN)
   const builtins = adapter === 'pi' ? PI_SEARCH_TOOLS : CLAUDE_SEARCH_TOOLS
   if (!declared) return { grants, search: searchRecord(builtins, 'ungranted') }
   try {
@@ -254,9 +254,16 @@ function resolveFffSearch(role, adapter, grants, exists) {
       search: searchRecord(builtins, 'withheld', 'binary-absent'),
     }
   }
+  // A granted seat records the refusal it actually has: pi seats loading
+  // readgate refuse direct and listed-wrapper search, while a granted pi seat
+  // without readgate withholds only the built-in grep/find tools. The value is
+  // decided from the resolved grants, never the role name. Intended side
+  // effect: pi planner and tech-lead lose 'git grep' under CREW_FFF=1 exactly
+  // as the builder already does; do not 'fix' it.
+  const withholding = adapter === 'pi' && !(grants.extensions || []).some((extension) => String(extension).replaceAll('\\', '/').endsWith('crew/pi/extensions/readgate.ts')) ? 'builtin-search-withheld' : FFF_SEARCH_WITHHOLDINGS[0]
   return {
     grants,
-    search: searchRecord(CLAUDE_FFF_TOOLS, 'granted', { withholding: FFF_SEARCH_WITHHOLDINGS[0], limit: FFF_SEARCH_WITHHOLDING_LIMITS[0] }),
+    search: searchRecord(CLAUDE_FFF_TOOLS, 'granted', { withholding, limit: FFF_SEARCH_WITHHOLDING_LIMITS[0] }),
   }
 }
 

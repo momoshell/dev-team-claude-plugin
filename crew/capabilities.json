@@ -54,10 +54,30 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "skills": []
+          "skills": [],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         },
         "claude": {
-          "skills": []
+          "skills": [],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         }
       }
     },
@@ -80,7 +100,7 @@
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/submit.ts"
           ],
-          "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }],
+          "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }, { "name": "fff", "command": { "bin": "/opt/homebrew/bin/fff-mcp", "args": [] }, "url": null }],
           "skills": [],
           "agents": [
             {
@@ -90,7 +110,17 @@
           ]
         },
         "claude": {
-          "skills": []
+          "skills": [],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         }
       }
     },
@@ -155,11 +185,31 @@
           ],
           "skills": [
             "skills/code-less/SKILL.md"
+          ],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
           ]
         },
         "claude": {
           "skills": [
             "skills/code-less/SKILL.md"
+          ],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
           ]
         }
       }
@@ -178,10 +228,30 @@
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/submit.ts"
           ],
-          "skills": []
+          "skills": [],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         },
         "claude": {
-          "skills": []
+          "skills": [],
+          "mcp_servers": [
+            {
+              "name": "fff",
+              "command": {
+                "bin": "/opt/homebrew/bin/fff-mcp",
+                "args": []
+              },
+              "url": null
+            }
+          ]
         }
       }
     }

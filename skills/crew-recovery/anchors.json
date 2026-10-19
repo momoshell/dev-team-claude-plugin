@@ -4,8 +4,8 @@
   "crew/seat-io.mjs:131": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/seat-io.mjs:1767": "export function recogniseProviderRetry(text) {",
   "crew/drive.mjs:60": "builder: 2400, reviewer: 1800",
-  "crew/crew.mjs:4201": "escalation -> NEVER teardown",
-  "crew/crew.mjs:4868": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4755": "const seats = rows.length",
+  "crew/crew.mjs:4208": "escalation -> NEVER teardown",
+  "crew/crew.mjs:4875": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:4762": "const seats = rows.length",
   "crew/drive.mjs:9550": "const completeCheckProof = (label, options = {}) => {"
 }

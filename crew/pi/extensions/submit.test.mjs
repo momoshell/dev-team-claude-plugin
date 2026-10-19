@@ -171,7 +171,7 @@ test('RR1 submit_envelope journal rows carry top-level ISO at within bracketing 
 test('RR2 refused row carries defect why, submitted row why null, overridden row carries why', async () => {
   // kills: journal `outcome === \'refused\' || outcome === \'overridden\' ? why : null` -> `why: null`
   const f = fixture({ name: 'rr2' })
-  const refused = await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
+  const refused = await f.call(f.envelope({ artifacts: ['/outside/./secret'] }))
   assert.equal(refused.details.reason, 'artifacts')
   const ok = await f.call(f.envelope())
   assert.equal(ok.details.submitted, true)
@@ -179,7 +179,7 @@ test('RR2 refused row carries defect why, submitted row why null, overridden row
   assert.equal(rows.length, 2)
   assert.equal(rows[0].submit_envelope.reason, 'artifacts')
   assert.equal(rows[0].submit_envelope.why, refused.details.why)
-  assert.match(rows[0].submit_envelope.why, /\/outside\/secret/)
+  assert.match(rows[0].submit_envelope.why, /\/outside\/\.\/secret/)
   assert.equal(rows[1].submit_envelope.why, null)
   const g = fixture({ name: 'rr2-override' })
   await g.call(g.envelope({ assignment_id: 'bad' }))
@@ -198,8 +198,9 @@ test('RR3 SUBMIT_REFUSAL_REASONS is frozen closed list and refused reasons are m
   assert.deepEqual(SUBMIT_REFUSAL_REASONS, ['status-kind', 'assignment-id-mismatch', 'role-mismatch', 'run-mismatch', 'no-envelope', 'summary', 'artifacts', 'details'])
   assert.equal(Object.isFrozen(SUBMIT_REFUSAL_REASONS), true)
   const f = fixture({ name: 'rr3' })
-  await f.call(f.envelope({ artifacts: ['/outside/secret'] }))
+  await f.call(f.envelope({ artifacts: ['/outside/./secret'] }))
   const rows = readFileSync(journalPath(f), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.event === 'submit_envelope')
   assert.equal(rows.length, 1)
+  assert.equal(rows[0].submit_envelope.outcome, 'refused')
   assert.equal(SUBMIT_REFUSAL_REASONS.includes(rows[0].submit_envelope.reason), true)
 })

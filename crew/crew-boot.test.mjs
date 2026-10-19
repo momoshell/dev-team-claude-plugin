@@ -39,7 +39,7 @@ test('LM5', async () => {
   try {
     await withHome(home, () => bootCmd({ task: 'lab-native-granted', checkout, roles: 'planner', 'agent-planner': 'pi', 'headless-all': true, 'claude-bin': process.execPath }, {
       env: { CREW_PI_CODEMODE: 'off' }, homedir: () => home,
-      existsSync: (path) => path === serverPath ? true : existsSync(path),
+      existsSync: (path) => path === serverPath || path === '/opt/homebrew/bin/fff-mcp' ? true : existsSync(path),
       awaitSeatsReady: async () => {}, cmux() { throw new Error('unexpected cmux') }, openRun: () => ({ recordSeats() {} }),
     }))
   } finally { process.stdout.write = quiet }
@@ -48,11 +48,12 @@ test('LM5', async () => {
   const grant = crew.members.planner.grant_snapshot.grants
   assert.ok(grant.extensions.includes('builtin:mcp'))
   assert.ok(!grant.extensions.some((path) => path.endsWith('/lab.ts')))
-  assert.deepEqual(grant.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [serverPath] }, url: null }])
+  assert.deepEqual(grant.mcp_servers, [{ name: 'lab', command: { bin: process.execPath, args: [serverPath] }, url: null }, { name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }])
   const row = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).find((event) => event.event === 'boot')
   assert.deepEqual(row.lab.planner, { state: 'granted' })
   const written = JSON.parse(readFileSync(join(dir, 'task/pi-agent/planner/mcp.json'), 'utf8'))
   assert.deepEqual(written.mcpServers.lab, { command: process.execPath, args: [serverPath], exposure: 'direct', timeout: 960 })
+  assert.deepEqual(written.mcpServers.fff, { command: '/opt/homebrew/bin/fff-mcp', args: [], exposure: 'direct' })
 })
 
 // MUTATION: remove the truthful withheld state while dropping the lab server.

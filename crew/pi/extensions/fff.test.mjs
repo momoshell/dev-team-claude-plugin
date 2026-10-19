@@ -8,16 +8,17 @@ import { basename, join } from 'node:path'
 import { createReadGate } from './readgate.ts'
 import {
   bootCmd, effectiveDeny, FFF_SEARCH_WITHHOLDINGS, FFF_SEARCH_WITHHOLDING_LIMITS,
-  mcpConfigDocument, normalizeFffSearchWithholdingLimit, persistedAdapters, resolveAdapters, SEAT_DEFAULTS, slug,
+  mcpConfigDocument, normalizeFffSearchWithholdingLimit, persistedAdapters, resolveAdapters, searchRecord, SEAT_DEFAULTS, slug,
 } from '../../crew.mjs'
 import { seatCommand as piSeatCommand } from '../../adapters/adapter-pi.mjs'
 import {
-  FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor,
+  acpLaunch as claudeAcpLaunch, FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor,
   fffHookDecision, headlessCommand as claudeHeadlessCommand, seatCommand as claudeSeatCommand,
   writeSeatSkills,
 } from '../../adapters/adapter-claude.mjs'
 import { headlessIo } from '../../headless.mjs'
-import { scratchDir } from '../../../test/helpers.mjs'
+import { ROOT, scratchDir } from '../../../test/helpers.mjs'
+import { assertAnchorsPinned } from '../../../skills/qa-test-writing/anchor-pin.mjs'
 
 // Hermetic against the operator's router switch. The adapters default `env` to
 // process.env, so a call that omits `env` resolves CREW_ROUTER_ATTEMPT_URL from the
@@ -60,10 +61,10 @@ function ungrantedBuilderRegister() {
   return register
 }
 
-function piCommand(entry, search = entry.search) {
+function piCommand(entry, search = entry.search, role = 'builder') {
   return piSeatCommand({
-    role: 'builder', model: 'openai-codex/gpt-5.6', promptFile: '/tmp/role-builder.md',
-    tools: SEAT_DEFAULTS.builder.tools, deny: effectiveDeny('builder', search), taskDir: '/tmp/crew-task',
+    role, model: 'openai-codex/gpt-5.6', promptFile: '/tmp/role-' + role + '.md',
+    tools: SEAT_DEFAULTS[role].tools, deny: effectiveDeny(role, search), taskDir: '/tmp/crew-task',
     bootBrief: 'boot', grants: entry.grants,
   })
 }
@@ -72,17 +73,17 @@ function piCommand(entry, search = entry.search) {
 // refuses to build its command until those skills are materialised under its task dir, so
 // a granted entry gets a scratch task dir with the skills written first. An ungranted entry
 // keeps the fixed path, which keeps the byte-for-byte comparison against it meaningful.
-function claudeTaskDir(entry) {
+function claudeTaskDir(entry, role = 'builder') {
   if ((entry.grants?.skills?.length ?? 0) === 0) return '/tmp/crew-task'
   const taskDir = scratchDir('fff-claude-task-')
-  writeSeatSkills({ taskDir, role: 'builder', grants: entry.grants })
+  writeSeatSkills({ taskDir, role, grants: entry.grants })
   return taskDir
 }
 
-function claudeCommand(entry, search = entry.search) {
+function claudeCommand(entry, search = entry.search, role = 'builder') {
   return claudeSeatCommand({
-    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
-    tools: SEAT_DEFAULTS.builder.tools, deny: effectiveDeny('builder', search), taskDir: claudeTaskDir(entry),
+    role, model: 'sonnet', promptFile: '/tmp/role-' + role + '.md',
+    tools: SEAT_DEFAULTS[role].tools, deny: effectiveDeny(role, search), taskDir: claudeTaskDir(entry, role),
     bootBrief: 'boot', grants: entry.grants, configDir: entry.configDir,
   })
 }
@@ -146,6 +147,15 @@ async function bootRecord({ agent = null, available = true, register = null } = 
     rmSync(checkout, { recursive: true, force: true })
   }
 }
+
+// MUTATION M4: restore a crew.mjs key in crew-recovery/anchors.json to its pre-insertion line.
+test('M4 crew-recovery crew.mjs pins stay current after fff resolver changes', () => {
+  const skillDir = join(ROOT, 'skills/crew-recovery')
+  assertAnchorsPinned({
+    root: ROOT, skillDir, manifestPath: join(skillDir, 'anchors.json'), minAnchors: 3,
+    fence: ['crew/crew.mjs', 'skills/crew-recovery/anchors.json'],
+  })
+})
 
 test('fff-A1-extension', async () => {
   const entry = await piEntry()
@@ -228,7 +238,7 @@ test('A1 granted seat record names withholding and its measured limit', async ()
 })
 
 test('B1 search withholding limit is a closed value', () => {
-  assert.deepEqual(FFF_SEARCH_WITHHOLDINGS, ['direct-and-listed-wrappers-refused'])
+  assert.deepEqual(FFF_SEARCH_WITHHOLDINGS, ['direct-and-listed-wrappers-refused', 'builtin-search-withheld'])
   assert.deepEqual(FFF_SEARCH_WITHHOLDING_LIMITS, ['arbitrary-shell-indirection-not-refused'])
   assert.equal(Object.isFrozen(FFF_SEARCH_WITHHOLDINGS), true)
   assert.equal(Object.isFrozen(FFF_SEARCH_WITHHOLDING_LIMITS), true)
@@ -463,5 +473,104 @@ test('fff-H1-headless-grant', async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+test('FA1 non-builder pi seats compose the native fff tools with builtins excluded', async () => {
+  // MUTATION: restore role === 'builder' && in resolveFffSearch's declared and every non-builder pi command loses its mcp__fff__ tools.
+  for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) {
+    const entry = (await resolveAdapters([role], { ['agent-' + role]: 'pi' }, null, { exists: present }))[role]
+    const command = piCommand(entry, entry.search, role)
+    const tools = command.match(/--tools "([^"]*)"/)[1].split(',')
+    const excluded = command.match(/--exclude-tools "([^"]*)"/)[1].split(',')
+    for (const tool of ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']) assert.ok(tools.includes(tool), role + ' ' + tool)
+    assert.ok(excluded.includes('find'), role)
+    assert.ok(excluded.includes('grep'), role)
+  }
+})
+
+test('FA1-lab the pi planner keeps the lab tool beside the fff tools', async () => {
+  // MUTATION: drop the planner pi lab server object from the register and the planner pi command loses mcp__lab__lab beside mcp__fff__grep.
+  const entry = (await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { exists: present })).planner
+  const tools = piCommand(entry, entry.search, 'planner').match(/--tools "([^"]*)"/)[1].split(',')
+  assert.ok(tools.includes('mcp__lab__lab'))
+  assert.ok(tools.includes('mcp__fff__grep'))
+})
+
+test('FA2 non-builder claude seats allow the fff tools, deny Glob/Grep and set CREW_FFF=1', async () => {
+  // MUTATION: narrow resolveFffSearch's declared to ['pi'] and every claude seat loses CREW_FFF=1, the Glob/Grep deny and the ACP mcp__fff__ tools.
+  for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) {
+    const entry = (await resolveAdapters([role], { ['agent-' + role]: 'claude' }, null, { exists: present }))[role]
+    const pane = claudeCommand(entry, entry.search, role)
+    assert.equal(paneFffEnvironment(pane).CREW_FFF, '1', role)
+    const denied = pane.match(/--disallowedTools "([^"]*)"/)[1].split(',')
+    assert.ok(denied.includes('Glob'), role)
+    assert.ok(denied.includes('Grep'), role)
+    assert.equal(denied.some((name) => name.startsWith('mcp__')), false, role)
+    const launched = claudeAcpLaunch({
+      role, bin: '/usr/local/bin/claude-agent-acp', claudeBin: process.execPath, cwd: '/tmp',
+      tools: SEAT_DEFAULTS[role].tools, deny: effectiveDeny(role, entry.search),
+      promptFile: '/tmp/role-' + role + '.md', taskDir: claudeTaskDir(entry, role),
+      grants: entry.grants, configDir: entry.configDir,
+    })
+    const options = launched.sessionParams._meta.claudeCode.options
+    for (const tool of ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']) assert.ok(options.allowedTools.includes(tool), role + ' ' + tool)
+    assert.ok(options.disallowedTools.includes('Glob'), role)
+    assert.ok(options.disallowedTools.includes('Grep'), role)
+  }
+})
+
+test('FA3 an absent fff-mcp withholds fff on every role in both adapters', async () => {
+  // MUTATION: drop the negation in copyFffGrant's filter and an absent binary no longer strips the fff server, so commands still carry mcp__fff__.
+  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+    const pi = (await resolveAdapters([role], { ['agent-' + role]: 'pi' }, null, { exists: absent }))[role]
+    assert.deepEqual(pi.search, { tools: ['grep', 'find'], fff: 'withheld', reason: 'binary-absent' })
+    assert.equal(pi.grants.mcp_servers.some((server) => server?.name === 'fff'), false, role)
+    assert.doesNotMatch(piCommand(pi, pi.search, role), /mcp__fff__/)
+    const claude = (await resolveAdapters([role], { ['agent-' + role]: 'claude' }, null, { exists: absent }))[role]
+    assert.deepEqual(claude.search, { tools: ['Glob', 'Grep'], fff: 'withheld', reason: 'binary-absent' })
+    assert.equal(claude.grants.mcp_servers.some((server) => server?.name === 'fff'), false, role)
+    assert.equal(paneFffEnvironment(claudeCommand(claude, claude.search, role)).CREW_FFF, '0', role)
+    const launched = claudeAcpLaunch({
+      role, bin: '/usr/local/bin/claude-agent-acp', claudeBin: process.execPath, cwd: '/tmp',
+      tools: SEAT_DEFAULTS[role].tools, deny: effectiveDeny(role, claude.search),
+      promptFile: '/tmp/role-' + role + '.md', taskDir: claudeTaskDir(claude, role),
+      grants: claude.grants, configDir: claude.configDir,
+    })
+    assert.equal(launched.sessionParams._meta.claudeCode.options.allowedTools.some((tool) => tool.startsWith('mcp__fff__')), false, role)
+  }
+})
+
+test('FA4 granted pi seats without readgate record builtin-search-withheld', async () => {
+  // MUTATION: swap the new value for FFF_SEARCH_WITHHOLDINGS[0] and granted pi seats without readgate claim a bash refusal they do not have.
+  for (const role of ['reviewer', 'lead']) {
+    const entry = (await resolveAdapters([role], { ['agent-' + role]: 'pi' }, null, { exists: present }))[role]
+    assert.equal(entry.search.fff, 'granted', role)
+    assert.equal(entry.search.withholding, 'builtin-search-withheld', role)
+  }
+  for (const role of ['builder', 'planner', 'tech-lead']) {
+    const entry = (await resolveAdapters([role], { ['agent-' + role]: 'pi' }, null, { exists: present }))[role]
+    assert.equal(entry.search.withholding, 'direct-and-listed-wrappers-refused', role)
+  }
+  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+    const entry = (await resolveAdapters([role], { ['agent-' + role]: 'claude' }, null, { exists: present }))[role]
+    assert.equal(entry.search.withholding, 'direct-and-listed-wrappers-refused', role)
+  }
+})
+
+test('FA4-grants the withholding follows the resolved grants, not the role name', async () => {
+  // MUTATION: swap the grants test for the role-name test and the value no longer follows the resolved grants.
+  const register = JSON.parse(readFileSync(new URL('../../capabilities.json', import.meta.url), 'utf8'))
+  register.roles.reviewer.by_agent.pi.extensions.push('crew/pi/extensions/readgate.ts')
+  register.roles.builder.by_agent.pi.extensions = register.roles.builder.by_agent.pi.extensions.filter((path) => path !== 'crew/pi/extensions/readgate.ts')
+  const reviewer = (await resolveAdapters(['reviewer'], { 'agent-reviewer': 'pi' }, null, { register, exists: present })).reviewer
+  assert.equal(reviewer.search.withholding, 'direct-and-listed-wrappers-refused')
+  const builder = (await resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register, exists: present })).builder
+  assert.equal(builder.search.withholding, 'builtin-search-withheld')
+})
+
+test('FA5 the withholding enum is closed and searchRecord refuses outside values', () => {
+  // MUTATION: disable the enum guard with if (false) and searchRecord stops throwing on a withholding outside the closed enum.
+  assert.deepEqual(FFF_SEARCH_WITHHOLDINGS, ['direct-and-listed-wrappers-refused', 'builtin-search-withheld'])
+  assert.equal(Object.isFrozen(FFF_SEARCH_WITHHOLDINGS), true)
+  assert.throws(() => searchRecord(['grep'], 'granted', { withholding: 'bash-search-refused' }), TypeError)
 })
 

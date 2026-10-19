@@ -6,7 +6,7 @@ import { scratchDir, ROOT } from '../../../test/helpers.mjs'; process.chdir(ROOT
 import { assignmentPrompt } from '../../driver.mjs'
 import { createReminders, attachReminders } from './reminders.ts'
 
-const ids = ['S1','S2','S3','S4','S5','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1']
+const ids = ['S1','S2','S3','S4','S5','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1','FA6','FA6-grep','FA7']
 const shipped = JSON.parse(readFileSync(new URL('./reminders.json', import.meta.url), 'utf8'))
 function setup({ table = shipped, role = 'builder', task = true } = {}) {
   const root = scratchDir('reminders-')
@@ -18,7 +18,7 @@ function setup({ table = shipped, role = 'builder', task = true } = {}) {
 const bash = (command) => ({ toolName: 'bash', input: { command }, content: [{ type: 'text', text: 'original' }] })
 const assignment = (id) => assignmentPrompt({ id, role: 'builder', briefFile: '/tmp/brief.md', returnPath: `/tmp/returns/run-1/${id}.builder.json`, taskDir: '/tmp/task' })
 
-test('S1 shipped table has exactly two expected rules', () => { assert.equal(shipped.rules.length, 2); assert.deepEqual(shipped.rules.map((r) => r.id), ['raw-temp-call', 'test-name-pattern']); assert.equal(setup().hooks.usable, true) })
+test('S1 shipped table has exactly three expected rules', () => { assert.equal(shipped.rules.length, 3); assert.deepEqual(shipped.rules.map((r) => r.id), ['raw-temp-call', 'test-name-pattern', 'fff-search-evasion']); assert.equal(setup().hooks.usable, true) })
 test('S2 rejects unknown keys, invalid regex, duplicate ids, bad source and top-level keys', () => {
   for (const mutate of [t => { t.rules[0].extra = true }, t => { t.rules[0].pattern = '[' }, t => { t.rules[1].id = t.rules[0].id }, t => { t.rules[0].source.quote = 'definitely-not-a-source-quote-zzq' }, t => { t.extra = true }]) { const t = structuredClone(shipped); mutate(t); const f = setup({ table: t }); assert.equal(f.hooks.usable, false); assert.equal(f.hooks.reason, 'schema') }
 })
@@ -58,4 +58,38 @@ test('RV1-1 corrupt table assignment hook does not throw', () => {
   assert.equal(hooks.usable, false)
   assert.doesNotThrow(() => hooks.beforeAgentStart({ prompt: assignment('rv1-1') }))
 })
-test('T1 test IDs are exactly the complete set and gate runs this file', () => { const source = readFileSync(new URL(import.meta.url), 'utf8'); const found = [...source.matchAll(/^test\('(S1|S2|S3|S4|S5|P1|P2|P3|P4|E1|R1|O1|O2|J1|U1|T1) /gm)].map(m => m[1]); assert.deepEqual(found.sort(), [...ids].sort()); assert.match(source, /test\('O2 /) })
+test('T1 test IDs are exactly the complete set and gate runs this file', () => { const source = readFileSync(new URL(import.meta.url), 'utf8'); const found = [...source.matchAll(/^test\('(S1|S2|S3|S4|S5|P1|P2|P3|P4|E1|R1|O1|O2|J1|U1|T1|FA6|FA6-grep|FA7) /gm)].map(m => m[1]); assert.deepEqual(found.sort(), [...ids].sort()); assert.match(source, /test\('O2 /) })
+test('FA6 builder piped grep and node -e scans fire fff-search-evasion', () => {
+  // MUTATION: change indexOf|matchAll to matchAll and the brief's node -e indexOf command no longer fires fff-search-evasion.
+  const f = setup()
+  f.hooks.beforeAgentStart({ prompt: assignment('fa6-a') })
+  const grep = f.hooks.toolResult(bash('grep -n "TO3" test/factory-prove-mutations.test.mjs | head -100'))
+  assert.ok(grep)
+  assert.ok(grep.content[0].text.startsWith('reminder (fff-search-evasion): '))
+  assert.ok(grep.content[0].text.includes('mcp__fff__grep'))
+  f.hooks.beforeAgentStart({ prompt: assignment('fa6-b') })
+  const command = `const t=require('fs').readFileSync(${JSON.stringify(join(ROOT, 'crew/drive.mjs'))},'utf8');console.log(t.indexOf('RUN_START_EVENT'))`
+  const scanned = f.hooks.toolResult(bash(`node -e '${command.replaceAll("'", "'\\''")}'`))
+  assert.ok(scanned)
+  assert.ok(scanned.content[0].text.startsWith('reminder (fff-search-evasion): '))
+  assert.ok(scanned.content[0].text.includes('mcp__fff__grep'))
+})
+
+test('FA6-grep the piped grep command alone fires fff-search-evasion', () => {
+  // MUTATION: rename (?:grep|rg) to (?:ripgrep) and the brief's piped grep command no longer fires fff-search-evasion.
+  const f = setup()
+  f.hooks.beforeAgentStart({ prompt: assignment('fa6-grep-a') })
+  const result = f.hooks.toolResult(bash('grep -n "TO3" test/factory-prove-mutations.test.mjs | head -100'))
+  assert.ok(result)
+  assert.ok(result.content[0].text.startsWith('reminder (fff-search-evasion): '))
+})
+
+test('FA7 plain test, node and sed commands never fire the search rule', () => {
+  // MUTATION: prefix the pattern with .| and the rule fires on npm test, node --test and sed commands it must not fire on.
+  for (const [index, command] of ['npm test', 'node --test crew/drive.test.mjs', 'sed -n 1,40p crew/drive.mjs'].entries()) {
+    const f = setup()
+    f.hooks.beforeAgentStart({ prompt: assignment('fa7-' + index) })
+    assert.equal(f.hooks.toolResult(bash(command)), undefined, command)
+    assert.deepEqual(f.rows, [], command)
+  }
+})

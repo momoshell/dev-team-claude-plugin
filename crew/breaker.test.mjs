@@ -165,6 +165,15 @@ test('ADR047 N3 advisor-role boot rows never inflate a same-key seat denominator
   assert.equal(record.verdict, 'open')
 })
 
+test('ADR047 N4 advisor-role failure rows count on the advisor cell only', () => {
+  const record = advisorHealth([attempt({ role: 'builder', attempts: 12 })], [row({ role: 'advisor', failures: 2 })])
+  assert.equal(record.advisor.numerator, 2)
+  assert.equal(record.advisor.failures, 2)
+  assert.equal(record.cells[0].numerator, 0)
+  assert.equal(record.cells[0].failures, 0)
+  assert.deepEqual(record.cells[0].by_kind, {})
+})
+
 test('cellHealth uses the rate edge: one short is closed and the threshold rate is open', () => {
   const under = health([row({ failures: 1 })], { threshold_rate: 0.1 }).record
   assert.equal(under.verdict, 'closed')

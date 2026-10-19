@@ -217,7 +217,12 @@ export function cellHealth({
 
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row) continue
-    for (const cell of cellsFor(row)) countFailures(cell, row)
+    for (const cell of cellsFor(row)) {
+      // A consult failure belongs to the advisor cell that failed, never to a seated
+      // cell that merely shares its key (ADR-047 operator decision 7, cf. attempt rows).
+      if (row.role === 'advisor' && cell !== advisorCell) continue
+      countFailures(cell, row)
+    }
   }
 
   for (const row of Array.isArray(attemptRows) ? attemptRows : []) {

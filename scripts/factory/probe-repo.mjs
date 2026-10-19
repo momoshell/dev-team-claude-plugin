@@ -2154,7 +2154,9 @@ export function checkoutBaseBranch({ checkout, profilePath = null, factoryRoot }
   }
   const branch = requireField(profile, 'default_branch')
   if (!isPlainBranchName(branch)) throw new ProfileRefusal(`base branch ${JSON.stringify(branch)} is invalid · ${path}`, 'base-branch-invalid')
-  return { branch, basis: `ratified profile field default_branch · ${path}` }
+  const tracking = gitOutput(resolve(checkout || process.cwd()), ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
+  if (!nonEmptyString(tracking)) return { branch, basis: `ratified profile field default_branch · ${path}` }
+  return { branch, basis: `ratified profile field default_branch · ${path}`, ref: `origin/${branch}` }
 }
 
 export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRoot } = {}) {

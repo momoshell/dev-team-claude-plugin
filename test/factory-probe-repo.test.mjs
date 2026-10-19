@@ -1209,6 +1209,27 @@ test('R1 ratified checkout base resolves the profile branch', () => {
   const result = checkoutBaseBranch({ checkout: root, profilePath: path })
   assert.equal(result.branch, 'dispute'); assert.ok(result.basis.includes(path))
 })
+// Mutation killed: returning origin/<branch> without verifying the tracking ref trusts a stale profile.
+test('R1b ratified profile returns origin ref only when tracking ref verifies', () => {
+  const makeProfile = (root) => put(root, 'profile.json', JSON.stringify({ repo_key: 'fixture', fields: { default_branch: { status: 'ratified', value: 'dispute', source: 'test', ratified_by: 'operator', ratified_at: 'now' } } }))
+  const bare = nextRoot('R1b-bare')
+  initGit(bare)
+  const barePath = makeProfile(bare)
+  const bareResult = checkoutBaseBranch({ checkout: bare, profilePath: barePath })
+  assert.equal(bareResult.branch, 'dispute')
+  assert.equal(bareResult.ref, undefined)
+  assert.ok(bareResult.basis.includes(barePath))
+  const tracked = nextRoot('R1b-tracked')
+  initGit(tracked)
+  put(tracked, 'base.txt', 'base\n')
+  git(tracked, 'add', '.')
+  git(tracked, 'commit', '-q', '-m', 'base')
+  git(tracked, 'update-ref', 'refs/remotes/origin/dispute', git(tracked, 'rev-parse', 'HEAD').trim())
+  const trackedPath = makeProfile(tracked)
+  assert.deepEqual(checkoutBaseBranch({ checkout: tracked, profilePath: trackedPath }), {
+    branch: 'dispute', basis: `ratified profile field default_branch \u00b7 ${trackedPath}`, ref: 'origin/dispute',
+  })
+})
 // MUTATION FB1: forcing the absent-profile branch to main must ignore origin/HEAD.
 test('FB1', () => {
   const root = nextRoot('FB1'), path = join(root, 'absent-profile.json')

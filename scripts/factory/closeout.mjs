@@ -941,7 +941,7 @@ function prView({ lane, checkout, deps, step = 'pr-open' }) {
   const d = normalDeps(deps)
   const result = runCommand({
     file: 'gh',
-    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,body'],
+    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,headRefOid,body'],
     cwd: checkout,
   }, d)
   if (!commandOk(result)) refuse(`cannot read PR for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.PR_UNREADABLE, step)
@@ -1102,7 +1102,7 @@ function closeIssue({ issue, lane, pr, deps }) {
 function gitStep({ args, cwd, reason, step, deps, message }) {
   const d = normalDeps(deps)
   const result = runCommand({ file: 'git', args, cwd }, d)
-  if (!commandOk(result)) refuse(message || `${args.join(' ')} failed: ${childFailure(result)}`, reason, step)
+  if (!commandOk(result)) refuse(`${message || `${args.join(' ')} failed`}: ${childFailure(result)}`, reason, step)
   return { args, cwd }
 }
 
@@ -1357,6 +1357,31 @@ export function reapPluginProvenance({ lane, laneDir, deps, closeout }) {
   return { boot, closeout, plugin_sha_changed: absent_reason === undefined ? boot.plugin_sha !== closeout.plugin_sha : null, absent_reason: absent_reason ?? null }
 }
 
+function laneTip({ lane, root, d, step }) {
+  const result = runCommand({ file: 'git', args: ['rev-parse', '--verify', '--quiet', `refs/heads/${lane}`], cwd: root }, d)
+  const tip = textOf(result?.stdout).trim()
+  if (commandOk(result) && !result.error && !result.signal && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(tip)) return tip
+  if (result?.status === 1 && !result.error && !result.signal && tip === '' && !textOf(result.stderr).trim()) return null
+  refuse(`cannot read lane tip for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, step)
+}
+
+function reapMergeProof({ lane, pr, root, deps }) {
+  const d = normalDeps(deps)
+  let base
+  try { base = d.baseBranch({ checkout: root }) } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged') }
+  const branch = typeof base?.branch === 'string' && base.branch.trim() ? base.branch : null
+  if (!branch) refuse(`cannot resolve checkout base branch for ${lane}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged')
+  const fetch = runCommand({ file: 'git', args: ['fetch', 'origin', branch], cwd: root }, d)
+  const fetchFailure = commandOk(fetch) ? null : childFailure(fetch)
+  const tip = laneTip({ lane, root, d, step: 'pr-merged' })
+  if (tip === null) return { proven: 'already-absent', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
+  const ancestor = runCommand({ file: 'git', args: ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${branch}`], cwd: root }, d)
+  if (commandOk(ancestor)) return { proven: 'ancestor', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
+  if (pr.headRefOid && pr.headRefOid === tip) return { proven: 'head-ref-oid', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
+  const fetchNote = fetchFailure ? `; git fetch failed: ${fetchFailure}` : ''
+  refuse(`branch deletion refused for ${lane}: lane tip ${tip} is not an ancestor of origin/${branch} and does not match PR head ${String(pr.headRefOid || '')}${fetchNote}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged')
+}
+
 export function reap({ lanes, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const batch = Array.isArray(lanes) ? lanes : []
@@ -1369,6 +1394,7 @@ export function reap({ lanes, checkout, deps } = {}) {
     const laneDir = join(dirname(root), `dt-${lane}`)
     const laneReport = { lane, closed: [], referenced: [], archived: [] }
     let pr = null
+    let provenTip = null
     let closeout = null
     try { closeout = d.pluginProvenance(); laneReport.plugin_provenance = reapPluginProvenance({ lane, laneDir, deps: d, closeout }) }
     catch { laneReport.plugin_provenance = { boot: null, closeout, plugin_sha_changed: null, absent_reason: 'boot_unreadable' } }
@@ -1376,7 +1402,9 @@ export function reap({ lanes, checkout, deps } = {}) {
       'pr-merged': () => {
         pr = prView({ lane, checkout: root, deps: d, step: 'pr-merged' })
         if (pr.state !== MERGED_STATE) refuse(`PR for ${lane} is ${JSON.stringify(pr.state)}, expected ${MERGED_STATE}`, CLOSEOUT_REFUSALS.PR_NOT_MERGED, 'pr-merged')
-        return { number: pr.number, state: pr.state }
+        const proof = reapMergeProof({ lane, pr, root, deps: d })
+        provenTip = proof.tip
+        return { number: pr.number, state: pr.state, proof: proof.proven, tip: proof.tip, base_ref: proof.base_ref, fetch_failure: proof.fetch_failure }
       },
       turns: () => {
         const detail = reapTurnEconomy({ lane, laneDir, root, deps: d })
@@ -1395,10 +1423,16 @@ export function reap({ lanes, checkout, deps } = {}) {
         return { closed: laneReport.closed, referenced: laneReport.referenced, summary: reapIssueSummary(laneReport), prompt_measures: promptMeasures }
       },
       worktree: () => {
+        if (!d.existsSync(laneDir)) return { args: ['worktree', 'remove', laneDir], cwd: root, already_done: true, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
         const detail = gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` })
-        return { ...detail, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
+        return { ...detail, already_done: false, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
       },
-      branch: () => gitStep({ args: ['branch', '-d', lane], cwd: root, reason: CLOSEOUT_REFUSALS.BRANCH_FAILED, step: 'branch', deps: d, message: `branch deletion failed for ${lane}` }),
+      branch: () => {
+        const tip = laneTip({ lane, root, d, step: 'branch' })
+        if (tip === null) return { args: ['branch', '-D', lane], cwd: root, already_done: true }
+        if (tip !== provenTip) refuse(`branch deletion refused for ${lane}: lane tip changed from ${provenTip} to ${tip}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'branch')
+        return { ...gitStep({ args: ['branch', '-D', lane], cwd: root, reason: CLOSEOUT_REFUSALS.BRANCH_FAILED, step: 'branch', deps: d, message: `branch deletion failed for ${lane}` }), already_done: false }
+      },
       prune: () => gitStep({ args: ['worktree', 'prune'], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'prune', deps: d, message: `worktree prune failed for ${lane}` }),
       archive: () => {
         const archived = archiveRecoveryCopies({ lane, checkout: laneDir, deps: d })

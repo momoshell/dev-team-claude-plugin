@@ -9233,16 +9233,26 @@ function runTask(ctx, io, crash) {
   // Lane fences remain recorded context for operators, not placement admission.
   acceptedScope = scopeFiles
   let inScope = scopeMatcher(scopeFiles)
-  function flakeRerun(result, command, runner, stageName, roundNumber, { run = (cmd) => io.run(cmd), fence = (file) => inScope(file), rerunCommand = ctx.testRunner?.rerun ?? null, checkout = ctx.checkout } = {}) {
-    const tests = failingTestFiles(result?.output, runner, checkout).map((entry) => ({ ...entry, rerun: null }))
+  function flakeRerun(result, command, runner, stageName, roundNumber, { run = (cmd) => io.run(cmd), fence = (file) => inScope(file), rerunCommand = ctx.testRunner?.rerun ?? null, checkout = ctx.checkout, changedFiles = null } = {}) {
+    const tests = failingTestFiles(result?.output, runner, checkout).map((entry) => ({ ...entry, rerun: null, rerun_ms: null }))
     const counts = parseSuiteCounts(result?.output)
+    // node counts a timed-out test as cancelled, not failed (b1258); parseSuiteCounts'
+    // {pass,fail,skipped} shape is a journal/checkpoint contract, so cancelled is read here.
+    let cancelled = 0
+    if (runner === 'node' && typeof result?.output === 'string') {
+      for (const line of result.output.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
+        const match = /^(?:#|ℹ)\s*cancelled (\d+)$/.exec(line)
+        if (match) cancelled = Number(match[1])
+      }
+    }
+    const expectedFailures = counts === null ? null : runner === 'node' ? counts.fail + cancelled : counts.fail
     let reason = null
     if (runner !== 'node' && runner !== 'cargo') reason = FLAKE_RERUN_REASONS[0]
     else if (counts === null) reason = FLAKE_RERUN_REASONS[1]
-    else if (counts.fail <= 0) reason = FLAKE_RERUN_REASONS[1]
-    else if (tests.length !== counts.fail) reason = FLAKE_RERUN_REASONS[1]
+    else if (expectedFailures <= 0) reason = FLAKE_RERUN_REASONS[1]
+    else if (tests.length !== expectedFailures) reason = FLAKE_RERUN_REASONS[1]
     else if (tests.some(({ file }) => file === null)) reason = FLAKE_RERUN_REASONS[1]
-    else if (tests.some(({ file }) => fence(file))) reason = FLAKE_RERUN_REASONS[2]
+    else if (tests.some(({ file }) => Array.isArray(changedFiles) ? changedFiles.includes(file) : fence(file))) reason = FLAKE_RERUN_REASONS[2]
     const commands = new Map()
     if (reason === null) {
       for (const entry of tests) {
@@ -9258,15 +9268,18 @@ function runTask(ctx, io, crash) {
       for (const entry of tests) {
         const isolated = commands.get(entry)
         if (!outputs.has(isolated)) {
+          const rerunStartedAt = io.now()
           try {
             const measuredRun = run(isolated)
+            const rerunMs = io.now() - rerunStartedAt
             if (typeof measuredRun?.kept === 'string' && measuredRun.kept) kept.push(measuredRun.kept)
-            outputs.set(isolated, measuredRun && typeof measuredRun.output === 'string' ? { output: measuredRun.output, ok: measuredRun.ok === true, denied: measuredRun.denied === true || measuredRun.interrupted === true } : { output: '', ok: false, denied: true })
-          } catch (error) { runErrors.push(String(error?.message ?? error)); outputs.set(isolated, { output: '', denied: true }) }
+            outputs.set(isolated, measuredRun && typeof measuredRun.output === 'string' ? { output: measuredRun.output, ok: measuredRun.ok === true, denied: measuredRun.denied === true || measuredRun.interrupted === true, ms: rerunMs } : { output: '', ok: false, denied: true, ms: rerunMs })
+          } catch (error) { runErrors.push(String(error?.message ?? error)); outputs.set(isolated, { output: '', denied: true, ms: null }) }
         }
       }
       for (const entry of tests) {
         const measured = outputs.get(commands.get(entry))
+        entry.rerun_ms = measured.denied || !Number.isFinite(measured.ms) || measured.ms < 0 ? null : measured.ms
         if (measured.denied) { entry.rerun = 'unmeasured'; continue }
         const verdict = runner === 'cargo' ? cargoNameVerdict(measured.output, entry.test) : nameVerdict(measured.output, entry.test)
         entry.rerun = verdict === 'passed' && !measured.ok ? 'unmeasured' : ['passed', 'failed', 'skipped'].includes(verdict) ? verdict : 'unmeasured' // a named pass inside a red isolated run is not isolation: a template without --exact can match other tests
@@ -9275,7 +9288,7 @@ function runTask(ctx, io, crash) {
     const green = reason === null && tests.length > 0 && tests.every(({ rerun }) => rerun === 'passed')
     io.log(recordRow({ at: io.now(), flake: { stage: stageName, round: roundNumber, outcome: green ? 'green' : 'red', reason, tests, ...(kept.length ? { kept } : {}), ...(runErrors.length ? { errors: runErrors } : {}) } }))
     if (green) {
-      for (const { test, file, rerun } of tests) S.flakes.push({ stage: stageName, test, file, rerun })
+      for (const { test, file, rerun, rerun_ms } of tests) S.flakes.push({ stage: stageName, test, file, rerun, rerun_ms })
       return { ...result, ok: true }
     }
     return result
@@ -13212,7 +13225,7 @@ function runTask(ctx, io, crash) {
   if (pinnedAfterRebase) return escalate('harden', preservationWhy(pinnedAfterRebase), [], { hardening_preservation: pinnedAfterRebase })
   stage('suite')
   let suiteRes = phaseSlot(SUITE_SLOT_PHASES.warm, () => io.run(ctx.suite))
-  if (!suiteRes?.ok) suiteRes = flakeRerun(suiteRes, ctx.suite, normalizeTestRunner(ctx.testRunner).runner, 'suite', S.buildRound)
+  if (!suiteRes?.ok) suiteRes = flakeRerun(suiteRes, ctx.suite, normalizeTestRunner(ctx.testRunner).runner, 'suite', S.buildRound, { changedFiles: publishFiles })
   if (!suiteRes?.ok && suiteRedNoop) {
     const output = String(suiteRes?.output || '')
     stageComplete()
@@ -13498,7 +13511,7 @@ function runTask(ctx, io, crash) {
       if (!cold.ok) {
         // lean: one fresh cold checkout per distinct isolated command, issued even after one is red, and every red one kept; stop issuing cold re-runs at the first non-passing verdict if multi-failure cold re-runs prove costly
         cold = flakeRerun(cold, ctx.suite, normalizeTestRunner(ctx.testRunner).runner, 'cold-suite', S.buildRound, {
-          checkout: cold.path,
+          checkout: cold.path, changedFiles: publishFiles,
           run: (cmd) => phaseSlot(SUITE_SLOT_PHASES.cold, () => io.runCold(cmd, coldGuards)),
         })
       }

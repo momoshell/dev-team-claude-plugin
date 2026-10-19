@@ -91,6 +91,8 @@ function harness({ home = null, answers = [], newest = () => 1000, now = null, l
   const queuePath = promptMeasurePath || join(tmpdir(), `factory-closeout-prompt-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
   const calls = { spawn: [], cp: [], rename: [], rm: [], write: [], log: [] }
   const HARNESS_DEFAULTS = [
+    // A present lane worktree sits on a commit; the default merge-base answer proves it merged.
+    ['rev-parse --verify --quiet HEAD', { status: 0, stdout: `${'c'.repeat(40)}\n`, stderr: '' }],
     ['worktree', (argv, options) => argv.includes('list') ? ({ status: 0, stdout: 'worktree ' + options.cwd + '\0', stderr: '' }) : ({ status: 0, stdout: '', stderr: '' })],
     ['--git-path info/exclude', { status: 0, stdout: join(scratch('closeout-exclude-default-'), 'exclude') + '\n', stderr: '' }],
   ]
@@ -1932,7 +1934,7 @@ test('H1 reap preserves its existing ordered step contract', () => {
   assert.deepEqual(result.report.closed, [1031])
   assert.equal(spawned(calls, 'issue close').length, 1)
   // Mutation killed: dropping --json while retaining the field list breaks the PR view argv.
-  assert.deepEqual(spawned(calls, 'gh pr view')[0].args, ['pr', 'view', 'ordinary-lane', '--json', 'number,state,headRefName,headRefOid,body'])
+  assert.deepEqual(spawned(calls, 'gh pr view')[0].args, ['pr', 'view', 'ordinary-lane', '--json', 'number,state,headRefName,headRefOid,body,baseRefName'])
   assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.proof, 'ancestor')
   assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.base_ref, 'origin/main')
 })
@@ -3051,7 +3053,7 @@ function reapRun(sc, opts = {}) {
     const args = options.args || []
     if (options.file === 'gh') {
       ghCalls.push(args)
-      return { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: sc.head, body: '' }), stderr: '' }
+      return { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', headRefOid: sc.head, baseRefName: opts.baseRefName ?? 'main', body: '' }), stderr: '' }
     }
     if (options.file === 'git') {
       if (args.join(' ') === `rev-parse --verify --quiet refs/heads/${sc.lane}`) {
@@ -3257,3 +3259,91 @@ test('reap unproven refusal carries fetch stderr when fetch failed', () => {
   assert.match(String(result.refusal.message || ''), /fatal:/)
 })
 
+// Rewrites origin/main to the pre-merge commit, as a force-push would.
+function reapForcePushBase(sc) {
+  const seed = join(sc.base, 'seed')
+  reapGit(seed, 'push', '-q', '--force', 'origin', 'main')
+}
+
+// Mutation killed: a refspec-less fetch leaves refs/remotes/origin/main at the pre-force-push tip.
+test('reap proves ancestry against the fetched base, not a stale tracking ref', () => {
+  const sc = reapScenario('ancestor')
+  sc.head = '0'.repeat(40)
+  reapGit(sc.root, 'config', '--unset-all', 'remote.origin.fetch')
+  reapForcePushBase(sc)
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /lane tip [0-9a-f]{40} is not an ancestor/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapGit(sc.root, 'rev-parse', `refs/heads/${sc.lane}`), sc.laneTip)
+})
+
+// Mutation killed: trusting the tracking ref after a failed fetch proves against a force-pushed-away base.
+test('reap does not prove ancestry from a tracking ref a failed fetch left stale', () => {
+  const sc = reapScenario('ancestor')
+  sc.head = '0'.repeat(40)
+  reapForcePushBase(sc)
+  const { result } = reapRun(sc, { breakOrigin: true })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /git fetch failed: .*fatal:/s)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: accepting headRefOid without the PR base deletes a lane merged into another branch.
+test('reap refuses a PR head merged into a branch other than the default', () => {
+  const sc = reapScenario('unproven')
+  sc.head = sc.laneTip
+  const { result } = reapRun(sc, { baseRefName: 'develop' })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.match(result.refusal.message, /on base develop/)
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapBranchExists(sc), true)
+})
+
+// Mutation killed: proving only the lane branch removes a worktree whose detached HEAD holds unmerged work.
+test('reap refuses a detached worktree holding an unmerged commit when the branch is gone', () => {
+  const sc = reapScenario('ancestor')
+  reapGit(sc.laneDir, 'checkout', '-q', '--detach')
+  writeFileSync(join(sc.laneDir, 'unmerged.txt'), 'unmerged\n')
+  reapGit(sc.laneDir, 'add', '.')
+  reapGit(sc.laneDir, 'commit', '-q', '-m', 'unmerged')
+  const unmerged = reapGit(sc.laneDir, 'rev-parse', 'HEAD')
+  reapGit(sc.root, 'branch', '-D', sc.lane)
+  const { result } = reapRun(sc)
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'branch-failed')
+  assert.equal(result.refusal.step, 'pr-merged')
+  assert.ok(result.refusal.message.includes(`worktree HEAD ${unmerged} is not an ancestor`))
+  assert.equal(existsSync(sc.laneDir), true)
+  assert.equal(reapGit(sc.laneDir, 'rev-parse', 'HEAD'), unmerged)
+})
+
+// Mutation killed: skipping the worktree HEAD re-read removes a worktree that moved after its proof.
+test('reap refuses worktree removal when the worktree HEAD moved after the proof', () => {
+  const tip = 'a'.repeat(40)
+  const moved = 'd'.repeat(40)
+  let reads = 0
+  const { deps, calls } = harness({
+    baseBranch: () => ({ branch: 'main' }),
+    answers: [
+      ['gh pr view', { status: 0, stdout: JSON.stringify({ number: 7, state: 'MERGED', body: '' }) }],
+      ['rev-parse --verify --quiet refs/heads/', { status: 0, stdout: tip }],
+      ['rev-parse --verify --quiet HEAD', () => ++reads === 1 ? { status: 0, stdout: tip } : { status: 0, stdout: moved }],
+    ],
+  })
+  const result = reap({ lanes: [lane], checkout: ROOT, deps })
+  assert.equal(result.code, 1)
+  assert.equal(result.refusal.reason, 'worktree-failed')
+  assert.equal(result.refusal.step, 'worktree')
+  assert.ok(result.refusal.message.includes(`from ${tip} to ${moved}`))
+  assert.equal(rows(result).find((row) => row.step === 'pr-merged').detail.head, tip)
+  assert.equal(spawned(calls, 'worktree remove').length, 0)
+  assert.equal(spawned(calls, 'branch -D').length, 0)
+})

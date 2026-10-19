@@ -941,7 +941,7 @@ function prView({ lane, checkout, deps, step = 'pr-open' }) {
   const d = normalDeps(deps)
   const result = runCommand({
     file: 'gh',
-    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,headRefOid,body'],
+    args: ['pr', 'view', lane, '--json', 'number,state,headRefName,headRefOid,body,baseRefName'],
     cwd: checkout,
   }, d)
   if (!commandOk(result)) refuse(`cannot read PR for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.PR_UNREADABLE, step)
@@ -1365,21 +1365,49 @@ function laneTip({ lane, root, d, step }) {
   refuse(`cannot read lane tip for ${lane}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, step)
 }
 
-function reapMergeProof({ lane, pr, root, deps }) {
+// The worktree's HEAD is what worktree removal discards; it may be detached from the lane branch.
+function worktreeHead({ lane, laneDir, d, step }) {
+  if (!d.existsSync(laneDir)) return null
+  const result = runCommand({ file: 'git', args: ['rev-parse', '--verify', '--quiet', 'HEAD'], cwd: laneDir }, d)
+  const head = textOf(result?.stdout).trim()
+  if (commandOk(result) && !result.error && !result.signal && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head)) return head
+  refuse(`cannot read worktree HEAD for ${lane} at ${laneDir}: ${childFailure(result)}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, step)
+}
+
+function provenBy({ oid, pr, branch, root, fetchFailure, d }) {
+  // A failed fetch leaves the tracking ref unverified (it may predate a force-push), so only the PR head can prove.
+  if (fetchFailure === null) {
+    const ancestor = runCommand({ file: 'git', args: ['merge-base', '--is-ancestor', oid, `refs/remotes/origin/${branch}`], cwd: root }, d)
+    if (commandOk(ancestor)) return 'ancestor'
+  }
+  if (pr.headRefOid && pr.headRefOid === oid && pr.baseRefName === branch) return 'head-ref-oid'
+  return null
+}
+
+function reapMergeProof({ lane, pr, root, laneDir, deps }) {
   const d = normalDeps(deps)
   let base
   try { base = d.baseBranch({ checkout: root }) } catch (error) { refuse(`cannot resolve checkout base branch: ${error.reason || error.message}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged') }
   const branch = typeof base?.branch === 'string' && base.branch.trim() ? base.branch : null
   if (!branch) refuse(`cannot resolve checkout base branch for ${lane}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged')
-  const fetch = runCommand({ file: 'git', args: ['fetch', 'origin', branch], cwd: root }, d)
+  // An explicit refspec updates the tracking ref even where remote.origin.fetch is unset.
+  const fetch = runCommand({ file: 'git', args: ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], cwd: root }, d)
   const fetchFailure = commandOk(fetch) ? null : childFailure(fetch)
   const tip = laneTip({ lane, root, d, step: 'pr-merged' })
-  if (tip === null) return { proven: 'already-absent', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
-  const ancestor = runCommand({ file: 'git', args: ['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${branch}`], cwd: root }, d)
-  if (commandOk(ancestor)) return { proven: 'ancestor', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
-  if (pr.headRefOid && pr.headRefOid === tip) return { proven: 'head-ref-oid', tip, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
-  const fetchNote = fetchFailure ? `; git fetch failed: ${fetchFailure}` : ''
-  refuse(`branch deletion refused for ${lane}: lane tip ${tip} is not an ancestor of origin/${branch} and does not match PR head ${String(pr.headRefOid || '')}${fetchNote}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged')
+  const head = worktreeHead({ lane, laneDir, d, step: 'pr-merged' })
+  if (tip === null && head === null) return { proven: 'already-absent', tip, head, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
+  // Every commit teardown would discard must be on the base: the lane tip and the worktree HEAD.
+  const proofs = []
+  for (const [what, oid] of [['lane tip', tip], ['worktree HEAD', head]]) {
+    if (oid === null) continue
+    const proven = provenBy({ oid, pr, branch, root, fetchFailure, d })
+    if (!proven) {
+      const fetchNote = fetchFailure ? `; git fetch failed: ${fetchFailure}` : ''
+      refuse(`branch deletion refused for ${lane}: ${what} ${oid} is not an ancestor of origin/${branch} and does not match PR head ${String(pr.headRefOid || '')} on base ${String(pr.baseRefName || '')}${fetchNote}`, CLOSEOUT_REFUSALS.BRANCH_FAILED, 'pr-merged')
+    }
+    proofs.push(proven)
+  }
+  return { proven: proofs[0], tip, head, base_ref: `origin/${branch}`, fetch_failure: fetchFailure }
 }
 
 export function reap({ lanes, checkout, deps } = {}) {
@@ -1395,6 +1423,7 @@ export function reap({ lanes, checkout, deps } = {}) {
     const laneReport = { lane, closed: [], referenced: [], archived: [] }
     let pr = null
     let provenTip = null
+    let provenHead = null
     let closeout = null
     try { closeout = d.pluginProvenance(); laneReport.plugin_provenance = reapPluginProvenance({ lane, laneDir, deps: d, closeout }) }
     catch { laneReport.plugin_provenance = { boot: null, closeout, plugin_sha_changed: null, absent_reason: 'boot_unreadable' } }
@@ -1402,9 +1431,10 @@ export function reap({ lanes, checkout, deps } = {}) {
       'pr-merged': () => {
         pr = prView({ lane, checkout: root, deps: d, step: 'pr-merged' })
         if (pr.state !== MERGED_STATE) refuse(`PR for ${lane} is ${JSON.stringify(pr.state)}, expected ${MERGED_STATE}`, CLOSEOUT_REFUSALS.PR_NOT_MERGED, 'pr-merged')
-        const proof = reapMergeProof({ lane, pr, root, deps: d })
+        const proof = reapMergeProof({ lane, pr, root, laneDir, deps: d })
         provenTip = proof.tip
-        return { number: pr.number, state: pr.state, proof: proof.proven, tip: proof.tip, base_ref: proof.base_ref, fetch_failure: proof.fetch_failure }
+        provenHead = proof.head
+        return { number: pr.number, state: pr.state, proof: proof.proven, tip: proof.tip, head: proof.head, base_ref: proof.base_ref, fetch_failure: proof.fetch_failure }
       },
       turns: () => {
         const detail = reapTurnEconomy({ lane, laneDir, root, deps: d })
@@ -1424,6 +1454,8 @@ export function reap({ lanes, checkout, deps } = {}) {
       },
       worktree: () => {
         if (!d.existsSync(laneDir)) return { args: ['worktree', 'remove', laneDir], cwd: root, already_done: true, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
+        const head = worktreeHead({ lane, laneDir, d, step: 'worktree' })
+        if (head !== provenHead) refuse(`worktree removal refused for ${lane}: worktree HEAD changed from ${provenHead} to ${head}`, CLOSEOUT_REFUSALS.WORKTREE_FAILED, 'worktree')
         const detail = gitStep({ args: ['worktree', 'remove', laneDir], cwd: root, reason: CLOSEOUT_REFUSALS.WORKTREE_FAILED, step: 'worktree', deps: d, message: `worktree removal failed for ${lane}` })
         return { ...detail, already_done: false, excludes: removeWorktreeExcludes({ checkout: root, laneDir, deps: d }) }
       },

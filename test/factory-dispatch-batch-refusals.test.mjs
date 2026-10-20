@@ -965,3 +965,32 @@ test('L2A a failed rollback exclude cleanup is logged by name and later branch d
   assert.equal(calls.some((call) => call.args.includes('-D')), true)
   assert.equal(readFileSync(exclude, 'utf8'), before)
 })
+
+test('LB1', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lb1-run-booted', names: ['lane-a', 'lane-b'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => spawnedOut.filter((c) => c.args.includes('boot')).length >= 1 ? [16] : [4], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-saturated')
+  const bootLanes = spawnedOut.filter((c) => c.args.includes('boot')).map((c) => c.args[c.args.indexOf('--task') + 1])
+  assert.deepEqual(bootLanes, ['lane-a'])
+  const runLanes = spawnedOut.filter((c) => c.args.includes('run') && c.args.includes('--task')).map((c) => c.args[c.args.indexOf('--task') + 1])
+  assert.deepEqual(runLanes, ['lane-a'])
+})
+
+test('LB2', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lb2-run-booted-pair', names: ['lane-a', 'lane-b', 'lane-c'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => spawnedOut.filter((c) => c.args.includes('boot')).length >= 2 ? [16] : [4], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-saturated')
+  const bootLanes = spawnedOut.filter((c) => c.args.includes('boot')).map((c) => c.args[c.args.indexOf('--task') + 1])
+  assert.deepEqual(bootLanes, ['lane-a', 'lane-b'])
+  const runLanes = spawnedOut.filter((c) => c.args.includes('run') && c.args.includes('--task')).map((c) => c.args[c.args.indexOf('--task') + 1])
+  assert.deepEqual(runLanes, ['lane-a', 'lane-b'])
+  const removes = spawnedOut.filter((c) => c.args.includes('worktree') && c.args.includes('remove')).map((c) => c.args.at(-1))
+  assert.equal(removes.length, 1)
+  assert.equal(String(removes[0]).endsWith('dt-lane-c'), true)
+  assert.deepEqual(spawnedOut.filter((c) => c.args.includes('branch') && c.args.includes('-D')).map((c) => c.args.at(-1)), ['lane-c'])
+})
+

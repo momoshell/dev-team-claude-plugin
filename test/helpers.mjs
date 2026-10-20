@@ -10,12 +10,12 @@ import { execFileSync, spawnSync } from 'node:child_process'
 
 // Scratch directories, drained without the caller remembering. The suite leaked
 // 142 directories per run because cleanup was wired per call site: a file with
-// twenty creates and one rmSync looks clean and leaks nineteen (#572). Three
-// drains, because the leaks that matter come from runs that do not finish:
-// the node:test root `after` hook (normal completion), `process.on('exit')`
-// (a test that throws, or hard-exits past every after hook), and the three
-// catchable interrupt signals, re-raised so the exit status is unchanged.
-// SIGKILL is unreachable by construction and is the one hole.
+// twenty creates and one rmSync looks clean and leaks nineteen (#572). Four
+// drains, because the leaks that matter come from runs that do not finish: the
+// `after` hook, `process.on('exit')`, the three catchable interrupt signals
+// (re-raised, status unchanged), and an EPIPE on stdout/stderr: a SIGTERMed
+// `node --test` runner closes the pipe, the reporter's write dies exit 7 past
+// every other drain, so EPIPE drains and exits 1. SIGKILL is the one hole.
 const SCRATCH_DIRS = new Set()
 const SCRATCH_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP']
 
@@ -40,6 +40,14 @@ export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {
   const dir = mkdtempSync(join(parent, prefix))
   SCRATCH_DIRS.add(dir)
   return dir
+}
+
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (err?.code !== 'EPIPE') throw err
+    drainScratchDirs()
+    process.exit(1)
+  })
 }
 
 // Detached process groups, drained with the scratch dirs. A fixture that

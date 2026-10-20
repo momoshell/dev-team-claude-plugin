@@ -418,6 +418,10 @@ test('RV2-1 newly tracked skill-read owner is covered by dynamic reach census', 
   assert.equal(currentReach.pathByFile.get(SKILL_READS_OWNER)?.has(SKILL_READS_TEST), true)
 })
 
+test('RV2-1 newly tracked working-set fixture owner is covered by dynamic reach census', () => {
+  assert.equal(collectTestReach({ checkout: ROOT }).pathByFile.get('test/fixtures/working-set/pi-rpc-builder-reads.jsonl')?.has('crew/drive-build.test.mjs'), true)
+})
+
 
 test('RV2-1 newly tracked skill-load fixture owners are covered by dynamic reach census', () => {
   const addedOwners = [

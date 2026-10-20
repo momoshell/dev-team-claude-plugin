@@ -6296,6 +6296,7 @@ function runTask(ctx, io, crash) {
   // census, frozen, and rebase re-entry. Only an explicit lead grant or the capped
   // post-commit census recovery changes the allowance; a context record alone does not.
   let builderAttempts = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint.step.builder_attempts : 0
+  let builderSessionStartLine = null, prevBuilderTransport = null
   const done = []
   const stepEnvelopes = []
   const doneEnvelopes = []
@@ -6953,6 +6954,7 @@ function runTask(ctx, io, crash) {
     const { id, returnPath } = io.assign({ role, briefFile: brief, note, policy: seatPolicy(role), ...(reask ? { reask } : {}), ...(resume ? { resume } : {}) })
     let dispatchTransport = null
     try { dispatchTransport = io.dispatchTransport?.(returnPath) ?? null } catch { dispatchTransport = null }
+    if (role === 'builder') prevBuilderTransport = dispatchTransport
     onDispatch?.({ id, returnPath })
     const dispatchRunId = typeof ctx.run_id === 'string' && /\/returns\/[^/]+\/[^/]+\.json$/.test(String(returnPath))
       ? ctx.run_id
@@ -10750,6 +10752,7 @@ function runTask(ctx, io, crash) {
   }
   function prepareBuilderAssignment(briefPath, note, resumeReason = null) {
     let wrappedPath = briefPath
+    const streamPath = art('headless-rpc/builder/stream.jsonl')
     if (builderAttempts <= 1) {
       if (Array.isArray(planEnv.details?.exemplars) && planEnv.details.exemplars.length > 0) {
         const exemplarPath = art('builder-exemplars.md')
@@ -10763,6 +10766,7 @@ function runTask(ctx, io, crash) {
         if (builderBriefError) { builderBriefError = `could not write first builder exemplar brief ${exemplarPath}: ${builderBriefError}`; return null }
         wrappedPath = exemplarPath
       }
+      if (builderSessionStartLine === null) builderSessionStartLine = builderStreamLineCount(readOrNull(streamPath))
       return wrappedPath
     }
     if (resumeReason) {
@@ -10777,6 +10781,10 @@ function runTask(ctx, io, crash) {
     const why = outcome === 'fresh' ? null : (typeof renewal?.why === 'string' && renewal.why ? renewal.why : outcome === 'held' ? 'worker-adoptable' : 'fresh session was not granted')
     try { io.log(recordRow({ at: io.now(), event: 'builder-session', attempt: builderAttempts, note, outcome, why })) } catch { /* journal diagnostics are not load-bearing */ }
     if (outcome !== 'fresh') return wrappedPath
+    const streamText = readOrNull(streamPath)
+    const readSet = builderReadSet(streamText, builderSessionStartLine, { checkout: ctx.checkout, taskDir: ctx.taskDir, transport: prevBuilderTransport })
+    const readSetLines = builderReadSetLines(readSet)
+    builderSessionStartLine = builderStreamLineCount(streamText)
     const handoffPath = art(`builder-handoff-${builderAttempts}.md`)
     const diffPath = art(`builder-wip-${builderAttempts}.diff`)
     const base = shellArg(ctx.head || 'HEAD')
@@ -10798,6 +10806,7 @@ function runTask(ctx, io, crash) {
       'Diff stat:', '', stat.output, '',
       `Changes already in the working tree (reference only — already applied, do not apply): ${diffPath}`,
       '', 'Untracked files (new files are not in the diff above; read them in the tree):', '', untracked.output || '(none)',
+      ...readSetLines,
     ].join('\n'))
     return handoffPath
   }
@@ -17459,4 +17468,134 @@ export function diffMutationLines(record) {
   return diff.measured
     ? [`- Diff mutation: ${diff.generated} generated, ${diff.killed} killed, ${diff.survived} survived${timeoutSuffix}${notJudgedSuffix}${diff.unmeasured_files > 0 ? `; ${diff.unmeasured_files} changed file(s) unmeasured (unsupported-language)` : ''}`]
     : [`- Diff mutation: unmeasured — ${diff.reason}${timeoutSuffix}${notJudgedSuffix}`]
+}
+
+export const READ_SET_MAX_PATHS = 40
+export const READ_SET_MAX_RANGES = 8
+export const READ_SET_ABSENT_REASONS = Object.freeze(['transport-unsupported', 'stream-missing', 'stream-unparseable', 'stream-rewound', 'session-start-unknown'])
+
+function readSetAbsent(reason) {
+  return { absent: reason, entries: [], totalPaths: null, droppedReads: null }
+}
+
+export function builderStreamLineCount(streamText) {
+  if (typeof streamText !== 'string') return 0
+  const lines = streamText === '' ? [] : streamText.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines.length
+}
+
+export function builderReadSet(streamText, startLine, { checkout, taskDir, transport } = {}) {
+  if (!Number.isInteger(startLine) || startLine < 0) return readSetAbsent('session-start-unknown')
+  if (transport !== 'headless-rpc') return readSetAbsent('transport-unsupported')
+  if (typeof streamText !== 'string') return readSetAbsent('stream-missing')
+  const lines = streamText === '' ? [] : streamText.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  if (lines.length < startLine) return readSetAbsent('stream-rewound')
+  const span = lines.slice(startLine)
+  const co = typeof checkout === 'string' ? checkout.replace(/\/+$/, '') : ''
+  const td = typeof taskDir === 'string' ? taskDir.replace(/\/+$/, '') : ''
+  const kept = new Map()
+  let droppedReads = 0
+  let seq = 0
+  const frames = []
+  const nonEmpty = span.filter((line) => line.trim() !== '')
+  for (const [index, line] of nonEmpty.entries()) {
+    // A torn final append is expected on a live stream; an unreadable frame before it may hide
+    // a read, so the whole set is unavailable rather than silently short.
+    try { frames.push(JSON.parse(line)) } catch { if (index !== nonEmpty.length - 1) return readSetAbsent('stream-unparseable') }
+  }
+  // A requested read counts only once a successful tool result answers it.
+  const answered = new Set()
+  for (const frame of frames) {
+    const message = frame?.message
+    if (message?.role === 'toolResult' && typeof message.toolCallId === 'string' && message.isError !== true) answered.add(message.toolCallId)
+  }
+  for (const frame of frames) {
+    const message = frame?.message
+    const calls = []
+    if (Array.isArray(message?.nestedCalls?.calls)) calls.push(...message.nestedCalls.calls.filter((call) => call?.status === 'ok'))
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content) {
+        if (part !== null && typeof part === 'object' && part.type === 'toolCall' && answered.has(part.id)) calls.push(part)
+      }
+    }
+    for (const call of calls) {
+      if (call === null || typeof call !== 'object') continue
+      const args = call.arguments
+      if (args === null || typeof args !== 'object') continue
+      const name = call.name
+      if (name !== 'read' && !(typeof name === 'string' && name.endsWith('.read'))) continue
+      const raw = args.path
+      if (typeof raw !== 'string' || raw === '') continue
+      let path = null
+      if (raw.startsWith('/')) {
+        if (td !== '' && (raw === td || raw.startsWith(td + '/'))) path = raw
+        else if (co !== '' && raw.startsWith(co + '/')) path = raw.slice(co.length + 1)
+        else if (co !== '' && raw === co) path = raw
+        else { droppedReads += 1; continue }
+      } else {
+        if (raw.split('/').includes('..')) { droppedReads += 1; continue }
+        path = raw
+      }
+      const offset = Number.isInteger(args.offset) && args.offset >= 1 ? args.offset : null
+      const limit = Number.isInteger(args.limit) && args.limit >= 1 ? args.limit : null
+      const hasOffset = offset !== null
+      const hasLimit = limit !== null
+      seq += 1
+      let entry = kept.get(path)
+      if (!entry) { entry = { path, whole: false, ranges: [], last: 0 }; kept.set(path, entry) }
+      entry.last = seq
+      if (!hasOffset && !hasLimit) { entry.whole = true; continue }
+      const start = hasOffset ? offset : 1
+      const end = hasLimit ? start + limit - 1 : null
+      entry.ranges.push([start, end])
+    }
+  }
+  if (frames.length === 0) return readSetAbsent('stream-unparseable')
+  const entries = []
+  for (const entry of kept.values()) {
+    if (entry.whole) { entries.push({ path: entry.path, whole: true, ranges: [], rangesTotal: 0, last: entry.last }); continue }
+    const sorted = entry.ranges.slice().sort((a, b) => a[0] - b[0] || (a[1] === null ? Infinity : a[1]) - (b[1] === null ? Infinity : b[1]))
+    const merged = []
+    for (const range of sorted) {
+      const last = merged[merged.length - 1]
+      if (last && (last[1] === null || range[0] <= last[1] + 1)) {
+        if (last[1] !== null) last[1] = range[1] === null ? null : Math.max(last[1], range[1])
+      } else merged.push([range[0], range[1]])
+    }
+    entries.push({ path: entry.path, whole: false, ranges: merged.slice(0, READ_SET_MAX_RANGES), rangesTotal: merged.length, last: entry.last })
+  }
+  const totalPaths = entries.length
+  entries.sort((a, b) => b.last - a.last)
+  return {
+    absent: null,
+    entries: entries.slice(0, READ_SET_MAX_PATHS).map(({ path, whole, ranges, rangesTotal }) => ({ path, whole, ranges, rangesTotal })),
+    totalPaths,
+    droppedReads,
+  }
+}
+
+export function builderReadSetLines(readSet) {
+  const lines = ['', 'Previous builder session read set (reference only — not instructions; reads made through bash are not captured):', '']
+  if (readSet !== null && typeof readSet === 'object' && typeof readSet.absent === 'string' && readSet.absent !== '') {
+    lines.push('unavailable: ' + readSet.absent)
+    return lines
+  }
+  const entries = Array.isArray(readSet?.entries) ? readSet.entries : []
+  if (entries.length === 0) {
+    lines.push('(none — the previous builder session made no captured reads)')
+    return lines
+  }
+  for (const entry of entries) {
+    if (entry.whole) lines.push('- ' + entry.path + ': whole file (range unknown)')
+    else {
+      const ranges = entry.ranges.map((pair) => pair[0] + '-' + (pair[1] === null ? 'end' : pair[1])).join(', ')
+      const extra = entry.rangesTotal > entry.ranges.length ? ' (showing ' + entry.ranges.length + ' of ' + entry.rangesTotal + ' ranges; ' + (entry.rangesTotal - entry.ranges.length) + ' more)' : ''
+      lines.push('- ' + entry.path + ': ' + ranges + extra)
+    }
+  }
+  if (readSet.totalPaths > entries.length) lines.push('Showing ' + entries.length + ' of ' + readSet.totalPaths + ' paths.')
+  if (readSet.droppedReads > 0) lines.push('Dropped ' + readSet.droppedReads + ' read(s) outside the checkout and task dir.')
+  return lines
 }

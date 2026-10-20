@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createReturnsSource } from '../visualizer/server/returns-source.mjs'
-import { treeDigest } from './helpers.mjs'
+import { scratchDir, treeDigest } from './helpers.mjs'
 
 test('returns source resolves archives, attempts, malformed envelopes, and never writes', () => {
   const root = mkdtempSync(join(tmpdir(), 'visualizer-returns-'))
@@ -59,4 +59,61 @@ test('returns source resolves archives, attempts, malformed envelopes, and never
     assert.equal(convention.verified, false)
     assert.equal(convention.envelopes.length, 1)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('returns source serves the latest run-start scoped directory with re-ask envelopes first', () => {
+  // Mutation killed: returnsDir = join(flatReturnsDir, latestRunId) -> returnsDir = flatReturnsDir (VF1),
+  // and reaskMatch -> null (VF3); either keeps the scoped d1 pair out of the listing.
+  const root = scratchDir('visualizer-returns-scoped-')
+  const dir = join(root, 'repo', 'task')
+  const envelope = (id, role, status) => JSON.stringify({ assignment_id: id, role, status, summary: id, artifacts: [], details: {} })
+  mkdirSync(join(dir, 'ledger'), { recursive: true })
+  writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }))
+  writeFileSync(join(dir, 'journal.jsonl'), [
+    JSON.stringify({ event: 'run-start', run_id: 'oldRun1' }),
+    JSON.stringify({ event: 'other' }),
+    '{torn',
+    JSON.stringify({ event: 'run-start', run_id: 'run-x' }),
+  ].join('\n') + '\n')
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  writeFileSync(join(dir, 'returns', 'd9.builder.json'), envelope('d9', 'builder', 'done'))
+  mkdirSync(join(dir, 'returns', 'oldRun1'), { recursive: true })
+  writeFileSync(join(dir, 'returns', 'oldRun1', 'd8.builder.json'), envelope('d8', 'builder', 'done'))
+  mkdirSync(join(dir, 'returns', 'run-x'), { recursive: true })
+  writeFileSync(join(dir, 'returns', 'run-x', 'd1.planner.json'), envelope('d1', 'planner', 'done'))
+  writeFileSync(join(dir, 'returns', 'run-x', 'd1.coverage-reask.planner.json'), envelope('d1', 'planner', 'blocked'))
+  writeFileSync(join(dir, 'returns', 'run-x', 'task.json'), JSON.stringify({ status: 'scoped-task' }))
+  const result = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+  assert.deepEqual(result.envelopes.map((entry) => [entry.dispatch_seq, entry.role, entry.coverage_reask, entry.status]), [[1, 'planner', null, 'done'], [1, 'planner', 'coverage-reask', 'blocked']])
+  assert.equal(result.task?.status, 'scoped-task')
+})
+
+test('returns source reads the flat directory without a run-start journal row', () => {
+  // Mutation killed: the VF2 adoption line falling back to flat when a run is named;
+  // these journals name no run, so flat is the measured answer in both cases.
+  for (const journal of [null, JSON.stringify({ event: 'assign', assign: 'd1' }) + '\n']) {
+    const root = scratchDir('visualizer-returns-flat-')
+    const dir = join(root, 'repo', 'task')
+    mkdirSync(join(dir, 'ledger'), { recursive: true })
+    writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }))
+    if (journal !== null) writeFileSync(join(dir, 'journal.jsonl'), journal)
+    mkdirSync(join(dir, 'returns'), { recursive: true })
+    writeFileSync(join(dir, 'returns', 'd3.reviewer.json'), JSON.stringify({ assignment_id: 'd3', role: 'reviewer', status: 'done', summary: 'd3', artifacts: [], details: {} }))
+    const result = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+    assert.deepEqual(result.envelopes.map((entry) => [entry.assignment_id, entry.status]), [['d3', 'done']])
+  }
+})
+
+test('returns source serves zero envelopes when the named run directory is absent', () => {
+  // Mutation killed: the VF2 adoption line falling back to the stale flat d9 envelope.
+  const root = scratchDir('visualizer-returns-missing-')
+  const dir = join(root, 'repo', 'task')
+  mkdirSync(join(dir, 'ledger'), { recursive: true })
+  writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }))
+  writeFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ event: 'run-start', run_id: 'run-y' }) + '\n')
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  writeFileSync(join(dir, 'returns', 'd9.builder.json'), JSON.stringify({ assignment_id: 'd9', role: 'builder', status: 'done', summary: 'd9', artifacts: [], details: {} }))
+  const result = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+  assert.deepEqual(result.envelopes.map((entry) => entry.assignment_id), [])
+  assert.equal(result.task, null)
 })

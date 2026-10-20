@@ -16,9 +16,9 @@
   let facts = $derived(entry ? envelopeFacts(entry) : [])
   let sections = $derived(entry ? envelopeSections(entry) : [])
 
-  function current(role, entries) { return entries.find((item) => item.dispatch_seq === selectedAttempt[role]) || entries.at(-1) }
+  function current(role, entries) { return entries.find((item) => item.file === selectedAttempt[role]) || entries.at(-1) }
   function chooseRole(role) { selectedRole = role; showDiff = false }
-  function chooseAttempt(role, dispatch) { selectedAttempt[role] = dispatch; showDiff = false }
+  function chooseAttempt(role, file) { selectedAttempt[role] = file; showDiff = false }
   function json(value) { return JSON.stringify(value, null, 2) }
   function label(value) { return String(value || 'unknown').replaceAll('_',' ').replaceAll('-',' ') }
   function display(value) { return typeof value === 'string' || typeof value === 'number' ? String(value) : JSON.stringify(value) }
@@ -47,7 +47,7 @@
         <article class="return-card" style={`--role-color:var(--role-${activeGroup.role})`}>
           <header class="return-head"><div><p class="micro">{label(activeGroup.role)} return</p><h3>{entry.assignment_id || `d${entry.dispatch_seq}`}</h3><p>Attempt {entry.attempt ?? entryIndex + 1} of {entry.attempts_total ?? activeGroup.entries.length}</p></div><span class={`return-status ${statusTone(entry.status)}`}>{entry.valid ? label(entry.status || 'status unknown') : 'Invalid return'}</span></header>
 
-          {#if activeGroup.entries.length > 1}<div class="attempts" aria-label="Return attempts">{#each activeGroup.entries as attempt (attempt.dispatch_seq)}<button class:active={entry === attempt} onclick={() => chooseAttempt(activeGroup.role, attempt.dispatch_seq)}>Attempt {attempt.attempt ?? activeGroup.entries.indexOf(attempt) + 1}<small>d{attempt.dispatch_seq}</small></button>{/each}</div>{/if}
+          {#if activeGroup.entries.length > 1}<div class="attempts" aria-label="Return attempts">{#each activeGroup.entries as attempt (attempt.file)}<button class:active={entry === attempt} onclick={() => chooseAttempt(activeGroup.role, attempt.file)}>Attempt {attempt.attempt ?? activeGroup.entries.indexOf(attempt) + 1}<small>d{attempt.dispatch_seq}</small></button>{/each}</div>{/if}
 
           {#if !entry.valid}<p class="error">This return could not be read — {entry.invalid_reason}</p>
           {:else}

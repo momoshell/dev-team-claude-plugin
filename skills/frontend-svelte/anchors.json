@@ -48,9 +48,9 @@
   "test/visualizer-panels.test.mjs:1502": "/duration<\\/th><th class=\"micro\">tokens<\\/th><th class=\"micro\">cost<\\/th><th class=\"micro\">heartbeat<\\/th>/",
   "test/visualizer-panels.test.mjs:1507": "/\\.status\\.ok,\\s*\\.status\\.serious\\s*\\{\\s*color:var\\(--status-ok\\)/",
   "test/visualizer-panels.test.mjs:1508": "/\\.status\\.serious\\s*\\{\\s*color:var\\(--status-escalated\\)/",
-  "test/visualizer-panels.test.mjs:1781": "source.includes('identityFor(lane)')",
-  "test/visualizer-panels.test.mjs:1788": "/#each markers as marker/",
-  "test/visualizer-panels.test.mjs:1854": "/class=\"bounce-layer\"/",
+  "test/visualizer-panels.test.mjs:1786": "source.includes('identityFor(lane)')",
+  "test/visualizer-panels.test.mjs:1793": "/#each markers as marker/",
+  "test/visualizer-panels.test.mjs:1859": "/class=\"bounce-layer\"/",
   "visualizer/web/src/lib/RunDetail.svelte:294": "4rem; display:grid; gap:1rem; }",
   "visualizer/web/src/lib/trace.js:542": "tone: gateTone(generation?.verdict),"
 }

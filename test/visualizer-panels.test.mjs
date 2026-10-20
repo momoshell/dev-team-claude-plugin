@@ -1719,7 +1719,12 @@ test('renderMarkdown returns typed safe blocks and keeps markup literal', () => 
 })
 
 test('phase artifacts keep return narratives separate and deduplicate file evidence', () => {
-  const panel = phasePanel({ phases:[{ id:1, name:'planning' }] }, { phase:'planning', returns:{ envelopes:[
+  const panel = phasePanel({ phases:[{ id:1, name:'planning' }] }, { phase:'planning', events:[
+    { type:'agent_start', phase_id:1, payload:{ dispatch_id:'d1', role:'planner' } },
+    { type:'agent_end', phase_id:1, payload:{ dispatch_id:'d1', role:'planner' } },
+    { type:'agent_start', phase_id:1, payload:{ dispatch_id:'d3', role:'lead' } },
+    { type:'agent_end', phase_id:1, payload:{ dispatch_id:'d3', role:'lead' } },
+  ], returns:{ envelopes:[
     { role:'planner', dispatch_seq:1, status:'done', summary:'BLOCKER: first return', artifacts:['task/plan.md'] },
     { role:'lead', dispatch_seq:3, status:'done', summary:'Escalate with context.', artifacts:['task/plan.md','returns/d3.json'] },
   ] } })
@@ -3980,4 +3985,99 @@ test('RV1-2 plan steps keep degradation reason slugs beside translated values', 
     "<span title={view.degraded.remaining_reason || undefined}>{view.degraded.remaining?.join(', ') ?? reasonText(view.degraded.remaining_reason)}</span>",
     '<span title={view.degraded.budget_reason || undefined}>{view.degraded.budget ?? reasonText(view.degraded.budget_reason)}</span>',
   ]) assert.ok(source.includes(span), span)
+})
+
+test('coverage-reask handoff joins each span to the envelope of its own kind', async () => {
+  // Mutation killed: the unmarked-pair refusal without the coverage_reask join (VF4).
+  const { buildTrajectory } = await import('../visualizer/web/src/lib/spans.js')
+  const envelopes = [
+    { assignment_id: 'd1', role: 'planner', valid: true, status: 'done', coverage_reask: null, details: {} },
+    { assignment_id: 'd1', role: 'planner', valid: true, status: 'insufficient', coverage_reask: 'coverage-reask', details: {} },
+  ]
+  const view = buildTrajectory([
+    { at: 1000, assign: 'd1', role: 'planner', brief: '/crew/task/planner-assignment-r1.md' },
+    { at: 2000, envelope: 'd1', role: 'planner', status: 'done' },
+    { at: 3000, assign: 'd1', role: 'planner', brief: '/crew/task/planner-coverage-reask-r1.md' },
+    { at: 4000, envelope: 'd1', role: 'planner', status: 'done' },
+  ])
+  assert.deepEqual(assignmentPath(view, envelopes).map((entry) => [entry.outcome, entry.tone]), [['done', 'ok'], ['insufficient', 'warn']])
+  const unmarked = buildTrajectory([
+    { at: 1000, assign: 'd1', role: 'planner' },
+    { at: 2000, envelope: 'd1', role: 'planner', status: 'done' },
+    { at: 3000, assign: 'd1', role: 'planner' },
+    { at: 4000, envelope: 'd1', role: 'planner', status: 'done' },
+  ])
+  assert.deepEqual(assignmentPath(unmarked, envelopes).map((entry) => entry.outcome), ['outcome not recorded', 'outcome not recorded'])
+})
+
+test('phase artifacts scope documents, paths and blocks to the phase dispatch set', () => {
+  // Mutation killed: documents: artifactDocuments(phaseEnvelopes) -> artifactDocuments(envelopeList) (VF5).
+  const run = { phases: [{ id: 1, name: 'plan' }, { id: 2, name: 'build' }, { id: 3, name: 'review' }] }
+  const events = [
+    { type: 'agent_start', phase_id: 1, payload: { dispatch_id: 'd1', role: 'planner' } },
+    { type: 'agent_end', phase_id: 1, payload: { dispatch_id: 'd1', role: 'planner' } },
+    { type: 'agent_start', phase_id: 2, payload: { dispatch_id: 'd4', role: 'builder' } },
+    { type: 'agent_end', phase_id: 2, payload: { dispatch_id: 'd4', role: 'builder' } },
+  ]
+  const returns = { envelopes: [
+    { role: 'planner', dispatch_seq: 1, status: 'done', summary: 'Plan narrative', artifacts: ['task/plan.md'], details: {} },
+    { role: 'builder', dispatch_seq: 4, status: 'done', summary: 'Build narrative', artifacts: ['src/build.mjs'], details: {} },
+  ] }
+  const panel = phasePanel(run, { phase: 'plan', events, returns })
+  assert.deepEqual(panel.artifacts.documents.map((document) => document.dispatch_seq), [1])
+  assert.deepEqual(panel.artifacts.paths.map((artifact) => artifact.path), ['task/plan.md'])
+  const blocks = JSON.stringify(panel.artifacts.blocks)
+  assert.ok(blocks.includes('Plan narrative'))
+  assert.equal(blocks.includes('Build narrative'), false)
+  const empty = phasePanel(run, { phase: 'review', events, returns })
+  assert.deepEqual(empty.artifacts.documents, [])
+  assert.deepEqual(empty.artifacts.paths, [])
+  assert.ok(empty.footer.some((entry) => entry.reason === 'no-envelope-narrative-in-phase'))
+})
+
+test('event story raw block renders under the approved Inspect label', () => {
+  // Mutation killed: <summary>Inspect</summary> -> <summary>Raw ledger event</summary> (VF6).
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/EventStory.svelte'), 'utf8')
+  assert.ok(source.includes('<details class="raw"><summary>Inspect</summary><pre>{story.raw}</pre></details>'))
+  assert.equal(source.includes('Raw ledger event'), false)
+})
+
+const sameDispatchReturns = [
+  { file: '/crew/returns/run-x/d1.planner.json', assignment_id: 'd1', dispatch_seq: 1, role: 'planner', coverage_reask: null, status: 'done', valid: true, summary: 'Plan narrative' },
+  { file: '/crew/returns/run-x/d1.coverage-reask.planner.json', assignment_id: 'd1', dispatch_seq: 1, role: 'planner', coverage_reask: 'coverage-reask', status: 'insufficient', valid: true, summary: 'Coverage narrative' },
+]
+
+test('RV1-1 same-dispatch returns remain independently selectable in Inspector', () => {
+  // Mutation killed: current() compares dispatch_seq instead of file.
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/EnvelopeInspector.svelte'), 'utf8')
+  const current = source.match(/  function current[^\n]+/)?.[0]
+  const chooseAttempt = source.match(/  function chooseAttempt[^\n]+/)?.[0]
+  const inspector = new Function('selectedAttempt', `let showDiff = false
+${current}
+${chooseAttempt}
+return { current, chooseAttempt }`)({})
+  const [{ role, entries }] = envelopeGroups(sameDispatchReturns)
+  assert.equal(inspector.current(role, entries).summary, 'Coverage narrative')
+  inspector.chooseAttempt(role, '/crew/returns/run-x/d1.planner.json')
+  assert.equal(inspector.current(role, entries).summary, 'Plan narrative')
+  inspector.chooseAttempt(role, '/crew/returns/run-x/d1.coverage-reask.planner.json')
+  assert.equal(inspector.current(role, entries).summary, 'Coverage narrative')
+  assert.match(source, /\{#each activeGroup\.entries as attempt \(attempt\.file\)\}/)
+  assert.match(source, /onclick=\{\(\) => chooseAttempt\(activeGroup\.role, attempt\.file\)\}/)
+})
+
+test('RV1-1 same-dispatch phase narratives retain independent disclosure identities', () => {
+  // Mutation killed: artifactDocuments() drops the envelope file from document IDs.
+  const panel = phasePanel({ phases: [{ id: 1, name: 'planning' }] }, {
+    phase: 'planning',
+    events: [
+      { type: 'agent_start', phase_id: 1, payload: { dispatch_id: 'd1', role: 'planner' } },
+      { type: 'agent_end', phase_id: 1, payload: { dispatch_id: 'd1', role: 'planner' } },
+    ],
+    returns: { envelopes: sameDispatchReturns },
+  })
+  assert.deepEqual(panel.artifacts.documents.map((document) => [document.id, document.status, document.blocks]), [
+    ['/crew/returns/run-x/d1.coverage-reask.planner.json', 'insufficient', renderMarkdown('Coverage narrative')],
+    ['/crew/returns/run-x/d1.planner.json', 'done', renderMarkdown('Plan narrative')],
+  ])
 })

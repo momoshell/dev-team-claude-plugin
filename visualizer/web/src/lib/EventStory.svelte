@@ -28,7 +28,7 @@
     <div class="meta"><span>Sequence {story.sequence ?? '—'}</span>{#if story.phase}<span>{story.phase}</span>{/if}{#if story.role}<span>{story.role}</span>{/if}{#if story.dispatch}<span class="mono">{story.dispatch}</span>{/if}{#if story.outcome}<span>{story.outcome}</span>{/if}</div>
     {#if story.detail}<div class="detail" class:collapsed={long && !expanded}>{#each paragraphs as paragraph}<p>{paragraph}</p>{/each}</div>{/if}
     {#if long}<button class="expand" type="button" onclick={() => expanded = !expanded}>{expanded ? 'Show less' : 'Read full explanation'}</button>{/if}
-    <details class="raw"><summary>Raw ledger event</summary><pre>{story.raw}</pre></details>
+    <details class="raw"><summary>Inspect</summary><pre>{story.raw}</pre></details>
   </div>
 </article>
 

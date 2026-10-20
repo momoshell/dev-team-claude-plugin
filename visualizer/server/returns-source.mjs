@@ -50,14 +50,29 @@ export function createReturnsSource({ crewRoot = join(homedir(), '.crew') } = {}
     if (!chosen) { chosen = candidates.at(-1); chosenVerified = false }
 
     const result = { ...empty, dir: chosen, verified: chosenVerified, envelopes: [], degraded: false, error: undefined }
-    const returnsDir = join(chosen, 'returns')
+    const flatReturnsDir = join(chosen, 'returns')
+    let returnsDir = flatReturnsDir
+    let latestRunId = null
+    try {
+      const text = readFileSync(join(chosen, 'journal.jsonl'), 'utf8')
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue
+        let row = null
+        try { row = JSON.parse(line) } catch { continue }
+        if (row?.event === 'run-start' && typeof row.run_id === 'string') latestRunId = row.run_id
+      }
+    } catch {}
+    if (latestRunId !== null && validSegment(latestRunId)) returnsDir = join(flatReturnsDir, latestRunId)
     let names = []
     try { names = readdirSync(returnsDir) } catch (err) { result.degraded = true; result.error = err.message; return result }
     const entries = []
     for (const name of names) {
       if (name === 'task.json') { result.task = readJson(join(returnsDir, name)); continue }
-      const match = name.match(/^d(\d+)\.([a-z][a-z0-9-]*)\.json$/)
+      const plainMatch = name.match(/^d(\d+)\.([a-z][a-z0-9-]*)\.json$/)
+      const reaskMatch = name.match(/^d(\d+)\.coverage-reask\.([a-z][a-z0-9-]*)\.json$/)
+      const match = reaskMatch ?? plainMatch
       if (!match) continue
+      const coverageReask = reaskMatch ? 'coverage-reask' : null
       const file = join(returnsDir, name)
       let bytes = null
       try { bytes = statSync(file).size } catch {}
@@ -73,10 +88,11 @@ export function createReturnsSource({ crewRoot = join(homedir(), '.crew') } = {}
         summary: valid ? (body.summary ?? null) : null,
         artifacts: valid ? (body.artifacts ?? null) : null,
         details: valid ? (body.details ?? null) : null,
+        coverage_reask: coverageReask,
         valid, invalid_reason,
       })
     }
-    entries.sort((a, b) => a.dispatch_seq - b.dispatch_seq)
+    entries.sort((a, b) => a.dispatch_seq - b.dispatch_seq || Number(a.coverage_reask != null) - Number(b.coverage_reask != null))
     const totals = new Map(), counts = new Map()
     for (const entry of entries) counts.set(entry.role, (counts.get(entry.role) || 0) + 1)
     for (const entry of entries) { totals.set(entry.role, (totals.get(entry.role) || 0) + 1); entry.attempt = totals.get(entry.role); entry.attempts_total = counts.get(entry.role) }

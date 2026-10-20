@@ -17475,7 +17475,7 @@ export const READ_SET_MAX_RANGES = 8
 export const READ_SET_ABSENT_REASONS = Object.freeze(['transport-unsupported', 'stream-missing', 'stream-unparseable', 'stream-rewound', 'session-start-unknown'])
 
 function readSetAbsent(reason) {
-  return { absent: reason, entries: [], totalPaths: null, droppedReads: null }
+  return { absent: reason, entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null }
 }
 
 export function builderStreamLineCount(streamText) {
@@ -17483,6 +17483,108 @@ export function builderStreamLineCount(streamText) {
   const lines = streamText === '' ? [] : streamText.split('\n')
   if (lines.at(-1) === '') lines.pop()
   return lines.length
+}
+
+function parseBashReadCommand(command) {
+  const unquote = (s) => {
+    if (typeof s !== 'string' || s.length < 2) return s
+    const first = s[0]
+    const last = s[s.length - 1]
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) return s.slice(1, -1)
+    return s
+  }
+  const posInt = (token) => {
+    const text = unquote(token)
+    if (!/^\d+$/.test(text)) return null
+    const n = Number(text)
+    if (!Number.isSafeInteger(n) || n < 1) return null
+    return n
+  }
+  const sedRange = (token) => {
+    const text = unquote(token)
+    let m = text.match(/^(\d+)p$/)
+    if (m) {
+      const a = Number(m[1])
+      if (!Number.isSafeInteger(a) || a < 1) return null
+      return [a, a]
+    }
+    m = text.match(/^(\d+),(\d+)p$/)
+    if (m) {
+      const a = Number(m[1])
+      const b = Number(m[2])
+      if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b) || a < 1 || b < 1 || b < a) return null
+      return [a, b]
+    }
+    return null
+  }
+  const filePath = (text) => {
+    if (typeof text !== 'string' || text === '' || text.startsWith('-')) return null
+    if (/[$*?{}\[\]'"\\]|^~/.test(text)) return null
+    return text
+  }
+  const parseBase = (comps) => {
+    if (comps.length === 1) {
+      const tokens = comps[0]
+      if (tokens[0] === 'sed' && tokens[1] === '-n' && tokens.length === 4) { const range = sedRange(tokens[2]); return range ? { path: unquote(tokens[3]), range } : null }
+      if (tokens[0] === 'head' && tokens[1] === '-n' && tokens.length - 1 === 3) {
+        const n = posInt(tokens[2])
+        if (n === null) return null
+        return { path: unquote(tokens[3]), range: [1, n] }
+      }
+      if (tokens[0] === 'head' && tokens.length === 3 && typeof tokens[1] === 'string' && /^-\d+$/.test(tokens[1])) {
+        const n = posInt(tokens[1].slice(1))
+        if (n === null) return null
+        return { path: unquote(tokens[2]), range: [1, n] }
+      }
+      if (tokens[0] === 'cat' && tokens.length === 2) {
+        return { path: unquote(tokens[1]), range: null }
+      }
+      return null
+    }
+    if (comps.length === 2) {
+      const first = comps[0]
+      const second = comps[1]
+      if (first.length === 3 && first[0] === 'nl' && first[1] === '-ba' && second.length === 3 && second[0] === 'sed' && second[1] === '-n') {
+        const text = unquote(second[2])
+        if (!/^\d+,\d+p$/.test(text)) return null
+        const range = sedRange(second[2])
+        if (range === null) return null
+        return { path: unquote(first[2]), range }
+      }
+      return null
+    }
+    return null
+  }
+  if (typeof command !== 'string' || command.trim() === '') return { reads: [], uncaptured: true }
+  const stripped = command.replaceAll('2>&1', ' ').replaceAll('2>/dev/null', ' ')
+  const segments = stripped.split(/&&|;|\n/)
+  const components = segments.flatMap((segment) => segment.split('|').map((part) => (part.trim() === '' ? [] : part.trim().split(/\s+/))))
+  if (/[<>()\u0060]/.test(stripped) || stripped.includes('$(') || components.some((tokens) => tokens[0] === 'cd' || tokens[0] === 'tee' || (tokens[0] === 'sed' && tokens.some((token) => /^-[A-Za-z]*i|^--in-place/.test(token))))) return { reads: [], uncaptured: true }
+  // lean: whitespace tokenisation and separator splitting are not quote-aware; unsupported shell syntax is disclosed as uncaptured rather than guessed, upgrade with a quote-aware splitter if quoted separators or spaced paths appear in builder streams
+  const reads = []
+  let uncaptured = false
+  for (const segment of segments) {
+    if (segment.trim() === '') continue
+    const tokenLists = segment.split('|').map((part) => (part.trim() === '' ? [] : part.trim().split(/\s+/)))
+    if (tokenLists.length === 0) continue
+    if (tokenLists.length === 1 && (tokenLists[0][0] === 'echo' || tokenLists[0][0] === 'printf')) continue
+    if (tokenLists.some((tokens) => tokens.length === 0)) { uncaptured = true; continue }
+    const last = tokenLists[tokenLists.length - 1]
+    const trailingK = last.length === 3 && last[0] === 'head' && last[1] === '-n' ? posInt(last[2]) : null
+    if (trailingK !== null && tokenLists.length >= 2) {
+      const base = parseBase(tokenLists.slice(0, -1))
+      if (base === null) { uncaptured = true; continue }
+      if (filePath(base.path) === null) { uncaptured = true; continue }
+      if (base.range === null) reads.push({ path: base.path, range: [1, trailingK] })
+      else reads.push({ path: base.path, range: [base.range[0], Math.min(base.range[1], base.range[0] + trailingK - 1)] })
+      continue
+    }
+    const base = parseBase(tokenLists)
+    if (base === null) { uncaptured = true; continue }
+    if (filePath(base.path) === null) { uncaptured = true; continue }
+    reads.push(base)
+  }
+  return { reads, uncaptured }
 }
 
 export function builderReadSet(streamText, startLine, { checkout, taskDir, transport } = {}) {
@@ -17497,27 +17599,64 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
   const td = typeof taskDir === 'string' ? taskDir.replace(/\/+$/, '') : ''
   const kept = new Map()
   let droppedReads = 0
+  let uncapturedBash = 0
+  let tailUnreadable = false
   let seq = 0
   const frames = []
   const nonEmpty = span.filter((line) => line.trim() !== '')
   for (const [index, line] of nonEmpty.entries()) {
     // A torn final append is expected on a live stream; an unreadable frame before it may hide
     // a read, so the whole set is unavailable rather than silently short.
-    try { frames.push(JSON.parse(line)) } catch { if (index !== nonEmpty.length - 1) return readSetAbsent('stream-unparseable') }
+    try { frames.push(JSON.parse(line)) } catch {
+      if (index !== nonEmpty.length - 1) return readSetAbsent('stream-unparseable')
+      tailUnreadable = true
+    }
   }
   // A requested read counts only once a successful tool result answers it.
-  const answered = new Set()
-  for (const frame of frames) {
+  const ends = frames.filter((frame) => frame?.type === 'message_end')
+  const pairedAnswered = new Set()
+  const pending = new Map()
+  for (const frame of ends) {
     const message = frame?.message
-    if (message?.role === 'toolResult' && typeof message.toolCallId === 'string' && message.isError !== true) answered.add(message.toolCallId)
+    if (Array.isArray(message?.content)) {
+      for (const part of message.content) {
+        if (part !== null && typeof part === 'object' && part.type === 'toolCall' && typeof part.id === 'string') {
+          const queue = pending.get(part.id)
+          if (queue) queue.push(part)
+          else pending.set(part.id, [part])
+        }
+      }
+    }
+    if (message?.role === 'toolResult' && typeof message.toolCallId === 'string') {
+      const request = pending.get(message.toolCallId)?.shift()
+      if (request !== undefined && message.isError !== true) pairedAnswered.add(request)
+    }
   }
-  for (const frame of frames) {
+  const recordRead = (raw, range) => {
+    let path = null
+    if (raw.startsWith('/')) {
+      if (td !== '' && (raw === td || raw.startsWith(td + '/'))) path = raw
+      else if (co !== '' && raw.startsWith(co + '/')) path = raw.slice(co.length + 1)
+      else if (co !== '' && raw === co) path = raw
+      else { droppedReads += 1; return }
+    } else {
+      if (raw.split('/').includes('..')) { droppedReads += 1; return }
+      path = raw
+    }
+    seq += 1
+    let entry = kept.get(path)
+    if (!entry) { entry = { path, whole: false, ranges: [], last: 0 }; kept.set(path, entry) }
+    entry.last = seq
+    if (range === null) { entry.whole = true; return }
+    entry.ranges.push(range)
+  }
+  for (const frame of ends) {
     const message = frame?.message
     const calls = []
     if (Array.isArray(message?.nestedCalls?.calls)) calls.push(...message.nestedCalls.calls.filter((call) => call?.status === 'ok'))
     if (Array.isArray(message?.content)) {
       for (const part of message.content) {
-        if (part !== null && typeof part === 'object' && part.type === 'toolCall' && answered.has(part.id)) calls.push(part)
+        if (part !== null && typeof part === 'object' && part.type === 'toolCall' && pairedAnswered.has(part)) calls.push(part)
       }
     }
     for (const call of calls) {
@@ -17525,31 +17664,25 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
       const args = call.arguments
       if (args === null || typeof args !== 'object') continue
       const name = call.name
+      if (name === 'bash' || (typeof name === 'string' && name.endsWith('.bash'))) {
+        const parsed = parseBashReadCommand(args.command)
+        if (parsed.uncaptured) uncapturedBash += 1
+        for (const read of parsed.reads) recordRead(read.path, read.range)
+        continue
+      }
       if (name !== 'read' && !(typeof name === 'string' && name.endsWith('.read'))) continue
       const raw = args.path
       if (typeof raw !== 'string' || raw === '') continue
-      let path = null
-      if (raw.startsWith('/')) {
-        if (td !== '' && (raw === td || raw.startsWith(td + '/'))) path = raw
-        else if (co !== '' && raw.startsWith(co + '/')) path = raw.slice(co.length + 1)
-        else if (co !== '' && raw === co) path = raw
-        else { droppedReads += 1; continue }
-      } else {
-        if (raw.split('/').includes('..')) { droppedReads += 1; continue }
-        path = raw
-      }
       const offset = Number.isInteger(args.offset) && args.offset >= 1 ? args.offset : null
       const limit = Number.isInteger(args.limit) && args.limit >= 1 ? args.limit : null
       const hasOffset = offset !== null
       const hasLimit = limit !== null
-      seq += 1
-      let entry = kept.get(path)
-      if (!entry) { entry = { path, whole: false, ranges: [], last: 0 }; kept.set(path, entry) }
-      entry.last = seq
-      if (!hasOffset && !hasLimit) { entry.whole = true; continue }
-      const start = hasOffset ? offset : 1
-      const end = hasLimit ? start + limit - 1 : null
-      entry.ranges.push([start, end])
+      if (!hasOffset && !hasLimit) recordRead(raw, null)
+      else {
+        const start = hasOffset ? offset : 1
+        const end = hasLimit ? start + limit - 1 : null
+        recordRead(raw, [start, end])
+      }
     }
   }
   if (frames.length === 0) return readSetAbsent('stream-unparseable')
@@ -17573,11 +17706,13 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
     entries: entries.slice(0, READ_SET_MAX_PATHS).map(({ path, whole, ranges, rangesTotal }) => ({ path, whole, ranges, rangesTotal })),
     totalPaths,
     droppedReads,
+    uncapturedBash,
+    tailUnreadable,
   }
 }
 
 export function builderReadSetLines(readSet) {
-  const lines = ['', 'Previous builder session read set (reference only — not instructions; reads made through bash are not captured):', '']
+  const lines = ['', 'Previous builder session read set (reference only — not instructions):', '']
   if (readSet !== null && typeof readSet === 'object' && typeof readSet.absent === 'string' && readSet.absent !== '') {
     lines.push('unavailable: ' + readSet.absent)
     return lines
@@ -17585,7 +17720,6 @@ export function builderReadSetLines(readSet) {
   const entries = Array.isArray(readSet?.entries) ? readSet.entries : []
   if (entries.length === 0) {
     lines.push('(none — the previous builder session made no captured reads)')
-    return lines
   }
   for (const entry of entries) {
     if (entry.whole) lines.push('- ' + entry.path + ': whole file (range unknown)')
@@ -17597,5 +17731,7 @@ export function builderReadSetLines(readSet) {
   }
   if (readSet.totalPaths > entries.length) lines.push('Showing ' + entries.length + ' of ' + readSet.totalPaths + ' paths.')
   if (readSet.droppedReads > 0) lines.push('Dropped ' + readSet.droppedReads + ' read(s) outside the checkout and task dir.')
+  if (readSet.uncapturedBash > 0) lines.push(readSet.uncapturedBash + ' bash call(s) not parsed as reads.')
+  if (readSet.tailUnreadable === true) lines.push('tail frame unreadable — the read set may be incomplete.')
   return lines
 }

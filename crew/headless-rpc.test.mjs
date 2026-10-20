@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
   briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, TRANSPORT_SETTLEMENT, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
-  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, readRecordedSeatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
   persistedLaunchRecord, PERSISTED_ENV_KEYS, PERSISTED_ENV_WITHHELD_REASON,
 } from './headless-rpc.mjs'
 import { acpClient } from './acp-client.mjs'
@@ -4825,4 +4825,199 @@ test('RS rpc spawn withholds inherited pi seat keys unless the seat env grants t
   } finally {
     for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
   }
+})
+
+test('RR2 fresh spawn records the opened FIFO path', () => {
+  const f = fixture({})
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const record = join(f.paths.taskDir, 'headless-rpc', 'builder', 'fifo-path')
+    const expected = seatCommandPath(f.dir, 'builder', SEAT_COMMAND_ROOT)
+    assert.equal(readFileSync(record, 'utf8').trim(), expected)
+  } finally { f.cleanup() }
+})
+
+test('RR3 re-attach opens the recorded FIFO when roots differ', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const expected = seatCommandPath(first.dir, 'builder', SEAT_COMMAND_ROOT)
+    const otherRoot = scratchDir('headless-rpc-runtime-other-')
+    try {
+      const opened = []
+      const second = fixture({ dir: first.dir, pid: 800, spawnPid: 801, seatCommandRoot: otherRoot, openSync: (path) => { opened.push(path); return 10 } })
+      try {
+        second.io.assign({ role: 'builder', briefFile: '/brief.md' })
+        assert.deepEqual(opened, [expected])
+      } finally { second.cleanup() }
+    } finally { rmSync(otherRoot, { recursive: true, force: true }) }
+  } finally { first.cleanup() }
+})
+
+// MUTATION RV1-1: prepare and validate the caller root even when a recorded FIFO is selected.
+test('RV1-1 cross-root adoption ignores unused root privacy and creates no runtime directories', () => {
+  for (const mode of [0o755, 0o700]) {
+    const roots = scratchDir('headless-rpc-adopt-roots-')
+    const rootA = join(roots, 'a'), rootB = join(roots, 'b')
+    const first = fixture({ seatCommandRoot: rootA, existsSync, kill: () => {} })
+    try {
+      first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const fifoA = seatCommandPath(first.dir, 'builder', rootA)
+      execFileSync('mkfifo', [fifoA])
+      mkdirSync(join(rootB, 'crew-rpc'), { recursive: true })
+      chmodSync(join(rootB, 'crew-rpc'), mode)
+      const fifoB = seatCommandPath(first.dir, 'builder', rootB)
+      const opened = []
+      const adopted = fixture({ dir: first.dir, pid: 800, seatCommandRoot: rootB, existsSync, openSync: (path) => { opened.push(path); return 10 } })
+      try {
+        adopted.io.assign({ role: 'builder', briefFile: '/brief.md' })
+        assert.deepEqual(opened, [fifoA])
+        assert.deepEqual(adopted.commands, [])
+        assert.equal(existsSync(dirname(fifoB)), false)
+        assert.equal(existsSync(dirname(dirname(fifoB))), false)
+        assert.deepEqual(adopted.io.teardown().map((row) => row.outcome), ['proven'])
+        assert.equal(existsSync(fifoA), false)
+        assert.equal(existsSync(dirname(fifoB)), false)
+        assert.equal(existsSync(dirname(dirname(fifoB))), false)
+      } finally { adopted.cleanup() }
+    } finally { first.cleanup(); rmSync(roots, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION RV1-2: omit unlinkSeatFifos after the predecessor's exit proof, losing its cleanup locator.
+test('RV1-2 cross-root replacement cleans both exited predecessor and replacement runtime paths', () => {
+  const roots = scratchDir('headless-rpc-restart-roots-')
+  const rootA = join(roots, 'a'), rootB = join(roots, 'b')
+  const first = fixture({ seatCommandRoot: rootA, existsSync, kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const fifoA = seatCommandPath(first.dir, 'builder', rootA)
+    execFileSync('mkfifo', [fifoA])
+    const seatDir = join(first.paths.taskDir, 'headless-rpc', 'builder')
+    writeFileSync(join(seatDir, 'exit'), '0')
+    const opened = []
+    const replacement = fixture({ dir: first.dir, pid: 800, spawnPid: 801, seatCommandRoot: rootB, existsSync, openSync: (path) => { opened.push(path); return 10 } })
+    try {
+      replacement.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const fifoB = seatCommandPath(first.dir, 'builder', rootB)
+      execFileSync('mkfifo', [fifoB])
+      assert.deepEqual(opened, [fifoB])
+      assert.deepEqual(replacement.commands, [{ kind: 'spawn' }])
+      assert.equal(readFileSync(join(seatDir, 'fifo-path'), 'utf8').trim(), fifoB)
+      assert.equal(existsSync(fifoA), false)
+      writeFileSync(join(seatDir, 'exit'), '0')
+      assert.deepEqual(replacement.io.teardown().map((row) => row.outcome), ['proven'])
+      for (const fifo of [fifoA, fifoB]) {
+        assert.equal(existsSync(fifo), false)
+        assert.equal(existsSync(dirname(fifo)), false)
+        assert.equal(existsSync(dirname(dirname(fifo))), false)
+      }
+    } finally { replacement.cleanup() }
+  } finally { first.cleanup(); rmSync(roots, { recursive: true, force: true }) }
+})
+
+// MUTATION RV1-2: ignore bound DEAD evidence when the predecessor has no exit marker.
+test('RV1-2 cross-root replacement cleans a bound dead predecessor without an exit marker', () => {
+  const roots = scratchDir('headless-rpc-dead-restart-roots-')
+  const rootA = join(roots, 'a'), rootB = join(roots, 'b')
+  const first = fixture({ seatCommandRoot: rootA, existsSync, kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const fifoA = seatCommandPath(first.dir, 'builder', rootA)
+    execFileSync('mkfifo', [fifoA])
+    const seatDir = join(first.paths.taskDir, 'headless-rpc', 'builder')
+    writeFileSync(join(seatDir, 'pgid'), '701')
+    assert.equal(existsSync(join(seatDir, 'exit')), false)
+    const opened = []
+    const replacement = fixture({
+      dir: first.dir, pid: 800, spawnPid: 801, seatCommandRoot: rootB, existsSync,
+      openSync: (path) => { opened.push(path); return 10 },
+      kill: (pid, signal) => {
+        if (signal === 0 && (pid === 700 || pid === -701)) {
+          const error = new Error('predecessor is gone'); error.code = 'ESRCH'; throw error
+        }
+      },
+    })
+    try {
+      replacement.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const fifoB = seatCommandPath(first.dir, 'builder', rootB)
+      execFileSync('mkfifo', [fifoB])
+      assert.equal(replacement.signals.some(([pid, signal]) => pid === 700 && signal === 0), true)
+      assert.equal(replacement.signals.some(([pid, signal]) => pid === -701 && signal === 0), true)
+      assert.deepEqual(opened, [fifoB])
+      assert.deepEqual(replacement.commands, [{ kind: 'spawn' }])
+      assert.equal(readFileSync(join(seatDir, 'fifo-path'), 'utf8').trim(), fifoB)
+      for (const path of [fifoA, dirname(fifoA), dirname(dirname(fifoA))]) assert.equal(existsSync(path), false)
+      writeFileSync(join(seatDir, 'exit'), '0')
+      assert.deepEqual(replacement.io.teardown().map((row) => row.outcome), ['proven'])
+      for (const path of [fifoB, dirname(fifoB), dirname(dirname(fifoB))]) assert.equal(existsSync(path), false)
+    } finally { replacement.cleanup() }
+  } finally { first.cleanup(); rmSync(roots, { recursive: true, force: true }) }
+})
+
+// MUTATION RV1-2: treat a non-DEAD or missing pgid probe as predecessor death.
+test('RV1-2 cross-root recovery retains unproven predecessor runtime paths', () => {
+  for (const probe of ['EPERM', 'EAGAIN', 'EINTR', 'empty']) {
+    const roots = scratchDir('headless-rpc-unproven-restart-roots-')
+    const rootA = join(roots, 'a'), rootB = join(roots, 'b')
+    const first = fixture({ seatCommandRoot: rootA, existsSync, kill: () => {} })
+    try {
+      first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const fifoA = seatCommandPath(first.dir, 'builder', rootA)
+      execFileSync('mkfifo', [fifoA])
+      const seatDir = join(first.paths.taskDir, 'headless-rpc', 'builder')
+      writeFileSync(join(seatDir, 'pgid'), probe === 'empty' ? '' : '701')
+      const replacement = fixture({
+        dir: first.dir, pid: 800, seatCommandRoot: rootB, existsSync,
+        kill: (pid, signal) => {
+          if (signal !== 0) return
+          if (pid === 700 || pid === -701) {
+            const error = new Error('predecessor probe'); error.code = pid === 700 ? 'ESRCH' : probe; throw error
+          }
+        },
+      })
+      try {
+        if (probe === 'EPERM') replacement.io.assign({ role: 'builder', briefFile: '/brief.md' })
+        else assert.throws(() => replacement.io.assign({ role: 'builder', briefFile: '/brief.md' }), (err) => err.stage === 'rpc-unresolvable-reservation')
+        assert.deepEqual(replacement.commands, [])
+        assert.equal(readFileSync(join(seatDir, 'fifo-path'), 'utf8').trim(), fifoA)
+        for (const path of [fifoA, dirname(fifoA), dirname(dirname(fifoA))]) assert.equal(existsSync(path), true)
+      } finally { replacement.cleanup() }
+    } finally { first.cleanup(); rmSync(roots, { recursive: true, force: true }) }
+  }
+})
+
+test('RR5 seat command helpers refuse a missing root', () => {
+  assert.throws(() => seatCommandPath('/tmp/gate-lane', 'builder'), (err) => err instanceof TypeError && err.message === 'seat command root is required')
+  assert.throws(() => seatCommandRootPrivate(), (err) => err instanceof TypeError && err.message === 'seat command root is required')
+})
+
+// MUTATION RR7: accept any recorded path and teardown unlinks an unrelated file the record names.
+test('RR7 a recorded fifo-path that is not this seat runtime FIFO is ignored', () => {
+  const root = scratchDir('headless-rpc-record-shape-')
+  const seat = join(root, 'task', 'headless-rpc', 'builder')
+  mkdirSync(seat, { recursive: true })
+  const deps = { existsSync, readFileSync }
+  const notes = join(root, 'operator-notes.txt')
+  writeFileSync(notes, 'keep me')
+  for (const recorded of [notes, '/x/crew-rpc/k/reviewer/cmd.fifo', '/x/crew-rpc/k/../builder/cmd.fifo', 'x/crew-rpc/k/builder/cmd.fifo']) {
+    writeFileSync(join(seat, 'fifo-path'), recorded)
+    assert.equal(readRecordedSeatCommandPath(seat, deps), null, recorded)
+  }
+  writeFileSync(join(seat, 'fifo-path'), '/x/crew-rpc/k/builder/cmd.fifo')
+  assert.equal(readRecordedSeatCommandPath(seat, deps), '/x/crew-rpc/k/builder/cmd.fifo')
+  assert.equal(readFileSync(notes, 'utf8'), 'keep me')
+  rmSync(root, { recursive: true, force: true })
+})
+
+// MUTATION RR8: build the runtime FIFO path with join instead of resolve and a relative root records a path the reader rejects.
+test('RR8 a relative command root still yields an absolute FIFO path the record reader accepts', () => {
+  const p = seatCommandPath('/lanes/b1-x', 'builder', 'runtime')
+  assert.equal(p.startsWith('/'), true)
+  const root = scratchDir('headless-rpc-relative-root-')
+  const seat = join(root, 'builder')
+  mkdirSync(seat, { recursive: true })
+  writeFileSync(join(seat, 'fifo-path'), p)
+  assert.equal(readRecordedSeatCommandPath(seat, { existsSync, readFileSync }), p)
+  rmSync(root, { recursive: true, force: true })
 })

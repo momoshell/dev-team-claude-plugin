@@ -998,3 +998,58 @@ test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants
     for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value }
   }
 })
+
+test('RR1 refused close leaves runtime dirs', () => {
+  const root = scratchDir('acp-rr1-refused-')
+  const acpRoot = join(root, 'acp')
+  const runtimeRoot = join(root, 'seat-runtime')
+  let clock = 0
+  const deps = {
+    pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
+    writeSync: () => {}, closeSync: () => {}, kill: () => true,
+    spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+    now: () => clock++, sleep: () => {}, log: () => {}, seatCommandRoot: runtimeRoot,
+  }
+  const first = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps })
+  const second = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...deps, pid: 902 } })
+  try {
+    first.start()
+    const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
+    const roleDir = dirname(paths.fifo)
+    const keyDir = dirname(roleDir)
+    let busy = null
+    try { second.start() } catch (err) { busy = err }
+    assert.equal(busy?.reason, 'acp-session-busy')
+    second.close()
+    assert.equal(existsSync(roleDir), true)
+    assert.equal(existsSync(keyDir), true)
+    writeFileSync(paths.exit, '0')
+    assert.equal(first.close().outcome, 'proven')
+    assert.equal(existsSync(roleDir), false)
+    assert.equal(existsSync(keyDir), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RR1 unproven owner close leaves runtime dirs', () => {
+  const root = scratchDir('acp-rr1-unproven-')
+  const acpRoot = join(root, 'acp')
+  const runtimeRoot = join(root, 'seat-runtime')
+  let clock = 0
+  const deps = {
+    pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
+    writeSync: () => {}, closeSync: () => {}, kill: () => true,
+    spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+    now: () => clock++, sleep: () => {}, log: () => {}, seatCommandRoot: runtimeRoot,
+  }
+  const owner = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps })
+  try {
+    owner.start()
+    const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
+    const roleDir = dirname(paths.fifo)
+    const keyDir = dirname(roleDir)
+    const result = owner.close()
+    assert.equal(result.outcome, 'unproven')
+    assert.equal(existsSync(roleDir), true)
+    assert.equal(existsSync(keyDir), true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

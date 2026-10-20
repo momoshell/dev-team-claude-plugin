@@ -433,8 +433,8 @@ test('G1', () => {
   assert.equal(hoverRes.paper, '5.65')
   assert.equal(hoverRes.ink, '6.95')
   const rows = registerRows()
-  assert.equal(rows.length, 25)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
+  assert.equal(rows.length, 24)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
   for (const file of libFiles()) {
     const expected = extractHoverRules(styleTextOf(file))
     for (const rule of expected) {
@@ -587,8 +587,8 @@ test('pin-sweep D1', () => {
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.
 test('K1', () => {
   const { rows, measured } = assertHoverDenominators()
-  assert.equal(rows.length, 25)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
+  assert.equal(rows.length, 24)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
   assert.equal(measured, 3)
 })
 

@@ -77,7 +77,7 @@
   $effect(() => {
     const target = { repo_slug:run.repo_slug || '', task_slug:run.goal || '', adw_id:run.adw_id || '' }
     if (!target.adw_id || target.adw_id === detailKey) return
-    detailKey = target.adw_id
+    detailKey = target.adw_id; returns = { envelopes: [], task: null }
     void load(target)
   })
   $effect(() => {
@@ -283,7 +283,7 @@
   <section class="diagnostics">
     <div class="diagnostics-heading"><p class="micro">Deep inspection</p><h2>Evidence & diagnostics</h2><p>The primary execution story is above. Open these only when you need the underlying envelopes, agent trace, or raw events.</p></div>
     <details><summary><span><strong>Agent returns & outcome</strong><small>What each seat handed back, the review evidence, and final acceptance</small></span><b>Open</b></summary><div class="detail-stack"><EnvelopeInspector {run} {returns} /><ReviewPanel {run} {returns} /><AcceptPanel {run} {returns} /></div></details>
-    <details><summary><span><strong>Agent trajectory</strong><small>How work moved between seats, how long each handoff took, and where retries occurred</small></span><b>Open</b></summary><div class="detail-stack"><Trajectory {run} {journalState} /></div></details>
+    <details><summary><span><strong>Agent trajectory</strong><small>How work moved between seats, how long each handoff took, and where retries occurred</small></span><b>Open</b></summary><div class="detail-stack"><Trajectory {run} {journalState} {returns} /></div></details>
     <details><summary><span><strong>Event stream</strong><small>An ordered, filterable account of turns, decisions, and workflow signals</small></span><b>Open</b></summary><div class="detail-stack"><EventStream {run} {events} phaseFilter={selectedPhase} onrefresh={load} /></div></details>
   </section>
 </main>

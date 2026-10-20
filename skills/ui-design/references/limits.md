@@ -23,7 +23,7 @@ Neither the status contrast problem nor the lane-block contrast problem is fixed
 
 ## Hover contrast — per-rule register
 
-Each of the 25 `:hover` rule blocks below is classified independently from source alone: one record per hover CSS block, not one verdict per component, so a mixed component keeps every computable rule. A value is `literal` when it contains a hex, a CSS named colour (including `white`/`black`), or `rgb(`/`rgba(`/`hsl(` — even beside `var()`; it is `token` when it contains `var()`/`color-mix()` and no literal; it is `none` when the rule declares no color-affecting declaration. Only source-declared foregrounds and each state's own background are resolved: the rest ratio is computed against the rest background, never the hover background, and when a hover rule declares no background its ground is the rest rule's background on the same element. A transparent, inherited, missing, or otherwise unresolvable ground is recorded as `Unmeasured — <closed reason>` rather than borrowed. Ratios are WCAG relative-luminance contrasts of the state foreground against the state ground, paper first then ink, shown as rest → hover. The RosterPanel `.scope button` rest rule declares `background:transparent`, so its rest ratio is unmeasured because the rest ground is transparent (see `RosterPanel.svelte:725`).
+Each of the 24 `:hover` rule blocks below is classified independently from source alone: one record per hover CSS block, not one verdict per component, so a mixed component keeps every computable rule. A value is `literal` when it contains a hex, a CSS named colour (including `white`/`black`), or `rgb(`/`rgba(`/`hsl(` — even beside `var()`; it is `token` when it contains `var()`/`color-mix()` and no literal; it is `none` when the rule declares no color-affecting declaration. Only source-declared foregrounds and each state's own background are resolved: the rest ratio is computed against the rest background, never the hover background, and when a hover rule declares no background its ground is the rest rule's background on the same element. A transparent, inherited, missing, or otherwise unresolvable ground is recorded as `Unmeasured — <closed reason>` rather than borrowed. Ratios are WCAG relative-luminance contrasts of the state foreground against the state ground, paper first then ink, shown as rest → hover. The RosterPanel `.scope button` rest rule declares `background:transparent`, so its rest ratio is unmeasured because the rest ground is transparent (see `RosterPanel.svelte:725`).
 
 ### `Dropdown.svelte` — 2 rules
 
@@ -98,19 +98,13 @@ Each of the 25 `:hover` rule blocks below is classified independently from sourc
 | `TaskList.svelte` | `tbody tr:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
 | `TaskList.svelte` | `tr:hover .open` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
 
-### `Trajectory.svelte` — 1 rule
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `Trajectory.svelte` | `.activity > button:hover` | `background: color-mix(in srgb,var(--activity-color) 5%,transparent)` | token | `transparent` | `color-mix(in srgb,var(--activity-color) 5%,transparent)` | Unmeasured — rest ground is transparent |
-
 ### `WorkflowGraph.svelte` — 1 rule
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
 | `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.56; ink 6.01 → 6.01 |
 
-25 rules in 12/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+24 rules in 11/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 

@@ -8,7 +8,7 @@ import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js
 import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
-import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
+import { STORY_KINDS, assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, journalLines, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 import { VARIANTS } from '../crew/variants.mjs'
 import { TASK_PROFILES } from '../crew/task-profiles.mjs'
@@ -1689,7 +1689,7 @@ test('trajectory stories separate handoffs from factory stages and explain journ
     { family:'assignment', id:'d2', role:'builder', status:null, started_at:80, ended_at:null, markers:[{ event:'seat-retrying' }] },
   ] }
   assert.deepEqual(trajectorySummary(view), { handoffs:2, completed:1, inFlight:1, seatIncidents:1, substrateOutages:0, driverStages:1 })
-  assert.deepEqual(assignmentPath(view).map((item) => [item.dispatch,item.role,item.outcome]), [['d1','planner','done'],['d2','builder','in flight']])
+  assert.deepEqual(assignmentPath(view).map((item) => [item.dispatch,item.role,item.outcome]), [['d1','planner','outcome not recorded'],['d2','builder','in flight']])
   assert.equal(trajectoryRowStory({ event:'row', row:{ assign:'d2', role:'builder', brief:'/tmp/plan.md' } }).title, 'Builder received d2')
   assert.equal(trajectoryRowStory({ event:'row', row:{ review_outcome:{ verdict:'pass', findings:[], must_fix:0 } } }).title, 'Review pass')
 })
@@ -3564,6 +3564,216 @@ test('VL8 partly measured teardown window is not clean and states runs measured'
  const okPosture = operationsPosture({ runSummary: run, teardownSummary: full, healthSummary: health, brake: { state: 'clear' }, errors: [] })
  assert.equal(okPosture.tone, 'ok')
  assert.equal(okPosture.label, 'Factory is operating cleanly')
+})
+
+test('JR1 story kinds list journal filtering and counting', () => {
+  assert.deepEqual(STORY_KINDS, ['stage', 'assign', 'envelope', 'plan_frozen', 'review_outcome', 'gate_discrimination', 'gate_check_discrimination', 'cold_suite', 'build_bounce', 'acceptance-coverage-bounce', 'step:bounce', 'decision', 'reseat', 'published', 'provider-retry', 'provider-retry-resumed', 'provider-retry-declined', 'seat-retrying', 'seat-substrate-down', 'seat-substrate-recovered'])
+  assert.equal(Object.isFrozen(STORY_KINDS), true)
+  const entry = (index, event, row, channel = null) => ({ index, at_ms: index * 1000, channel, event, row })
+  const rows = [
+    entry(0, 'assign', { assign: 'd2', role: 'builder' }),
+    entry(1, 'stage', { stage: 'build:r1' }),
+    entry(2, 'envelope', { envelope: 'd1', role: 'planner', status: 'done' }),
+    entry(3, 'stage_done', { stage_done: 'build:r1' }),
+    entry(4, 'fence-admitted', { 'fence-admitted': 'gate:r1' }),
+    entry(5, 'seat-skills', { event: 'seat-skills', role: 'builder', skills: ['a', 'b', 'c'] }),
+    entry(6, 'zz-unknown', { 'zz-unknown': true }),
+    entry(7, 'seat-retrying', { event: 'seat-retrying', role: 'builder' }, 'operational'),
+    entry(8, 'descendant-capture', { event: 'descendant-capture', role: 'builder' }, 'operational')
+  ]
+  const out = journalLines(rows, { reveal: false })
+  assert.deepEqual(out.lines.map((l) => l.kind), ['assign', 'stage', 'envelope', 'seat-retrying'])
+  assert.equal(out.operationalCount, 5)
+})
+
+test('JR2 envelope and gate journal sentences use plain words', () => {
+  const entry = (index, event, row, channel = null) => ({ index, at_ms: index * 1000, channel, event, row })
+  const env = journalLines([entry(0, 'envelope', { envelope: 'd4', role: 'builder', status: 'done' })], { envelopes: [{ assignment_id: 'd4', role: 'builder', status: 'done', valid: true, details: { files_changed: ['a.mjs', 'b.mjs'] } }] })
+  const text = String(env.lines[0].text).toLowerCase()
+  assert.ok(text.includes('builder'))
+  assert.ok(text.includes('d4'))
+  assert.ok(text.includes('done'))
+  assert.ok(text.includes('2 files'))
+  assert.equal(text.includes('unclassified'), false)
+  const gate = journalLines([entry(1, 'gate_discrimination', { gate_discrimination: 'proven', gate_summary: { total: 5, failed: 5 } })], {})
+  assert.ok(String(gate.lines[0].text).includes('5 of 5'))
+  for (const line of env.lines.concat(gate.lines)) assert.equal(String(line.text).includes('unclassified'), false)
+})
+
+test('JR3 adjacent seat skills collapse with role rollup', () => {
+  const entry = (index, event, row, channel = null) => ({ index, at_ms: index * 1000, channel, event, row })
+  const skills = [
+    entry(0, 'seat-skills', { event: 'seat-skills', role: 'builder', skills: ['a', 'b', 'c'] }),
+    entry(1, 'seat-skills', { event: 'seat-skills', role: 'planner', skills: ['a'] }),
+    entry(2, 'seat-skills', { event: 'seat-skills', role: 'lead', skills: [] }),
+    entry(3, 'seat-skills', { event: 'seat-skills', role: 'reviewer', skills: [] }),
+    entry(4, 'seat-skills', { event: 'seat-skills', role: 'tech-lead', skills: [] })
+  ]
+  const out = journalLines(skills, { reveal: true })
+  assert.equal(out.lines.length, 1)
+  assert.equal(out.lines[0].count, 5)
+  assert.ok(String(out.lines[0].text).includes('builder 3'))
+  assert.ok(String(out.lines[0].text).includes('planner 1'))
+  const split = journalLines([entry(0, 'assign', { assign: 'd1', role: 'planner' }), entry(1, 'stage', { stage: 'build:r1' }), entry(2, 'assign', { assign: 'd2', role: 'builder' })], {})
+  assert.equal(split.lines.filter((l) => l.kind === 'assign').length, 2)
+})
+
+test('JR4 handoff outcomes join envelopes with precedence', () => {
+  const span = (id, role, started_at, ended_at, status = null) => ({ family: 'assignment', id, role, status, started_at, ended_at, duration_ms: ended_at == null ? null : ended_at - started_at, started_index: started_at })
+  const view = { spans: [
+    span('d1', 'tech-lead', 1, 2),
+    span('d2', 'tech-lead', 3, 4),
+    span('d4', 'builder', 5, 6),
+    span('d6', 'reviewer', 7, 8),
+    span('d1', 'planner', 9, 10),
+    span('d1', 'planner', 11, 12),
+    span('d9', 'builder', 13, 14),
+    span('d10', 'builder', 15, null),
+    span('d11', 'tech-lead', 16, 17)
+  ] }
+  const envelopes = [
+    { assignment_id: 'd1', role: 'tech-lead', status: 'done', valid: true, details: { verdict: 'revise' } },
+    { assignment_id: 'd2', role: 'tech-lead', status: 'done', valid: true, details: { verdict: 'approve' } },
+    { assignment_id: 'd4', role: 'builder', status: 'done', valid: true, details: { files_changed: ['a.mjs', 'b.mjs'] } },
+    { assignment_id: 'd6', role: 'reviewer', status: 'done', valid: true, details: { verdict: 'pass', must_fix: 0 } },
+    { assignment_id: 'd1', role: 'planner', status: 'done', valid: true, details: {} },
+    { assignment_id: 'd11', role: 'tech-lead', status: 'done', valid: true, details: { verdict: 'wobble' } }
+  ]
+  const path = assignmentPath(view, envelopes)
+  const get = (d, r, occ = 0) => path.filter((p) => p.dispatch === d && p.role === r)[occ] || {}
+  assert.equal(get('d1', 'tech-lead').outcome, 'changes requested')
+  assert.equal(get('d2', 'tech-lead').outcome, 'accepted')
+  assert.equal(get('d6', 'reviewer').outcome, 'accepted')
+  assert.equal(get('d1', 'planner', 0).outcome, 'outcome not recorded')
+  assert.equal(get('d1', 'planner', 1).outcome, 'outcome not recorded')
+  assert.equal(get('d9', 'builder').outcome, 'outcome not recorded')
+  assert.equal(get('d10', 'builder').outcome, 'in flight')
+  assert.equal(get('d11', 'tech-lead').outcome, 'wobble')
+  assert.ok(String(get('d4', 'builder').outcome).includes('done'))
+  assert.ok(String(get('d4', 'builder').outcome).includes('2 files'))
+  assert.equal(get('d2', 'tech-lead').tone, 'ok')
+  assert.notEqual(get('d11', 'tech-lead').tone, 'ok')
+})
+
+// Mutation killed: restoring the journal span's status when its envelope has no status.
+test('RV1-1 handoff status comes only from the joined envelope', () => {
+  for (const role of ['builder', 'planner']) {
+    const view = { spans:[{ family:'assignment', id:'d4', role, status:'done', started_at:1, ended_at:2 }] }
+    for (const status of [{}, { status:null }]) {
+      const envelopes = [{ assignment_id:'d4', role, valid:true, ...status }]
+      assert.deepEqual(assignmentPath(view, envelopes).map(({ outcome, tone }) => ({ outcome, tone })), [{ outcome:'unknown', tone:'neutral' }])
+    }
+    assert.deepEqual(assignmentPath(view, [{ assignment_id:'d4', role, valid:true, status:'done' }]).map(({ outcome, tone }) => ({ outcome, tone })), [{ outcome:'done', tone:'ok' }])
+  }
+})
+
+// Mutation killed: deriving handoffs from the focused view without the run-wide span list.
+test('RV1-2 focused reused dispatch keeps run-wide envelope ambiguity', async () => {
+  const { initialJournalState, trajectoryView } = await import('../visualizer/web/src/lib/live.js')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  const expression = source.match(/let handoffs = \$derived\((.+)\)/)?.[1]
+  assert.ok(expression, 'the handoff derived expression must be readable')
+  const handoffs = new Function('view', 'sourceState', 'envelopes', 'assignmentPath', 'trajectoryView', 'now', 'run', 'PANEL_REFRESH_MS', `return ${expression}`)
+  const base = initialJournalState()
+  const state = { ...base, payload:{ ...base.payload, rows:[
+    { at:1000, assign:'d1', role:'planner' },
+    { at:2000, envelope:'d1', role:'planner', status:'done' },
+    { at:3000, assign:'d1', role:'planner' },
+    { at:4000, envelope:'d1', role:'planner', status:'done' },
+    { at:5000, assign:'d2', role:'builder' },
+    { at:6000, envelope:'d2', role:'builder', status:'done' },
+  ] } }
+  const envelopes = [
+    { assignment_id:'d1', role:'planner', valid:true, status:'done' },
+    { assignment_id:'d2', role:'builder', valid:true, status:'done' },
+  ]
+  const path = (range) => {
+    const sourceState = { ...state, range }
+    const view = trajectoryView(sourceState)
+    return handoffs(view, sourceState, envelopes, assignmentPath, trajectoryView, 6000, { running:false }, PANEL_REFRESH_MS)
+  }
+  assert.deepEqual(path(null).map(({ outcome, tone }) => [outcome, tone]), [['outcome not recorded','neutral'], ['outcome not recorded','neutral'], ['done','ok']])
+  for (const [from, to, started_index] of [[1100,1900,0], [3100,3900,2]]) {
+    assert.deepEqual(path({ from, to }).map(({ started_index, outcome, tone }) => [started_index, outcome, tone]), [[started_index,'outcome not recorded','neutral']])
+  }
+  assert.deepEqual(path({ from:5100, to:5900 }).map(({ outcome, tone }) => [outcome, tone]), [['done','ok']])
+})
+
+// Mutation killed: retaining the previous run's returns when the detail identity changes.
+test('RV2-1 switching runs clears envelope joins before delayed details without clearing refreshes', async () => {
+  const { applyRead, createPulse, initialJournalState, shouldRead, trajectoryView } = await import('../visualizer/web/src/lib/live.js')
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  // Execute the component's loaders and read effects; no DOM or rune scheduling is simulated.
+  const setup = source.slice(source.indexOf('  let returns = $state('), source.indexOf('  $effect(() => {\n    const requested = phase'))
+    .replace(/^  let \w+ = \$derived\([^\n]*\)\n/gm, '')
+  const effects = []
+  const pulse = createPulse()
+  const pending = []
+  const requests = []
+  const runA = { repo_slug:'repo', goal:'task', adw_id:'run-A', running:true }
+  const runB = { ...runA, adw_id:'run-B' }
+  const returnsA = { envelopes:[{ assignment_id:'d4', role:'builder', status:'done', details:{ files_changed:['a.mjs','b.mjs'] } }], task:null }
+  const returnsB = { envelopes:[{ assignment_id:'d4', role:'builder', status:'blocked', details:{ files_changed:['c.mjs'] } }], task:null }
+  const instantiate = new Function('run', 'initialJournalState', 'applyRead', 'shouldRead', 'getReturns', 'getEvents', 'drainEvents', 'getJournal', 'journalPulse', '$state', '$effect', `${setup}
+    return { setRun(next) { run = next }, snapshot() { return { returns, journalState, error } } }`)
+  const reader = instantiate(runA, initialJournalState, applyRead, shouldRead,
+    async (repo, task, id) => {
+      requests.push(id)
+      return id === 'run-A' ? returnsA : new Promise((resolve) => pending.push(resolve))
+    },
+    async () => ({ events:[] }), async () => ({ events:[] }),
+    async (repo, task, id) => ({ ...initialJournalState().payload, rows:[
+      { at:1000, assign:'d4', role:'builder' },
+      { at:2000, envelope:'d4', role:'builder', status:id === 'run-A' ? 'done' : 'blocked' },
+    ] }),
+    pulse, (value) => value, (effect) => effects.push(effect))
+  const [identity, journal, subscribe] = effects
+  const tick = () => new Promise((resolve) => setImmediate(resolve))
+  const story = () => {
+    const { returns, journalState } = reader.snapshot()
+    const view = trajectoryView(journalState)
+    return {
+      path:assignmentPath(view, returns.envelopes).map(({ outcome, tone }) => [outcome, tone]),
+      journal:journalLines(view.rows, { envelopes:returns.envelopes }).lines.filter((line) => line.kind === 'envelope').map((line) => line.text),
+    }
+  }
+  identity(); journal()
+  const unsubscribe = subscribe()
+  try {
+    await tick()
+    assert.deepEqual(story(), { path:[['done with 2 files changed','ok']], journal:['builder d4 returned done with 2 files changed'] })
+    reader.setRun(runB)
+    identity(); journal()
+    await tick()
+    assert.deepEqual(requests, ['run-A','run-B'])
+    assert.equal(pending.length, 1)
+    assert.deepEqual(story(), { path:[['outcome not recorded','neutral']], journal:['builder d4 returned blocked'] })
+    pending.shift()(returnsB)
+    await tick()
+    const expectedB = { path:[['blocked','fail']], journal:['builder d4 returned blocked with 1 file changed'] }
+    assert.deepEqual(story(), expectedB)
+    identity(); journal()
+    assert.deepEqual(story(), expectedB)
+    pulse.pulse()
+    await tick()
+    assert.equal(pending.length, 1)
+    assert.deepEqual(story(), expectedB)
+    pending.shift()(returnsB)
+    await tick()
+    assert.deepEqual(story(), expectedB)
+  } finally { unsubscribe() }
+})
+
+test('JR5 trajectory renders shaped journal with closed inspect', () => {
+  const traj = readFileSync(join(ROOT, 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.equal(traj.includes('unclassified'), false)
+  assert.ok(traj.match(/<details(?![^>]*\bopen\b)[^>]*>\s*<summary>Inspect<\/summary>\s*<pre>\{line\.raw\}<\/pre>/))
+  assert.ok(traj.split('journal.operationalCount').length - 1 >= 2)
+  assert.ok(traj.includes('journalLines'))
+  assert.ok(detail.includes('<Trajectory {run} {journalState} {returns} />'))
+  assert.ok(traj.includes('No agent handoffs in this view'))
+  assert.ok(traj.includes('No journal rows in this interval'))
 })
 
 // MUTATION EL2: blank the ' (estimated)' suffix in price_label and the estimated row reads as measured.

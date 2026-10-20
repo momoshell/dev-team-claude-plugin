@@ -1,5 +1,13 @@
 const ROLE_ORDER = ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver']
 
+export const STORY_KINDS = Object.freeze([
+  'stage', 'assign', 'envelope', 'plan_frozen', 'review_outcome', 'gate_discrimination',
+  'gate_check_discrimination', 'cold_suite', 'build_bounce', 'acceptance-coverage-bounce',
+  'step:bounce', 'decision', 'reseat', 'published', 'provider-retry', 'provider-retry-resumed',
+  'provider-retry-declined', 'seat-retrying', 'seat-substrate-down', 'seat-substrate-recovered',
+])
+const STORY_SET = new Set(STORY_KINDS)
+
 function words(value) {
   return String(value || '').replaceAll('_', ' ').replaceAll('-', ' ')
 }
@@ -97,18 +105,151 @@ export function trajectorySummary(view = {}) {
   }
 }
 
-export function assignmentPath(view = {}) {
-  return (Array.isArray(view.spans) ? view.spans : [])
+export function assignmentPath(view = {}, envelopes = [], fullView = view) {
+  const spans = (Array.isArray(view.spans) ? view.spans : [])
     .filter((span) => span.family === 'assignment')
     .sort((a, b) => a.started_at - b.started_at)
-    .map((span, index) => ({
-      ...span,
-      order:index + 1,
-      dispatch:span.id || String(span.label || '').split(':')[0],
-      role:span.role || 'unknown',
-      outcome:span.status || (span.ended_at == null ? 'in flight' : 'returned'),
-      duration:duration(span.duration_ms),
-    }))
+  const counts = new Map()
+  for (const span of Array.isArray(fullView.spans) ? fullView.spans : []) {
+    if (span.family !== 'assignment') continue
+    const dispatch = span.id || String(span.label || '').split(':')[0]
+    const role = span.role || 'unknown'
+    const key = `${dispatch} ${role}`
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const list = Array.isArray(envelopes) ? envelopes : []
+  return spans.map((span, index) => {
+    const dispatch = span.id || String(span.label || '').split(':')[0]
+    const role = span.role || 'unknown'
+    const handoff = { ...span, order:index + 1, dispatch, role, outcome:'outcome not recorded', tone:'neutral', duration:duration(span.duration_ms) }
+    if (span.ended_at == null) return { ...handoff, outcome:'in flight', tone:'warn' }
+    if ((counts.get(`${dispatch} ${role}`) ?? 0) > 1) return handoff
+    const joinedList = list.filter((entry) => entry?.valid !== false && entry?.assignment_id === dispatch && entry?.role === role)
+    if (joinedList.length !== 1) return handoff
+    const joined = joinedList[0]
+    const status = joined?.status
+    const details = joined?.details ?? {}
+    const verdict = details?.verdict
+    const decision = details?.decision
+    let outcome
+    let tone = 'neutral'
+    if (status === 'insufficient') { outcome = 'insufficient'; tone = 'warn' }
+    else if (status === 'blocked') { outcome = 'blocked'; tone = 'fail' }
+    else if (role === 'tech-lead' && verdict === 'approve') { outcome = 'accepted'; tone = 'ok' }
+    else if (role === 'tech-lead' && verdict === 'revise') { outcome = 'changes requested'; tone = 'warn' }
+    else if (role === 'tech-lead' && typeof verdict === 'string' && verdict) { outcome = words(verdict) }
+    else if (role === 'reviewer' && verdict === 'pass') { outcome = 'accepted'; tone = 'ok' }
+    else if (role === 'reviewer' && verdict === 'changes-needed') {
+      const mustFix = details?.must_fix
+      outcome = `changes requested${mustFix != null ? ` with ${mustFix} must-fix` : ''}`
+      tone = 'warn'
+    } else if (role === 'reviewer' && typeof verdict === 'string' && verdict) { outcome = words(verdict) }
+    else if (role === 'builder' && status === 'done') {
+      const count = Array.isArray(details.files_changed) ? details.files_changed.length : null
+      outcome = count == null ? 'done' : `done with ${count} file${count === 1 ? '' : 's'} changed`
+      tone = 'ok'
+    } else if (role === 'lead' && decision === 'accept') { outcome = 'accepted'; tone = 'ok' }
+    else if (role === 'lead' && typeof decision === 'string' && decision.startsWith('bounce')) { outcome = 'bounced'; tone = 'warn' }
+    else if (role === 'lead' && typeof decision === 'string' && decision.startsWith('escalate')) { outcome = 'escalated'; tone = 'fail' }
+    else if (role === 'lead' && typeof decision === 'string' && decision) { outcome = words(decision) }
+    else if (status === 'done') { outcome = 'done'; tone = 'ok' }
+    else { outcome = words(status || 'unknown') }
+    return { ...handoff, outcome, tone }
+  })
+}
+
+function kindOf(entry) {
+  if (typeof entry?.event === 'string' && entry.event) return entry.event
+  if (typeof entry?.row?.event === 'string') return entry.row.event
+  return 'row'
+}
+
+function sentenceFor(entry, joined) {
+  const row = entry?.row ?? {}
+  const kind = kindOf(entry)
+  const actor = row.role || 'agent'
+  if (kind === 'assign') return `${actor} received ${row.assign}`
+  if (kind === 'envelope') {
+    const files = Array.isArray(joined?.details?.files_changed) ? joined.details.files_changed : null
+    const filePhrase = files == null ? '' : ` with ${files.length} file${files.length === 1 ? '' : 's'} changed`
+    return `${actor} ${row.envelope} returned ${words(row.status || 'unknown')}${filePhrase}`
+  }
+  if (kind === 'stage') {
+    if (typeof row.stage === 'string' && row.stage.startsWith('escalate:')) return `escalated at ${words(row.stage.slice('escalate:'.length))}`
+    return `${stageLabel(row.stage)} started`
+  }
+  if (kind === 'plan_frozen') return 'plan accepted'
+  if (kind === 'review_outcome') {
+    const review = row.review_outcome && typeof row.review_outcome === 'object' ? row.review_outcome : {}
+    return `review${review.dispatch ? ` ${review.dispatch}` : ''} ${words(review.verdict || 'recorded')} with ${review.must_fix ?? 0} must-fix`
+  }
+  if (kind === 'gate_discrimination') {
+    const total = row.gate_summary?.total
+    const failed = row.gate_summary?.failed
+    if (typeof total === 'number' && typeof failed === 'number') return `gate ${words(row.gate_discrimination || 'recorded')}, ${failed} of ${total} checks red on the unchanged tree`
+    return `gate discrimination ${words(row.gate_discrimination || 'recorded')}`
+  }
+  if (kind === 'gate_check_discrimination') return `gate check discrimination ${words(row.gate_check_discrimination || 'recorded')} with ${row.gate_check_discriminations?.length ?? 0} declared mutation checks`
+  if (kind === 'cold_suite') {
+    const verdict = row.cold_suite && typeof row.cold_suite === 'object' ? row.cold_suite?.verdict : row.cold_suite
+    return `cold validation ${words(verdict || 'recorded')}`
+  }
+  if (kind === 'seat-retrying') return `${row.role || 'seat'} began retrying`
+  if (kind === 'seat-substrate-down') return 'pane substrate became unavailable'
+  if (kind === 'seat-substrate-recovered') return 'pane substrate recovered'
+  const prefix = row.role ? `${row.role} ` : 'factory '
+  const suffix = row.status ? ` ${words(row.status)}` : ''
+  return `${prefix}${words(kind)}${suffix}`
+}
+
+export function journalLines(rows = [], { reveal = false, envelopes = [] } = {}) {
+  const list = Array.isArray(rows) ? rows : []
+  const pool = Array.isArray(envelopes) ? envelopes : []
+  const byKey = new Map()
+  for (const envelope of pool) {
+    if (envelope?.valid === false) continue
+    const key = `${envelope?.assignment_id}\0${envelope?.role}`
+    if (!byKey.has(key)) byKey.set(key, [])
+    byKey.get(key).push(envelope)
+  }
+  let operationalCount = 0
+  const groups = []
+  let last = null
+  for (const entry of list) {
+    const row = entry?.row ?? {}
+    const kind = kindOf(entry)
+    const isStory = STORY_SET.has(kind)
+    if (!isStory) operationalCount += 1
+    if (!isStory && !reveal) continue
+    const hits = typeof row.envelope === 'string' ? byKey.get(`${row.envelope}\0${row.role}`) ?? [] : []
+    const joined = hits.length === 1 ? hits[0] : null
+    if (last && last.kind === kind) {
+      last.entries.push({ entry, row, joined })
+    } else {
+      const group = { kind, entries:[{ entry, row, joined }] }
+      groups.push(group)
+      last = group
+    }
+  }
+  const lines = groups.map((group) => {
+    const first = group.entries[0].entry
+    const count = group.entries.length
+    let text
+    if (count === 1) text = sentenceFor(first, group.entries[0].joined)
+    else {
+      const skills = group.kind === 'seat-skills'
+      const totals = new Map()
+      for (const item of group.entries) {
+        const role = item.row?.role || 'factory'
+        const n = skills ? (Array.isArray(item.row?.skills) ? item.row.skills.length : 0) : 1
+        totals.set(role, (totals.get(role) ?? 0) + n)
+      }
+      const rollup = [...totals.entries()].map(([role, n]) => `${role} ${n}`).join(', ')
+      text = skills ? `${count} seats loaded skills — ${rollup}` : `${words(group.kind)} recorded ${count} times — ${rollup}`
+    }
+    return { index:first.index, indexes:group.entries.map((item) => item.entry.index), at_ms:first.at_ms, kind:group.kind, count, text, tone:trajectoryRowStory(first).tone, raw:group.entries.map((item) => JSON.stringify(item.entry.row ?? {}, null, 2)).join('\n') }
+  })
+  return { lines, operationalCount }
 }
 
 function stageLabel(value) {

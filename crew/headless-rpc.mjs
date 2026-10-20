@@ -73,7 +73,8 @@ export function seatCommandPath(crewDir, role, root) {
   if (typeof root !== 'string' || root === '') throw new TypeError('seat command root is required')
   const resolved = resolve(crewDir)
   const key = `${(basename(resolved) || 'lane').slice(0, 48)}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
-  return join(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
+  // Resolved, so the opened FIFO and its fifo-path record are absolute even under a relative TMPDIR.
+  return resolve(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
 }
 // Legacy command path inside the crew dir.
 export function inCrewSeatCommandPath(crewDir, role) {

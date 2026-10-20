@@ -5009,3 +5009,15 @@ test('RR7 a recorded fifo-path that is not this seat runtime FIFO is ignored', (
   assert.equal(readFileSync(notes, 'utf8'), 'keep me')
   rmSync(root, { recursive: true, force: true })
 })
+
+// MUTATION RR8: build the runtime FIFO path with join instead of resolve and a relative root records a path the reader rejects.
+test('RR8 a relative command root still yields an absolute FIFO path the record reader accepts', () => {
+  const p = seatCommandPath('/lanes/b1-x', 'builder', 'runtime')
+  assert.equal(p.startsWith('/'), true)
+  const root = scratchDir('headless-rpc-relative-root-')
+  const seat = join(root, 'builder')
+  mkdirSync(seat, { recursive: true })
+  writeFileSync(join(seat, 'fifo-path'), p)
+  assert.equal(readRecordedSeatCommandPath(seat, { existsSync, readFileSync }), p)
+  rmSync(root, { recursive: true, force: true })
+})

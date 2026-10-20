@@ -7,10 +7,12 @@ import {
   unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync,
   openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
   renameSync as fsRenameSync, statSync as fsStatSync, constants as fsConstants,
+  rmdirSync as fsRmdirSync, lstatSync as fsLstatSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { sleptMilliseconds } from './headless.mjs'
@@ -62,10 +64,29 @@ export function teardownOutcome(liveness) {
 }
 
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
-export function seatCommandPath(crewDir, role) {
+// Keep FIFOs outside crew/task trees: BSD recursive grep blocks opening them.
+// Headless-rpc keys by crew dir, ACP by task dir. The key is a readable prefix
+// (at most 48 chars, so it stays under NAME_MAX) plus 128 bits of the
+// resolved-path hash, which keeps same-named lanes apart. The full path is at
+// most len(root) + len(role) + 101 bytes; FIFOs have no sun_path limit.
+export function seatCommandPath(crewDir, role, root = tmpdir()) {
+  const resolved = resolve(crewDir)
+  const key = `${(basename(resolved) || 'lane').slice(0, 48)}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
+  return join(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
+}
+// Legacy command path inside the crew dir.
+export function inCrewSeatCommandPath(crewDir, role) {
   return join(crewDir, 'rpc', role, SEAT_COMMAND_FILE)
 }
-// Where a worker spawned before #1496 reads its commands: inside the seat-visible task/ tree.
+// A shared tmpdir may contain a co-tenant's node that mkfifo leaves in place.
+// Require an owned, private crew-rpc directory before using a command channel.
+export function seatCommandRootPrivate(root = tmpdir(), uid = process.getuid()) {
+  try {
+    const top = fsLstatSync(join(root, 'crew-rpc'))
+    return top.isDirectory() && top.uid === uid && (top.mode & 0o077) === 0
+  } catch { return false }
+}
+// Oldest command path, inside the seat-visible task tree.
 export function legacySeatCommandPath(taskDir, role) {
   return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
 }
@@ -821,6 +842,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   const mkdir = deps.mkdirSync || fsMkdirSync
   const readdir = deps.readdirSync || fsReaddirSync
   const rename = deps.renameSync || fsRenameSync
+  const rmdir = deps.rmdirSync || fsRmdirSync
+  const seatCommandRoot = deps.seatCommandRoot
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const uuid = deps.uuid || randomUUID
   const now = deps.now || (() => Date.now())
@@ -974,10 +997,16 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   // is adopted where it is (its stdin cannot move, and killing it would drop its turn),
   // so it keeps the grep-hang hazard until it ends. No new spawn ever uses the path.
   function legacySeatFifo(role) { return legacySeatCommandPath(taskDir || paths.taskDir, role) }
+  function inCrewSeatFifo(role) { return inCrewSeatCommandPath(paths.dir, role) }
   function unlinkSeatFifos(role) {
-    for (const path of [seatCommandPath(paths.dir, role), legacySeatFifo(role)]) {
+    const runtime = seatCommandPath(paths.dir, role, seatCommandRoot)
+    for (const path of [runtime, inCrewSeatFifo(role), legacySeatFifo(role)]) {
       try { if (exists(path)) unlink(path) } catch {}
     }
+    // rmdir refuses a non-empty dir, so a sibling seat's live pipe keeps the
+    // lane key dir; only the last proven-dead seat removes it.
+    try { rmdir(dirname(runtime)) } catch {}
+    try { rmdir(dirname(dirname(runtime))) } catch {}
   }
   function sessionPath(role) { return seatFile(role, 'session.json') }
   function readJson(path) {
@@ -1312,8 +1341,9 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     mkdir(dir, { recursive: true })
     const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
     const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), cmdPath = seatFile(role, 'cmd.json')
-    const fifo = seatCommandPath(paths.dir, role)
-    mkdir(dirname(fifo), { recursive: true })
+    const fifo = seatCommandPath(paths.dir, role, seatCommandRoot)
+    mkdir(dirname(fifo), { recursive: true, mode: 0o700 })
+    if (!seatCommandRootPrivate(seatCommandRoot)) throw staged('rpc-spawn-failed', `rpc command dir ${dirname(dirname(dirname(fifo)))} is not private to this user`, role)
     const old = session(role)
     const sessionId = member.session_id || old.sessionId || uuid()
     const resume = !!(member.started || old.sessionId)
@@ -1329,7 +1359,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     let child = null
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
-      const adoptFifo = !exists(fifo) && exists(legacySeatFifo(role)) ? legacySeatFifo(role) : fifo
+      const adoptFifo = [fifo, inCrewSeatFifo(role), legacySeatFifo(role)].find((path) => exists(path)) || fifo
       fd = open(adoptFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
       const savedArgs = readJson(cmdPath)?.args
       const modelIndex = Array.isArray(savedArgs) ? savedArgs.indexOf('--model') : -1
@@ -1342,6 +1372,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (marker.verdict === VERDICTS.UNRESOLVABLE) throw staged('rpc-unresolvable-reservation', `rpc seat ${role} has an unresolvable reservation`, role)
     if (marker.verdict === VERDICTS.RECLAIMABLE) { try { store.clear(marker.handle) } catch {} }
     // No live worker holds a legacy pipe past this point: a stale one would hang grep -r task/.
+    try { if (exists(inCrewSeatFifo(role))) unlink(inCrewSeatFifo(role)) } catch {}
     try { if (exists(legacySeatFifo(role))) unlink(legacySeatFifo(role)) } catch {}
     const adapter = adapterFor(adapters, role)
     const commandFactory = adapter?.rpcCommand || rpcCommand

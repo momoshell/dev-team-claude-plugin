@@ -667,7 +667,7 @@ test('end to end: the unchanged acp-client drives the bridge and the real extens
     dir: seatRoot, cwd: dir, role: 'builder',
     sinks: { agent_message_chunk: ({ update }) => chunks.push(update.content.text) },
     onPermission: ({ toolCall, options }) => { asked.push({ toolCallId: toolCall.toolCallId, kinds: options.map((o) => o.kind) }); return asked.length === 1 ? 'reject_once' : 'allow_once' },
-    deps: { now: () => origin + (Date.now() - origin) * 20 },
+    deps: { now: () => origin + (Date.now() - origin) * 20, seatCommandRoot: join(dir, 'seat-runtime') },
   })
   try {
     api.start()

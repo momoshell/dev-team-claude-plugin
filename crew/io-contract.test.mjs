@@ -261,6 +261,7 @@ function makeHeadlessRpcIo() {
     mkdirSync,
     readdirSync,
     log: () => {},
+    seatCommandRoot: join(paths.dir, 'seat-runtime'),
   }
   const crew = { members: { builder: { model: 'model', transport: 'headless-rpc' } } }
   const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: paths.dir, adapters: { builder: {} }, bin: '/bin/pi', deps })
@@ -1014,6 +1015,7 @@ function seatFreshFixture({ effortOnly = false, running = true, inFlight = false
       if (signal !== 0) fsWriteFileSync(join(seatDir, 'exit'), '0')
     },
     now: () => clock, sleep: ms => { clock += ms }, log: () => {},
+    seatCommandRoot: join(dir, 'seat-runtime'),
   } })
   let rpc = supervisor()
   const io = seatIo(crew, paths, dir, null, { builder: { modelString: ({ provider, id }) => id === 'old-model' ? 'openai-codex/old-model' : `${provider}/${id}` } }, {}, {

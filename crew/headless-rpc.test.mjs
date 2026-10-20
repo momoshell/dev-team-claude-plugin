@@ -3,14 +3,15 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, rmSync, lstatSync, constants as fsConstants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'; import { ROOT } from '../test/helpers.mjs'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
   briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, TRANSPORT_SETTLEMENT, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
-  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
   persistedLaunchRecord, PERSISTED_ENV_KEYS, PERSISTED_ENV_WITHHELD_REASON,
 } from './headless-rpc.mjs'
+import { acpClient } from './acp-client.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { attachAdvisor } from './pi/extensions/advisor.ts'
 import * as claudeAdapter from './adapters/adapter-claude.mjs'
@@ -19,6 +20,7 @@ import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+const SEAT_COMMAND_ROOT = scratchDir('headless-rpc-runtime-')
 import { TRANSPORT_SETTLEMENT as DRIVE_TRANSPORT_SETTLEMENT } from './drive.mjs'
 
 // MUTATION PV1: changing the registry key breaks the producer identity/payload contract.
@@ -66,6 +68,7 @@ function fixture(options = {}) {
     options.sleep?.(ms)
     options.onSleep?.({ ms, sleepCount, appendStream })
   }
+  const seatCommandRoot = options.seatCommandRoot || SEAT_COMMAND_ROOT
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
     spawn: options.spawn || (() => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }), openSync: options.openSync || (() => 10),
@@ -73,6 +76,7 @@ function fixture(options = {}) {
     existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
     readdirSync: options.readdirSync || readdirSync,
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep,
+    seatCommandRoot,
     ...(options.now ? { now: options.now } : {}),
     ...(options.monotonic ? { monotonic: options.monotonic } : {}),
     ...(Object.hasOwn(options, 'promptDeliveryWindowMs') ? { promptDeliveryWindowMs: options.promptDeliveryWindowMs } : {}),
@@ -85,7 +89,7 @@ function fixture(options = {}) {
   const adapterEntry = options.adapterEntry || (options.grants ? { adapter, grants: options.grants } : adapter)
   const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: options.checkout ?? dir, adapters: { [role]: adapterEntry }, bin: '/bin/pi', turnCeilings: options.turnCeilings, deps })
   return {
-    dir, paths, crew, io, writes, commands, specs, signals, role, sleepCount: () => sleepCount,
+    dir, paths, crew, io, writes, commands, specs, signals, role, seatCommandRoot, sleepCount: () => sleepCount,
     writeStream: (text) => writeFileSync(join(paths.taskDir, 'headless-rpc', role, 'stream.jsonl'), text),
     cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) },
   }
@@ -1341,7 +1345,7 @@ test('recorded B6 capture remains LF-framed and carries the boundary events', ()
 test('send command channel and steer frame are exported', () => {
   const f = fixture()
   try {
-    assert.equal(seatCommandPath('/c', 'builder'), join('/c', 'rpc', 'builder', 'cmd.fifo'))
+    assert.equal(inCrewSeatCommandPath('/c', 'builder'), join('/c', 'rpc', 'builder', 'cmd.fifo'))
     assert.deepEqual(steerFrame('g'), { type: 'steer', message: 'g' })
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
@@ -2515,7 +2519,7 @@ test('run-end teardown proves a worker that survives its first SIGTERM and the o
   const streamPath = join(paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
   let rows = []
   try {
-    const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: null, bin, deps: { log: () => {} } })
+    const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: null, bin, deps: { log: () => {}, seatCommandRoot: SEAT_COMMAND_ROOT } })
     io.assign({ role: 'builder', briefFile: join(paths.taskDir, 'brief.md') })
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
@@ -3991,10 +3995,10 @@ function realFifoSeat(prefix) {
     crew, paths, taskDir, checkout: dir,
     adapters: { builder: { rpcCommand: () => ({ bin: '/bin/sleep', args: ['30'], env: {} }) } },
     bin: '/bin/sleep',
-    deps: { pid: 700, uuid: () => 'session-1', log: () => {} },
+    deps: { pid: 700, uuid: () => 'session-1', log: () => {}, seatCommandRoot: SEAT_COMMAND_ROOT },
   })
   const run = io.assign({ role: 'builder', briefFile })
-  return { dir, taskDir, io, run, fifo: seatCommandPath(dir, 'builder') }
+  return { dir, taskDir, io, run, fifo: seatCommandPath(dir, 'builder', SEAT_COMMAND_ROOT) }
 }
 
 function killSeatGroup(taskDir) {
@@ -4050,7 +4054,7 @@ test('D1', () => {
   const seat = realFifoSeat('rpc-fifo-d1-')
   try {
     assert.equal(lstatSync(seat.fifo).isFIFO(), true)
-    assert.deepEqual(fifosUnder(join(seat.dir, 'rpc')), [seat.fifo])
+    assert.deepEqual(fifosUnder(seat.dir), [])
     const retired = seat.io.retire('builder', { force: true })
     assert.equal(retired.retired, true)
     assert.equal(retired.liveness, LIVENESS.DEAD)
@@ -4068,7 +4072,7 @@ test('D1', () => {
   })
   try {
     held.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    const fifo = seatCommandPath(held.dir, 'builder')
+    const fifo = seatCommandPath(held.dir, 'builder', SEAT_COMMAND_ROOT)
     writeFileSync(fifo, '')
     const retired = held.io.retire('builder', { force: true })
     assert.equal(retired.retired, true)
@@ -4111,7 +4115,7 @@ test('RV2-2 a fresh spawn removes a stale legacy pipe no worker holds', () => {
     const f = fixture({ dir, existsSync, openSync: (path) => { opened.push(path); return 10 } })
     f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     assert.equal(existsSync(legacy), false)
-    assert.deepEqual(opened, [seatCommandPath(dir, 'builder')])
+    assert.deepEqual(opened, [seatCommandPath(dir, 'builder', SEAT_COMMAND_ROOT)])
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -4119,7 +4123,7 @@ test('RV2-3 a marker-only proven teardown after a supervisor restart removes the
   const first = fixture({ kill: () => {} })
   try {
     first.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    const fifo = seatCommandPath(first.dir, 'builder')
+    const fifo = seatCommandPath(first.dir, 'builder', SEAT_COMMAND_ROOT)
     writeFileSync(fifo, '')
     const restarted = fixture({ dir: first.dir, pid: 800, existsSync })
     try {
@@ -4135,7 +4139,7 @@ test('RV2-4 a marker-only teardown that cannot prove death keeps the live worker
   const first = fixture({ kill: () => {} })
   try {
     first.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    const fifo = seatCommandPath(first.dir, 'builder')
+    const fifo = seatCommandPath(first.dir, 'builder', SEAT_COMMAND_ROOT)
     writeFileSync(fifo, '')
     let clock = 0
     const restarted = fixture({
@@ -4149,6 +4153,117 @@ test('RV2-4 a marker-only teardown that cannot prove death keeps the live worker
       assert.equal(existsSync(fifo), true)
     } finally { restarted.cleanup() }
   } finally { first.cleanup() }
+})
+
+test('FO1 runtime FIFO escapes the crew dir and task dir so recursive grep exits by status', () => {
+  const opened = []
+  const f = fixture({ openSync: (path) => { opened.push(path); return 10 } })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(opened.length, 1)
+    const fifoPath = opened[0]
+    execFileSync('mkfifo', [fifoPath])
+    try {
+      assert.deepEqual([...fifosUnder(f.dir), ...fifosUnder(f.paths.taskDir)], [])
+      writeFileSync(join(f.paths.taskDir, 'hello.txt'), 'hello\n')
+      const result = spawnSync('grep', ['-rn', 'hello', f.dir, f.paths.taskDir], { timeout: 5000, encoding: 'utf8' })
+      assert.equal(result.signal, null)
+      assert.equal(result.status, 0)
+    } finally {
+      try { rmSync(fifoPath, { force: true }) } catch {}
+    }
+  } finally { f.cleanup() }
+})
+
+// MUTATION FO6: drop the mode clause from seatCommandRootPrivate and a 0755 crew-rpc dir permits a spawn.
+// Omitting either transport's privacy check also lets that transport spawn.
+test('FO6 a group- or other-accessible crew-rpc dir refuses the seat before any spawn', () => {
+  const root = join(SEAT_COMMAND_ROOT, 'fo6')
+  const top = join(root, 'crew-rpc')
+  mkdirSync(top, { recursive: true }); chmodSync(top, 0o755)
+  const f = fixture({ seatCommandRoot: root })
+  try {
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (err) => err.stage === 'rpc-spawn-failed')
+    assert.deepEqual(f.commands, [])
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: join(f.paths.taskDir, 'acp'), cwd: f.dir,
+      deps: {
+        seatCommandRoot: root,
+        spawn: () => { f.commands.push({ kind: 'acp-spawn' }); return { pid: 901, unref() {} } },
+        openSync: () => 10,
+      },
+    })
+    assert.throws(() => api.start(), (err) => err.reason === 'acp-spawn-failed')
+    assert.deepEqual(f.commands, [])
+    chmodSync(top, 0o700)
+    assert.equal(seatCommandRootPrivate(root), true)
+    assert.equal(seatCommandRootPrivate(root, process.getuid() + 1), false)
+  } finally { f.cleanup() }
+})
+
+test('FO2 runtime key is outside the crew dir, hashed, and exactly 132 chars for the stated example', () => {
+  const root48 = '/' + 'x'.repeat(47)
+  assert.equal(root48.length, 48)
+  const p = seatCommandPath(join('/lanes', 'b1285-builderloopguard'), 'tech-lead', root48)
+  assert.equal(p.startsWith(root48 + '/'), true)
+  assert.equal(p.startsWith(join('/lanes', 'b1285-builderloopguard')), false)
+  assert.equal(p.length, 132)
+  assert.equal(p.endsWith('/cmd.fifo'), true)
+  assert.notEqual(seatCommandPath('/a/lane', 'builder', root48), seatCommandPath('/b/lane', 'builder', root48))
+})
+
+test('FO3 proven teardown removes the runtime FIFO and its lane key dir', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const fifo = seatCommandPath(first.dir, 'builder', SEAT_COMMAND_ROOT)
+    writeFileSync(fifo, '')
+    const restarted = fixture({ dir: first.dir, pid: 800, existsSync })
+    try {
+      const rows = restarted.io.teardown()
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(existsSync(fifo), false)
+      assert.equal(existsSync(dirname(dirname(fifo))), false)
+    } finally { restarted.cleanup() }
+  } finally { first.cleanup() }
+})
+
+test('RV4-1 a worker live across the runtime move is adopted on its in-crew pipe and proven teardown removes it', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const inCrew = inCrewSeatCommandPath(first.dir, 'builder')
+    mkdirSync(dirname(inCrew), { recursive: true })
+    writeFileSync(inCrew, '')
+    const opened = []
+    const adopted = fixture({
+      dir: first.dir, pid: 800, spawnPid: 801, existsSync,
+      openSync: (path) => { opened.push(path); return 10 },
+    })
+    try {
+      adopted.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      assert.deepEqual(opened, [inCrew])
+      const rows = adopted.io.teardown()
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(existsSync(inCrew), false)
+    } finally { adopted.cleanup() }
+  } finally { first.cleanup() }
+})
+
+test('RV4-2 a fresh spawn removes a stale in-crew pipe no worker holds', () => {
+  const dir = scratchDir('headless-rpc-rv4-2-')
+  try {
+    const inCrew = inCrewSeatCommandPath(dir, 'builder')
+    mkdirSync(dirname(inCrew), { recursive: true })
+    writeFileSync(inCrew, '')
+    const opened = []
+    const f = fixture({ dir, existsSync, openSync: (path) => { opened.push(path); return 10 } })
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(existsSync(inCrew), false)
+    assert.deepEqual(opened, [seatCommandPath(dir, 'builder', SEAT_COMMAND_ROOT)])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 function withInheritedEndpoint(value, body) {
@@ -4567,4 +4682,23 @@ test('CH3 failed cmd-history append never fails the launch and journals append-f
     assert.equal(new Date(hits[0].at).toISOString(), hits[0].at)
     void run
   } finally { f.cleanup() }
+})
+
+// MUTATION FO7: shorten the runtime key digest back to 8 hex digits and these two lanes share one FIFO.
+test('FO7 same-named lanes whose short digests collide still get distinct command FIFOs', () => {
+  // The first 8 hex digits of sha256 match for these two crew dirs (b3ceb385).
+  const a = seatCommandPath('/tmp/review-parent-10740/lane', 'builder', '/run')
+  const b = seatCommandPath('/tmp/review-parent-33667/lane', 'builder', '/run')
+  assert.notEqual(a, b)
+  assert.match(a, /^\/run\/crew-rpc\/lane-[0-9a-f]{32}\/builder\/cmd\.fifo$/)
+})
+
+// MUTATION FO8: drop the 48-char prefix cap and a long lane slug overruns NAME_MAX.
+test('FO8 a long lane slug keeps the runtime key directory under NAME_MAX', () => {
+  const slug = 'b' + 'x'.repeat(229)
+  const p = seatCommandPath(join('/lanes', slug), 'builder', '/run')
+  const keyDir = p.split('/').at(-3)
+  assert.equal(keyDir.length, 48 + 1 + 32)
+  assert.equal(keyDir.startsWith(slug.slice(0, 48) + '-'), true)
+  assert.notEqual(p, seatCommandPath(join('/lanes', slug + 'y'), 'builder', '/run'))
 })

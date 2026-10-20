@@ -4,12 +4,12 @@ description: Use when a change could be smaller, before adding a helper, branch,
 compatibility: Delivered inline to the builder and granted to the reviewer; the ladder still reaches every seat through `_shared.md`.
 ---
 
-The ladder is in your shared charter; this skill does not restate it. These are its rungs as this codebase has already climbed them — reach for the accepted shape before inventing one.
+The ladder is in your shared charter; this skill does not restate it. Reach for the codebase's accepted shapes before inventing one.
 
 - Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (crew/seat-io.mjs:3933).
 - Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).
 - Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39).
-- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:136).
+- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:157).
 
 When two standard-library options are the same size, choose the edge-case-correct one.
 A rate is never reported without its denominator; a guard is never claimed without its kill-mutation.

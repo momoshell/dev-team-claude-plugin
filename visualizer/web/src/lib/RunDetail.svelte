@@ -4,6 +4,7 @@
   import { deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, shipStatus, tokenCell } from './fleet.js'
   import { executionTopology } from './execution-steps.js'
   import { stepTimeline } from './plan-steps.js'
+  import { reasonText } from './reason-copy.js'
   import { runConfiguration } from './workflow-semantics.js'
   import { crewSummary } from './crew.js'
   import { applyRead, initialJournalState, journalPulse, shouldRead } from './live.js'
@@ -142,7 +143,7 @@
   <header class="task-header">
     <div class="task-title"><div class="status-line"><span class={`status ${status.tone}`}><i></i>{status.word}</span><span>{configuration.assurance.label} assurance{#if configuration.assurance.legacy_alias} · {configuration.assurance.legacy_alias}{/if}</span>{#if run.mode}<span>{run.mode}</span>{/if}</div><h1>{run.goal || 'Untitled task'}</h1><p><span>{run.repo_slug || 'Repository unavailable'}</span><span class="header-start">Started <time datetime={started.iso || undefined}>{started.date} · {started.time}</time></span></p></div>
     <button class="id-button" onclick={copyId} title={run.adw_id}><span>{copied ? 'Copied' : 'Run ID'}</span><code>{String(run.adw_id || '').slice(0,8)}</code></button>
-    <ol class="step-strip" aria-label="Accepted plan progress">{#each stepView.strip as entry (entry.id)}<li class={`tone-${entry.tone}`} title={entry.reason || undefined}><code>{entry.id}</code> · {entry.state ?? `Unmeasured — ${entry.reason}`}</li>{/each}</ol>
+    <ol class="step-strip" aria-label="Accepted plan progress">{#each stepView.strip as entry (entry.id)}<li class={`tone-${entry.tone}`} title={entry.reason || undefined}><code>{entry.id}</code> · {entry.state ?? reasonText(entry.reason)}</li>{/each}</ol>
   </header>
 
   <section class="configuration-strip" aria-label="Recorded run configuration">
@@ -262,19 +263,20 @@
   <section class="profile-evidence" aria-label="Profile evidence summary">
     <header class="profile-evidence-heading"><div><p class="micro">Measured evidence</p><h2>{profileEvidence.profile.label}</h2><p>{profileEvidence.profile_specific ? 'The ordered blocks below explain why this profile requires each recorded evidence family.' : 'This run has no recorded task profile; the visualizer does not infer one from its envelopes or stages.'}</p></div><span class:unrecorded={!profileEvidence.profile_specific}>{profileEvidence.profile_specific ? 'Profile-specific' : 'Not recorded'}</span></header>
     <div class="evidence-summary-grid">
-      {#each profileEvidence.blocks as block (block.key)}
-        <article class="evidence-summary" class:not-recorded={!block.measured}>
-          <header><strong>{block.label}</strong><span>{block.measured ? 'Recorded' : 'Not recorded'}</span></header>
+      {#each profileEvidence.cards as block (block.key)}
+        <article class="evidence-summary">
+          <header><strong>{block.label}</strong><span>Recorded</span></header>
           <p>{block.reason}</p>
           <small>{block.summary}</small>
           {#if block.references.length}<ul>{#each block.references as reference, index (`${reference.dispatch_seq ?? 'task'}-${reference.field}-${reference.role ?? 'unknown'}-${index}`)}<li><code>{reference.role || 'return'} · {reference.field}</code><span>{typeof reference.value === 'string' ? reference.value : JSON.stringify(reference.value)}</span></li>{/each}</ul>{/if}
         </article>
       {/each}
     </div>
+    {#if profileEvidence.footer.length}<details class="not-recorded"><summary>Not recorded: {profileEvidence.footer.map((entry) => entry.label).join(', ')}</summary><ul>{#each profileEvidence.footer as entry (entry.key)}<li>{entry.label} — {entry.text}</li>{/each}</ul></details>{/if}
     <section class="topology-summary" aria-label="Execution topology summary">
       <header><div><p class="micro">Measured execution topology</p><h3>{topology.measured ? configuration.execution.label : 'Not recorded'}</h3><p>{topology.measured ? 'Declared stages are shown in order; repair and reverify checkpoints are conditional.' : 'The execution shape is not recorded or is not declared; no topology is inferred.'}</p></div>{#if topology.measured}<span>{topology.rows.length} declared stages</span>{/if}</header>
       {#if topology.measured}
-        <div class="topology-rows" aria-label="Declared execution stages">{#each topology.rows as row (row.stage)}<span class={`topology-stage ${row.status}`}><strong>{row.stage}</strong><small>{row.status === 'conditional' ? 'Conditional' : row.status}</small></span>{/each}</div>
+        <div class="topology-rows" aria-label="Declared execution stages">{#each topology.rows as row (row.stage)}<span class={`topology-stage ${row.status}`} aria-label={row.stage} title={row.stage}></span>{/each}</div>
         {#if topology.defects.length}<div class="topology-defects" aria-label="Execution topology defects"><strong>Topology defects</strong><ul>{#each topology.defects as defect (`${defect.kind}-${defect.stage}`)}<li class={defect.kind}><b>{defect.stage}</b><span>{defect.message}</span></li>{/each}</ul></div>{:else}<p class="topology-clear">No missing or undeclared stages were recorded.</p>{/if}
       {:else}<p class="topology-not-recorded">Not recorded — stage absence is not classified without a measured execution declaration.</p>{/if}
     </section>
@@ -307,4 +309,12 @@
 
 @media (max-width: 620px) { .detail { padding:1rem .75rem 3rem; }.task-header { align-items:start; }.id-button { display:none; }.header-start { width:100%; border-left:0; padding-left:0; }.configuration-strip { grid-template-columns:1fr; }.configuration-strip article { border-right:0; border-bottom:1px solid var(--line); }.configuration-strip article:last-child { border-bottom:0; }.summary-grid { grid-template-columns:1fr; }.summary-grid article { min-height:7.5rem; border-right:0; border-bottom:1px solid var(--line); }.summary-grid article:nth-last-child(-n+2) { border-bottom:1px solid var(--line); }.summary-grid article:last-child { border-bottom:0; }.phase-section > header > span { display:none; } }
 @media (max-width: 620px) { .configuration-pair { grid-template-columns:1fr; }.run-state-facts { grid-template-columns:1fr; }.reconcile-copy,.run-state-card .reconcile-copy { max-width:none; justify-items:stretch; }.reconcile-copy small { text-align:left; }.shipping-summary { grid-template-columns:1fr; }.shipping-time { border-left:0; padding-left:0; } }
+.topology-rows { display:flex; flex-wrap:wrap; gap:.4rem; }
+.topology-stage { width:.85rem; height:.85rem; border-radius:50%; padding:0; }
+.topology-stage.recorded { background:var(--muted); }
+.topology-stage.conditional { opacity:.45; }
+.topology-stage.missing { background:var(--status-fail); }
+.not-recorded { margin:.6rem .75rem .75rem; border:1px solid var(--line); border-radius:.45rem; background:var(--bg); padding:.55rem .65rem; }
+.not-recorded summary { color:var(--muted); cursor:pointer; font-size:.6rem; }
+.not-recorded ul { display:grid; gap:.2rem; margin:.4rem 0 0; padding-left:1.1rem; color:var(--muted); font-size:.6rem; }
 </style>

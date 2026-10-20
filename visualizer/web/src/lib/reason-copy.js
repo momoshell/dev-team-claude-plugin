@@ -31,6 +31,10 @@ export const REASON_COPY = Object.freeze({
   'brief-outside-crew-root': 'The brief path is outside the crew directory',
   'brief-unreadable': 'The brief could not be read',
   'brief-has-no-acceptance-text': 'The brief has no acceptance criteria',
+  'no-gate-in-phase': 'No gate ran in this phase',
+  'no-envelope-narrative-in-phase': 'No envelope narrative was recorded for this phase',
+  'dispatch-end-not-recorded': 'The dispatch end was not recorded',
+  'profile-evidence-not-recorded': 'This evidence was not recorded for the profile',
 });
 export function reasonText(slug) {
   if (typeof slug === 'string' && Object.hasOwn(REASON_COPY, slug)) return REASON_COPY[slug];

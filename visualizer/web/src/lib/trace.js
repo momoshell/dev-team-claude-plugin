@@ -1,6 +1,9 @@
 import { acceptRows } from './panels.js'
+import { reasonText } from './reason-copy.js'
 
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
+
+export const PHASE_PANEL_REASONS = Object.freeze(['no-gate-in-phase', 'no-envelope-narrative-in-phase', 'dispatch-end-not-recorded'])
 
 const EFFORT_WHY = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/seat-io.mjs:264-265, 285-288)'
 const CONTEXT_WHY = 'claude pane seats land an agent_sessions row via emitPaneUsage (crew/seat-io.mjs:1940); pi/codex pane seats land none because only claude ships a reader (crew/seat-io.mjs:877), so pane totals are a floor; no live transport records occupancy — headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
@@ -425,6 +428,9 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
       gate: null,
       accept: null,
       events: [],
+      headline: null,
+      dispatches: [],
+      footer: [],
       artifacts: null,
       pending: `no phase named ${phase ?? '—'} in this run`,
     }
@@ -441,6 +447,83 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   const proof = gateProofStory(orderedGateRows, gateRow?.gate_generation ?? null, run.gate_generations)
   const envelopeList = Array.isArray(returns?.envelopes) ? returns.envelopes : []
   const scopedEvents = (Array.isArray(events) ? events : []).filter((event) => samePhase(event?.phase_id, found.id))
+  const phaseTime = (value) => {
+    if (value == null) return null
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  const paired = new Map()
+  for (const event of scopedEvents) {
+    if (event?.type !== 'agent_start' && event?.type !== 'agent_end') continue
+    const id = payload(event)?.dispatch_id
+    if (id == null || id === '') continue
+    const key = String(id)
+    if (!paired.has(key)) paired.set(key, { start: null, end: null })
+    const slot = paired.get(key)
+    if (event.type === 'agent_start') { if (slot.start == null) slot.start = event }
+    else slot.end = event
+  }
+  const dispatches = [...paired.entries()].map(([id, slot]) => {
+    const startPayload = slot.start ? payload(slot.start) : {}
+    const endPayload = slot.end ? payload(slot.end) : {}
+    const digits = String(id).match(/(\d+)$/)
+    const startMs = phaseTime(slot.start?.started_at ?? slot.start?.ended_at)
+    const endMs = phaseTime(slot.end?.ended_at ?? slot.end?.started_at)
+    return {
+      dispatch_id: String(id),
+      dispatch_seq: digits ? Number(digits[1]) : null,
+      role: String(startPayload?.role ?? endPayload?.role ?? 'agent').toLowerCase().replaceAll('_', ' ').replaceAll('-', ' '),
+      duration_ms: startMs != null && endMs != null && endMs >= startMs ? endMs - startMs : null,
+    }
+  })
+  const phaseEnvelopes = envelopeList.filter((envelope) => dispatches.some((dispatch) => dispatch.dispatch_seq != null && Number(envelope?.dispatch_seq) === dispatch.dispatch_seq))
+  const humanise = (value) => String(value || 'unknown').replaceAll('_', ' ').replaceAll('-', ' ')
+  const formatPaired = (value) => {
+    if (value == null) return null
+    if (value < 1000) return `${Math.round(value)} ms`
+    const seconds = value / 1000
+    if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`
+    return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
+  }
+  const rawLabel = String(found.name || 'phase').split(':')[0].replaceAll('_', ' ').replaceAll('-', ' ')
+  const headLabel = rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1)
+  const headlineSegments = [headLabel]
+  if (dispatches.length) {
+    const groups = []
+    for (const dispatch of dispatches) {
+      const group = groups.find((entry) => entry.role === dispatch.role)
+      if (group) group.count += 1
+      else groups.push({ role: dispatch.role, count: 1 })
+    }
+    headlineSegments.push(groups.map((entry) => `${entry.count} ${entry.role} dispatch${entry.count === 1 ? '' : 'es'}`).join(', '))
+    const pairedDurations = dispatches.map((dispatch) => dispatch.duration_ms).filter((value) => value != null)
+    if (pairedDurations.length) headlineSegments.push(pairedDurations.map((value) => formatPaired(value)).join(' + '))
+  }
+  if (gateRow != null) {
+    const selected = orderedGateRows.filter((row) => gateRow.gate_generation == null || String(row?.gate_generation) === String(gateRow.gate_generation))
+    const builtRow = [...selected].reverse().find((row) => /^gate:r\d+$/.test(String(row?.gate_name || ''))) ?? null
+    const builtSummary = gateRunSummary(builtRow)
+    if (builtSummary?.total != null) {
+      const passed = builtSummary.total - (builtSummary.failed ?? 0) - (builtSummary.errored ?? 0)
+      headlineSegments.push(`gate ${passed}/${builtSummary.total} passed`)
+    } else if (generation?.verdict === 'proven' && generation?.checks_total != null) {
+      // Proven means the built run passed every one of the same N checks.
+      headlineSegments.push(`gate ${generation.checks_total}/${generation.checks_total} passed`)
+    } else if (generation?.verdict != null) headlineSegments.push(`gate ${generation.verdict}`)
+    else headlineSegments.push('gate recorded')
+  } else if (!dispatches.length) {
+    if (found.duration_ms != null) headlineSegments.push(`completion recorded in ${formatPaired(found.duration_ms)}`)
+    else if (found.status === 'ok') headlineSegments.push('completion recorded')
+    else headlineSegments.push(humanise(found.status || 'completion recorded'))
+  }
+  const headline = { text: headlineSegments.join(' · '), collapsed: gateRow == null && phaseEnvelopes.length === 0 && scopedEvents.length <= 1 }
+  const otherGateIds = new Set((Array.isArray(run.gate_checks) ? run.gate_checks : []).map((row) => row?.phase_id).filter((id) => id != null && String(id) !== String(found.id)))
+  const otherGateLocations = (Array.isArray(run.phases) ? run.phases : []).filter((entry) => [...otherGateIds].some((id) => String(id) === String(entry?.id))).map((entry) => humanise(entry.name))
+  const footer = []
+  if (gateRow == null) footer.push({ label: 'gate', reason: 'no-gate-in-phase', text: otherGateLocations.length ? 'Validation evidence is attached to ' + otherGateLocations.join(', ') + '.' : reasonText('no-gate-in-phase') })
+  if (artifactDocuments(envelopeList).length === 0) footer.push({ label: 'envelope narrative', reason: 'no-envelope-narrative-in-phase', text: reasonText('no-envelope-narrative-in-phase') })
+  for (const dispatch of dispatches) if (dispatch.duration_ms == null) footer.push({ label: 'dispatch ' + dispatch.dispatch_id, reason: 'dispatch-end-not-recorded', text: reasonText('dispatch-end-not-recorded') })
   const gate = gateRow == null
     ? {
       generation: null,
@@ -468,6 +551,9 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   return {
     phase: found,
     found: true,
+    headline,
+    dispatches,
+    footer,
     gate,
     accept: acceptEvidence(run, returns),
     events: scopedEvents,

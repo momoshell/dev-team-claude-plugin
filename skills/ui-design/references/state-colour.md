@@ -4,7 +4,7 @@ This reference turns the measured R1-R5 decisions and the documented L1 inventor
 
 ## R1 - derive a tone, then map class to token
 
-Keep status policy in the data layer. `visualizer/web/src/lib/fleet.js:518` (`deriveStatus`) returns `{ key, word, tone, where, why }` with tones including `serious`, `ok`, `fail`, `aborted`, `quiet`, and `busy`, where the `quiet` tone covers the queued and unknown cases. A component interpolates that tone into a class at `visualizer/web/src/lib/RunCard.svelte:53` and the equivalent row at `visualizer/web/src/lib/FleetTable.svelte:14`, while CSS maps class to an alias at `visualizer/web/src/lib/RunCard.svelte:65` through `visualizer/web/src/lib/RunCard.svelte:69` and at `visualizer/web/src/lib/FleetTable.svelte:37` through `visualizer/web/src/lib/FleetTable.svelte:41`.
+Keep status policy in the data layer. `visualizer/web/src/lib/fleet.js:525` (`deriveStatus`) returns `{ key, word, tone, where, why }` with tones including `serious`, `ok`, `fail`, `aborted`, `quiet`, and `busy`, where the `quiet` tone covers the queued and unknown cases. A component interpolates that tone into a class at `visualizer/web/src/lib/RunCard.svelte:53` and the equivalent row at `visualizer/web/src/lib/FleetTable.svelte:14`, while CSS maps class to an alias at `visualizer/web/src/lib/RunCard.svelte:65` through `visualizer/web/src/lib/RunCard.svelte:69` and at `visualizer/web/src/lib/FleetTable.svelte:37` through `visualizer/web/src/lib/FleetTable.svelte:41`.
 
 A component never decides colour: render the tone returned by the shaper, and let CSS map class -> token. No component reads `run.status` to pick a colour. The tone vocabulary is pinned by the shaper tests in `test/visualizer-panels.test.mjs` and `test/visualizer-teardown.test.mjs`; no broad test proves every tone-to-token mapping.
 
@@ -14,7 +14,7 @@ Pass the role suffix through one custom-property indirection and let the stylesh
 
 ## R3 - lane colour uses the same indirection
 
-Use the lane index only through a lane alias. `visualizer/web/src/lib/PhaseDots.svelte:5` sets the lane indirection and `visualizer/web/src/lib/PhaseDots.svelte:8` paints it; `visualizer/web/src/lib/PhaseGantt.svelte:146` supplies the bar lane variable. Lanes 0-5 follow `ROLE_ORDER` from `visualizer/web/src/lib/trace.js:3`; `--lane-N` exists only for N in 0-7, from `visualizer/web/src/lib/theme.css:122` through `visualizer/web/src/lib/theme.css:129`.
+Use the lane index only through a lane alias. `visualizer/web/src/lib/PhaseDots.svelte:5` sets the lane indirection and `visualizer/web/src/lib/PhaseDots.svelte:8` paints it; `visualizer/web/src/lib/PhaseGantt.svelte:146` supplies the bar lane variable. Lanes 0-5 follow `ROLE_ORDER` from `visualizer/web/src/lib/trace.js:4`; `--lane-N` exists only for N in 0-7, from `visualizer/web/src/lib/theme.css:122` through `visualizer/web/src/lib/theme.css:129`.
 
 ## R4 - role/lane use is delegated, but the allowlist is finite
 
@@ -32,7 +32,7 @@ The measured leak is **22 hex literals in 4 of 34 components**. They are all sta
 |---|---|---:|
 | `visualizer/web/src/lib/GateChips.svelte:13` | `#166534`, `#dcfce7`, `#991b1b`, `#fee2e2` | 4 |
 | `visualizer/web/src/lib/AcceptPanel.svelte:23` | `#166534`, `#dcfce7`, `#991b1b`, `#fee2e2` | 4 |
-| `visualizer/web/src/lib/PhasePanel.svelte:100` | `#166534`, `#dcfce7`, `#991b1b`, `#fee2e2`, `#92400e`, `#fef3c7` | 6 |
+| `visualizer/web/src/lib/PhasePanel.svelte:99` | `#166534`, `#dcfce7`, `#991b1b`, `#fee2e2`, `#92400e`, `#fef3c7` | 6 |
 | `visualizer/web/src/lib/PhaseGantt.svelte:257` | `#071015`, `#fff`, `#611`, `#ffd6d6`, `#073e24`, `#c6f7d8`, `#614200`, `#ffe7a9` | 8 |
 | **Total** | **22 hex** | **22** |
 
@@ -48,9 +48,9 @@ Six rows from the earlier inventory are gone upstream and are recorded here with
 
 ## Divergences: encode the boundary, not the majority
 
-- **D4:** the old 3-vs-2 majority is gone: no hard-coded `#b42318` `.error` remains. The token-correct `var(--status-fail)` form appears in `visualizer/web/src/lib/RunDetail.svelte:300` (`.error-banner`), `visualizer/web/src/lib/EnvelopeInspector.svelte:85` (`.error`), and `visualizer/web/src/App.svelte:246` (`.rail-status.fail`), alongside the roster notice rule. Following a hard-coded majority would now be wrong twice over: the majority no longer exists, and the surviving rule is the alias.
-- **D5:** `unproven` has four policies: an amber chip (`#92400e` on `#fef3c7`) at `visualizer/web/src/lib/PhasePanel.svelte:100`; muted text with a `color-mix` fill at `visualizer/web/src/lib/GateChips.svelte:13`; pale text `#ffe7a9` at `visualizer/web/src/lib/PhaseGantt.svelte:257`; and `var(--status-running)` at `visualizer/web/src/lib/TeardownPanel.svelte:63`. `proven` and `failed` likewise mix chip pairs, gantt colours, and status aliases. Choose one token policy for new state, do not infer it from the most common old rule.
-- **D6:** `deriveStatus` emits `quiet` for queued and unknown at `visualizer/web/src/lib/fleet.js:533-535`, but only the attention rail defines those tones; the RunCard class map at `visualizer/web/src/lib/RunCard.svelte:66` through `visualizer/web/src/lib/RunCard.svelte:69` and the FleetTable class map at `visualizer/web/src/lib/FleetTable.svelte:37` through `visualizer/web/src/lib/FleetTable.svelte:41` omit `quiet`. Require every emitted tone to have a class rule in every consumer, or state the absence explicitly.
+- **D4:** the old 3-vs-2 majority is gone: no hard-coded `#b42318` `.error` remains. The token-correct `var(--status-fail)` form appears in `visualizer/web/src/lib/RunDetail.svelte:302` (`.error-banner`), `visualizer/web/src/lib/EnvelopeInspector.svelte:85` (`.error`), and `visualizer/web/src/App.svelte:246` (`.rail-status.fail`), alongside the roster notice rule. Following a hard-coded majority would now be wrong twice over: the majority no longer exists, and the surviving rule is the alias.
+- **D5:** `unproven` has four policies: an amber chip (`#92400e` on `#fef3c7`) at `visualizer/web/src/lib/PhasePanel.svelte:99`; muted text with a `color-mix` fill at `visualizer/web/src/lib/GateChips.svelte:13`; pale text `#ffe7a9` at `visualizer/web/src/lib/PhaseGantt.svelte:257`; and `var(--status-running)` at `visualizer/web/src/lib/TeardownPanel.svelte:63`. `proven` and `failed` likewise mix chip pairs, gantt colours, and status aliases. Choose one token policy for new state, do not infer it from the most common old rule.
+- **D6:** `deriveStatus` emits `quiet` for queued and unknown at `visualizer/web/src/lib/fleet.js:540-542`, but only the attention rail defines those tones; the RunCard class map at `visualizer/web/src/lib/RunCard.svelte:66` through `visualizer/web/src/lib/RunCard.svelte:69` and the FleetTable class map at `visualizer/web/src/lib/FleetTable.svelte:37` through `visualizer/web/src/lib/FleetTable.svelte:41` omit `quiet`. Require every emitted tone to have a class rule in every consumer, or state the absence explicitly.
 - **D10:** the old global `border-radius:0` reset is gone from `theme.css`; the surviving global reset is the box-sizing rule at `visualizer/web/src/lib/theme.css:141`, and `visualizer/web/src/App.svelte:233` restates it. Components reintroduce corners through the panel and status idioms. A new component follows the actual boundary rather than reading `theme.css` alone and concluding that every surface is square.
 
 The register also records C9's honest blank as the state-safe alternative: unmeasured values render a muted em-dash or reasoned sentence with a `title`, often with a dashed underline; see `visualizer/web/src/lib/RunCard.svelte:53`, the `{@render mark(...)}` rows at `visualizer/web/src/lib/FleetTable.svelte:15-21` ending at `visualizer/web/src/lib/FleetTable.svelte:21`, and ADR-029 section 2 at `docs/adr/adr-029-headless-observability-interjection.md:23`. State colour must not turn absence into a measured-looking zero.

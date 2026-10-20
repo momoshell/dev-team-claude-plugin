@@ -18,7 +18,7 @@ Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onsele
 
 ## Snippets and rendering
 
-The census found `{#snippet` 3 times in 3 files and `{@render` 19 times in 3 files (measured over visualizer/web/src/**/*.svelte, 34 files). `visualizer/web/src/lib/PhasePanel.svelte:54-83` defines the `countMark` snippet and renders it; `visualizer/web/src/lib/AcceptPanel.svelte:16` renders evidence blocks through `MarkdownView`. Keep a snippet's input shape local and render it at the call site rather than duplicating markdown markup.
+The census found `{#snippet` 4 times in 3 files and `{@render` 21 times in 3 files (measured over visualizer/web/src/**/*.svelte, 34 files). `visualizer/web/src/lib/PhasePanel.svelte:49-72` defines the `countMark` snippet and renders it; `visualizer/web/src/lib/AcceptPanel.svelte:16` renders evidence blocks through `MarkdownView`. Keep a snippet's input shape local and render it at the call site rather than duplicating markdown markup.
 
 ## Events and bindings
 
@@ -26,13 +26,13 @@ Use native `onclick=` attributes: the census found 69 across 19 files and zero `
 
 ## Runes census and effects
 
-The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 143 times in 22 files, `$derived` 178 times in 30 files, `$props()` 26 times in 26 files, `$effect` 32 times in 19 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:973-975` checks those strings across every `.svelte` file.
+The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 143 times in 22 files, `$derived` 177 times in 30 files, `$props()` 26 times in 26 files, `$effect` 32 times in 19 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:973-975` checks those strings across every `.svelte` file.
 
 A correct effect has a dependency and a cleanup boundary. `visualizer/web/src/lib/RunCard.svelte:20-22` carries the `state_referenced_locally` comment: `previousRunning` is left undefined until the effect's first pass so a true running-to-finished transition can trigger the final drain. Treat that comment's shape—local previous value, guarded work, returned cleanup—as the repo's measured effect idiom, not as a generic API tutorial.
 
 ## Scoped styles
 
-Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:100`. The `:global(*)` reset copy in `visualizer/web/src/App.svelte:233` is recorded duplication, not a pattern for ordinary component selectors. The repo has zero `{@html}` uses in the measured component suite.
+Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The `:global(*)` reset copy in `visualizer/web/src/App.svelte:233` is recorded duplication, not a pattern for ordinary component selectors. The repo has zero `{@html}` uses in the measured component suite.
 
 ## Composition over cross-cutting colour
 

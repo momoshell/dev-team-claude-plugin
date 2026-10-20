@@ -42,6 +42,7 @@ async function withAttentionFixture(extraKey, callback) {
   try {
     const sourcePath = join(ROOT, 'visualizer/web/src/lib/fleet.js')
     const semanticsPath = join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js')
+    const reasonCopyPath = join(ROOT, 'visualizer/web/src/lib/reason-copy.js')
     const profilesPath = join(ROOT, 'crew/task-profiles.mjs')
     const source = readFileSync(sourcePath, 'utf8')
     const original = "export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])"
@@ -51,6 +52,7 @@ async function withAttentionFixture(extraKey, callback) {
     mkdirSync(moduleDir, { recursive:true })
     mkdirSync(join(dir, 'crew'), { recursive:true })
     writeFileSync(join(moduleDir, 'workflow-semantics.js'), readFileSync(semanticsPath, 'utf8'))
+    writeFileSync(join(moduleDir, 'reason-copy.js'), readFileSync(reasonCopyPath, 'utf8'))
     writeFileSync(join(moduleDir, 'fleet.js'), source.replace(original, changed))
     writeFileSync(join(dir, 'crew', 'task-profiles.mjs'), readFileSync(profilesPath, 'utf8'))
     const module = await import(`${pathToFileURL(join(moduleDir, 'fleet.js')).href}?attention=${encodeURIComponent(extraKey)}`)
@@ -1734,14 +1736,16 @@ test('phase inspection explains factory checkpoints and suppresses empty gate co
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
   assert.match(source, /Task completion recorded/)
   assert.match(source, /No agent lane owned this checkpoint/)
-  assert.match(source, /No gate ran on this checkpoint/)
-  assert.match(source, /Validation evidence is attached to/)
   assert.match(source, /What this establishes/)
   assert.match(source, /How the gate was proved/)
   assert.match(source, /formatted from the ledger/)
   assert.doesNotMatch(source, /check\.label/)
   assert.doesNotMatch(source, /gate verdict unavailable/)
   assert.doesNotMatch(source, /unlinked.*lane/)
+  const panel = phasePanel({ phases: [{ id: 1, name: 'done', status: 'ok' }, { id: 2, name: 'build', status: 'ok' }], gate_checks: [{ phase_id: 2, gate_generation: 1, checks: [] }], gate_generations: [{ gate_generation: 1, verdict: 'proven' }] }, { phase: 1, events: [], returns: { envelopes: [] } })
+  const gateEntry = panel.footer.find((entry) => entry.reason === 'no-gate-in-phase')
+  assert.ok(gateEntry)
+  assert.match(gateEntry.text, /Validation evidence is attached to/)
 })
 
 test('operations cadence keeps time labels below the chart baseline', () => {
@@ -3788,12 +3792,17 @@ test('estimated cell prices label as estimated and chips render the flag', () =>
 })
 
 const reasonCopyProbes = await import('../visualizer/web/src/lib/reason-copy.js').catch(() => null)
+const traceProbes = await import('../visualizer/web/src/lib/trace.js').catch(() => null)
+const fleetProbes = await import('../visualizer/web/src/lib/fleet.js').catch(() => null)
 const planCardsProbes = await import('../visualizer/web/src/lib/plan-steps.js').catch(() => null)
 const journalSourceProbes = await import('../visualizer/server/journal-source.mjs').catch(() => null)
 test('PU1 reason copy covers every timeline and server slug', () => {
   assert.ok(reasonCopyProbes && planCardsProbes && journalSourceProbes, 'expected reason-copy, plan-steps and journal-source modules');
   assert.equal(Object.isFrozen(reasonCopyProbes.REASON_COPY), true);
-  const lists = [planCardsProbes.STEP_TIMELINE_REASONS, planCardsProbes.PLAN_STEP_REASONS, planCardsProbes.PLAN_ABSENCE_REASONS, journalSourceProbes.STEP_TITLE_REASONS, journalSourceProbes.ACCEPTANCE_REASONS];
+  assert.ok(traceProbes && fleetProbes, 'expected trace and fleet modules');
+  assert.equal(Object.isFrozen(traceProbes.PHASE_PANEL_REASONS), true);
+  assert.equal(Object.isFrozen(fleetProbes.PROFILE_EVIDENCE_REASONS), true);
+  const lists = [planCardsProbes.STEP_TIMELINE_REASONS, planCardsProbes.PLAN_STEP_REASONS, planCardsProbes.PLAN_ABSENCE_REASONS, journalSourceProbes.STEP_TITLE_REASONS, journalSourceProbes.ACCEPTANCE_REASONS, traceProbes.PHASE_PANEL_REASONS, fleetProbes.PROFILE_EVIDENCE_REASONS];
   for (const list of lists) {
     assert.equal(Array.isArray(list), true);
     for (const slug of list) {
@@ -3805,6 +3814,89 @@ test('PU1 reason copy covers every timeline and server slug', () => {
   }
   assert.equal(reasonCopyProbes.reasonText('made-up-slug').includes('made-up-slug'), true);
   assert.notEqual(reasonCopyProbes.reasonText(null).length, 0);
+})
+test('PH1 done phase headline records completion and collapses', () => {
+  const panel = phasePanel({ phases: [{ id: 10987, name: 'done', status: 'ok', duration_ms: 1400 }], gate_checks: [] }, { phase: 10987, events: [{ phase_id: 10987, type: 'log', payload_json: '{"level":"info","message":"done"}' }], returns: { envelopes: [{ role: 'planner', dispatch_seq: 1, status: 'done', summary: 'Planner narrative.' }] } })
+  assert.equal(panel.headline.text, 'Done · completion recorded in 1.4 s')
+  assert.equal(panel.headline.collapsed, true)
+})
+test('PH2 build phase headline groups dispatches with gate proof', () => {
+  const ev = (id, type, dispatch_id, at) => ({ id, phase_id: 2, type, payload_json: JSON.stringify({ role: 'builder', dispatch_id }), started_at: at, ended_at: at })
+  const panel = phasePanel({ phases: [{ id: 2, name: 'build', status: 'ok' }], gate_checks: [{ phase_id: 2, gate_generation: 1, checks: [] }], gate_generations: [{ gate_generation: 1, verdict: 'proven', checks_total: 5, checks_failed: 0, checks_errored: 0 }] }, { phase: 2, events: [ev(1, 'agent_start', 'd4', 1000), ev(2, 'agent_end', 'd4', 260000), ev(3, 'agent_start', 'd5', 1000), ev(4, 'agent_end', 'd5', 689000)], returns: { envelopes: [] } })
+  assert.equal(panel.headline.text, 'Build · 2 builder dispatches · 4m 19s + 11m 28s · gate 5/5 passed')
+  assert.equal(panel.headline.collapsed, false)
+  assert.deepEqual(panel.dispatches.map((d) => d.duration_ms), [259000, 688000])
+})
+test('PH2 built gate counts, not pristine proof', () => {
+  // MUTATION: replace builtSummary with generation's pristine-proof counters.
+  const summary = (total, failed, errored = 0) => [{ label:JSON.stringify({ total, failed, errored }) }]
+  const builtRow = (failed, attempt) => ({ phase_id:2, gate_generation:1, gate_name:'gate:r1', attempt, checks:summary(10, failed) })
+  const headline = (builtRows, verdict = 'proven') => phasePanel({
+    phases:[{ id:2, name:'build', status:'ok' }],
+    gate_checks:[
+      ...builtRows,
+      { phase_id:2, gate_generation:1, gate_name:'gate-proof:1', attempt:3, checks:summary(10, 10) },
+    ],
+    gate_generations:[{ gate_generation:1, verdict, checks_total:10, checks_failed:10, checks_errored:0 }],
+  }, { phase:2 }).headline.text
+  const green = headline([builtRow(2, 1), builtRow(0, 2)])
+  assert.match(green, / · gate 10\/10 passed$/)
+  assert.doesNotMatch(green, /\b0\/10\b/)
+  assert.equal(headline([builtRow(2, 1)]), 'Build · gate 8/10 passed')
+  assert.equal(headline([], 'failed'), 'Build · gate failed')
+})
+test('PH3 unpaired dispatch headline carries no zero duration and pins its footer', () => {
+  const panel = phasePanel({ phases: [{ id: 2, name: 'build', status: 'running' }], gate_checks: [] }, { phase: 2, events: [{ id: 1, phase_id: 2, type: 'agent_start', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'd6' }), started_at: 1000, ended_at: 1000 }], returns: { envelopes: [] } })
+  assert.equal(panel.headline.text, 'Build · 1 builder dispatch')
+  assert.equal(panel.dispatches[0].duration_ms, null)
+  const entry = panel.footer.find((e) => e.reason === 'dispatch-end-not-recorded')
+  assert.ok(entry)
+  assert.equal(entry.text, reasonCopyProbes.reasonText('dispatch-end-not-recorded'))
+})
+test('PH4 phase panel renders headline with collapsed details and quiet footer', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  assert.ok(source.includes('{panel.headline.text}'))
+  assert.ok(source.includes('panel.headline.collapsed'))
+  assert.ok(source.includes('<details class="phase-details">'))
+  assert.ok(source.includes('<summary>details ▸</summary>'))
+  assert.ok(source.includes('<details class="not-recorded">'))
+  assert.equal(source.includes('evidence-elsewhere'), false)
+  assert.equal(source.includes('No envelope narrative was recorded.'), false)
+})
+test('EV1 profile evidence separates measured cards from quiet footer', () => {
+  const view = profileEvidenceView('code_review', { envelopes: [] })
+  assert.deepEqual(view.cards, [])
+  assert.deepEqual(view.footer.map((e) => e.key), ['base_head_identity', 'structured_findings', 'severity', 'citations', 'zero_source_writes'])
+  for (const entry of view.footer) {
+    assert.ok(Object.hasOwn(reasonCopyProbes.REASON_COPY, entry.reason))
+    assert.equal(entry.text, reasonCopyProbes.reasonText(entry.reason))
+  }
+})
+test('EV2 run detail renders measured cards with a quiet footer', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok(source.includes('{#each profileEvidence.cards as block'))
+  assert.ok(source.includes('<details class="not-recorded">'))
+  assert.ok(source.includes('Not recorded: {profileEvidence.footer'))
+  assert.equal(source.includes("{block.measured ? 'Recorded' : 'Not recorded'}"), false)
+})
+test('TS1 topology pills carry stage names without visible text', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok(source.includes('aria-label={row.stage}'))
+  assert.ok(source.includes('title={row.stage}'))
+  assert.ok(source.includes('topology-defects'))
+  assert.equal(source.includes("<small>{row.status === 'conditional' ? 'Conditional' : row.status}</small>"), false)
+  assert.equal(source.includes('<strong>{row.stage}</strong>'), false)
+})
+test('TS2 converge checkpoint is conditional with no missing defect', () => {
+  const topo = executionTopology('full', ['plan', 'check', 'gate-baseline', 'build', 'gate', 'scope-gate', 'lane', 'gate-proof', 'review', 'commit', 'document', 'rebase', 'suite', 'publish', 'done'], { complete: true })
+  assert.deepEqual(topo.defects, [])
+  assert.equal(topo.rows.find((r) => r.stage === 'converge').status, 'conditional')
+})
+test('HS1 step strip translates unmeasured reasons with slug titles', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok(source.includes('reasonText(entry.reason)'))
+  assert.ok(source.includes('title={entry.reason'))
+  assert.equal(source.includes('Unmeasured — ${entry.reason}'), false)
 })
 test('PU2 plan step cards choose titles by precedence', () => {
   assert.ok(planCardsProbes && typeof planCardsProbes.planStepCards === 'function', 'expected planStepCards');

@@ -13661,3 +13661,77 @@ test('resolveLaneBinary makes a leading-hyphen package dir an explicit relative 
   const option = resolveLaneBinary({ lane: 'npx vitest run src/a.test.mjs', checkout: '/tmp/repo', scopeFiles: ['-P/a.test.mjs'], exists: (p) => p === '/tmp/repo/-P/node_modules/.bin/vitest' })
   assert.deepEqual(option, { lane: 'cd ./-P && ./node_modules/.bin/vitest run src/a.test.mjs', source: 'package-local', tool: 'vitest', package_dir: '-P', candidates: ['-P'] })
 })
+
+const B1316_LEAD_REASON = 'the gate names a symbol the brief never asked for'
+const b1316BaseIo = ({ verdict, gateRound1, repairGateCmd = 'gate-fixed' }) => fakeIo({
+  envelopes: {
+    'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+    'builder:1': buildEnv({ status: 'insufficient', summary: 'the acceptance gate is red and I cannot make it green', details: { questions: [{ id: 'q1', question: 'How should the gate be fixed?' }] } }),
+    'lead:1': leadEnv('gate-defect', 'repair the gate, then rebuild', { reason: B1316_LEAD_REASON }),
+    'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: verdict, reason: 'triage verdict reason' } },
+    'lead:2': repairGateCmd === null ? { status: 'done', role: 'lead', details: {} } : { status: 'done', role: 'lead', details: { gate_cmd: repairGateCmd } },
+    'builder:2': buildEnv(),
+    'reviewer:2': reviewEnv('pass'),
+  },
+  runs: {
+    'gate-bad:1': { ok: false, output: RED(3) },
+    'gate-bad:2': gateRound1,
+    'gate-fixed': { ok: true, output: '' },
+    'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+  },
+  changed: ['a.mjs', 'a.test.mjs'],
+})
+const b1316TriageAssigns = (io) => io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'gate-triage').length
+
+test('GD1 round-1 lead gate-defect with a gate verdict repairs and bounces the builder', () => {
+  // Kills replacing leadGateDefect:true with false at the consult call site (no round-1 triage, no repair, no bounce).
+  const io = b1316BaseIo({ verdict: 'gate', gateRound1: { ok: false, output: RED(3) } })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(b1316TriageAssigns(io), 1)
+  assert.match(io.calls.writes[`${TD}/gate-triage-r1.md`], /builder did NOT return done/)
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+})
+
+test('GD2 round-1 lead gate-defect with a build verdict escalates where build', () => {
+  // Kills dropping the lead reason from the build-verdict escalate template.
+  const io = b1316BaseIo({ verdict: 'build', gateRound1: { ok: false, output: RED(3) } })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'build')
+  assert.equal(b1316TriageAssigns(io), 1)
+  assert.equal(res.details.gate.repairs, 0)
+  assert.match(res.details.escalation.why, /reviewer triage returned no gate verdict/)
+  assert.ok(res.details.escalation.why.includes(B1316_LEAD_REASON))
+})
+
+test('GD3 decision-1 offers gate-defect iff the round-1 gate ran red with triage and repair unspent', () => {
+  // Kills replacing the eligibility condition with true (gate-defect offered on a green gate).
+  const redIo = b1316BaseIo({ verdict: 'gate', gateRound1: { ok: false, output: RED(3) } })
+  driveTask(CTX, redIo)
+  const redBrief = redIo.calls.writes[`${TD}/decision-1.md`] || ''
+  assert.ok(redBrief.includes('- bounce'))
+  assert.ok(redBrief.includes('the reviewer then triages build-vs-gate independently'))
+  assert.ok(redBrief.includes('- gate-defect'))
+  const greenIo = b1316BaseIo({ verdict: 'gate', gateRound1: { ok: true, output: '' } })
+  const greenRes = driveTask(CTX, greenIo)
+  const greenBrief = greenIo.calls.writes[`${TD}/decision-1.md`] || ''
+  assert.ok(greenBrief.includes('- bounce'))
+  assert.ok(!greenBrief.includes('the reviewer then triages build-vs-gate independently'))
+  assert.ok(!greenBrief.includes('- gate-defect'))
+  assert.equal(greenRes.status, 'escalation')
+  assert.equal(greenRes.details.escalation.where, 'build')
+  assert.equal(b1316TriageAssigns(greenIo), 0)
+})
+
+test('round-1 lead gate-defect with no accepted repair escalates naming the diagnosis', () => {
+  // Kills dropping the custodian tail (no-accepted-repair escalates without naming it).
+  const io = b1316BaseIo({ verdict: 'gate', gateRound1: { ok: false, output: RED(3) }, repairGateCmd: null })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'build')
+  assert.match(res.details.escalation.why, /the gate custodian returned no accepted repair/)
+  assert.ok(res.details.escalation.why.includes(B1316_LEAD_REASON))
+})

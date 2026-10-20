@@ -313,14 +313,19 @@ function runPublished(options = {}) {
 
 const PROMPT_SCOPE = ['crew/roles/planner.md']
 const PLAN_PROMPT_CLAIM = 'unmeasured — n insufficient; reason: fixture migration; re-measure after 1 seats.'
-const promptPublicationOptions = (body = '', claim = PLAN_PROMPT_CLAIM) => ({
+const promptPublicationOptions = (body = '', claim = PLAN_PROMPT_CLAIM) => {
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: PROMPT_SCOPE, prompt_claim: claim } })
+  return ({
   changed: PROMPT_SCOPE,
   envelopes: {
-    'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: PROMPT_SCOPE, prompt_claim: claim } }),
+    'planner:1': plan,
+    'planner1.coverage-reask.planner.json': plan,
+    'planner:2': plan,
     'builder:1': buildEnv({ details: { files_changed: PROMPT_SCOPE, commit_message: body } }),
     'reviewer:1': reviewEnv('pass'),
   },
 })
+}
 function runPromptPublished(body = '', options = {}) {
   const defaults = promptPublicationOptions(body)
   return runPublished({

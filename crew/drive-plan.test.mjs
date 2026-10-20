@@ -3674,12 +3674,13 @@ test('authored prompt admission still requires a planner claim', () => {
   const journal = b624Journal([{ event: 'fence-admitted', lane: B624_LANE, file, source: 'data-file' }])
   const io = b624Io({
     journal,
-    envelopes: { 'planner:1': b624Plan([...B624_PLANNED, file]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    envelopes: { 'planner:1': b624Plan([...B624_PLANNED, file]), 'planner1.coverage-reask.planner.json': b624Plan([...B624_PLANNED, file]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
   })
   const result = driveTask(b624Context({ files_in_scope: [...B624_INHERITED, file] }), io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'plan')
   assert.match(result.details.escalation.why, /prompt-claim-missing/)
+  assert.deepEqual(io.calls.logs.map((x) => x.planner_shape_reask).filter(Boolean), [{ round: 1, defects: ['prompt-claim-missing'], outcome: 'asked' }])
 })
 
 
@@ -3976,6 +3977,140 @@ test('CR7', () => {
  assert.equal(io.calls.assign.filter(x=>x.role==='planner').length,1)
  assert.equal(result.details.escalation?.where,'plan')
  assert.deepEqual(io.calls.logs.map(x=>x.acceptance_coverage_reask).filter(Boolean).map(x=>x.outcome),['grace-spent'])
+})
+
+// RA1-RA6: planner shape defects get ONE re-ask through plannerCoverageReask;
+// plan-accept stays the backstop. Each test mirrors task/gate.mjs one-for-one.
+const RA_CLAIM = 'unmeasured \u2014 n insufficient; reason: gate fixture; re-measure after 1 seats.'
+const raReasks = (io) => io.calls.assign.filter((a) => a.note === 'acceptance-coverage-reask')
+const raBuilders = (io) => io.calls.assign.filter((a) => a.role === 'builder').length
+const raShapeRows = (io) => io.calls.logs.map((x) => x.planner_shape_reask).filter(Boolean)
+const raReaskBrief = (io) => io.calls.writes[TD + '/planner-coverage-reask-r1.md'] ?? ''
+const raPromptPlan = (claim) => planEnv({ details: { ...planEnv().details, files_in_scope: ['crew/roles/planner.md'], ...(claim ? { prompt_claim: claim } : {}) } })
+const raPromptIo = (retry) => fakeIo({
+  envelopes: { 'planner:1': raPromptPlan(null), 'planner1.coverage-reask.planner.json': retry, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+  runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+  changed: ['crew/roles/planner.md'],
+})
+const RA_STEP_MUTATIONS = [
+  { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
+  { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
+]
+const raSteppedPlan = (c1Checks) => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'stepped-gate', mutations: RA_STEP_MUTATIONS.map((m) => ({ ...m })),
+  chunks: [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: c1Checks }, { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] }] } })
+const raSteppedIo = (retry) => {
+  const baseline = 'FAIL A1: pristine red\nFAIL A2: pristine red\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}'
+  let gateCalls = 0
+  return fakeIo({
+    files: { [TD + '/plan.md']: '# stepped plan\n', [CTX.checkout + '/a.mjs']: 'alpha\n', [CTX.checkout + '/b.mjs']: 'beta\n' },
+    writeThrough: true,
+    envelopes: { 'planner:1': raSteppedPlan([]), 'planner1.coverage-reask.planner.json': retry,
+      'builder:1': buildEnv({ artifacts: [TD + '/step-c1.md'], details: { ...buildEnv().details, files_changed: ['a.mjs'] } }),
+      'builder:2': buildEnv({ artifacts: [TD + '/step-c2.md'], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
+      'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      'stepped-gate': () => (gateCalls++ === 0 ? { ok: false, output: baseline } : { ok: true, output: 'GATE-SUMMARY {"total":2,"failed":0,"errored":0}' }) },
+    cleanRuns: { 'stepped-gate': { ok: false, output: baseline } },
+    changed: ['a.mjs', 'b.mjs', 'a.test.mjs'],
+  })
+}
+
+// MUTATION: negate the prompt-claim predicate in plannerShapeDefects (!validPlanPromptClaim -> validPlanPromptClaim); no re-ask is dispatched.
+// MUTATION: drop the coverageMiss guard on the acceptance_coverage_reask_result emit; a shape-only re-ask then journals a coverage result.
+test('RA1 prompt shape re-ask repaired reaches builders with no coverage result row', () => {
+  const io = raPromptIo(raPromptPlan(RA_CLAIM))
+  const result = driveTask(CTX, io)
+  const text = raReaskBrief(io)
+  assert.equal(raReasks(io).length, 1)
+  assert.equal(raReasks(io)[0]?.id, 'planner1')
+  assert.match(text, /prompt-claim-missing/)
+  assert.match(text, /not applicable \u2014 citation-only/)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['prompt-claim-missing'], outcome: 'asked' }])
+  assert.ok(raBuilders(io) >= 1)
+  assert.notEqual(result.details?.escalation?.where, 'plan')
+  assert.deepEqual(io.calls.logs.filter((x) => x.acceptance_coverage_reask_result), [])
+})
+
+// MUTATION: rewrite the plan-accept backstop reason text ('prompt-claim-missing: prompt-scoped...' -> 'prompt-claim-other: ...'); a still-failing retry no longer escalates with the same reason.
+test('RA2 still-missing retry escalates plan with the backstop reason', () => {
+  const io = raPromptIo(raPromptPlan(null))
+  const result = driveTask(CTX, io)
+  assert.equal(raReasks(io).length, 1)
+  assert.equal(result.details?.escalation?.where, 'plan')
+  assert.equal(result.details?.escalation?.why, 'prompt-claim-missing: prompt-scoped planner plans require one valid prompt_claim')
+  assert.equal(raBuilders(io), 0)
+})
+
+// MUTATION: invert the chunk-defect push in plannerShapeDefects (chunkResult?.defect -> !chunkResult?.defect); a stepped lane empty checks_owned never reaches the re-ask.
+test('RA3 stepped empty checks_owned re-asked then repaired reaches builders', () => {
+  const io = raSteppedIo(raSteppedPlan(['A1']))
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  const text = raReaskBrief(io)
+  assert.equal(raReasks(io).length, 1)
+  assert.match(text, /chunk-checks-not-array/)
+  assert.match(text, /non-empty array of declared gate labels/)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['chunk-checks-not-array'], outcome: 'asked' }])
+  assert.ok(raBuilders(io) >= 1)
+  assert.notEqual(result.details?.escalation?.where, 'plan-chunks')
+})
+
+// MUTATION: rename the plan-chunks backstop stage (escalate('plan-chunks', 'chunk plan validation refused...') -> 'plan-chunks-x'); a still-failing stepped retry no longer escalates at plan-chunks.
+test('RA4 stepped still-empty retry escalates plan-chunks', () => {
+  const io = raSteppedIo(raSteppedPlan([]))
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(raReasks(io).length, 1)
+  assert.equal(result.details?.escalation?.where, 'plan-chunks')
+  assert.match(String(result.details?.escalation?.why ?? ''), /chunk-checks-not-array/)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['chunk-checks-not-array'], outcome: 'asked' }])
+})
+
+// MUTATION: report a spent grace as 'asked' in the planner_shape_reask row (outcome: graceSpentBy ? 'grace-spent' : 'asked' -> ? 'asked' : 'asked'); the grace-spent shape row no longer records that no dispatch happened.
+test('RA5 grace spent records grace-spent shape row with no dispatch', () => {
+  const io = raPromptIo(raPromptPlan(RA_CLAIM))
+  io.reaskGraceSpent = () => 'planner'
+  const result = driveTask(CTX, io)
+  assert.equal(raReasks(io).length, 0)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['prompt-claim-missing'], outcome: 'grace-spent' }])
+  assert.equal(result.details?.escalation?.where, 'plan')
+  assert.match(String(result.details?.escalation?.why ?? ''), /prompt-claim-missing/)
+})
+
+// MUTATION: drop plannerShapeReaskLines from the re-ask brief (shapeDefects.length > 0 ? plannerShapeReaskLines(shapeDefects) : [] -> []); a combined coverage+shape re-ask brief no longer names the shape defect.
+test('RA6 combined coverage and shape defects share one re-ask', () => {
+  const brief = '# T\n\n## Acceptance\n(CB1) required\n'
+  const miss = { ...CHECK_MUTATION, check: 'X1' }, fixed = { ...CHECK_MUTATION, check: 'CB1' }
+  const first = planEnv({ details: { ...planEnv().details, files_in_scope: ['crew/roles/planner.md'], gate_cmd: 'gate-cmd', mutations: [miss] } })
+  const retry = planEnv({ details: { ...planEnv().details, files_in_scope: ['crew/roles/planner.md'], gate_cmd: 'gate-cmd', prompt_claim: RA_CLAIM, mutations: [fixed] } })
+  const io = fakeIo({ files: { [CTX.briefFile]: brief }, envelopes: { 'planner:1': first, 'planner1.coverage-reask.planner.json': retry, 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } } })
+  driveTask(CTX, io)
+  const text = raReaskBrief(io)
+  assert.equal(raReasks(io).length, 1)
+  assert.match(text, /Uncovered ids: CB1/)
+  assert.match(text, /prompt-claim-missing/)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['prompt-claim-missing'], outcome: 'asked' }])
+  assert.deepEqual(io.calls.logs.filter((x) => x.acceptance_coverage_reask_result).map((x) => x.acceptance_coverage_reask_result), [{ round: 1, repaired: true, uncovered_after: [] }])
+})
+
+// MUTATION: at the :8753 call site use validateChunksAtAccept: true; under that mutation the guard sees 1 re-ask and one planner_shape_reask row and goes red.
+test('shape re-ask: full variant invalid chunks untouched', () => {
+  const mutations = [
+    { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
+    { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
+  ]
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], mutations,
+    chunks: [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: [] }, { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] }] } })
+  const io = fakeIo({
+    files: { [TD + '/plan.md']: '# full plan\n', [CTX.checkout + '/a.mjs']: 'alpha\n', [CTX.checkout + '/b.mjs']: 'beta\n' },
+    writeThrough: true,
+    envelopes: { 'planner:1': plan, 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'b.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(raReasks(io).length, 0)
+  assert.deepEqual(raShapeRows(io), [])
+  assert.notEqual(result.details?.escalation?.where, 'plan-chunks')
 })
 
 // Mutation killed: empty preflight mutations bounce even a fully covered plan.

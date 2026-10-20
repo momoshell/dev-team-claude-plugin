@@ -5535,6 +5535,8 @@ function pcIo({ claim, scope = ['a.mjs'], builder = '', inventory = () => [PC_PR
   const details = { ...planEnv().details, files_in_scope: scope, ...(claim === undefined ? {} : { prompt_claim: claim }), ...(issues ? { issues } : {}), ...(gate ? { gate_cmd: 'gate-cmd' } : {}) }
   const io = publicationIo({ changed: scope, envelopes: {
     'planner:1': planEnv({ details }),
+    'planner1.coverage-reask.planner.json': planEnv({ details }),
+    'planner:2': planEnv({ details }),
     'builder:1': buildEnv({ details: { files_changed: scope, commit_message: `feat: change\n\n${builder}` } }),
     'reviewer:1': reviewEnv('pass'),
   } })

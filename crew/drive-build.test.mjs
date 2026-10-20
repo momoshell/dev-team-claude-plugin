@@ -9887,6 +9887,7 @@ function steppedAcceptanceIo({ chunks = steppedChunks, planFilesInScope = ['a.mj
     files, writeThrough: true,
     envelopes: {
       'planner:1': plan,
+      'planner1.coverage-reask.planner.json': plan,
       'builder:1': builder1 || buildEnv({ artifacts: [`${TD}/step-c1.md`], details: { ...buildEnv().details, files_changed: ['a.mjs'], ...(corrected ? { mutation_corrections: [correction] } : {}) } }),
       'builder:2': builder2 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
       'builder:3': builder3 || buildEnv({ artifacts: [`${TD}/step-c2.md`], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),

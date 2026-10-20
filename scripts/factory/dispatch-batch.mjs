@@ -5098,12 +5098,22 @@ function launchDispatchWave(compiled, launchedLanes) {
     waveNumber,
     deferred,
     unstarted,
+    createdWorktrees = [],
+    attachedBranches = [],
   } = compiled
 
   const loadGate = parseLoadGate(runFlags)
   const arrivals = []
   for (const [index, item] of settled.entries()) {
-    const loadWait = loadGate ? waitForHostLoad({ lane: item.lane, pendingLanes: settled.slice(index).map((entry) => entry.lane), gate: loadGate, deps: d }) : null
+    const pendingLanes = settled.slice(index).map((entry) => entry.lane)
+    let loadWait = null
+    try {
+      loadWait = loadGate ? waitForHostLoad({ lane: item.lane, pendingLanes, gate: loadGate, deps: d }) : null
+    } catch (error) {
+      const pending = new Set(pendingLanes)
+      removeWorktrees({ plans: createdWorktrees.filter((plan) => pending.has(plan.lane)), branches: attachedBranches.filter((plan) => pending.has(plan.lane)), checkout: root, deps: d })
+      throw error
+    }
     let firstFailure = null
     let teardown = null
     for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {

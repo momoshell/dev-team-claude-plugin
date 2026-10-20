@@ -1627,7 +1627,7 @@ test('accepted_via records a lead accept-with-residuals distinctly from a review
 
 test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.ok(Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS))
-  assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])
+  assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate', 'gate-defect'])
   assert.equal(SECOND_OPINION, 'second-opinion')
   assert.ok(Object.isFrozen(PERSPECTIVE_TARGETS))
 })

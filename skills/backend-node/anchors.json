@@ -28,7 +28,7 @@
   "test/factory-ledger-cli.test.mjs:339": "payload.until, '2026-08-21T01:00:00.000Z'",
   "docs/conventions.md:134": "A frozen exported enum's drift guard needs",
   "docs/conventions.md:57": "first TypeScript file on main, and every file under",
-  "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
+  "crew/drive-review.test.mjs:1630": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate', 'gate-defect'])",
   "crew/drive-review.test.mjs:1629": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
   "crew/drive-review.test.mjs:1628": "DECISIONS and LIMITS are the frozen public contract",
   "test/factory-emit.test.mjs:1849": "CLI: emit-cli-unknown-flag-refusal",

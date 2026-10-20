@@ -566,7 +566,7 @@ export function turnCeilingBreached(turns, budget) {
 // The decision enum the lead may return. The driver offers a SUBSET as
 // options in each consult; any answer outside the offered set is treated as
 // escalate (fail toward the human, never toward silent progress).
-export const DECISIONS = Object.freeze(['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])
+export const DECISIONS = Object.freeze(['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate', 'gate-defect'])
 
 // #45 Tier B slice 1. The failure upgrade is spent ONCE PER TASK, across all
 // roles and all bounce kinds — the ratified budget is per task, not per role.
@@ -11564,20 +11564,20 @@ function runTask(ctx, io, crash) {
   // never opened, and the lane burned all four lead consults and escalated with
   // `gate_repairs` still 0. Returns the (possibly re-run) gate result, and an
   // `escalation` the CALLER must return — this closure never returns out of driveTask.
-  const gateDefectValve = (round, gateRes, { committedBaseline = false } = {}) => {
-    if (pendingRebaseConflict && !gateRes?.ok && round >= limits.gate_fails_to_triage
+  const gateDefectValve = (round, gateRes, { committedBaseline = false, leadGateDefect = false } = {}) => {
+    if (pendingRebaseConflict && !gateRes?.ok && (leadGateDefect || round >= limits.gate_fails_to_triage)
       && !gateTriaged && !gateObserveTriaged && gateRepairs < limits.gate_repairs) {
       return { gateRes, escalation: pendingRebaseEscalate('the pending conflict cycle requires gate repair before continuation') }
     }
-    if (gateRes.ok || round < limits.gate_fails_to_triage || gateTriaged || gateRepairs >= limits.gate_repairs) return { gateRes }
+    if (gateRes.ok || (!leadGateDefect && round < limits.gate_fails_to_triage) || gateTriaged || gateRepairs >= limits.gate_repairs) return { gateRes }
     if (gateObserving) gateObserveTriaged = true
     else gateTriaged = true
     gateAttention(`the acceptance gate failed ${round} rounds — escalated to reviewer triage (build defect vs gate defect)`, [planPath])
     const tBrief = art(`gate-triage-r${round}.md`)
-    const partialTreeNote = gateObserving
+    const partialTreeNote = gateObserving || leadGateDefect
       ? '\n\nThe builder did NOT return done and the diff is partial. "The tree is unfinished" is not to be read as "the build is defective".'
       : ''
-    io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.${partialTreeNote}`)
+    io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate ${leadGateDefect ? 'is red on this round' : 'keeps failing'}. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.${partialTreeNote}`)
     const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
     if (gateObserving && triage.status === 'done' && triage.details?.defect === 'gate') gateTriaged = true
     if (triage.status === 'done' && triage.details?.defect === 'gate') {
@@ -11773,14 +11773,14 @@ function runTask(ctx, io, crash) {
         buildBrief = b; buildNote = 'build-fix'
         continue
       }
-      const c = consultLead(
-        [`The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?`,
+      const gateDefectOffered = gateRes?.ok === false && !gateTriaged && !gateObserveTriaged && gateRepairs < limits.gate_repairs
+      const c = consultLead([`The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?${gateDefectOffered ? ' Or answer gate-defect if the acceptance GATE, not the build, is defective: the reviewer then triages build-vs-gate independently; a gate verdict spends the single gate repair and bounces the builder with your guidance against the repaired gate; any other outcome escalates.' : ''}`,
           ...questionConsultLines('builder', questions)].join('\n'),
-        ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
+        gateDefectOffered ? ['bounce', 'escalate', 'gate-defect'] : ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
       )
-      if (c.decision === 'escalate') {
-        return escalate('build', c.reason, env.artifacts || [])
-      }
+      if (c.decision === 'escalate') return escalate('build', c.reason, env.artifacts || [])
+      if (c.decision === 'gate-defect') { const repairsBefore = gateRepairs; const valved = gateDefectValve(round, gateRes, { committedBaseline, leadGateDefect: true })
+        if (valved.escalation) return valved.escalation; if (!(gateRepairs > repairsBefore && valved.forceFullCheckProof !== undefined)) return escalate('build', `lead diagnosed a gate defect (${c.reason || 'no reason given'}), but ${gateRepairs > repairsBefore ? 'the gate custodian returned no accepted repair' : 'reviewer triage returned no gate verdict'}`, env.artifacts || []) }
       if (finalRound()) grantBuilderAllowance('build', round) // the lead-granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder', env)

@@ -19,7 +19,7 @@ import { seatCommand as piSeatCommand } from './adapters/adapter-pi.mjs'
 import { assignmentLine } from './driver.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { CENSUS_ABSENT_CAUSES, NO_ENVELOPE_CENSUS_ABSENT_REASONS, NO_ENVELOPE_REASONS, SEAT_SUITE_POLICY_EVENT, SUITE_RUN_REFUSAL, SUITE_RUN_UNRECOGNISED, WAIT_POLL_MS, claudeCensus, noEnvelopeDetail } from './headless.mjs'
-import { scratchDir } from '../test/helpers.mjs'
+import { scratchDir, trackProcessGroup } from '../test/helpers.mjs'
 const SEAT_COMMAND_ROOT = scratchDir('headless-rpc-runtime-')
 import { TRANSPORT_SETTLEMENT as DRIVE_TRANSPORT_SETTLEMENT } from './drive.mjs'
 
@@ -4068,6 +4068,8 @@ test('RV1-1 immediate EPERM writes zero elapsed on a frozen clock', () => {
 // command FIFO must live outside the seat-visible task/ tree. The sleep
 // command ignores its stdin, so the supervisor's prompt write fits the pipe
 // buffer while the worker holds the read end open like a real pi worker.
+const REAL_SEAT_PGIDS = new Map()
+
 function realFifoSeat(prefix) {
   const dir = scratchDir(prefix)
   const taskDir = join(dir, 'task')
@@ -4078,17 +4080,32 @@ function realFifoSeat(prefix) {
   writeFileSync(briefFile, '# brief\n')
   const crew = { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
   const paths = { dir, taskDir, returnsDir }
+  let spawnedPid = null
   const io = headlessRpcIo({
     crew, paths, taskDir, checkout: dir,
     adapters: { builder: { rpcCommand: () => ({ bin: '/bin/sleep', args: ['30'], env: {} }) } },
     bin: '/bin/sleep',
-    deps: { pid: 700, uuid: () => 'session-1', log: () => {}, seatCommandRoot: SEAT_COMMAND_ROOT },
+    deps: {
+      pid: 700, uuid: () => 'session-1', log: () => {}, seatCommandRoot: SEAT_COMMAND_ROOT,
+      spawn: (...args) => {
+        const child = spawn(...args)
+        if (args[2]?.detached === true && Number.isSafeInteger(child?.pid) && child.pid > 1) {
+          spawnedPid = child.pid
+          REAL_SEAT_PGIDS.set(taskDir, child.pid)
+          trackProcessGroup(child.pid)
+        }
+        return child
+      },
+    },
   })
   const run = io.assign({ role: 'builder', briefFile })
-  return { dir, taskDir, io, run, fifo: seatCommandPath(dir, 'builder', SEAT_COMMAND_ROOT) }
+  return { dir, taskDir, io, run, childPid: spawnedPid, fifo: seatCommandPath(dir, 'builder', SEAT_COMMAND_ROOT) }
 }
 
 function killSeatGroup(taskDir) {
+  const recorded = REAL_SEAT_PGIDS.get(taskDir)
+  REAL_SEAT_PGIDS.delete(taskDir)
+  if (Number.isSafeInteger(recorded) && recorded > 1) { try { process.kill(-recorded, 'SIGKILL') } catch {} return }
   try {
     const pgid = Number(String(readFileSync(join(taskDir, 'headless-rpc', 'builder', 'pgid'), 'utf8')).trim())
     if (Number.isSafeInteger(pgid) && pgid > 1) { try { process.kill(-pgid, 'SIGKILL') } catch {} }
@@ -5020,4 +5037,76 @@ test('RR8 a relative command root still yields an absolute FIFO path the record 
   writeFileSync(join(seat, 'fifo-path'), p)
   assert.equal(readRecordedSeatCommandPath(seat, { existsSync, readFileSync }), p)
   rmSync(root, { recursive: true, force: true })
+})
+
+test('LG1 default seat command root resolves the rpc FIFO under TMPDIR crew-rpc', () => {
+  const dir = scratchDir('lg-rpc-default-')
+  const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true })
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const scratchTmp = scratchDir('lg-default-tmp-')
+  const previousTmpdir = process.env.TMPDIR
+  process.env.TMPDIR = scratchTmp
+  try {
+    const opened = []
+    const expectedFifo = seatCommandPath(dir, 'builder', scratchTmp)
+    const crew = { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
+    const io = headlessRpcIo({
+      crew, paths, taskDir: paths.taskDir, checkout: dir,
+      adapters: { builder: { rpcCommand: (spec) => rpcCommand(spec) } },
+      bin: '/bin/pi',
+      deps: {
+        pid: 700,
+        uuid: () => 'session-1',
+        spawn: () => ({ pid: 701, unref() {} }),
+        openSync: (path) => { opened.push(path); return 10 },
+        writeSync: (_fd, line) => { JSON.parse(line); return undefined },
+        closeSync: () => {},
+        kill: () => {},
+        existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
+        readdirSync,
+        writeFileSync,
+        readFileSync,
+        mkdirSync,
+        log: () => {},
+        sleep: () => {},
+      },
+    })
+    io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.deepEqual(opened, [expectedFifo])
+    assert.equal(readFileSync(join(paths.taskDir, 'headless-rpc', 'builder', 'fifo-path'), 'utf8'), expectedFifo)
+    assert.equal(expectedFifo.startsWith(join(scratchTmp, 'crew-rpc')), true)
+    assert.deepEqual(fifosUnder(dir), [])
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+    rmSync(scratchTmp, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
+  assert.equal(process.env.TMPDIR, previousTmpdir)
+})
+
+test('LG5 realFifoSeat teardown reaps the spawned group after its pgid file is deleted', async () => {
+  const seat = realFifoSeat('rpc-fifo-lg5-')
+  try {
+    assert.equal(Number.isSafeInteger(seat.childPid) && seat.childPid > 1, true)
+    assert.doesNotThrow(() => process.kill(-seat.childPid, 0))
+    const pgidFile = join(seat.taskDir, 'headless-rpc', 'builder', 'pgid')
+    const pgidDeadline = Date.now() + 5000
+    while (!existsSync(pgidFile) && Date.now() < pgidDeadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(Number(readFileSync(pgidFile, 'utf8').trim()), seat.childPid)
+    rmSync(pgidFile, { force: true })
+    assert.equal(existsSync(pgidFile), false)
+    killSeatGroup(seat.taskDir)
+    const deadline = Date.now() + 5000
+    let gone = false
+    while (Date.now() < deadline && !gone) {
+      try { process.kill(-seat.childPid, 0) } catch { gone = true }
+      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.throws(() => process.kill(-seat.childPid, 0), /ESRCH/)
+  } finally {
+    if (Number.isSafeInteger(seat.childPid) && seat.childPid > 1) { try { process.kill(-seat.childPid, 'SIGKILL') } catch {} }
+    rmSync(seat.dir, { recursive: true, force: true })
+  }
 })

@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, childTracker, forAll, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
+import { ROOT, childTracker, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroup, trackProcessGroupFile, trackSpawn, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -390,4 +390,87 @@ test('forAll is seeded, bounded to [0,1), runs exactly N times, and names run, s
   const circular = {}; circular.self = circular
   assert.throws(() => forAll(() => circular, () => { throw new Error('still named') }, { runs: 1 }), /with input \[object Object\]\nstill named/)
   assert.throws(() => forAll(() => { throw new Error('gen') }, () => {}, { runs: 1 }), (error) => /generator failed on run 0 of 1 \(seed \d+\): gen/.test(error.message) && error.cause?.message === 'gen')
+})
+
+// Mutation killed: SIGKILL -> signal 0 in drainProcessGroups (test/helpers.mjs) leaves the sleep alive (LG4 gate).
+test('LG4 tracked detached process group is reaped when its test process is SIGTERMed', async () => {
+  const root = scratchDir('helpers-lg4-')
+  const script = join(root, 'child.mjs')
+  const report = join(root, 'grandchild.pid')
+  writeFileSync(script, `import { spawn } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nimport { trackSpawn } from ${JSON.stringify(helperUrl)}\nconst child = trackSpawn(spawn)('sleep', ['30'], { detached: true, stdio: 'ignore' })\nchild.unref()\nwriteFileSync(${JSON.stringify(report)}, String(child.pid))\nsetInterval(() => {}, 1000)\n`)
+  const childProcess = spawn(process.execPath, [script], { stdio: 'ignore' })
+  let pid = null
+  try {
+    const reportDeadline = Date.now() + 10000
+    while (pid === null && Date.now() < reportDeadline) {
+      try {
+        const value = Number(String(readFileSync(report, 'utf8')).trim())
+        if (Number.isSafeInteger(value) && value > 1) pid = value
+      } catch {}
+      if (pid === null) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no detached pid: ${pid}`)
+    assert.doesNotThrow(() => process.kill(-pid, 0))
+    process.kill(childProcess.pid, 'SIGTERM')
+    await new Promise((resolve, reject) => {
+      if (childProcess.exitCode !== null) { resolve(); return }
+      const timer = setTimeout(() => reject(new Error(`blocked child did not exit after SIGTERM (pid ${childProcess.pid})`)), 10000)
+      childProcess.once('exit', () => { clearTimeout(timer); resolve() })
+    })
+    const goneDeadline = Date.now() + 5000
+    let gone = false
+    while (!gone && Date.now() < goneDeadline) {
+      try { process.kill(-pid, 0) } catch { gone = true }
+      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.throws(() => process.kill(-pid, 0), /ESRCH/)
+  } finally {
+    if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
+    try { childProcess.kill('SIGKILL') } catch {}
+  }
+})
+
+// Mutation killed: removing the trackProcessGroupFile registration, or reading the file at
+// register time instead of drain time, leaves the sleep alive after the child exits.
+test('a process group registered by pgid file is read at drain time and does not survive', async () => {
+  const root = scratchDir('helpers-pgid-file-')
+  const script = join(root, 'pgid-child.test.mjs')
+  const pgidFile = join(root, 'builder-pgid')
+  writeFileSync(script, `import { test } from 'node:test'\nimport { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\ntest('child registers the pgid file before it exists', () => {\n  trackProcessGroupFile(${JSON.stringify(pgidFile)})\n  const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })\n  child.unref()\n  writeFileSync(${JSON.stringify(pgidFile)}, String(child.pid))\n})\n`)
+  const env = { ...process.env, TMPDIR: root, NO_COLOR: '1' }
+  delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', script], { env, encoding: 'utf8', timeout: 30000 })
+  rmSync(script, { force: true })
+  let pid = null
+  try {
+    assert.equal(result.status, 0, result.stderr)
+    pid = Number(String(readFileSync(pgidFile, 'utf8')).trim())
+    assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no pgid: ${pid}`)
+    const deadline = Date.now() + 5000
+    let gone = false
+    while (!gone && Date.now() < deadline) {
+      try { process.kill(pid, 0) } catch { gone = true }
+      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.throws(() => process.kill(pid, 0), /ESRCH/)
+  } finally {
+    if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
+    rmSync(pgidFile, { force: true })
+  }
+})
+
+// Mutation killed: dropping any pgid > 1 check lets an unsafe id reach process.kill at drain.
+// The drain runs in a CHILD process: registering unsafe ids here would arm our own exit drain.
+test('unsafe process group ids never reach process.kill at drain', () => {
+  const root = scratchDir('helpers-unsafe-pgid-')
+  const script = join(root, 'unsafe-child.mjs')
+  const log = join(root, 'kill.log')
+  const f1 = join(root, 'pgid-1')
+  const f0 = join(root, 'pgid-0')
+  writeFileSync(f1, '1')
+  writeFileSync(f0, '0')
+  writeFileSync(script, `import { appendFileSync } from 'node:fs'\nimport { trackProcessGroup, trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\nprocess.kill = (pid, sig) => { appendFileSync(${JSON.stringify(log)}, pid + ' ' + sig + '\\n') }\ntrackProcessGroup(1)\ntrackProcessGroup(0)\ntrackProcessGroup(-5)\ntrackProcessGroup(1.5)\ntrackProcessGroupFile(${JSON.stringify(f1)})\ntrackProcessGroupFile(${JSON.stringify(f0)})\ntrackProcessGroup(424242)\n`)
+  const result = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(log, 'utf8'), '-424242 SIGKILL\n')
 })

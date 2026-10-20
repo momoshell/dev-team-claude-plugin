@@ -19,7 +19,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 const SCRATCH_DIRS = new Set()
 const SCRATCH_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP']
 
-function drainScratchDirs() {
+function drainScratchDirs() { drainProcessGroups()
   for (const dir of SCRATCH_DIRS) {
     try { rmSync(dir, { recursive: true, force: true }) } catch {}
   }
@@ -40,6 +40,45 @@ export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {
   const dir = mkdtempSync(join(parent, prefix))
   SCRATCH_DIRS.add(dir)
   return dir
+}
+
+// Detached process groups, drained with the scratch dirs. A fixture that
+// spawns a detached group and is killed mid-test never reaches its finally,
+// and the group is reparented to pid 1 — measured 54 such orphans on
+// 2026-10-20, the oldest 9 days old. Register the group at spawn time, from
+// the detached child's pid (a detached child leads its group), never from a
+// pgid file the seat shell writes later; where the group is spawned in a
+// child process, register the pgid FILE and it is read at drain time, before
+// the scratch dirs that hold it are removed.
+// lean: entries outlive the test's own reap, so a pgid recycled before the drain is SIGKILLed; release the entry in the finally reap if pid wrap within one file run is ever observed
+const PROCESS_GROUPS = new Set()
+function readTrackedPgid(file) {
+  try {
+    const pgid = Number(String(readFileSync(file, 'utf8')).trim())
+    return Number.isSafeInteger(pgid) && pgid > 1 ? pgid : null
+  } catch { return null }
+}
+export function trackProcessGroup(pgid) {
+  if (Number.isSafeInteger(pgid) && pgid > 1) PROCESS_GROUPS.add(pgid)
+  return pgid
+}
+export function trackProcessGroupFile(file) {
+  if (typeof file === 'string' && file !== '') PROCESS_GROUPS.add({ file })
+  return file
+}
+export function trackSpawn(spawnFn) {
+  return (...args) => {
+    const child = spawnFn(...args)
+    if (args[2]?.detached === true) trackProcessGroup(child?.pid)
+    return child
+  }
+}
+function drainProcessGroups() {
+  for (const entry of PROCESS_GROUPS) {
+    const pgid = typeof entry === 'number' ? entry : readTrackedPgid(entry.file)
+    if (Number.isSafeInteger(pgid) && pgid > 1) { try { process.kill(-pgid, 'SIGKILL') } catch {} }
+  }
+  PROCESS_GROUPS.clear()
 }
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')

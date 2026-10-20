@@ -4035,3 +4035,40 @@ test('RR4 daemon send refuses a non-private recorded command dir', async () => {
     })
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
 })
+
+test('LG3 default seat command root resolves the daemon send FIFO under TMPDIR crew-rpc', async () => {
+  await each(async (f) => {
+    const scratchTmp = scratchDir('lg-default-tmp-')
+    const previousTmpdir = process.env.TMPDIR
+    process.env.TMPDIR = scratchTmp
+    try {
+      const deps = { ...f.deps }
+      delete deps.seatCommandRoot
+      const d = daemon({ root: f.root, deps })
+      try {
+        const { run_id: run } = d.enqueue({ crew_dir: f.crewDir })
+        const seatDir = join(f.taskDir, 'headless-rpc', 'builder')
+        mkdirSync(seatDir, { recursive: true })
+        writeFileSync(join(seatDir, 'pgid'), '900')
+        const expectedFifo = seatCommandPath(f.crewDir, 'builder', scratchTmp)
+        mkdirSync(dirname(expectedFifo), { recursive: true })
+        chmodSync(join(scratchTmp, 'crew-rpc'), 0o700)
+        writeFileSync(expectedFifo, '')
+        const result = await d.send({ run, message: 'default root guidance', role: 'builder' })
+        assert.equal(result.delivered, 'command-channel')
+        const frame = JSON.parse(readFileSync(expectedFifo, 'utf8').trim())
+        assert.equal(frame.message, 'default root guidance')
+        assert.equal(frame.id, result.command_id)
+        assert.equal(existsSync(join(seatDir, 'cmd.fifo')), false)
+        assert.equal(existsSync(inCrewSeatCommandPath(f.crewDir, 'builder')), false)
+      } finally {
+        await d.stop()
+      }
+    } finally {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR
+      else process.env.TMPDIR = previousTmpdir
+      rmSync(scratchTmp, { recursive: true, force: true })
+    }
+    assert.equal(process.env.TMPDIR, previousTmpdir)
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})

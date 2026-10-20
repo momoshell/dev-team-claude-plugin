@@ -4904,9 +4904,9 @@ export function composePrBody(record) {
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
   const whyParts = []
-  if (closes.length) whyParts.push(`Closes ${closes.join(', ')}`)
+  for (const ref of closes) whyParts.push(`Closes ${ref}`)
   if (issues.length) whyParts.push(`Refs ${issues.join(', ')}`)
-  const why = whyParts.length ? whyParts.join(' · ') : 'No issue named.'
+  const why = whyParts.length ? whyParts.join('\n') : 'No issue named.'
   const gate = record?.gate || null
   const summary = gate?.summary || null
   const chunkRecord = record?.chunk || null

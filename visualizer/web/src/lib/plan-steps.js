@@ -1,3 +1,4 @@
+import { reasonText } from './reason-copy.js'
 export const PLAN_STEP_STATUSES = Object.freeze(['not-started', 'started', 'done', 'red', 'bounced'])
 export const PLAN_STEP_REASONS = Object.freeze(['no-step-events', 'degraded-to-whole-build', 'journal-unavailable'])
 export const PLAN_ABSENCE_REASONS = Object.freeze(['plan-not-accepted', 'plan-unreadable', 'plan-has-no-chunks'])
@@ -131,7 +132,7 @@ export function stepTimeline(payload = {}) {
       if(censuses.length === 1 && !validTurns) turnsReason='invalid-builder-census'
       const outcome=terminal?timelineOutcome(terminal.event):null
       const bounced=terminal?.event==='step:bounce'
-      return {round:row.round,outcome,reason:terminal?null:'round-open',bounce_status:terminal?.event === 'step:bounce' ? terminal.status ?? null : null,bounce_reason:null,bounce_reason_reason:bounced?'bounce-summary-not-journaled':'not-a-bounce',failed:terminal?(Array.isArray(terminal.failed)?[...terminal.failed]:null):null,failed_reason:terminal?(Array.isArray(terminal.failed)?null:'gate-labels-not-recorded'):'round-open',regressed:terminal?(Array.isArray(terminal.regressed)?[...terminal.regressed]:null):null,regressed_reason:terminal?(Array.isArray(terminal.regressed)?null:'gate-labels-not-recorded'):'round-open',duration_ms,duration_reason,turns:validTurns?turns:null,turns_reason:turnsReason,cost:null,cost_reason:'no-per-step-cost-source'}
+      return {round:row.round,outcome,reason:terminal?null:'round-open',bounce_status:terminal?.event === 'step:bounce' ? terminal.status ?? null : null,bounce_reason:null,bounce_reason_reason:bounced?'bounce-summary-not-journaled':'not-a-bounce',passed:terminal?(Array.isArray(terminal.passed)?[...terminal.passed]:null):null,passed_reason:terminal?(Array.isArray(terminal.passed)?null:'gate-labels-not-recorded'):'round-open',failed:terminal?(Array.isArray(terminal.failed)?[...terminal.failed]:null):null,failed_reason:terminal?(Array.isArray(terminal.failed)?null:'gate-labels-not-recorded'):'round-open',regressed:terminal?(Array.isArray(terminal.regressed)?[...terminal.regressed]:null):null,regressed_reason:terminal?(Array.isArray(terminal.regressed)?null:'gate-labels-not-recorded'):'round-open',duration_ms,duration_reason,turns:validTurns?turns:null,turns_reason:turnsReason,cost:null,cost_reason:'no-per-step-cost-source'}
     })
     const doneAfter=(degradeIndex)=>related.some(({row,index})=>index>degradeIndex&&['step:done','step:accepted-by-gate','step:reverified'].includes(row.event))
     const completedAfterDegrade=drow?doneAfter(lastDegrade.index):false
@@ -157,4 +158,116 @@ export function stepTimeline(payload = {}) {
     return {id:chunk.id,files: Array.isArray(chunk.files_in_scope) ? [...chunk.files_in_scope] : null,files_reason:Array.isArray(chunk.files_in_scope)?null:'plan-files-not-recorded',depends_on:Array.isArray(chunk.depends_on)?[...chunk.depends_on]:null,depends_on_reason:Array.isArray(chunk.depends_on)?null:'plan-dependencies-not-recorded',intent:typeof chunk.intent==='string'?chunk.intent:null,intent_reason:typeof chunk.intent==='string'?null:'plan-chunk-carries-no-intent',checks:finalChecks,checks_reason:owned?null:'plan-checks-not-recorded',rounds:finalRounds,state:finalState,reason:finalReason,escalation:finalEscalation,escalation_reason:unavailable?'journal-unavailable':finalEscalation?null:'no-escalation-recorded',tone}
   })
   return {steps,absent:legacy.absent,unplanned:legacy.unplanned,degraded,strip:steps.map(({id,state,reason,tone})=>({id,state,reason,tone}))}
+}
+
+export function formatStepDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSeconds = Math.round(ms / 1000)
+  if (totalSeconds < 60) return totalSeconds + 's';
+  if (totalSeconds < 3600) {
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return m + 'm ' + s + 's';
+  }
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+const STATE_LABELS = Object.freeze({ done: 'Done', active: 'In progress', red: 'Failed', escalated: 'Escalated', degraded: 'Degraded', 'not-started': 'Not started' });
+
+export function planStepCards(payload = {}) {
+  const safePayload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+  const view = stepTimeline(safePayload);
+  if (view.absent) return { steps: [], absent: view.absent, unplanned: view.unplanned, degraded: view.degraded, footer: [] };
+  const cards = view.steps.map((step) => {
+    const chunk = Array.isArray(safePayload.plan?.chunks) ? safePayload.plan.chunks.find((entry) => entry && entry.id === step.id) : null;
+    const rawOwned = Array.isArray(chunk?.checks_owned) ? chunk.checks_owned.filter((x) => typeof x === 'string') : null;
+    const owned = rawOwned ?? (Array.isArray(step.checks) ? step.checks.map((c) => c.id) : null);
+    const intentTitle = typeof step.intent === 'string' && step.intent.trim() ? step.intent : null;
+    const headingRaw = safePayload.step_titles?.[step.id];
+    const headingTitle = typeof headingRaw === 'string' && headingRaw.trim() ? headingRaw.trim() : null;
+    let acceptanceTitle = null;
+    if (owned) {
+      for (const checkId of owned) {
+        const raw = safePayload.acceptance?.[checkId];
+        if (typeof raw === 'string' && raw.trim()) {
+          let text = raw.trim();
+          const dot = text.indexOf('.');
+          if (dot !== -1) text = text.slice(0, dot + 1);
+          if (text.length > 120) text = text.slice(0, 117).trimEnd() + '...';
+          if (owned.length > 1) text += ' +' + (owned.length - 1) + ' more';
+          acceptanceTitle = text;
+          break;
+        }
+      }
+    }
+    const checksTitle = owned?.length ? 'Owns checks ' + owned.join(', ') : null;
+    const title = intentTitle ?? headingTitle ?? acceptanceTitle ?? checksTitle ?? `Step ${step.id}`;
+    const title_source = intentTitle ? 'intent' : headingTitle ? 'plan-heading' : acceptanceTitle ? 'acceptance' : checksTitle ? 'check-ids' : 'step-id';
+    const state_label = step.state ? (STATE_LABELS[step.state] ?? step.state) : reasonText(step.reason);
+    const rounds = step.rounds === null ? null : step.rounds.map((round) => {
+      let label;
+      if (round.outcome === null || round.outcome === undefined) {
+        label = 'Round ' + round.round + ' \u00b7 in progress';
+      } else {
+        const den = owned?.length ?? round.passed?.length ?? 0;
+        const num = owned ? owned.filter((id) => round.passed?.includes(id)).length : (round.passed?.length ?? 0);
+        const parts = ['Round ' + round.round, num + '/' + den + ' checks passed'];
+        const failedSegs = round.failed?.length ? ['failed: ' + round.failed.join(', ')] : [];
+        const regressedSegs = round.regressed?.length ? ['regressed: ' + round.regressed.join(', ')] : [];
+        parts.push(...failedSegs, ...regressedSegs);
+        const pretty = formatStepDuration(round.duration_ms);
+        if (pretty !== null) parts.push(pretty);
+        if (round.turns !== null && round.turns !== undefined) parts.push(round.turns + ' turns');
+        label = parts.join(' \u00b7 ');
+      }
+      return { ...round, label };
+    });
+    return { ...step, title, title_source, state_label, rounds };
+  });
+  const footer = [];
+  if (cards.length > 0) footer.push({ label: 'cost per step', reason: 'no-per-step-cost-source', text: reasonText('no-per-step-cost-source'), steps: cards.map((c) => c.id) });
+  const descSteps = cards.filter((c) => c.title_source === 'acceptance' || c.title_source === 'check-ids' || c.title_source === 'step-id').map((c) => c.id);
+  if (descSteps.length > 0) {
+    const reason = safePayload.step_titles == null ? (safePayload.step_titles_reason ?? 'plan-chunk-carries-no-intent') : 'plan-chunk-carries-no-intent';
+    footer.push({ label: 'step description', reason, text: reasonText(reason), steps: descSteps });
+  }
+  const failSteps = cards.filter((c) => {
+    const ownedFor = Array.isArray(safePayload.plan?.chunks) ? (safePayload.plan.chunks.find((e) => e && e.id === c.id)?.checks_owned ?? null) : null;
+    const ownedIds = Array.isArray(ownedFor) ? ownedFor.filter((x) => typeof x === 'string') : (Array.isArray(c.checks) ? c.checks.map((x) => x.id) : null);
+    return (c.rounds ?? []).some((r) => {
+      if (r.outcome === null || r.outcome === undefined) return false;
+      const missing = r.failed == null || r.regressed == null;
+      if (!missing) return false;
+      const covers = ownedIds && Array.isArray(r.passed) ? ownedIds.every((id) => r.passed.includes(id)) : false;
+      return !covers;
+    });
+  }).map((c) => c.id);
+  if (failSteps.length > 0) footer.push({ label: 'failure labels', reason: 'gate-labels-not-recorded', text: reasonText('gate-labels-not-recorded'), steps: failSteps });
+  const durSteps = [];
+  let durReason = null;
+  for (const c of cards) {
+    for (const r of c.rounds ?? []) {
+      if (r.outcome !== null && r.outcome !== undefined && r.duration_ms == null) {
+        durSteps.push(c.id);
+        durReason = durReason ?? r.duration_reason;
+        break;
+      }
+    }
+  }
+  if (durSteps.length > 0) footer.push({ label: 'duration', reason: durReason, text: reasonText(durReason), steps: durSteps });
+  const turnSteps = [];
+  let turnReason = null;
+  for (const c of cards) {
+    for (const r of c.rounds ?? []) {
+      if (r.outcome !== null && r.outcome !== undefined && r.turns == null) {
+        turnSteps.push(c.id);
+        turnReason = turnReason ?? r.turns_reason;
+        break;
+      }
+    }
+  }
+  if (turnSteps.length > 0) footer.push({ label: 'turns', reason: turnReason, text: reasonText(turnReason), steps: turnSteps });
+  return { steps: cards, absent: view.absent, unplanned: view.unplanned, degraded: view.degraded, footer };
 }

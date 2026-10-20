@@ -4906,6 +4906,41 @@ test('CI1 validateChunks refuses a non-string chunk intent', () => {
   check([base], null)
 })
 
+test('CI2 validateChunks enforces the chunk intent shape', () => {
+  const scope = ['crew/a.mjs']
+  const labels = ['k']
+  const muts = [{ check: 'k', file: 'crew/a.mjs', find: 'x', replace: 'y' }]
+  const base = { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['k'] }
+  const check = (chunks, expected) => {
+    const r = validateChunks({ chunks }, { scope, checkLabels: labels, mutations: muts })
+    assert.equal(r.defect, expected, JSON.stringify(chunks))
+    return r
+  }
+  for (const intent of ['', '   ', '\t \t']) {
+    const r = check([{ ...base, intent }], 'chunk-intent-empty')
+    assert.deepEqual(r.chunks, [])
+    assert.ok(r.why.startsWith('chunk c1 intent'), r.why)
+  }
+  for (const intent of ['a\nb', 'a\rb', 'a\r\nb']) {
+    const r = check([{ ...base, intent }], 'chunk-intent-not-one-line')
+    assert.deepEqual(r.chunks, [])
+    assert.ok(r.why.startsWith('chunk c1 intent'), r.why)
+  }
+  const over = check([{ ...base, intent: 'x'.repeat(101) }], 'chunk-intent-too-long')
+  assert.deepEqual(over.chunks, [])
+  assert.ok(over.why.startsWith('chunk c1 intent'), over.why)
+  assert.match(over.why, /at most 100 characters, found 101/)
+  const exact = check([{ ...base, intent: 'x'.repeat(100) }], null)
+  assert.equal(exact.chunks[0].intent, 'x'.repeat(100))
+  const astralOk = check([{ ...base, intent: '\u{1F600}'.repeat(100) }], null)
+  assert.equal([...astralOk.chunks[0].intent].length, 100)
+  const astralOver = check([{ ...base, intent: '\u{1F600}'.repeat(101) }], 'chunk-intent-too-long')
+  assert.deepEqual(astralOver.chunks, [])
+  assert.ok(astralOver.why.startsWith('chunk c1 intent'), astralOver.why)
+  assert.match(astralOver.why, /found 101/)
+  assert.doesNotMatch(astralOver.why, /202/)
+})
+
 test('chunk validateChunks enforces all-and-only ownership with an exempt third bucket', () => {
   const scope = ['crew/a.mjs', 'crew/b.mjs']
   const muts = [

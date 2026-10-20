@@ -492,8 +492,12 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   const extensions = [...new Set([...(grants?.extensions || []), ...(paneAdvisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
   const skills = grants?.skills || []
+  const withheldUnsets = [...new Set([
+    PI_ADVISOR_ENV, PI_ADVISOR_ENDPOINT_ENV, PI_ADVISOR_MODEL_ENV, 'CREW_ADVISOR_MODELS', 'CREW_ADVISOR_PROVENANCE', PI_EDIT_ASSIST_ENV, 'CREW_PI_AGENTS',
+    ...Object.keys(env ?? {}).filter((key) => isPiSeatWithheldEnvKey(key)),
+  ])].flatMap((key) => ['-u', key])
   return [
-    'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', '-u', 'CREW_PI_AGENTS', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    'env', ...withheldUnsets, 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
     `CREW_FFF=${piFffEnv(grants).CREW_FFF}`,
     // Advisor activation is the sole CREW_ADVISOR* value; the manifest owns the cell.

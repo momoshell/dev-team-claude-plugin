@@ -1092,3 +1092,21 @@ test('AB1 an ACP Bash call that cats a SKILL.md is a load', () => {
     assert.deepEqual(loaded.map((r) => [r.skill, r.slice]), [['code-less', null]])
   } finally { cleanup(f) }
 })
+
+test('SH4 ACP fff grant without hook refuses before spawn', () => {
+  const fffGrants = { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp' } }] }
+  let launchCalls = 0
+  const f = fixture({ crew: { claude_bin: '/frozen/claude', members: { builder: { agent: 'claude', model: 'opus' } } }, adapters: { builder: { name: 'claude', grants: fffGrants, adapter: { ACP_BINARY: '/bin/claude-agent-acp', capabilitiesFor: (spec) => claudeCapabilitiesFor({ ...spec, settings: {} }), acpLaunch: () => { launchCalls += 1; return { bin: '/bin/pi', args: [], env: {} } } } } } })
+  try {
+    assert.throws(() => assign(f), (error) => error?.reason === 'grant-unsupported')
+    assert.equal(f.factoryCalls, 0)
+    assert.equal(launchCalls, 0)
+  } finally { cleanup(f) }
+  let controlLaunches = 0
+  const c = fixture({ crew: { claude_bin: '/frozen/claude', members: { builder: { agent: 'claude', model: 'opus' } } }, adapters: { builder: { name: 'claude', grants: { ...fffGrants, mcp_servers: [] }, adapter: { ACP_BINARY: '/bin/claude-agent-acp', capabilitiesFor: (spec) => claudeCapabilitiesFor({ ...spec, settings: {} }), acpLaunch: () => { controlLaunches += 1; return { bin: '/bin/pi', args: [], env: {} } } } } } })
+  try {
+    assign(c)
+    assert.equal(c.factoryCalls, 1)
+    assert.equal(controlLaunches, 1)
+  } finally { cleanup(c) }
+})

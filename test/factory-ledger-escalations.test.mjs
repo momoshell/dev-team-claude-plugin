@@ -127,6 +127,26 @@ test('a spent provider ladder escalates as infrastructure, not budget', () => {
   assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: 'headless budget-refused: seat lead produced no valid envelope at /x' }), { cause: 'budget', actor: 'driver' })
 })
 
+test('a provider-exhausted stage escalates as infrastructure even without annotation prose', () => {
+  // Mutation killed: rename 'headless-provider-exhausted' in the ledger where-rule and the new stage falls back to budget on plain prose.
+  const annotated = (kind, status) => `headless budget-refused: seat lead produced no valid envelope at /x\n[provider ${kind} status ${status}: 3 of 3 retry attempts spent over 1980000ms]`;
+  for (const [kind, status] of [['server_error', 'null'], ['rate_limit', '429'], ['stream-stall', 'null']]) {
+    assert.deepEqual(escalationCause({ where: 'headless-provider-exhausted', why: annotated(kind, status) }), { cause: 'infrastructure', actor: 'driver' }, `${kind} ${status}`);
+  }
+  assert.deepEqual(escalationCause({ where: 'headless-provider-exhausted', why: 'headless budget-refused: seat planner produced no valid envelope at /x' }), { cause: 'infrastructure', actor: 'driver' });
+  // Composed: an error from a spent ladder routes through its own stage, not its prose.
+  const spent = { stage: 'headless-provider-exhausted', message: 'headless budget-refused: seat lead produced no valid envelope at /x\n[provider server_error status null: 3 of 3 retry attempts spent over 1980000ms]' };
+  assert.deepEqual(escalationCause({ where: spent.stage, why: spent.message }), { cause: 'infrastructure', actor: 'driver' });
+});
+
+test('RV1-1 declined stall provider stage outranks timeout prose', () => {
+  // Mutation killed: remove the provider-exhausted stage rule and Rule 4 misclassifies the declined stall as seat-timeout.
+  const timeout = 'headless timeout: seat builder produced no valid envelope at /x'
+  const why = `${timeout}\n[provider stream-stall status null: 3 of 3 retry attempts spent over 1980000ms]`
+  assert.deepEqual(escalationCause({ where: 'headless-provider-exhausted', why }), { cause: 'infrastructure', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-timeout', why: timeout }), { cause: 'seat-timeout', actor: 'driver' })
+})
+
 test('the plan round cap is bounded to its own sentence', () => {
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 7 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
   assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 12 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })

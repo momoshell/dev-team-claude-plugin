@@ -74,7 +74,7 @@ export function acpIo({ crew, paths, taskDir, checkout, adapters = {}, bin = 'pi
       error.stage = 'acp-launch-unsupported'
       throw error
     }
-    const profile = (mod.capabilitiesFor || piAdapter.capabilitiesFor)({ transport: 'acp' })
+    const profile = (mod.capabilitiesFor || piAdapter.capabilitiesFor)({ transport: 'acp', grants: adapter.grants })
     const acpBin = mod.ACP_BINARY ?? bin
     const searchedPath = deps.env?.PATH ?? process.env.PATH ?? ''
     const canRead = (path) => { try { return exists(path) === true } catch { return false } }

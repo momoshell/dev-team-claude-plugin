@@ -2327,9 +2327,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     if (includeCensus) journalSkillLoads(run, stream)
     journalSkillsLeak(run)
   }
-  function outcomeError(run, outcome, message) {
+  function outcomeError(run, outcome, message, stream = null) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
-    err.stage = `headless-${outcome === NO_ENVELOPE_REASONS.ZERO_TURN_NON_START ? NO_ENVELOPE_REASONS.NO_ENVELOPE : outcome}`; err.role = run.role
+    const providerAction = stream?.providerFailure ? (PROVIDER_RETRY_ACTIONS[stream.providerFailure.kind] ?? 'none') : 'none'
+    if (['backoff', 'park'].includes(providerAction)) err.stage = 'headless-provider-exhausted'
+    else err.stage = `headless-${outcome === NO_ENVELOPE_REASONS.ZERO_TURN_NON_START ? NO_ENVELOPE_REASONS.NO_ENVELOPE : outcome}`
+    err.role = run.role
     const condition = capturedCondition(run, read, exists)
     if (condition) err.providerCondition = condition
     // A model fallback is DELIVERY of the same ask, never an answered re-ask
@@ -2817,7 +2820,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
       const env = readEnvelopeOrFail(run)
       if (env) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream) }
+      if (exitCode !== null) { const stream = telemetryParser(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome, undefined, stream), run, stream) }
       // lean: reread the cumulative stream per poll for stall detection; incremental tailing if stream sizes make this costly
       const observed = readStreamObservation(run)
       if (observed.read) {
@@ -2832,7 +2835,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, turn
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = settleDelivered(run); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused, census: stream.census }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), parsed = telemetryParser(run.stream, read, exists), stream = stalled && !parsed.terminal && !parsed.providerFailure ? { ...parsed, providerFailure: { kind: PROVIDER_FAILURE_KINDS.STREAM_STALL, status: null } } : parsed, outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused, census: stream.census })
-    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome), run, stream)
+    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); const routed = providerRetryOnFailure(run, returnPath, deadline, stream); if (routed.act === 'retry') return routed.resume(); if (routed.act === 'none' && outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline, stream.providerFailure); if (again) return again() } throw providerAnnotated(outcomeError(run, outcome, undefined, stream), run, stream)
   }
   return { assign, wait }
 }

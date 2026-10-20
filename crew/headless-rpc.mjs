@@ -65,16 +65,12 @@ export function teardownOutcome(liveness) {
 
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
 // Keep FIFOs outside crew/task trees: BSD recursive grep blocks opening them.
-// Headless-rpc keys by crew dir, ACP by task dir; the resolved-path hash
-// separates equal basenames across checkouts and archives.
-// The key keeps 128 bits of the digest: an 8-hex key let two same-named lanes share a
-// FIFO (a colliding pair is pinned in the tests).
-// Path length: len(root) + len(lane) + len(role) + 53. A 48-char macOS tmpdir
-// with b1285-builderloopguard and tech-lead gives 132 bytes, below PATH_MAX.
-// FIFOs have no sun_path limit.
+// Headless-rpc keys by crew dir, ACP by task dir. The key is a readable prefix
+// (at most 48 chars, so it stays under NAME_MAX) plus 128 bits of the
+// resolved-path hash, which keeps same-named lanes apart. The full path is at
+// most len(root) + len(role) + 101 bytes; FIFOs have no sun_path limit.
 export function seatCommandPath(crewDir, role, root = tmpdir()) {
   const resolved = resolve(crewDir)
-  // The readable prefix is capped so a long lane slug plus the digest stays under NAME_MAX (255).
   const key = `${(basename(resolved) || 'lane').slice(0, 48)}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
   return join(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
 }

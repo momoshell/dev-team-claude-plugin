@@ -636,7 +636,7 @@ test('J1 J2 J3 J4 the planner charter declares chunks and leaves the executor to
   // opens and closes it, so a weakened rule cannot hide behind words another passage
   // supplies and a negation spliced into it ("not every ...") cannot stay green.
   for (const clause of [
-    'If work has an order, declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]`',
+    'If work has an order, declare `details.chunks: [{ id, intent, files_in_scope, checks_owned, depends_on }]`',
     "head each step's plan `### Step <id>`",
     'every provable check is owned by exactly one chunk; depends_on names only earlier chunks;',
     '2+ chunks run as in-lane steps unless dispatch forced single-brief; the planner never picks the executor.',

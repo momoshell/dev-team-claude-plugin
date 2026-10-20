@@ -4887,6 +4887,25 @@ test('chunk validateChunks refuses malformed programs with closed reasons', () =
   check([{ ...base, checks_owned: ['k'] }, { id: 'c2', files_in_scope: ['crew/a.mjs'], checks_owned: ['k'] }], 'chunk-check-double-owned')
 })
 
+test('CI1 validateChunks refuses a non-string chunk intent', () => {
+  const scope = ['crew/a.mjs']
+  const labels = ['k']
+  const muts = [{ check: 'k', file: 'crew/a.mjs', find: 'x', replace: 'y' }]
+  const base = { id: 'c1', files_in_scope: ['crew/a.mjs'], checks_owned: ['k'] }
+  const check = (chunks, expected) => {
+    const r = validateChunks({ chunks }, { scope, checkLabels: labels, mutations: muts })
+    assert.equal(r.defect, expected, JSON.stringify(chunks))
+    return r
+  }
+  check([{ ...base, intent: 7 }], 'chunk-intent-not-string')
+  check([{ ...base, intent: null }], 'chunk-intent-not-string')
+  check([{ ...base, intent: ['k'] }], 'chunk-intent-not-string')
+  check([{ ...base, intent: { text: 'k' } }], 'chunk-intent-not-string')
+  const ok = check([{ ...base, intent: 'Guard the roots' }], null)
+  assert.equal(ok.chunks[0].intent, 'Guard the roots')
+  check([base], null)
+})
+
 test('chunk validateChunks enforces all-and-only ownership with an exempt third bucket', () => {
   const scope = ['crew/a.mjs', 'crew/b.mjs']
   const muts = [

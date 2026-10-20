@@ -422,6 +422,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
   ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
+  ['recordRow', "event='seat-stall-resume'", 'at role id attempt of reason outcome ...extra'],
   ['recordRow', '', 'at seat_turn_census'],
   ['recordRow', "event='skill-load-window'", 'at role dispatch_id transport loads_absent_reason first_edits'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
@@ -654,11 +655,11 @@ test('SS4', () => {
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 41)
+  assert.equal(sites.length, 42)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 28)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 13)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 14)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -2450,17 +2451,20 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second",}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
-function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, role = 'builder', waits = [], assignFails = [], onWait = null, onLog = null, unmeasuredFirst = false, policy = undefined } = {}) {
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, role = 'builder', waits = [], assignFails = [], onWait = null, onAssign = null, onLog = null, unmeasuredFirst = false, policy = undefined, stateful = false } = {}) {
   const root = scratchDir(`seat-transport-reask-${transport}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
   const workerBin = join(root, 'stub-claude')
   writeFileSync(workerBin, '')
   const logs = []; const events = []; const assigns = []; const waitCalls = []
-  let clock = 0; let waitIndex = 0; let transportSleep = null
+  let clock = 0; let waitIndex = 0; let transportSleep = null; let inFlight = false
   const transportIo = {
     assign(spec) {
+      if (stateful && inFlight) throw stagedReaskFailure('rpc-session-busy', 'rpc-session-busy: rpc seat builder already has an in-flight turn')
+      inFlight = true
       assigns.push(spec)
+      onAssign?.({ spec, attempt: assigns.length, sleep: transportSleep })
       const failure = assignFails[assigns.length - 1]
       if (failure) throw failure
       const n = assigns.length
@@ -2474,12 +2478,19 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, role = 'bui
       return { id, returnPath }
     },
     wait(path, seconds) {
-      waitCalls.push({ path, seconds })
-      onWait?.({ path, seconds, deps, sleep: transportSleep })
-      const step = waits[waitIndex++]
-      if (typeof step !== 'function') throw new Error(`no scripted wait for ${path}`)
-      return step(path, seconds)
+      try {
+        waitCalls.push({ path, seconds })
+        onWait?.({ path, seconds, deps, sleep: transportSleep })
+        const step = waits[waitIndex++]
+        if (typeof step !== 'function') throw new Error(`no scripted wait for ${path}`)
+        return step(path, seconds)
+      } finally { inFlight = false }
     },
+    ...(stateful ? { retire(_role, options = {}) {
+      if (inFlight && options.force !== true) return { retired: false, reason: 'in-flight' }
+      inFlight = false
+      return { retired: true, session: 'fresh' }
+    } } : {}),
     teardown() { return [] },
   }
   const crew = {
@@ -2512,6 +2523,281 @@ function stagedReaskFailure(stage, message = stage) {
   error.stage = stage; error.role = 'builder'
   return error
 }
+function stallReaskFailure(silentMs = 900_000) {
+  const error = stagedReaskFailure('rpc-stall', 'rpc stall: seat builder wrote no frame for 900s (threshold 900s)')
+  error.silentMs = silentMs
+  error.lastFrameAt = 0
+  return error
+}
+const advanceFirst900s = () => {
+  let calls = 0
+  return ({ sleep }) => { calls += 1; if (calls === 1 && typeof sleep === 'function') sleep(900_000) }
+}
+const STALL_VALID = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'recovered', artifacts: [], details: {} })
+
+// MUTATION ST2: drop 'stall' from seat-io's resume predicate and the resumed
+// assignment takes a fresh session (io.freshSession runs, no resumed/stall row).
+test('ST2 a stalled rpc assignment resumes the same assignment in the same session', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    let freshCalls = 0
+    const origFresh = harness.io.freshSession
+    assert.equal(typeof origFresh, 'function')
+    harness.io.freshSession = (...args) => { freshCalls += 1; return origFresh.apply(harness.io, args) }
+    const envelope = harness.io.wait(harness.first.returnPath, 1000)
+    assert.deepEqual(envelope, JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.assigns[1].reask.id, harness.first.id)
+    assert.notEqual(harness.assigns[1].reask.returnPath, harness.first.returnPath)
+    assert.ok(harness.logs.some((row) => row.event === 'seat-session' && row.outcome === 'resumed' && row.why === 'stall'), JSON.stringify(harness.logs.map((x) => x.event)))
+    assert.equal(freshCalls, 0)
+  } finally { harness.cleanup() }
+})
+
+// MUTATION ST3: judge the ORIGINAL stall error for the lost-seat block and the
+// resumed wait's rpc-timeout never reaches the lost-seat re-ask the unspent grace allows.
+test('ST3 a resumed wait that times out still gets the one grace lost-seat re-ask', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => { throw stagedReaskFailure('rpc-timeout') }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    const envelope = harness.io.wait(harness.first.returnPath, 3600)
+    assert.deepEqual(envelope, JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 3)
+    const stallRows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+    assert.equal(stallRows.length, 1)
+    assert.equal(stallRows[0].outcome, 'failed')
+    assert.equal(stallRows[0].second, 'rpc-timeout')
+    assert.ok(harness.logs.some((row) => row.event === 'seat-timeout-reask' && row.outcome === 'recovered'), JSON.stringify(harness.logs.map((x) => x.event)))
+    assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), 'timeout')
+  } finally { harness.cleanup() }
+})
+
+// MUTATION ST4: raise STALL_RESUME_MAX to 3 and a third stall buys a third
+// resume (4 assigns, 3 rows) instead of rethrowing rpc-stall after 2.
+test('ST4 stall-resumes are bounded to two per assignment on the remaining window', () => {
+  const stall = () => { throw stallReaskFailure() }
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [stall, stall, stall, stall],
+    onWait: ({ sleep }) => { sleep(900_000) },
+  })
+  try {
+    let thrown = null
+    try { harness.io.wait(harness.first.returnPath, 3600) } catch (error) { thrown = error }
+    assert.ok(thrown, 'expected rethrown rpc-stall after the bound')
+    assert.equal(thrown.stage, 'rpc-stall')
+    assert.equal(harness.assigns.length, 3)
+    const rows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+    assert.equal(rows.length, 2)
+    assert.equal(rows[0].attempt, 1)
+    assert.equal(rows[1].attempt, 2)
+    assert.ok(rows.every((row) => row.of === 2 && row.reason === 'transcript-stall'), JSON.stringify(rows))
+    assert.deepEqual(harness.waitCalls.map((call) => call.seconds), [3600, 2700, 1800])
+    assert.equal(harness.logs.some((row) => row.event === 'seat-timeout-reask' || row.event === 'seat-abort-reask'), false)
+    assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), null)
+  } finally { harness.cleanup() }
+})
+
+test('SS-brief the stall resume brief names the silence, the paths and the close line', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    const envelope = harness.io.wait(harness.first.returnPath, 1000)
+    assert.deepEqual(envelope, JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 2)
+    const brief = readFileSync(harness.assigns[1].briefFile, 'utf8')
+    assert.match(brief, /wrote nothing for 900 seconds/)
+    assert.match(brief, /must not be repeated as it was/)
+    assert.ok(brief.includes('/tmp/brief.md'), 'names the original brief')
+    assert.ok(brief.includes(harness.assigns[1].reask.returnPath), 'names the new return path')
+    assert.ok(brief.includes('CREW-DONE builder d1'), 'names the close line')
+    const rows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].attempt, 1)
+    assert.equal(rows[0].of, 2)
+    assert.equal(rows[0].outcome, 'recovered')
+  } finally { harness.cleanup() }
+})
+
+test('SS-grace a stall-resume neither spends nor respects the one grace', () => {
+  const fresh = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    assert.deepEqual(fresh.io.wait(fresh.first.returnPath, 1000), JSON.parse(STALL_VALID))
+    assert.equal(fresh.io.reaskGraceSpent(fresh.first.returnPath), null)
+  } finally { fresh.cleanup() }
+  const spent = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    spent.io.assign({ role: 'builder', briefFile: '/tmp/brief.md', reask: { id: 'd1', returnPath: join(spent.paths.returnsDir, 'd1.caller.builder.json') } })
+    assert.equal(spent.io.reaskGraceSpent(spent.first.returnPath), 'caller-reask')
+    assert.deepEqual(spent.io.wait(spent.first.returnPath, 1000), JSON.parse(STALL_VALID))
+    assert.equal(spent.io.reaskGraceSpent(spent.first.returnPath), 'caller-reask')
+  } finally { spent.cleanup() }
+})
+
+test('SS-terminal a non-retryable secondary failure after a stall is terminal', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => { throw stagedReaskFailure('rpc-spawn-failed') }],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    let thrown = null
+    try { harness.io.wait(harness.first.returnPath, 3600) } catch (error) { thrown = error }
+    assert.ok(thrown, 'expected the secondary failure to throw')
+    assert.equal(thrown.stage, 'rpc-spawn-failed')
+    assert.equal(harness.assigns.length, 2)
+  } finally { harness.cleanup() }
+})
+
+// MUTATION SS-window: return currentErr from the exhausted-window branch and the
+// stall escalates while a lost-seat re-ask that baseline always ran never happens.
+test('SS-window a stall with no time left hands back a timeout ceiling and keeps the re-ask', () => {
+  let calls = 0
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => JSON.parse(STALL_VALID)],
+    onWait: ({ sleep }) => { calls += 1; if (calls === 1 && typeof sleep === 'function') sleep(700_000) },
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 600), JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 2)
+    const stallRows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+    assert.equal(stallRows.length, 1)
+    assert.equal(stallRows[0].attempt, 1)
+    assert.equal(stallRows[0].outcome, 'declined')
+    assert.ok(harness.logs.some((row) => row.event === 'seat-timeout-reask' && row.outcome === 'recovered'))
+    assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), 'timeout')
+  } finally { harness.cleanup() }
+})
+
+// MUTATION RV1-1: remove the post-delivery remainingS recomputation and a
+// delayed resume receives the stale budget, even when delivery crossed the deadline.
+test('RV1-1 stall resume delivery consumes the original wait window', () => {
+  for (const deliveryMs of [5_000, 10_000, 20_000]) {
+    const harness = makeTransportReaskHarness({
+      transport: HEADLESS_RPC_TRANSPORT,
+      waits: [
+        () => { throw stallReaskFailure() },
+        (_path, seconds) => { if (!(seconds > 0)) throw stagedReaskFailure('rpc-timeout'); return JSON.parse(STALL_VALID) },
+        () => JSON.parse(STALL_VALID),
+      ],
+      onWait: advanceFirst900s(),
+      onAssign: ({ attempt, sleep }) => { if (attempt === 2) sleep(deliveryMs) },
+    })
+    try {
+      assert.deepEqual(harness.io.wait(harness.first.returnPath, 910), JSON.parse(STALL_VALID))
+      const exhausted = deliveryMs >= 10_000
+      assert.equal(harness.assigns.length, exhausted ? 3 : 2)
+      assert.equal(harness.waitCalls.length, exhausted ? 3 : 2)
+      assert.equal(harness.waitCalls[0].seconds, 910)
+      assert.equal(harness.waitCalls[1].path, harness.assigns[1].reask.returnPath)
+      assert.equal(harness.waitCalls[1].seconds, Math.max(0, 10 - deliveryMs / 1000))
+      if (exhausted) assert.equal(harness.waitCalls[2].path, harness.assigns[2].reask.returnPath)
+      const rows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].attempt, 1)
+      assert.equal(rows[0].outcome, exhausted ? 'failed' : 'recovered')
+      if (exhausted) {
+        assert.equal(rows[0].failure, 'timeout')
+        assert.equal(rows[0].second, 'rpc-timeout')
+      }
+      assert.equal(harness.logs.some((row) => row.event === 'seat-timeout-reask' && row.outcome === 'recovered'), exhausted)
+      assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), exhausted ? 'timeout' : null)
+    } finally { harness.cleanup() }
+  }
+})
+
+// MUTATION RV2-1: restore the post-delivery timeoutCeiling return and the
+// unsettled resume blocks the owed lost-seat re-ask with rpc-session-busy.
+test('RV2-1: a delivered stall resume that exhausts the window settles its turn and the lost-seat re-ask is delivered', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    stateful: true,
+    waits: [
+      () => { throw stallReaskFailure() },
+      (_path, seconds) => { assert.equal(seconds, 0); throw stagedReaskFailure('rpc-timeout') },
+      () => JSON.parse(STALL_VALID),
+    ],
+    onWait: advanceFirst900s(),
+    onAssign: ({ attempt, sleep }) => { if (attempt === 2) sleep(20_000) },
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 910), JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 3)
+    assert.equal(harness.waitCalls.length, 3)
+    assert.equal(harness.waitCalls[1].path, harness.assigns[1].reask.returnPath)
+    const rows = harness.logs.filter((row) => row.event === 'seat-stall-resume')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].attempt, 1)
+    assert.equal(rows[0].outcome, 'failed')
+    assert.equal(rows[0].failure, 'timeout')
+    assert.equal(rows[0].second, 'rpc-timeout')
+    assert.ok(harness.logs.some((row) => row.event === 'seat-timeout-reask' && row.outcome === 'recovered'))
+    assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), 'timeout')
+  } finally { harness.cleanup() }
+})
+
+// MUTATION SS-unusable: judge the original stall in the unusable block and the
+// resumed seat's malformed envelope never reaches the envelope re-ask.
+test('SS-unusable a resumed seat that writes a malformed envelope gets the envelope re-ask', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [() => { throw stallReaskFailure() }, () => { throw parseReaskFailure('rpc-parse-error') }, () => JSON.parse(STALL_VALID)],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 3600), JSON.parse(STALL_VALID))
+    assert.equal(harness.assigns.length, 3)
+    assert.ok(harness.logs.some((row) => row.event === 'envelope-reask' && row.outcome === 'recovered'), JSON.stringify(harness.logs.map((x) => x.event)))
+    assert.equal(harness.io.reaskGraceSpent(harness.first.returnPath), 'unusable-envelope')
+  } finally { harness.cleanup() }
+})
+
+// MUTATION SS-bytes: read the ORIGINAL returnPath for the bytes check and envelope
+// bytes the resumed seat wrote to its own collect path never block the death re-ask.
+test('SS-bytes envelope bytes on the stall collect path block a death re-ask', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [
+      () => { throw stallReaskFailure() },
+      (path) => {
+        writeFileSync(path, '{')
+        const error = stagedReaskFailure(SEAT_DIED_STAGE)
+        error.reclaim = { root_liveness: 'dead' }
+        error.waitContext = { returnPath: path, timeoutS: 2700, waitStartedAt: 900000 }
+        throw error
+      },
+    ],
+    onWait: advanceFirst900s(),
+  })
+  try {
+    let thrown = null
+    try { harness.io.wait(harness.first.returnPath, 3600) } catch (error) { thrown = error }
+    assert.ok(thrown, 'expected the seat death to throw')
+    assert.equal(thrown.stage, 'seat-died')
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.logs.some((row) => row.event === 'seat-death-reask'), false)
+  } finally { harness.cleanup() }
+})
+
 
 test('both pane waits journal the retry transition and the wait exit retires it', () => {
   const ordinary = makeRetryHarness({

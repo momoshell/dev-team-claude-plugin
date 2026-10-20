@@ -356,8 +356,13 @@ export function escalationCause(input = {}) {
   if (new Set(['review', 'refuted-must-fix', 'review-unresolved']).has(where)) {
     return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
   }
+  // Rule 13a: a review_only/verify_only seat's exhausted stall resumes reach here wrapped as
+  // 'envelope' (crew/drive.mjs escalate); the wrapped rpc-stall is still driver-owned infrastructure.
+  if (where === 'envelope' && /\bseat failed: rpc stall: seat \S+ wrote no frame for \d+s\b/.test(why)) {
+    return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
+  }
   // Rule 13: these locations are infrastructure failures owned by the driver.
-  if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
+  if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr', 'rpc-stall']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }
   // No rule matched: a readable location with no rule is a rule gap; no usable location is unmeasured — never a guess, never an actor.

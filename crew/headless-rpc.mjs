@@ -1813,6 +1813,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     let deadline = now() + Number(timeoutS) * 1000
     let graceMs = 0
     let timeoutReason = 'no recent tool call'
+    let stalled = null
     const monotonic = deps.monotonic || (() => Number(process.hrtime.bigint()) / 1e6)
     let priorWall = now(), priorMono
     try { priorMono = monotonic(); if (!Number.isFinite(priorMono)) priorMono = undefined } catch { priorMono = undefined }
@@ -1857,6 +1858,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         }
       }
       const judgedAt = now()
+      const lastFrameAt = turn.observed.lastAt
+      const silentMs = Number.isFinite(lastFrameAt) ? judgedAt - lastFrameAt : null
+      // lean: stall age is wall-clock, not suspend-adjusted, so a host sleep of 900s+ mid-turn reads as a stall on wake; upgrade: measure silence from the later of lastAt and the last wake (slept > 0 at the loop head) once suspend rows appear in lane journals
+      if (acknowledged && !turn.state.settled && !exists(returnPath) && silentMs !== null && silentMs >= TRANSCRIPT_STALE_MS) {
+        stalled = { lastFrameAt, silentMs }
+        try { log(operationalRow({ at: judgedAt, event: 'rpc-stall', reason: 'transcript-stall', role: turn.role, id: turn.id, last_frame_at: lastFrameAt, silent_ms: silentMs, threshold_ms: TRANSCRIPT_STALE_MS })) } catch { /* diagnostics only */ }
+        break waitLoop
+      }
       if (judgedAt >= deadline) {
         const toolTimes = [turn.observed.lastToolStartAt, turn.observed.lastToolAt].filter(Number.isFinite)
         const lastToolAt = toolTimes.length ? Math.max(...toolTimes) : null
@@ -1933,6 +1942,12 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (discardSeat) {
       try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }
       seats.delete(seat.role)
+    }
+    if (stalled) {
+      const stallErr = staged('rpc-stall', `rpc stall: seat ${turn.role} wrote no frame for ${Math.round(stalled.silentMs / 1000)}s (threshold ${TRANSCRIPT_STALE_MS / 1000}s) at ${returnPath}`, turn.role)
+      stallErr.silentMs = stalled.silentMs
+      stallErr.lastFrameAt = stalled.lastFrameAt
+      throw stallErr
     }
     throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath} (${timeoutReason})`, turn.role)
   }

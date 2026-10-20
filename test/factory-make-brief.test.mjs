@@ -2159,19 +2159,19 @@ test('PB3 standingBlocksFor self-hosted and null return repo-specific blocks', (
   assert.equal(mutations.includes(PORTABLE_MUTATION_CONTRACT_BLOCK), false)
 })
 
-test('PB4 foreign briefs carry checkout-local tripwire grep roots', () => {
+test('PB4 foreign briefs grep the whole checkout, never a silent subset of the factory roots', () => {
   const rootsOf = (line) => line.slice(line.lastIndexOf('"') + 1).trim()
   const grepLine = (text, heading) => section(text, heading).split('\n').find((line) => line.startsWith('grep -rn "'))
   const root = fixture('pb4-foreign', { scripts: FAST_FIXTURE_TEST })
   const { brief } = compile(root, {}, [], 'pb4.md')
-  assert.equal(rootsOf(grepLine(brief, '## Conventions')), 'test/')
+  assert.equal(rootsOf(grepLine(brief, '## Conventions')), '.')
   const declareLine = section(brief, '## Tripwires').split('\n').find((line) => line.startsWith('declare every hit:'))
-  assert.equal(rootsOf(declareLine), 'test/')
+  assert.equal(rootsOf(declareLine), '.')
   const packDir = join(root, 'pack')
   mkdirSync(packDir)
   const { brief: packed } = compile(root, {}, ['--pack', packDir], 'pb4-packed.md')
   const vocabLine = section(packed, '## Tripwires').split('\n').find((line) => line.startsWith('vocabulary:'))
-  assert.equal(vocabLine.slice(vocabLine.indexOf('-f ') + 3).split(' ').slice(1).join(' '), 'test/')
+  assert.equal(vocabLine.slice(vocabLine.indexOf('-f ') + 3).split(' ').slice(1).join(' '), '.')
   const srcRoot = nextRoot('pb4-src-only')
   put(srcRoot, 'package.json', JSON.stringify({ name: 'brief-pb4-src', private: true, type: 'module', scripts: { test: FAST_FIXTURE_TEST } }, null, 2) + '\n')
   put(srcRoot, 'src/widget.mjs', 'export function computeWidget(n) { return n + 1 }\n')

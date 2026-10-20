@@ -371,7 +371,7 @@ gate carries, above the check that prints \`FAIL C1\`:
     // MUTATION C1: neutralise the standing block in renderBrief's lines array and
     // no compiled brief carries the contract any more.
 
-and the declaration is \`{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }\`.
+and the declaration is \`{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "'## Per-check mutations', ${'blocks'}.mutations]", "replace": "'## Per-check mutations', '']" }\`.
 Rationale: #330.
 
 NEVER PUT A \`#\` IN A CHECK LABEL, AND NEVER NAME A TEST AFTER THE ISSUE IT CLOSES.
@@ -3092,7 +3092,8 @@ function grepRoots(checkout = null) {
   if (typeof checkout !== 'string' || checkout === '') return GREP_ROOTS.join(' ')
   try {
     const present = GREP_ROOTS.filter((root) => existsSync(join(checkout, root)))
-    return present.length > 0 ? present.join(' ') : '.'
+    // A checkout missing any of these roots is foreign: search all of it, never a silent subset.
+    return present.length === GREP_ROOTS.length ? present.join(' ') : '.'
   } catch { return GREP_ROOTS.join(' ') }
 }
 

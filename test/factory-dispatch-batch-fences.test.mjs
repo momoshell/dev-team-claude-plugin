@@ -113,7 +113,7 @@ import {
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief, WAITS_S } from '../crew/drive.mjs'
 import { slotStore } from '../crew/reclaim.mjs'
-import { gatherFences, laneFenceFor, readPremiseBaselineFile, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
+import { gatherFences, laneFenceFor, MUTATION_CONTRACT_BLOCK, readPremiseBaselineFile, renderBrief, resolveWriteSurface } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 import { fileURLToPath } from 'node:url'
 
@@ -2476,4 +2476,12 @@ test('a register span over a committed blob past 1 MiB survives readRegister', (
   writeFileSync(fencesPath, JSON.stringify({ lanes: [{ lane: 'own', files: ['lib/big.mjs:1-1'] }] }))
   const result = readRegister({ fencesPath, checkout: repo, deps: { home: root } })
   assert.deepEqual(result.fences.map((fence) => fence.files), [['lib/big.mjs:1-1']])
+})
+
+test('the worked mutation example binds to the render line, not to its own text', () => {
+  // kills: an example find that only matches the example (binds to prose) or matches twice (ambiguous)
+  const find = "'## Per-check mutations', blocks.mutations]"
+  const source = readFileSync(join(repoRoot, 'scripts', 'factory', 'make-brief.mjs'), 'utf8')
+  assert.equal(source.split(find).length - 1, 1)
+  assert.ok(MUTATION_CONTRACT_BLOCK.includes(JSON.stringify(find)))
 })

@@ -2699,7 +2699,7 @@ export function scopeMatcher(entries) {
 // adjudicates the gate per owned check, failing closed on anything unattributed.
 // Exempt labels are a third accounting bucket: real declarations excluded from
 // ownership, counted in the total, and refused behind their own guard when red.
-export const CHUNK_ID = /^[A-Za-z0-9._-]{1,64}$/
+export const CHUNK_ID = /^[A-Za-z0-9._-]{1,64}$/; export const CHUNK_INTENT_MAX = 100
 const chunkIdValid = (id) => typeof id === 'string' && CHUNK_ID.test(id) && id !== '.' && id !== '..'
 
 export function validateChunks(details, { scope = [], checkLabels = [], mutations = [] } = {}) {
@@ -2735,7 +2735,7 @@ export function validateChunks(details, { scope = [], checkLabels = [], mutation
       || !chunk.checks_owned.every((label) => labels.includes(label))) {
       return { chunks: [], exemptLabels, defect: 'chunk-checks-not-array', why: `chunk ${chunk.id} checks_owned must be a non-empty array of declared gate labels` }
     }
-    if (chunk.depends_on === undefined) chunk.depends_on = []; if (chunk.intent !== undefined && typeof chunk.intent !== 'string') return { chunks: [], exemptLabels, defect: 'chunk-intent-not-string', why: `chunk ${chunk.id} intent must be a string` }
+    if (chunk.depends_on === undefined) chunk.depends_on = []; if (chunk.intent !== undefined && typeof chunk.intent !== 'string') return { chunks: [], exemptLabels, defect: 'chunk-intent-not-string', why: `chunk ${chunk.id} intent must be a string` }; if (typeof chunk.intent === 'string' && chunk.intent.trim() === '') return { chunks: [], exemptLabels, defect: 'chunk-intent-empty', why: `chunk ${chunk.id} intent must be non-empty` }; if (typeof chunk.intent === 'string' && /[\n\r]/.test(chunk.intent)) return { chunks: [], exemptLabels, defect: 'chunk-intent-not-one-line', why: `chunk ${chunk.id} intent must be one line` }; if (typeof chunk.intent === 'string' && [...chunk.intent].length > CHUNK_INTENT_MAX) return { chunks: [], exemptLabels, defect: 'chunk-intent-too-long', why: `chunk ${chunk.id} intent must be at most ${CHUNK_INTENT_MAX} characters, found ${[...chunk.intent].length}` }
     if (!Array.isArray(chunk.depends_on)) return { chunks: [], exemptLabels, defect: 'chunk-dep-not-array', why: `chunk ${chunk.id} depends_on must be an array` }
     chunks.push(chunk)
   }
@@ -17443,7 +17443,7 @@ export function plannerShapeReaskLines(defects) {
   for (const { id, why } of defects) {
     lines.push(`Shape defect ${id}: ${why}`)
     if (id === 'prompt-claim-missing') lines.push('details.prompt_claim must be exactly one own-whole-line form: Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).; unmeasured — n insufficient; reason: <why>; re-measure after N seats.; or not applicable — citation-only; no seat-behaviour change intended.')
-    else lines.push("Every chunk's checks_owned must be a non-empty array of declared gate labels, and details.chunks must satisfy validateChunks against files_in_scope and the declared mutations.")
+    else if (id.startsWith('chunk-intent-')) lines.push(`Every chunk's intent must be one non-empty imperative line of at most ${CHUNK_INTENT_MAX} characters.`); else lines.push("Every chunk's checks_owned must be a non-empty array of declared gate labels, and details.chunks must satisfy validateChunks against files_in_scope and the declared mutations.")
   }
   return lines
 }

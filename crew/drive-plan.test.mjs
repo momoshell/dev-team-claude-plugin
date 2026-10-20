@@ -26,6 +26,7 @@ import {
   planCapNote,
   planExhaustedWhy,
   planRefusedWhy,
+  plannerShapeReaskLines,
   prescribedPlanCorrection,
   turnCeilingOf,
   zeroTurnNonStartOf,
@@ -3996,15 +3997,15 @@ const RA_STEP_MUTATIONS = [
   { check: 'A1', file: 'a.mjs', find: 'alpha', replace: 'ALPHA' },
   { check: 'A2', file: 'b.mjs', find: 'beta', replace: 'BETA' },
 ]
-const raSteppedPlan = (c1Checks) => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'stepped-gate', mutations: RA_STEP_MUTATIONS.map((m) => ({ ...m })),
-  chunks: [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: c1Checks }, { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] }] } })
-const raSteppedIo = (retry) => {
+const raSteppedPlan = (c1Checks, c1Extra = {}) => planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'stepped-gate', mutations: RA_STEP_MUTATIONS.map((m) => ({ ...m })),
+  chunks: [{ id: 'c1', files_in_scope: ['a.mjs'], checks_owned: c1Checks, ...c1Extra }, { id: 'c2', files_in_scope: ['b.mjs'], checks_owned: ['A2'] }] } })
+const raSteppedIo = (retry, first = raSteppedPlan([])) => {
   const baseline = 'FAIL A1: pristine red\nFAIL A2: pristine red\nGATE-SUMMARY {"total":2,"failed":2,"errored":0}'
   let gateCalls = 0
   return fakeIo({
     files: { [TD + '/plan.md']: '# stepped plan\n', [CTX.checkout + '/a.mjs']: 'alpha\n', [CTX.checkout + '/b.mjs']: 'beta\n' },
     writeThrough: true,
-    envelopes: { 'planner:1': raSteppedPlan([]), 'planner1.coverage-reask.planner.json': retry,
+    envelopes: { 'planner:1': first, 'planner1.coverage-reask.planner.json': retry,
       'builder:1': buildEnv({ artifacts: [TD + '/step-c1.md'], details: { ...buildEnv().details, files_changed: ['a.mjs'] } }),
       'builder:2': buildEnv({ artifacts: [TD + '/step-c2.md'], details: { ...buildEnv().details, files_changed: ['b.mjs'] } }),
       'reviewer:1': reviewEnv('pass') },
@@ -4111,6 +4112,44 @@ test('shape re-ask: full variant invalid chunks untouched', () => {
   assert.equal(raReasks(io).length, 0)
   assert.deepEqual(raShapeRows(io), [])
   assert.notEqual(result.details?.escalation?.where, 'plan-chunks')
+})
+
+// MUTATION: make the too-long refusal return defect: null; the stepped lane dispatches no re-ask and reaches no builder.
+test('RA7 stepped over-long intent re-asked then repaired reaches builders', () => {
+  const io = raSteppedIo(raSteppedPlan(['A1'], { intent: 'Guard the roots' }), raSteppedPlan(['A1'], { intent: 'x'.repeat(101) }))
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(raReasks(io).length, 1)
+  assert.deepEqual(raShapeRows(io).map(({ round, defects, outcome }) => ({ round, defects, outcome })), [{ round: 1, defects: ['chunk-intent-too-long'], outcome: 'asked' }])
+  assert.ok(raBuilders(io) >= 1)
+  assert.notEqual(result.details?.escalation?.where, 'plan-chunks')
+})
+
+// MUTATION: rename the plan-chunks backstop stage; a still-failing stepped retry no longer escalates at plan-chunks.
+test('RA8 stepped still-over-long retry escalates plan-chunks', () => {
+  const io = raSteppedIo(raSteppedPlan(['A1'], { intent: 'x'.repeat(101) }), raSteppedPlan(['A1'], { intent: 'x'.repeat(101) }))
+  const result = driveTask({ ...CTX, variant: 'stepped' }, io)
+  assert.equal(raReasks(io).length, 1)
+  assert.equal(result.details?.escalation?.where, 'plan-chunks')
+  assert.match(String(result.details?.escalation?.why ?? ''), /chunk-intent-too-long/)
+  assert.equal(raBuilders(io), 0)
+})
+
+// MUTATION: drop the chunk-intent- hint branch in plannerShapeReaskLines; the intent brief falls back to the checks_owned sentence.
+test('RA9 intent re-ask brief states the intent rule and checks brief keeps the checks_owned sentence', () => {
+  const intentIo = raSteppedIo(raSteppedPlan(['A1'], { intent: 'Guard the roots' }), raSteppedPlan(['A1'], { intent: 'x'.repeat(101) }))
+  driveTask({ ...CTX, variant: 'stepped' }, intentIo)
+  const intentBrief = raReaskBrief(intentIo)
+  assert.match(intentBrief, /one non-empty imperative line of at most 100 characters/)
+  assert.doesNotMatch(intentBrief, /checks_owned must be a non-empty array/)
+  const checksIo = raSteppedIo(raSteppedPlan(['A1']))
+  driveTask({ ...CTX, variant: 'stepped' }, checksIo)
+  const checksBrief = raReaskBrief(checksIo)
+  assert.match(checksBrief, /checks_owned must be a non-empty array/)
+  assert.doesNotMatch(checksBrief, /one non-empty imperative line/)
+  for (const id of ['chunk-intent-not-string', 'chunk-intent-empty', 'chunk-intent-not-one-line']) {
+    const lines = plannerShapeReaskLines([{ id, why: 'chunk c1 intent test' }])
+    assert.match(lines.join('\n'), /one non-empty imperative line of at most 100 characters/)
+  }
 })
 
 // Mutation killed: empty preflight mutations bounce even a fully covered plan.

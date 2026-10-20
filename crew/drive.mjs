@@ -8992,8 +8992,8 @@ function runTask(ctx, io, crash) {
       if (typeof gateSource === 'string') gateLintFindings = lintGate({ source: gateSource, gateFile: gateLintPath, checkout: ctx.checkout, gateDir: dirname(gateLintPath), readFile: (p) => io.readFile(p) })
     } catch { gateLintFindings = [] } // lint is evidence, never load-bearing: unreadable gate = no findings
     if (gateLintFindings.length > 0) {
-      io.log(recordRow({ at: io.now(), event: 'gate-lint', round, gate_lint: gateLintFindings }))
-      if (!gateLintBounced && round < planRounds()) {
+      try { io.log(recordRow({ at: io.now(), event: 'gate-lint', round, gate_lint: gateLintFindings })) } catch { /* lint evidence is never load-bearing */ }
+      if (!gateLintBounced) { // the one-shot bounce funds its own round: planRounds() adds 1 once gateLintBounced is set, so a cap-1 plan still gets it
         gateLintBounced = true
         const why = 'Gate lint findings: ' + gateLintFindings.map((f) => `${f.rule} at ${f.file}:${f.line} — ${f.why}`).join('; ')
         const b = art(`plan-bounce-r${round}.md`)

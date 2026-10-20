@@ -4591,6 +4591,34 @@ test('GL3 gate-lint bounces once then proceeds without escalating', () => {
  assert.ok(assigns.some((a) => a.role === 'builder'));
 })
 
+// MUTATION: restore `&& round < planRounds()` on the bounce condition; a cap-1 plan skips the bounce and planners drops to 1.
+test('gate-lint bounce is funded on a one-round plan cap', () => {
+ const gatePath = TD + '/gate.mjs';
+ const files = {};
+ files[gatePath] = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ files[CTX_TL.checkout + '/ui/src/probe.test.ts'] = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'planner:2': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 1 } }, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2);
+ assert.ok((io.calls.writes[TD + '/plan-bounce-r1.md'] || '').includes('vitest-console-observation'));
+})
+
+// MUTATION: remove the try/catch around the gate-lint journal write; the throwing log escalates the task.
+test('gate-lint journal failure never stops the task', () => {
+ const gatePath = TD + '/gate.mjs';
+ const files = {};
+ files[gatePath] = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ files[CTX_TL.checkout + '/ui/src/probe.test.ts'] = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'planner:2': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const log = io.log.bind(io); io.log = (row) => { if (row.event === 'gate-lint') throw new Error('journal unavailable'); return log(row) };
+ const result = driveTask(CTX_TL, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2);
+})
+
 test('gate-lint bounce does not spend the adversary round', () => {
  const gatePath = TD + '/gate.mjs';
  const probePath = CTX_TL.checkout + '/ui/src/probe.test.ts';

@@ -5,10 +5,10 @@
   "crew/drive.mjs:2255": "export function planAcceptContractLines() {",
   "crew/drive.mjs:1335": "function verdictOf(env) {",
   "crew/drive.mjs:5672": "const checkPath = check.details?.check_path",
-  "crew/drive.mjs:9226": "const plannedScopeFiles = planEnv.details?.files_in_scope",
-  "crew/drive.mjs:9361": "const declared = planEnv.details?.mutations",
-  "crew/drive.mjs:9036": "if (planAdversary.trigger === 'none') {",
-  "crew/drive.mjs:9083": "const v = verdictOf(check)",
   "crew/drive.mjs:7533": "function settleAccept(c, where, contextPaths = []) {",
-  "crew/drive.mjs:9081": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')"
+  "crew/drive.mjs:9249": "const plannedScopeFiles = planEnv.details?.files_in_scope",
+  "crew/drive.mjs:9384": "const declared = planEnv.details?.mutations",
+  "crew/drive.mjs:9059": "if (planAdversary.trigger === 'none') {",
+  "crew/drive.mjs:9104": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
+  "crew/drive.mjs:9106": "const v = verdictOf(check)"
 }

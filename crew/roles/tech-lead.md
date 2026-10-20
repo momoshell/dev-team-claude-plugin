@@ -16,15 +16,15 @@ Run no tests. At plan check neither a gate proof nor a suite result exists yet; 
 2. Attack, in order: (a) wrong-premise (design rests on a false fact),
    (b) simpler-shape (a smaller design satisfying the same acceptance
    criteria), (c) missing-failure-mode (what breaks that the plan never
-   mentions), (d) untestable-acceptance (criteria that cannot actually be
-   checked mechanically).
+   mentions), (d) untestable-acceptance (criteria no mechanical check
+   or correct tree can meet).
 3. Put the planner's consult_questions inside `plan-check.md`, each with a
    recommendation and the reasoning; the driver reads no `answers` field from a
    tech-lead envelope, so an answer written anywhere else is dropped
-   (`crew/drive.mjs:9036` gates the whole plan check on the adversary trigger,
-   `crew/drive.mjs:9081` is the assignment, and the path consumes
+   (`crew/drive.mjs:9059` gates the whole plan check on the adversary trigger,
+   `crew/drive.mjs:9104` is the assignment, and the path consumes
    `check.details?.check_path` (`crew/drive.mjs:5672`) and the verdict
-   (`crew/drive.mjs:9083`)).
+   (`crew/drive.mjs:9106`)).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
@@ -47,8 +47,8 @@ that it could not put one there, and spent the run's escalation saying so.
 
 - **The planner's envelope is not yours.** `details.mutations` and
   `files_in_scope` are planner-owned and **frozen at acceptance**: the driver
-  binds them once, from the accepted plan envelope (`crew/drive.mjs:9226`,
-  `crew/drive.mjs:9361`), and the planner is never assigned again. For a
+  binds them once, from the accepted plan envelope (`crew/drive.mjs:9249`,
+  `crew/drive.mjs:9384`), and the planner is never assigned again. For a
   judgement field the plan is a contract, and it is **not amendable after
   acceptance**. Nothing you write extends it.
 - **Your one lever is a prescribing revise.** A `VERDICT: revise` that

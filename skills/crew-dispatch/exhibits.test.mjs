@@ -20,6 +20,8 @@ const LEAN_OWNER = 'skills/code-less/anchors.json'
 const LEAN_TEST_FILE = 'skills/code-less/exhibits.test.mjs'
 const GATE_KIT_OWNER = 'crew/guidelines/gate-kit.mjs'
 const GATE_KIT_TEST_FILE = 'crew/guidelines/gate-kit.test.mjs'
+const GATE_LINT_OWNER = 'crew/gate-lint.mjs'
+const GATE_LINT_TEST_FILE = 'crew/gate-lint.test.mjs'
 const FRONTEND_OWNER = 'skills/frontend-svelte/anchors.json'
 const FRONTEND_TEST_FILE = 'skills/frontend-svelte/exhibits.test.mjs'
 const UI_OWNER = 'skills/ui-design/anchors.json'
@@ -566,6 +568,49 @@ test('RV2-1 gate-kit owner is covered by dynamic reach census', () => {
       readFileSync: (path) => {
         const repoRelative = relative(ROOT, path)
         return execFileSync('git', ['-C', ROOT, 'show', `HEAD:${repoRelative}`], { encoding: 'utf8' })
+      },
+    },
+  })
+  const pristine = reachCensus(pristineFiles, pristineReach)
+  assert.ok(current.owners > 0 && current.pairs > 0 && current.contributingTests > 0 && current.tests > 0 && current.nonTests > 0)
+  assert.ok(current.owners <= current.nonTests)
+  assert.ok(current.pairs >= current.owners)
+  assert.ok(current.contributingTests <= current.tests)
+  assert.ok(pristine.owners > 0 && pristine.pairs > 0 && pristine.contributingTests > 0 && pristine.tests > 0 && pristine.nonTests > 0)
+  assert.ok(pristine.owners <= pristine.nonTests)
+  assert.ok(pristine.pairs >= pristine.owners)
+  assert.ok(pristine.contributingTests <= pristine.tests)
+
+  const absentOwners = addedOwners.filter((owner) => !pristineFiles.includes(owner))
+  for (const owner of absentOwners) assert.equal(pristineReach.pathByFile.has(owner), false)
+  const ownerDelta = current.owners - pristine.owners
+  const pairDelta = current.pairs - pristine.pairs
+  assert.equal(Number.isInteger(ownerDelta), true)
+  assert.equal(Number.isInteger(pairDelta), true)
+  if (absentOwners.length) {
+    assert.ok(ownerDelta > 0)
+    assert.ok(pairDelta > 0)
+  }
+})
+
+test('RV2-1 gate-lint owner is covered by dynamic reach census', () => {
+  const addedOwners = [GATE_LINT_OWNER]
+  const addedTests = [GATE_LINT_TEST_FILE]
+  const currentReach = collectTestReach({ checkout: ROOT })
+  const currentFiles = [...new Set([...gitPaths(['ls-files', '-z']), ...addedOwners, ...addedTests])]
+  const current = reachCensus(currentFiles, currentReach)
+  for (const owner of addedOwners) {
+    assert.equal(currentReach.pathByFile.get(owner)?.has(GATE_LINT_TEST_FILE), true, owner + ' must be reached by the gate-lint unit test')
+  }
+
+  const pristineFiles = gitPaths(['ls-tree', '-r', '--name-only', '-z', 'HEAD'])
+  const pristineReach = collectTestReach({
+    checkout: ROOT,
+    deps: {
+      spawn: () => ({ status: 0, stdout: pristineFiles.join(String.fromCharCode(0)) + String.fromCharCode(0) }),
+      readFileSync: (path) => {
+        const repoRelative = relative(ROOT, path)
+        return execFileSync('git', ['-C', ROOT, 'show', 'HEAD:' + repoRelative], { encoding: 'utf8' })
       },
     },
   })

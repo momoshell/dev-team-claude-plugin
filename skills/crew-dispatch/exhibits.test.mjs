@@ -89,7 +89,7 @@ test('PS9', () => {
   const text = readText(TIER)
   for (const token of [
     'PROMPT_SURFACE', 'crew/roles/', 'crew/guidelines/',
-    'ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK',
+    'ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK', 'PORTABLE_ACCEPTANCE_GATE_BLOCK', 'PORTABLE_HOSTILE_ENV_BLOCK', 'PORTABLE_CONVENTIONS_BLOCK', 'PORTABLE_MUTATION_CONTRACT_BLOCK',
     'prompt-surface-conflict', 'tier-floor-conflict', 'prompt=change', 'prompt=code-only',
     'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.',
     'ADR-038', '64–66', '13',

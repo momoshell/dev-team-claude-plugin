@@ -212,11 +212,11 @@ exemption, never both; at most `MUTATIONS_MAX` (32) entries.
 The human sentence goes in a comment beside the check, never in the entry:
 
     // MUTATION C1: neutralise the standing block in renderBrief's lines array and
-    // no compiled brief carries the contract any more.
+    // no compiled brief carries it any more.
     check('C1', …)
 
-paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }`.
-Every compiled brief repeats this contract under `## Per-check mutations`.
+paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "'## Per-check mutations', blocks.mutations]", "replace": "'## Per-check mutations', '']" }`.
+Each compiled brief repeats it under `## Per-check mutations`.
 Rationale: #330.
 
 A `find` must be a **single contiguous statement or line that the plan does not itself instruct

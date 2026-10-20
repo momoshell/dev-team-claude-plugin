@@ -532,7 +532,7 @@ escapes is not enumerated here and may be version-dependent.
 
 A gate that shells out to \`node --test\` MUST pass \`--test-reporter=tap\`. node
 --test picks its reporter by context and the summary lines differ in their
-leading character; measured on this checkout, same file and same environment,
+leading character; measured in the factory's own checkout, same file and same environment,
 the two shapes are LITERALLY:
 
     ℹ pass 7      ← default reporter, no --test-reporter flag

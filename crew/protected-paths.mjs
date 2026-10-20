@@ -12,7 +12,7 @@ export const PROTECTED_PATHS = Object.freeze([
   'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json',
 ])
 
-export const PROMPT_SURFACE = Object.freeze({ paths: Object.freeze(['crew/roles/', 'crew/guidelines/']), templateBlocks: Object.freeze(['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK']) })
+export const PROMPT_SURFACE = Object.freeze({ paths: Object.freeze(['crew/roles/', 'crew/guidelines/']), templateBlocks: Object.freeze(['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK', 'PORTABLE_ACCEPTANCE_GATE_BLOCK', 'PORTABLE_HOSTILE_ENV_BLOCK', 'PORTABLE_CONVENTIONS_BLOCK', 'PORTABLE_MUTATION_CONTRACT_BLOCK']) })
 export const PROMPT_SURFACE_BLIND_SPOT = 'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.'
 
 function normaliseProtectedPath(value) {

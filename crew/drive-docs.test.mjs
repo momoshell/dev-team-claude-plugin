@@ -261,6 +261,20 @@ test('CH2 no charter claims a journalled suite result', () => {
   }
 })
 
+test('PE1 planner worked example binds the rendered contract', async () => {
+  const planner = readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8')
+  const line = planner.split('\n').find((entry) => entry.startsWith('paired with'))
+  const decl = JSON.parse(line.slice(line.indexOf('`') + 1, line.lastIndexOf('`')))
+  const { MUTATION_CONTRACT_BLOCK } = await import('../scripts/factory/make-brief.mjs')
+  const renderedLine = MUTATION_CONTRACT_BLOCK.split('\n').find((entry) => entry.startsWith('and the declaration is'))
+  const rendered = JSON.parse(renderedLine.slice(renderedLine.indexOf('`') + 1, renderedLine.lastIndexOf('`')))
+  assert.equal(decl.file, 'scripts/factory/make-brief.mjs')
+  assert.equal(decl.find, rendered.find)
+  assert.equal(decl.replace, rendered.replace)
+  const source = readFileSync(join(REPO_ROOT, 'scripts/factory/make-brief.mjs'), 'utf8')
+  assert.equal(source.split(decl.find).length - 1, 1)
+})
+
 // MUTATION CH3: rename prior_findings_closed in the prose contract.
 test('CH3 tech-lead contract names details.findings', () => {
   const source = readFileSync(join(REPO_ROOT, 'crew/roles/tech-lead.md'), 'utf8')

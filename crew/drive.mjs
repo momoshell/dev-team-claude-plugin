@@ -17524,8 +17524,26 @@ export const READ_SET_MAX_PATHS = 40
 export const READ_SET_MAX_RANGES = 8
 export const READ_SET_ABSENT_REASONS = Object.freeze(['transport-unsupported', 'stream-missing', 'stream-unparseable', 'stream-rewound', 'session-start-unknown'])
 
+export const BASH_READ_COMMANDS = Object.freeze(['cat', 'head', 'tail', 'sed', 'nl', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'awk'])
+export const BASH_READ_INTERPRETERS = Object.freeze(['node', 'python', 'python3'])
+export const BASH_READ_MARKERS = Object.freeze(['readFileSync', 'open(', 'read_text('])
+
+export function bashReadLike(text) {
+  if (typeof text !== 'string') return false
+  for (const segment of text.split(/&&|\|\||;|\n/)) {
+    const firstPipe = segment.split('|')[0]
+    const tokens = firstPipe.trim() === '' ? [] : firstPipe.trim().split(/\s+/)
+    let i = 0
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1
+    const head = tokens[i]
+    if (BASH_READ_COMMANDS.includes(head)) return true
+    if (BASH_READ_INTERPRETERS.includes(head) && BASH_READ_MARKERS.some((marker) => text.includes(marker))) return true
+  }
+  return false
+}
+
 function readSetAbsent(reason) {
-  return { absent: reason, entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null }
+  return { absent: reason, entries: [], totalPaths: null, droppedReads: null, uncapturedReads: null, nonReadBash: null, tailUnreadable: null }
 }
 
 export function builderStreamLineCount(streamText) {
@@ -17605,36 +17623,37 @@ function parseBashReadCommand(command) {
     }
     return null
   }
-  if (typeof command !== 'string' || command.trim() === '') return { reads: [], uncaptured: true }
+  if (typeof command !== 'string' || command.trim() === '') return { reads: [], uncaptured: true, readLike: false }
   const stripped = command.replaceAll('2>&1', ' ').replaceAll('2>/dev/null', ' ')
   const segments = stripped.split(/&&|;|\n/)
   const components = segments.flatMap((segment) => segment.split('|').map((part) => (part.trim() === '' ? [] : part.trim().split(/\s+/))))
-  if (/[<>()\u0060]/.test(stripped) || stripped.includes('$(') || components.some((tokens) => tokens[0] === 'cd' || tokens[0] === 'tee' || (tokens[0] === 'sed' && tokens.some((token) => /^-[A-Za-z]*i|^--in-place/.test(token))))) return { reads: [], uncaptured: true }
+  if (/[<>()\u0060]/.test(stripped) || stripped.includes('$(') || components.some((tokens) => tokens[0] === 'cd' || tokens[0] === 'tee' || (tokens[0] === 'sed' && tokens.some((token) => /^-[A-Za-z]*i|^--in-place/.test(token))))) return { reads: [], uncaptured: true, readLike: bashReadLike(command) }
   // lean: whitespace tokenisation and separator splitting are not quote-aware; unsupported shell syntax is disclosed as uncaptured rather than guessed, upgrade with a quote-aware splitter if quoted separators or spaced paths appear in builder streams
   const reads = []
   let uncaptured = false
+  let readLike = false
   for (const segment of segments) {
     if (segment.trim() === '') continue
     const tokenLists = segment.split('|').map((part) => (part.trim() === '' ? [] : part.trim().split(/\s+/)))
     if (tokenLists.length === 0) continue
     if (tokenLists.length === 1 && (tokenLists[0][0] === 'echo' || tokenLists[0][0] === 'printf')) continue
-    if (tokenLists.some((tokens) => tokens.length === 0)) { uncaptured = true; continue }
+    if (tokenLists.some((tokens) => tokens.length === 0)) { uncaptured = true; if (bashReadLike(segment)) readLike = true; continue }
     const last = tokenLists[tokenLists.length - 1]
     const trailingK = last.length === 3 && last[0] === 'head' && last[1] === '-n' ? posInt(last[2]) : null
     if (trailingK !== null && tokenLists.length >= 2) {
       const base = parseBase(tokenLists.slice(0, -1))
-      if (base === null) { uncaptured = true; continue }
-      if (filePath(base.path) === null) { uncaptured = true; continue }
+      if (base === null) { uncaptured = true; if (bashReadLike(segment)) readLike = true; continue }
+      if (filePath(base.path) === null) { uncaptured = true; if (bashReadLike(segment)) readLike = true; continue }
       if (base.range === null) reads.push({ path: base.path, range: [1, trailingK] })
       else reads.push({ path: base.path, range: [base.range[0], Math.min(base.range[1], base.range[0] + trailingK - 1)] })
       continue
     }
     const base = parseBase(tokenLists)
-    if (base === null) { uncaptured = true; continue }
-    if (filePath(base.path) === null) { uncaptured = true; continue }
+    if (base === null) { uncaptured = true; if (bashReadLike(segment)) readLike = true; continue }
+    if (filePath(base.path) === null) { uncaptured = true; if (bashReadLike(segment)) readLike = true; continue }
     reads.push(base)
   }
-  return { reads, uncaptured }
+  return { reads, uncaptured, readLike }
 }
 
 export function builderReadSet(streamText, startLine, { checkout, taskDir, transport } = {}) {
@@ -17649,7 +17668,8 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
   const td = typeof taskDir === 'string' ? taskDir.replace(/\/+$/, '') : ''
   const kept = new Map()
   let droppedReads = 0
-  let uncapturedBash = 0
+  let uncapturedReads = 0
+  let nonReadBash = 0
   let tailUnreadable = false
   let seq = 0
   const frames = []
@@ -17716,7 +17736,7 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
       const name = call.name
       if (name === 'bash' || (typeof name === 'string' && name.endsWith('.bash'))) {
         const parsed = parseBashReadCommand(args.command)
-        if (parsed.uncaptured) uncapturedBash += 1
+        if (parsed.uncaptured) { if (parsed.readLike) uncapturedReads += 1; else nonReadBash += 1 }
         for (const read of parsed.reads) recordRead(read.path, read.range)
         continue
       }
@@ -17756,7 +17776,8 @@ export function builderReadSet(streamText, startLine, { checkout, taskDir, trans
     entries: entries.slice(0, READ_SET_MAX_PATHS).map(({ path, whole, ranges, rangesTotal }) => ({ path, whole, ranges, rangesTotal })),
     totalPaths,
     droppedReads,
-    uncapturedBash,
+    uncapturedReads,
+    nonReadBash,
     tailUnreadable,
   }
 }
@@ -17781,7 +17802,8 @@ export function builderReadSetLines(readSet) {
   }
   if (readSet.totalPaths > entries.length) lines.push('Showing ' + entries.length + ' of ' + readSet.totalPaths + ' paths.')
   if (readSet.droppedReads > 0) lines.push('Dropped ' + readSet.droppedReads + ' read(s) outside the checkout and task dir.')
-  if (readSet.uncapturedBash > 0) lines.push(readSet.uncapturedBash + ' bash call(s) not parsed as reads.')
+  if (readSet.uncapturedReads > 0) lines.push(readSet.uncapturedReads + ' bash read(s) not captured.')
+  if (readSet.nonReadBash > 0) lines.push(readSet.nonReadBash + ' other bash call(s) ran no listed read command; any file they read is not captured.')
   if (readSet.tailUnreadable === true) lines.push('tail frame unreadable — the read set may be incomplete.')
   return lines
 }

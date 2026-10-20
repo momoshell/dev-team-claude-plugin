@@ -13,7 +13,7 @@ import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_IN
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
-import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor, builderReadSet, builderReadSetLines, builderStreamLineCount, READ_SET_MAX_PATHS, READ_SET_MAX_RANGES, READ_SET_ABSENT_REASONS } from './drive.mjs'
+import { GATE_RUN_MS_ABSENT_REASONS, gateRunTiming, resumeCheckpointDefect, resumeTask, resumeWorktreeSha256, EXECUTION_DEFAULT_REASONS, STEP_SECTION_UNAVAILABLE, STEP_ALLOWANCE, STEP_ACCEPT_REASONS, STEP_DEGRADE_REASONS, stepAllowance, steppedBudget, planStepSection, parseQuestions, stepBriefText, steppedExecutor, builderReadSet, builderReadSetLines, builderStreamLineCount, READ_SET_MAX_PATHS, READ_SET_MAX_RANGES, READ_SET_ABSENT_REASONS, bashReadLike, BASH_READ_COMMANDS, BASH_READ_INTERPRETERS, BASH_READ_MARKERS } from './drive.mjs'
 import { symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fingerprintTree } from './tree-fingerprint.mjs'; import { ROOT, forAll, git } from '../test/helpers.mjs'
@@ -10907,7 +10907,8 @@ test('WS1 recorded fixture derives the pinned five-entry read set', () => {
     absent: null,
     totalPaths: 5,
     droppedReads: 4,
-    uncapturedBash: 2,
+    uncapturedReads: 0,
+    nonReadBash: 2,
     tailUnreadable: true,
     entries: [
       { path: 'crew/drive.mjs', whole: false, ranges: [[14300, 14384]], rangesTotal: 1 },
@@ -10934,7 +10935,8 @@ test('WS2 limit-only touching offset-only and whole reads derive exact ranges', 
     absent: null,
     totalPaths: 4,
     droppedReads: 0,
-    uncapturedBash: 0,
+    uncapturedReads: 0,
+    nonReadBash: 0,
     tailUnreadable: false,
     entries: [
       { path: 'd.mjs', whole: false, ranges: [[1, 5]], rangesTotal: 1 },
@@ -10989,12 +10991,12 @@ test('WS4 absence reasons are closed frozen and rendered unavailable', () => {
     ['stream-rewound', builderReadSet('{"a":1}\n', 5, opts)],
   ]
   for (const [want, got] of cases) {
-    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
+    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null, uncapturedReads: null, nonReadBash: null, tailUnreadable: null })
   }
   assert.ok(builderReadSetLines(cases[4][1]).join('\n').includes('unavailable: stream-rewound'))
   assert.equal(builderStreamLineCount(null), 0)
   const empty = builderReadSet('{"type":"response"}\n{"type":"message_end","message":{"role":"system","content":""}}\n', 0, opts)
-  assert.deepEqual(empty, { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedBash: 0, tailUnreadable: false })
+  assert.deepEqual(empty, { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedReads: 0, nonReadBash: 0, tailUnreadable: false })
   const emptyRendered = builderReadSetLines(empty).join('\n')
   assert.ok(emptyRendered.includes('(none — the previous builder session made no captured reads)'))
   assert.equal(emptyRendered.includes('unavailable:'), false)
@@ -13331,7 +13333,7 @@ test('WS6 a cancelled or failed nested read is not a read', () => {
   const frame = (status) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status, arguments: { path: 'crew/drive.mjs', offset: 120 } }] } } })
   const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
   for (const status of ['cancelled', 'error']) {
-    assert.deepEqual(builderReadSet(`${frame(status)}\n`, 0, opts), { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedBash: 0, tailUnreadable: false })
+    assert.deepEqual(builderReadSet(`${frame(status)}\n`, 0, opts), { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedReads: 0, nonReadBash: 0, tailUnreadable: false })
   }
   assert.equal(builderReadSet(`${frame('ok')}\n`, 0, opts).totalPaths, 1)
 })
@@ -13350,7 +13352,7 @@ test('WS8 an unreadable frame before the tail makes the read set unavailable; a 
   // kills: skipping an unparseable interior frame instead of returning stream-unparseable
   const good = JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status: 'ok', arguments: { path: 'lib/a.mjs' } }] } } })
   const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
-  assert.deepEqual(builderReadSet(`{"type":"response"}\n{not json\n${good}\n`, 0, opts), { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
+  assert.deepEqual(builderReadSet(`{"type":"response"}\n{not json\n${good}\n`, 0, opts), { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedReads: null, nonReadBash: null, tailUnreadable: null })
   assert.equal(builderReadSet(`${good}\n{"type":"message_end","mess`, 0, opts).totalPaths, 1)
 })
 const wsBashFrame = (command, status = 'ok') => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'bash', status, arguments: { command } }] } } })
@@ -13379,7 +13381,8 @@ test('RB1 bash read shapes derive exact ranges', () => {
     { path: 'a.mjs', whole: false, ranges: [[7, 7]], rangesTotal: 1 },
     { path: 'crew/x.mjs', whole: false, ranges: [[10, 20]], rangesTotal: 1 },
   ])
-  assert.equal(got.uncapturedBash, 0)
+  assert.equal(got.uncapturedReads, 0)
+  assert.equal(got.nonReadBash, 0)
 })
 
 test('RB2 write-capable bash commands disclose uncaptured', () => {
@@ -13404,11 +13407,13 @@ test('RB2 write-capable bash commands disclose uncaptured', () => {
   for (const command of dangerous) {
     const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
     assert.deepEqual(got.entries, [])
-    assert.equal(got.uncapturedBash, 1)
+    assert.equal(got.uncapturedReads, 1)
+    assert.equal(got.nonReadBash, 0)
   }
   const harmless = builderReadSet(wsBashFrame("sed -n '2,4p' a.mjs 2>/dev/null") + '\n' + wsBashFrame('cat b.mjs 2>&1') + '\n', 0, opts)
   assert.equal(harmless.totalPaths, 2)
-  assert.equal(harmless.uncapturedBash, 0)
+  assert.equal(harmless.uncapturedReads, 0)
+  assert.equal(harmless.nonReadBash, 0)
 })
 
 test('F4 bash FILE validation rejects nested quotes and sed wildcards', () => {
@@ -13422,11 +13427,13 @@ test('F4 bash FILE validation rejects nested quotes and sed wildcards', () => {
   ]) {
     const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
     assert.deepEqual(got.entries, [], command)
-    assert.equal(got.uncapturedBash, 1, command)
+    assert.equal(got.uncapturedReads, 1, command)
+    assert.equal(got.nonReadBash, 0, command)
   }
   const quoted = builderReadSet(wsBashFrame("sed -n '1,2p' \"a.mjs\"") + '\n', 0, opts)
   assert.deepEqual(quoted.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
-  assert.equal(quoted.uncapturedBash, 0)
+  assert.equal(quoted.uncapturedReads, 0)
+  assert.equal(quoted.nonReadBash, 0)
 })
 
 test('RB3 only successful bash reads count', () => {
@@ -13435,7 +13442,8 @@ test('RB3 only successful bash reads count', () => {
   for (const status of ['cancelled', 'error']) {
     const got = builderReadSet(wsBashFrame('cat a.mjs', status) + '\n', 0, opts)
     assert.deepEqual(got.entries, [])
-    assert.equal(got.uncapturedBash, 0)
+    assert.equal(got.uncapturedReads, 0)
+    assert.equal(got.nonReadBash, 0)
   }
   const request = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'tb', name: 'bash', arguments: { command: 'cat direct.mjs' } }] } })
   const result = (isError) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'tb', isError } })
@@ -13446,19 +13454,22 @@ test('RB3 only successful bash reads count', () => {
 })
 
 test('RB4 uncaptured bash renders and duplicated frames count once', () => {
-  // kills: raising readSet.uncapturedBash > 0 to readSet.uncapturedBash > 999
+  // kills: raising readSet.nonReadBash > 0 to readSet.nonReadBash > 999
   const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
   const got = builderReadSet(wsBashFrame('node t.mjs') + '\n', 0, opts)
-  assert.equal(got.uncapturedBash, 1)
+  assert.equal(got.uncapturedReads, 0)
+  assert.equal(got.nonReadBash, 1)
   const rendered = builderReadSetLines(got).join('\n')
-  assert.ok(rendered.includes('1 bash call(s) not parsed as reads.'))
-  assert.equal(rendered.includes('reads made through bash are not captured'), false)
+  assert.ok(rendered.includes('1 other bash call(s) ran no listed read command; any file they read is not captured.'))
+  assert.equal(rendered.includes('bash call(s) not parsed as reads.'), false)
   const mixed = builderReadSet(wsBashFrame("sed -n '1,2p' a.mjs; node t.mjs") + '\n', 0, opts)
   assert.deepEqual(mixed.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
-  assert.equal(mixed.uncapturedBash, 1)
+  assert.equal(mixed.uncapturedReads, 0)
+  assert.equal(mixed.nonReadBash, 1)
   const dupMessage = { role: 'toolResult', nestedCalls: { calls: [{ name: 'bash', status: 'ok', arguments: { command: 'node t.mjs' } }, { name: 'read', status: 'ok', arguments: { path: '/elsewhere/x.mjs' } }] } }
   const dup = builderReadSet(JSON.stringify({ type: 'message_start', message: dupMessage }) + '\n' + JSON.stringify({ type: 'message_end', message: dupMessage }) + '\n', 0, opts)
-  assert.equal(dup.uncapturedBash, 1)
+  assert.equal(dup.uncapturedReads, 0)
+  assert.equal(dup.nonReadBash, 1)
   assert.equal(dup.droppedReads, 1)
 })
 
@@ -13487,7 +13498,104 @@ test('RB6 torn tail discloses and interior failure is absent', () => {
   const clean = builderReadSet(good + '\n', 0, opts)
   assert.equal(clean.tailUnreadable, false)
   const interior = builderReadSet('{\"type\":\"response\"}\n{not json\n' + good + '\n', 0, opts)
-  assert.deepEqual(interior, { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
+  assert.deepEqual(interior, { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedReads: null, nonReadBash: null, tailUnreadable: null })
+})
+
+test('BR1 recorded fixture splits its two non-read bash calls', () => {
+  assert.deepEqual(builderReadSet(WS_FIXTURE, 0, { checkout: WS_REC_CO, taskDir: WS_REC_TD, transport: 'headless-rpc' }), {
+    absent: null,
+    totalPaths: 5,
+    droppedReads: 4,
+    uncapturedReads: 0,
+    nonReadBash: 2,
+    tailUnreadable: true,
+    entries: [
+      { path: 'crew/drive.mjs', whole: false, ranges: [[14300, 14384]], rangesTotal: 1 },
+      { path: 'test/factory-prove-mutations.test.mjs', whole: false, ranges: [[1, 90], [730, 1094]], rangesTotal: 2 },
+      { path: 'scripts/factory/prove-mutations.mjs', whole: false, ranges: [[1, 120], [548, 615], [1040, 1444]], rangesTotal: 3 },
+      { path: WS_REC_TD + '/review.md', whole: true, ranges: [], rangesTotal: 0 },
+      { path: WS_REC_TD + '/build-bounce-r1.md', whole: true, ranges: [], rangesTotal: 0 },
+    ],
+  })
+})
+
+test('BR2 read-like bash misses count as uncapturedReads', () => {
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  for (const command of [
+    'grep -n "pub mod packages" crates/power-runtime/src/lib.rs; rustc --version; cargo --version',
+    'tail -n 30 crew/pi/extensions/submit.test.mjs; echo "---lines---"; wc -l crew/pi/extensions/submit.test.mjs',
+    'node -e "console.log(require(\'fs\').readFileSync(\'crew/roles/planner.md\',\'utf8\'))"',
+    'python3 -c "import json; print(json.load(open(\'crew/roles/planner.md\')))"',
+    'cat ~/x.mjs',
+    "cd sub; sed -n '1,2p' a.mjs",
+  ]) {
+    const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
+    assert.deepEqual(got.entries, [], command)
+    assert.equal(got.uncapturedReads, 1, command)
+    assert.equal(got.nonReadBash, 0, command)
+  }
+  const mixed = builderReadSet(wsBashFrame("sed -n '1,2p' a.mjs; grep -n x b.mjs") + '\n', 0, opts)
+  assert.deepEqual(mixed.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
+  assert.equal(mixed.uncapturedReads, 1)
+  assert.equal(mixed.nonReadBash, 0)
+})
+
+test('BR3 non-read bash counts as nonReadBash and a piped reader is not a file read', () => {
+  // kills: taking the last pipe component instead of the first reddens the tail -22 sample
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  for (const command of [
+    'git status --short && git diff --stat',
+    'cargo check -p power-runtime 2>&1 | tail -3',
+    'FORCE_COLOR=0 node /td/gate.mjs',
+    'node /td/gate.mjs 2>&1 | tail -22',
+    'node t.mjs',
+  ]) {
+    const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
+    assert.deepEqual(got.entries, [], command)
+    assert.equal(got.uncapturedReads, 0, command)
+    assert.equal(got.nonReadBash, 1, command)
+  }
+  const mixed = builderReadSet(wsBashFrame("sed -n '1,2p' a.mjs; node t.mjs") + '\n', 0, opts)
+  assert.deepEqual(mixed.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
+  assert.equal(mixed.uncapturedReads, 0)
+  assert.equal(mixed.nonReadBash, 1)
+  assert.equal(bashReadLike('git diff | tail -5'), false)
+  assert.equal(bashReadLike('false || grep -n x b.mjs'), true)
+  assert.equal(bashReadLike('FORCE_COLOR=0 grep -n x b.mjs'), true)
+})
+
+test('BR4 handoff renders each bucket line and never the old line', () => {
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const read = builderReadSetLines(builderReadSet(wsBashFrame('grep -n x b.mjs') + '\n', 0, opts)).join('\n')
+  const nonRead = builderReadSetLines(builderReadSet(wsBashFrame('node t.mjs') + '\n', 0, opts)).join('\n')
+  const none = builderReadSetLines(builderReadSet(wsBashFrame('cat a.mjs') + '\n', 0, opts)).join('\n')
+  assert.ok(read.includes('1 bash read(s) not captured.'))
+  assert.ok(nonRead.includes('1 other bash call(s) ran no listed read command; any file they read is not captured.'))
+  assert.equal(none.includes('bash read(s)'), false)
+  assert.equal(none.includes('other bash'), false)
+  assert.equal(read.includes('bash call(s) not parsed as reads.'), false)
+  assert.equal(nonRead.includes('bash call(s) not parsed as reads.'), false)
+  assert.equal(none.includes('bash call(s) not parsed as reads.'), false)
+})
+
+test('BR5 frozen lists are exact and every absence carries null split counters', () => {
+  assert.deepEqual(BASH_READ_COMMANDS, ['cat', 'head', 'tail', 'sed', 'nl', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'awk'])
+  assert.equal(Object.isFrozen(BASH_READ_COMMANDS), true)
+  assert.deepEqual(BASH_READ_INTERPRETERS, ['node', 'python', 'python3'])
+  assert.equal(Object.isFrozen(BASH_READ_INTERPRETERS), true)
+  assert.deepEqual(BASH_READ_MARKERS, ['readFileSync', 'open(', 'read_text('])
+  assert.equal(Object.isFrozen(BASH_READ_MARKERS), true)
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const cases = [
+    ['session-start-unknown', builderReadSet('{"a":1}\n', null, opts)],
+    ['transport-unsupported', builderReadSet('{"a":1}\n', 0, { ...opts, transport: 'cmux' })],
+    ['stream-missing', builderReadSet(null, 0, opts)],
+    ['stream-unparseable', builderReadSet('not json\n{bad\n', 0, opts)],
+    ['stream-rewound', builderReadSet('{"a":1}\n', 5, opts)],
+  ]
+  for (const [want, got] of cases) {
+    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null, uncapturedReads: null, nonReadBash: null, tailUnreadable: null })
+  }
 })
 
 import { resolveLaneBinary, moduleResolutionSignature, LANE_BINARY_SOURCES } from './lane-red.mjs'

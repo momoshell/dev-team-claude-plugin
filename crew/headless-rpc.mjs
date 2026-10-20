@@ -16,7 +16,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { assignmentDelivery, assignmentPrompt } from './driver.mjs'; import { operationalRow } from './drive.mjs'
 import { sleptMilliseconds } from './headless.mjs'
-import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, createSkillLoadTracker, skillLoadWindowEdits, SKILL_LOAD_ABSENT_REASONS, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail } from './headless.mjs'
+import { shq, classifyRun, noEnvelopeDetail, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail, classifyToolCall, TOOL_CLASSES, CENSUS_ABSENT_CAUSES, censusFileOperands, skillReadsOf, createSkillLoadTracker, skillLoadWindowEdits, SKILL_LOAD_ABSENT_REASONS, suitePolicyCounters, countSuiteDecision, suiteRunPolicy, suitePolicyRow, suiteRefusalRow, suiteSeatCell, suiteRefusalEnvelope, turnCeilingBreached, turnCeilingEnvelope, turnCeilingDetail, providerFailureKind, providerRetryRouter, PROVIDER_RETRY_ACTIONS, PROVIDER_RESET_ABSENT } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { piRpcSeatParts, advisorLaunchCell, piSeatSpawnEnv } from './adapters/adapter-pi.mjs'
@@ -934,6 +934,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     if (injectedLog) return injectedLog(value)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(value)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
   }
+  const { providerRetryOnFailure, providerAnnotated } = providerRetryRouter({
+    paths,
+    deps: { ...deps, now, readFileSync: read, writeFileSync: write, delay: sleep, log, emit },
+    persistDeps: crewDeps,
+    notePersist: null,
+    reassign: (run, returnPath) => assign({ role: run.role, briefFile: run.briefFile, policy: run.policy, reask: { id: run.id, returnPath } }),
+    resume: (returnPath, retryDeadline) => wait(returnPath, Math.max(0, retryDeadline - now()) / 1000),
+  })
   function safeFinalisePreFirstTurn(turn) {
     try { return preFirstTurnFinalizer(turn) }
     catch { return absentPreFirstTurn(PRE_FIRST_TURN_ABSENT_REASONS.computation_failed) }
@@ -1148,6 +1156,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         if (frame.type === 'tool_execution_start') turn.providerBoundary.calls += 1
         if (frame.type === 'turn_end' && turn.providerBoundary.calls > 0) turn.providerBoundary.turns += 1
         if (frame.type === 'agent_settled') turn.state.settled = true
+        if (frame.type === 'auto_retry_end') turn.providerRetryFrame = frame
         // agent_end is only the conversation boundary; it is not completion.
         if (frame.type === 'agent_end') turn.state.ended = true
       }
@@ -1528,7 +1537,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const delivery = assignmentDelivery({ briefFile, readFileSync: read })
     const briefCandidates = briefReadCandidates(briefFile, delivery.briefText)
     const prompt = assignmentPrompt({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir, ...delivery }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, lastToolStartAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, brief_read_candidates: briefCandidates, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_seen: false, brief_read_turns: 0, brief_read_ms: null, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, previousAssignmentId, priorUnsettled: !priorSettled, priorTurnId, usage: null, acknowledged: false, deliveryFailure: null, deliveryFailureLogged: false, state: { sawJson: false, settled: false, ended: false }, providerBoundary: { calls: 0, turns: 0 }, providerRetryFrame: null, parked: { frames: 0 }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null, lastToolStartAt: null, census: newCensus() }, timing: { assignment_started_at: assignmentStartedAt, seat_reused: seatReused, seat_boot_started_at: seatReused ? null : assignmentStartedAt, seat_boot_ready_at: seatBootReadyAt, prompt_delivery_started_at: promptDeliveryStartedAt, prompt_delivery_sent_at: null, brief_file: briefFile, brief_read_candidates: briefCandidates, current_pre_boundary_turn: newPreBoundaryTurn(), brief_read_seen: false, brief_read_turns: 0, brief_read_ms: null, brief_read_measured: false, first_non_brief_tool_seen: false, first_non_brief_tool_at: null }, censusJournalled: false, sentAt: now(), policy: policy ?? null, seenToolCalls: new Set(), policyReported: false, pendingSuiteRefusal: null, enforced: false, ceilingDecision: null }
     if (turn.priorUnsettled && seat !== existing) {
       turn.priorUnsettled = false
       turn.priorTurnId = null
@@ -1952,13 +1961,26 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         const census = observed.frames === 0 ? null : finaliseCensus(observed.census || null)
         const detail = noEnvelopeDetail(census)
         const failureDetail = `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`
+        // An unreadable status is unknown, never a guess: providerFailureKind(null) is null and the turn keeps today's path below.
+        const retryFrame = turn.providerRetryFrame?.success === false ? turn.providerRetryFrame : null
+        const retryStatus = retryFrame ? Number(/API error \((\d{3})\)/.exec(retryFrame.finalError || '')?.[1] ?? Number.NaN) : Number.NaN
+        const classifiedKind = retryFrame ? providerFailureKind(retryStatus) : null
+        const providerKind = classifiedKind && (PROVIDER_RETRY_ACTIONS[classifiedKind] ?? 'none') !== 'none' ? classifiedKind : null
+        const providerFailure = providerKind ? { kind: providerKind, status: retryStatus } : null
         try {
           emit?.({ kind: 'cell-failure', role: turn.role, id: turn.id, failure: 'no-envelope', stage: 'rpc-no-envelope', detail: failureDetail })
         } catch { /* ADR-026: instrumentation is never load-bearing */ }
-        try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true, ...detail }) } catch { /* diagnostics only */ }
+        try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true, ...detail, ...(providerFailure ? { provider_failure: providerFailure } : {}) }) } catch { /* diagnostics only */ }
         emitUsage(turn, seat, turn.usage)
         journalTurnCensus(turn, seat)
         finishTurn(seat)
+        if (providerFailure) {
+          const run = { role: turn.role, id: turn.id, briefFile: turn.timing.brief_file, returnPath, policy: turn.policy }
+          const stream = { providerFailure, providerReset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } }
+          const routed = providerRetryOnFailure(run, returnPath, deadline, stream)
+          if (routed.act === 'retry') return routed.resume()
+          if (routed.act === 'refuse') throw providerAnnotated(staged('headless-provider-exhausted', failureDetail, turn.role), run, stream)
+        }
         return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath, census })
       }
       sleep(Math.min(!acknowledged ? Math.min(WAIT_POLL_MS, Math.max(1, promptDeliveryWindowMs - elapsed)) : WAIT_POLL_MS, Math.max(1, deadline - now())))

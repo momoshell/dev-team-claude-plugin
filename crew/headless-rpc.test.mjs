@@ -2432,6 +2432,144 @@ test('RV1-1 zero-turn RPC journal preserves generic no-envelope driver carve-out
   } finally { f.cleanup() }
 })
 
+function recordedProviderExhaustedCapture() {
+  const reach = join(ROOT, 'tasks/headless-worker/captures/pi-rpc-b1317-provider-exhausted.jsonl')
+  assert.ok(reach.endsWith('pi-rpc-b1317-provider-exhausted.jsonl'))
+  return readFileSync(new URL('../tasks/headless-worker/captures/pi-rpc-b1317-provider-exhausted.jsonl', import.meta.url), 'utf8')
+}
+
+function rewriteProviderExhaustedRetryEnd(text, fn) {
+  return text.split('\n').map((line) => {
+    if (!line.trim()) return line
+    let frame
+    try { frame = JSON.parse(line) } catch { return line }
+    if (frame?.type !== 'auto_retry_end') return line
+    return JSON.stringify(fn(frame))
+  }).join('\n')
+}
+
+test('provider-exhausted RPC turn retries through the provider ladder', () => {
+  const rows = []
+  let clock = 1700000000000
+  let run = null
+  let appended = false
+  let f = null
+  f = fixture({
+    now: () => clock,
+    monotonic: () => clock,
+    log: (row) => rows.push(row),
+    onSleep: ({ ms, appendStream }) => {
+      clock += ms
+      if (!appended && run && f.writes.filter((w) => w.type === 'prompt').length >= 2) {
+        appended = true
+        appendStream(JSON.stringify({ type: 'agent_settled' }) + '\n')
+        writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done', summary: 'retry succeeded', artifacts: [], details: {} }))
+      }
+    },
+  })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(recordedProviderExhaustedCapture())
+    const env = f.io.wait(run.returnPath, 600)
+    assert.equal(env.status, 'done')
+    assert.equal(f.writes.filter((w) => w.type === 'prompt').length, 2)
+    const retry = rows.find((r) => r.event === 'provider-retry')
+    assert.equal(retry.kind, 'server_error')
+    assert.equal(retry.status, 503)
+    assert.equal(retry.action, 'backoff')
+    assert.equal(retry.attempt, 1)
+    const resumed = rows.find((r) => r.event === 'provider-retry-resumed')
+    assert.equal(resumed.attempt, 1)
+    const outcome = rows.find((r) => r.rpc_outcome === 'no-envelope')
+    assert.deepEqual(outcome.provider_failure, { kind: 'server_error', status: 503 })
+  } finally { f.cleanup() }
+})
+
+test('provider retry ending success:true keeps the generic no-envelope envelope', () => {
+  const rows = []
+  let clock = 1700000000000
+  const f = fixture({
+    now: () => clock,
+    monotonic: () => clock,
+    log: (row) => rows.push(row),
+    onSleep: ({ ms }) => { clock += ms },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(rewriteProviderExhaustedRetryEnd(recordedProviderExhaustedCapture(), (frame) => ({ ...frame, success: true })))
+    const env = f.io.wait(run.returnPath, 600)
+    assert.equal(env.status, 'insufficient')
+    assert.equal(env.details.reason, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+    assert.equal(rows.filter((r) => typeof r.event === 'string' && r.event.startsWith('provider-retry')).length, 0)
+    const outcome = rows.find((r) => r.rpc_outcome === 'no-envelope')
+    assert.equal(outcome.provider_failure, undefined)
+  } finally { f.cleanup() }
+})
+
+test('provider-exhausted RPC turn with a credential fault throws the spent-ladder stage', () => {
+  const rows = []
+  let clock = 1700000000000
+  const f = fixture({
+    now: () => clock,
+    monotonic: () => clock,
+    log: (row) => rows.push(row),
+    onSleep: ({ ms }) => { clock += ms },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(rewriteProviderExhaustedRetryEnd(recordedProviderExhaustedCapture(), (frame) => ({ ...frame, finalError: String(frame.finalError).replace('(503)', '(401)') })))
+    let thrown = null
+    try { f.io.wait(run.returnPath, 600) } catch (err) { thrown = err }
+    assert.ok(thrown)
+    assert.equal(thrown.stage, 'headless-provider-exhausted')
+    assert.ok(String(thrown.message).includes('[provider authentication_failed status 401:'))
+    assert.equal(rows.filter((r) => r.event === 'provider-retry-declined').length, 1)
+    assert.equal(f.writes.filter((w) => w.type === 'prompt').length, 1)
+  } finally { f.cleanup() }
+})
+
+test('provider-exhausted RPC turn with an unreadable status keeps the generic path', () => {
+  const rows = []
+  let clock = 1700000000000
+  const f = fixture({
+    now: () => clock,
+    monotonic: () => clock,
+    log: (row) => rows.push(row),
+    onSleep: ({ ms }) => { clock += ms },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(rewriteProviderExhaustedRetryEnd(recordedProviderExhaustedCapture(), (frame) => ({ ...frame, finalError: 'meta API error: service_overloaded' })))
+    const env = f.io.wait(run.returnPath, 600)
+    assert.equal(env.status, 'insufficient')
+    assert.equal(env.details.reason, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+    assert.equal(rows.filter((r) => typeof r.event === 'string' && r.event.startsWith('provider-retry')).length, 0)
+    const outcome = rows.find((r) => r.rpc_outcome === 'no-envelope')
+    assert.equal(outcome.provider_failure, undefined)
+  } finally { f.cleanup() }
+})
+
+test('provider-exhausted RPC turn with an unclassified status keeps the generic path', () => {
+  const rows = []
+  let clock = 1700000000000
+  const f = fixture({
+    now: () => clock,
+    monotonic: () => clock,
+    log: (row) => rows.push(row),
+    onSleep: ({ ms }) => { clock += ms },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    f.writeStream(rewriteProviderExhaustedRetryEnd(recordedProviderExhaustedCapture(), (frame) => ({ ...frame, finalError: String(frame.finalError).replace('(503)', '(418)') })))
+    const env = f.io.wait(run.returnPath, 600)
+    assert.equal(env.status, 'insufficient')
+    assert.equal(env.details.reason, NO_ENVELOPE_REASONS.ZERO_TURN_NON_START)
+    assert.equal(rows.filter((r) => typeof r.event === 'string' && r.event.startsWith('provider-retry')).length, 0)
+    const outcome = rows.find((r) => r.rpc_outcome === 'no-envelope')
+    assert.equal(outcome.provider_failure, undefined)
+  } finally { f.cleanup() }
+})
+
 test('teardown forces an in-flight turn but does not mark a settled seat forced', () => {
   const inFlight = fixture()
   try {

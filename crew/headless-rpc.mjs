@@ -74,7 +74,8 @@ export const SEAT_COMMAND_FILE = 'cmd.fifo'
 // FIFOs have no sun_path limit.
 export function seatCommandPath(crewDir, role, root = tmpdir()) {
   const resolved = resolve(crewDir)
-  const key = `${basename(resolved) || 'lane'}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
+  // The readable prefix is capped so a long lane slug plus the digest stays under NAME_MAX (255).
+  const key = `${(basename(resolved) || 'lane').slice(0, 48)}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
   return join(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
 }
 // Legacy command path inside the crew dir.

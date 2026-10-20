@@ -4692,3 +4692,13 @@ test('FO7 same-named lanes whose short digests collide still get distinct comman
   assert.notEqual(a, b)
   assert.match(a, /^\/run\/crew-rpc\/lane-[0-9a-f]{32}\/builder\/cmd\.fifo$/)
 })
+
+// MUTATION FO8: drop the 48-char prefix cap and a long lane slug overruns NAME_MAX.
+test('FO8 a long lane slug keeps the runtime key directory under NAME_MAX', () => {
+  const slug = 'b' + 'x'.repeat(229)
+  const p = seatCommandPath(join('/lanes', slug), 'builder', '/run')
+  const keyDir = p.split('/').at(-3)
+  assert.equal(keyDir.length, 48 + 1 + 32)
+  assert.equal(keyDir.startsWith(slug.slice(0, 48) + '-'), true)
+  assert.notEqual(p, seatCommandPath(join('/lanes', slug + 'y'), 'builder', '/run'))
+})

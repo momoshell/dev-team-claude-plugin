@@ -1,15 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { ROOT } from '../test/helpers.mjs'
+import { ROOT, scratchDir } from '../test/helpers.mjs'
 
 // Kill mutation: replace the final existsSync(..., false) with true and this
 // guard accepts a leaked crew-rpc instead of failing.
 test('seat runtime suites leave no crew-rpc entry under a fresh TMPDIR', () => {
-  const scratch = mkdtempSync(join(tmpdir(), 'seat-runtime-tmpdir-'))
+  const scratch = scratchDir('seat-runtime-tmpdir-')
   try {
     const env = { ...process.env, TMPDIR: scratch, NO_COLOR: '1' }
     delete env.FORCE_COLOR

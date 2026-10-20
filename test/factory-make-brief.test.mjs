@@ -15,7 +15,7 @@ import {
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractPremiseClaims, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
-  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PORTABLE_CONVENTIONS_BLOCK, PORTABLE_HOSTILE_ENV_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
+  MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PORTABLE_ACCEPTANCE_GATE_BLOCK, PORTABLE_CONVENTIONS_BLOCK, PORTABLE_HOSTILE_ENV_BLOCK, PORTABLE_MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, standingBlocksFor, SYMBOL_INDEX_ENTRY_LIMIT,
   SYMBOL_INDEX_ABSENT_REASONS, SYMBOL_INDEX_SCAN_LIMIT, testTitleEntries, validateAsk, writePack,
   canonicalisePremiseText, validateRequest, validateScopeEntries, verifyCreates, verifyPremises, verifyWhere, issueBindingFor, gatherBaseline,
@@ -1985,6 +1985,8 @@ test('BB2', () => {
 
 test('standing blocks render verbatim and no unfilled slot ships', () => {
   const root = fixture('standing')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   put(root, 'scripts/factory/seed.mjs', 'export {}\n')
   const { brief } = compile(root)
   assert.ok(brief.includes(ACCEPTANCE_GATE_BLOCK))
@@ -2012,6 +2014,8 @@ test('standing blocks render verbatim and no unfilled slot ships', () => {
 // reaches every future lane without touching the protected driver.
 test('every compiled brief requires a hostile-environment pass of the lane\'s own tests', () => {
   const root = fixture('hostile-env')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   put(root, 'crew/crew-boot.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
   put(root, 'crew/adapter-pi.test.mjs', "import { test } from 'node:test'\ntest('seed', () => {})\n")
   const { brief } = compile(root)
@@ -2098,12 +2102,109 @@ test('FB4 self-hosted fixture compiles repo-specific blocks verbatim', () => {
   assert.notEqual(PORTABLE_CONVENTIONS_BLOCK, CONVENTIONS_BLOCK)
 })
 
+test('PB1 foreign brief carries the portable acceptance gate block', () => {
+  const root = fixture('pb1-foreign', { scripts: FAST_FIXTURE_TEST })
+  const { brief } = compile(root, {}, [], 'pb1.md')
+  const gate = section(brief, '## Acceptance gate')
+  assert.ok(gate.includes(PORTABLE_ACCEPTANCE_GATE_BLOCK))
+  assert.equal(gate.includes(ACCEPTANCE_GATE_BLOCK), false)
+  assert.equal(gate.includes('crew/drive.mjs'), false)
+  assert.equal(gate.includes('GATE_SUMMARY_PREFIX'), false)
+})
+
+test('PB2 foreign briefs carry the portable mutation contract inline and packed', () => {
+  const root = fixture('pb2-foreign', { scripts: FAST_FIXTURE_TEST })
+  const forbidden = ['crew/drive.mjs', 'scripts/factory/make-brief.mjs', 'standingBlocks()', 'validateMutations', 'checkFailureLine']
+  const { brief: unpacked } = compile(root, {}, [], 'pb2-unpacked.md')
+  const mutations = section(unpacked, '## Per-check mutations')
+  assert.equal(mutations, PORTABLE_MUTATION_CONTRACT_BLOCK)
+  for (const bad of forbidden) assert.equal(mutations.includes(bad), false)
+  const packDir = join(root, 'pack')
+  mkdirSync(packDir)
+  const { brief: packed } = compile(root, {}, ['--pack', packDir], 'pb2-packed.md')
+  const packedMutations = section(packed, '## Per-check mutations')
+  assert.equal(packedMutations, PORTABLE_MUTATION_CONTRACT_BLOCK)
+  for (const bad of forbidden) assert.equal(packedMutations.includes(bad), false)
+})
+
+// MUTATION: emptying the driver requirement in MUTATION_CITED_PATHS selects the repo block here.
+test('PB2 compiler-only checkout carries the portable mutation contract', () => {
+  const root = fixture('pb2-compiler-only', { scripts: FAST_FIXTURE_TEST })
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
+  const { brief } = compile(root)
+  assert.equal(section(brief, '## Per-check mutations'), PORTABLE_MUTATION_CONTRACT_BLOCK)
+})
+
+// MUTATION: emptying the compiler requirement in MUTATION_CITED_PATHS selects the repo block here.
+test('PB2 driver-only checkout carries the portable mutation contract', () => {
+  const root = fixture('pb2-driver-only', { scripts: FAST_FIXTURE_TEST })
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  const { brief } = compile(root)
+  assert.equal(section(brief, '## Per-check mutations'), PORTABLE_MUTATION_CONTRACT_BLOCK)
+})
+
+test('PB3 standingBlocksFor self-hosted and null return repo-specific blocks', () => {
+  assert.ok(standingBlocksFor(ROOT).acceptance.startsWith(ACCEPTANCE_GATE_BLOCK))
+  assert.equal(standingBlocksFor(ROOT).mutations, MUTATION_CONTRACT_BLOCK)
+  assert.deepEqual(standingBlocksFor(null), standingBlocksFor(ROOT))
+  const root = fixture('pb3-self', { scripts: FAST_FIXTURE_TEST })
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
+  const { brief } = compile(root, {}, [], 'pb3.md')
+  const gate = section(brief, '## Acceptance gate')
+  const mutations = section(brief, '## Per-check mutations')
+  assert.ok(gate.includes(ACCEPTANCE_GATE_BLOCK))
+  assert.equal(mutations, MUTATION_CONTRACT_BLOCK)
+  assert.equal(gate.includes(PORTABLE_ACCEPTANCE_GATE_BLOCK), false)
+  assert.equal(mutations.includes(PORTABLE_MUTATION_CONTRACT_BLOCK), false)
+})
+
+test('PB4 foreign briefs grep the whole checkout, never a silent subset of the factory roots', () => {
+  const rootsOf = (line) => line.slice(line.lastIndexOf('"') + 1).trim()
+  const grepLine = (text, heading) => section(text, heading).split('\n').find((line) => line.startsWith('grep -rn "'))
+  const root = fixture('pb4-foreign', { scripts: FAST_FIXTURE_TEST })
+  const { brief } = compile(root, {}, [], 'pb4.md')
+  assert.equal(rootsOf(grepLine(brief, '## Conventions')), '.')
+  const declareLine = section(brief, '## Tripwires').split('\n').find((line) => line.startsWith('declare every hit:'))
+  assert.equal(rootsOf(declareLine), '.')
+  const packDir = join(root, 'pack')
+  mkdirSync(packDir)
+  const { brief: packed } = compile(root, {}, ['--pack', packDir], 'pb4-packed.md')
+  const vocabLine = section(packed, '## Tripwires').split('\n').find((line) => line.startsWith('vocabulary:'))
+  assert.equal(vocabLine.slice(vocabLine.indexOf('-f ') + 3).split(' ').slice(1).join(' '), '.')
+  const srcRoot = nextRoot('pb4-src-only')
+  put(srcRoot, 'package.json', JSON.stringify({ name: 'brief-pb4-src', private: true, type: 'module', scripts: { test: FAST_FIXTURE_TEST } }, null, 2) + '\n')
+  put(srcRoot, 'src/widget.mjs', 'export function computeWidget(n) { return n + 1 }\n')
+  git(srcRoot, 'init', '-q')
+  git(srcRoot, 'add', '-A')
+  const { brief: srcBrief } = compile(srcRoot, { where: ['src/widget.mjs'] }, [], 'pb4-src.md')
+  assert.equal(rootsOf(grepLine(srcBrief, '## Conventions')), '.')
+  const full = fixture('pb4-full', { scripts: FAST_FIXTURE_TEST })
+  put(full, 'crew/drive.mjs', 'export {}\n')
+  put(full, 'scripts/factory/seed.mjs', 'export {}\n')
+  put(full, 'docs/seed.md', '# seed\n')
+  const { brief: fullBrief } = compile(full, {}, [], 'pb4-full.md')
+  assert.equal(rootsOf(grepLine(fullBrief, '## Conventions')), 'crew/ test/ scripts/ docs/')
+})
+
+test('PB5 portable standing blocks keep the gate and mutation contract', () => {
+  assert.ok(PORTABLE_ACCEPTANCE_GATE_BLOCK.includes('RED at baseline'))
+  assert.ok(PORTABLE_ACCEPTANCE_GATE_BLOCK.includes('GATE-SUMMARY {"total":n,"failed":n,"errored":n}'))
+  for (const clause of ['FAIL <check>: <why>', 'FAIL <check> \u2014 <why>', '"check"', '"file"', '"find"', '"replace"', 'exempt', String(MUTATIONS_MAX), 'anchor-unsafe', 'Use `A1`, `B2`, `C3` only when none is declared']) {
+    assert.ok(PORTABLE_MUTATION_CONTRACT_BLOCK.includes(clause), clause)
+  }
+  assert.notEqual(PORTABLE_ACCEPTANCE_GATE_BLOCK, ACCEPTANCE_GATE_BLOCK)
+  assert.notEqual(PORTABLE_MUTATION_CONTRACT_BLOCK, MUTATION_CONTRACT_BLOCK)
+})
+
 // The per-check mutation contract must reach a planner mechanically: two lanes lost
 // a plan round each to a format that lived only inside crew/drive.mjs (#330, #345).
 // This test is also the anti-drift pin — the constants come from the enforcement
 // point, so changing MUTATIONS_MAX or CHECK_FAIL_PREFIX reddens the prose.
 test('every compiled brief carries the per-check mutation contract', () => {
   const root = fixture('mutation-contract')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   const { brief } = compile(root)
   assert.ok(brief.includes(MUTATION_CONTRACT_BLOCK))
   const contract = section(brief, '## Per-check mutations')
@@ -2128,6 +2229,8 @@ test('every compiled brief carries the per-check mutation contract', () => {
 // human-readable separator (#387). The forms are asserted LITERALLY.
 test('the mutation contract states the FAIL-line separator rule', () => {
   const root = fixture('fail-separator')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   const { brief } = compile(root)
   const contract = section(brief, '## Per-check mutations')
   assert.equal(contract, MUTATION_CONTRACT_BLOCK)
@@ -2177,6 +2280,8 @@ test('the contract and ADR-030 name anchor-unsafe', () => {
 // LITERALLY, the same mechanism that closed the FAIL-separator problem above.
 test('the mutation contract states the node --test reporter rule', () => {
   const root = fixture('reporter-rule')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   const { brief } = compile(root)
   const contract = section(brief, '## Per-check mutations')
   assert.equal(contract, MUTATION_CONTRACT_BLOCK)
@@ -2198,6 +2303,8 @@ test('the mutation contract states the node --test reporter rule', () => {
 // the contract cannot satisfy this test.
 test('the mutation contract demands a mutation exercising the narrowest claim', () => {
   const root = fixture('narrowest-claim')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'scripts/factory/make-brief.mjs', 'export {}\n')
   const { brief } = compile(root)
   const second = compile(root, {}, [], 'brief-second.md').brief
   assert.equal(second, brief)

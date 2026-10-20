@@ -7,5 +7,5 @@
   "crew/crew.mjs:4875": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:4762": "const seats = rows.length",
   "crew/drive.mjs:9577": "const completeCheckProof = (label, options = {}) => {",
-  "scripts/factory/make-brief.mjs:1033": "function colourNeutralEnv(base = process.env)"
+  "scripts/factory/make-brief.mjs:1187": "function colourNeutralEnv(base = process.env)"
 }

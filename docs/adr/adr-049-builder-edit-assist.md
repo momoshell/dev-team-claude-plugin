@@ -132,7 +132,7 @@ switch the dispatcher can set per lane, so the A/B below needs no roster change.
 ## Measurement that decides stage 2
 
 - **Arms:** alternate edit assist on and off at dispatch, stratified by builder cell.
-- **Floor:** 12 builder seats per arm per cell (`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:441`). A cell below
+- **Floor:** 12 builder seats per arm per cell (`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:447`). A cell below
   the floor reads unmeasured.
 - **Primary metric:** failed-edit round-trips per 100 edits, and round-trips from a failed edit to the next successful
   edit of the same file. Each is reported with its denominator.

@@ -1809,6 +1809,7 @@ export function parseStream(path, readFileSync, existsSync) {
   let terminalReason = null
   let lines = 0
   let sawSynthetic = false
+  let syntheticError = null
   let sawApiError = false
   let apiErrorStatus = null
   let resetAtMs = null
@@ -1819,7 +1820,7 @@ export function parseStream(path, readFileSync, existsSync) {
     try {
       const event = JSON.parse(line)
       sawJson = true
-      if (event?.type === 'assistant' && event.message?.model === SYNTHETIC_MODEL) sawSynthetic = true
+      if (event?.type === 'assistant' && event.message?.model === SYNTHETIC_MODEL) { sawSynthetic = true; if (typeof event.error === 'string') syntheticError = event.error }
       if (event?.type === 'result') {
         terminal = true
         terminalReason = event.terminal_reason || event.subtype || null
@@ -1844,7 +1845,7 @@ export function parseStream(path, readFileSync, existsSync) {
       }
     } catch { /* truncated trailing JSONL is not itself a malformed run */ }
   }
-  const kind = providerFailureKind(apiErrorStatus)
+  const kind = providerFailureKind(apiErrorStatus) ?? acpProviderFailureKind(syntheticError)
   return {
     sawJson, terminal, terminalReason, lines, usage: foldUsage(text),
     census: claudeCensus(text), census_absent: sawJson ? null : CENSUS_ABSENT_CAUSES.no_frames,

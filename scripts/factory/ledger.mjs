@@ -306,6 +306,12 @@ export function escalationCause(input = {}) {
   if (where === 'build' && /^no accepted build within \d+ rounds$/.test(why.trim())) {
     return Object.freeze({ cause: 'build-rounds-exhausted', actor: 'lead' })
   }
+  // Rule 8b: a provider ladder that ran out is infrastructure, not budget — the
+  // annotation is providerAnnotated's own sentence (crew/headless.mjs, providerAnnotated).
+  // authentication_failed and provider-unclassified deliberately stay with Rule 9.
+  if (/\[provider (?:server_error|stream-stall|rate_limit) status /.test(why)) {
+    return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
+  }
   // Rule 9: an exceeded budget is a driver budget outcome. It runs AFTER every
   // structural rule above: its 'no valid envelope' arm is prose that four
   // different producers emit, and only the location tells them apart (#854 (3)).

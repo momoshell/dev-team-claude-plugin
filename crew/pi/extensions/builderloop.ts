@@ -804,6 +804,8 @@ export function createBuilderLoop(value = {}) {
 
   let last = null
   let nextDeadlineMs = null
+  let laneInFlight = false
+  let lanePending = null
   const corpus = []
   let corpusBytes = 0
   let currentId = null
@@ -908,6 +910,61 @@ export function createBuilderLoop(value = {}) {
     return failureResult
   }
 
+  function coalescedPart(part, count) {
+    return { type: 'text', text: `${part.text} (coalesced: covered ${count} edits)` }
+  }
+
+  function enqueueCoalesced(spec) {
+    if (lanePending === null) lanePending = { waiters: [] }
+    return new Promise((resolve) => {
+      lanePending.waiters.push({ spec, resolve })
+    })
+  }
+
+  async function executeLaneRun(spec) {
+    const { event, ctx, cwd, command, target } = spec
+    const explicitDeadlineMs = runnerDeps?.deadlineMs ?? runnerDeps?.timeoutMs
+    const deadlineMs = explicitDeadlineMs !== undefined
+      ? positiveNumber(explicitDeadlineMs, DEFAULT_DEADLINE_MS)
+      : (nextDeadlineMs ?? scaledDeadlineMs(command.args.length - 1))
+    const metadata = metadataFor({ role, target: target || '', tests: command.args.slice(1) })
+    metadata.deadline_ms = deadlineMs
+    try {
+      const result = await runTests(command, { cwd, signal: ctx?.signal, deps: runnerDeps, deadlineMs })
+      nextDeadlineMs = null
+      return { part: laneResultPart(result, command.args) }
+    } catch (error) {
+      if (failureReason(error) === 'timeout') nextDeadlineMs = Math.min(MAX_DEADLINE_MS, deadlineMs * 2)
+      const patched = preserveAfterFailure(error, recordFailure, metadata, { content: event.content, args: command.args, deadlineMs })
+      return { part: patched ? patched.content.at(-1) : null }
+    }
+  }
+
+  async function drainPendingLane() {
+    try {
+      while (lanePending) {
+        const batch = lanePending
+        lanePending = null
+        let outcome
+        try {
+          outcome = await executeLaneRun(batch.waiters[0].spec)
+        } catch {
+          outcome = { part: null }
+        }
+        for (const waiter of batch.waiters) {
+          waiter.resolve(outcome.part ? { content: [...waiter.spec.event.content, coalescedPart(outcome.part, batch.waiters.length)] } : undefined)
+        }
+      }
+    } finally {
+      laneInFlight = false
+      if (lanePending) {
+        const leftover = lanePending
+        lanePending = null
+        for (const waiter of leftover.waiters) waiter.resolve(undefined)
+      }
+    }
+  }
+
   async function normalToolResult(event, ctx) {
     let loaded
     try {
@@ -918,20 +975,19 @@ export function createBuilderLoop(value = {}) {
     if (!eligible(event, current, cwd)) return undefined
     const command = fencedNodeTestCommand(current)
     const target = targetRelative(cwd, event?.input?.path)
-    const explicitDeadlineMs = runnerDeps?.deadlineMs ?? runnerDeps?.timeoutMs
-    const deadlineMs = explicitDeadlineMs !== undefined
-      ? positiveNumber(explicitDeadlineMs, DEFAULT_DEADLINE_MS)
-      : (nextDeadlineMs ?? scaledDeadlineMs(command.args.length - 1))
-    const metadata = metadataFor({ role, target: target || '', tests: command.args.slice(1) })
-    metadata.deadline_ms = deadlineMs
+    const spec = { event, ctx, cwd, command, target }
+    if (laneInFlight) return enqueueCoalesced(spec)
+    laneInFlight = true
+    let outcome
     try {
-      const result = await runTests(command, { cwd, signal: ctx?.signal, deps: runnerDeps, deadlineMs })
-      nextDeadlineMs = null
-      return { content: [...event.content, laneResultPart(result, command.args)] }
-    } catch (error) {
-      if (failureReason(error) === 'timeout') nextDeadlineMs = Math.min(MAX_DEADLINE_MS, deadlineMs * 2)
-      return preserveAfterFailure(error, recordFailure, metadata, { content: event.content, args: command.args, deadlineMs })
+      outcome = await executeLaneRun(spec)
+    } catch {
+      outcome = { part: null }
     }
+    const result = outcome.part ? { content: [...event.content, outcome.part] } : undefined
+    if (lanePending) void drainPendingLane()
+    else laneInFlight = false
+    return result
   }
 
   return { onToolCall, onToolResult, onBeforeAgentStart }

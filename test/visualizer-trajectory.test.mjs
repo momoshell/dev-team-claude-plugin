@@ -609,3 +609,44 @@ test('the #673 marker events keep landing unchanged', () => {
   assert.deepEqual(markers.map((marker) => marker.event), ['seat-retrying', 'seat-retry-cleared'])
   assert.equal(markers.every((marker) => marker.kind !== 'substrate'), true)
 })
+
+test('PU6 journal source reads step titles and acceptance text without changing the tree', () => {
+  const root = scratchDir('visualizer-pu6-crew-');
+  const outside = scratchDir('visualizer-pu6-outside-');
+  const dir = join(root, 'repo', 'task');
+  mkdirSync(join(dir, 'ledger'), { recursive: true });
+  mkdirSync(join(dir, 'task'), { recursive: true });
+  writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }));
+  const chunks = [{ id: 'S1' }, { id: 'S2' }];
+  writeFileSync(join(dir, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }));
+  writeFileSync(join(dir, 'task', 'plan.accepted.md'), '### Step S1 \u2014 process-group registry\n\n### Step S2\n');
+  mkdirSync(join(root, 'briefs'), { recursive: true });
+  const brief = join(root, 'briefs', 'lane.brief.md');
+  writeFileSync(brief, '## Acceptance\n\n(LG4) Reaps the group.\n');
+  writeFileSync(join(outside, 'evil.brief.md'), '## Acceptance\n\n(LG4) Outside text.\n');
+  const journal = (b) => JSON.stringify({ event: 'batch-dir', batch_dir: root, brief: b }) + '\n';
+  writeFileSync(join(dir, 'journal.jsonl'), journal(brief));
+  const src = createJournalSource({ crewRoot: root });
+  const before = treeDigest(root);
+  const r1 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
+  assert.deepEqual(r1.step_titles, { S1: 'process-group registry' });
+  assert.deepEqual(r1.acceptance, { LG4: 'Reaps the group.' });
+  assert.deepEqual(r1.plan, { chunks, absent: null });
+  assert.equal(treeDigest(root), before);
+  writeFileSync(join(dir, 'journal.jsonl'), journal(join(outside, 'evil.brief.md')));
+  const r2 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
+  assert.deepEqual([r2.acceptance, r2.acceptance_reason], [null, 'brief-outside-crew-root']);
+  writeFileSync(join(dir, 'journal.jsonl'), '');
+  const r3 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
+  assert.deepEqual([r3.acceptance, r3.acceptance_reason], [null, 'brief-path-not-journaled']);
+  const rootNoMd = scratchDir('visualizer-pu6-nomd-');
+  const dirNoMd = join(rootNoMd, 'repo', 'task');
+  mkdirSync(join(dirNoMd, 'ledger'), { recursive: true });
+  mkdirSync(join(dirNoMd, 'task'), { recursive: true });
+  writeFileSync(join(dirNoMd, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }));
+  writeFileSync(join(dirNoMd, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }));
+  writeFileSync(join(dirNoMd, 'journal.jsonl'), '');
+  const r4 = createJournalSource({ crewRoot: rootNoMd }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
+  assert.deepEqual([r4.step_titles, r4.step_titles_reason], [null, 'plan-text-unreadable']);
+})
+

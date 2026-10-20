@@ -1,8 +1,9 @@
 <script>
-  import { stepTimeline } from './plan-steps.js'
+  import { planStepCards } from './plan-steps.js'
+  import { reasonText } from './reason-copy.js'
 
   let { journalState } = $props()
-  let view = $derived(stepTimeline({ ...journalState.payload, error: journalState.error || journalState.payload?.error }))
+  let view = $derived(planStepCards({ ...journalState.payload, error: journalState.error || journalState.payload?.error }))
   let hasError = $derived(Boolean(journalState.error || journalState.payload?.error))
 </script>
 
@@ -13,25 +14,31 @@
   {:else if journalState.reads === 0}
     <p class="muted">Loading accepted plan and step events…</p>
   {:else if view.absent}
-    <p class="muted" title={view.absent}>Plan unavailable: {view.absent}. Inspect the accepted planner return.</p>
+    <p class="muted" title={view.absent}>Plan unavailable: {reasonText(view.absent)}. Inspect the accepted planner return.</p>
   {:else if view.steps.length === 0}
     <p class="muted">The accepted plan has no valid chunks. Inspect the accepted planner return.</p>
   {:else}
-    {#if view.degraded.value === true}<aside class="degradation" role="status">Lane degradation · {view.degraded.reason || 'Source reason not recorded'} · step {view.degraded.step ?? 'Unmeasured — degrade-step-not-recorded'} · remaining {view.degraded.remaining?.join(', ') ?? 'Unmeasured — degrade-remaining-not-recorded'} · budget {view.degraded.budget ?? 'Unmeasured — degrade-budget-not-recorded'}</aside>{/if}
+    {#if view.degraded.value === true}<aside class="degradation" role="status">Lane degradation · <span title={view.degraded.reason || undefined}>{reasonText(view.degraded.reason) || 'Source reason not recorded'}</span> · step <span title={view.degraded.step_reason || undefined}>{view.degraded.step ?? reasonText(view.degraded.step_reason)}</span> · remaining <span title={view.degraded.remaining_reason || undefined}>{view.degraded.remaining?.join(', ') ?? reasonText(view.degraded.remaining_reason)}</span> · budget <span title={view.degraded.budget_reason || undefined}>{view.degraded.budget ?? reasonText(view.degraded.budget_reason)}</span></aside>{/if}
     <ol class="step-timeline">
       {#each view.steps as step (step.id)}
-        <li aria-current={step.state === 'active' ? 'step' : undefined} class={`tone-${step.tone}`}>
+        <li aria-current={step.state === 'active' ? 'step' : undefined} class={'tone-' + step.tone}>
           <article class="step-card">
-            <header><strong>{step.id}</strong><span title={step.reason || undefined}>{step.state ?? `Unmeasured — ${step.reason}`}</span></header>
-            <p class:dashed={step.intent == null} title={step.intent_reason || undefined}>{step.intent == null ? `Unmeasured — ${step.intent_reason}` : step.intent}</p>
-            <dl><dt>Files</dt><dd class:dashed={step.files == null} title={step.files_reason || undefined}>{step.files?.join(', ') ?? `Unmeasured — ${step.files_reason}`}</dd><dt>Dependencies</dt><dd class:dashed={step.depends_on == null} title={step.depends_on_reason || undefined}>{step.depends_on?.join(', ') ?? `Unmeasured — ${step.depends_on_reason}`}</dd></dl>
-            <div class="checks"><strong>Checks</strong>{#if step.checks}{#each step.checks as check (check.id)}<span class={`tone-${check.tone}`} title={check.reason || undefined}>{check.id}: {check.result ?? `Unmeasured — ${check.reason}`}{#if check.regressed} · regressed{/if}</span>{/each}{:else}<span class="dashed">Unmeasured — {step.checks_reason}</span>{/if}</div>
-            {#if step.rounds === null}<p class="dashed" title={step.reason || undefined}>Unmeasured — {step.reason}</p>{:else}
+            <header><strong>{step.id}</strong><span title={step.reason || undefined}>{step.state_label}</span></header>
+            <p>{step.title}</p>
+            {#if step.files !== null}
+              <details><summary>{step.files.length} files</summary><ul>{#each step.files as file, i (i)}<li>{file}</li>{/each}</ul></details>
+            {:else}
+              <p class="muted" title={step.files_reason}>{reasonText(step.files_reason)}</p>
+            {/if}
+            {#if step.depends_on !== null}
+              {#if step.depends_on.length > 0}<p class="muted">after {step.depends_on.join(', ')}</p>{/if}
+            {:else}
+              <p class="muted" title={step.depends_on_reason}>{reasonText(step.depends_on_reason)}</p>
+            {/if}
+            <div class="checks"><strong>Checks</strong>{#if step.checks}{#each step.checks as check (check.id)}<span class={'tone-' + check.tone} title={check.reason || undefined}>{#if check.result === null}{check.id}: {reasonText(check.reason)}{:else}{check.id}: {check.result}{#if check.regressed} · regressed{/if}{/if}</span>{/each}{:else}<span class="dashed" title={step.checks_reason}>{reasonText(step.checks_reason)}</span>{/if}</div>
+            {#if step.rounds === null}<p class="dashed" title={step.reason || undefined}>{reasonText(step.reason)}</p>{:else}
               {#each step.rounds as round, i (i)}
-                <section class="round"><strong>Round {round.round} · {round.outcome ?? `Unmeasured — ${round.reason}`}</strong>{#if round.bounce_status}<span>Bounce status · {round.bounce_status}</span>{/if}
-                  <span class:dashed={round.failed == null} title={round.failed_reason || undefined}>Failed · {round.failed?.join(', ') ?? `Unmeasured — ${round.failed_reason}`}</span><span class:dashed={round.regressed == null} title={round.regressed_reason || undefined}>Regressed · {round.regressed?.join(', ') ?? `Unmeasured — ${round.regressed_reason}`}</span>
-                  <span class:dashed={round.duration_ms == null} title={round.duration_reason || undefined}>Duration · {round.duration_ms ?? `Unmeasured — ${round.duration_reason}`}</span><span class:dashed={round.turns == null} title={round.turns_reason || undefined}>Turns · {round.turns ?? `Unmeasured — ${round.turns_reason}`}</span><span class="dashed" title={round.cost_reason}>Cost · Unmeasured — {round.cost_reason}</span>
-                </section>
+                <section class="round"><span>{round.label}</span>{#if round.bounce_status}<span>Bounce status · {round.bounce_status}</span>{/if}</section>
               {/each}
             {/if}
             {#if step.escalation}<small>Escalation · {step.escalation}</small>{/if}
@@ -39,6 +46,7 @@
         </li>
       {/each}
     </ol>
+    {#if view.footer.length}<details class="not-recorded"><summary>Not recorded: {view.footer.map((e) => e.label).join(', ')}</summary><ul>{#each view.footer as entry}<li>{entry.label} — {entry.text} ({entry.steps.join(', ')})</li>{/each}</ul></details>{/if}
     {#if view.unplanned.length}<p class="muted">Unplanned step ids: {view.unplanned.join(', ')}</p>{/if}
   {/if}
 </section>

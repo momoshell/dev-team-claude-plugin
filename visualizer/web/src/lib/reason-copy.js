@@ -1,0 +1,39 @@
+export const REASON_COPY = Object.freeze({
+  'plan-files-not-recorded': 'The plan did not list files for this step',
+  'plan-dependencies-not-recorded': 'The plan did not list dependencies for this step',
+  'plan-checks-not-recorded': 'The plan did not list checks for this step',
+  'plan-chunk-carries-no-intent': 'The planner did not describe this step',
+  'no-gate-result': 'The gate has not reported a result for this check yet',
+  'round-open': 'This round is still in progress',
+  'bounce-summary-not-journaled': 'The bounce summary was not written to the journal',
+  'not-a-bounce': 'This round was not a bounce',
+  'gate-labels-not-recorded': "This step's gate did not record which checks failed",
+  'invalid-round-timestamps': 'The round timestamps are invalid',
+  'no-builder-census-in-window': 'No builder turn count was recorded in this round',
+  'ambiguous-builder-census': 'More than one builder turn count was recorded in this round',
+  'invalid-builder-census': 'The recorded builder turn count is invalid',
+  'no-per-step-cost-source': 'Per-step cost is not tracked yet',
+  'no-escalation-recorded': 'No escalation was recorded',
+  'no-step-events': 'No step events were recorded',
+  'not-started': 'This step has not started yet',
+  'superseded-open-round': 'An earlier open round was superseded by a later step',
+  'journal-unavailable': 'The journal is unavailable',
+  'degrade-step-not-recorded': 'The degraded step was not recorded',
+  'degrade-remaining-not-recorded': 'The remaining steps were not recorded',
+  'degrade-budget-not-recorded': 'The degrade budget was not recorded',
+  'degraded-to-whole-build': 'This step was degraded to the whole build',
+  'plan-not-accepted': 'No accepted plan was found',
+  'plan-unreadable': 'The accepted plan could not be read',
+  'plan-has-no-chunks': 'The accepted plan has no steps',
+  'plan-text-unreadable': 'The accepted plan text could not be read',
+  'plan-text-has-no-step-titles': 'The accepted plan text has no step titles',
+  'brief-path-not-journaled': 'No brief path was journaled for this run',
+  'brief-outside-crew-root': 'The brief path is outside the crew directory',
+  'brief-unreadable': 'The brief could not be read',
+  'brief-has-no-acceptance-text': 'The brief has no acceptance criteria',
+});
+export function reasonText(slug) {
+  if (typeof slug === 'string' && Object.hasOwn(REASON_COPY, slug)) return REASON_COPY[slug];
+  if (typeof slug === 'string' && slug) return 'Not recorded (' + slug + ')';
+  return 'Not recorded';
+}

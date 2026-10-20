@@ -3190,11 +3190,11 @@ test('PV8', () => {
 test('PV9', () => {
   const component = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8')
   const detail = readSource(new URL('../visualizer/web/src/lib/RunDetail.svelte', import.meta.url), 'utf8')
-  assert.match(component, /import \{ stepTimeline \} from '\.\/plan-steps\.js'/)
+  assert.match(component, /import \{ planStepCards \} from '\.\/plan-steps\.js'/)
   assert.match(component, /let \{ journalState \} = \$props\(\)/)
   assert.match(component, /step\.checks/)
-  assert.match(component, /step\.state \?\? `Unmeasured —/)
-  assert.match(component, /step\.rounds === null/)
+  assert.match(component, /<details/)
+  assert.match(component, /Not recorded:/)
   assert.match(component, /<ol class="step-timeline">/)
   assert.match(component, /aria-current=\{step\.state === 'active' \? 'step' : undefined\}/)
   assert.match(detail, /\{#each stepView\.strip as entry \(entry\.id\)\}/)
@@ -3575,4 +3575,107 @@ test('estimated cell prices label as estimated and chips render the flag', () =>
  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
  const line = source.split('\n').find((l) => l.includes('chip.cost_out_per_mtok'))
  assert.match(line, /chip\.rate_estimated \? ' \(estimated\)'/)
+})
+
+const reasonCopyProbes = await import('../visualizer/web/src/lib/reason-copy.js').catch(() => null)
+const planCardsProbes = await import('../visualizer/web/src/lib/plan-steps.js').catch(() => null)
+const journalSourceProbes = await import('../visualizer/server/journal-source.mjs').catch(() => null)
+test('PU1 reason copy covers every timeline and server slug', () => {
+  assert.ok(reasonCopyProbes && planCardsProbes && journalSourceProbes, 'expected reason-copy, plan-steps and journal-source modules');
+  assert.equal(Object.isFrozen(reasonCopyProbes.REASON_COPY), true);
+  const lists = [planCardsProbes.STEP_TIMELINE_REASONS, planCardsProbes.PLAN_STEP_REASONS, planCardsProbes.PLAN_ABSENCE_REASONS, journalSourceProbes.STEP_TITLE_REASONS, journalSourceProbes.ACCEPTANCE_REASONS];
+  for (const list of lists) {
+    assert.equal(Array.isArray(list), true);
+    for (const slug of list) {
+      const text = reasonCopyProbes.reasonText(slug);
+      assert.equal(typeof text, 'string');
+      assert.notEqual(text.length, 0);
+      assert.equal(text.includes(slug), false, slug);
+    }
+  }
+  assert.equal(reasonCopyProbes.reasonText('made-up-slug').includes('made-up-slug'), true);
+  assert.notEqual(reasonCopyProbes.reasonText(null).length, 0);
+})
+test('PU2 plan step cards choose titles by precedence', () => {
+  assert.ok(planCardsProbes && typeof planCardsProbes.planStepCards === 'function', 'expected planStepCards');
+  const cases = [
+    [{ plan: { chunks: [{ id: 'S1', intent: 'Recorded', checks_owned: ['LG4'] }] }, rows: [] }, 'Recorded', 'intent'],
+    [{ plan: { chunks: [{ id: 'S1', checks_owned: ['LG4'] }] }, rows: [], step_titles: { S1: 'process-group registry' } }, 'process-group registry', 'plan-heading'],
+    [{ plan: { chunks: [{ id: 'S1', checks_owned: ['LG4'] }] }, rows: [], acceptance: { LG4: 'Reaps the group. More text.' } }, 'Reaps the group.', 'acceptance'],
+    [{ plan: { chunks: [{ id: 'S1', checks_owned: ['LG1', 'LG2'] }] }, rows: [] }, 'Owns checks LG1, LG2', 'check-ids'],
+    [{ plan: { chunks: [{ id: 'S1' }] }, rows: [] }, 'Step S1', 'step-id'],
+  ];
+  for (const entry of cases) {
+    const card = planCardsProbes.planStepCards(entry[0]).steps[0];
+    assert.deepEqual([card.title, card.title_source], [entry[1], entry[2]]);
+  }
+})
+test('PU3 plan step cards render one-line round labels and durations', () => {
+  assert.ok(planCardsProbes && typeof planCardsProbes.planStepCards === 'function' && typeof planCardsProbes.formatStepDuration === 'function', 'expected planStepCards and formatStepDuration');
+  const build = (id, owned, ms, turns) => planCardsProbes.planStepCards({ plan: { chunks: [{ id, checks_owned: owned, files_in_scope: [], depends_on: [] }] }, rows: [{ event: 'step:start', step: id, round: 1, at: 1000 }, { at: 1500, seat_turn_census: { role: 'builder', turns } }, { event: 'step:done', step: id, round: 1, at: 1000 + ms, passed: owned }] }).steps[0].rounds[0].label;
+  assert.equal(build('S2', ['LG1', 'LG2', 'LG3', 'LG5'], 688047, 52), 'Round 1 \u00b7 4/4 checks passed \u00b7 11m 28s \u00b7 52 turns');
+  assert.equal(build('S1', ['LG4'], 258539, 21), 'Round 1 \u00b7 1/1 checks passed \u00b7 4m 19s \u00b7 21 turns');
+  assert.deepEqual([planCardsProbes.formatStepDuration(42000), planCardsProbes.formatStepDuration(258539), planCardsProbes.formatStepDuration(3780000)], ['42s', '4m 19s', '1h 3m']);
+})
+test('PU4 plan step cards show failed segments only when recorded', () => {
+  assert.ok(planCardsProbes && typeof planCardsProbes.planStepCards === 'function', 'expected planStepCards');
+  const view = (t) => planCardsProbes.planStepCards({ plan: { chunks: [{ id: 'S1', checks_owned: ['C1', 'C2'], files_in_scope: [], depends_on: [] }] }, rows: [{ event: 'step:start', step: 'S1', round: 1, at: 1000 }, { at: 1500, seat_turn_census: { role: 'builder', turns: 3 } }, t] });
+  const red = view({ event: 'step:red', step: 'S1', round: 1, at: 2000, failed: ['C1'], regressed: ['C2'] });
+  assert.equal(red.steps[0].rounds[0].label.includes(' \u00b7 failed: C1 \u00b7 regressed: C2'), true);
+  const bare = view({ event: 'step:red', step: 'S1', round: 1, at: 2000 });
+  assert.equal(bare.steps[0].rounds[0].label.includes('failed:'), false);
+  assert.equal(bare.steps[0].rounds[0].label.includes('Unmeasured'), false);
+  assert.equal(bare.footer.some((e) => e.reason === 'gate-labels-not-recorded'), true);
+  const done = view({ event: 'step:done', step: 'S1', round: 1, at: 2000, passed: ['C1', 'C2'] });
+  assert.equal(done.footer.some((e) => e.reason === 'gate-labels-not-recorded'), false);
+})
+test('PU5 plan step cards footer always names cost and missing descriptions', () => {
+  assert.ok(planCardsProbes && reasonCopyProbes, 'expected planStepCards and reasonText');
+  const payload = (extra) => ({ plan: { chunks: [{ id: 'S1', checks_owned: ['C1'], files_in_scope: [], depends_on: [] }] }, rows: [{ event: 'step:start', step: 'S1', round: 1, at: 1000 }, { at: 1500, seat_turn_census: { role: 'builder', turns: 3 } }, { event: 'step:done', step: 'S1', round: 1, at: 2000, passed: ['C1'] }], ...extra });
+  const full = planCardsProbes.planStepCards(payload({ step_titles: { S1: 'Do the thing' } }));
+  assert.deepEqual(full.footer.map((e) => e.label), ['cost per step']);
+  assert.deepEqual([full.footer[0].reason, full.footer[0].steps], ['no-per-step-cost-source', ['S1']]);
+  const bare = planCardsProbes.planStepCards(payload({ step_titles: null, acceptance: null }));
+  assert.deepEqual(bare.footer.map((e) => e.label), ['cost per step', 'step description']);
+  for (const e of bare.footer) assert.equal(e.text, reasonCopyProbes.reasonText(e.reason));
+})
+test('PU7 plan steps panel renders cards with details and footer', () => {
+  const source = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8');
+  assert.equal(source.includes('Unmeasured \u2014 ${'), false);
+  assert.equal(source.includes('planStepCards'), true);
+  assert.equal((source.match(/<details/g) || []).length >= 2, true);
+  assert.equal(source.includes('Not recorded:'), true);
+  assert.equal(source.includes('<ol class="step-timeline">'), true);
+  assert.equal(source.includes('{#each step.rounds as round, i (i)}'), true);
+})
+
+// MUTATION RV1-1: restore the file-path key and duplicate recorded paths collide.
+test('RV1-1 plan steps preserve duplicate files with index-keyed rendering', () => {
+  const view = planCardsProbes.planStepCards({
+    plan: { chunks: [{ id: 'S1', files_in_scope: ['a.mjs', 'a.mjs'] }] },
+    rows: [],
+  })
+  assert.deepEqual(view.steps[0].files, ['a.mjs', 'a.mjs'])
+  const source = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8')
+  assert.match(source, /\{#each step\.files as file, i \(i\)\}<li>\{file\}<\/li>\{\/each\}/)
+})
+
+// MUTATION RV1-2: drop the missing-step title and its translated reason loses provenance.
+test('RV1-2 plan steps keep degradation reason slugs beside translated values', () => {
+  const view = planCardsProbes.planStepCards({
+    plan: { chunks: [{ id: 'S1' }] },
+    rows: [{ event: 'step:degrade', reason: 'degraded-to-whole-build' }],
+  })
+  assert.deepEqual(view.degraded, {
+    value: true, step: null, step_reason: 'degrade-step-not-recorded',
+    remaining: null, remaining_reason: 'degrade-remaining-not-recorded',
+    reason: 'degraded-to-whole-build', budget: null, budget_reason: 'degrade-budget-not-recorded',
+  })
+  const source = readSource(new URL('../visualizer/web/src/lib/PlanSteps.svelte', import.meta.url), 'utf8')
+  for (const span of [
+    "<span title={view.degraded.reason || undefined}>{reasonText(view.degraded.reason) || 'Source reason not recorded'}</span>",
+    '<span title={view.degraded.step_reason || undefined}>{view.degraded.step ?? reasonText(view.degraded.step_reason)}</span>',
+    "<span title={view.degraded.remaining_reason || undefined}>{view.degraded.remaining?.join(', ') ?? reasonText(view.degraded.remaining_reason)}</span>",
+    '<span title={view.degraded.budget_reason || undefined}>{view.degraded.budget ?? reasonText(view.degraded.budget_reason)}</span>',
+  ]) assert.ok(source.includes(span), span)
 })

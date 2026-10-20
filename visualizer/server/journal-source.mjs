@@ -11,10 +11,13 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
 
+export const STEP_TITLE_REASONS = Object.freeze(['plan-text-unreadable','plan-text-has-no-step-titles'])
+export const ACCEPTANCE_REASONS = Object.freeze(['brief-path-not-journaled','brief-outside-crew-root','brief-unreadable','brief-has-no-acceptance-text'])
+
 export function createJournalSource({ crewRoot = join(homedir(), '.crew') } = {}) {
   const root = resolve(crewRoot)
   function readJournal({ repo_slug, task_slug, adw_id } = {}) {
-    const empty = { dir: null, verified: false, rows: [], skipped_malformed: 0, skipped_line_numbers: [], channels: JOURNAL_CHANNELS, degraded: false, plan: { chunks: null, absent: 'plan-not-accepted' } }
+    const empty = { dir: null, verified: false, rows: [], skipped_malformed: 0, skipped_line_numbers: [], channels: JOURNAL_CHANNELS, degraded: false, plan: { chunks: null, absent: 'plan-not-accepted' }, step_titles: null, step_titles_reason: 'plan-text-unreadable', acceptance: null, acceptance_reason: 'brief-path-not-journaled' }
     if (!validSegment(repo_slug) || !validSegment(task_slug)) return { ...empty, error: 'invalid repo_slug or task_slug' }
     const parent = resolve(root, repo_slug)
     const candidateRoot = resolve(parent, task_slug)
@@ -67,6 +70,50 @@ export function createJournalSource({ crewRoot = join(homedir(), '.crew') } = {}
     result.rows = rows
     result.skipped_malformed = skipped_malformed
     result.skipped_line_numbers = skipped_line_numbers
+    let step_titles = null
+    let step_titles_reason = 'plan-text-unreadable'
+    try {
+      const planText = readFileSync(join(chosen, 'task', 'plan.accepted.md'), 'utf8')
+      const titles = {}
+      for (const line of planText.split('\n')) {
+        const match = line.match(/^### Step[ \t]+(\S+)[ \t]+—[ \t]+(.+?)\s*$/);
+        if (match) titles[match[1]] = match[2].trim()
+      }
+      if (Object.keys(titles).length === 0) { step_titles = null; step_titles_reason = 'plan-text-has-no-step-titles' }
+      else { step_titles = titles; step_titles_reason = null }
+    } catch { step_titles = null; step_titles_reason = 'plan-text-unreadable' }
+    result.step_titles = step_titles
+    result.step_titles_reason = step_titles_reason
+    let acceptance = null
+    let acceptance_reason = 'brief-path-not-journaled'
+    const row = [...result.rows].reverse().find((entry) => entry.event === 'batch-dir')
+    if (row && typeof row.brief === 'string' && row.brief) {
+      const rootPrefix = `${root}${sep}`
+      const briefPath = resolve(row.brief)
+      if (!briefPath.startsWith(rootPrefix) || !briefPath.endsWith('.brief.md')) { acceptance = null; acceptance_reason = 'brief-outside-crew-root' }
+      else {
+        let briefText = null
+        try { briefText = readFileSync(briefPath, 'utf8') } catch { briefText = null }
+        if (briefText === null) { acceptance = null; acceptance_reason = 'brief-unreadable' }
+        else {
+          const briefLines = briefText.split('\n')
+          const startIndex = briefLines.findIndex((line) => line.trim() === '## Acceptance')
+          const section = startIndex === -1 ? [] : briefLines.slice(startIndex + 1)
+          const items = {}
+          let current = null
+          for (const line of section) {
+            if (/^## /.test(line)) break
+            const item = line.match(/^\(([^)]+)\)\s+(.*)$/)
+            if (item) { current = item[1]; items[current] = item[2].trim() }
+            else if (line.trim() && current) items[current] += ' ' + line.trim()
+          }
+          if (Object.keys(items).length === 0) { acceptance = null; acceptance_reason = 'brief-has-no-acceptance-text' }
+          else { acceptance = items; acceptance_reason = null }
+        }
+      }
+    }
+    result.acceptance = acceptance
+    result.acceptance_reason = acceptance_reason
     return result
   }
   return { readJournal, health: () => ({ crew_root: root, readonly: true }) }

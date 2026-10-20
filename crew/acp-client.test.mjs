@@ -7,7 +7,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { scratchDir } from '../test/helpers.mjs'
+import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import {
   ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, ACP_WRITE_DEADLINE_MS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
@@ -691,6 +691,7 @@ test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
   try {
     writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
     writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))}}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    trackProcessGroupFile(join(acpRoot, 'builder', 'pgid'))
     out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
     assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
     assert.equal(out.stderr, '')
@@ -1052,4 +1053,44 @@ test('RR1 unproven owner close leaves runtime dirs', () => {
     assert.equal(existsSync(roleDir), true)
     assert.equal(existsSync(keyDir), true)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('LG2 default seat command root resolves the acp FIFO under TMPDIR crew-rpc', () => {
+  const root = scratchDir('lg-acp-default-')
+  const acpRoot = join(root, 'acp')
+  const seatDir = join(acpRoot, 'builder')
+  mkdirSync(seatDir, { recursive: true })
+  writeFileSync(join(seatDir, 'stream.jsonl'), '')
+  const opened = []
+  const scratchTmp = scratchDir('lg-default-tmp-')
+  const previousTmpdir = process.env.TMPDIR
+  process.env.TMPDIR = scratchTmp
+  try {
+    const expectedFifo = seatCommandPath(root, 'builder', scratchTmp)
+    const api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} },
+      dir: acpRoot, cwd: root, role: 'builder',
+      deps: {
+        pid: 900,
+        spawn: () => ({ pid: 901, unref() {} }),
+        openSync: (path) => { opened.push(path); return 7 },
+        writeSync: () => {},
+        closeSync: () => {},
+        kill: () => { writeFileSync(join(seatDir, 'exit'), '0') },
+        now: () => 1000,
+        sleep: () => {},
+        log: () => {},
+      },
+    })
+    assert.equal(api.start().pid, 901)
+    assert.deepEqual(opened, [expectedFifo])
+    assert.equal(expectedFifo.startsWith(join(scratchTmp, 'crew-rpc')), true)
+    assert.equal(existsSync(join(acpRoot, 'builder', 'cmd.fifo')), false)
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+    rmSync(scratchTmp, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true })
+  }
+  assert.equal(process.env.TMPDIR, previousTmpdir)
 })

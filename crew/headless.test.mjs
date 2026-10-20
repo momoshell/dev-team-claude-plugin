@@ -24,7 +24,7 @@ import { headlessRpcIo } from './headless-rpc.mjs'
 import { assignmentLine, assignmentPrompt } from './driver.mjs'
 import { cellFailureKind, HEADLESS_TRANSPORT, readEnvelopeFile, seatIo } from './seat-io.mjs'
 import { DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS } from '../scripts/factory/lane-watch.mjs'
-import { ROOT, forAll, scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { ROOT, forAll, scratchDir, startFileWriter, trackSpawn } from '../test/helpers.mjs'
 import { CTX as DRIVE_CTX, driveTask, fakeIo, reconEnv } from './drive-fixtures.mjs'
 import { absenceFailure, gitGrepHits } from '../scripts/factory/absence.mjs'
 
@@ -5177,7 +5177,7 @@ async function spawnSignalWrapper(workerSource) {
   const readyPath = join(dir, 'ready')
   const releasePath = join(dir, 'release')
   const adapter = { headlessCommand: () => ({ bin: process.execPath, args: [workerPath, pidPath, readyPath, releasePath], env: {} }) }
-  const io = headlessIo({ crew: { checkout: dir, members: { builder: { model: 'sonnet', transport: 'headless-json' } } }, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { builder: { adapter } }, bin: process.execPath, deps: { spawn: realSpawn, uuid: () => 'wrapper-1', log() {} } })
+  const io = headlessIo({ crew: { checkout: dir, members: { builder: { model: 'sonnet', transport: 'headless-json' } } }, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: { builder: { adapter } }, bin: process.execPath, deps: { spawn: trackSpawn(realSpawn), uuid: () => 'wrapper-1', log() {} } })
   const run = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
   const runDir = join(taskDir, 'headless', run.id)
   // The wrapper publishes its own pid atomically before the worker runs; that

@@ -3156,14 +3156,19 @@ test('PS-E1 ungranted skills do not trigger and no bare skills prefix is derived
   })
 })
 
-test('PS3', () => {
+test('PS3', async () => {
   assert.deepEqual(PROMPT_SURFACE, {
     paths: ['crew/roles/', 'crew/guidelines/'],
-    templateBlocks: ['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK'],
+    templateBlocks: ['ACCEPTANCE_GATE_BLOCK', 'HOSTILE_ENV_BLOCK', 'CONVENTIONS_BLOCK', 'MUTATION_CONTRACT_BLOCK', 'PORTABLE_ACCEPTANCE_GATE_BLOCK', 'PORTABLE_HOSTILE_ENV_BLOCK', 'PORTABLE_CONVENTIONS_BLOCK', 'PORTABLE_MUTATION_CONTRACT_BLOCK'],
   })
   assert.equal(Object.isFrozen(PROMPT_SURFACE), true)
   assert.equal(Object.isFrozen(PROMPT_SURFACE.paths), true)
   assert.equal(Object.isFrozen(PROMPT_SURFACE.templateBlocks), true)
+  const makeBrief = await import('../scripts/factory/make-brief.mjs')
+  for (const name of PROMPT_SURFACE.templateBlocks) {
+    assert.equal(typeof makeBrief[name], 'string', name)
+    assert.ok(makeBrief[name].length > 0, name)
+  }
 })
 
 test('PS4', () => {

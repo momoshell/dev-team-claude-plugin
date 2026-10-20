@@ -2197,6 +2197,13 @@ test('PB5 portable standing blocks keep the gate and mutation contract', () => {
   assert.notEqual(PORTABLE_MUTATION_CONTRACT_BLOCK, MUTATION_CONTRACT_BLOCK)
 })
 
+test('PW1 portable mutation block drops the checkout claim', () => {
+  assert.equal(PORTABLE_MUTATION_CONTRACT_BLOCK.toLowerCase().includes('this checkout'), false)
+  assert.ok(PORTABLE_MUTATION_CONTRACT_BLOCK.includes("measured in the factory's own checkout, same file and same environment,"))
+  assert.ok(PORTABLE_MUTATION_CONTRACT_BLOCK.includes('--test-reporter=tap'))
+  assert.ok(MUTATION_CONTRACT_BLOCK.includes('measured on this checkout'))
+})
+
 // The per-check mutation contract must reach a planner mechanically: two lanes lost
 // a plan round each to a format that lived only inside crew/drive.mjs (#330, #345).
 // This test is also the anti-drift pin — the constants come from the enforcement

@@ -10,8 +10,11 @@ post-hoc review label.
 The prompt-surface rule is distinct from the protected floor. The exported
 `PROMPT_SURFACE` contract classifies path writes under `crew/roles/` and
 `crew/guidelines/` as prompt changes and names the compiler-owned template
-blocks `ACCEPTANCE_GATE_BLOCK`, `HOSTILE_ENV_BLOCK`, `CONVENTIONS_BLOCK`, and
-`MUTATION_CONTRACT_BLOCK`. A prompt-surface hit forces rigorous review (the
+blocks `ACCEPTANCE_GATE_BLOCK`, `HOSTILE_ENV_BLOCK`, `CONVENTIONS_BLOCK`,
+`MUTATION_CONTRACT_BLOCK`, and their portable counterparts
+`PORTABLE_ACCEPTANCE_GATE_BLOCK`, `PORTABLE_HOSTILE_ENV_BLOCK`,
+`PORTABLE_CONVENTIONS_BLOCK`, and `PORTABLE_MUTATION_CONTRACT_BLOCK`.
+A prompt-surface hit forces rigorous review (the
 implementation tier is `judge`); an explicit lower lane tier refuses with the
 distinct `prompt-surface-conflict` reason rather than the protected
 `tier-floor-conflict` reason.

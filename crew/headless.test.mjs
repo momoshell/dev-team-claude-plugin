@@ -2624,13 +2624,15 @@ test('a stall the ladder declines escalates with the stream-stall provider fact,
     let thrown = null
     try { f.io.wait(f.run.returnPath, 20_000) } catch (error) { thrown = error }
     assert.ok(thrown, 'a stall on every attempt must end the dispatch')
-    assert.equal(thrown.stage, 'headless-timeout')
+    assert.equal(thrown.stage, 'headless-provider-exhausted')
     assert.deepEqual(thrown.providerFailure, { kind: 'stream-stall', status: null })
     assert.match(thrown.message, /\[provider stream-stall status null: \d+ of \d+ retry attempts spent/)
     assert.equal(f.spawns(), PROVIDER_RETRY_MAX + 1)
     const declined = f.journal.find((row) => row.event === 'provider-retry-declined')
     assert.ok(declined, 'a declined stall journals provider-retry-declined')
     assert.equal(declined.kind, 'stream-stall')
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses timeout.
+    assert.ok(f.journal.some((row) => row.headless_outcome === 'timeout'), 'declined stall keeps recorded outcome timeout')
   } finally { f.cleanup() }
 })
 
@@ -2997,12 +2999,14 @@ test('RV1-1 classified provider failures use retry routing before model fallback
   assert.deepEqual(noFrame.providerReset, { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME })
   const resetless = providerRetryFixture({ tail: noFrame429, at, fallback })
   try {
-    assert.throws(() => resetless.io.wait(resetless.run.returnPath, 600), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => resetless.io.wait(resetless.run.returnPath, 600), (error) => error.stage === 'headless-provider-exhausted')
     assert.equal(resetless.spawns(), 1)
     assert.equal(resetless.parks.length, 0)
     assert.equal(resetless.journal.filter((row) => row.event === 'provider-retry').length, 0)
     assert.equal(resetless.journal.filter((row) => row.event === 'seat-fallback').length, 0)
     assert.equal(resetless.journal.find((row) => row.event === 'provider-retry-declined').reset_at, null)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(resetless.journal.some((row) => row.headless_outcome === 'budget-refused'), 'resetless keeps recorded outcome budget-refused')
   } finally { resetless.cleanup() }
 
   const rejectedFrame = B332_D2_TAIL.split('\n').find((line) => {
@@ -3023,10 +3027,12 @@ test('RV1-1 classified provider failures use retry routing before model fallback
   assert.deepEqual(staleStream.providerReset, { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_RESET_FIELD })
   const stale = providerRetryFixture({ tail: staleReset, at, fallback })
   try {
-    assert.throws(() => stale.io.wait(stale.run.returnPath, 600), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => stale.io.wait(stale.run.returnPath, 600), (error) => error.stage === 'headless-provider-exhausted')
     assert.equal(stale.spawns(), 1)
     assert.equal(stale.parks.length, 0)
     assert.equal(stale.journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(stale.journal.some((row) => row.headless_outcome === 'budget-refused'), 'stale keeps recorded outcome budget-refused')
   } finally { stale.cleanup() }
 
   const laterSeconds = 1788115200 + 600
@@ -3044,7 +3050,7 @@ test('RV1-1 classified provider failures use retry routing before model fallback
   const boundaryAt = at + PROVIDER_RESET_SETTLE_MS - PROVIDER_RETRY_TOTAL_WAIT_MS
   const overshot = providerRetryFixture({ tail: B332_D2_TAIL, at: boundaryAt, fallback, drift: 1 })
   try {
-    assert.throws(() => overshot.io.wait(overshot.run.returnPath, 600), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => overshot.io.wait(overshot.run.returnPath, 600), (error) => error.stage === 'headless-provider-exhausted')
     const retry = overshot.journal.find((row) => row.event === 'provider-retry')
     const decline = overshot.journal.find((row) => row.event === 'provider-retry-declined')
     assert.equal(retry.wait_ms, PROVIDER_RETRY_TOTAL_WAIT_MS)
@@ -3053,11 +3059,13 @@ test('RV1-1 classified provider failures use retry routing before model fallback
     assert.equal(decline.attempts_spent, 0)
     assert.equal(overshot.journal.filter((row) => row.event === 'provider-retry-resumed').length, 0)
     assert.equal(overshot.journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(overshot.journal.some((row) => row.headless_outcome === 'budget-refused'), 'overshot keeps recorded outcome budget-refused')
   } finally { overshot.cleanup() }
 
   const persistent = providerRetryFixture({ tail: DERIVED_529_TAIL, at, fallback, refusals: PROVIDER_RETRY_MAX + 3 })
   try {
-    assert.throws(() => persistent.io.wait(persistent.run.returnPath, 600), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => persistent.io.wait(persistent.run.returnPath, 600), (error) => error.stage === 'headless-provider-exhausted')
     assert.equal(persistent.spawns(), PROVIDER_RETRY_MAX + 1)
     assert.equal(persistent.journal.filter((row) => row.event === 'provider-retry').length, PROVIDER_RETRY_MAX)
     const decline = persistent.journal.find((row) => row.event === 'provider-retry-declined')
@@ -3065,22 +3073,26 @@ test('RV1-1 classified provider failures use retry routing before model fallback
     assert.equal(decline.attempts_spent, PROVIDER_RETRY_MAX)
     assert.match(decline.why, new RegExp(String(PROVIDER_RETRY_MAX)))
     assert.equal(persistent.journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(persistent.journal.some((row) => row.headless_outcome === 'budget-refused'), 'persistent keeps recorded outcome budget-refused')
   } finally { persistent.cleanup() }
 
   const retryFailure = providerRetryFixture({ tail: B332_D2_TAIL, at, fallback, spawnThrowsOn: 2 })
   try {
-    assert.throws(() => retryFailure.io.wait(retryFailure.run.returnPath, 600), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => retryFailure.io.wait(retryFailure.run.returnPath, 600), (error) => error.stage === 'headless-provider-exhausted')
     assert.equal(retryFailure.spawns(), 2)
     assert.equal(retryFailure.journal.filter((row) => row.event === 'provider-retry').length, 1)
     const failed = retryFailure.journal.find((row) => row.event === 'provider-retry-failed')
     assert.equal(failed.attempts_spent, 0)
     assert.equal(retryFailure.journal.filter((row) => row.event === 'provider-retry-resumed').length, 0)
     assert.equal(retryFailure.journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(retryFailure.journal.some((row) => row.headless_outcome === 'budget-refused'), 'retryFailure keeps recorded outcome budget-refused')
   } finally { retryFailure.cleanup() }
 
   const racedTimeout = providerRetryFixture({ tail: DERIVED_529_TAIL, at, fallback, noExit: true })
   try {
-    assert.throws(() => racedTimeout.io.wait(racedTimeout.run.returnPath, 60), (error) => error.stage === 'headless-budget-refused')
+    assert.throws(() => racedTimeout.io.wait(racedTimeout.run.returnPath, 60), (error) => error.stage === 'headless-provider-exhausted')
     assert.equal(racedTimeout.spawns(), 1)
     assert.equal(racedTimeout.parks.length, 0)
     assert.equal(racedTimeout.journal.filter((row) => row.event === 'provider-retry').length, 0)
@@ -3088,6 +3100,8 @@ test('RV1-1 classified provider failures use retry routing before model fallback
     assert.equal(decline.kind, PROVIDER_FAILURE_KINDS.SERVER_ERROR)
     assert.match(decline.why, /work budget/)
     assert.equal(racedTimeout.journal.filter((row) => row.event === 'seat-fallback').length, 0)
+    // Mutation killed: fold the recorded outcome into the new stage and the journal loses budget-refused.
+    assert.ok(racedTimeout.journal.some((row) => row.headless_outcome === 'budget-refused'), 'racedTimeout keeps recorded outcome budget-refused')
   } finally { racedTimeout.cleanup() }
 
   const unclassified = providerRetryFixture({ tail: withTerminalStatus(B332_D2_TAIL, 418), at, fallback })

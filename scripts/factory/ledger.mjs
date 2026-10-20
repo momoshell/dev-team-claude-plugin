@@ -251,6 +251,9 @@ export function escalationCause(input = {}) {
   if (where === 'seat-died' || /\bseat died: /.test(why)) {
     return Object.freeze({ cause: 'seat-lost', actor: 'driver' })
   }
+  // Rule 8a: a spent provider ladder's own stage (crew/headless.mjs, outcomeError) is infrastructure.
+  // It must precede Rule 4/5 because a declined stall's message carries 'headless timeout:' prose.
+  if (where === 'headless-provider-exhausted') return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   // Rule 4: the driver's own wait ceiling fired — it killed the seat; nothing
   // died under it. `where` is the raised error's stage: `headless-${outcome}`
   // (crew/headless.mjs:553) or the literal 'rpc-timeout' (crew/headless-rpc.mjs:785).

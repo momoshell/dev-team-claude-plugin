@@ -751,7 +751,7 @@ test('A1', () => {
     role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
   }
-  const expected = `env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  const expected = `env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_EDIT_ASSIST -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
   assert.equal(seatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
   assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
@@ -996,11 +996,29 @@ test('NP7 the grant decides CREW_FFF for rpc, pane and acp, and readgate points 
 test('pane seat unsets inherited CREW_PI_AGENTS while a granted seat keeps its assignment', () => {
   // MUTATION: remove '-u', 'CREW_PI_AGENTS', from seatCommand and an ungranted pane seat inherits the value again.
   const base = { role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot', env: {} }
-  const prefix = 'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1'
+  const prefix = 'env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_EDIT_ASSIST -u CREW_PI_AGENTS DEVTEAM_WORKER=1'
   const ungranted = seatCommand(base)
   assert.equal(ungranted.startsWith(prefix), true)
   const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false }
   const granted = seatCommand({ ...base, grants })
   assert.equal(granted.startsWith(prefix), true)
   assert.equal(granted.includes("CREW_PI_AGENTS='[{\"name\":\"scout\",\"def\":\"/scout.json\"}]'"), true)
+})
+
+test('an ungranted pane seat withholds every advisor/edit-assist value when executed, while granted seats keep their assignments', () => {
+  // MUTATION: drop the dynamic withheld-key spread in seatCommand and an operator CREW_ADVISOR_* key leaks into the pane env again.
+  const base = { role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot' }
+  const inherited = { CREW_ADVISOR: 'evil', CREW_ADVISOR_ENDPOINT: 'http://evil', CREW_ADVISOR_CUSTOM_X: 'evil2', CREW_EDIT_ASSIST: 'on', CREW_PI_AGENTS: 'evil3' }
+  const executed = (command, spawnEnv) => {
+    const prefix = command.slice(0, command.indexOf(' pi --model '))
+    const out = spawnSync('/bin/sh', ['-c', `${prefix} /usr/bin/env -0`], { env: { PATH: process.env.PATH, ...spawnEnv } })
+    assert.equal(out.status, 0, String(out.stderr))
+    return Object.fromEntries(String(out.stdout).split('\0').filter(Boolean).map((row) => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]))
+  }
+  const ungranted = executed(seatCommand({ ...base, env: inherited }), inherited)
+  for (const key of Object.keys(inherited)) assert.equal(ungranted[key], undefined, key)
+  const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: true }
+  const granted = executed(seatCommand({ ...base, env: {}, grants }), {})
+  assert.equal(granted.CREW_ADVISOR, '1')
+  assert.equal(granted.CREW_PI_AGENTS, JSON.stringify([{ name: 'scout', def: '/scout.json' }]))
 })

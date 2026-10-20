@@ -132,7 +132,7 @@ switch the dispatcher can set per lane, so the A/B below needs no roster change.
 ## Measurement that decides stage 2
 
 - **Arms:** alternate edit assist on and off at dispatch, stratified by builder cell.
-- **Floor:** 12 builder seats per arm per cell (`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:452`). A cell below
+- **Floor:** 12 builder seats per arm per cell (`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:455`). A cell below
   the floor reads unmeasured.
 - **Primary metric:** failed-edit round-trips per 100 edits, and round-trips from a failed edit to the next successful
   edit of the same file. Each is reported with its denominator.
@@ -179,6 +179,6 @@ The A/B window starts at PR 1860 (commit a0df4a49), merged 2026-10-18T07:28:19Z.
 
 Only `run_configurations` rows whose `edit_assist_source` is `'rotation'` count.
 Rows before this window are request-set flags, not arms, and are not A/B evidence.
-The Floor bullet's `CELL_RATE_FLOOR` cite is re-pointed to its line when this amendment landed; every other `file:line` here remains as read at `5666385a`.
+The Floor bullet's `CELL_RATE_FLOOR` cite tracks its current declaration; every other `file:line` here remains as read at `5666385a`.
 
 **What does not change.** Stage 1's existing decisions are unchanged.

@@ -10906,6 +10906,8 @@ test('WS1 recorded fixture derives the pinned five-entry read set', () => {
     absent: null,
     totalPaths: 5,
     droppedReads: 4,
+    uncapturedBash: 2,
+    tailUnreadable: true,
     entries: [
       { path: 'crew/drive.mjs', whole: false, ranges: [[14300, 14384]], rangesTotal: 1 },
       { path: 'test/factory-prove-mutations.test.mjs', whole: false, ranges: [[1, 90], [730, 1094]], rangesTotal: 2 },
@@ -10931,6 +10933,8 @@ test('WS2 limit-only touching offset-only and whole reads derive exact ranges', 
     absent: null,
     totalPaths: 4,
     droppedReads: 0,
+    uncapturedBash: 0,
+    tailUnreadable: false,
     entries: [
       { path: 'd.mjs', whole: false, ranges: [[1, 5]], rangesTotal: 1 },
       { path: 'c.mjs', whole: true, ranges: [], rangesTotal: 0 },
@@ -10965,7 +10969,7 @@ test('WS3 path and range caps keep the most recent with exact totals', () => {
   assert.deepEqual(entry.ranges.at(-1), [141, 150])
   const rrendered = builderReadSetLines(rgot).join('\n')
   assert.ok(rrendered.includes('Previous builder session read set (reference only'))
-  assert.ok(rrendered.includes('reads made through bash are not captured'))
+  assert.equal(rrendered.includes('reads made through bash are not captured'), false)
   assert.ok(rrendered.includes('(showing 8 of 10 ranges; 2 more)'))
   assert.equal(READ_SET_MAX_PATHS, 40)
   assert.equal(READ_SET_MAX_RANGES, 8)
@@ -10984,12 +10988,12 @@ test('WS4 absence reasons are closed frozen and rendered unavailable', () => {
     ['stream-rewound', builderReadSet('{"a":1}\n', 5, opts)],
   ]
   for (const [want, got] of cases) {
-    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null })
+    assert.deepEqual(got, { absent: want, entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
   }
   assert.ok(builderReadSetLines(cases[4][1]).join('\n').includes('unavailable: stream-rewound'))
   assert.equal(builderStreamLineCount(null), 0)
   const empty = builderReadSet('{"type":"response"}\n{"type":"message_end","message":{"role":"system","content":""}}\n', 0, opts)
-  assert.deepEqual(empty, { absent: null, entries: [], totalPaths: 0, droppedReads: 0 })
+  assert.deepEqual(empty, { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedBash: 0, tailUnreadable: false })
   const emptyRendered = builderReadSetLines(empty).join('\n')
   assert.ok(emptyRendered.includes('(none — the previous builder session made no captured reads)'))
   assert.equal(emptyRendered.includes('unavailable:'), false)
@@ -13326,7 +13330,7 @@ test('WS6 a cancelled or failed nested read is not a read', () => {
   const frame = (status) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status, arguments: { path: 'crew/drive.mjs', offset: 120 } }] } } })
   const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
   for (const status of ['cancelled', 'error']) {
-    assert.deepEqual(builderReadSet(`${frame(status)}\n`, 0, opts), { absent: null, entries: [], totalPaths: 0, droppedReads: 0 })
+    assert.deepEqual(builderReadSet(`${frame(status)}\n`, 0, opts), { absent: null, entries: [], totalPaths: 0, droppedReads: 0, uncapturedBash: 0, tailUnreadable: false })
   }
   assert.equal(builderReadSet(`${frame('ok')}\n`, 0, opts).totalPaths, 1)
 })
@@ -13345,6 +13349,142 @@ test('WS8 an unreadable frame before the tail makes the read set unavailable; a 
   // kills: skipping an unparseable interior frame instead of returning stream-unparseable
   const good = JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status: 'ok', arguments: { path: 'lib/a.mjs' } }] } } })
   const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
-  assert.deepEqual(builderReadSet(`{"type":"response"}\n{not json\n${good}\n`, 0, opts), { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null })
+  assert.deepEqual(builderReadSet(`{"type":"response"}\n{not json\n${good}\n`, 0, opts), { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
   assert.equal(builderReadSet(`${good}\n{"type":"message_end","mess`, 0, opts).totalPaths, 1)
+})
+const wsBashFrame = (command, status = 'ok') => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'bash', status, arguments: { command } }] } } })
+
+test('RB1 bash read shapes derive exact ranges', () => {
+  // kills: changing the sed tokens.length === 4 decision to tokens.length === 5
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const text = [
+    wsBashFrame("sed -n '10,20p' crew/x.mjs"),
+    wsBashFrame("sed -n '7p' a.mjs"),
+    wsBashFrame('head -n 40 b.mjs'),
+    wsBashFrame('head -30 c.mjs'),
+    wsBashFrame('cat d.mjs'),
+    wsBashFrame("nl -ba e.mjs | sed -n '5,9p'"),
+    wsBashFrame("sed -n '10,30p' f.mjs | head -n 5"),
+    wsBashFrame('cat g.mjs | head -n 3'),
+  ].join('\n') + '\n'
+  const got = builderReadSet(text, 0, opts)
+  assert.deepEqual(got.entries, [
+    { path: 'g.mjs', whole: false, ranges: [[1, 3]], rangesTotal: 1 },
+    { path: 'f.mjs', whole: false, ranges: [[10, 14]], rangesTotal: 1 },
+    { path: 'e.mjs', whole: false, ranges: [[5, 9]], rangesTotal: 1 },
+    { path: 'd.mjs', whole: true, ranges: [], rangesTotal: 0 },
+    { path: 'c.mjs', whole: false, ranges: [[1, 30]], rangesTotal: 1 },
+    { path: 'b.mjs', whole: false, ranges: [[1, 40]], rangesTotal: 1 },
+    { path: 'a.mjs', whole: false, ranges: [[7, 7]], rangesTotal: 1 },
+    { path: 'crew/x.mjs', whole: false, ranges: [[10, 20]], rangesTotal: 1 },
+  ])
+  assert.equal(got.uncapturedBash, 0)
+})
+
+test('RB2 write-capable bash commands disclose uncaptured', () => {
+  // kills: renaming the guard cd token to cdx
+  const tick = String.fromCharCode(96)
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const dangerous = [
+    "sed -n '1,2p' a.mjs > out.txt",
+    "sed -n '1,2p' a.mjs; cat <<'EOF'\nhello\nEOF",
+    "sed -i 's/a/b/' a.mjs; sed -n '1,2p' a.mjs",
+    "sed -n '1,2p' a.mjs | tee out.txt",
+    'echo $(date); ' + "sed -n '1,2p' a.mjs",
+    'echo ' + tick + 'date' + tick + "; sed -n '1,2p' a.mjs",
+    "cd sub; sed -n '1,2p' a.mjs",
+    "(cd sub; sed -n '1,2p' a.mjs)",
+    'cat ~/x.mjs',
+    'cat $F',
+    'head -n 5 crew/*.mjs',
+    "sed -n '1,2p' crew/*.mjs",
+    'sed --in-place s/a/b/ a.mjs; cat a.mjs',
+  ]
+  for (const command of dangerous) {
+    const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
+    assert.deepEqual(got.entries, [])
+    assert.equal(got.uncapturedBash, 1)
+  }
+  const harmless = builderReadSet(wsBashFrame("sed -n '2,4p' a.mjs 2>/dev/null") + '\n' + wsBashFrame('cat b.mjs 2>&1') + '\n', 0, opts)
+  assert.equal(harmless.totalPaths, 2)
+  assert.equal(harmless.uncapturedBash, 0)
+})
+
+test('F4 bash FILE validation rejects nested quotes and sed wildcards', () => {
+  // kills: unquoting an already-unquoted base path again in filePath
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  for (const command of [
+    "sed -n '1,2p' \"'a.mjs'\"",
+    "sed -n '1,2p' \"'a.mjs'\" | head -n 1",
+    "sed -n '1,2p' crew/*.mjs",
+    "sed -n '1,2p' crew/*.mjs | head -n 1",
+  ]) {
+    const got = builderReadSet(wsBashFrame(command) + '\n', 0, opts)
+    assert.deepEqual(got.entries, [], command)
+    assert.equal(got.uncapturedBash, 1, command)
+  }
+  const quoted = builderReadSet(wsBashFrame("sed -n '1,2p' \"a.mjs\"") + '\n', 0, opts)
+  assert.deepEqual(quoted.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
+  assert.equal(quoted.uncapturedBash, 0)
+})
+
+test('RB3 only successful bash reads count', () => {
+  // kills: inverting call?.status === 'ok' to call?.status !== 'ok'
+  const opts = { checkout: '/repo', taskDir: '/task', transport: 'headless-rpc' }
+  for (const status of ['cancelled', 'error']) {
+    const got = builderReadSet(wsBashFrame('cat a.mjs', status) + '\n', 0, opts)
+    assert.deepEqual(got.entries, [])
+    assert.equal(got.uncapturedBash, 0)
+  }
+  const request = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'tb', name: 'bash', arguments: { command: 'cat direct.mjs' } }] } })
+  const result = (isError) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'tb', isError } })
+  const bad = builderReadSet(request + '\n' + result(true) + '\n', 0, opts)
+  assert.deepEqual(bad.entries, [])
+  const good = builderReadSet(request + '\n' + result(false) + '\n', 0, opts)
+  assert.deepEqual(good.entries, [{ path: 'direct.mjs', whole: true, ranges: [], rangesTotal: 0 }])
+})
+
+test('RB4 uncaptured bash renders and duplicated frames count once', () => {
+  // kills: raising readSet.uncapturedBash > 0 to readSet.uncapturedBash > 999
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const got = builderReadSet(wsBashFrame('node t.mjs') + '\n', 0, opts)
+  assert.equal(got.uncapturedBash, 1)
+  const rendered = builderReadSetLines(got).join('\n')
+  assert.ok(rendered.includes('1 bash call(s) not parsed as reads.'))
+  assert.equal(rendered.includes('reads made through bash are not captured'), false)
+  const mixed = builderReadSet(wsBashFrame("sed -n '1,2p' a.mjs; node t.mjs") + '\n', 0, opts)
+  assert.deepEqual(mixed.entries, [{ path: 'a.mjs', whole: false, ranges: [[1, 2]], rangesTotal: 1 }])
+  assert.equal(mixed.uncapturedBash, 1)
+  const dupMessage = { role: 'toolResult', nestedCalls: { calls: [{ name: 'bash', status: 'ok', arguments: { command: 'node t.mjs' } }, { name: 'read', status: 'ok', arguments: { path: '/elsewhere/x.mjs' } }] } }
+  const dup = builderReadSet(JSON.stringify({ type: 'message_start', message: dupMessage }) + '\n' + JSON.stringify({ type: 'message_end', message: dupMessage }) + '\n', 0, opts)
+  assert.equal(dup.uncapturedBash, 1)
+  assert.equal(dup.droppedReads, 1)
+})
+
+test('RB5 reused tool-call ids pair to their own next result', () => {
+  // kills: replacing pending.get(message.toolCallId)?.shift() with pending.get(message.toolCallId)?.[0]
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const request = (path, type = 'message_end') => JSON.stringify({ type, message: { role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'read', arguments: { path } }] } })
+  const result = (isError) => JSON.stringify({ type: 'message_end', message: { role: 'toolResult', toolCallId: 't1', isError } })
+  const first = builderReadSet([request('a.mjs'), result(false), request('b.mjs'), result(true), request('b.mjs', 'turn_end')].join('\n') + '\n', 0, opts)
+  assert.deepEqual(first.entries, [{ path: 'a.mjs', whole: true, ranges: [], rangesTotal: 0 }])
+  const swapped = builderReadSet([request('a.mjs'), result(true), request('a.mjs', 'turn_end'), request('b.mjs'), result(false)].join('\n') + '\n', 0, opts)
+  assert.deepEqual(swapped.entries, [{ path: 'b.mjs', whole: true, ranges: [], rangesTotal: 0 }])
+  const dupRequest = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'read', arguments: { path: 'a.mjs' } }, { type: 'toolCall', id: 't1', name: 'read', arguments: { path: 'b.mjs' } }] } })
+  const dupResult = (type, isError) => JSON.stringify({ type, message: { role: 'toolResult', toolCallId: 't1', isError } })
+  const dup = builderReadSet([dupRequest, dupResult('message_start', false), dupResult('message_end', false), dupResult('message_start', true), dupResult('message_end', true)].join('\n') + '\n', 0, opts)
+  assert.deepEqual(dup.entries, [{ path: 'a.mjs', whole: true, ranges: [], rangesTotal: 0 }])
+})
+
+test('RB6 torn tail discloses and interior failure is absent', () => {
+  // kills: changing tailUnreadable = true to tailUnreadable = false
+  const opts = { checkout: '/co', taskDir: '/td', transport: 'headless-rpc' }
+  const good = JSON.stringify({ type: 'message_end', message: { role: 'toolResult', nestedCalls: { calls: [{ name: 'read', status: 'ok', arguments: { path: 'lib/a.mjs' } }] } } })
+  const torn = builderReadSet(good + '\n{"type":"message_end","mess', 0, opts)
+  assert.equal(torn.tailUnreadable, true)
+  assert.ok(builderReadSetLines(torn).join('\n').includes('tail frame unreadable'))
+  const clean = builderReadSet(good + '\n', 0, opts)
+  assert.equal(clean.tailUnreadable, false)
+  const interior = builderReadSet('{\"type\":\"response\"}\n{not json\n' + good + '\n', 0, opts)
+  assert.deepEqual(interior, { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
 })

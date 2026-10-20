@@ -519,3 +519,10 @@ test('E1', () => {
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// MUTATION ST6: drop Rule 13a and a review-only seat's exhausted stall reads as a rule gap.
+test('ST6 a review-only seat stall wrapped as envelope is driver-owned infrastructure', () => {
+  const why = 'the reviewer seat failed: rpc stall: seat reviewer wrote no frame for 900s (threshold 900s) at /t/returns/r/d7.reviewer.json'
+  assert.deepEqual(escalationCause({ where: 'envelope', why }), { cause: 'infrastructure', actor: 'driver' })
+  assert.notDeepEqual(escalationCause({ where: 'envelope', why: 'the reviewer seat returned status=blocked: missing context' }), { cause: 'infrastructure', actor: 'driver' })
+})

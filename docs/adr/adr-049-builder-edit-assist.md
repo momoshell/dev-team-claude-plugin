@@ -51,7 +51,7 @@ by the skeleton index, so they are not an artifact of `crew/pi/extensions/skelet
 approximate: `fff_grep` output carries `path:line:` prefixes, so a multi-line match seen only through grep reads as
 "partly seen". The classifier is a stream reader, not a shipped instrument.
 
-**What pi already forgives.** `normalizeForFuzzyMatch` (`core/tools/edit-diff.js:31-50`) strips trailing whitespace
+**What pi already forgives.** `normalizeForFuzzyMatch` (`core/tools/edit-diff.js`) strips trailing whitespace
 and folds smart quotes, Unicode dashes and special spaces before matching. It does not forgive leading indentation,
 and nothing can forgive text that is not in the file.
 
@@ -64,19 +64,15 @@ tool vocabulary on its own, but it does justify a cheap fix and an instrument.
 
 - **The builder's result hook.** `crew/pi/extensions/builderloop.ts` is granted to every pi builder (`crew/capabilities.json`,
   `roles.builder.by_agent.pi.extensions`). It runs fenced tests after a successful edit or write, and its eligibility
-  check skips failed edits (`eligible`, `crew/pi/extensions/builderloop.ts:808-812`). Extensions already rewrite results through
+  check skips failed edits (`eligible`, `crew/pi/extensions/builderloop.ts`). Extensions already rewrite results through
   `pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts`; `attachReadGate`, `crew/pi/extensions/readgate.ts`).
 - **Changing a call's arguments.** pi's `ToolCallEventResult` says "To modify arguments, mutate `event.input` in place"
-  (`core/extensions/types.d.ts:887-888`). No extension in this repository does that yet.
-- **A symbol index.** `exportEntries` (`scripts/factory/make-brief.mjs:2248`) lists **exported** symbols only
-  (`exportedSymbolEntries`, `scripts/factory/make-brief.mjs:2174`). The skeleton reader's `retrieve` tool serves a
-  symbol only when its row has one body span (`crew/pi/extensions/skeletonread.ts:621-628`).
-- **Registering a tool.** Four extensions do it (`crew/pi/extensions/submit.ts:83`, `fff.ts:273`, `skeletonread.ts:757`,
-  `lab.ts:1602`), so a new edit tool is possible as an extension. It is not core-only.
-- **Everything keyed on the name `edit`.** The census classes a call as an edit by name (`EDIT_TOOLS` in
-  `classifyToolCall`, `crew/headless.mjs:510-516`). The ACP permission gate maps tool names to kinds
-  (`TOOL_KINDS`, `crew/pi/extensions/acp-server.ts:94`). builderloop's eligibility checks `toolName` for `edit` or `write`
-  (`crew/pi/extensions/builderloop.ts:810`).
+  (`ToolCallEventResult`, `core/extensions/types.d.ts`). No extension in this repository does that yet.
+- **A symbol index.** The brief compiler (`exportEntries`, `scripts/factory/make-brief.mjs`) lists **exported** symbols only
+  (`exportedSymbolEntries`, `scripts/factory/make-brief.mjs`). The skeleton reader's `retrieve` tool serves a
+  symbol only when its row has one body span (`retrieveSymbol`, `crew/pi/extensions/skeletonread.ts`).
+- **Registering a tool.** Four extensions do it (`crew/pi/extensions/submit.ts`, `crew/pi/extensions/skeletonread.ts`, `crew/pi/extensions/lab.ts`, `crew/pi/extensions/subagent.ts`), so a new edit tool is possible as an extension. It is not core-only.
+- **Everything keyed on the name `edit`.** The census classes a call as an edit by name (`EDIT_TOOLS` in `classifyToolCall`, `crew/headless.mjs`). The ACP permission gate maps tool names to kinds (`TOOL_KINDS`, `crew/pi/extensions/acp-server.ts`). builderloop's eligibility (`eligible`, `crew/pi/extensions/builderloop.ts`) checks `toolName` for `edit` or `write`.
 - **An operator codemod.** `.agents/skills/ast-grep-codemod` proposes a structural rewrite and applies it only with a
   human `--resolve` reason. It shells out to the `ast-grep` binary, but the operator removed the skill on 2026-10-19.
 
@@ -125,8 +121,7 @@ gate, which is the opposite of a seat tool. It stays an operator skill.
 Adopt **(d)** as stage 1. Defer **(b)** to a stage 2 that runs only if stage 1's measurement says so. Reject **(a)**
 and **(c)**.
 
-Stage 1 lands in `crew/pi/extensions/builderloop.ts` and its test, and changes that file's own header comment, which
-today says failed edits are left untouched (`crew/pi/extensions/builderloop.ts:1-5`). It runs behind an environment
+Stage 1 lands in `crew/pi/extensions/builderloop.ts` and its test, and changes that file's own header comment (`crew/pi/extensions/builderloop.ts`), which as it read at ratification said failed edits are left untouched. It runs behind an environment
 switch the dispatcher can set per lane, so the A/B below needs no roster change.
 
 ## Measurement that decides stage 2
@@ -145,7 +140,7 @@ switch the dispatcher can set per lane, so the A/B below needs no roster change.
 
 **Mutation declarations (#998).** The planner declares gate-check mutations as find/replace text against code the
 builder has not written yet. That is the same never-seen failure class, but on the planner's side. No builder edit
-tool fixes it. The existing repair is the builder's `mutation_corrections` (`crew/drive.mjs:9598`). D4's cause
+tool fixes it. The existing repair is the builder's correction field (`mutation_corrections`, `crew/drive.mjs`). D4's cause
 classes could later classify declaration drift too. That is out of scope here.
 
 **The scope gate.** Under ADR-045 scope is context, and option (d) changes no path or tool name the gate or the fence

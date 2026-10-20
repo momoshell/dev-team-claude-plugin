@@ -110,6 +110,86 @@ test('AD1', () => {
   assert.equal(source.includes('`crew/pi/extensions/readgate.ts:620`'), false)
 })
 
+const OLD_FIND = 'standingBlocks()' + '.mutations'
+
+// MUTATION SD1: put the fff.ts entry back, with its line number, into the
+// Registering-a-tool bullet (replace the subagent.ts entry) and SD1 reddens
+// on both the digit scan and the derived registerTool set.
+test('SD1', () => {
+  const raw = readFileSync(join(REPO_ROOT, 'docs/adr/adr-049-builder-edit-assist.md'), 'utf8')
+  const s = raw.replace(/\s+/g, ' ')
+  const digitCites = [...raw.matchAll(/[\w./-]+\.(?:mjs|ts):\d[\d-]*/g)].map((m) => m[0])
+  assert.deepEqual(digitCites.filter((m) => !m.startsWith('scripts/factory/ledger.mjs:')), [])
+  const pairs = [
+    ['check skips failed edits (`eligible`, `crew/pi/extensions/builderloop.ts`).', 'eligible', 'crew/pi/extensions/builderloop.ts'],
+    ['(`exportEntries`, `scripts/factory/make-brief.mjs`)', 'exportEntries', 'scripts/factory/make-brief.mjs'],
+    ['(`exportedSymbolEntries`, `scripts/factory/make-brief.mjs`)', 'exportedSymbolEntries', 'scripts/factory/make-brief.mjs'],
+    ['(`retrieveSymbol`, `crew/pi/extensions/skeletonread.ts`)', 'retrieveSymbol', 'crew/pi/extensions/skeletonread.ts'],
+    ['(`EDIT_TOOLS` in `classifyToolCall`, `crew/headless.mjs`)', 'EDIT_TOOLS', 'crew/headless.mjs'],
+    ['(`EDIT_TOOLS` in `classifyToolCall`, `crew/headless.mjs`)', 'classifyToolCall', 'crew/headless.mjs'],
+    ['(`TOOL_KINDS`, `crew/pi/extensions/acp-server.ts`)', 'TOOL_KINDS', 'crew/pi/extensions/acp-server.ts'],
+    ['(`mutation_corrections`, `crew/drive.mjs`)', 'mutation_corrections', 'crew/drive.mjs'],
+    ['eligibility (`eligible`, `crew/pi/extensions/builderloop.ts`) checks `toolName`', 'eligible', 'crew/pi/extensions/builderloop.ts'],
+  ]
+  for (const [cite, symbol, file] of pairs) {
+    assert.ok(s.includes(cite), `expected cite ${cite}`)
+    assert.ok(new RegExp('\\b' + symbol + '\\b').test(readFileSync(join(REPO_ROOT, file), 'utf8')), `expected symbol ${symbol} in ${file}`)
+  }
+  assert.equal(raw.includes('edit-diff.js:'), false)
+  assert.ok(s.includes('`normalizeForFuzzyMatch` (`core/tools/edit-diff.js`) strips'))
+  assert.ok(s.includes('(`ToolCallEventResult`, `core/extensions/types.d.ts`)'))
+  assert.ok(s.includes('as it read at ratification said failed edits are left untouched'))
+  assert.equal(s.includes('today says failed edits'), false)
+  assert.equal(raw.includes('fff.ts'), false)
+  const dir = join(REPO_ROOT, 'crew/pi/extensions')
+  const derived = readdirSync(dir).filter((f) => f.endsWith('.ts')).filter((f) => readFileSync(join(dir, f), 'utf8').includes('.registerTool(')).map((f) => 'crew/pi/extensions/' + f).sort()
+  assert.deepEqual(derived.length, 4)
+  const seg = raw.slice(raw.indexOf('**Registering a tool.**'), raw.indexOf('**Everything keyed'))
+  assert.ok(seg.length > 0)
+  const cited = [...seg.matchAll(/`(crew\/pi\/extensions\/[\w.-]+\.ts)`/g)].map((m) => m[1]).sort()
+  assert.deepEqual(cited, derived)
+  assert.ok(seg.replace(/\s+/g, ' ').includes('Four extensions do it'))
+  const floorLine = readFileSync(join(REPO_ROOT, 'scripts/factory/ledger.mjs'), 'utf8').split('\n').findIndex((l) => l === 'export const CELL_RATE_FLOOR = 12') + 1
+  assert.ok(floorLine >= 1)
+  assert.ok(s.includes('`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:' + floorLine + '`)'))
+  assert.ok(s.includes("`pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts`; `attachReadGate`, `crew/pi/extensions/readgate.ts`)."))
+  assert.ok(s.includes('the operator removed the skill on 2026-10-19'))
+})
+
+// MUTATION F2: restore the pi edit-diff.js numeric suffix in ADR-049.
+test('ADR-049 keeps the pi edit citation line-free', () => {
+  const raw = readFileSync(join(REPO_ROOT, 'docs/adr/adr-049-builder-edit-assist.md'), 'utf8')
+  assert.equal(raw.includes('edit-diff.js:'), false)
+  assert.ok(raw.replace(/\s+/g, ' ').includes('`normalizeForFuzzyMatch` (`core/tools/edit-diff.js`) strips'))
+})
+
+// MUTATION SD2: delete the dated note (declared mutation changes PR 1902 to
+// PR 1903 inside it) and SD2 reddens on the exact-note assertion.
+test('SD2', () => {
+  const raw = readFileSync(join(REPO_ROOT, 'docs/audits/2026-08-23/README.md'), 'utf8')
+  const s = raw.replace(/\s+/g, ' ')
+  const NEW_FIND = "'## Per-check mutations', blocks.mutations]"
+  const note = 'A later note (2026-10-20): the C1 exemplar quoted in the ten compiled briefs in `briefs/` and in `audit/register-charters.md` is superseded by PR 1902 (commit 4432b0db). Its old `find` string was ' + '`' + OLD_FIND + '`' + '; the current `find` string is ' + '`' + NEW_FIND + '`' + '. The live source is `crew/roles/planner.md`; the briefs and register are preserved as written.'
+  assert.ok(s.includes(note))
+  const at = raw.indexOf('A later note (2026-10-20)')
+  assert.ok(at > raw.indexOf('## briefs/') && at > raw.indexOf('`h2` and `h3` escalated'))
+  assert.ok(readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8').includes(NEW_FIND))
+})
+
+// MUTATION SD3: change one compiled brief's C1 find string on a scratch copy
+// only (see the gate) and SD3 reddens on the preservation loop below. The
+// git-grep absence half is paired with a positive control so a broken search
+// cannot read as clean.
+test('SD3', () => {
+  const dir = join(REPO_ROOT, 'docs/audits/2026-08-23/briefs')
+  const compiled = readdirSync(dir).filter((f) => f.endsWith('.compiled.md')).sort()
+  assert.deepEqual(compiled.length, 10)
+  for (const f of compiled) assert.ok(readFileSync(join(dir, f), 'utf8').includes(OLD_FIND), `expected preserved C1 find in ${f}`)
+  assert.ok(readFileSync(join(REPO_ROOT, 'docs/audits/2026-08-23/audit/register-charters.md'), 'utf8').includes(OLD_FIND))
+  assert.ok(gitGrepHits({ needle: OLD_FIND, paths: ['docs/audits/2026-08-23/briefs'], cwd: REPO_ROOT }).count > 0)
+  assert.deepEqual(gitGrepHits({ needle: OLD_FIND, paths: ['.', ':(exclude)docs/audits/'], cwd: REPO_ROOT }).lines, [])
+})
+
 // MUTATION DC1: adding a numeric line suffix to the runCold citation must change the projection.
 test('DC1', () => {
   const source = readFileSync(join(REPO_ROOT, 'crew/drive.mjs'), 'utf8')

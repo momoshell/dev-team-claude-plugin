@@ -79,3 +79,5 @@ briefs so a later sweep re-asks the good questions and does not repeat that one.
 finished and the write-up did not fit the seat wait budget. `h2`'s register
 survived in full; `h3`'s did not, which is why its findings live in the headers
 of its reproduction programs.
+
+A later note (2026-10-20): the C1 exemplar quoted in the ten compiled briefs in `briefs/` and in `audit/register-charters.md` is superseded by PR 1902 (commit 4432b0db). Its old `find` string was `standingBlocks().mutations`; the current `find` string is `'## Per-check mutations', blocks.mutations]`. The live source is `crew/roles/planner.md`; the briefs and register are preserved as written.

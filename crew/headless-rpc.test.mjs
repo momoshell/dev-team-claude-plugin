@@ -4202,13 +4202,13 @@ test('FO6 a group- or other-accessible crew-rpc dir refuses the seat before any 
   } finally { f.cleanup() }
 })
 
-test('FO2 runtime key is outside the crew dir, hashed, and exactly 108 chars for the stated example', () => {
+test('FO2 runtime key is outside the crew dir, hashed, and exactly 132 chars for the stated example', () => {
   const root48 = '/' + 'x'.repeat(47)
   assert.equal(root48.length, 48)
   const p = seatCommandPath(join('/lanes', 'b1285-builderloopguard'), 'tech-lead', root48)
   assert.equal(p.startsWith(root48 + '/'), true)
   assert.equal(p.startsWith(join('/lanes', 'b1285-builderloopguard')), false)
-  assert.equal(p.length, 108)
+  assert.equal(p.length, 132)
   assert.equal(p.endsWith('/cmd.fifo'), true)
   assert.notEqual(seatCommandPath('/a/lane', 'builder', root48), seatCommandPath('/b/lane', 'builder', root48))
 })
@@ -4682,4 +4682,13 @@ test('CH3 failed cmd-history append never fails the launch and journals append-f
     assert.equal(new Date(hits[0].at).toISOString(), hits[0].at)
     void run
   } finally { f.cleanup() }
+})
+
+// MUTATION FO7: shorten the runtime key digest back to 8 hex digits and these two lanes share one FIFO.
+test('FO7 same-named lanes whose short digests collide still get distinct command FIFOs', () => {
+  // The first 8 hex digits of sha256 match for these two crew dirs (b3ceb385).
+  const a = seatCommandPath('/tmp/review-parent-10740/lane', 'builder', '/run')
+  const b = seatCommandPath('/tmp/review-parent-33667/lane', 'builder', '/run')
+  assert.notEqual(a, b)
+  assert.match(a, /^\/run\/crew-rpc\/lane-[0-9a-f]{32}\/builder\/cmd\.fifo$/)
 })

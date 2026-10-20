@@ -87,21 +87,21 @@ test('ux manifest pins carry current exact content', () => {
 test('ux absence vocabulary re-derives from the component tree', () => {
   const body = readFileSync(join(REF_DIR, 'absence.md'), 'utf8')
   const dash = census('—', 'g')
-  assert.equal(dash.occurrences, 140)
+  assert.equal(dash.occurrences, 141)
   assert.equal(dash.files, 24)
   const unavailable = census('unavailable', 'gi')
   assert.equal(unavailable.occurrences, 91)
   assert.equal(unavailable.files, 24)
   const unmeasured = census('unmeasured', 'gi')
-  assert.equal(unmeasured.occurrences, 38)
-  assert.equal(unmeasured.files, 13)
+  assert.equal(unmeasured.occurrences, 37)
+  assert.equal(unmeasured.files, 12)
   const notMeasured = census('not measured', 'gi')
   assert.equal(notMeasured.occurrences, 14)
   assert.equal(notMeasured.files, 7)
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
   assert.equal(union.size, 28)
   assert.equal(libFiles().length, 34)
-  for (const row of ['| `—` | 140 | 24 |', '| `unavailable` | 91 | 24 |', '| `unmeasured` | 38 | 13 |', '| `not measured` | 14 | 7 |']) {
+  for (const row of ['| `—` | 141 | 24 |', '| `unavailable` | 91 | 24 |', '| `unmeasured` | 37 | 12 |', '| `not measured` | 14 | 7 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
@@ -198,7 +198,7 @@ test('ux stated gaps are counted and few', () => {
     gaps += (body.match(/\*\*Stated gap:\*\*/g) || []).length
   }
   assert.equal(gaps, 4)
-  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('5/34'), 'absence.md must record the canonical-phrase adoption count')
+  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('4/34'), 'absence.md must record the canonical-phrase adoption count')
   for (const body of readDocs()) {
     for (const line of body.split('\n')) {
       if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/34/, 'every stated gap carries a denominator')

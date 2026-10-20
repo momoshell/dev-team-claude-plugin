@@ -1,4 +1,5 @@
 import { TASK_PROFILES } from '../../../../crew/task-profiles.mjs'
+import { reasonText } from './reason-copy.js'
 import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
 
 export const SILENT_AFTER_MS = 30_000
@@ -125,6 +126,8 @@ export function runDetailSeats(run = {}) {
 const DEFAULT_PROFILE_EVIDENCE = Object.freeze([
   'structured_findings', 'checks_run', 'reproduction_or_cited_failure', 'mutation_or_negative_control',
 ])
+
+export const PROFILE_EVIDENCE_REASONS = Object.freeze(['profile-evidence-not-recorded'])
 
 const EVIDENCE_LABELS = Object.freeze({
   base_head_identity: 'Base/head identity',
@@ -357,10 +360,14 @@ export function profileEvidenceView(profileKey, returns = {}) {
       references: payload.references,
     }
   })
+  const cards = blocks.filter((block) => block.measured)
+  const footer = blocks.filter((block) => !block.measured).map((block) => ({ key: block.key, label: block.label, reason: 'profile-evidence-not-recorded', text: reasonText('profile-evidence-not-recorded') }))
   return {
     profile: { key: profile?.name ? profileKey : null, label: profile?.name || 'Not recorded' },
     profile_specific: Boolean(profile),
     blocks,
+    cards,
+    footer,
   }
 }
 

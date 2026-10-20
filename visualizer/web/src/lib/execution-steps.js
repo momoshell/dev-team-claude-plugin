@@ -200,7 +200,7 @@ export function factoryStepTrace(journalState = {}, timeline = {}, { now = Date.
 }
 
 const TOPOLOGY_TERMINALS = new Set(['done', 'escalate'])
-const CONDITIONAL_TOPOLOGY_STAGES = new Set(['gate-repair', 'gate-reverify'])
+const CONDITIONAL_TOPOLOGY_STAGES = new Set(['gate-repair', 'gate-reverify', 'converge'])
 
 function topologyHead(value) {
   const label = typeof value === 'string' ? value.trim() : ''

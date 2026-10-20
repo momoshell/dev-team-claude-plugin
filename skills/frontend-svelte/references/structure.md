@@ -10,7 +10,7 @@ main.js is the only importer of theme.css.
 
 The stylesheet is loaded before the mount call in `visualizer/web/src/main.js:1-5`. `visualizer/web/src/App.svelte:72` applies the selected `data-theme` after the component starts; a new component consumes aliases and does not import or re-select the sheet.
 
-There are 34 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:186`, `visualizer/web/src/App.svelte:228` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:292` owns a grid gap for its children.
+There are 34 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:186`, `visualizer/web/src/App.svelte:228` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:294` owns a grid gap for its children.
 
 ## Plain module split
 
@@ -22,10 +22,10 @@ Keep data acquisition, route parsing, drains, shaping, envelope diffing, layout,
 | `envelope-diff.js` | compare two envelopes field-by-field over `['status','summary','artifacts','details']` | `visualizer/web/src/lib/envelope-diff.js:1-42` |
 | `route.js` | parse and format hash views and subscribe to hash changes | `visualizer/web/src/lib/route.js:1-39` |
 | `drain.js` | page event streams by cursor and coalesce a final drain behind an in-flight periodic drain | `visualizer/web/src/lib/drain.js:1-48` |
-| `fleet.js` | derive status tones and shape run cells, absence marks, filters, and fleet metrics | `visualizer/web/src/lib/fleet.js:1-174` |
+| `fleet.js` | derive status tones and shape run cells, absence marks, filters, and fleet metrics | `visualizer/web/src/lib/fleet.js:1-177` |
 | `panels.js` | shape panel payloads, freshness, fleet metrics, and panel read loops | `visualizer/web/src/lib/panels.js:1-785` |
 | `timeline.js` | turn timed phases and events into gantt lanes and blocks | `visualizer/web/src/lib/timeline.js:1-83` |
-| `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-459` |
+| `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-542` |
 
 The data flow is server -> `api.js` -> a plain-module shaper (`fleet.js`, `panels.js`, `timeline.js`, or `trace.js`) -> a Svelte component. `visualizer/web/src/App.svelte:29-117` demonstrates the fetch-to-derived-view hop; `visualizer/web/src/lib/FleetTable.svelte:2` demonstrates the component boundary.
 

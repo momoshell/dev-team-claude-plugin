@@ -176,7 +176,7 @@ test('SD2', () => {
   assert.ok(readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8').includes(NEW_FIND))
 })
 
-// MUTATION SD3: change one compiled brief's C1 find string on a scratch copy
+// MUTATION SD3: change the C1 find string in one compiled brief on a scratch copy
 // only (see the gate) and SD3 reddens on the preservation loop below. The
 // git-grep absence half is paired with a positive control so a broken search
 // cannot read as clean.

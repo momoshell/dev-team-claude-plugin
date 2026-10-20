@@ -24,6 +24,8 @@ between `forced=` and `recommended=`. The refusal carries this limitation:
 `BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.`
 A lane fence cannot identify which string inside a mixed compiler file changed.
 
+A fenced prompt-surface file that the request's where or creates does not name is a carrier and forces nothing. A behaviour edit to that carrier is then guarded by publish, not dispatch, which measures the real diff.
+
 Rigorous prompt review is history, not a standing cost: **64–66 minutes versus about 13 minutes for standard planning** was what the forced loop cost before ADR-038. The loop now runs only on `needs_adversary` or an unprovable protected surface. This is a planning-cost measurement; it is not a measurement of whether the prompt worked.
 
 ## Pane seating

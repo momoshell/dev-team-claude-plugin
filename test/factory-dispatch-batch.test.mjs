@@ -3269,6 +3269,27 @@ test('PS7', async () => {
   })
 })
 
+test('SK1', () => {
+  assert.deepEqual(promptSurfaceVerdict({ files: ['src/owned.mjs', 'skills/code-less/SKILL.md'], subjects: ['src/owned.mjs'] }), { hits: [], promptChange: false, forced: null })
+  assert.deepEqual(promptSurfaceVerdict({ files: ['src/owned.mjs', 'skills/code-less/SKILL.md'], subjects: ['skills/code-less/SKILL.md:11-12'] }), { hits: ['skills/code-less/SKILL.md'], promptChange: true, forced: 'judge' })
+})
+
+test('SK2', async () => {
+  const result = await dispatchFixture({
+    label: 'SK2-carrier',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { where: ['src/owned.mjs'] }) },
+    fences: [entry('lane-a', ['src/owned.mjs', 'crew/roles/planner.md'])],
+  })
+  const line = result.logs.find((value) => value.startsWith('dispatch-batch: lane=lane-a '))
+  assert.match(line, /forced=none prompt=code-only recommended=/)
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.notEqual(boot.args[boot.args.indexOf('--assurance') + 1], 'rigorous')
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(record.prompt_surface, { hits: [], prompt_change: false, forced: null })
+})
+
 test('PS8', () => {
   const error = thrown(() => reconcileTier({
     lane: 'prompt', forced: 'judge', recommended: 'build', requested: 'build', requestedFrom: 'lane',

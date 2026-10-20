@@ -2001,3 +2001,15 @@ test('docs/conventions.md keeps ## Entries as its single, final section', () => 
   assert.equal(headings.filter((line) => line === '## Entries').length, 1)
   assert.equal(headings.at(-1), '## Entries')
 })
+
+test('GL4 charters carry the fixture sentences at exact byte counts', () => {
+ const planner = readFileSync(join(REPO_ROOT, 'crew/roles/planner.md'), 'utf8');
+ const techLead = readFileSync(join(REPO_ROOT, 'crew/roles/tech-lead.md'), 'utf8');
+ const guide = readFileSync(join(REPO_ROOT, 'crew/guidelines/vitest-gates.md'), 'utf8');
+ assert.ok(planner.includes('- Refusal fixtures trip only their targets, or checks assert containment.'));
+ assert.equal(Buffer.byteLength(planner, 'utf8'), 16848);
+ assert.equal(Buffer.byteLength(techLead, 'utf8'), 6310);
+ assert.ok(techLead.includes('(criteria no mechanical check'));
+ assert.ok(techLead.includes('or correct tree can meet'));
+ assert.ok(guide.includes('Never observe a check through console output from a passing test'));
+})

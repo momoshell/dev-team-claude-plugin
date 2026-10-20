@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
 import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { resolveLaneBinary, moduleResolutionSignature, failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS, validTestRerunCommand } from './lane-red.mjs'
-import { classifyTestRunner } from './runner-classify.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
+import { classifyTestRunner } from './runner-classify.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`; import { lintGate } from './gate-lint.mjs';
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -8669,6 +8669,7 @@ function runTask(ctx, io, crash) {
   let laneDeferred = []
   let planBounceWhy = null
   let exemplarsBounced = false
+  let gateLintBounced = false
   let acceptedExemplars = null
   let acceptedExemplarsRound = null
   let planBrief = ctx.briefFile
@@ -8711,7 +8712,7 @@ function runTask(ctx, io, crash) {
   // #959 — keep the long form: shorthand makes this call textually identical to
   // planCapNote({ … }) from `predecessorChecked` onward, so a text-anchored mutation
   // aimed at that call would rewrite this cap too. Do not collapse it to shorthand.
-  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds }); if (ctx.roles === undefined) ctx = { ...ctx, roles: [] }
+  const planRounds = () => planRoundCap({ limits, adopted: adoption.adopted, predecessorChecked, extraPlanRounds: extraPlanRounds + (gateLintBounced ? 1 : 0) }); if (ctx.roles === undefined) ctx = { ...ctx, roles: [] }
   const planAttempts = () => planRounds() + prescribedPlanApplications
   io.log(recordRow({ at: io.now(), plan_round_cap: {
     adopted: adoption.adopted, predecessor_checked: predecessorChecked,
@@ -8983,6 +8984,28 @@ function runTask(ctx, io, crash) {
       planEnv = null
       stageComplete()
       continue
+    }
+    let gateLintFindings = []
+    try {
+      const gateLintPath = taskLocalPath(env.details?.gate_path) ?? art('gate.mjs')
+      const gateSource = io.readFile(gateLintPath)
+      if (typeof gateSource === 'string') gateLintFindings = lintGate({ source: gateSource, gateFile: gateLintPath, checkout: ctx.checkout, gateDir: dirname(gateLintPath), readFile: (p) => io.readFile(p) })
+    } catch { gateLintFindings = [] } // lint is evidence, never load-bearing: unreadable gate = no findings
+    if (gateLintFindings.length > 0) {
+      try { io.log(recordRow({ at: io.now(), event: 'gate-lint', round, gate_lint: gateLintFindings })) } catch { /* lint evidence is never load-bearing */ }
+      if (!gateLintBounced) { // the one-shot bounce funds its own round: planRounds() adds 1 once gateLintBounced is set, so a cap-1 plan still gets it
+        gateLintBounced = true
+        const why = 'Gate lint findings: ' + gateLintFindings.map((f) => `${f.rule} at ${f.file}:${f.line} — ${f.why}`).join('; ')
+        const b = art(`plan-bounce-r${round}.md`)
+        failureUpgrade('plan', 'planner')
+        io.writeFile(b, [`# Gate lint (round ${round})`, '', why, ...gateLintFindings.map((f) => `- ${f.rule} ${f.file}:${f.line} ${f.why}`), '', `Original task brief: ${ctx.briefFile}`].join('\n'))
+        planBrief = b
+        planNote = 'gate-lint'
+        planBounceWhy = why
+        planEnv = null
+        stageComplete()
+        continue
+      }
     }
     planBounceWhy = null
     planEnv = env

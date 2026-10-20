@@ -4563,3 +4563,98 @@ test('LR3', () => {
  const sites=driveJournalSites(readFileSync(new URL('./drive.mjs',import.meta.url),'utf8'))
  assert.ok(sites.some(({wrapper,events,keys})=>JSON.stringify([wrapper,events,keys])===JSON.stringify(tuple)))
 })
+
+test('GL3 gate-lint bounces once then proceeds without escalating', () => {
+ const gatePath = TD + '/gate.mjs';
+ const probePath = CTX_TL.checkout + '/ui/src/probe.test.ts';
+ const tripping = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ const probe = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const files = {};
+ files[gatePath] = tripping;
+ files[probePath] = probe;
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'planner:2': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const result = driveTask(CTX_TL, io);
+ assert.equal(result.status, 'done');
+ const assigns = io.calls.assign;
+ const planners = assigns.filter((a) => a.role === 'planner');
+ assert.equal(planners.length, 2);
+ const firstBuilder = assigns.findIndex((a) => a.role === 'builder');
+ assert.ok(firstBuilder > assigns.indexOf(planners[1]));
+ assert.ok((io.calls.writes[TD + '/plan-bounce-r1.md'] || '').includes('vitest-console-observation'));
+ assert.equal(Object.hasOwn(io.calls.writes, TD + '/plan-bounce-r2.md'), false);
+ const rows = io.calls.logs.filter((r) => r.event === 'gate-lint');
+ assert.equal(rows.length, 2);
+ assert.equal(rows[0].round, 1);
+ assert.equal(rows[1].round, 2);
+ assert.deepEqual(rows[1].gate_lint.map((f) => f.rule), ['vitest-console-observation']);
+ assert.ok(assigns.some((a) => a.role === 'builder'));
+})
+
+// MUTATION: restore `&& round < planRounds()` on the bounce condition; a cap-1 plan skips the bounce and planners drops to 1.
+test('gate-lint bounce is funded on a one-round plan cap', () => {
+ const gatePath = TD + '/gate.mjs';
+ const files = {};
+ files[gatePath] = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ files[CTX_TL.checkout + '/ui/src/probe.test.ts'] = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'planner:2': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 1 } }, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2);
+ assert.ok((io.calls.writes[TD + '/plan-bounce-r1.md'] || '').includes('vitest-console-observation'));
+})
+
+// MUTATION: remove the try/catch around the gate-lint journal write; the throwing log escalates the task.
+test('gate-lint journal failure never stops the task', () => {
+ const gatePath = TD + '/gate.mjs';
+ const files = {};
+ files[gatePath] = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ files[CTX_TL.checkout + '/ui/src/probe.test.ts'] = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'planner:2': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const log = io.log.bind(io); io.log = (row) => { if (row.event === 'gate-lint') throw new Error('journal unavailable'); return log(row) };
+ const result = driveTask(CTX_TL, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2);
+})
+
+test('gate-lint bounce does not spend the adversary round', () => {
+ const gatePath = TD + '/gate.mjs';
+ const probePath = CTX_TL.checkout + '/ui/src/probe.test.ts';
+ const tripping = "const r = spawnSync('npx', ['vitest', 'run', 'ui/src/probe.test.ts']); const seen = 'GATE-OBS';";
+ const clean = '// clean gate';
+ const probe = "test('probe', () => { console.log('GATE-OBS ready') })";
+ const files = {};
+ files[gatePath] = tripping;
+ files[probePath] = probe;
+ let io = null;
+ const second = () => {
+  io.calls.files[gatePath] = clean;
+  return adversarialPlanEnv({ details: { gate_path: gatePath } });
+ };
+ io = fakeIo({ files: files, envelopes: { 'planner:1': adversarialPlanEnv({ details: { gate_path: gatePath } }), 'planner:2': second, 'planner:3': adversarialPlanEnv({ details: { gate_path: gatePath } }), 'tech-lead:1': { status: 'done', role: 'tech-lead', summary: 'checked', details: { verdict: 'revise', check_path: TD + '/plan-check.md', findings: [{ id: 'PC-1', severity: 'minor', correction: 'do the thing' }] } }, 'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const result = driveTask(CTX_TL, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 3);
+ assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 0);
+});
+
+test('gate-lint is silent on a clean gate', () => {
+ const gatePath = TD + '/gate.mjs';
+ const files = {};
+ files[gatePath] = '// clean gate';
+ const details = Object.assign({}, planEnv().details, { gate_path: gatePath });
+ const io = fakeIo({ files: files, envelopes: { 'planner:1': planEnv({ details: details }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] });
+ const result = driveTask(CTX_TL, io);
+ assert.equal(result.status, 'done');
+ assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 1);
+ assert.equal(io.calls.logs.filter((r) => r.event === 'gate-lint').length, 0);
+});
+
+test('gate-lint journal census tuple', () => {
+ const tuple = ['recordRow', 'event=' + String.fromCharCode(39) + 'gate-lint' + String.fromCharCode(39), 'at round gate_lint'];
+ assert.ok(DRIVE_JOURNAL_EXPECTED.some((entry) => JSON.stringify(entry) === JSON.stringify(tuple)));
+ const sites = driveJournalSites(readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8'));
+ assert.ok(sites.some((s) => JSON.stringify([s.wrapper, s.events, s.keys]) === JSON.stringify(tuple)));
+})

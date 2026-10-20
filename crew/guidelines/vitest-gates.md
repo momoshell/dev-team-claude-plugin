@@ -4,6 +4,8 @@ Vitest's `-t` option is a regular expression, not a literal title. Always pass t
 
 The reporter's final summary is a `Tests` line. Both modern output such as `Tests  1 passed (1)` and legacy output such as `Tests  1 passed` are accepted. `vitestSummaryPassed(output, count)` preserves these unfiltered rules. With the optional `{ filtered: true }` option, it requires a safe requested count of at least one and an exact passed count; skipped tests are permitted only in filtered mode, no other statuses are accepted, and a printed total must equal passed plus skipped. A filtered summary with zero passed tests is always red. It does not infer success from the process exit status or a Test Files line.
 
+Never observe a check through console output from a passing test; reporters may drop it, so read the test result instead.
+
 The planner receives this document as an absolute plugin path. Resolve `gate-kit.mjs` as a sibling of that guideline: use the absolute file URL and the same directory as `dirname(guidelinePath)`. The target repository remains `process.cwd()`; do not derive the plugin path from that target cwd. Build the kit URL with `pathToFileURL(join(dirname(guidelinePath), 'gate-kit.mjs')).href`, then dynamically import both helpers from that URL.
 
 A minimal executable gate-check body returns a finding string when red:

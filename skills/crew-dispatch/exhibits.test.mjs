@@ -425,6 +425,10 @@ test('RV2-1 newly tracked working-set fixture owner is covered by dynamic reach 
   assert.equal(collectTestReach({ checkout: ROOT }).pathByFile.get('test/fixtures/working-set/pi-rpc-builder-reads.jsonl')?.has('crew/drive-build.test.mjs'), true)
 })
 
+test('RV2-1 newly tracked provider-exhausted capture owner is covered by dynamic reach census', () => {
+  assert.equal(collectTestReach({ checkout: ROOT }).pathByFile.get('tasks/headless-worker/captures/pi-rpc-b1317-provider-exhausted.jsonl')?.has('crew/headless-rpc.test.mjs'), true)
+})
+
 
 test('RV2-1 newly tracked skill-load fixture owners are covered by dynamic reach census', () => {
   const addedOwners = [

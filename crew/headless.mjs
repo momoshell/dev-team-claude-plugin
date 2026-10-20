@@ -2112,9 +2112,9 @@ export function providerRetryRouter({ paths, deps = {}, persistDeps = deps, note
   //              accident. A 429 with an eligible reset parks through reset plus
   //              settle within PROVIDER_RETRY_TOTAL_WAIT_MS, then declines when
   //              its declared bound is spent instead of trying another model.
-  // Shared by headlessIo and acpIo; headlessRpcIo owns the Pi transport
-  // separately, so the Pi tech-lead's declared fallback keeps its existing
-  // behaviour.
+  // Shared by headlessIo, acpIo and headlessRpcIo; all three transports
+  // route provider exhaustion through this ladder, so the Pi tech-lead's
+  // declared fallback keeps its existing behaviour.
   function providerRetryOnFailure(run, returnPath, deadline, stream) {
     const failure = stream.providerFailure
     if (!failure) return { act: 'none' }

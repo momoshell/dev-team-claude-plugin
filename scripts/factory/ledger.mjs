@@ -210,7 +210,7 @@ function isWaitCeiling(where, why) {
 
 export function escalationCause(input = {}) {
   const where = typeof input?.where === 'string' ? input.where : ''
-  const why = typeof input?.why === 'string' ? input.why : ''
+  const why = typeof input?.why === 'string' ? input.why : ''; if (where === 'lane' && why.startsWith('lane-environment: ')) return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   // Rule 1: the explicit sendLine marker is transport evidence and precedes all
   // other prose so a transport failure stays driver-owned. The `where ===
   // 'transport'` arm this rule used to carry had NO producer anywhere in the

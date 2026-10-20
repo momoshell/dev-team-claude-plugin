@@ -243,3 +243,38 @@ export function stepFailureDiagnostics(io, labels, steps, shellArg) {
     return `\ndiagnostics unavailable: ${error?.message || String(error)}`
   }
 }
+
+export const LANE_BINARY_SOURCES = Object.freeze(['unchanged', 'package-local', 'unresolved', 'unmeasured'])
+
+export function resolveLaneBinary({ lane, checkout, scopeFiles, exists } = {}) {
+  const match = typeof lane === 'string' ? /^npx[ \t]+([A-Za-z0-9][A-Za-z0-9._-]*)([\s\S]*)$/.exec(lane) : null
+  if (!match || (match[2] && !/^[ \t]/.test(match[2]))) return { lane, source: 'unchanged', tool: null, package_dir: null, candidates: [] }
+  const tool = match[1]
+  const rest = match[2]
+  if (typeof exists !== 'function') return { lane, source: 'unmeasured', tool, package_dir: null, candidates: [] }
+  const root = typeof checkout === 'string' ? checkout.replace(/\/+$/, '') : ''
+  if (exists(`${root}/node_modules/.bin/${tool}`)) return { lane, source: 'unchanged', tool, package_dir: null, candidates: [] }
+  const candidates = []
+  for (const entry of Array.isArray(scopeFiles) ? scopeFiles : []) {
+    if (typeof entry !== 'string') continue
+    const clean = entry.replace(/^\.\//, '').replace(/\/+$/, '')
+    if (!clean || clean.startsWith('/') || clean.split('/').includes('..')) continue
+    let dir = entry.endsWith('/') ? clean : (clean.includes('/') ? clean.slice(0, clean.lastIndexOf('/')) : '')
+    while (dir) {
+      if (!candidates.includes(dir) && /^[\w.@+\/-]+$/.test(dir) && exists(`${root}/${dir}/node_modules/.bin/${tool}`)) candidates.push(dir)
+      dir = dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : ''
+    }
+  }
+  if (candidates.length === 1) { const dir = candidates[0]; return { lane: `cd ${dir.startsWith('-') ? './' : ''}${dir} && ./node_modules/.bin/${tool}${rest}`, source: 'package-local', tool, package_dir: dir, candidates } }
+  return { lane: `npx --no ${tool}${rest}`, source: 'unresolved', tool, package_dir: null, candidates }
+}
+
+export function moduleResolutionSignature(output) {
+  if (typeof output !== 'string') return null
+  const text = output.replace(/\x1b\[[0-9;]*m/g, '')
+  const modules = [...new Set([...text.matchAll(/Cannot find (?:module|package) '([^']+)'/g)].map((m) => m[1]))].sort()
+  const code = text.includes('ERR_MODULE_NOT_FOUND') ? 'ERR_MODULE_NOT_FOUND' : null
+  if (!code && modules.length === 0) return null
+  const noTests = text.includes('Test Files  no tests') || text.includes('No test files found')
+  return [...(code ? [code] : []), ...modules, ...(noTests ? ['no-tests'] : [])].join('|')
+}

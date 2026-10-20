@@ -430,6 +430,54 @@ test('LG4 tracked detached process group is reaped when its test process is SIGT
   }
 })
 
+// Mutation killed: deleting the EPIPE drain in test/helpers.mjs, or narrowing it to process.stderr only (the reporter writes to stdout), leaves the sleep group alive.
+test('WL1 tracked detached process group is reaped when the node --test runner is SIGTERMed', async () => {
+  const root = scratchDir('helpers-wl1-')
+  const script = join(root, 'wl1-child.test.mjs')
+  const pidFile = join(root, 'sleep.pid')
+  const release = join(root, 'release')
+  writeFileSync(script, `import { test } from 'node:test'\nimport { spawn } from 'node:child_process'\nimport { writeFileSync, existsSync } from 'node:fs'\nimport { trackSpawn } from ${JSON.stringify(helperUrl)}\ntest('wl1 fixture spawns sleep then waits for release', () => {\n  const child = trackSpawn(spawn)('sleep', ['60'], { detached: true, stdio: 'ignore' })\n  child.unref()\n  writeFileSync(${JSON.stringify(pidFile)}, String(child.pid))\n  const deadline = Date.now() + 20000\n  while (!existsSync(${JSON.stringify(release)}) && Date.now() < deadline) {}\n})\ntest('wl1 fixture holds the runner open', async () => {\n  await new Promise((resolve) => setTimeout(resolve, 60000))\n})\n`)
+  const env = { ...process.env, NO_COLOR: '1' }
+  delete env.NODE_TEST_CONTEXT
+  delete env.FORCE_COLOR
+  delete env.CLICOLOR_FORCE
+  const runner = spawn(process.execPath, ['--test', '--test-reporter=tap', script], { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env })
+  let output = ''
+  runner.stdout.on('data', (chunk) => { output += chunk })
+  runner.stderr.on('data', (chunk) => { output += chunk })
+  let pid = null
+  try {
+    const reportDeadline = Date.now() + 10000
+    while (pid === null && Date.now() < reportDeadline) {
+      try {
+        const value = Number(String(readFileSync(pidFile, 'utf8')).trim())
+        if (Number.isSafeInteger(value) && value > 1) pid = value
+      } catch {}
+      if (pid === null) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no detached pid: ${pid}`)
+    assert.doesNotThrow(() => process.kill(-pid, 0))
+    process.kill(runner.pid, 'SIGTERM')
+    await new Promise((resolve, reject) => {
+      if (runner.exitCode !== null) { resolve(); return }
+      const timer = setTimeout(() => reject(new Error(`runner did not exit after SIGTERM (pid ${runner.pid})`)), 10000)
+      runner.once('exit', () => { clearTimeout(timer); resolve() })
+    })
+    writeFileSync(release, '')
+    const goneDeadline = Date.now() + 10000
+    let gone = false
+    while (!gone && Date.now() < goneDeadline) {
+      try { process.kill(-pid, 0) } catch { gone = true }
+      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.throws(() => process.kill(-pid, 0), /ESRCH/)
+  } finally {
+    if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
+    if (Number.isSafeInteger(runner.pid)) { try { process.kill(-runner.pid, 'SIGKILL') } catch {} }
+    try { runner.kill('SIGKILL') } catch {}
+  }
+})
+
 // Mutation killed: removing the trackProcessGroupFile registration, or reading the file at
 // register time instead of drain time, leaves the sleep alive after the child exits.
 test('a process group registered by pgid file is read at drain time and does not survive', async () => {

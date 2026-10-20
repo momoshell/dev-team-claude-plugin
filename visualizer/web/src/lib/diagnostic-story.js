@@ -109,13 +109,16 @@ export function assignmentPath(view = {}, envelopes = [], fullView = view) {
   const spans = (Array.isArray(view.spans) ? view.spans : [])
     .filter((span) => span.family === 'assignment')
     .sort((a, b) => a.started_at - b.started_at)
-  const counts = new Map()
+  const groups = new Map()
   for (const span of Array.isArray(fullView.spans) ? fullView.spans : []) {
     if (span.family !== 'assignment') continue
     const dispatch = span.id || String(span.label || '').split(':')[0]
     const role = span.role || 'unknown'
     const key = `${dispatch} ${role}`
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+    const group = groups.get(key) ?? { count: 0, marked: 0 }
+    group.count += 1
+    if (span.coverage_reask === 'coverage-reask') group.marked += 1
+    groups.set(key, group)
   }
   const list = Array.isArray(envelopes) ? envelopes : []
   return spans.map((span, index) => {
@@ -123,8 +126,10 @@ export function assignmentPath(view = {}, envelopes = [], fullView = view) {
     const role = span.role || 'unknown'
     const handoff = { ...span, order:index + 1, dispatch, role, outcome:'outcome not recorded', tone:'neutral', duration:duration(span.duration_ms) }
     if (span.ended_at == null) return { ...handoff, outcome:'in flight', tone:'warn' }
-    if ((counts.get(`${dispatch} ${role}`) ?? 0) > 1) return handoff
-    const joinedList = list.filter((entry) => entry?.valid !== false && entry?.assignment_id === dispatch && entry?.role === role)
+    const group = groups.get(`${dispatch} ${role}`) ?? { count: 0, marked: 0 }
+    const wantReask = span.coverage_reask ?? null
+    if (group.count > 1 && wantReask === null && group.marked === 0) return handoff
+    const joinedList = list.filter((entry) => entry?.valid !== false && entry?.assignment_id === dispatch && entry?.role === role && (entry?.coverage_reask ?? null) === wantReask)
     if (joinedList.length !== 1) return handoff
     const joined = joinedList[0]
     const status = joined?.status

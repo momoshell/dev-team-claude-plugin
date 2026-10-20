@@ -120,7 +120,7 @@ export function buildTrajectory(rows = [], { operational_channel = null, reveal 
     }
     if (typeof row.assign === 'string') {
       const key = `${row.assign} ${row.role ?? ''}`
-      const span = { family: 'assignment', label: `${row.assign}:${row.role ?? 'unknown'}`, id: row.assign, role: row.role ?? null, status: null, started_at: entry.at_ms, started_index: entry.index, ended_at: null, ended_index: null, depth: 0, parent: null }
+      const span = { family: 'assignment', label: `${row.assign}:${row.role ?? 'unknown'}`, id: row.assign, role: row.role ?? null, status: null, started_at: entry.at_ms, started_index: entry.index, ended_at: null, ended_index: null, depth: 0, parent: null, coverage_reask: (typeof row.brief === 'string' && row.brief.split('/').at(-1).startsWith('planner-coverage-reask-')) ? 'coverage-reask' : null, }
       spans.push(span)
       if (!openAssignments.has(key)) openAssignments.set(key, [])
       openAssignments.get(key).push(spans.length - 1)

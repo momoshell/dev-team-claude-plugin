@@ -397,7 +397,7 @@ function artifactDocuments(envelopes) {
   return [...envelopes].reverse().map((envelope) => {
     const blocks = artifactBlocks([envelope])
     return {
-      id: `${envelope?.role || 'agent'}-${envelope?.dispatch_seq ?? 'unknown'}`,
+      id: envelope?.file ?? `${envelope?.role || 'agent'}-${envelope?.dispatch_seq ?? 'unknown'}`,
       role: envelope?.role || 'agent',
       dispatch_seq: envelope?.dispatch_seq ?? null,
       status: envelope?.status ?? null,
@@ -522,7 +522,7 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   const otherGateLocations = (Array.isArray(run.phases) ? run.phases : []).filter((entry) => [...otherGateIds].some((id) => String(id) === String(entry?.id))).map((entry) => humanise(entry.name))
   const footer = []
   if (gateRow == null) footer.push({ label: 'gate', reason: 'no-gate-in-phase', text: otherGateLocations.length ? 'Validation evidence is attached to ' + otherGateLocations.join(', ') + '.' : reasonText('no-gate-in-phase') })
-  if (artifactDocuments(envelopeList).length === 0) footer.push({ label: 'envelope narrative', reason: 'no-envelope-narrative-in-phase', text: reasonText('no-envelope-narrative-in-phase') })
+  if (artifactDocuments(phaseEnvelopes).length === 0) footer.push({ label: 'envelope narrative', reason: 'no-envelope-narrative-in-phase', text: reasonText('no-envelope-narrative-in-phase') })
   for (const dispatch of dispatches) if (dispatch.duration_ms == null) footer.push({ label: 'dispatch ' + dispatch.dispatch_id, reason: 'dispatch-end-not-recorded', text: reasonText('dispatch-end-not-recorded') })
   const gate = gateRow == null
     ? {
@@ -558,9 +558,9 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
     accept: acceptEvidence(run, returns),
     events: scopedEvents,
     artifacts: {
-      blocks: artifactBlocks(envelopeList),
-      documents: artifactDocuments(envelopeList),
-      paths: artifactPaths(envelopeList),
+      blocks: artifactBlocks(phaseEnvelopes),
+      documents: artifactDocuments(phaseEnvelopes),
+      paths: artifactPaths(phaseEnvelopes),
     },
     pending: returns?.error ?? null,
   }

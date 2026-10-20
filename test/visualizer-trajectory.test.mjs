@@ -650,3 +650,19 @@ test('PU6 journal source reads step titles and acceptance text without changing 
   assert.deepEqual([r4.step_titles, r4.step_titles_reason], [null, 'plan-text-unreadable']);
 })
 
+test('trajectory marks only the coverage-reask assign span', () => {
+  // Mutation killed: .startsWith('planner-coverage-reask-') -> .startsWith('planner-assignment-') (VF4).
+  const view = buildTrajectory([
+    { at: 1000, assign: 'd1', role: 'planner', brief: '/crew/task/planner-assignment-r1.md' },
+    { at: 2000, envelope: 'd1', role: 'planner', status: 'done' },
+    { at: 3000, assign: 'd1', role: 'planner', brief: '/crew/task/planner-coverage-reask-r1.md' },
+    { at: 4000, envelope: 'd1', role: 'planner', status: 'done' },
+  ])
+  assert.deepEqual(view.spans.filter((span) => span.family === 'assignment').map((span) => span.coverage_reask), [null, 'coverage-reask'])
+  const bare = buildTrajectory([
+    { at: 1000, assign: 'd1', role: 'planner' },
+    { at: 2000, envelope: 'd1', role: 'planner', status: 'done' },
+  ])
+  assert.deepEqual(bare.spans.filter((span) => span.family === 'assignment').map((span) => span.coverage_reask), [null])
+})
+

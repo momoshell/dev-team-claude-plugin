@@ -3693,12 +3693,18 @@ export function tierFloor({ files, extra } = {}) {
   return { hits, forced, floor: forced }
 }
 
-export function promptSurfaceVerdict({ files, register = loadCapabilities() } = {}) {
+export function promptSurfaceVerdict({ files, subjects, register = loadCapabilities() } = {}) {
   const protectedFiles = (Array.isArray(files) ? files : []).map((entry) => {
     const parsed = parseFenceScope(entry)
     return parsed.kind === 'span' ? parsed.path : entry
   })
-  const hits = protectedHitsIn(protectedFiles, promptSurfacePaths(register))
+  const surfaceHits = protectedHitsIn(protectedFiles, promptSurfacePaths(register))
+  if (subjects === undefined) return { hits: surfaceHits, promptChange: surfaceHits.length > 0, forced: surfaceHits.length > 0 ? 'judge' : null }
+  const subjectPaths = (Array.isArray(subjects) ? subjects : []).map((entry) => {
+    const parsed = parseFenceScope(entry)
+    return parsed.kind === 'span' ? parsed.path : entry
+  })
+  const hits = surfaceHits.filter((hit) => protectedHitsIn([hit], subjectPaths).length > 0)
   return { hits, promptChange: hits.length > 0, forced: hits.length > 0 ? 'judge' : null }
 }
 
@@ -4945,7 +4951,7 @@ async function compileDispatchWave(prepared) {
     const authoredFence = fenceReport.authoredPerLane?.[item.lane]
     const assuranceFiles = authoredFence?.files || laneFence.files
     const floor = tierFloor({ files: assuranceFiles, extra: runFlags.protectedPaths })
-    const prompt = promptSurfaceVerdict({ files: assuranceFiles })
+    const prompt = promptSurfaceVerdict({ files: assuranceFiles, subjects: [...(laneFence.where ?? []), ...(laneFence.creates ?? [])] })
     const laneEntry = laneByName.get(item.lane)
     const enrollments = experimentEnrollments.get(item.lane) || []
     const charterArm = charterArms.get(item.lane) || 'control'

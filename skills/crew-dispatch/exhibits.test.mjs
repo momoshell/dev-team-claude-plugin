@@ -95,6 +95,7 @@ test('PS9', () => {
     'prompt-surface-conflict', 'tier-floor-conflict', 'prompt=change', 'prompt=code-only',
     'BLIND SPOT: path matching cannot see a prompt embedded as a template string in a compiler; the named templateBlocks require human recognition.',
     'ADR-038', '64–66', '13',
+    "A fenced prompt-surface file that the request's where or creates does not name is a carrier and forces nothing.",
   ]) assert.ok(text.includes(token), `tier.md must carry ${token}`)
   assert.ok(text.includes('not a measurement of whether the prompt worked'))
 })

@@ -8750,7 +8750,7 @@ function runTask(ctx, io, crash) {
       return escalate('plan', `planner assignment wrapper could not be written: ${err?.message || String(err)}`)
     }
     let plannerReturnPath = null, plannerDispatch = null
-    let env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'), { onDispatch: (dispatch) => { plannerDispatch = dispatch; plannerReturnPath = dispatch.returnPath } }); ({ env, returnPath: plannerReturnPath } = plannerCoverageReask({ env, dispatch: plannerDispatch, briefText, round, briefFile: ctx.briefFile, wrapperPath: plannerBrief, io, art, dispatchOnce, pendingEnforcement }))
+    let env = assignAndWait('planner', plannerBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'), { onDispatch: (dispatch) => { plannerDispatch = dispatch; plannerReturnPath = dispatch.returnPath } }); ({ env, returnPath: plannerReturnPath } = plannerCoverageReask({ env, dispatch: plannerDispatch, briefText, round, briefFile: ctx.briefFile, wrapperPath: plannerBrief, io, art, dispatchOnce, pendingEnforcement, validateChunksAtAccept: variant === 'stepped' || ctx.chunked === true || ctx.chunk != null }))
     acceptedPlannerReturn = { path: plannerReturnPath, text: readOrNull(plannerReturnPath) }
     planNote = null
     const refusalWhy = handledEnvelopeRefusalWhy(env)
@@ -17402,18 +17402,45 @@ export function plannerConsultCoverage(briefText, mutations, round, briefFile) {
   return { coverage, lines: ['', ...acceptanceCoverageBounceLines(round, coverage, briefFile)] }
 }
 
-export function plannerCoverageReask({ env, dispatch, briefText, round, briefFile, wrapperPath, io, art, dispatchOnce, pendingEnforcement }) {
+export function plannerShapeDefects(env, { validateChunksAtAccept = false } = {}) {
+  const details = env?.details && typeof env.details === 'object' ? env.details : {}
+  const ownScope = details.files_in_scope
+  if (!Array.isArray(ownScope) || ownScope.length === 0 || validateScopeEntries(ownScope).length > 0) return []
+  const defects = []
+  if (promptScopeHits(ownScope, promptSurfacePaths(loadCapabilities())).length > 0 && !validPlanPromptClaim(details.prompt_claim)) defects.push({ id: 'prompt-claim-missing', why: 'prompt-scoped planner plans require one valid prompt_claim' })
+  const mutations = Array.isArray(details.mutations) ? details.mutations : []
+  const checkLabels = mutations.map((mutation) => mutation?.check).filter((label) => typeof label === 'string')
+  const chunkResult = validateChunksAtAccept ? validateChunks(details, { scope: ownScope, checkLabels, mutations }) : null
+  if (chunkResult?.defect) defects.push({ id: chunkResult.defect, why: chunkResult.why })
+  return defects
+}
+
+export function plannerShapeReaskLines(defects) {
+  const lines = ['# Planner shape defects — fix these envelope fields and return the corrected envelope', '']
+  for (const { id, why } of defects) {
+    lines.push(`Shape defect ${id}: ${why}`)
+    if (id === 'prompt-claim-missing') lines.push('details.prompt_claim must be exactly one own-whole-line form: Measure: <name>; before: <sample> (n=N); after: <sample> (n=N).; unmeasured — n insufficient; reason: <why>; re-measure after N seats.; or not applicable — citation-only; no seat-behaviour change intended.')
+    else lines.push("Every chunk's checks_owned must be a non-empty array of declared gate labels, and details.chunks must satisfy validateChunks against files_in_scope and the declared mutations.")
+  }
+  return lines
+}
+
+export function plannerCoverageReask({ env, dispatch, briefText, round, briefFile, wrapperPath, io, art, dispatchOnce, pendingEnforcement, validateChunksAtAccept = false }) {
   const unchanged = { env, returnPath: dispatch.returnPath }
   if (handledEnvelopeRefusalOf(env)) return unchanged
   const coverage = env.status === 'done' ? acceptanceCoverage(briefText, env.details?.mutations ?? []) : plannerConsultCoverage(briefText, env.details?.mutations, round, briefFile).coverage
-  if (!coverage || coverage.status !== 'measured' || coverage.uncovered.length === 0) return unchanged
+  const coverageMiss = Boolean(coverage && coverage.status === 'measured' && coverage.uncovered.length > 0)
+  const shapeDefects = env.status === 'done' ? plannerShapeDefects(env, { validateChunksAtAccept }) : []
+  if (!coverageMiss && shapeDefects.length === 0) return unchanged
   const graceSpentBy = typeof io.reaskGraceSpent === 'function' ? io.reaskGraceSpent(dispatch.returnPath) : null
-  try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask: { round, uncovered: coverage.uncovered, extra: coverage.extra, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* coverage re-ask journal is never load-bearing */ }
+  if (coverageMiss) { try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask: { round, uncovered: coverage.uncovered, extra: coverage.extra, outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* coverage re-ask journal is never load-bearing */ } }
+  if (shapeDefects.length > 0) { try { io.log(recordRow({ at: io.now(), planner_shape_reask: { round, defects: shapeDefects.map(({ id }) => id), outcome: graceSpentBy ? 'grace-spent' : 'asked' } })) } catch { /* shape re-ask journal is never load-bearing */ } }
   if (graceSpentBy) return unchanged
   const retryPath = join(dirname(dispatch.returnPath), `${dispatch.id}.coverage-reask.planner.json`)
   const reaskBrief = art(`planner-coverage-reask-r${round}.md`)
   io.writeFile(reaskBrief, [
-    ...acceptanceCoverageBounceLines(round, coverage, briefFile),
+    ...(coverageMiss ? acceptanceCoverageBounceLines(round, coverage, briefFile) : []),
+    ...(shapeDefects.length > 0 ? plannerShapeReaskLines(shapeDefects) : []),
     'This costs no plan round; every acceptance id must appear as a top-level check label.',
     `Original assignment wrapper: ${wrapperPath}`,
   ].join('\n'))
@@ -17425,7 +17452,7 @@ export function plannerCoverageReask({ env, dispatch, briefText, round, briefFil
     const retryResult = retryCoverage?.status === 'measured'
       ? { round, repaired: retryCoverage.uncovered.length === 0, uncovered_after: retryCoverage.uncovered }
       : { round, repaired: null, uncovered_after: null, reason: retryRefused ? 'envelope-refusal' : retryCoverage?.reason ?? 'no-declared-checks' }
-    try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask_result: retryResult })) } catch { /* coverage re-ask result journal is never load-bearing */ }
+    if (coverageMiss) { try { io.log(recordRow({ at: io.now(), acceptance_coverage_reask_result: retryResult })) } catch { /* coverage re-ask result journal is never load-bearing */ } }
     return { env: corrected, returnPath: retryPath }
   } finally {
     // The coverage retry buys no direct retry, so a non-start or no-envelope preamble it queued must not reach a later round.

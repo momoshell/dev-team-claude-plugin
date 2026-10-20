@@ -714,6 +714,43 @@ test('R1', async () => { const f = await summaryFixture('r1', true); assert.equa
 test('R2', async () => { const f = await summaryFixture('r2', true); assert.equal(f.spawnedOut.filter(c => c.args.includes('remove') && c.args.includes('--force')).length, 2) })
 // MUTATION R3: skip rollback on a pre-boot floor refusal.
 test('R3', async () => { const spawnedOut = []; let error; try { await dispatchFixture({ label: 'r3-floor', names: ['lane-a'], requests: { 'lane-a': requestFor('lane-a', { assurance: 'quick', where: ['crew/drive.mjs'] }) }, fences: [entry('lane-a', ['crew/drive.mjs'])], spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught } assert.equal(error?.reason, 'tier-floor-conflict'); const adds = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('add')); assert.equal(adds.length, 1); assert.deepEqual(spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1)), adds.map(c => c.args.at(-2))) })
+test('LR1', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lr1-saturated', names: ['lane-a'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => [16], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-saturated')
+  assert.equal(spawnedOut.filter(c => c.args.includes('boot')).length, 0)
+  const adds = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('add'))
+  assert.deepEqual(spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1)), adds.map(c => c.args.at(-2)))
+  assert.deepEqual(spawnedOut.filter(c => c.args.includes('branch') && c.args.includes('-D')).map(c => c.args.at(-1)), ['lane-a'])
+})
+test('LR2', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lr2-saturated-later', names: ['lane-a', 'lane-b'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => spawnedOut.some(c => c.args.includes('boot')) ? [16] : [4], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-saturated')
+  const boots = spawnedOut.filter(c => c.args.includes('boot'))
+  assert.equal(boots.length, 1)
+  assert.equal(boots[0].args.includes('lane-a'), true)
+  const removes = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1))
+  assert.equal(removes.length, 1)
+  assert.equal(String(removes[0]).endsWith('dt-lane-b'), true)
+  assert.equal(removes.some((target) => String(target).endsWith('dt-lane-a')), false)
+  assert.deepEqual(spawnedOut.filter(c => c.args.includes('branch') && c.args.includes('-D')).map(c => c.args.at(-1)), ['lane-b'])
+})
+test('LR3', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lr3-unmeasured', names: ['lane-a'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => [], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }) }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-unmeasured')
+  assert.equal(spawnedOut.filter(c => c.args.includes('boot')).length, 0)
+  const adds = spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('add'))
+  assert.deepEqual(spawnedOut.filter(c => c.args.includes('worktree') && c.args.includes('remove')).map(c => c.args.at(-1)), adds.map(c => c.args.at(-2)))
+  assert.deepEqual(spawnedOut.filter(c => c.args.includes('branch') && c.args.includes('-D')).map(c => c.args.at(-1)), ['lane-a'])
+})
 // MUTATION R4: switch branch creation to a detached branch command.
 test('R4', () => { const attached = []; const plans = [{ lane: 'a', branch: 'a', dir: '/tmp/a' }]; attachBranches({ plans, attached, deps: { spawn: () => ({ status: 0 }) } }); assert.deepEqual(attached, plans) })
 // MUTATION R5: moving attachBranches directly after createWorktrees must fail this compile-only order pin.

@@ -3,6 +3,7 @@
 // Shared fixtures, and the ledger sandbox side effect, live in ./drive-fixtures.mjs.
 import { test } from 'node:test'
 import { renderBrief } from '../scripts/factory/make-brief.mjs'
+import { issueTrailersFromPrBody } from '../scripts/factory/closeout.mjs'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -2376,14 +2377,32 @@ test('F1 rendered PR closing trailers cover zero, one, two, and three closes', (
     const body = composePrBody(record)
     return body.slice(body.indexOf('## Why\n') + '## Why\n'.length, body.indexOf('## Proof')).trim()
   }
-  assert.equal(whyOf({ closes: ['#1235', '#1238'] }), 'Closes #1235, #1238')
-  assert.equal(whyOf({ closes: ['#1235', '#1238', '#1247'] }), 'Closes #1235, #1238, #1247')
+  assert.equal(whyOf({ closes: ['#1235', '#1238'] }), 'Closes #1235\nCloses #1238')
+  assert.equal(whyOf({ closes: ['#1235', '#1238', '#1247'] }), 'Closes #1235\nCloses #1238\nCloses #1247')
   assert.equal(whyOf({ closes: ['#806'] }), 'Closes #806')
   assert.equal(whyOf({ issues: ['#679', '#758'] }), 'Refs #679, #758')
-  assert.equal(whyOf({ closes: ['#806'], issues: ['#679', '#758'] }), 'Closes #806 · Refs #679, #758')
+  assert.equal(whyOf({ closes: ['#806'], issues: ['#679', '#758'] }), 'Closes #806\nRefs #679, #758')
   const sparse = composePrBody({ closes: [] })
   assert.ok(sparse.includes('No issue named.'))
   assert.doesNotMatch(sparse, /^Closes(?:\s|$)/m)
+})
+
+// MUTATION MC1: restore the comma-joined single Closes push in place of the per-ref for-of push, and two closes collapse onto one line.
+test('MC1 composePrBody renders one Closes line per closing issue', () => {
+  const body = composePrBody({ closes: ['#1907', '#1909'] })
+  const why = body.slice(body.indexOf('## Why\n') + '## Why\n'.length, body.indexOf('## Proof')).trim()
+  assert.equal(why, 'Closes #1907\nCloses #1909')
+  for (const line of body.split('\n').filter((l) => l.startsWith('Closes'))) {
+    assert.equal((line.match(/#\d+/g) || []).length, 1)
+  }
+})
+
+// MUTATION MC2: fold the Refs part onto the preceding Closes whyPart instead of pushing its own part, and reap parses the refs as closes.
+test('MC2 composePrBody Refs line is parsed by reap as referenced not closed', () => {
+  const body = composePrBody({ closes: ['#806'], issues: ['#679', '#758'] })
+  const why = body.slice(body.indexOf('## Why\n') + '## Why\n'.length, body.indexOf('## Proof')).trim()
+  assert.equal(why, 'Closes #806\nRefs #679, #758')
+  assert.deepEqual(issueTrailersFromPrBody(body), { closes: [806], referenced: [679, 758] })
 })
 
 test('composePrBody is pure and renders every populated section with its own values', () => {
@@ -2402,7 +2421,7 @@ test('composePrBody is pure and renders every populated section with its own val
   assert.equal(first, second)
   assert.equal(first, [
     `## What\nwhy the lane existed\n\n${claim}`,
-    '## Why\nCloses #806 · Refs #679, #758',
+    '## Why\nCloses #806\nRefs #679, #758',
     '## Proof\n- Gate: 2 checks, 0 failed, 0 errored — discrimination unproven (`gate-cmd`)\n- Suite: warm 11/2/3 · cold 13/4/5, cold-verified from a fresh checkout\n- Review: changes-needed · 1 residual\n  - R1 (cosmetic): leave this note',
     '## Changed\n- crew/drive.mjs',
     '## Run\ncommit → document → rebase → suite → publish\n- bounce: retry',
@@ -2417,7 +2436,7 @@ test('composePrBody is pure and renders every populated section with its own val
     '## Proof\nNo acceptance gate ran.\nSuite counts: not measured.\n- Review: not recorded · no residuals',
     '## Run',
   ].join('\n\n'))
-  for (const token of ['why the lane existed', 'Closes #806 · Refs #679, #758',
+  for (const token of ['why the lane existed', 'Closes #806\nRefs #679, #758',
     '- Gate: 2 checks, 0 failed, 0 errored — discrimination unproven', '(`gate-cmd`)',
     'warm 11/2/3', 'cold 13/4/5', 'cold-verified from a fresh checkout',
     '- Review: changes-needed · 1 residual', '  - R1 (cosmetic): leave this note', '## Changed\n- crew/drive.mjs',
@@ -3447,7 +3466,7 @@ test('CT3 PR body neutralises every seat prose slot but preserves driver Why', (
   })
   assert.equal(body.includes(unsafe), false)
   assert.ok(body.includes(safe))
-  assert.ok(body.includes('Closes #900008 · Refs #900009'))
+  assert.ok(body.includes('Closes #900008\nRefs #900009'))
   assert.ok(body.includes(`- ${safe}.mjs`))
 })
 

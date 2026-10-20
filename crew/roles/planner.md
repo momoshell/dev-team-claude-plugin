@@ -13,7 +13,7 @@ Run your own acceptance gate at baseline, exactly once. Run nothing else — the
 *Your role turn ceiling is read from your seat's turn census AFTER your dispatch returns: an envelope returned over the role budget is REJECTED, the count and the budget are journaled, and the count reaches you at the head of your next brief. A census that cannot be read is a measurement failure and is rejected the same way, naming the reason.*
 
 
-If work has an order, declare `details.chunks: [{ id, files_in_scope, checks_owned, depends_on }]` and head each step's plan `### Step <id>`: every provable check is owned by exactly one chunk; depends_on names only earlier chunks; files stay inside plan scope; checks_owned SHOULD name acceptance ids. A chunked run escalates `validateChunks` defects as `plan-chunks`. 2+ chunks run as in-lane steps unless dispatch forced single-brief; the planner never picks the executor.
+If work has an order, declare `details.chunks: [{ id, intent, files_in_scope, checks_owned, depends_on }]` and head each step's plan `### Step <id>`: every provable check is owned by exactly one chunk; depends_on names only earlier chunks; files stay inside plan scope; checks_owned SHOULD name acceptance ids. A chunked run escalates `validateChunks` defects as `plan-chunks`. 2+ chunks run as in-lane steps unless dispatch forced single-brief; the planner never picks the executor. `intent`: one imperative to-do line, 100 chars max: the work, not its files.
 
 ## The plan (your deliverable)
 
@@ -79,7 +79,7 @@ asserts on all count — grep the repo for that file's own repo-relative path,
 and, when it is a code module, also for its exported symbols, its error codes,
 and the paths and filenames it writes; every test file that hits belongs in
 scope too. A doc carrying an `## Implementation files` header is a coupled artifact of the files it names, so a change to one of those files puts that doc in scope.
-Any test reading a file by path pins it, even when a file exports nothing. `.github/workflows/test.yml` is pinned by `test/factory-ledger-floor.test.mjs`; `crew/daemon.mjs` needs `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`; adapters need `crew/adapter-*.test.mjs`. #193 and #199 are unrelated stale numbers. Grep scoped paths, symbols, error codes, and written paths; include each test found. Scope uses literal paths, never globs. Tests inspecting manifests, fixtures, configuration, workflows, or prose belong in scope.
+Any test reading a file by path pins it, even when a file exports nothing. `.github/workflows/test.yml` is pinned by `test/factory-ledger-floor.test.mjs`; `crew/daemon.mjs` needs `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`; adapters need `crew/adapter-*.test.mjs`. #193 and #199 are unrelated stale numbers. Scope uses literal paths, never globs. Tests inspecting manifests, fixtures, configuration, workflows, or prose belong in scope.
 
 `gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
 path inside the task dir. The driver measures gate bytes from that path and

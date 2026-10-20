@@ -2735,7 +2735,7 @@ export function validateChunks(details, { scope = [], checkLabels = [], mutation
       || !chunk.checks_owned.every((label) => labels.includes(label))) {
       return { chunks: [], exemptLabels, defect: 'chunk-checks-not-array', why: `chunk ${chunk.id} checks_owned must be a non-empty array of declared gate labels` }
     }
-    if (chunk.depends_on === undefined) chunk.depends_on = []
+    if (chunk.depends_on === undefined) chunk.depends_on = []; if (chunk.intent !== undefined && typeof chunk.intent !== 'string') return { chunks: [], exemptLabels, defect: 'chunk-intent-not-string', why: `chunk ${chunk.id} intent must be a string` }
     if (!Array.isArray(chunk.depends_on)) return { chunks: [], exemptLabels, defect: 'chunk-dep-not-array', why: `chunk ${chunk.id} depends_on must be an array` }
     chunks.push(chunk)
   }

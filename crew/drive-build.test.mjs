@@ -13488,3 +13488,175 @@ test('RB6 torn tail discloses and interior failure is absent', () => {
   const interior = builderReadSet('{\"type\":\"response\"}\n{not json\n' + good + '\n', 0, opts)
   assert.deepEqual(interior, { absent: 'stream-unparseable', entries: [], totalPaths: null, droppedReads: null, uncapturedBash: null, tailUnreadable: null })
 })
+
+import { resolveLaneBinary, moduleResolutionSignature, LANE_BINARY_SOURCES } from './lane-red.mjs'
+import { escalationCause } from '../scripts/factory/ledger.mjs'
+
+test('(SP1) resolveLaneBinary resolves the ui package-local vitest', () => {
+  const got = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['ui/src/inspector/a.dom.test.ts', 'ui/src/inspector/b.ts'], exists: (p) => p === '/tmp/repo/ui/node_modules/.bin/vitest' });
+  assert.deepEqual(got, { lane: 'cd ui && ./node_modules/.bin/vitest run src/inspector/a.dom.test.ts', source: 'package-local', tool: 'vitest', package_dir: 'ui', candidates: ['ui'] });
+  assert.deepEqual(LANE_BINARY_SOURCES, ['unchanged', 'package-local', 'unresolved', 'unmeasured']);
+  assert.equal(Object.isFrozen(LANE_BINARY_SOURCES), true);
+  const dirScope = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['ui/'], exists: (p) => p === '/tmp/repo/ui/node_modules/.bin/vitest' });
+  assert.deepEqual(dirScope, { lane: 'cd ui && ./node_modules/.bin/vitest run src/inspector/a.dom.test.ts', source: 'package-local', tool: 'vitest', package_dir: 'ui', candidates: ['ui'] });
+});
+
+test('(SP2) resolveLaneBinary rewrites to npx --no when unresolved', () => {
+  const want = { lane: 'npx --no vitest run src/inspector/a.dom.test.ts', source: 'unresolved', tool: 'vitest', package_dir: null, candidates: [] };
+  const got = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['ui/src/inspector/a.dom.test.ts'], exists: () => false });
+  assert.deepEqual(got, want);
+  const several = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['ui/src/a.ts', 'app/src/b.ts'], exists: (p) => p === '/tmp/repo/ui/node_modules/.bin/vitest' || p === '/tmp/repo/app/node_modules/.bin/vitest' });
+  assert.deepEqual(several, { lane: 'npx --no vitest run src/inspector/a.dom.test.ts', source: 'unresolved', tool: 'vitest', package_dir: null, candidates: ['ui', 'app'] });
+  const nearest = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['ui/src/deep/a.ts'], exists: (p) => p === '/tmp/repo/ui/src/node_modules/.bin/vitest' || p === '/tmp/repo/ui/node_modules/.bin/vitest' });
+  assert.deepEqual(nearest, { lane: 'npx --no vitest run src/inspector/a.dom.test.ts', source: 'unresolved', tool: 'vitest', package_dir: null, candidates: ['ui/src', 'ui'] });
+  const unsafe = resolveLaneBinary({ lane: 'npx vitest run src/inspector/a.dom.test.ts', checkout: '/tmp/repo', scopeFiles: ['my app/src/a.ts'], exists: (p) => p === '/tmp/repo/my app/node_modules/.bin/vitest' });
+  assert.deepEqual(unsafe, want);
+});
+
+test('(SP3) resolveLaneBinary leaves root-local and non-npx lanes byte-identical and reports unmeasured without exists', () => {
+  const npxLane = 'npx vitest run src/inspector/a.dom.test.ts';
+  const root = resolveLaneBinary({ lane: npxLane, checkout: '/tmp/repo', scopeFiles: ['ui/src/inspector/a.dom.test.ts'], exists: (p) => p === '/tmp/repo/node_modules/.bin/vitest' });
+  assert.deepEqual(root, { lane: npxLane, source: 'unchanged', tool: 'vitest', package_dir: null, candidates: [] });
+  const nonNpx = resolveLaneBinary({ lane: 'node --test a.test.mjs', checkout: '/tmp/repo', scopeFiles: ['ui/a.ts'], exists: () => false });
+  assert.deepEqual(nonNpx, { lane: 'node --test a.test.mjs', source: 'unchanged', tool: null, package_dir: null, candidates: [] });
+  const flagged = resolveLaneBinary({ lane: 'npx --yes vitest run a', checkout: '/tmp/repo', scopeFiles: ['ui/a.ts'], exists: () => false });
+  assert.deepEqual(flagged, { lane: 'npx --yes vitest run a', source: 'unchanged', tool: null, package_dir: null, candidates: [] });
+  const unmeasured = resolveLaneBinary({ lane: npxLane, checkout: '/tmp/repo', scopeFiles: ['ui/src/inspector/a.dom.test.ts'] });
+  assert.deepEqual(unmeasured, { lane: npxLane, source: 'unmeasured', tool: 'vitest', package_dir: null, candidates: [] });
+});
+
+test('(SP4) driveTask runs the package-local lane and journals one lane_binary row', () => {
+  const npxLane = 'npx vitest run src/inspector/a.dom.test.ts';
+  const resolvedLane = 'CDPATH= cd ui && ./node_modules/.bin/vitest run src/inspector/a.dom.test.ts';
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['ui/src/inspector/a.dom.test.ts', 'ui/src/inspector/a.ts'], validation_lane: npxLane } }),
+      'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['ui/src/inspector/a.ts'] } }),
+      'reviewer:1': reviewEnv('pass')
+    },
+    runs: { 'CDPATH= cd ui && ./node_modules/.bin/vitest run src/inspector/a.dom.test.ts': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['ui/src/inspector/a.ts']
+  });
+  io.exists = (p) => p === CTX.checkout + '/ui/node_modules/.bin/vitest';
+  const res = driveTask(CTX, io);
+  assert.equal(res.status, 'done');
+  const cmds = io.calls.run.map((r) => r.cmd);
+  assert.ok(cmds.includes(resolvedLane));
+  assert.match(cmds.find((cmd) => cmd === resolvedLane), /^CDPATH= cd ui && /);
+  assert.ok(!cmds.includes(npxLane));
+  assert.deepEqual(io.calls.logs.filter((r) => r.lane_binary).map((r) => r.lane_binary), [{ from: npxLane, to: resolvedLane, source: 'package-local', tool: 'vitest', package_dir: 'ui', candidates: ['ui'] }]);
+});
+
+test('(SP5) moduleResolutionSignature is timestamp-independent and null for assertion failures', () => {
+  const NL = String.fromCharCode(10);
+  const ESC = String.fromCharCode(27);
+  const a = '2026-10-20T01:00:00Z ' + ESC + '[31mError: ' + "Cannot find package 'happy-dom'" + ESC + '[39m ERR_MODULE_NOT_FOUND' + NL + 'Test Files  no tests';
+  const b = '2999-01-01T09:30:00Z other noise ' + "Cannot find module 'happy-dom'" + ' code ERR_MODULE_NOT_FOUND' + NL + 'Test Files  no tests';
+  assert.equal(moduleResolutionSignature(a), 'ERR_MODULE_NOT_FOUND|happy-dom|no-tests');
+  assert.equal(moduleResolutionSignature(b), 'ERR_MODULE_NOT_FOUND|happy-dom|no-tests');
+  assert.equal(moduleResolutionSignature(b), moduleResolutionSignature(a));
+  const multi = "Cannot find module 'zeta' Cannot find package 'alpha' Cannot find module 'zeta' No test files found";
+  assert.equal(moduleResolutionSignature(multi), 'alpha|zeta|no-tests');
+  assert.equal(moduleResolutionSignature('AssertionError: expected 1 to equal 2' + NL + 'not ok 1 - plain failure'), null);
+  assert.equal(moduleResolutionSignature(undefined), null);
+});
+
+test('(SP6) repeated module-resolution lane red escalates lane-environment without a second upgrade', () => {
+  const NL = String.fromCharCode(10);
+  const out1 = '2026-10-20T01:00:00Z Error: ' + "Cannot find package 'happy-dom'" + ' ERR_MODULE_NOT_FOUND' + NL + 'Test Files  no tests';
+  const out2 = '2999-01-01T09:30:00Z other noise ' + "Cannot find module 'happy-dom'" + ' code ERR_MODULE_NOT_FOUND' + NL + 'Test Files  no tests';
+  const applying = () => ({ applied: true, from: 'm1', to: 'm2', rung: 1 });
+  const ioA = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: out1 }, 'lane-cmd:2': { ok: false, output: out2 }, 'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'],
+    reseat: applying
+  });
+  const resA = driveTask(CTX, ioA);
+  assert.equal(resA.status, 'escalation');
+  assert.equal(resA.details.escalation.where, 'lane');
+  assert.match(resA.details.escalation.why, /^lane-environment: /);
+  assert.equal(ioA.calls.reseat.length, 1);
+  assert.deepEqual(ioA.calls.logs.filter((r) => r.modifier && r.modifier.modifier === FAILURE_UPGRADE).map((r) => [r.modifier.kind, r.modifier.outcome]), [['lane', 'applied']]);
+  assert.equal(ioA.calls.assign.filter((row) => row.role === 'builder').length, 2);
+  assert.equal(ioA.calls.logs.filter((r) => r.lane_red).length, 2);
+  assert.deepEqual(escalationCause(resA.details.escalation), { cause: 'infrastructure', actor: 'driver' });
+  const ioD = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv() },
+    runs: {
+      'lane-cmd:1': { ok: false, output: out1.replace('happy-dom', 'contradiction') },
+      'lane-cmd:2': { ok: false, output: out2.replace("module 'happy-dom'", "package 'contradiction'") }
+    },
+    changed: ['a.mjs'],
+    reseat: applying
+  });
+  const resD = driveTask(CTX, ioD);
+  assert.equal(resD.status, 'escalation');
+  assert.equal(resD.details.escalation.where, 'lane');
+  assert.match(resD.details.escalation.why, /^lane-environment: .*contradiction/);
+  assert.deepEqual(escalationCause(resD.details.escalation), { cause: 'infrastructure', actor: 'driver' });
+  const ioC = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'lead:1': leadEnv('bounce') },
+    runs: { 'lane-cmd:1': { ok: false, output: out1 }, 'lane-cmd:2': { ok: false, output: out2 } },
+    changed: ['a.mjs'],
+    reseat: applying
+  });
+  const resC = driveTask({ ...CTX, limits: { build_rounds: 2 } }, ioC);
+  assert.equal(resC.status, 'escalation');
+  assert.equal(resC.details.escalation.where, 'lane');
+  assert.match(resC.details.escalation.why, /^lane-environment: /);
+  assert.equal(ioC.calls.assign.filter((row) => row.role === 'lead').length, 0);
+  assert.equal(ioC.calls.reseat.length, 1);
+  const ioB = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: out1 }, 'lane-cmd:2': { ok: false, output: "Cannot find package 'other-dom' ERR_MODULE_NOT_FOUND" }, 'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'],
+    reseat: applying
+  });
+  const resB = driveTask(CTX, ioB);
+  assert.equal(resB.status, 'done');
+  assert.equal(ioB.calls.logs.filter((r) => r.lane_red).length, 2);
+});
+
+test('(SP7) escalationCause classifies lane-environment as infrastructure owned by the driver', () => {
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'lane-environment: ERR_MODULE_NOT_FOUND|happy-dom|no-tests' }), { cause: 'infrastructure', actor: 'driver' });
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'lane-environment: ERR_MODULE_NOT_FOUND|contradiction|no-tests' }), { cause: 'infrastructure', actor: 'driver' });
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'lane-environment: ERR_MODULE_NOT_FOUND|unapplied|no-tests' }), { cause: 'infrastructure', actor: 'driver' });
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'lane-environment: ERR_MODULE_NOT_FOUND|sendLine|no-tests' }), { cause: 'infrastructure', actor: 'driver' });
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'the lane is still red' }), { cause: 'rule-gap', actor: null });
+});
+
+test('RV1-1 package-local lane clears inherited CDPATH before cd', () => {
+  // Kills removal of CDPATH clearing before the cd builtin.
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['ui/a.test.mjs', 'ui/a.mjs'], validation_lane: 'npx vitest run a.test.mjs' } }),
+      'builder:1': buildEnv({ details: { ...buildEnv().details, files_changed: ['ui/a.mjs'] } }),
+      'reviewer:1': reviewEnv('pass')
+    },
+    changed: ['ui/a.mjs']
+  })
+  io.exists = (p) => p === CTX.checkout + '/ui/node_modules/.bin/vitest'
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const commands = io.calls.run.map(({ cmd }) => cmd).filter((cmd) => cmd.includes('vitest'))
+  assert.deepEqual(commands, ['CDPATH= cd ui && ./node_modules/.bin/vitest run a.test.mjs'])
+  assert.deepEqual(io.calls.logs.filter((row) => row.lane_binary).map((row) => row.lane_binary.to), commands)
+})
+
+test('RV1-2 lane-environment prefix wins over module names matching prose rules', () => {
+  // Kills moving lane-environment classification after prose rules.
+  for (const name of ['contradiction', 'unapplied', 'sendLine']) {
+    assert.deepEqual(escalationCause({ where: 'lane', why: `lane-environment: ERR_MODULE_NOT_FOUND|${name}|no-tests` }), { cause: 'infrastructure', actor: 'driver' })
+  }
+  assert.deepEqual(escalationCause({ where: 'lane', why: 'contradiction' }), { cause: 'brief-contradiction', actor: 'operator' })
+  assert.deepEqual(escalationCause({ where: 'suite', why: 'sendLine' }), { cause: 'transport', actor: 'driver' })
+})
+
+test('resolveLaneBinary makes a leading-hyphen package dir an explicit relative cd operand', () => {
+  // Kills removing the ./ prefix from leading-hyphen cd operands.
+  const dash = resolveLaneBinary({ lane: 'npx vitest run src/a.test.mjs', checkout: '/tmp/repo', scopeFiles: ['-/src/a.test.mjs'], exists: (p) => p === '/tmp/repo/-/node_modules/.bin/vitest' })
+  assert.deepEqual(dash, { lane: 'cd ./- && ./node_modules/.bin/vitest run src/a.test.mjs', source: 'package-local', tool: 'vitest', package_dir: '-', candidates: ['-'] })
+  const option = resolveLaneBinary({ lane: 'npx vitest run src/a.test.mjs', checkout: '/tmp/repo', scopeFiles: ['-P/a.test.mjs'], exists: (p) => p === '/tmp/repo/-P/node_modules/.bin/vitest' })
+  assert.deepEqual(option, { lane: 'cd ./-P && ./node_modules/.bin/vitest run src/a.test.mjs', source: 'package-local', tool: 'vitest', package_dir: '-P', candidates: ['-P'] })
+})

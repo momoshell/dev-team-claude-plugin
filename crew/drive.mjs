@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { SUITE_SLOT_KIND, SLOT_WAIT_INTERVAL_MS, SLOT_WAIT_CEILING_MS, SLOT_UNRESOLVABLE_WAIT_MAX, slotPolicy } from './host-load.mjs'
 import { slotStore } from './reclaim.mjs'
-import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS, validTestRerunCommand } from './lane-red.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES } from './tree-fingerprint.mjs'; import { panelPermission } from './acp-permission.mjs'; import { resolveLaneBinary, moduleResolutionSignature, failingTestsSection, dropPassingLines, stepFailureDiagnostics, failingTestFiles, isolatedTestCommand, CARGO_CAPTURE_OFF, FLAKE_RERUN_REASONS, validTestRerunCommand } from './lane-red.mjs'
 import { classifyTestRunner } from './runner-classify.mjs'; import { stripTypeScriptTypes } from 'node:module'; import { fileURLToPath } from 'node:url'; export const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url))); export const PROVE_MUTATIONS_SCRIPT = join(PLUGIN_ROOT, 'scripts/factory/prove-mutations.mjs'); export const ANCHOR_PIN_SCRIPT = join(PLUGIN_ROOT, 'skills/qa-test-writing/anchor-pin.mjs'); export const PROVE_MUTATIONS_COMMAND = `node ${shellArg(PROVE_MUTATIONS_SCRIPT)}`; export const ANCHOR_PIN_COMMAND = `node ${shellArg(ANCHOR_PIN_SCRIPT)}`; export const CAPABILITIES_PATH = `${PLUGIN_ROOT}/crew/capabilities.json`; export const SCREENER_MODULE = `${PLUGIN_ROOT}/crew/screener.mjs`
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
@@ -9336,7 +9336,7 @@ function runTask(ctx, io, crash) {
   if (planEnv.role === 'planner' && promptScopeHits(scopeFiles, promptSurfacePaths(loadCapabilities())).filter((hit) => !acceptedInheritedScope.preserved.some(({ file }) => file === hit)).length > 0 && !validPlanPromptClaim(planEnv.details?.prompt_claim)) {
     return escalate('plan', 'prompt-claim-missing: prompt-scoped planner plans require one valid prompt_claim', planEnv.artifacts || [])
   }
-  const lane = planEnv.details?.validation_lane || ctx.lane
+  const laneSigState = { sig: null }, lane = (() => { const rawLane = planEnv.details?.validation_lane || ctx.lane; if (!rawLane) return rawLane; const resolvedLane = resolveLaneBinary({ lane: rawLane, checkout: ctx.checkout, scopeFiles, exists: typeof io.exists === 'function' ? (path) => io.exists(path) : undefined }); if (resolvedLane.source === 'package-local') resolvedLane.lane = `CDPATH= ${resolvedLane.lane}`; if (resolvedLane.lane !== rawLane) io.log(recordRow({ at: io.now(), lane_binary: { from: rawLane, to: resolvedLane.lane, source: resolvedLane.source, tool: resolvedLane.tool, package_dir: resolvedLane.package_dir, candidates: resolvedLane.candidates } })); return resolvedLane.lane })()
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
   const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
   if (floorHits.length > 0) {
@@ -11817,7 +11817,7 @@ function runTask(ctx, io, crash) {
       const laneRedArtifact = art(`lane-red-r${round}.md`)
       io.writeFile(laneRedArtifact, `# Red validation lane (round ${round})\n\nCommand:\n    ${lane}\n\nFailing tests (${laneFailures.found} found):\n${laneFailures.text}\n\nFailures:\n${laneTail || 'the lane produced no output'}\n`)
       const laneRedRow = { round, artifact: laneRedArtifact, output_bytes: Buffer.byteLength(laneOutput, 'utf8'), truncated: laneOutput.length > LANE_RED_TAIL_CHARS, tail: laneTail }
-      io.log(recordRow({ at: io.now(), lane_red: laneRedRow }))
+      io.log(recordRow({ at: io.now(), lane_red: laneRedRow })); const laneSig = moduleResolutionSignature(laneOutput); if (laneSig !== null && laneSig === laneSigState.sig) { stageComplete(); return escalate('lane', `lane-environment: identical module-resolution lane failure repeated across rounds (${laneSig})`, [laneRedArtifact]) } laneSigState.sig = laneSig
       if (finalRound()) {
         const c = consultLead(
           `The validation lane is still red after ${round} rounds. Bounce once more with guidance, or escalate?`,

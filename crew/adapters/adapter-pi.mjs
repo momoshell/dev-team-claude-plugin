@@ -323,6 +323,13 @@ function hasPiAgentDir(grants) {
   return grants?.extensions?.some((extension) => ['builtin:codemode', 'builtin:mcp'].includes(extension))
 }
 
+function isPiSeatWithheldEnvKey(key) { return key.startsWith('CREW_ADVISOR') || key === PI_EDIT_ASSIST_ENV || key === 'CREW_PI_AGENTS' }
+
+// A key the seat parts withheld must not return via the daemon's inherited
+// env; an explicit seat-env value (the grant-built one) always wins. Node
+// drops undefined env values at spawn.
+export function piSeatSpawnEnv(inherited = {}, seatEnv = {}) { const env = { ...inherited, ...seatEnv }; for (const key of Object.keys(inherited)) if (isPiSeatWithheldEnvKey(key) && !Object.hasOwn(seatEnv, key)) env[key] = undefined; return env }
+
 export function piRpcSeatParts(spec = {}) {
   const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, editAssist = null, role, taskDir } = spec
   const agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
@@ -340,7 +347,7 @@ export function piRpcSeatParts(spec = {}) {
       '--no-skills', ...skills.flatMap((skill) => ['--skill', skill]),
     ],
     env: {
-      ...Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('CREW_ADVISOR') && key !== PI_EDIT_ASSIST_ENV && key !== 'CREW_PI_AGENTS')),
+      ...Object.fromEntries(Object.entries(env).filter(([key]) => !isPiSeatWithheldEnvKey(key))),
       ...piFffEnv(grants),
       ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),
@@ -486,7 +493,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
   const skills = grants?.skills || []
   return [
-    'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    'env', '-u', 'CREW_ADVISOR_ENDPOINT', '-u', 'CREW_ADVISOR_MODEL', '-u', 'CREW_ADVISOR_MODELS', '-u', 'CREW_ADVISOR_PROVENANCE', '-u', 'CREW_PI_AGENTS', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
     `CREW_FFF=${piFffEnv(grants).CREW_FFF}`,
     // Advisor activation is the sole CREW_ADVISOR* value; the manifest owns the cell.

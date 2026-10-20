@@ -7,6 +7,7 @@ import {
 import { dirname, join } from 'node:path'
 
 import { splitFrames, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate } from './headless-rpc.mjs'
+import { piSeatSpawnEnv } from './adapters/adapter-pi.mjs'
 import { shq } from './headless.mjs'
 import { reclaimStore, PHASES, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 
@@ -139,7 +140,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const shell = `trap ':' TERM INT; rm -f ${shq(paths.exit)}; mkfifo ${shq(paths.fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${paths.pgid}.tmp`)}; mv ${shq(`${paths.pgid}.tmp`)} ${shq(paths.pgid)}; ${shq(launch?.bin)} ${args.map(shq).join(' ')} <${shq(paths.fifo)} >>${shq(paths.stream)} 2>>${shq(paths.stderr)}; printf '%s' $? >${shq(`${paths.exit}.tmp`)}; mv ${shq(`${paths.exit}.tmp`)} ${shq(paths.exit)}`
     store.advance(handle, PHASES.SPAWNING)
     try {
-      child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd, env: { ...process.env, ...(launch?.env || {}) } })
+      child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd, env: piSeatSpawnEnv(process.env, launch?.env || {}) })
       child.unref?.()
     } catch (err) {
       try { store.clear(handle) } catch {}

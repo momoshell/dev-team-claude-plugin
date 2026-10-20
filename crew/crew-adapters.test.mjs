@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, effectiveDeny, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY, hasSkillIsolationSettings, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY, FFF_HOOK_PATH, hasSkillIsolationSettings, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny, piSeatAgentDir } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
@@ -408,7 +408,7 @@ test('Claude ACP launch carries SDK tools directories and frozen binaries', () =
   assert.equal(ACP_BINARY, 'claude-agent-acp')
   assert.deepEqual(launch.args, [])
   assert.equal(launch.mode, 'acceptEdits')
-  assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' })
+  assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
   assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', settingSources: ['project'], settings: PANE_USAGE_SETTINGS, allowedTools: ['Read', 'Write', 'Bash'], tools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
   assert.deepEqual(launch.policy, { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] })
   assert.equal(Object.hasOwn(launch.sessionParams, 'additionalDirectories'), false)
@@ -2432,4 +2432,12 @@ test('CK4 capabilitiesFor refuses a skill grant when the settings reader throws'
     () => capabilitiesFor({ transport: 'pane', grants, readSettings: () => { throw new Error('EPERM') } }),
     (err) => err?.reason === 'grant-unsupported',
   )
+})
+
+test('Claude ACP launch carries the grant-decided CREW_FFF triple', () => {
+  // MUTATION: remove ...fffEnvironment(grants) from the claude ACP launch env and CREW_FFF is undefined there again.
+  const granted = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', cwd: '/checkout', model: 'opus', tools: 'Read,Write', deny: 'Edit,Task', grants: { tools: [], mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] }, promptFile: '/task/role.md', writableDirs: ['/task'], env: { CREW_FFF: 'evil' } })
+  assert.equal(granted.env.CREW_FFF, '1')
+  assert.equal(granted.env.CREW_FFF_NODE, process.execPath)
+  assert.equal(granted.env.CREW_FFF_HOOK, FFF_HOOK_PATH)
 })

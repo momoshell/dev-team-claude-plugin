@@ -1035,12 +1035,12 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent,submit_envelope" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/submit.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: EMPTY_GRANTS }),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
 })
 
@@ -1068,7 +1068,7 @@ test('C1P/C1R subagent-only grants preserve the pre-change argv', () => {
   }
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants }),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const rpc = rpcCommand({
     bin: '/repo/pi', model: 'openai-codex/gpt-5.6', sessionDir: '/tmp/crew-task/sessions', sessionId: 'planner',
@@ -1095,7 +1095,7 @@ test('BG1', () => {
   }
   assert.deepEqual(
     piSeatCommand(builder),
-    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/submit.ts" -e "/repo/crew/pi/extensions/reminders.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" CREW_FFF=0 pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope" --no-extensions -e "/repo/crew/pi/extensions/builderloop.ts" -e "/repo/crew/pi/extensions/readgate.ts" -e "/repo/crew/pi/extensions/skeletonread.ts" -e "/repo/crew/pi/extensions/submit.ts" -e "/repo/crew/pi/extensions/reminders.ts" --no-skills --append-system-prompt "/tmp/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   const builderCommand = piSeatCommand(builder)
   assert.equal(builderCommand.split(' -e ').length - 1, 5)

@@ -210,6 +210,7 @@ export function normalDeps(deps = {}) {
     testCommand: deps.testCommand || (({ checkout }) => checkoutTestCommand({ checkout, factoryRoot: deps.factoryRoot })),
     suiteTimeout: deps.suiteTimeout || (({ checkout }) => checkoutSuiteTimeout({ checkout, factoryRoot: deps.factoryRoot })),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
+    err: deps.err || ((line) => process.stderr.write(`${line}\n`)),
   }
   d.promptMeasurePath = deps.promptMeasurePath || defaultPromptMeasurePath(d)
   return d
@@ -2120,7 +2121,8 @@ export function main(argv, deps = {}) {
           : parsed.verb === 'ingest-all'
           ? ingestAll({ root: parsed.root, dryRun: parsed.dry_run === true, deps: d })
           : reconcile({ ...options, lane: parsed.lanes[0], dryRun: parsed.dry_run === true, reason: parsed.reason })
-    if (result.refusal) return EXIT_REFUSED
+    // stdout carries the step rows; the refusal's message goes to stderr so a refused verb says why.
+    if (result.refusal) { d.err(`${result.refusal.message || result.refusal.reason} [reason: ${result.refusal.reason}]`); return EXIT_REFUSED }
     return EXIT_OK
   } catch (error) {
     if (error instanceof CloseoutUsageError) {

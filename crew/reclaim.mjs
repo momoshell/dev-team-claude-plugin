@@ -303,7 +303,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
         // The option stays private and default-off. For markers, leases and parks
         // a damaged lock is repaired by an ATTESTED override
         // (crew/reclaim.test.mjs:106); only the slot pool opts out, because there
-        // one lock stands in front of K slots (docs/conventions.md:64).
+        // one lock stands in front of K slots (docs/conventions.md 2026-08-02).
         const staleCorrupt = _staleCorruptLock && cur.raw !== null && !validLockRecord(cur)
         if (!staleCorrupt) {
           if (!cur.record) return failure('unresolvable', cur)
@@ -1212,7 +1212,7 @@ export function slotStore({ dir, kind, capacity, deps = {} }) {
   // and a store must never shape another consumer's layout (the hazard recorded
   // at the _lockOnly return above). _staleCorruptLock is the pool's opt-in to
   // the corrupt-lock-is-stale rule: one lock stands in front of K slots here, so
-  // a damaged epoch must not wedge the pool (docs/conventions.md:64). It is only
+  // a damaged epoch must not wedge the pool (docs/conventions.md 2026-08-02). It is only
   // ever DAMAGE — an epoch whose bytes could not be read at all stays
   // unresolvable, because unreadable is not evidence of corrupt.
   const poolDir = join(dir, 'slots')

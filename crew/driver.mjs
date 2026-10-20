@@ -680,7 +680,7 @@ export function logLine(file, obj) {
 // `cmux top` prints positional refs only, so the retained UUID is translated
 // with `cmux tree --json --id-format both --all`, which carries id and ref on
 // one surface object. A ref is valid only inside a single invocation
-// (docs/conventions.md:78, docs/trd-cmux-execution-mode.md:199-200), so the top
+// (docs/conventions.md 2026-08-01, docs/trd-cmux-execution-mode.md:199-200), so the top
 // read is BRACKETED by two tree reads and the mapping must be identical in
 // both; if it moved, this returns unknown rather than another pane's processes.
 //

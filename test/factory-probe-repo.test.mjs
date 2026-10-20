@@ -71,6 +71,9 @@ function git(root, ...args) {
 
 function initGit(root, { commit = false } = {}) {
   git(root, 'init', '-q', '-b', 'main')
+  // git 2.48+ auto-maintenance holds .git/objects/maintenance.lock in the background after
+  // a commit, so a later .git snapshot can see it appear or vanish (IP3, 2026-10-19).
+  git(root, 'config', 'maintenance.auto', 'false')
   if (commit) {
     git(root, 'add', '.')
     git(root, 'commit', '-q', '-m', 'test: fixture')
@@ -1473,6 +1476,8 @@ test('IP3', () => {
     '',
   ].join('\n'))
   initGit(root, { commit: true })
+  // The guard that keeps background maintenance from racing the snapshot below.
+  assert.equal(git(root, 'config', '--local', '--get', 'maintenance.auto').trim(), 'false')
   const before = snapshot(root)
   const entry = idiomEntry(root, 'dependency_injection')
   assert.deepEqual(snapshot(root), before)

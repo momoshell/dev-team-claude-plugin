@@ -3544,3 +3544,14 @@ test('SM5 stacked suite diff spawns are exactly one per lane and absent when gre
   assert.equal(spawned(single.calls, 'diff --name-only').length, 0)
   assert.equal(rows(singleResult).at(-1).detail, null)
 })
+
+test('a refused verb writes its message to stderr and leaves stdout rows unchanged', () => {
+  // kills: main returning EXIT_REFUSED on result.refusal without writing its message
+  const out = []
+  const err = []
+  const deps = { log: (line) => out.push(line), err: (line) => err.push(line), readdirSync: () => { throw new Error('EACCES: denied') } }
+  assert.equal(main(['ingest-all', '--root', '/crew-root-unreadable'], deps), 1)
+  assert.deepEqual(err, ['cannot read crew root /crew-root-unreadable: EACCES: denied [reason: crew-unreadable]'])
+  assert.equal(out.length, 1)
+  assert.equal(JSON.parse(out[0]).skipped_by_reason.root_unreadable, 1)
+})

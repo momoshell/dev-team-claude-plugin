@@ -5,6 +5,7 @@ import {
   unlinkSync as fsUnlinkSync, constants as fsConstants, rmdirSync as fsRmdirSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 import { splitFrames, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate } from './headless-rpc.mjs'
 import { piSeatSpawnEnv } from './adapters/adapter-pi.mjs'
@@ -68,7 +69,8 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
   const pid = deps.pid ?? process.pid
   const journal = deps.log || (() => {})
-  const paths = acpSeatPaths(dir, role, deps.seatCommandRoot)
+  const seatCommandRoot = deps.seatCommandRoot ?? tmpdir()
+  const paths = acpSeatPaths(dir, role, seatCommandRoot)
   const store = reclaimStore({
     dir, actor: `acp:${pid}`, deps,
     evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
@@ -125,7 +127,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   function start() {
     mkdir(paths.dir, { recursive: true })
     mkdir(dirname(paths.fifo), { recursive: true, mode: 0o700 })
-    if (!seatCommandRootPrivate(deps.seatCommandRoot)) throw acpRefuse('acp-spawn-failed', `acp command dir ${dirname(dirname(dirname(paths.fifo)))} is not private to this user`)
+    if (!seatCommandRootPrivate(seatCommandRoot)) throw acpRefuse('acp-spawn-failed', `acp command dir ${dirname(dirname(dirname(paths.fifo)))} is not private to this user`)
     offset = streamEnd()
     rest = Buffer.alloc(0)
     const reservation = store.reserve(role, {
@@ -375,6 +377,12 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return probeBounded(ACP_KILL_PROOF_MS, pgid)
   }
 
+  function removeRuntimeDirs(proven) {
+    if (!proven) return
+    try { rmdir(dirname(paths.fifo)) } catch {}
+    try { rmdir(dirname(dirname(paths.fifo))) } catch {}
+  }
+
   function close() {
     if (closed) return closeResult
     closed = true
@@ -382,8 +390,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const proof = proveDead()
     if (proof.liveness === LIVENESS.DEAD && handle) { try { store.clear(handle) } catch {} }
     try { if (proof.liveness === LIVENESS.DEAD && exists(paths.fifo)) unlink(paths.fifo) } catch {}
-    try { rmdir(dirname(paths.fifo)) } catch {}
-    try { rmdir(dirname(dirname(paths.fifo))) } catch {}
+    removeRuntimeDirs(proof.liveness === LIVENESS.DEAD && handle != null)
     const result = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
     closeResult = result
     log({ at: now(), acp_teardown: { role, ...result } })
@@ -399,8 +406,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     if (proof.liveness === LIVENESS.DEAD) {
       if (handle) { try { store.clear(handle) } catch {} }
       try { if (exists(paths.fifo)) unlink(paths.fifo) } catch {}
-      try { rmdir(dirname(paths.fifo)) } catch {}
-      try { rmdir(dirname(dirname(paths.fifo))) } catch {}
+      removeRuntimeDirs(handle != null)
     }
     closeResult = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
     log({ at: now(), acp_teardown: { role, ...closeResult } })

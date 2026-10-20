@@ -3992,3 +3992,46 @@ test('RV3-1 send delivers to a pre-upgrade worker on its legacy in-task pipe', a
     assert.equal(frame.id, result.command_id)
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
 })
+
+test('RR4 daemon send opens the recorded FIFO when roots differ', async () => {
+  // Kill mutation: ignore the fifo-path record and recompute from the daemon root.
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const seatDir = join(f.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(seatDir, { recursive: true })
+    writeFileSync(join(seatDir, 'pgid'), '900')
+    const rootA = join(f.dir, 'root-a')
+    const fifoA = seatCommandPath(f.crewDir, 'builder', rootA)
+    mkdirSync(dirname(fifoA), { recursive: true })
+    chmodSync(join(rootA, 'crew-rpc'), 0o700)
+    writeFileSync(fifoA, '')
+    mkdirSync(join(f.seatCommandRoot, 'crew-rpc'), { recursive: true })
+    chmodSync(join(f.seatCommandRoot, 'crew-rpc'), 0o700)
+    writeFileSync(join(seatDir, 'fifo-path'), fifoA)
+    const sent = await f.d.send({ run, message: 'guidance', role: 'builder' })
+    const frame = JSON.parse(readFileSync(fifoA, 'utf8').trim())
+    assert.equal(frame.message, 'guidance')
+    assert.equal(frame.id, sent.command_id)
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('RR4 daemon send refuses a non-private recorded command dir', async () => {
+  // Kill mutation: fall back to the daemon-root pipe instead of naming the recorded dir.
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const seatDir = join(f.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(seatDir, { recursive: true })
+    writeFileSync(join(seatDir, 'pgid'), '900')
+    const rootA = join(f.dir, 'root-a')
+    const fifoA = seatCommandPath(f.crewDir, 'builder', rootA)
+    mkdirSync(dirname(fifoA), { recursive: true })
+    chmodSync(join(rootA, 'crew-rpc'), 0o755)
+    writeFileSync(fifoA, '')
+    writeFileSync(join(seatDir, 'fifo-path'), fifoA)
+    await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'builder' }), (err) => {
+      assert.equal(err.code, 'not-live')
+      assert.equal(err.message, `seat builder command dir ${join(rootA, 'crew-rpc')} is not private to this user`)
+      return true
+    })
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})

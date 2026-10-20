@@ -69,7 +69,8 @@ export const SEAT_COMMAND_FILE = 'cmd.fifo'
 // (at most 48 chars, so it stays under NAME_MAX) plus 128 bits of the
 // resolved-path hash, which keeps same-named lanes apart. The full path is at
 // most len(root) + len(role) + 101 bytes; FIFOs have no sun_path limit.
-export function seatCommandPath(crewDir, role, root = tmpdir()) {
+export function seatCommandPath(crewDir, role, root) {
+  if (typeof root !== 'string' || root === '') throw new TypeError('seat command root is required')
   const resolved = resolve(crewDir)
   const key = `${(basename(resolved) || 'lane').slice(0, 48)}-${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}`
   return join(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
@@ -80,7 +81,8 @@ export function inCrewSeatCommandPath(crewDir, role) {
 }
 // A shared tmpdir may contain a co-tenant's node that mkfifo leaves in place.
 // Require an owned, private crew-rpc directory before using a command channel.
-export function seatCommandRootPrivate(root = tmpdir(), uid = process.getuid()) {
+export function seatCommandRootPrivate(root, uid = process.getuid()) {
+  if (typeof root !== 'string' || root === '') throw new TypeError('seat command root is required')
   try {
     const top = fsLstatSync(join(root, 'crew-rpc'))
     return top.isDirectory() && top.uid === uid && (top.mode & 0o077) === 0
@@ -89,6 +91,18 @@ export function seatCommandRootPrivate(root = tmpdir(), uid = process.getuid()) 
 // Oldest command path, inside the seat-visible task tree.
 export function legacySeatCommandPath(taskDir, role) {
   return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
+}
+export const SEAT_COMMAND_RECORD_FILE = 'fifo-path'
+export function readRecordedSeatCommandPath(seatDir, { existsSync, readFileSync }) {
+  try {
+    const path = join(seatDir, SEAT_COMMAND_RECORD_FILE)
+    if (!existsSync(path)) return null
+    const recorded = String(readFileSync(path, 'utf8')).trim()
+    return recorded || null
+  } catch { return null }
+}
+export function recordedSeatCommandPrivate(recorded, uid = process.getuid()) {
+  return seatCommandRootPrivate(dirname(dirname(dirname(dirname(recorded)))), uid)
 }
 export function steerFrame(message) { return { type: 'steer', message } }
 
@@ -843,7 +857,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   const readdir = deps.readdirSync || fsReaddirSync
   const rename = deps.renameSync || fsRenameSync
   const rmdir = deps.rmdirSync || fsRmdirSync
-  const seatCommandRoot = deps.seatCommandRoot
+  const seatCommandRoot = deps.seatCommandRoot ?? tmpdir()
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const uuid = deps.uuid || randomUUID
   const now = deps.now || (() => Date.now())
@@ -999,7 +1013,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
   function legacySeatFifo(role) { return legacySeatCommandPath(taskDir || paths.taskDir, role) }
   function inCrewSeatFifo(role) { return inCrewSeatCommandPath(paths.dir, role) }
   function unlinkSeatFifos(role) {
-    const runtime = seatCommandPath(paths.dir, role, seatCommandRoot)
+    const recorded = readRecordedSeatCommandPath(seatDir(role), { existsSync: exists, readFileSync: read })
+    const runtime = recorded || seatCommandPath(paths.dir, role, seatCommandRoot)
     for (const path of [runtime, inCrewSeatFifo(role), legacySeatFifo(role)]) {
       try { if (exists(path)) unlink(path) } catch {}
     }
@@ -1007,6 +1022,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     // lane key dir; only the last proven-dead seat removes it.
     try { rmdir(dirname(runtime)) } catch {}
     try { rmdir(dirname(dirname(runtime))) } catch {}
+    try { if (recorded) unlink(seatFile(role, SEAT_COMMAND_RECORD_FILE)) } catch {}
   }
   function sessionPath(role) { return seatFile(role, 'session.json') }
   function readJson(path) {
@@ -1342,24 +1358,37 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
     const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
     const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), cmdPath = seatFile(role, 'cmd.json')
     const fifo = seatCommandPath(paths.dir, role, seatCommandRoot)
-    mkdir(dirname(fifo), { recursive: true, mode: 0o700 })
-    if (!seatCommandRootPrivate(seatCommandRoot)) throw staged('rpc-spawn-failed', `rpc command dir ${dirname(dirname(dirname(fifo)))} is not private to this user`, role)
     const old = session(role)
     const sessionId = member.session_id || old.sessionId || uuid()
     const resume = !!(member.started || old.sessionId)
     // A prior process may have exited while this supervisor was away. Observe
     // its completion proof before removing the reusable seat's exit marker.
     const prior = store.reconcile(role)
-    if (prior.marker?.exit && exists(prior.marker.exit)) {
+    const priorPgid = markerPgid(prior.marker)
+    if ((prior.marker?.exit && exists(prior.marker.exit))
+      || (prior.verdict === VERDICTS.RECLAIMABLE && priorPgid !== null
+        && evidencePgid(prior.marker.evidence) === priorPgid
+        && store.probeEvidence(prior.marker.evidence) === LIVENESS.DEAD)) {
       try { store.clear(prior.handle) } catch {}
+      unlinkSeatFifos(role)
     }
     if (exists(exit)) { try { unlink(exit) } catch {} }
     let marker = store.reconcile(role)
+    const recorded = marker.verdict === VERDICTS.BUSY && marker.marker?.pid
+      ? readRecordedSeatCommandPath(dir, { existsSync: exists, readFileSync: read })
+      : null
+    if (!recorded) {
+      mkdir(dirname(fifo), { recursive: true, mode: 0o700 })
+      if (!seatCommandRootPrivate(seatCommandRoot)) throw staged('rpc-spawn-failed', `rpc command dir ${dirname(dirname(dirname(fifo)))} is not private to this user`, role)
+    }
     let fd = null
     let child = null
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
-      const adoptFifo = [fifo, inCrewSeatFifo(role), legacySeatFifo(role)].find((path) => exists(path)) || fifo
+      const recordedPrivate = recorded ? recordedSeatCommandPrivate(recorded) : false
+      const availableFifo = [recordedPrivate && recorded, !recorded && fifo, inCrewSeatFifo(role), legacySeatFifo(role)].find((path) => path && exists(path))
+      if (!availableFifo && recorded && !recordedPrivate) throw staged('rpc-spawn-failed', `rpc command dir ${dirname(dirname(dirname(recorded)))} is not private to this user`, role)
+      const adoptFifo = availableFifo || recorded || fifo
       fd = open(adoptFifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
       const savedArgs = readJson(cmdPath)?.args
       const modelIndex = Array.isArray(savedArgs) ? savedArgs.indexOf('--model') : -1
@@ -1420,6 +1449,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, t
         try { fd = open(fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch { sleep(FIFO_RETRY_MS) }
       }
       if (fd == null) throw staged('rpc-spawn-failed', `rpc fifo did not appear for seat ${role}`, role)
+      try { write(seatFile(role, SEAT_COMMAND_RECORD_FILE), fifo) } catch {}
       member.session_id = sessionId; member.started = true
       notePersist(log, now, role, persistCrew(paths, role, { session_id: sessionId, started: true }, crewDeps))
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), ...(old.lastAssignmentId !== undefined ? { lastAssignmentId: old.lastAssignmentId } : {}) })

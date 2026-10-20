@@ -974,6 +974,7 @@ test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants
         now: () => Date.now(),
         sleep: () => {},
         log: () => {},
+        seatCommandRoot: join(root, 'seat-runtime'),
       },
     })
     api.start()

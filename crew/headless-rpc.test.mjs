@@ -8,7 +8,7 @@ import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
   briefReadCandidates, carriesOwnSpend, closedReason, emptyTurnEnvelope, TRANSPORT_SETTLEMENT, finaliseCensus, finalisePreFirstTurn, foldCensusFrame, foldRpcUsage, headlessRpcIo, isBriefReadToolCall, isBusyRefusal, newCensus, PRE_FIRST_TURN_ABSENT_REASONS, PRE_FIRST_TURN_TOLERANCE_MS, PROMPT_REFUSAL_RETRIES, RPC_PROMPT_DELIVERY_WINDOW_MS, CEILING_STEER_WRITE_MS,
-  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+  rpcCensus, rpcCommand, rpcDeliveryCorpusReport, rpcStreamCensus, seatCommandPath, readRecordedSeatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
   persistedLaunchRecord, PERSISTED_ENV_KEYS, PERSISTED_ENV_WITHHELD_REASON,
 } from './headless-rpc.mjs'
 import { acpClient } from './acp-client.mjs'
@@ -4990,4 +4990,22 @@ test('RV1-2 cross-root recovery retains unproven predecessor runtime paths', () 
 test('RR5 seat command helpers refuse a missing root', () => {
   assert.throws(() => seatCommandPath('/tmp/gate-lane', 'builder'), (err) => err instanceof TypeError && err.message === 'seat command root is required')
   assert.throws(() => seatCommandRootPrivate(), (err) => err instanceof TypeError && err.message === 'seat command root is required')
+})
+
+// MUTATION RR7: accept any recorded path and teardown unlinks an unrelated file the record names.
+test('RR7 a recorded fifo-path that is not this seat runtime FIFO is ignored', () => {
+  const root = scratchDir('headless-rpc-record-shape-')
+  const seat = join(root, 'task', 'headless-rpc', 'builder')
+  mkdirSync(seat, { recursive: true })
+  const deps = { existsSync, readFileSync }
+  const notes = join(root, 'operator-notes.txt')
+  writeFileSync(notes, 'keep me')
+  for (const recorded of [notes, '/x/crew-rpc/k/reviewer/cmd.fifo', '/x/crew-rpc/k/../builder/cmd.fifo', 'x/crew-rpc/k/builder/cmd.fifo']) {
+    writeFileSync(join(seat, 'fifo-path'), recorded)
+    assert.equal(readRecordedSeatCommandPath(seat, deps), null, recorded)
+  }
+  writeFileSync(join(seat, 'fifo-path'), '/x/crew-rpc/k/builder/cmd.fifo')
+  assert.equal(readRecordedSeatCommandPath(seat, deps), '/x/crew-rpc/k/builder/cmd.fifo')
+  assert.equal(readFileSync(notes, 'utf8'), 'keep me')
+  rmSync(root, { recursive: true, force: true })
 })

@@ -98,7 +98,12 @@ export function readRecordedSeatCommandPath(seatDir, { existsSync, readFileSync 
     const path = join(seatDir, SEAT_COMMAND_RECORD_FILE)
     if (!existsSync(path)) return null
     const recorded = String(readFileSync(path, 'utf8')).trim()
-    return recorded || null
+    // Teardown unlinks this path, so only this seat's runtime FIFO shape is trusted:
+    // <abs>/crew-rpc/<key>/<role>/cmd.fifo, the role matching the seat dir.
+    const parts = recorded.split('/')
+    const shaped = recorded.startsWith('/') && !parts.includes('..') && parts.at(-1) === SEAT_COMMAND_FILE &&
+      parts.at(-2) === basename(seatDir) && parts.at(-4) === 'crew-rpc'
+    return shaped ? recorded : null
   } catch { return null }
 }
 export function recordedSeatCommandPrivate(recorded, uid = process.getuid()) {

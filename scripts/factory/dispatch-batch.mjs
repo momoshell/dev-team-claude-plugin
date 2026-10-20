@@ -5104,6 +5104,7 @@ function launchDispatchWave(compiled, launchedLanes) {
 
   const loadGate = parseLoadGate(runFlags)
   const arrivals = []
+  let loadRefusal = null
   for (const [index, item] of settled.entries()) {
     const pendingLanes = settled.slice(index).map((entry) => entry.lane)
     let loadWait = null
@@ -5112,7 +5113,8 @@ function launchDispatchWave(compiled, launchedLanes) {
     } catch (error) {
       const pending = new Set(pendingLanes)
       removeWorktrees({ plans: createdWorktrees.filter((plan) => pending.has(plan.lane)), branches: attachedBranches.filter((plan) => pending.has(plan.lane)), checkout: root, deps: d })
-      throw error
+      loadRefusal = error
+      break
     }
     let firstFailure = null
     let teardown = null
@@ -5260,6 +5262,7 @@ function launchDispatchWave(compiled, launchedLanes) {
     d.log(`dispatch-batch: teardown lane=${item.lane} command=node ${CREW_PATH} teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
   d.log(mergeCheckLine(runs.map((item) => item.lane)))
+  if (loadRefusal) throw loadRefusal
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted, fences: fenceReport }
 }
 

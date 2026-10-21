@@ -2267,7 +2267,7 @@ test('G2 plan and builder closes union de-duplicated, excluded from Refs, and ca
     planEnv: planEnv({ details: { ...planEnv().details, closes: [1520] } }),
     builderEnv: buildEnv({ details: { ...buildEnv().details, closes: ['#1520', '1521', 'invalid', '#1521'] } }),
   })
-  assert.equal(union.split('\n').find((line) => line.startsWith('Closes:')), 'Closes: #1520, #1521')
+  assert.equal(union.split('\n').filter((line) => line.startsWith('Closes:')).join('\n'), 'Closes: #1520\nCloses: #1521')
   const overlapping = composeCommitMessage({
     task: 't1',
     planEnv: planEnv({ details: { ...planEnv().details, issues: [1521, 1522] } }),
@@ -2281,6 +2281,38 @@ test('G2 plan and builder closes union de-duplicated, excluded from Refs, and ca
   assert.ok(body.split('\n').some((line) => line.startsWith('Closes #1521')))
   assert.doesNotMatch(body, /Refs #1521/)
   assert.match(body, /Refs #1522/)
+})
+
+// MUTATION KT1: restore `Closes: ${closes.join(', ')}` in composeCommitMessage (crew/drive.mjs) and the two per-line trailers collapse to one comma-joined line.
+test('KT1 composeCommitMessage emits one Closes trailer line per closing issue', () => {
+  const message = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, closes: [1907, 1909], issues: [1913] } }),
+    builderEnv: buildEnv({ details: { ...buildEnv().details, closes: [] } }),
+  })
+  const closesLines = message.split('\n').filter((line) => line.startsWith('Closes'))
+  assert.deepEqual(closesLines, ['Closes: #1907', 'Closes: #1909'])
+  assert.ok(closesLines.every((line) => /^Closes: #\d+$/.test(line)))
+  assert.ok(message.includes('Closes: #1907\nCloses: #1909\n\nRefs: #1913'))
+  const zero = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, issues: [1913] } }),
+    builderEnv: buildEnv({ details: { ...buildEnv().details, closes: [] } }),
+  })
+  assert.ok(!zero.split('\n').some((line) => line.startsWith('Closes')))
+})
+
+// MUTATION KT2: break the closing-keyword alternative in issueTrailers' line regex in crew/drive.mjs (close[sd]? -> closex on the line-test statement) and the per-line trailers no longer round-trip into closes.
+test('KT2 per-line Closes trailers round-trip through issueTrailers and commitIntent', () => {
+  const builderBody = 'KT2 builder body\nsecond body line'
+  const message = composeCommitMessage({
+    task: 't1',
+    planEnv: planEnv({ details: { ...planEnv().details, closes: [1907, 1909, 1911], issues: [1913] } }),
+    builderEnv: buildEnv({ details: { ...buildEnv().details, commit_message: builderBody } }),
+  })
+  assert.deepEqual(message.split('\n\n').slice(-2), ['Closes: #1907\nCloses: #1909\nCloses: #1911', 'Refs: #1913'])
+  assert.deepEqual(issueTrailers(message), { closes: ['#1907', '#1909', '#1911'], refs: ['#1913'] })
+  assert.equal(commitIntent(message), builderBody)
 })
 
 test('all branch and task paths are shellArg quoted in publication commands', () => {

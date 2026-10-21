@@ -15407,17 +15407,25 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
-// lean: lexical lane classification (cargo, node --test, pytest, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
+// lean: lexical classification of the lane's last && segment after cd/test setup steps (cargo, node --test, pytest, python -m unittest|pytest after no-value flags only), anything else honestly unparsed with the lane as basis, never the suite runner; a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
+export const LANE_SETUP_EXECUTABLES = Object.freeze(['cd', 'test'])
 export function laneHardeningRunner(lane, suiteRunner) {
-  const { shape, words } = laneCommandShape(lane)
-  if (shape === 'unparsable' || words.some((word) => /[&|;<>\x60$]/.test(word))) return suiteRunner
-  const executable = words[0]?.slice(words[0].lastIndexOf('/') + 1)
+  const { words, why } = laneCommandShape(lane)
   const basis = `lane validation_lane: ${lane}`
+  const unparsed = (reason) => ({ runner: 'unparsed', basis: `${basis} · ${reason}` })
+  if (words.length === 0) return unparsed(why)
+  const segments = [[]]
+  for (const word of words) { if (word === '&&') segments.push([]); else segments.at(-1).push(word) }
+  const basename = (word) => word?.slice(word.lastIndexOf('/') + 1)
+  const setupOk = segments.slice(0, -1).every((segment) => LANE_SETUP_EXECUTABLES.includes(basename(segment[0])))
+  const segment = segments.at(-1)
+  if (!setupOk || segment.length === 0 || segments.some((s) => s.some((word) => /[&|;<>\x60$]/.test(word)))) return unparsed('no single test invocation after its leading cd/test steps')
+  const executable = basename(segment[0])
   if (executable === 'cargo') return { runner: 'cargo', basis }
-  if (shape === 'node-test') return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
-  const moduleAt = words.indexOf('-m')
-  if (executable === 'pytest' || (/^python(?:\d+(?:\.\d+)?)?$/.test(executable ?? '') && moduleAt > 0 && words.slice(1, moduleAt).every((word) => /^-[BEIOsSuvqbdP]+$/.test(word)) && ['unittest', 'pytest'].includes(words[moduleAt + 1]))) return { runner: 'python', basis }
-  return suiteRunner
+  if (executable === 'node' && segment.includes('--test')) return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
+  const moduleAt = segment.indexOf('-m')
+  if (executable === 'pytest' || (/^python(?:\d+(?:\.\d+)?)?$/.test(executable ?? '') && moduleAt > 0 && segment.slice(1, moduleAt).every((word) => /^-[BEIOsSuvqbdP]+$/.test(word)) && ['unittest', 'pytest'].includes(segment[moduleAt + 1]))) return { runner: 'python', basis }
+  return unparsed(`runner ${executable} is not a cargo, node --test, pytest or python -m unittest|pytest invocation`)
 }
 export function cargoLintInvocation(invocation) {
   if (typeof invocation !== 'string' || /[\r\n\0]/.test(invocation)) return false

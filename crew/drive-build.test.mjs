@@ -9,7 +9,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, suiteRefusalEnv, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, LANE_SETUP_EXECUTABLES, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -7615,7 +7615,7 @@ const cargoOutput = (name, verdict = 'ok', summary = cargoSummary) => `test suit
 const cargoEntry = (over = {}) => b863InvocationEntry({ name: 'guard_fn', file: 'src/lib.rs', find: 'GUARD: bool = false', replace: 'GUARD: bool = true', ...over })
 const cargoInvocationCase = ({ entry = cargoEntry(), runFn, source = cargoSource, companion = 'pub fn unrelated() {}\n', flipTo } = {}) => {
   const files = { [`${CTX.checkout}/${entry.file}`]: source, [`${CTX.checkout}/src/other.rs`]: companion }
-  const io = invocationProofIo({ entry, files, changed: [entry.file], scopeFiles: [entry.file, 'src/other.rs'], runFn, flipTo: flipTo === undefined ? { set: { [`${CTX.checkout}/${entry.file}`]: `${source}// built repair\n` } } : flipTo })
+  const io = invocationProofIo({ lane: 'cargo test -p fixture', entry, files, changed: [entry.file], scopeFiles: [entry.file, 'src/other.rs'], runFn, flipTo: flipTo === undefined ? { set: { [`${CTX.checkout}/${entry.file}`]: `${source}// built repair\n` } } : flipTo })
   return { io, ctx: { ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, files }
 }
 // RV2-2 (b1145 review): a lane total hides a run that moves between rounds. Mark
@@ -9778,7 +9778,7 @@ test('b869 hardening acceptance', async (t) => {
     assert.equal(result.details.stages.includes('lane:harden:r3'), true)
     const killed = io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'killed').map((entry) => entry.finding_hardened.finding)
     assert.deepEqual(killed, ['RV1', 'RV2'])
-    assert.equal(io.calls.logs.filter((entry) => entry.hardening_observation?.finding === 'RV1').length, 0)
+    assert.equal(io.calls.logs.filter((entry) => entry.hardening_observation?.finding === 'RV1' && entry.hardening_observation?.reason === 'unknown-finding').length, 0)
     assert.doesNotMatch(Object.values(io.calls.writes).join('\n'), /unknown-finding/)
   })
 
@@ -9793,7 +9793,7 @@ test('b869 hardening acceptance', async (t) => {
     const io = b376ProofIo({ hardened: [B376_HARDENED, extra], files: { [`${CTX.checkout}/${B376_TEST_FILE}`]: 'export const repaired = true\n', [`${CTX.checkout}/${B376_IMPL_FILE}`]: 'const guard = false\n' } })
     const result = driveTask({ ...CTX, limits: { build_rounds: 2 } }, io)
     assert.equal(result.status, 'done')
-    const journalled = io.calls.logs.filter((entry) => entry.hardening_observation)
+    const journalled = io.calls.logs.filter((entry) => entry.hardening_observation?.reason === 'unknown-finding')
     assert.equal(journalled.length, 1)
     assert.equal(journalled[0].hardening_observation.finding, 'ZZ9')
     assert.equal(journalled[0].hardening_observation.reason, 'unknown-finding')
@@ -11618,7 +11618,7 @@ test('HN5 unclassified runner uncertainty', () => {
   assertText(invalid.observations[0]?.why ?? '', ['unexpected runner value', 'unverified'], 'unexpected runner observation')
   const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, limits: { build_rounds: 3 } })
   driveTask({ ...CTX, testRunner: unparsed, limits: { build_rounds: 3 } }, io)
-  assert.equal(io.calls.logs.some((row) => row.hardening_observation?.reason === 'runner-unclassified' && row.hardening_observation?.finding === 'F1' && row.hardening_observation?.why.includes('profile-basis-unclassified-7')), true, 'driveTask journals unclassified runner observation')
+  assert.equal(io.calls.logs.some((row) => row.hardening_observation?.reason === 'runner-unclassified' && row.hardening_observation?.finding === 'F1' && row.hardening_observation?.why.includes('lane validation_lane: lane-cmd')), true, 'driveTask journals unclassified runner observation')
 })
 // MUTATION HN6: remove test-runner-mismatch from the end of HARDENING_REFUSALS; the closed refusal contract drifts.
 test('HN6 legacy node runner and closed refusals', () => {
@@ -11661,28 +11661,29 @@ test('HN6 legacy node runner and closed refusals', () => {
 })
 // MUTATION HN7: omit ctx.testRunner from lane:harden's validator call; the cargo lane accepts the node guard and never refuses it.
 test('HN7 cargo lane bounces and escalates', () => {
-  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, limits: { build_rounds: 3 } })
+  const io = b376ProofIo({ hardened: [{ ...B376_HARDENED }], files: { ...B376_FILES }, limits: { build_rounds: 3 }, plan: { validation_lane: 'cargo test -p fixture' }, runs: { 'cargo test -p fixture': { ok: true, output: '' } } })
   const result = driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 3 } }, io)
   const bounce = io.calls.writes[join(TD, 'build-bounce-r2.md')] ?? null
   const reviewBounce = io.calls.writeLog.filter(({ content }) => typeof content === 'string' && content.includes('# Review bounce')).map(({ content }) => content)
-  assertText(bounce ?? '', ['cargo', cargo.basis, '#[test]', 'test-runner-mismatch'], 'driveTask build-bounce-r2.md')
+  assertText(bounce ?? '', ['cargo', 'lane validation_lane: cargo test -p fixture', '#[test]', 'test-runner-mismatch'], 'driveTask build-bounce-r2.md')
   assert.equal(result.status, 'escalation', 'driveTask result status')
   assert.equal(result.details.escalation?.where, 'harden', 'driveTask escalation where')
   assertText(result.details.escalation?.why ?? '', ['cargo', '#[test]', 'test-runner-mismatch'], 'driveTask terminal hardening bounce')
   assert.equal(reviewBounce.some((text) => text.includes('cargo') && text.includes('#[test]')), true, `driveTask review bounce output=${inspect(reviewBounce)}`)
-  const askIo = dispositionIo({ ...D_ASK, hardening: undefined, hardening_why: undefined }, { leadDecision: 'bounce' })
+  const askIo = dispositionIo({ ...D_ASK, hardening: undefined, hardening_why: undefined }, { leadDecision: 'bounce', plan: { validation_lane: 'cargo test -p fixture' }, runs: { 'cargo test -p fixture': { ok: true, output: '' } } })
   driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 2 } }, askIo)
   const askBriefs = Object.values(askIo.calls.writes).filter((text) => typeof text === 'string').join('\n')
   assertText(askBriefs, ['cargo', '#[test]'], 'ask-user hardening brief')
   assert.equal(askBriefs.includes(nodeSentence), false, 'ask-user retained legacy node guidance')
-  const autoIo = dispositionIo({ ...D_AUTO, hardening: undefined, hardening_why: undefined })
+  const autoIo = dispositionIo({ ...D_AUTO, hardening: undefined, hardening_why: undefined }, { plan: { validation_lane: 'cargo test -p fixture' }, runs: { 'cargo test -p fixture': { ok: true, output: '' } } })
   const baseRun = autoIo.run
   let laneRuns = 0
   autoIo.run = function (cmd) {
-    if (cmd === 'lane-cmd' && ++laneRuns === 2) return { ok: false, output: 'auto-fix lane failure' }
+    if (cmd === 'cargo test -p fixture' && ++laneRuns === 2) return { ok: false, output: 'auto-fix lane failure' }
     return baseRun.call(this, cmd)
   }
   driveTask({ ...CTX, testRunner: cargo, limits: { build_rounds: 2 } }, autoIo)
+  assert.equal(laneRuns >= 2, true, 'auto-fix lane failure injected')
   const autoBriefs = Object.values(autoIo.calls.writes).filter((text) => typeof text === 'string').join('\n')
   assertText(autoBriefs, ['cargo', '#[test]'], 'auto-fix hardening brief')
   assert.equal(autoBriefs.includes(nodeSentence), false, 'auto-fix retained legacy node guidance')
@@ -11737,7 +11738,7 @@ test('HB2 spends the final hardening bounce once before terminal refusal', () =>
     '- F1: name-not-new — the declared name F1 guard already exists in the witnessed a.test.mjs: passed',
     '- F1: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse F1 guard.',
     '',
-    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, blind spot: the runner could not be classified (lane validation_lane: lane-cmd · runner lane-cmd is not a cargo, node --test, pytest or python -m unittest|pytest invocation), so a .test.mjs guard\'s presence in the repo suite is unverified; invocation is the form whose run is proven. A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.',
     'Hardening proof for round 3 did not close every finding.',
     'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
   ].join(' ')
@@ -11776,7 +11777,7 @@ test('HB7 terminal hardening refusal retains missing-declaration evidence', () =
     'No guard was declared for:',
     '- F1',
     '',
-    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, blind spot: the runner could not be classified (lane validation_lane: lane-cmd · runner lane-cmd is not a cargo, node --test, pytest or python -m unittest|pytest invocation), so a .test.mjs guard\'s presence in the repo suite is unverified; invocation is the form whose run is proven. A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.',
     'Hardening proof for round 3 did not close every finding.',
     'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
   ].join(' ')
@@ -11843,7 +11844,7 @@ test('RV1-4 final refusal contains literal refuted-row evidence', () => {
     '- F1: name-not-new — the declared name F1 guard already exists in the witnessed a.test.mjs: passed',
     '- F1: declare a NEW top-level test(...) whose name is absent from the reviewed tree; do not reuse F1 guard.',
     '',
-    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, blind spot: the runner could not be classified (lane validation_lane: lane-cmd · runner lane-cmd is not a cargo, node --test, pytest or python -m unittest|pytest invocation), so a .test.mjs guard\'s presence in the repo suite is unverified; invocation is the form whose run is proven. A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.',
     'Hardening proof for round 3 did not close every finding.',
     'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
   ].join(' ')
@@ -11856,7 +11857,7 @@ test('RV1-4 final refusal contains literal refuted-row evidence', () => {
     'No guard was declared for:',
     '- F1',
     '',
-    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.',
+    'Return details.hardened entries shaped exactly as { finding, test, name, file, find, replace } or { finding, invocation, name, file, find, replace }, and "class": "coverage" when the implementation was already correct at review time; the declared name must not exist on the tree the review read. In this bounce, blind spot: the runner could not be classified (lane validation_lane: lane-cmd · runner lane-cmd is not a cargo, node --test, pytest or python -m unittest|pytest invocation), so a .test.mjs guard\'s presence in the repo suite is unverified; invocation is the form whose run is proven. A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.',
     'Hardening proof for round 3 did not close every finding.',
     'A finding whose defect class cannot become a mechanical guard is asked about, not waived: ask with an entry of exactly { "finding": "<id>", "hardening": "ungateable", "hardening_why": "<why the defect class cannot become a mechanical guard>" }, which is still refused builder-exemption until the reviewer approves it.',
   ].join(' ')
@@ -12156,7 +12157,9 @@ test('HL2 lane command classification is conservative and preserves opaque suite
     ['python3.12 -B -q -m unittest', 'python'],
   ]
   for (const [lane, runner] of expected) assert.equal(laneHardeningRunner(lane, suite).runner, runner, lane)
-  for (const lane of ['node scripts/gate.mjs', 'sh -c "cargo test"', 'python tests/run.py -m pytest', 'lane-cmd', '', "python -m 'unterminated", 'cargo test | cat']) assert.equal(laneHardeningRunner(lane, suite), suite, lane)
+  const unknownWhy = (name) => `runner ${name} is not a cargo, node --test, pytest or python -m unittest|pytest invocation`
+  const genericWhy = 'no single test invocation after its leading cd/test steps'
+  for (const [lane, why] of [['node scripts/gate.mjs', unknownWhy('node')], ['sh -c "cargo test"', unknownWhy('sh')], ['python tests/run.py -m pytest', unknownWhy('python')], ['lane-cmd', unknownWhy('lane-cmd')], ['', 'the lane is empty'], ["python -m 'unterminated", 'the lane has an unterminated single quote'], ['cargo test | cat', genericWhy]]) assert.deepEqual(laneHardeningRunner(lane, suite), { runner: 'unparsed', basis: `lane validation_lane: ${lane} · ${why}` }, lane)
   const unparsedSuite = { runner: 'unparsed', basis: 'u' }
   assert.equal(laneHardeningRunner('node --test a.test.mjs', unparsedSuite) === unparsedSuite, true)
   forAll((random) => {
@@ -12172,7 +12175,8 @@ test('HL2 lane command classification is conservative and preserves opaque suite
     return { cmd, runner, opaque: ['node script.mjs', 'sh -c "cargo test"', 'python script.py -m pytest', 'cargo test && cat', 'cargo test | cat'][Math.floor(random() * 5)] }
   }, ({ cmd, runner, opaque }) => {
     assert.equal(laneHardeningRunner(cmd, suite).runner, runner, JSON.stringify({ cmd, runner }))
-    assert.equal(laneHardeningRunner(opaque, suite), suite, opaque)
+    const opaqueWhy = opaque === 'node script.mjs' ? unknownWhy('node') : opaque === 'sh -c "cargo test"' ? unknownWhy('sh') : opaque === 'python script.py -m pytest' ? unknownWhy('python') : genericWhy
+    assert.deepEqual(laneHardeningRunner(opaque, suite), { runner: 'unparsed', basis: `lane validation_lane: ${opaque} · ${opaqueWhy}` }, opaque)
   }, { runs: 100, seed: 1202 })
 })
 
@@ -12250,7 +12254,7 @@ test('HL7 lint predicate rejects operators and cargo test', () => {
   assert.equal(cargoLintInvocation("cargo clippy 'unterminated"), false)
   for (const command of ['cargo test -p crate', 'cargo clippy -p crate && cargo test']) {
     const entry = b863InvocationEntry({ invocation: command })
-    const io = invocationProofIo({ entry, runFn: (_text, n) => ({ ...b863Green(n === 2 ? 0 : 1), output: 'compile complete' }) })
+    const io = invocationProofIo({ lane: 'cargo test -p fixture', entry, runFn: (_text, n) => ({ ...b863Green(n === 2 ? 0 : 1), output: 'compile complete' }) })
     driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
     assert.equal(invocationRows(io).find((row) => row.round === 2)?.outcome, 'unproven', command)
   }
@@ -12272,7 +12276,27 @@ test('HL8 driven Python lane invocation proof is exit-status adjudicated', () =>
   const { invocation: _opaqueInvocation, ...opaqueEntry } = { ...entry, test: 'a.test.mjs' }
   const opaqueIo = invocationProofIo({ lane: opaqueLane, entry: opaqueEntry })
   driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, opaqueIo)
-  assert.match(Object.values(opaqueIo.calls.writes).join('\n'), /test-runner-mismatch/)
+  assert.doesNotMatch(Object.values(opaqueIo.calls.writes).join('\n'), /test-runner-mismatch/)
+  assert.equal(opaqueIo.calls.logs.some((row) => row.hardening_observation?.reason === 'runner-unclassified' && row.hardening_observation?.finding === 'F1' && row.hardening_observation?.why.includes('lane validation_lane: ' + opaqueLane)), true, 'driveTask journals unclassified runner observation')
+})
+
+test('HL11 lane hardening runner classifies only the lane\'s own final invocation', () => {
+  const t265i = 'cd ui && test -f src/proxy/pipeline-binding.dom.test.ts && ./node_modules/.bin/vitest run src/proxy/pipeline-binding.dom.test.ts'
+  const suite = { runner: 'cargo', basis: 'suite' }
+  assert.deepEqual(laneHardeningRunner(t265i, suite), { runner: 'unparsed', basis: 'lane validation_lane: ' + t265i + ' · runner vitest is not a cargo, node --test, pytest or python -m unittest|pytest invocation' })
+  assert.match(hardeningRunnerSentence(laneHardeningRunner(t265i, suite)), /blind spot/)
+  assert.doesNotMatch(hardeningRunnerSentence(laneHardeningRunner(t265i, suite)), /#\[test\]/)
+  for (const [lane, runner, sr] of [['cd crates && cargo test -p x', 'cargo', { runner: 'node', basis: 'suite' }], ['cd ui && test -f x && cargo test -p x', 'cargo', { runner: 'node', basis: 'suite' }], ['cd py && test -f tests/a.py && python3 -m pytest -q tests', 'python', { runner: 'node', basis: 'suite' }], ['cd ui && test -f a.test.mjs && node --test a.test.mjs', 'node', { runner: 'cargo', basis: 'suite' }], ['test -d ui && python3 -m pytest tests', 'python', { runner: 'cargo', basis: 'suite' }], ['cd crates/x && pytest -q tests', 'python', { runner: 'cargo', basis: 'suite' }]]) assert.deepEqual(laneHardeningRunner(lane, sr), { runner, basis: 'lane validation_lane: ' + lane }, lane)
+  assert.deepEqual(LANE_SETUP_EXECUTABLES, ['cd', 'test'])
+  assert.equal(Object.isFrozen(LANE_SETUP_EXECUTABLES), true)
+  const genericWhy = 'no single test invocation after its leading cd/test steps'
+  for (const lane of ['npm run build && cargo test', 'cd ui && cargo test | cat']) assert.deepEqual(laneHardeningRunner(lane, suite), { runner: 'unparsed', basis: 'lane validation_lane: ' + lane + ' · ' + genericWhy }, lane)
+  const io = invocationProofIo({ lane: t265i, entry: { ...entry } })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  const reviewBounce = Object.values(io.calls.writes).find((content) => typeof content === 'string' && content.startsWith('# Review bounce (round 1)'))
+  assert.ok(reviewBounce?.includes('blind spot: the runner could not be classified (lane validation_lane: ' + t265i))
+  assert.doesNotMatch(reviewBounce ?? '', /#\[test\]/)
+  assert.equal((reviewBounce ?? '').includes('the declared runner is cargo'), false)
 })
 
 // MUTATION RV1-1: pass ctx.testRunner to the failed-bounce-write escalation instead of the lane runner

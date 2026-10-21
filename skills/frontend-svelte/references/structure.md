@@ -25,7 +25,7 @@ Keep data acquisition, route parsing, drains, shaping, envelope diffing, layout,
 | `fleet.js` | derive status tones and shape run cells, absence marks, filters, and fleet metrics | `visualizer/web/src/lib/fleet.js:1-177` |
 | `panels.js` | shape panel payloads, freshness, fleet metrics, and panel read loops | `visualizer/web/src/lib/panels.js:1-785` |
 | `timeline.js` | turn timed phases and events into gantt lanes and blocks | `visualizer/web/src/lib/timeline.js:1-83` |
-| `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-542` |
+| `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-546` |
 
 The data flow is server -> `api.js` -> a plain-module shaper (`fleet.js`, `panels.js`, `timeline.js`, or `trace.js`) -> a Svelte component. `visualizer/web/src/App.svelte:29-117` demonstrates the fetch-to-derived-view hop; `visualizer/web/src/lib/FleetTable.svelte:2` demonstrates the component boundary.
 

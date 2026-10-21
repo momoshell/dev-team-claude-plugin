@@ -1004,9 +1004,8 @@ test('a held load refusal outranks a later run failure', async () => {
   const runLanes = spawnedOut.filter((c) => c.args.includes('run') && c.args.includes('--task')).map((c) => c.args[c.args.indexOf('--task') + 1])
   assert.deepEqual(runLanes, ['lane-a', 'lane-b'])
   const removes = spawnedOut.filter((c) => c.args.includes('worktree') && c.args.includes('remove')).map((c) => c.args.at(-1))
-  assert.equal(removes.length, 1)
-  assert.equal(String(removes[0]).endsWith('dt-lane-c'), true)
-  assert.deepEqual(spawnedOut.filter((c) => c.args.includes('branch') && c.args.includes('-D')).map((c) => c.args.at(-1)), ['lane-c'])
+  assert.deepEqual(removes.map((p) => String(p).split('/').at(-1)), ['dt-lane-c', 'dt-lane-a'])
+  assert.deepEqual(spawnedOut.filter((c) => c.args.includes('branch') && c.args.includes('-D')).map((c) => c.args.at(-1)), ['lane-c', 'lane-a'])
 })
 
 const taskOf = (args) => args[args.indexOf("--task") + 1];
@@ -1053,5 +1052,67 @@ test("BS4", async () => {
   try { await dispatchFixture({ label: "bs4-run-failed", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("run") && taskOf(args) === "lane-a" ? { status: 1, stdout: "", stderr: "run exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
   assert.equal(error?.reason, "run-failed");
   assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a", "lane-b"]);
-  assert.deepEqual(removeTargets(spawnedOut), []);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-a"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-a"]);
+  assert.deepEqual(verbLanes(spawnedOut, "teardown"), ["lane-a"]);
+});
+
+// MUTATION RF1: if (!launchedLanes.has(item.lane)) { -> if (false) { leaves the unlaunched lane live; teardown/remove/branch go empty.
+test("RF1", async () => {
+  const spawnedOut = [];
+  let error;
+  try { await dispatchFixture({ label: "rf1-run-failed", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("run") && taskOf(args) === "lane-a" ? { status: 1, stdout: "", stderr: "run exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "run-failed");
+  assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a", "lane-b"]);
+  assert.deepEqual(verbLanes(spawnedOut, "teardown"), ["lane-a"]);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-a"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-a"]);
+});
+
+// MUTATION RF2: if (!launchedLanes.has(item.lane)) { -> if (true) { tears down the already-launched lane-b too.
+// MUTATION RV1-1: reason fallback unknown -> empty leaves an ordinary Error without a reason in the log.
+test("RF2", async () => {
+  const spawnedOut = [];
+  const timeline = [];
+  let error;
+  const originalPush = Array.prototype.push;
+  Array.prototype.push = function (...items) {
+    if (items.some((item) => typeof item === "string" && item.startsWith("dispatch-batch: watch lane=lane-b"))) throw new Error("watch logging failed");
+    return originalPush.apply(this, items);
+  };
+  try { await dispatchFixture({ label: "rf2-run-failed-watch-throw", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("run") && taskOf(args) === "lane-a" ? { status: 1, stdout: "", stderr: "run exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, timeline, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; } finally { Array.prototype.push = originalPush; }
+  const watchFailure = timeline.find((entry) => entry.kind === "log" && String(entry.line).includes("run-failure lane=lane-b"));
+  assert.match(String(watchFailure?.line), /reason=unknown/);
+  assert.match(String(watchFailure?.line), /error=watch logging failed/);
+  assert.deepEqual(verbLanes(spawnedOut, "teardown"), ["lane-a"]);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-a"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-a"]);
+});
+
+// MUTATION RF3: dispatch-batch: run-failure lane= -> dispatch-batch: run-silent lane= silences the log; the timeline finds none.
+test("RF3", async () => {
+  const spawnedOut = [];
+  const timeline = [];
+  let error;
+  try { await dispatchFixture({ label: "rf3-both-run-failed", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("run") ? { status: 1, stdout: "", stderr: "run exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, timeline, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "run-failed");
+  assert.match(error.message, /lane-a/);
+  const runFailures = timeline.filter((entry) => entry.kind === "log" && String(entry.line).includes("run-failure"));
+  assert.equal(runFailures.length, 2);
+  assert.match(String(runFailures[0].line), /lane=lane-a/);
+  assert.match(String(runFailures[0].line), /run-failed/);
+  assert.match(String(runFailures[1].line), /lane=lane-b/);
+  assert.match(String(runFailures[1].line), /run-failed/);
+});
+
+// MUTATION RF4: if (!waveRefusal) waveRefusal = error -> waveRefusal = error lets the later run failure overwrite the held boot refusal.
+test("RF4", async () => {
+  const spawnedOut = [];
+  const timeline = [];
+  let error;
+  try { await dispatchFixture({ label: "rf4-boot-holds-over-run", names: ["lane-a", "lane-b"], spawnResult: (args) => ((args.includes("boot") && taskOf(args) === "lane-b") || (args.includes("run") && taskOf(args) === "lane-a") ? { status: 1, stdout: "", stderr: "exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, timeline, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "boot-failed");
+  const runFailures = timeline.filter((entry) => entry.kind === "log" && String(entry.line).includes("run-failure"));
+  assert.equal(runFailures.some((entry) => String(entry.line).includes("lane=lane-a") && String(entry.line).includes("run-failed")), true);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-b", "dt-lane-a"]);
 });

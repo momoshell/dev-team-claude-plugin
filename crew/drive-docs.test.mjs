@@ -1837,7 +1837,7 @@ test('CZ2 every ADR symbol-in-path pair names a top-level definition', () => {
     for (const [symbol, path] of adrSymbolPairs(text)) {
       let source
       try {
-        source = readFileSync(new URL('../' + path, import.meta.url), 'utf8')
+        source = readFileSync(join(REPO_ROOT, path), 'utf8')
       } catch {
         bad.push(f + ': `' + symbol + '` in `' + path + '` (missing file)')
         continue

@@ -1768,6 +1768,46 @@ test('KT3 ADR-048 build-steps section cites crew and scripts symbols without lin
   }
 })
 
+// MUTATION AD1: re-adding `:26-27` to the `docs/decisions-needed.md` citation (a non-crew/scripts prefix outside KT3's section) makes a backticked path-colon-digits token exist again.
+test('AD1 ADR-048 carries no file-and-line citation anywhere', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-048-ordered-build-steps.md', import.meta.url), 'utf8')
+  const bad = [...adr.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /(?:^|[\w./-]):\d/.test(t))
+  assert.deepEqual(bad, [])
+})
+
+// MUTATION AD2: citing the real `chunkCtxFromArgs` at the wrong path (`crew/drive.mjs`) keeps all seven required pairs present and reddens only the every-pair definition sweep.
+test('AD2 ADR-048 cites the seven driver symbols and every cited pair is defined', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-048-ordered-build-steps.md', import.meta.url), 'utf8')
+  const required = [
+    ['ACCEPTANCE_ITEM', 'crew/drive.mjs'],
+    ['acceptanceCoverage', 'crew/drive.mjs'],
+    ['validateCarve', 'crew/drive.mjs'],
+    ['runTask', 'crew/drive.mjs'],
+    ['CELL_RATE_FLOOR', 'scripts/factory/ledger.mjs'],
+    ['PROMPT_SURFACE', 'crew/protected-paths.mjs'],
+    ['createReturnsSource', 'visualizer/server/returns-source.mjs'],
+  ]
+  const found = [...adr.matchAll(/`([A-Za-z_$][\w$]*)` in `([^`]+)`/g)].map((m) => [m[1], m[2]])
+  const foundKeys = new Set(found.map(([s, p]) => `${s} ${p}`))
+  const missing = required.filter(([s, p]) => !foundKeys.has(`${s} ${p}`))
+  assert.deepEqual(missing, [])
+  const seen = new Set()
+  for (const [symbol, path] of found) {
+    const key = `${symbol} ${path}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+    assert.match(source, new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm'), `${symbol} must be defined in ${path}`)
+  }
+})
+
+// MUTATION AD3: restoring the old sentence brings the fragment back.
+test('AD3 ADR-048 no longer claims file:line citations and still names the read-at commit', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-048-ordered-build-steps.md', import.meta.url), 'utf8')
+  assert.equal(adr.includes('Every `file:line` below'), false)
+  assert.ok(adr.includes('Every description below, except the dated amendments, was read at `46594dad`.'))
+})
+
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.
 test('AR1 ADR register next free number is one past the largest minted number', () => {
   const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')

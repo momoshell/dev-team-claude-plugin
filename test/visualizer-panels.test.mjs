@@ -4081,3 +4081,45 @@ test('RV1-1 same-dispatch phase narratives retain independent disclosure identit
     ['/crew/returns/run-x/d1.planner.json', 'done', renderMarkdown('Plan narrative')],
   ])
 })
+
+test('PP1 pairs same-id dispatches of different roles separately', () => {
+  // Mutation killed: pairing key back to String(id) alone merges the two d1 rows into one 8000 ms planner row.
+  const ev = (id, phase_id, type, role, dispatch_id, at) => ({ id, phase_id, type, payload_json: JSON.stringify({ role, dispatch_id }), started_at: at, ended_at: at })
+  const panel = phasePanel({ phases: [{ id: 1, name: 'plan', status: 'ok' }], gate_checks: [] }, { phase: 'plan', events: [
+    ev(1, 1, 'agent_start', 'planner', 'd1', 1000), ev(2, 1, 'agent_end', 'planner', 'd1', 5000),
+    ev(3, 1, 'agent_start', 'tech-lead', 'd1', 6000), ev(4, 1, 'agent_end', 'tech-lead', 'd1', 9000),
+  ], returns: { envelopes: [] } })
+  assert.deepEqual(panel.dispatches.map((d) => [d.role, d.dispatch_id, d.duration_ms]), [['planner', 'd1', 4000], ['tech lead', 'd1', 3000]])
+  assert.match(panel.headline.text, /1 planner dispatch, 1 tech lead dispatch/)
+})
+
+test('PP2 scopes plan-phase envelopes by (role, dispatch_seq)', () => {
+  // Mutation killed: dropping the raw-role half of the phaseEnvelopes match leaks the reviewer d1 return into plan.
+  const ev = (id, phase_id, type, role, dispatch_id, at) => ({ id, phase_id, type, payload_json: JSON.stringify({ role, dispatch_id }), started_at: at, ended_at: at })
+  const run = { phases: [{ id: 1, name: 'plan', status: 'ok' }, { id: 2, name: 'review', status: 'ok' }], gate_checks: [] }
+  const events = [
+    ev(1, 1, 'agent_start', 'planner', 'd1', 1000), ev(2, 1, 'agent_end', 'planner', 'd1', 5000),
+    ev(3, 1, 'agent_start', 'tech-lead', 'd1', 6000), ev(4, 1, 'agent_end', 'tech-lead', 'd1', 9000),
+    ev(5, 2, 'agent_start', 'reviewer', 'd1', 1000), ev(6, 2, 'agent_end', 'reviewer', 'd1', 5000),
+  ]
+  const returns = { envelopes: [
+    { role: 'planner', dispatch_seq: 1, status: 'done', summary: 'Planner PP2 narrative' },
+    { role: 'tech-lead', dispatch_seq: 1, status: 'done', summary: 'TechLead PP2 narrative' },
+    { role: 'reviewer', dispatch_seq: 1, status: 'done', summary: 'Reviewer PP2 narrative' },
+  ] }
+  const panel = phasePanel(run, { phase: 'plan', events, returns })
+  assert.deepEqual(panel.artifacts.documents.map((d) => d.role).sort(), ['planner', 'tech-lead'])
+  assert.equal(JSON.stringify(panel.artifacts.blocks).includes('Reviewer PP2 narrative'), false)
+})
+
+test('PP3 labels unpaired same-id dispatches with distinct role names', () => {
+  // Mutation killed: label back to 'dispatch ' + dispatch.dispatch_id collapses the two d1 labels to duplicates.
+  const ev = (id, phase_id, type, role, dispatch_id, at) => ({ id, phase_id, type, payload_json: JSON.stringify({ role, dispatch_id }), started_at: at, ended_at: at })
+  const panel = phasePanel({ phases: [{ id: 1, name: 'plan', status: 'running' }], gate_checks: [] }, { phase: 'plan', events: [
+    ev(1, 1, 'agent_start', 'planner', 'd1', 1000), ev(2, 1, 'agent_start', 'tech-lead', 'd1', 6000),
+  ], returns: { envelopes: [] } })
+  const entries = panel.footer.filter((e) => e.reason === 'dispatch-end-not-recorded')
+  assert.equal(entries.length, 2)
+  assert.equal(new Set(entries.map((e) => e.label)).size, entries.length)
+  assert.deepEqual(entries.map((e) => e.label).sort(), ['planner dispatch d1', 'tech lead dispatch d1'])
+})

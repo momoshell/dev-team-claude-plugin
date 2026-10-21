@@ -456,28 +456,32 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   const paired = new Map()
   for (const event of scopedEvents) {
     if (event?.type !== 'agent_start' && event?.type !== 'agent_end') continue
-    const id = payload(event)?.dispatch_id
+    const eventPayload = payload(event)
+    const id = eventPayload?.dispatch_id
     if (id == null || id === '') continue
-    const key = String(id)
-    if (!paired.has(key)) paired.set(key, { start: null, end: null })
+    const key = String(eventPayload?.role ?? '') + ':' + String(id)
+    if (!paired.has(key)) paired.set(key, { id: String(id), start: null, end: null })
     const slot = paired.get(key)
     if (event.type === 'agent_start') { if (slot.start == null) slot.start = event }
     else slot.end = event
   }
-  const dispatches = [...paired.entries()].map(([id, slot]) => {
+  const dispatchIdentities = []
+  const dispatches = [...paired.values()].map((slot) => {
     const startPayload = slot.start ? payload(slot.start) : {}
     const endPayload = slot.end ? payload(slot.end) : {}
-    const digits = String(id).match(/(\d+)$/)
+    const digits = slot.id.match(/(\d+)$/)
     const startMs = phaseTime(slot.start?.started_at ?? slot.start?.ended_at)
     const endMs = phaseTime(slot.end?.ended_at ?? slot.end?.started_at)
+    const dispatch_seq = digits ? Number(digits[1]) : null
+    dispatchIdentities.push({ role: String(startPayload?.role ?? endPayload?.role ?? 'agent'), dispatch_seq })
     return {
-      dispatch_id: String(id),
-      dispatch_seq: digits ? Number(digits[1]) : null,
+      dispatch_id: slot.id,
+      dispatch_seq,
       role: String(startPayload?.role ?? endPayload?.role ?? 'agent').toLowerCase().replaceAll('_', ' ').replaceAll('-', ' '),
       duration_ms: startMs != null && endMs != null && endMs >= startMs ? endMs - startMs : null,
     }
   })
-  const phaseEnvelopes = envelopeList.filter((envelope) => dispatches.some((dispatch) => dispatch.dispatch_seq != null && Number(envelope?.dispatch_seq) === dispatch.dispatch_seq))
+  const phaseEnvelopes = envelopeList.filter((envelope) => dispatchIdentities.some((identity) => identity.dispatch_seq != null && String(envelope?.role ?? 'agent') === identity.role && Number(envelope?.dispatch_seq) === identity.dispatch_seq))
   const humanise = (value) => String(value || 'unknown').replaceAll('_', ' ').replaceAll('-', ' ')
   const formatPaired = (value) => {
     if (value == null) return null
@@ -523,7 +527,7 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   const footer = []
   if (gateRow == null) footer.push({ label: 'gate', reason: 'no-gate-in-phase', text: otherGateLocations.length ? 'Validation evidence is attached to ' + otherGateLocations.join(', ') + '.' : reasonText('no-gate-in-phase') })
   if (artifactDocuments(phaseEnvelopes).length === 0) footer.push({ label: 'envelope narrative', reason: 'no-envelope-narrative-in-phase', text: reasonText('no-envelope-narrative-in-phase') })
-  for (const dispatch of dispatches) if (dispatch.duration_ms == null) footer.push({ label: 'dispatch ' + dispatch.dispatch_id, reason: 'dispatch-end-not-recorded', text: reasonText('dispatch-end-not-recorded') })
+  for (const dispatch of dispatches) if (dispatch.duration_ms == null) footer.push({ label: dispatch.role + ' dispatch ' + dispatch.dispatch_id, reason: 'dispatch-end-not-recorded', text: reasonText('dispatch-end-not-recorded') })
   const gate = gateRow == null
     ? {
       generation: null,

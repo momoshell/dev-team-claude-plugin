@@ -16671,7 +16671,9 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (preRun.thrown !== null) return row('unproven', `invocation-pre-repair-unrunnable:threw-${preRun.thrown?.message ?? String(preRun.thrown)}`)
     const preClass = classifyInvocationResult(preRun.result)
     if (!preClass.runnable) return row('unproven', `invocation-pre-repair-unrunnable:${preClass.reason}`)
-    if (vitest ? named(preRun.result.output) === 'passed' : preRun.result.status === 0) return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair ${vitest ? 'passed by name' : `exited ${preRun.result.status}`}`)
+    const pre = vitest ? named(preRun.result.output) : preRun.result.status === 0 ? 'passed' : 'failed'
+    if (pre === 'passed') return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair ${vitest ? 'passed by name' : `exited ${preRun.result.status}`}`)
+    if (pre !== 'failed') return row('unproven', `vitest named test ${pre ?? 'unmeasured'} on the witnessed pre-repair ${entry.file}; the guard must fail by name there`)
     const controlRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
     if (controlRun.fatal !== null) { fatal = controlRun.fatal; return row('unproven', controlRun.fatal) }
     const controlSideEffected = checkSideEffects('control', controlRun.outside)

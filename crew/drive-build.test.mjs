@@ -12251,10 +12251,10 @@ test('HV3 a vitest guard is proven through invocation by name, and a load failur
   const invocation = './node_modules/.bin/vitest run --reporter=verbose src/banner.test.ts'
   const file = 'ui/src/banner.ts'
   // The exit status each capture was recorded with.
-  const exits = { 'guard-failed': 1, 'guard-passed': 0, 'filtered-verbose': 0, 'load-failed': 1, 'mixed-verbose': 1 }
-  const prove = (mutant, control = 'guard-passed', pre = 'guard-failed', name = 'keeps the decision banner') => {
+  const exits = { 'guard-failed': 1, 'guard-passed': 0, 'filtered-verbose': 0, 'load-failed': 1, 'guard-passed-other-failed': 1 }
+  const prove = (mutant, control = 'guard-passed', pre = 'guard-failed') => {
     const outputs = [pre, control, mutant].map((capture) => [capture, exits[capture]])
-    const vitestEntry = b863InvocationEntry({ invocation, name, file })
+    const vitestEntry = b863InvocationEntry({ invocation, name: 'keeps the decision banner', file })
     const io = invocationProofIo({ lane: VITEST_LANE, entry: vitestEntry, files: { [`${CTX.checkout}/${file}`]: 'const guard = false\n' }, changed: [file], scopeFiles: [file, 'ui/src/banner.test.ts'],
       runFn: (_text, n) => ({ ...b863Green(outputs[n - 1][1]), output: vitestCapture(outputs[n - 1][0]) }) })
     driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
@@ -12273,9 +12273,11 @@ test('HV3 a vitest guard is proven through invocation by name, and a load failur
   // MUTATION: adjudicate the vitest control on exit status and a green run that never printed the guard passes control.
   assert.equal(prove('guard-failed', 'filtered-verbose').row?.outcome, 'name-absent')
   // MUTATION: adjudicate the vitest pre-repair on exit status and a guard that passed while another test failed is not refuted.
-  assert.equal(prove('guard-failed', 'mixed-verbose', 'mixed-verbose', 'top passes').row?.outcome, 'pre-repair-green')
+  assert.equal(prove('guard-failed', 'guard-passed', 'guard-passed-other-failed').row?.outcome, 'pre-repair-green')
   // MUTATION: accept a named pass on a red control run and a guard is proven while another test fails.
-  assert.equal(prove('guard-failed', 'mixed-verbose', 'guard-failed', 'top passes').row?.outcome, 'control-red')
+  assert.equal(prove('guard-failed', 'guard-passed-other-failed').row?.outcome, 'control-red')
+  // MUTATION: let a pre-repair run that never printed the guard proceed and a guard never seen failing is recorded killed.
+  assert.equal(prove('guard-failed', 'guard-passed', 'filtered-verbose').row?.outcome, 'unproven')
 })
 
 test('HV4 a Rust finding in a vitest lane is still proven as a cargo guard', () => {

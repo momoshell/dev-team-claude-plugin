@@ -15407,22 +15407,27 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
-// lean: lexical lane classification (cargo, node --test, pytest, vitest as one && step, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
+export const LANE_SETUP_EXECUTABLES = Object.freeze(['cd', 'test'])
+// lean: lexical lane classification (last && segment after leading cd/test steps only: cargo, node --test, pytest, vitest or npx vitest, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
 export function laneHardeningRunner(lane, suiteRunner) {
-  const { shape, words } = laneCommandShape(lane)
+  const { words, why: shapeWhy } = laneCommandShape(lane)
   const basis = `lane validation_lane: ${lane}`
-  // #1920: a UI lane is `cd ui && test -f x.test.ts && ./node_modules/.bin/vitest run x.test.ts`, so its runner
-  // is the executable of one && step, not the first word; `suite` keeps the suite's runner for non-UI files.
+  const unparsed = (why) => ({ runner: 'unparsed', basis: `${basis} · ${why}` })
+  if (words.length === 0) return unparsed(shapeWhy)
   const steps = [[]]
   for (const word of words) if (word === '&&') steps.push([]); else steps.at(-1).push(word)
-  if (shape !== 'unparsable' && words.every((word) => word === '&&' || !/[&|;<>\x60$]/.test(word)) && steps.some(([head]) => head?.slice(head.lastIndexOf('/') + 1) === 'vitest')) return { runner: 'vitest', basis, suite: suiteRunner }
-  if (shape === 'unparsable' || words.some((word) => /[&|;<>\x60$]/.test(word))) return suiteRunner
-  const executable = words[0]?.slice(words[0].lastIndexOf('/') + 1)
+  const basename = (word) => word?.slice(word.lastIndexOf('/') + 1)
+  const last = steps.at(-1)
+  const setupOk = steps.slice(0, -1).every((segment) => segment.length > 0 && LANE_SETUP_EXECUTABLES.includes(basename(segment[0])))
+  const operatorFree = steps.every((segment) => segment.every((word) => !/[&|;<>\x60$]/.test(word)))
+  if (!setupOk || last.length === 0 || !operatorFree) return unparsed('no single test invocation after its leading cd/test steps')
+  const executable = basename(last[0])
+  if (executable === 'vitest' || (executable === 'npx' && last[1] === 'vitest')) return { runner: 'vitest', basis, suite: suiteRunner }
   if (executable === 'cargo') return { runner: 'cargo', basis }
-  if (shape === 'node-test') return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
-  const moduleAt = words.indexOf('-m')
-  if (executable === 'pytest' || (/^python(?:\d+(?:\.\d+)?)?$/.test(executable ?? '') && moduleAt > 0 && words.slice(1, moduleAt).every((word) => /^-[BEIOsSuvqbdP]+$/.test(word)) && ['unittest', 'pytest'].includes(words[moduleAt + 1]))) return { runner: 'python', basis }
-  return suiteRunner
+  if (executable === 'node' && last.includes('--test')) return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
+  const moduleAt = last.indexOf('-m')
+  if (executable === 'pytest' || (/^python(?:\d+(?:\.\d+)?)?$/.test(executable ?? '') && moduleAt > 0 && last.slice(1, moduleAt).every((word) => /^-[BEIOsSuvqbdP]+$/.test(word)) && ['unittest', 'pytest'].includes(last[moduleAt + 1]))) return { runner: 'python', basis }
+  return unparsed(`runner ${executable} is not a cargo, node --test, pytest, python -m unittest|pytest or vitest invocation`)
 }
 export function cargoLintInvocation(invocation) {
   if (typeof invocation !== 'string' || /[\r\n\0]/.test(invocation)) return false

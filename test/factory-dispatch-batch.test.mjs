@@ -4453,9 +4453,10 @@ test('advisor reservation launch marks a successful run before a later log throw
   const path = join(home, 'factory-state', 'advisor-reservations.json')
   mkdirSync(dirname(path), { recursive: true })
   let id = 0
+  const spawned = []
   const originalPush = Array.prototype.push
   const thrown = new Error('watch logging failed')
-  const options = { label: 'reservation-log-throw', names: ['first', 'second'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { randomUUID: () => `log-${++id}` }, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
+  const options = { label: 'reservation-log-throw', names: ['first', 'second'], home, batchTier: 'build', readAdvisorArms: testRotationRead, rotationDeps: { randomUUID: () => `log-${++id}` }, spawnedOut: spawned, writeFile: (file, text) => { if (String(file) === path) writeFileSync(file, text) } }
   Array.prototype.push = function (...items) {
     if (items.some((item) => typeof item === 'string' && item.startsWith('dispatch-batch: watch lane=first'))) throw thrown
     return originalPush.apply(this, items)
@@ -4465,7 +4466,8 @@ test('advisor reservation launch marks a successful run before a later log throw
   } finally {
     Array.prototype.push = originalPush
   }
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).map(({ lane }) => lane), ['first'])
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).map(({ lane }) => lane), ['first', 'second'])
+  assert.deepEqual(spawned.filter(({ args }) => args.includes('run')).map(({ args }) => args[args.indexOf('--task') + 1]), ['first', 'second'])
 })
 
 test('advisor reservation legacy tuple retraction retains id-bearing reservation', () => {

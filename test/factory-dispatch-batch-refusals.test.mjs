@@ -994,3 +994,64 @@ test('LB2', async () => {
   assert.deepEqual(spawnedOut.filter((c) => c.args.includes('branch') && c.args.includes('-D')).map((c) => c.args.at(-1)), ['lane-c'])
 })
 
+// MUTATION: rethrow waveRefusal before loadRefusal; the later run failure masks the held load refusal.
+test('a held load refusal outranks a later run failure', async () => {
+  const spawnedOut = []
+  let clock = 0
+  let error
+  try { await dispatchFixture({ label: 'lb2-run-booted-pair', names: ['lane-a', 'lane-b', 'lane-c'], runFlags: { 'max-load': '0.5', 'load-wait': '30' }, loadavg: () => spawnedOut.filter((c) => c.args.includes('boot')).length >= 2 ? [16] : [4], cpus: () => new Array(16).fill({}), now: () => clock, sleep: (ms) => { clock += ms }, spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: 'main' }), spawnResult: (args) => args.includes('run') && args.includes('--task') && args[args.indexOf('--task') + 1] === 'lane-a' ? { status: 1, stdout: '', stderr: 'run exploded' } : { status: 0, stdout: '', stderr: '' } }) } catch (caught) { error = caught }
+  assert.equal(error?.reason, 'host-load-saturated')
+  const runLanes = spawnedOut.filter((c) => c.args.includes('run') && c.args.includes('--task')).map((c) => c.args[c.args.indexOf('--task') + 1])
+  assert.deepEqual(runLanes, ['lane-a', 'lane-b'])
+  const removes = spawnedOut.filter((c) => c.args.includes('worktree') && c.args.includes('remove')).map((c) => c.args.at(-1))
+  assert.equal(removes.length, 1)
+  assert.equal(String(removes[0]).endsWith('dt-lane-c'), true)
+  assert.deepEqual(spawnedOut.filter((c) => c.args.includes('branch') && c.args.includes('-D')).map((c) => c.args.at(-1)), ['lane-c'])
+})
+
+const taskOf = (args) => args[args.indexOf("--task") + 1];
+const verbLanes = (spawned, verb) => spawned.filter(({ args }) => args.includes(verb) && args.includes("--task")).map(({ args }) => taskOf(args));
+const removeTargets = (spawned) => spawned.filter(({ args }) => args.includes("worktree") && args.includes("remove")).map(({ args }) => String(args.at(-1)).split("/").at(-1));
+const branchTargets = (spawned) => spawned.filter(({ args }) => args.includes("branch") && args.includes("-D")).map(({ args }) => String(args.at(-1)));
+
+test("BS1", async () => {
+  const spawnedOut = [];
+  let error;
+  try { await dispatchFixture({ label: "bs1-boot-failed", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("boot") && taskOf(args) === "lane-b" ? { status: 1, stdout: "", stderr: "boot exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "boot-failed");
+  assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a"]);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-b"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-b"]);
+});
+
+test("BS2", async () => {
+  const spawnedOut = [];
+  let error;
+  try { await dispatchFixture({ label: "bs2-floor", names: ["lane-a", "lane-b", "lane-c"], spawnResult: (args) => (args.includes("boot") && taskOf(args) === "lane-b" ? { status: 1, stdout: "", stderr: "crew boot refused [band-below-floor]" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "seat-floor-conflict");
+  assert.deepEqual(verbLanes(spawnedOut, "boot"), ["lane-a", "lane-b"]);
+  assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a"]);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-b", "dt-lane-c"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-b", "lane-c"]);
+  assert.deepEqual(verbLanes(spawnedOut, "teardown"), []);
+});
+
+test("BS3", async () => {
+  const spawnedOut = [];
+  let error;
+  try { await dispatchFixture({ label: "bs3-bad-crew", names: ["lane-a", "lane-b"], crewJsonFor: (lane) => (lane === "lane-b" ? "{not json" : JSON.stringify({ lane_name: lane, lane_fence: [], workspace_id: "ws-" + lane })), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "boot-failed");
+  assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a"]);
+  assert.deepEqual(verbLanes(spawnedOut, "teardown"), ["lane-b"]);
+  assert.deepEqual(removeTargets(spawnedOut), ["dt-lane-b"]);
+  assert.deepEqual(branchTargets(spawnedOut), ["lane-b"]);
+});
+
+test("BS4", async () => {
+  const spawnedOut = [];
+  let error;
+  try { await dispatchFixture({ label: "bs4-run-failed", names: ["lane-a", "lane-b"], spawnResult: (args) => (args.includes("run") && taskOf(args) === "lane-a" ? { status: 1, stdout: "", stderr: "run exploded" } : { status: 0, stdout: "", stderr: "" }), spawnedOut, assertQuiet: () => {}, baseBranch: () => ({ branch: "main" }) }); } catch (caught) { error = caught; }
+  assert.equal(error?.reason, "run-failed");
+  assert.deepEqual(verbLanes(spawnedOut, "run"), ["lane-a", "lane-b"]);
+  assert.deepEqual(removeTargets(spawnedOut), []);
+});

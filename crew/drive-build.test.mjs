@@ -12217,6 +12217,11 @@ test('HV1 a vitest step of an && validation lane sets the runner, and only UI fi
   // MUTATION: leave vitest out of the test-runner-mismatch refusal and a .test.mjs guard for a .ts finding is accepted.
   const ui = { ...entry, file: 'ui/src/a.ts' }
   assert.equal(validateHardened({ hardened: [ui] }, owed, scope, runner).refusals[0]?.reason, 'test-runner-mismatch')
+  // MUTATION: drop the vitest-reporter-not-verbose refusal and a reporter that hides passing tests is accepted.
+  const { test: _test, ...invocationEntry } = ui
+  const declare = (invocation) => validateHardened({ hardened: [{ ...invocationEntry, invocation }] }, owed, scope, runner)
+  assert.match(declare('./node_modules/.bin/vitest run src/a.test.ts').refusals[0]?.why ?? '', /^vitest-reporter-not-verbose/)
+  for (const verbose of ['./node_modules/.bin/vitest run --reporter=verbose src/a.test.ts', './node_modules/.bin/vitest run --reporter verbose src/a.test.ts']) assert.equal(declare(verbose).entries.length, 1, verbose)
 })
 
 test('HV2 vitest verdicts come from recorded verbose captures', () => {
@@ -12227,7 +12232,10 @@ test('HV2 vitest verdicts come from recorded verbose captures', () => {
     [mixed, 'nested passes', 'passed'], [mixed, 'outer group > nested fails', 'failed'],
     [mixed, 'top skipped', 'skipped'], [mixed, 'top todo', 'skipped'], [mixed, 'passes', 'absent'], [mixed, 'top missing', 'absent'],
     [vitestCapture('filtered-verbose'), 'top passes', 'skipped'],
-    [vitestCapture('mixed-default'), 'top passes', 'absent'],
+    // MUTATION: bound the result lines by > instead of !== and a forged line in a default-reporter run (which prints
+    // no line for a passing test) reads as a passing guard.
+    [vitestCapture('mixed-default'), 'top passes', null],
+    [vitestCapture('mixed-default').replace('\n\n Test Files', '\n ✓ |node| src/probe/probe.test.ts > top passes 0ms\n\n Test Files'), 'top passes', null],
     [vitestCapture('guard-passed'), 'keeps the decision banner', 'passed'], [vitestCapture('guard-failed'), 'keeps the decision banner', 'failed'],
     [`${mixed}\n${mixed}`, 'top passes', 'ambiguous'],
     // MUTATION: drop the reported > summarized bound and the test's own stdout line forges a result.
@@ -12242,9 +12250,11 @@ test('HV2 vitest verdicts come from recorded verbose captures', () => {
 test('HV3 a vitest guard is proven through invocation by name, and a load failure is not a kill', () => {
   const invocation = './node_modules/.bin/vitest run --reporter=verbose src/banner.test.ts'
   const file = 'ui/src/banner.ts'
-  const prove = (mutant, control = 'guard-passed') => {
-    const outputs = [['guard-failed', 1], [control, 0], [mutant, 1]]
-    const vitestEntry = b863InvocationEntry({ invocation, name: 'keeps the decision banner', file })
+  // The exit status each capture was recorded with.
+  const exits = { 'guard-failed': 1, 'guard-passed': 0, 'filtered-verbose': 0, 'load-failed': 1, 'mixed-verbose': 1 }
+  const prove = (mutant, control = 'guard-passed', pre = 'guard-failed', name = 'keeps the decision banner') => {
+    const outputs = [pre, control, mutant].map((capture) => [capture, exits[capture]])
+    const vitestEntry = b863InvocationEntry({ invocation, name, file })
     const io = invocationProofIo({ lane: VITEST_LANE, entry: vitestEntry, files: { [`${CTX.checkout}/${file}`]: 'const guard = false\n' }, changed: [file], scopeFiles: [file, 'ui/src/banner.test.ts'],
       runFn: (_text, n) => ({ ...b863Green(outputs[n - 1][1]), output: vitestCapture(outputs[n - 1][0]) }) })
     driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
@@ -12262,6 +12272,10 @@ test('HV3 a vitest guard is proven through invocation by name, and a load failur
   assert.equal(prove('load-failed').row?.outcome, 'unproven')
   // MUTATION: adjudicate the vitest control on exit status and a green run that never printed the guard passes control.
   assert.equal(prove('guard-failed', 'filtered-verbose').row?.outcome, 'name-absent')
+  // MUTATION: adjudicate the vitest pre-repair on exit status and a guard that passed while another test failed is not refuted.
+  assert.equal(prove('guard-failed', 'mixed-verbose', 'mixed-verbose', 'top passes').row?.outcome, 'pre-repair-green')
+  // MUTATION: accept a named pass on a red control run and a guard is proven while another test fails.
+  assert.equal(prove('guard-failed', 'mixed-verbose', 'guard-failed', 'top passes').row?.outcome, 'control-red')
 })
 
 test('HV4 a Rust finding in a vitest lane is still proven as a cargo guard', () => {

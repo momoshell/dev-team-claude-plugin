@@ -15571,7 +15571,7 @@ export function cargoNameVerdict(output, name) {
 // #1920: the same adjudication over vitest's verbose reporter, recorded from vitest 5.0.1 in
 // test/fixtures/vitest/: one ` ✓|×|↓|□ [|project| ]<file> > [describe > ]<title>[ 3ms]` line per test and a
 // `      Tests  1 failed | 3 passed | 1 skipped | 1 todo (6)` summary. Test stdout is printed too, so result
-// lines beyond the summaries' totals are unmeasured, as for cargo.
+// lines that differ from the summaries' totals are unmeasured: a forged line, or a reporter that omits passing tests.
 export function vitestNameVerdict(output, name) {
   const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
   const summaries = text.match(/^ +Tests {2}.* \(\d+\)$/gm) ?? []
@@ -15587,7 +15587,7 @@ export function vitestNameVerdict(output, name) {
     if (label === String(name) || label.endsWith(` > ${name}`)) hits.push(match[1])
   }
   if (hits.length > 1) return 'ambiguous'
-  if (reported > summarized) return null
+  if (reported !== summarized) return null
   if (hits.length === 0) return 'absent'
   return hits[0] === '✓' ? 'passed' : hits[0] === '×' ? 'failed' : 'skipped'
 }
@@ -16124,6 +16124,10 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
         continue
       }
+      if (runner.runner === 'vitest' && !/(?:^|\s)--reporter[= ]verbose(?:\s|$)/.test(entry.invocation)) {
+        refuse(id, 'invocation-invalid', `vitest-reporter-not-verbose: the hardened invocation for finding ${id} must pass --reporter=verbose, the only vitest reporter that prints a line for every test`)
+        continue
+      }
     } else {
       if (!hardeningTestPath(entry.test)) {
         refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs${namesTest ? '; for a guard run by any runner other than node --test, declare invocation with the exact command that runs it' : ''}`)
@@ -16628,6 +16632,8 @@ function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, d
   }
 const invoke = () => hardenRun(entry.invocation, { reap: true })
   const vitest = normalizeTestRunner(ctx.testRunner).runner === 'vitest'
+  // #1920: a vitest guard is adjudicated on its own named line, so a mutant that breaks the test file's load is not a kill.
+  const named = (output) => vitestNameVerdict(output, entry.name)
   let fatal = null
   let active = null
   const run = () => {
@@ -16665,7 +16671,7 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (preRun.thrown !== null) return row('unproven', `invocation-pre-repair-unrunnable:threw-${preRun.thrown?.message ?? String(preRun.thrown)}`)
     const preClass = classifyInvocationResult(preRun.result)
     if (!preClass.runnable) return row('unproven', `invocation-pre-repair-unrunnable:${preClass.reason}`)
-    if (preRun.result.status === 0) return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair exited ${preRun.result.status}`)
+    if (vitest ? named(preRun.result.output) === 'passed' : preRun.result.status === 0) return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair ${vitest ? 'passed by name' : `exited ${preRun.result.status}`}`)
     const controlRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
     if (controlRun.fatal !== null) { fatal = controlRun.fatal; return row('unproven', controlRun.fatal) }
     const controlSideEffected = checkSideEffects('control', controlRun.outside)
@@ -16673,13 +16679,11 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (controlRun.thrown !== null) return row('unproven', `invocation-control-unrunnable:threw-${controlRun.thrown?.message ?? String(controlRun.thrown)}`)
     const controlClass = classifyInvocationResult(controlRun.result)
     if (!controlClass.runnable) return row('unproven', `invocation-control-unrunnable:${controlClass.reason}`)
-    // #1920: a vitest guard is adjudicated on its own named line, so a mutant that breaks the test file's load is not a kill.
-    const named = (output) => vitestNameVerdict(output, entry.name)
     const control = vitest ? named(controlRun.result.output) : controlRun.result.status === 0 ? 'passed' : 'failed'
-    if (control === null) return row('unproven', 'vitest named test result was unmeasured on control')
+    if (control === null) return row('unproven', 'vitest named test result was unmeasured on control: its per-test lines did not match the Tests summary')
     if (control === 'absent' || control === 'ambiguous') return row(`name-${control}`, 'the invocation must run vitest with --reporter=verbose so it prints one line per test, and name exactly one of them')
     if (control === 'skipped') return row('control-skipped', 'vitest named test was skipped on control')
-    if (control === 'failed') return row('control-red', `the invocation guard ${vitest ? 'failed by name' : `exited ${controlRun.result.status}`} on control`)
+    if (control === 'failed' || controlRun.result.status !== 0) return row('control-red', `the invocation guard ${control === 'failed' && vitest ? 'failed by name' : `exited ${controlRun.result.status}`} on control`)
     active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
     let mutantRun = null
     try {

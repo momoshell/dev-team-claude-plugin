@@ -417,13 +417,7 @@ test('LG4 tracked detached process group is reaped when its test process is SIGT
       const timer = setTimeout(() => reject(new Error(`blocked child did not exit after SIGTERM (pid ${childProcess.pid})`)), 10000)
       childProcess.once('exit', () => { clearTimeout(timer); resolve() })
     })
-    const goneDeadline = Date.now() + 5000
-    let gone = false
-    while (!gone && Date.now() < goneDeadline) {
-      try { process.kill(-pid, 0) } catch { gone = true }
-      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    assert.throws(() => process.kill(-pid, 0), /ESRCH/)
+    await assertProcessGone(-pid)
   } finally {
     if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     try { childProcess.kill('SIGKILL') } catch {}
@@ -464,13 +458,7 @@ test('WL1 tracked detached process group is reaped when the node --test runner i
       runner.once('exit', () => { clearTimeout(timer); resolve() })
     })
     writeFileSync(release, '')
-    const goneDeadline = Date.now() + 10000
-    let gone = false
-    while (!gone && Date.now() < goneDeadline) {
-      try { process.kill(-pid, 0) } catch { gone = true }
-      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    assert.throws(() => process.kill(-pid, 0), /ESRCH/)
+    await assertProcessGone(-pid, 10000)
   } finally {
     if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     if (Number.isSafeInteger(runner.pid)) { try { process.kill(-runner.pid, 'SIGKILL') } catch {} }
@@ -494,13 +482,7 @@ test('a process group registered by pgid file is read at drain time and does not
     assert.equal(result.status, 0, result.stderr)
     pid = Number(String(readFileSync(pgidFile, 'utf8')).trim())
     assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no pgid: ${pid}`)
-    const deadline = Date.now() + 5000
-    let gone = false
-    while (!gone && Date.now() < deadline) {
-      try { process.kill(pid, 0) } catch { gone = true }
-      if (!gone) await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    assert.throws(() => process.kill(pid, 0), /ESRCH/)
+    await assertProcessGone(pid)
   } finally {
     if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     rmSync(pgidFile, { force: true })
@@ -521,4 +503,54 @@ test('unsafe process group ids never reach process.kill at drain', () => {
   const result = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(log, 'utf8'), '-424242 SIGKILL\n')
+})
+
+async function assertProcessGone(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    let state = 'still present'
+    try { process.kill(pid, 0) } catch (error) {
+      if (error?.code === 'ESRCH') return
+      if (error?.code !== 'EPERM') throw error
+      state = 'unobservable (EPERM)'
+    }
+    assert.ok(Date.now() < deadline, `process ${pid} ${state} after ${timeoutMs} ms`)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+// Mutation killed: accepting EPERM as disappearance returns before the ESRCH probe.
+test('LG4 disappearance polling retries EPERM until ESRCH confirms the group is gone', async () => {
+  const kill = process.kill
+  const codes = ['EPERM', 'EPERM', 'ESRCH']
+  let calls = 0
+  process.kill = (pid, signal) => {
+    assert.equal(pid, -424242)
+    assert.equal(signal, 0)
+    const code = codes[calls++]
+    throw Object.assign(new Error(code), { code })
+  }
+  try {
+    await assertProcessGone(-424242)
+    assert.equal(calls, 3)
+  } finally {
+    process.kill = kill
+  }
+})
+
+// Mutation killed: treating any probe error as absence admits persistent EPERM and unknown errors.
+test('disappearance polling fails closed on denied, interrupted, unknown and live probes', async () => {
+  const kill = process.kill
+  try {
+    process.kill = () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }
+    await assert.rejects(assertProcessGone(-424242, 0), /unobservable \(EPERM\)/)
+    for (const error of [Object.assign(new Error('interrupted'), { code: 'EINTR' }), new Error('unknown')]) {
+      process.kill = () => { throw error }
+      await assert.rejects(assertProcessGone(-424242, 0), (actual) => actual === error)
+    }
+    process.kill = () => undefined
+    await assert.rejects(assertProcessGone(-424242, 0), /still present/)
+  } finally {
+    process.kill = kill
+  }
 })

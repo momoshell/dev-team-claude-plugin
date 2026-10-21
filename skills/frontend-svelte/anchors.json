@@ -52,5 +52,5 @@
   "test/visualizer-panels.test.mjs:1793": "/#each markers as marker/",
   "test/visualizer-panels.test.mjs:1859": "/class=\"bounce-layer\"/",
   "visualizer/web/src/lib/RunDetail.svelte:294": "4rem; display:grid; gap:1rem; }",
-  "visualizer/web/src/lib/trace.js:542": "tone: gateTone(generation?.verdict),"
+  "visualizer/web/src/lib/trace.js:546": "tone: gateTone(generation?.verdict),"
 }

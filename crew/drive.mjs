@@ -4900,7 +4900,7 @@ const SECTION_ORDER = ['## What', '## Why', '## Proof', '## Hardening blind spot
 
 export function composePrBody(record) {
   const rawIntent = neutralizeClosingProse(record?.intent || '').trim()
-  const intent = record?.prompt_claim === PROMPT_NOT_APPLICABLE ? stripPromptClaims(rawIntent).trim() : rawIntent
+  const intent = stripPromptClaims(rawIntent).trim()
   const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
   const whyParts = []
@@ -4960,7 +4960,7 @@ export function composePrBody(record) {
     ...(repeated.length ? [`- Repeated: ${repeated.join(', ')}`] : []),
     ...anomalies.map((row) => neutralizeClosingProse(`- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`)),
   ]
-  const claims = record && Object.hasOwn(record, 'prompt_claim') ? (validPlanPromptClaim(record.prompt_claim) ? [record.prompt_claim] : []) : promptClaimLines(intent)
+  const claims = record && Object.hasOwn(record, 'prompt_claim') ? (validPlanPromptClaim(record.prompt_claim) ? [record.prompt_claim] : []) : promptClaimLines(rawIntent)
   const prSections = [
     ['## What', intent],
     ['## Why', why],
@@ -9448,7 +9448,7 @@ function runTask(ctx, io, crash) {
   gateRepairs = 0
   failDelimiterRepairs = 0 // one bounded correction that does not spend gateRepairs
   gateReverified = null // set only when a MID-RUN repair is accepted:
-  let builderEnv = null
+  let builderEnv = null; let laneIntentEnv = null // first accepted builder envelope of the run; survives suite cycles
   const carriedCorrections = new Map()
   let carriedRound = 0
   const rememberCorrection = (entry, round, mutations) => {
@@ -11795,7 +11795,7 @@ function runTask(ctx, io, crash) {
       buildBrief = b; buildNote = 'build-fix'
       continue
     }
-    builderEnv = env
+    builderEnv = env; laneIntentEnv ??= env
     if (!seededBuild) stageComplete()
     let scopeIo = io
     if (pendingRebaseConflict) {
@@ -13647,9 +13647,9 @@ function runTask(ctx, io, crash) {
     const gateNow = gateBlock()
     // The record IS the narrator's prompt. Driver-composed fields are path-clean: the
     // cold checkout stays in the journal and the gate command renders checkout-relative.
-    // `intent` is the builder's commit body verbatim, so an absolute path it carries reaches the body.
+    // `intent` is recomposed from the FIRST accepted builder envelope (never a later round's repair text) and is still builder prose verbatim, so an absolute path it carries reaches the body; trailers come from the real commit message.
     const record = {
-      intent: commitIntent(message),
+      intent: commitIntent(composeCommitMessage({ task: ctx.task, planEnv, builderEnv: laneIntentEnv ?? builderEnv, brief: briefText })),
       ...(promptClaim ? { prompt_claim: promptClaim.claim } : {}),
       closes: trailers.closes,
       issues: trailers.refs,

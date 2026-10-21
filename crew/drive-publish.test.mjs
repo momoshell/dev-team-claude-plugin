@@ -2452,7 +2452,7 @@ test('composePrBody is pure and renders every populated section with its own val
   const second = composePrBody(JSON.parse(JSON.stringify(record)))
   assert.equal(first, second)
   assert.equal(first, [
-    `## What\nwhy the lane existed\n\n${claim}`,
+    `## What\nwhy the lane existed`,
     '## Why\nCloses #806\nRefs #679, #758',
     '## Proof\n- Gate: 2 checks, 0 failed, 0 errored — discrimination unproven (`gate-cmd`)\n- Suite: warm 11/2/3 · cold 13/4/5, cold-verified from a fresh checkout\n- Review: changes-needed · 1 residual\n  - R1 (cosmetic): leave this note',
     '## Changed\n- crew/drive.mjs',
@@ -4274,3 +4274,46 @@ test('RV1-1 staged returns debris is refused before rebase continue settles', ()
   assert.ok(String(result.details.escalation.why || '').indexOf('returns/injected.json') >= 0, String(result.details.escalation.why || ''))
   assert.equal(String(sh('git log --all --format=%H -- returns/injected.json').stdout || '').trim(), '')
 })
+
+test('PW1 strips the not-applicable claim from What and keeps it once under Prompt measurement', () => {
+  const NA = 'not applicable — citation-only; no seat-behaviour change intended.';
+  const body = composePrBody({ intent: 'Lane change line\n\n' + NA });
+  const section = (name) => {
+    const start = body.indexOf(name + '\n');
+    if (start < 0) return null;
+    const rest = body.slice(start + name.length + 1);
+    const next = rest.indexOf('\n## ');
+    return (next < 0 ? rest : rest.slice(0, next)).trim();
+  };
+  assert.equal(section('## What'), 'Lane change line');
+  assert.equal(section('## Prompt measurement'), NA);
+  assert.equal(body.split(NA).length - 1, 1);
+});
+
+test('PW2 strips a measured claim from What when record carries prompt_claim', () => {
+  const claim = 'Measure: turns per seat; before: 2 turns (n=2); after: 3 turns (n=3).';
+  const body = composePrBody({ intent: 'Lane change line\n\n' + claim, prompt_claim: claim });
+  const section = (name) => {
+    const start = body.indexOf(name + '\n');
+    if (start < 0) return null;
+    const rest = body.slice(start + name.length + 1);
+    const next = rest.indexOf('\n## ');
+    return (next < 0 ? rest : rest.slice(0, next)).trim();
+  };
+  assert.equal(section('## What'), 'Lane change line');
+  assert.equal(section('## Prompt measurement'), claim);
+  assert.equal(body.split(claim).length - 1, 1);
+});
+
+test('PW3 main publication sources What from the first builder envelope', () => {
+  const NA = 'not applicable — citation-only; no seat-behaviour change intended.';
+  const run = runPublished({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, commit_subject: 'fix(crew): the lane subject', prompt_claim: NA } }), 'builder:1': buildEnv({ details: { files_changed: ['a.mjs', 'a.test.mjs'], commit_message: 'Round one: the whole lane change' } }), 'reviewer:1': reviewEnv('changes-needed'), 'builder:2': buildEnv({ details: { files_changed: ['a.mjs', 'a.test.mjs'], commit_message: 'fix(test): round two repair only' } }), 'reviewer:2': reviewEnv('pass') } });
+  assert.equal(run.result.status, 'done');
+  const body = run.io.calls.writes[TD + '/pr-body.md'];
+  const start = body.indexOf('## What\n');
+  const rest = body.slice(start + '## What\n'.length);
+  const end = rest.indexOf('\n## Why');
+  const what = (end < 0 ? rest : rest.slice(0, end)).trim();
+  assert.equal(what, 'Round one: the whole lane change');
+  assert.match(run.io.calls.commits.at(-1).message, /round two repair only/);
+});

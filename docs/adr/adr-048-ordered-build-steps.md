@@ -8,24 +8,25 @@ The idea comes from Kiro's spec tasks. There, `tasks.md` is a checklist, each ta
 question is whether a lane's build stage should work the same way: several ordered, smaller builder assignments, each
 proven by the gate checks it owns, instead of one assignment carrying the whole plan.
 
-Every `file:line` below was read at `46594dad`.
+Every description below, except the dated amendments, was read at `46594dad`.
 
 ## What exists today
 
 **The plan's order is prose that nothing reads.** `plan.md` has a **Sequencing** section, "what lands before what, if
-anything" (`crew/roles/planner.md:30`). No code under `crew/` or `scripts/` reads it.
+anything" (`crew/roles/planner.md`, the **Sequencing** bullet). No code under `crew/` or `scripts/` reads it.
 
-**At plan-accept the driver binds these fields and nothing else:** `files_in_scope` (`crew/drive.mjs:8416`),
-`validation_lane` (`:8446`), `gate_path`/`gate_cmd` (`:8458-8459`) and `mutations` (`:8461`). It also runs the
-acceptance coverage check against the brief (`:8485`). On a plan revision it reads `carve_verdict`/`carve_slices`
-(`:1414-1427`). **On a `--chunked` lane only**, it reads `details.chunks` (`:8498-8519`).
+**At plan-accept the driver binds these fields and nothing else:** `files_in_scope`, `validation_lane`,
+`gate_path`/`gate_cmd` and `mutations` (bound in `runTask` in `crew/drive.mjs`). It also runs the
+acceptance coverage check against the brief (`acceptanceCoverage` in `crew/drive.mjs`). On a plan revision it reads
+`carve_verdict`/`carve_slices` (`validateCarve` in `crew/drive.mjs`). **On a `--chunked` lane only**, it reads `details.chunks`
+(also bound in `runTask` in `crew/drive.mjs`).
 
-**The builder gets the whole plan as one brief.** The first build brief is the plan itself
-(`let suiteBuildBrief = planPath`, `crew/drive.mjs:9870`, carried into `buildBrief` at `:10152`). Each round is one
-stage, `build:r<n>` (`:10452`), and one assignment,
-`assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)` (`:10454`). Every later round is a bounce
-through the same loop: `build-fix` `:10541`, `lane-fix` `:10583`, `gate-fix` `:10731`, `scope-fix` `:10514`/`:10550`.
-The builder charter says "You execute `plan.md` exactly" (`crew/roles/builder.md:3-4`).
+**The builder gets the whole plan as one brief.** The first build brief is the plan itself (`runTask` in `crew/drive.mjs`:
+the local `let suiteBuildBrief = planPath`, carried into `buildBrief`). Each round is one stage, `build:r<n>`, and one
+assignment, `assignAndWait('builder', builderAssignmentBrief(buildBrief), buildNote)` as read at `46594dad`
+(`runTask` in `crew/drive.mjs`). Every later round is a bounce through the same loop: `build-fix`, `lane-fix`,
+`gate-fix` and `scope-fix` (bounce notes in `runTask` in `crew/drive.mjs`).
+The builder charter says "You execute `plan.md` exactly" (`crew/roles/builder.md`, as read at `46594dad`).
 
 **A program shape already exists: `details.chunks`.** It arrived with `c2301a07` (2026-09-19) and is not mentioned
 in the planner charter. `validateChunks` in `crew/drive.mjs` enforces all of the following:
@@ -44,19 +45,19 @@ in the planner charter. `validateChunks` in `crew/drive.mjs` enforces all of the
 **Today a chunk program runs across lanes, never inside one.** `dispatch-batch --from-plan` compiles a parent
 planner envelope's `details.chunks` into one request per chunk (`readChunkProgram` in `scripts/factory/dispatch-batch.mjs`).
 When a plan has no chunks, it derives them from `carve_slices`. Each request carries `adopt` of the parent,
-`assurance: quick` and dependency lane names, and records the wave (`skills/crew-dispatch/references/batch.md:38-42`).
+`assurance: quick` and dependency lane names, and records the wave (`skills/crew-dispatch/references/batch.md`).
 Each chunk lane boots with `--chunked --chunk <id>` (`chunkCtxFromArgs` in `crew/crew.mjs`; `runCommand` in `scripts/factory/dispatch-batch.mjs`) and runs
 a full lane of its own: build, review, suite and publish.
 
 **`carve_slices` is a third, human-routed split.** A plan revision may answer `carve`, and a carve always escalates
-to the human carrying the slices (`crew/roles/planner.md:99-105`).
+to the human carrying the slices (`crew/roles/planner.md`).
 
 **Traceability is already built at the check level.** A brief's `## Acceptance` ids use the same grammar as gate
-check labels (`ACCEPTANCE_ITEM`, `crew/drive.mjs:2331-2337`). Plan-accept escalates when an id has no proving mutation
-(`crew/drive.mjs:8484-8492`, `acceptanceCoverage` `:2370`). An exemption counts as waived, never as covered.
+check labels (`ACCEPTANCE_ITEM` in `crew/drive.mjs`). Plan-accept escalates when an id has no proving mutation
+(`acceptanceCoverage` in `crew/drive.mjs`). An exemption counts as waived, never as covered.
 
-**The visualizer renders no plan content.** `visualizer/server/returns-source.mjs` reads `ledger/run.json` and
-`returns/*.json` (`:47`, `:53-61`). No page renders `plan.md` or `details.chunks`. A journal reader exists
+**The visualizer renders no plan content.** `createReturnsSource` in `visualizer/server/returns-source.mjs` reads
+`ledger/run.json` and `returns/*.json`. No page renders `plan.md` or `details.chunks`. A journal reader exists
 (`visualizer/server/journal-source.mjs`).
 
 ## Decision
@@ -111,7 +112,7 @@ owned checks and their acceptance ids. A plan with no chunks renders as it does 
 
 ### 4. Requirement traceability: no new field, one charter change
 
-`checks_owned` names gate labels, and gate labels *are* acceptance ids (`crew/drive.mjs:2331-2337`). A step therefore
+`checks_owned` names gate labels, and gate labels *are* acceptance ids (`ACCEPTANCE_ITEM` in `crew/drive.mjs`). A step therefore
 traces to the brief's `done_means` transitively, and plan-accept already refuses an uncovered id. So the only
 change is to the charter. `crew/roles/planner.md` documents `details.chunks`, which it does not do today, and says
 each chunk's `checks_owned` should name acceptance ids. A check that is not an acceptance id is recorded as `extra`
@@ -124,7 +125,7 @@ Stepped building means more and smaller builder assignments. The numbers that de
 - **Every extra assignment pays the builder's fixed overhead.** The 2026-09-09 census fit
   (`model_time = overhead + marginal × turns`, 1,388 assignments in 208 lanes) put the builder at **87 s overhead,
   12.3 s/turn marginal (n = 269, R² 0.90)**. The builder's overhead figure is in the operator's notes, not in a
-  tracked document. The tracked record is `docs/decisions-needed.md:26-27`: builder marginal **12.0 s/turn on a first
+  tracked document. The tracked record is `docs/decisions-needed.md`: builder marginal **12.0 s/turn on a first
   round and 15.3 s/turn on later rounds**, and the planner's **169 s fixed overhead × 414 assignments = 19.4 h, 13% of
   146.7 h** of seat wall clock. A k-step lane therefore starts about (k − 1) × 87 s behind before any saving, and the
   deciding lane re-measures that overhead from `seat_turn_census` rather than citing it.
@@ -139,7 +140,7 @@ Stepped building means more and smaller builder assignments. The numbers that de
 
 ## Measurement that decides the default
 
-- **Opt-in only**, for the first **12 stepped lanes** (the repo's `CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:427`).
+- **Opt-in only**, for the first **12 stepped lanes** (the repo's `CELL_RATE_FLOOR` in `scripts/factory/ledger.mjs`).
 - **Assignment:** among plans that declare a chunk program, dispatch alternates stepped and single-brief. The planner
   writes the program either way, so the arms differ only in executor. Matching after the fact (same assurance preset,
   similar check and file counts, same builder cell) is the fallback. It is weaker, and the readout says so.
@@ -167,7 +168,7 @@ Stepped building means more and smaller builder assignments. The numbers that de
 
 1. **This ADR.**
 2. **Planner and validator lane.** `crew/roles/planner.md` documents `details.chunks` and the acceptance-id note
-   (prompt surface, `crew/protected-paths.mjs:15`). The dispatch request gains the stepped switch. `validateChunks`
+   (prompt surface, `PROMPT_SURFACE` in `crew/protected-paths.mjs`). The dispatch request gains the stepped switch. `validateChunks`
    is unchanged, apart from possibly refusing a one-step program on a stepped lane.
 3. **Driver lane.** Build the step loop, the per-step adjudication with its regression rule, the `step:*` journal
    rows and step-granular resume in `crew/drive.mjs`. It is on the protected floor, so it runs rigorous with
@@ -201,7 +202,7 @@ At plan-accept, when the chunks first exist, a valid program of 2+ chunks with a
 
 The supplied motivating context is 149 multi-chunk envelopes / 396 planner envelopes across 282 lanes; 98 accepted / 149 multi-chunk envelopes, 50 malformed-check-array / 149, and 1 unbuildable-first / 149. Supplied carry-over / total builder context is 67% (underlying sample/token counts unreported), and round-start context is 7k→126k. PR 1664 merged; zero stepped runs and no post-change A/B benefit are measured. These are attributed supplied figures, not this implementation's results.
 
-Measurement: `ledger.mjs context` (builder first and peak context per assignment, denominators beside rates, `thin` below 12) is the instrument, but today it groups by role and model only and classifies executor from `effective_execution` (`scripts/factory/ledger.mjs:5170`), which stays `full` for a default-stepped lane; the by-executor split is therefore `unmeasured — reason: the ledger does not ingest the `execution-default` journal row`, and the reversal trigger below cannot fire until a follow-on lane ingests that row (`executor`, `reason`) into the ledger.
+Measurement: `ledger.mjs context` (builder first and peak context per assignment, denominators beside rates, `thin` below 12) is the instrument, but today it groups by role and model only and classifies executor from `effective_execution` (`scripts/factory/ledger.mjs`), which stays `full` for a default-stepped lane; the by-executor split is therefore `unmeasured — reason: the ledger does not ingest the `execution-default` journal row`, and the reversal trigger below cannot fire until a follow-on lane ingests that row (`executor`, `reason`) into the ledger.
 
 This amendment supersedes the Measurement section and decision 5 above. Once that follow-on makes the split measurable, at 12 stepped lanes reverse if builder peak context is not lower OR escalations/lane rise. It also supersedes the Out of scope sentence's “Making stepped the default.” No savings are demonstrated by this amendment.
 

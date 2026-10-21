@@ -11357,6 +11357,9 @@ function runTask(ctx, io, crash) {
   // trap that second generation in exactly the deadlock this removes. The reset happens
   // where — and only where — Gate C arms a newly reviewed debt.
   let hardenAppeals = 0
+  // The round whose hardening appeal came back done for the current debt generation;
+  // reset with hardenAppeals where Gate C arms a newly reviewed debt.
+  let hardenAppealRuled = null
   const witnessTree = (files) => {
     const witness = new Map()
     for (const file of Array.isArray(files) ? files : []) {
@@ -12090,7 +12093,9 @@ function runTask(ctx, io, crash) {
         // debt with whatever tentative fields it left behind. Gate triage takes the same
         // guard at crew/drive.mjs:4967.
         // MUTATION C6: drop the status guard and a NON-done appeal envelope waives the debt.
-        const marks = appeal?.status === 'done' ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
+        const ruled = appeal?.status === 'done'
+        if (ruled) hardenAppealRuled = round
+        const marks = ruled ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
         settleBlindSpots(marks.map(({ id }) => id))
         excused = new Set(marks.map(({ id }) => id))
@@ -12098,7 +12103,9 @@ function runTask(ctx, io, crash) {
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
         stageComplete()
       }
-      const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding))
+      // MUTATION AP4: keep the pre-appeal builder-exemption wording after a done ruling and
+      // the builder is bounced to wait for a ruling the driver already holds.
+      const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding)).map((refusal) => hardenAppealRuled !== null && refusal.reason === 'builder-exemption' ? { ...refusal, reason: 'appeal-declined', why: `the reviewer ruled in the round-${hardenAppealRuled} hardening appeal and did not mark ${refusal.finding} ungateable; the appeal is spent — a permanent named guard proven by its declared mutation is owed` } : refusal)
       const liveRows = rows.filter((row) => !excused.has(row.finding))
       const finalHardenBounce = plans && finalRound() && hardenFinalBounces < HARDEN_FINAL_BOUNCE_MAX
       if (hardenCleared(liveRefusals, liveRows)) {
@@ -12316,6 +12323,7 @@ function runTask(ctx, io, crash) {
         const debt = hardeningDebt(review.details)
         if (debt.owed.length > 0 || debt.exempt.length > 0) {
           hardenAppeals = 0
+          hardenAppealRuled = null
           const tree = witnessTree(scopeFiles)
           const exempted = new Set(debt.exempt.map(({ id }) => id))
           hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !exempted.has(id)), exempt: hardenOwed.exempt }
@@ -14866,7 +14874,8 @@ export function guardedWrite(io, filePath, contents) {
 export function acceptedRawById(details) {
   const accepted = new Map()
   const seen = new Set()
-  for (const entry of Array.isArray(details?.findings) ? details.findings : []) {
+  const entries = Array.isArray(details?.findings) ? details.findings : []
+  for (const entry of entries) {
     if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id.trim() === '') continue
     if (!FINDING_SEVERITIES.includes(entry.severity)) continue
     if (seen.has(entry.id)) continue
@@ -15942,21 +15951,26 @@ export function hardeningAppealable(refusals) {
   // fix — a missing declaration, a malformed claim — spends the lane's one reviewer appeal.
   return (Array.isArray(refusals) ? refusals : []).some((refusal) => HARDENING_APPEAL_REFUSALS.includes(refusal.reason) && typeof refusal.appeal === 'string' && refusal.appeal !== '')   // ANCHOR HA1
 }
-// The appeal READER. Only a reviewer-origin envelope reaches it — the driver assigns the
-// reviewer seat — and only an id the review ALREADY owed can be excused: an appeal may not
-// mint a finding, re-open a closed one, or excuse something no review raised. It reads the
-// appeal envelope's normalised findings directly, not `hardeningDebt`: an appeal reviewer
-// may re-report the owed finding at a severity other than must-fix, and `hardeningDebt`'s
-// must-fix filter (the normal path, unchanged) would drop the grant before the mark is
-// read. The mark's shape ('ungateable' plus a NON-EMPTY hardening_why, via
-// `hardeningOf` inside `reviewFindings`) is still decided by one predicate everywhere.
+// Only reviewer-origin appeals reach this reader; only already-owed ids can be excused.
+// Read appeal fields directly: reviewFindings and hardeningDebt filter by severity,
+// which appeals do not require. hardeningOf validates the mark and non-empty reason.
 export function hardeningAppealMarks(details, owed) {
   const wanted = new Set((Array.isArray(owed) ? owed : []).map(({ id }) => id))
   // MUTATION C3: drop the owed intersection and an appeal reviewer can excuse a finding
   // the review never raised — a mark minted rather than granted.
   // MUTATION HA-SEV: add a must-fix severity filter to the appeal read below and a
   // should-fix re-report of an owed finding drops the reviewer's grant.
-  return (reviewFindings(details)?.findings ?? []).filter(({ id, hardening }) => wanted.has(id) && hardening === 'ungateable').map(({ id, hardening_why }) => ({ id, why: hardening_why }))               // ANCHOR HA2
+  // MUTATION AP1: route this read back through reviewFindings and an appeal entry with
+  // no severity — a field the appeal brief never asks for — is rejected unread.
+  const marks = []
+  const seen = new Set()
+  for (const entry of Array.isArray(details?.findings) ? details.findings : []) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !wanted.has(entry.id) || seen.has(entry.id)) continue   // ANCHOR HA2
+    if (hardeningOf(entry) !== 'ungateable') continue
+    seen.add(entry.id)
+    marks.push({ id: entry.id, why: entry.hardening_why.trim() })
+  }
+  return marks
 }
 export function hardeningAppealLines(round, owed, refusals, rows) {
   const byId = new Map((Array.isArray(owed) ? owed : []).map((finding) => [finding.id, finding]))

@@ -3,7 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { tokenizeJs } from './js-tokens.mjs'
-import { INFRASTRUCTURE_INTERRUPTIONS, infrastructureInterruptionOf } from './drive.mjs'
+import { INFRASTRUCTURE_INTERRUPTIONS, hardeningAppealMarks, infrastructureInterruptionOf } from './drive.mjs'
 import {
   staleSpawnProof, publicationIo, ANCHOR_PIN_COMMAND, PUBLISH_WARM_OUTPUT, DRIVE_JOURNAL_EXPECTED, driveJournalSites, runCmdFixture, shellArg,
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
@@ -4689,6 +4689,85 @@ test('AS3 a should-fix appeal grant issues no harden-fix bounce', () => {
   const { io } = appealSeverityRun()
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
   assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 0)
+})
+
+const appealGrantRun = () => {
+  const { severity: _unrated, ...unratedMark } = { ...B376_APPEAL_MARK }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('changes-needed', [unratedMark]),
+    files: { ...B376_FILES },
+  })
+  return { io, result: driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io) }
+}
+
+const appealDeclineRun = () => {
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: b376Review('pass', []), reviewer3: b376Review('pass', []),
+    files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  return { io, result: driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io) }
+}
+
+test('AP1 severity-less appeal grant finishes the lane done', () => {
+  const { result } = appealGrantRun()
+  assert.equal(result.status, 'done')
+})
+
+test('AP2 severity-less appeal grant journals one ungateable row with the reviewer reason', () => {
+  const { io } = appealGrantRun()
+  const rows = io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').map((entry) => entry.finding_hardened)
+  assert.deepEqual(rows.map((row) => row.finding), ['F1'])
+  assert.deepEqual(rows.map((row) => row.why), ['the reviewer approved the exception'])
+})
+
+test('AP3 severity-less appeal grant issues no harden-fix bounce', () => {
+  const { io } = appealGrantRun()
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'builder' && note === 'harden-fix').length, 0)
+})
+
+test('AP4 declined appeal bounce states appeal-declined for the finding', () => {
+  const { io } = appealDeclineRun()
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
+  assert.match(bounce, /F1: appeal-declined/)
+  assert.equal(/F1: builder-exemption/.test(bounce), false)
+})
+
+test('AP5 hardeningAppealMarks reads the appeal fields and ignores severity', () => {
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', hardening: 'ungateable', hardening_why: ' why ' }] }, [{ id: 'F1' }]), [{ id: 'F1', why: 'why' }])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', severity: 'bogus', hardening: 'ungateable', hardening_why: ' why ' }] }, [{ id: 'F1' }]), [{ id: 'F1', why: 'why' }])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', hardening: 'ungateable', hardening_why: ' why ' }] }, [{ id: 'F2' }]), [])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', hardening: 'ungateable', hardening_why: '   ' }] }, [{ id: 'F1' }]), [])
+})
+
+test('hardening appeal non-done envelope writes no appeal-declined', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(Object.values(io.calls.writes).some((text) => /appeal-declined/.test(text)), false)
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
+  assert.match(bounce, /F1: builder-exemption/)
+})
+
+test('hardeningAppealMarks grants critical and should-fix and keeps the first grant', () => {
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', severity: 'critical', hardening: 'ungateable', hardening_why: ' first ' }] }, [{ id: 'F1' }]), [{ id: 'F1', why: 'first' }])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', severity: 'should-fix', hardening: 'ungateable', hardening_why: ' second ' }] }, [{ id: 'F1' }]), [{ id: 'F1', why: 'second' }])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', hardening: 'ungateable', hardening_why: ' first ' }, { id: 'F1', hardening: 'ungateable', hardening_why: ' second ' }] }, [{ id: 'F1' }]), [{ id: 'F1', why: 'first' }])
+  assert.deepEqual(hardeningAppealMarks({ findings: [{ id: 'F1', hardening: 'ungatable', hardening_why: ' why ' }] }, [{ id: 'F1' }]), [])
+})
+
+test('reviewFindings still rejects a severity-less ordinary review entry', () => {
+  assert.deepEqual(reviewFindings({ findings: [{ id: 'F1', location: 'a.mjs:1', summary: 'the implementation defect' }] }), { findings: [], rejected: [{ index: 0, why: 'severity outside the closed set' }] })
+})
+
+// MUTATION: move hardenAppealRuled = null into the harden stage, and the r3 re-ask reverts to the wait wording.
+test('declined hardening ruling is still stated at the harden escalation', () => {
+  const { result } = appealDeclineRun()
+  assert.match(result.details.escalation.why, /F1: appeal-declined/)
+  assert.match(result.details.escalation.why, /round-2 hardening appeal/)
+  assert.equal(/grants nothing until the reviewer approves it/.test(result.details.escalation.why), false)
 })
 
 test('#900 ordinary builder defects and pre-repair-green spend no appeal', () => {

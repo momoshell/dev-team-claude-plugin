@@ -12039,7 +12039,7 @@ function runTask(ctx, io, crash) {
     // ADR-038: proof on the changed surface beats argument about it.
     if (hardenOwed.owed.length > 0) {
       stage(`lane:harden:r${round}`)
-      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope, laneHardeningRunner(lane, ctx.testRunner))
+      const { entries, refusals, observations } = validateHardened(builderEnv.details, hardenOwed.owed, inScope, laneHardeningRunner(lane, ctx.testRunner), ctx.testRunner)
       for (const observation of observations ?? []) panelLog({ hardening_observation: { round, ...observation } })
       const prescribed = new Set(hardenOwed.owed.filter((finding) => finding.prescription).map(({ id }) => id))
       // A prescribed guard goes in a DIFFERENT test file that the lane may write: in scope, or
@@ -16046,7 +16046,7 @@ export function hardeningTestPath(file) {
   return typeof file === 'string' && file.trim() !== '' && file.endsWith('.test.mjs')
 }
 
-export function validateHardened(details, owed, inScope, testRunner) {
+export function validateHardened(details, owed, inScope, testRunner, suiteRunner) {
   const wanted = Array.isArray(owed) ? owed : []
   const wantedIds = wanted.map(({ id }) => id)
   const wantedSet = new Set(wantedIds)
@@ -16144,6 +16144,12 @@ export function validateHardened(details, owed, inScope, testRunner) {
       }
       if (runner.runner !== 'node' && runner.runner !== 'unparsed') {
         refuse(id, 'test-runner-mismatch', `the declared ${runner.runner} runner (${runner.basis}) cannot run a .test.mjs guard; declare invocation with the exact command that runs it`)
+        continue
+      }
+      // An unclassified lane runs no .test.mjs guard it can be shown to run; only a node (or itself unclassified) suite still might.
+      const suite = suiteRunner === undefined ? null : normalizeTestRunner(suiteRunner)
+      if (runner.runner === 'unparsed' && suite && suite.runner !== 'node' && suite.runner !== 'unparsed') {
+        refuse(id, 'test-runner-mismatch', `the lane runner is unclassified (${runner.basis}) and the suite runner is ${suite.runner} (${suite.basis}), so neither runs a .test.mjs guard; declare invocation with the exact command that runs it`)
         continue
       }
     }

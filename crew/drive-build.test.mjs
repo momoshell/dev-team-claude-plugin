@@ -12401,8 +12401,12 @@ test('HL8 driven Python lane invocation proof is exit-status adjudicated', () =>
   const { invocation: _opaqueInvocation, ...opaqueEntry } = { ...entry, test: 'a.test.mjs' }
   const opaqueIo = invocationProofIo({ lane: opaqueLane, entry: opaqueEntry })
   driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, opaqueIo)
-  assert.doesNotMatch(Object.values(opaqueIo.calls.writes).join('\n'), /test-runner-mismatch/)
-  const opaqueObs = opaqueIo.calls.logs.filter((row) => row.hardening_observation?.finding === 'F1')
+  // An unclassified lane under a cargo suite has no command that runs a .test.mjs guard, so the guard is refused.
+  assert.match(Object.values(opaqueIo.calls.writes).join('\n'), /the lane runner is unclassified \(lane validation_lane: node scripts\/gate\.mjs · [^)]*\) and the suite runner is cargo \(fixture cargo runner\)/)
+  const nodeSuiteIo = invocationProofIo({ lane: opaqueLane, entry: { ...opaqueEntry } })
+  driveTask({ ...CTX, testRunner: { runner: 'node', basis: 'fixture node runner' }, limits: { build_rounds: 2 } }, nodeSuiteIo)
+  assert.doesNotMatch(Object.values(nodeSuiteIo.calls.writes).join('\n'), /test-runner-mismatch/)
+  const opaqueObs = nodeSuiteIo.calls.logs.filter((row) => row.hardening_observation?.finding === 'F1')
   assert.deepEqual(opaqueObs.map((row) => row.hardening_observation.reason), ['runner-unclassified'])
   assert.ok(opaqueObs[0].hardening_observation.why.includes('lane validation_lane: node scripts/gate.mjs'))
 })

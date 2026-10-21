@@ -74,13 +74,13 @@ lane, whose fence is non-empty; and on an UNMEASURED fence, which is a stated
 blind spot rather than a clear.
 
 **Grounds, measured 2026-09-19.** Three call sites already applied this rule by
-hand and were never reconciled with the Accepted cost —
-`crew/drive-docs.test.mjs:574`, `skills/crew-dispatch/exhibits.test.mjs:99` and
-`crew/drive-review.test.mjs:3919`. The contradiction was not theoretical: on
+hand and were never reconciled with the Accepted cost — at commit `53e326ef`,
+`crew/drive-docs.test.mjs`, `skills/crew-dispatch/exhibits.test.mjs` and
+`crew/drive-review.test.mjs` each applied the owed-here rule by hand. The contradiction was not theoretical: on
 2026-09-19 `main` was RED on `crew/drive-review.test.mjs` `b600 N1` with six
 shifted pins in `skills/pr-review/anchors.json`. Before that, 13 pins across
 `skills/crew-recovery` and `skills/backend-node` were stale on `main` while
-`npm test` reported 5746 pass / 0 fail — the largest, `crew/drive.mjs:8101`, by
+`npm test` reported 5746 pass / 0 fail — the largest, a `crew/drive.mjs` pin, by
 453 lines. The warning printed to stderr inside a green suite, where nobody
 reads it, and the operator pass the Accepted cost relies on was simply not run.
 

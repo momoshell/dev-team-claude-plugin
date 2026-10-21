@@ -107,7 +107,7 @@ But `crew/drive.mjs` is where the **queue** is: **#1051, #1021, #1003, #931,
 lane may hold it. #1051 alone costs every judge lane ~27 minutes.
 
 **A split is not the cheapest way to unblock that.** The mutex is a dispatcher
-property: `scopeMatcher` (`crew/drive.mjs:2087-2090`) is `path === entry` or a
+property: `scopeMatcher` in `crew/drive.mjs` is `path === entry` or a
 directory prefix, so a fence cannot say *"this lane owns `enforceTurnCeiling`"*.
 **#1061** proposes sub-file scopes over the clusters `seams.mjs` already emits,
 which would unlock much of that queue at no migration cost — the same move
@@ -317,8 +317,7 @@ Order, by edges per cluster ascending — cheapest real seam first:
 | `crew/drive.mjs` | 8,257 | 32 | **9,641** | **LAST**: 28 pins across 6 manifests, 12 reaching tests, protected floor |
 
 `crew/drive.mjs` goes last and not first, despite being the file the queue is
-behind. Its `runTask` spans `:2944-6928` — 3,985 lines under ONE top-level
-declaration — so it is the hardest interface to design, and it is the only
+behind. Its `runTask` spanned 3,985 lines under ONE top-level declaration as measured at commit `245209b4`, so it is the hardest interface to design, and it is the only
 candidate whose migration runs as a judge lane against the file it is migrating.
 The four files above it are where the technique is proven at lower cost.
 
@@ -370,8 +369,7 @@ size is citing the wrong thing.
 
 ### Consequence 2 — the unlock is act 1, and it arrives before any file is divided
 
-The 19 issues converge on `runTask` (`crew/drive.mjs:2944-6928`, 3,985 lines under
-ONE top-level declaration), which is why one span per file means one lane. **Once
+The 19 issues converge on `runTask` (`crew/drive.mjs`; 3,985 lines under ONE top-level declaration as measured at commit `245209b4`), which is why one span per file means one lane. **Once
 those decisions live behind narrow interfaces, span fences begin to work on the
 file** and several lanes can hold disjoint pieces of it — *before* the file is
 ever divided.

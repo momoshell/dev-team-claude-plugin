@@ -8,11 +8,11 @@ This record is written, not ratified; no Wave 1 lane starts before the operator 
 
 This record starts from the transport and outcome boundaries already present in the checkout, rather than making the protocol responsible for facts it does not own.
 
-- `crew/seat-io.mjs:35-36` names the two bespoke headless transports already shipped: `headless-json` and `headless-rpc`. The pane transport is a separate mode.
-- `crew/drive.mjs:627` contains the `validEnvelope` check whose `assignment_id` comparison prevents a stale return from satisfying a new assignment. That anti-replay boundary belongs to the envelope, not to a transport.
-- The Pi adapter documents its `tool_deny` capability at `crew/adapters/adapter-pi.mjs:20-24`; its `translateDeny` seam is the adapter boundary that maps the roster's Claude-named deny list into Pi names.
-- The bespoke signal dance is visible at `crew/headless-rpc.mjs:33-35` for the exit-marker window and repeated TERM delivery, and `crew/headless-rpc.mjs:36` for FIFO retries. It is operational machinery of the retiring transport, not an outcome record.
-- ADR-029 keeps the rule that `idle ≠ success` (`docs/adr/adr-029-headless-observability-interjection.md:23`, `docs/adr/adr-029-headless-observability-interjection.md:146`). A screen, stream, heartbeat or process state may be transport and observability, but the envelope and durable task records remain authoritative.
+- `HEADLESS_TRANSPORT` in `crew/seat-io.mjs` and `HEADLESS_RPC_TRANSPORT` in `crew/seat-io.mjs` name the two bespoke headless transports already shipped: `headless-json` and `headless-rpc`. The pane transport is a separate mode.
+- `validEnvelope` in `crew/drive.mjs` is the check whose `assignment_id` comparison prevents a stale return from satisfying a new assignment. That anti-replay boundary belongs to the envelope, not to a transport.
+- The Pi adapter documents its `tool_deny` capability in `INVARIANT` in `crew/adapters/adapter-pi.mjs`; its `translateDeny` seam is the adapter boundary that maps the roster's Claude-named deny list into Pi names.
+- The bespoke signal dance is visible in `EXIT_MARKER_WINDOW_MS` in `crew/headless-rpc.mjs` and `TERM_REPEAT_MS` in `crew/headless-rpc.mjs` for the exit-marker window and repeated TERM delivery, and `FIFO_RETRIES` in `crew/headless-rpc.mjs` for FIFO retries. It is operational machinery of the retiring transport, not an outcome record.
+- ADR-029 keeps the rule that `idle ≠ success` (ADR-029 section 2 and section 7: `docs/adr/adr-029-headless-observability-interjection.md`). A screen, stream, heartbeat or process state may be transport and observability, but the envelope and durable task records remain authoritative.
 
 The ACP facts in this record are attributed to the TRD's reading of upstream protocol and adapter documentation. This lane did not boot an ACP adapter; the Wave 0 spike is the place to verify the upstream behaviours that are explicitly named as gaps below.
 
@@ -95,7 +95,7 @@ plan growth by seat model is unmeasured — the R9 run reported rounds only; #78
 
 The TRD §9 limitations are named gaps, not losses hidden by this record.
 
-- **Pi permission requests.** pi-acp does not implement `session/request_permission`. The verified adapter-side boundary remains `--exclude-tools` (`crew/adapters/adapter-pi.mjs:130`), so Pi seats keep that tool exclusion and Pi permission escalation is out of scope until upstream lands it. The protocol limitation is TRD-attributed and was not live-verified by this lane.
+- **Pi permission requests.** pi-acp does not implement `session/request_permission`. The verified adapter-side boundary remains `--exclude-tools` (`translateDeny` in `crew/adapters/adapter-pi.mjs`), so Pi seats keep that tool exclusion and Pi permission escalation is out of scope until upstream lands it. The protocol limitation is TRD-attributed and was not live-verified by this lane.
 - **Claude SDK mapping.** `@agentclientprotocol/claude-agent-acp` wraps `@anthropic-ai/claude-agent-sdk`, not the `claude` CLI. The effort flag, `--append-system-prompt`, per-seat settings files, and the `"<synthetic>"` refusal shape are CLI behaviours; each needs an SDK equivalent pinned by a Wave 0 fixture before a Claude ACP seat is trusted at judge tier. This mapping is also TRD-attributed rather than a live boot result here.
 
 ## 10. Alternatives rejected

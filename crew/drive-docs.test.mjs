@@ -149,9 +149,7 @@ test('SD1', () => {
   const cited = [...seg.matchAll(/`(crew\/pi\/extensions\/[\w.-]+\.ts)`/g)].map((m) => m[1]).sort()
   assert.deepEqual(cited, derived)
   assert.ok(seg.replace(/\s+/g, ' ').includes('Four extensions do it'))
-  const floorLine = readFileSync(join(REPO_ROOT, 'scripts/factory/ledger.mjs'), 'utf8').split('\n').findIndex((l) => l === 'export const CELL_RATE_FLOOR = 12') + 1
-  assert.ok(floorLine >= 1)
-  assert.ok(s.includes('`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:' + floorLine + '`)'))
+  assert.ok(s.includes('`CELL_RATE_FLOOR` in `scripts/factory/ledger.mjs`'))
   assert.ok(s.includes("`pi.on('tool_result', …)` (`attachBuilderLoop`, `crew/pi/extensions/builderloop.ts`; `attachReadGate`, `crew/pi/extensions/readgate.ts`)."))
   assert.ok(s.includes('the operator removed the skill on 2026-10-19'))
 })
@@ -1808,6 +1806,67 @@ test('AD3 ADR-048 no longer claims file:line citations and still names the read-
   assert.ok(adr.includes('Every description below, except the dated amendments, was read at `46594dad`.'))
 })
 
+const ADR_PENDING_FILE_LINE = [
+  'adr-029-headless-observability-interjection.md',
+  'adr-030-acceptance-authorship.md',
+  'adr-044-declared-topologies-name-executor-paths.md',
+  'adr-047-the-advisor-is-a-roster-seat.md',
+  'adr-050-seat-skills-are-granted-not-pasted.md',
+]
+const adrDirFiles = () => readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => f.endsWith('.md')).sort()
+const adrFileLineTokens = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /\.[A-Za-z][A-Za-z0-9]*:\d/.test(t) || /^:\d/.test(t))
+const adrSymbolPairs = (text) => [...text.matchAll(/`([A-Za-z_$][\w$]*)` in `([^`]+)`/g)].map((m) => [m[1], m[2]]).filter(([, p]) => /\.(mjs|js|ts)$/.test(p))
+const readAdrFile = (f) => readFileSync(new URL('../docs/adr/' + f, import.meta.url), 'utf8')
+const namesTopLevelDefinition = (source, symbol) => new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm').test(source)
+
+// MUTATION CZ1: expanding "at commit `53e326ef`" in ADR-040 to add a backticked crew/drive-docs.test.mjs:574 token makes a cleaned file carry a token again.
+test('CZ1 ADR file-and-line citations survive only in the five PENDING files', () => {
+  assert.deepEqual(adrFileLineTokens('`crew/drive.mjs:12`'), ['crew/drive.mjs:12'])
+  assert.deepEqual(adrFileLineTokens('`surface:27` `[::1]` `2026-10-18T07:28:19Z`'), [])
+  assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), ADR_PENDING_FILE_LINE)
+})
+
+// MUTATION CZ2: citing FIFO_RETRIES at crew/drive.mjs instead of crew/headless-rpc.mjs names no definition there — the finish/EXECUTABLE_SHAPES probes pin definition-vs-mention.
+test('CZ2 every ADR symbol-in-path pair names a top-level definition', () => {
+  const probe = 'export const EXECUTABLE_SHAPES = Object.freeze({\n  finish: Object.freeze({}),\n})\n'
+  assert.equal(namesTopLevelDefinition(probe, 'EXECUTABLE_SHAPES'), true)
+  assert.equal(namesTopLevelDefinition(probe, 'finish'), false)
+  const bad = []
+  for (const f of adrDirFiles()) {
+    const text = readAdrFile(f)
+    for (const [symbol, path] of adrSymbolPairs(text)) {
+      let source
+      try {
+        source = readFileSync(join(REPO_ROOT, path), 'utf8')
+      } catch {
+        bad.push(f + ': `' + symbol + '` in `' + path + '` (missing file)')
+        continue
+      }
+      if (!namesTopLevelDefinition(source, symbol)) bad.push(f + ': `' + symbol + '` in `' + path + '`')
+    }
+  }
+  assert.deepEqual(bad, [])
+  for (const f of ['adr-036-acp-seat-transport.md', 'adr-037-local-models.md', 'adr-038-floor-forces-proof-not-rounds.md', 'adr-042-split-the-suites-not-the-driver.md', 'adr-049-builder-edit-assist.md', 'adr-051-finish-shape.md']) {
+    assert.ok(adrSymbolPairs(readAdrFile(f)).length >= 1, 'expected at least one symbol-in-path pair in ' + f)
+  }
+})
+
+// MUTATION CZ3: citing scopeMatcher at crew/pi/extensions/advisor.ts (a same-named definition exists there) removes ADR-042's required pair while CZ2 still passes.
+test('CZ3 cleaned ADRs cite the eight required symbol pairs', () => {
+  const required = [
+    ['adr-036-acp-seat-transport.md', 'validEnvelope', 'crew/drive.mjs'],
+    ['adr-036-acp-seat-transport.md', 'translateDeny', 'crew/adapters/adapter-pi.mjs'],
+    ['adr-037-local-models.md', 'classifyAdvisorCell', 'crew/crew.mjs'],
+    ['adr-037-local-models.md', 'assertBandFloors', 'crew/crew.mjs'],
+    ['adr-038-floor-forces-proof-not-rounds.md', 'proposeShape', 'scripts/factory/make-brief.mjs'],
+    ['adr-042-split-the-suites-not-the-driver.md', 'scopeMatcher', 'crew/drive.mjs'],
+    ['adr-049-builder-edit-assist.md', 'CELL_RATE_FLOOR', 'scripts/factory/ledger.mjs'],
+    ['adr-051-finish-shape.md', 'EXECUTABLE_SHAPES', 'crew/variants.mjs'],
+  ]
+  const missing = required.filter(([f, symbol, path]) => !adrSymbolPairs(readAdrFile(f)).some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.
 test('AR1 ADR register next free number is one past the largest minted number', () => {
   const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')
@@ -2042,7 +2101,6 @@ test('SP7', () => {
 test('AW1 ADR-049 Amendment 1 starts the A/B window at PR 1860', () => {
   const adr = readFileSync(join(REPO_ROOT, 'docs/adr/adr-049-builder-edit-assist.md'), 'utf8')
   const index = readFileSync(join(REPO_ROOT, 'docs/adr/README.md'), 'utf8')
-  const ledger = readFileSync(join(REPO_ROOT, 'scripts/factory/ledger.mjs'), 'utf8')
   const heading = '## Amendment 1 (2026-10-18, operator decision) — the A/B window starts at PR 1860'
   const reverseAt = adr.indexOf('## Reverses if')
   const amendmentAt = adr.indexOf(heading)
@@ -2051,8 +2109,7 @@ test('AW1 ADR-049 Amendment 1 starts the A/B window at PR 1860', () => {
   assert.ok(adr.includes("Only `run_configurations` rows whose `edit_assist_source` is `'rotation'` count."))
   assert.ok(adr.includes('Rows before this window are request-set flags, not arms, and are not A/B evidence.'))
   assert.ok(adr.includes("**What does not change.** Stage 1's existing decisions are unchanged."))
-  const floorLine = ledger.split('\n').findIndex((line) => line === 'export const CELL_RATE_FLOOR = 12') + 1
-  assert.ok(adr.includes('`CELL_RATE_FLOOR`, `scripts/factory/ledger.mjs:' + floorLine + '`)'))
+  assert.ok(adr.includes('`CELL_RATE_FLOOR` in `scripts/factory/ledger.mjs`'))
   const tableRow = index.split('\n').find((line) => line.startsWith('| 049 |'))
   const listRow = index.split('\n').find((line) => line.startsWith('- **ADR-049'))
   assert.ok(tableRow.includes('**ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**'))

@@ -5111,6 +5111,7 @@ function launchDispatchWave(compiled, launchedLanes) {
   const loadGate = parseLoadGate(runFlags)
   const arrivals = []
   let loadRefusal = null
+  let waveRefusal = null
   for (const [index, item] of settled.entries()) {
     const pendingLanes = settled.slice(index).map((entry) => entry.lane)
     let loadWait = null
@@ -5122,136 +5123,155 @@ function launchDispatchWave(compiled, launchedLanes) {
       loadRefusal = error
       break
     }
-    let firstFailure = null
-    let teardown = null
-    for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {
-      const boot = bootOnce({ item, registerPath, transport, runFlags, deps: d })
-      if (boot.ok) break
-      // A ratified floor refusal is a DECISION, not an accident: the same seats refuse
-      // the same way on a retry, so retrying it burns a second dispatch to reach the
-      // same answer. #767 ask 1 is a retry around a LOST boot, never around one that
-      // was answered.
-      if (boot.floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${boot.floorReason}]: ${boot.why}`, SEAT_FLOOR_CONFLICT)
-      if (attempt >= BOOT_ATTEMPTS) {
-        refuse(`crew boot failed for ${item.lane} after ${BOOT_ATTEMPTS} attempts - attempt 1: ${firstFailure ?? boot.why}; attempt ${attempt}: ${boot.why}`, BOOT_FAILED)
+    try {
+      let firstFailure = null
+      let teardown = null
+      for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {
+        const boot = bootOnce({ item, registerPath, transport, runFlags, deps: d })
+        if (boot.ok) break
+        // A ratified floor refusal is a DECISION, not an accident: the same seats refuse
+        // the same way on a retry, so retrying it burns a second dispatch to reach the
+        // same answer. #767 ask 1 is a retry around a LOST boot, never around one that
+        // was answered.
+        if (boot.floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${boot.floorReason}]: ${boot.why}`, SEAT_FLOOR_CONFLICT)
+        if (attempt >= BOOT_ATTEMPTS) {
+          refuse(`crew boot failed for ${item.lane} after ${BOOT_ATTEMPTS} attempts - attempt 1: ${firstFailure ?? boot.why}; attempt ${attempt}: ${boot.why}`, BOOT_FAILED)
+        }
+        firstFailure = boot.why
+        teardown = teardownBetweenAttempts({ item, deps: d })
+        d.log(`dispatch-batch: boot-retry lane=${item.lane} attempt=${attempt} first_failure=${firstFailure} teardown=${teardown.verdict} teardown_exit=${teardown.exit ?? 'none'} teardown_why=${JSON.stringify(teardown.why)}`)
       }
-      firstFailure = boot.why
-      teardown = teardownBetweenAttempts({ item, deps: d })
-      d.log(`dispatch-batch: boot-retry lane=${item.lane} attempt=${attempt} first_failure=${firstFailure} teardown=${teardown.verdict} teardown_exit=${teardown.exit ?? 'none'} teardown_why=${JSON.stringify(teardown.why)}`)
-    }
-    const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane, deps: d })
-    if (firstFailure !== null) {
-      const row = bootRetryRow({ lane: item.lane, first: firstFailure, teardown })
-      // Instrumentation is never load-bearing: the retry has already happened and the
-      // log line above carries the same fact, so a journal that cannot be appended
-      // never fails a lane.
-      try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
-    }
-    if (loadWait) {
-      try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(bootLoadRow({ lane: item.lane, record: loadWait.record, waited_ms: loadWait.waited_ms, polls: loadWait.polls }))}\n`) } catch { /* instrumentation is never load-bearing */ }
-    }
-    let crew
-    try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
-      refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
-    }
-    if (!crew || typeof crew !== 'object' || Array.isArray(crew)) {
-      refuse(`crew boot produced a structurally invalid crew.json for ${item.lane}: expected an object`, BOOT_FAILED)
-    }
-    // A pane boot's proof is what boot RETURNED, not the argv it was given:
-    // crew.mjs writes workspace_id null whenever no workspace was created
-    // (crew/crew.mjs:1626), and a --panes lane with a null workspace is exactly
-    // the silent degradation this flag exists to remove.
-    const workspaceId = typeof crew.workspace_id === 'string' && crew.workspace_id.trim() ? crew.workspace_id : null
-    if (transport === PANE_TRANSPORT && !workspaceId) {
-      refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
-    }
-    const arrival = checkArrival({ crew, lane: item.lane })
-    const journal = join(dirname(path), 'journal.jsonl')
-    for (const observation of arrival.observations || []) {
-      const row = { at: new Date().toISOString(), event: FENCE_OBSERVATION_EVENT, lane: item.lane, reason: observation.reason, detail: observation.detail }
-      try {
-        d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
-      } catch (err) {
-        d.log(`dispatch-batch: ${FENCE_OBSERVATION_EVENT} journal append failed lane=${item.lane}: ${err?.message || String(err)} observation=${JSON.stringify(observation)}`)
+      const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane, deps: d })
+      if (firstFailure !== null) {
+        const row = bootRetryRow({ lane: item.lane, first: firstFailure, teardown })
+        // Instrumentation is never load-bearing: the retry has already happened and the
+        // log line above carries the same fact, so a journal that cannot be appended
+        // never fails a lane.
+        try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
       }
-    }
-    const admissionRows = fenceReport.perLane[item.lane]?.fence_admissions || []
-    if (admissionRows.length > 0) {
-      let journalExists = false
-      try { journalExists = d.existsSync(journal) } catch (err) {
-        d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal probe failed lane=${item.lane}: ${err?.message || String(err)}`)
+      if (loadWait) {
+        try { d.appendFileSync(join(dirname(path), 'journal.jsonl'), `${JSON.stringify(bootLoadRow({ lane: item.lane, record: loadWait.record, waited_ms: loadWait.waited_ms, polls: loadWait.polls }))}\n`) } catch { /* instrumentation is never load-bearing */ }
       }
-      if (!journalExists) {
-        d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal unavailable lane=${item.lane} path=${journal}`)
-      } else {
-        for (const admission of admissionRows) {
-          const row = { at: new Date().toISOString(), event: FENCE_ADMISSION_EVENT, lane: item.lane, file: admission.file, source: admission.source }
-          try {
-            d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
-          } catch (err) {
-            d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal append failed lane=${item.lane} file=${admission.file}: ${err?.message || String(err)}`)
+      let crew
+      try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
+        refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
+      }
+      if (!crew || typeof crew !== 'object' || Array.isArray(crew)) {
+        refuse(`crew boot produced a structurally invalid crew.json for ${item.lane}: expected an object`, BOOT_FAILED)
+      }
+      // A pane boot's proof is what boot RETURNED, not the argv it was given:
+      // crew.mjs writes workspace_id null whenever no workspace was created
+      // (crew/crew.mjs:1626), and a --panes lane with a null workspace is exactly
+      // the silent degradation this flag exists to remove.
+      const workspaceId = typeof crew.workspace_id === 'string' && crew.workspace_id.trim() ? crew.workspace_id : null
+      if (transport === PANE_TRANSPORT && !workspaceId) {
+        refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
+      }
+      const arrival = checkArrival({ crew, lane: item.lane })
+      const journal = join(dirname(path), 'journal.jsonl')
+      for (const observation of arrival.observations || []) {
+        const row = { at: new Date().toISOString(), event: FENCE_OBSERVATION_EVENT, lane: item.lane, reason: observation.reason, detail: observation.detail }
+        try {
+          d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+        } catch (err) {
+          d.log(`dispatch-batch: ${FENCE_OBSERVATION_EVENT} journal append failed lane=${item.lane}: ${err?.message || String(err)} observation=${JSON.stringify(observation)}`)
+        }
+      }
+      const admissionRows = fenceReport.perLane[item.lane]?.fence_admissions || []
+      if (admissionRows.length > 0) {
+        let journalExists = false
+        try { journalExists = d.existsSync(journal) } catch (err) {
+          d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal probe failed lane=${item.lane}: ${err?.message || String(err)}`)
+        }
+        if (!journalExists) {
+          d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal unavailable lane=${item.lane} path=${journal}`)
+        } else {
+          for (const admission of admissionRows) {
+            const row = { at: new Date().toISOString(), event: FENCE_ADMISSION_EVENT, lane: item.lane, file: admission.file, source: admission.source }
+            try {
+              d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+            } catch (err) {
+              d.log(`dispatch-batch: ${FENCE_ADMISSION_EVENT} journal append failed lane=${item.lane} file=${admission.file}: ${err?.message || String(err)}`)
+            }
           }
         }
       }
+      arrivals.push({ ...item, crewPath: path, arrival, workspaceId })
+    } catch (error) {
+      if (error?.reason !== SEAT_FLOOR_CONFLICT) {
+        const failureTeardown = teardownBetweenAttempts({ item, deps: d })
+        d.log(`dispatch-batch: boot-failure lane=${item.lane} teardown=${failureTeardown?.verdict ?? 'none'} teardown_exit=${failureTeardown?.exit ?? 'none'} teardown_why=${JSON.stringify(failureTeardown?.why ?? null)}`)
+      }
+      const pending = new Set(pendingLanes)
+      removeWorktrees({
+        plans: createdWorktrees.filter((plan) => pending.has(plan.lane)),
+        branches: attachedBranches.filter((plan) => pending.has(plan.lane)),
+        checkout: root, deps: d,
+      })
+      waveRefusal = error
+      break
     }
-    arrivals.push({ ...item, crewPath: path, arrival, workspaceId })
   }
 
   const runs = []
   for (const item of arrivals) {
-    const files = fenceReport.perLane[item.lane].files
-    const crewDir = dirname(item.crewPath)
-    const journal = join(crewDir, 'journal.jsonl')
-    const runLog = join(crewDir, 'run.log')
-    for (const enrollment of item.enrollments || []) {
-      const row = { at: new Date().toISOString(), event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: enrollment.name, arm: enrollment.arm, fraction: enrollment.fraction }
-      try {
-        d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
-      } catch (err) {
-        d.log(`dispatch-batch: experiment arm journal append failed lane=${item.lane}: ${err?.message || String(err)}`)
-      }
-    }
-    const adoption = adoptions.get(item.lane) ?? null
-    const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
-    const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
-    recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
-    recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, transport, deps: d })
-    recordPiCodemode({ piCodemode: item.piCodemode, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
-    if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
-    if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
-    let run
     try {
-      run = d.spawn({
-        ...runCommand({
-          lane: item.lane,
-          laneDir: item.plan.dir,
-          briefPath: item.brief,
-          files,
-          execution: item.execution,
-          keep,
-          runFlags,
-          chunk: item.chunk ?? null,
-        }),
-        background: true,
-        logPath: runLog,
-      })
-    } catch (err) {
-      refuse(`crew run failed for ${item.lane}: ${err?.message || String(err)}`, RUN_FAILED)
+      const files = fenceReport.perLane[item.lane].files
+      const crewDir = dirname(item.crewPath)
+      const journal = join(crewDir, 'journal.jsonl')
+      const runLog = join(crewDir, 'run.log')
+      for (const enrollment of item.enrollments || []) {
+        const row = { at: new Date().toISOString(), event: PLANNER_SYMBOLS_ARM_EVENT, role: 'planner', experiment: enrollment.name, arm: enrollment.arm, fraction: enrollment.fraction }
+        try {
+          d.appendFileSync(journal, `${JSON.stringify(row)}\n`)
+        } catch (err) {
+          d.log(`dispatch-batch: experiment arm journal append failed lane=${item.lane}: ${err?.message || String(err)}`)
+        }
+      }
+      const adoption = adoptions.get(item.lane) ?? null
+      const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
+      const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+      recordAdvisorSource({ advisorSource: item.advisorSource, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+      recordEditAssist({ editAssist: item.editAssist, crewPath: item.crewPath, crewDir, lane: item.lane, transport, deps: d })
+      recordPiCodemode({ piCodemode: item.piCodemode, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+      if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
+      if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from} ${lineageLine(adoption)}`)
+      let run
+      try {
+        run = d.spawn({
+          ...runCommand({
+            lane: item.lane,
+            laneDir: item.plan.dir,
+            briefPath: item.brief,
+            files,
+            execution: item.execution,
+            keep,
+            runFlags,
+            chunk: item.chunk ?? null,
+          }),
+          background: true,
+          logPath: runLog,
+        })
+      } catch (err) {
+        refuse(`crew run failed for ${item.lane}: ${err?.message || String(err)}`, RUN_FAILED)
+      }
+      if (run && run.status !== undefined && run.status !== 0 && run.status !== 3) {
+        refuse(`crew run failed for ${item.lane}: ${JSON.stringify(childFailure(run))}`, RUN_FAILED)
+      }
+      launchedLanes.add(item.lane)
+      // b313-waitextend's driver died with no pid anywhere on disk (#749 ask 1).
+      // The pid is a DIAGNOSTIC, never the run's liveness: the run log's terminal
+      // {"status":…} line stays the signal.
+      const pid = run && Number.isInteger(run.pid) ? run.pid : null
+      if (pid !== null) {
+        try { writeFileSync(join(crewDir, 'run.pid'), `${pid}\n`) } catch { /* a lane never fails for want of a diagnostic */ }
+      }
+      const watchArgs = [WATCH_PATH, item.lane, '--follow']
+      d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} run pid=${pid ?? 'none'} command=node ${watchArgs.join(' ')}`)
+      runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
+    } catch (error) {
+      if (!waveRefusal) waveRefusal = error
     }
-    if (run && run.status !== undefined && run.status !== 0 && run.status !== 3) {
-      refuse(`crew run failed for ${item.lane}: ${JSON.stringify(childFailure(run))}`, RUN_FAILED)
-    }
-    launchedLanes.add(item.lane)
-    // b313-waitextend's driver died with no pid anywhere on disk (#749 ask 1).
-    // The pid is a DIAGNOSTIC, never the run's liveness: the run log's terminal
-    // {"status":…} line stays the signal.
-    const pid = run && Number.isInteger(run.pid) ? run.pid : null
-    if (pid !== null) {
-      try { writeFileSync(join(crewDir, 'run.pid'), `${pid}\n`) } catch { /* a lane never fails for want of a diagnostic */ }
-    }
-    const watchArgs = [WATCH_PATH, item.lane, '--follow']
-    d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} run pid=${pid ?? 'none'} command=node ${watchArgs.join(' ')}`)
-    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
   }
 
   // Keeping the workspaces is a CHOICE, so the dispatcher states it and names
@@ -5269,6 +5289,7 @@ function launchDispatchWave(compiled, launchedLanes) {
   }
   d.log(mergeCheckLine(runs.map((item) => item.lane)))
   if (loadRefusal) throw loadRefusal
+  if (waveRefusal) throw waveRefusal
   return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted, fences: fenceReport }
 }
 

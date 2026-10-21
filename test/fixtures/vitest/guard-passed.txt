@@ -1,0 +1,12 @@
+10:27:59 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+10:27:59 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+
+ RUN  v5.0.1 /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy
+
+ ✓ |node| src/probe/guard.test.ts > keeps the decision banner 1ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  10:27:59
+   Duration  584ms (transform 47%, import 40%, worker 10%, tests 3%)
+

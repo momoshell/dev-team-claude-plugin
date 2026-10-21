@@ -1,0 +1,34 @@
+10:28:04 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+10:28:05 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+
+ RUN  v5.0.1 /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |node| src/probe/broken.test.ts [ src/probe/broken.test.ts ]
+Error: Transform failed with 1 error:
+
+[31m[PARSE_ERROR] [0mUnexpected token
+   [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m src/probe/broken.test.ts:2:47 [38;5;246m][0m
+   [38;5;246m│[0m
+ [38;5;246m2 │[0m [38;5;249mi[0m[38;5;249mt[0m[38;5;249m([0m[38;5;249m'[0m[38;5;249mk[0m[38;5;249me[0m[38;5;249me[0m[38;5;249mp[0m[38;5;249ms[0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mh[0m[38;5;249me[0m[38;5;249m [0m[38;5;249md[0m[38;5;249me[0m[38;5;249mc[0m[38;5;249mi[0m[38;5;249ms[0m[38;5;249mi[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m [0m[38;5;249mb[0m[38;5;249ma[0m[38;5;249mn[0m[38;5;249mn[0m[38;5;249me[0m[38;5;249mr[0m[38;5;249m'[0m[38;5;249m,[0m[38;5;249m [0m[38;5;249m([0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m=[0m[38;5;249m>[0m[38;5;249m [0m[38;5;249m{[0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249ms[0m[38;5;249mt[0m[38;5;249m [0m=[38;5;249m [0m[38;5;249m}[0m[38;5;249m)[0m
+ [38;5;240m  │[0m                                               ┬  
+ [38;5;240m  │[0m                                               ╰── 
+[38;5;246m───╯[0m
+
+  Plugin: vite:oxc
+  File: /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy/src/probe/broken.test.ts
+ ❯ transformWithOxc ../../../../../../../Users/momoshell/Dev/dt-t55g-run-decision-banner/ui/node_modules/vite/dist/node/chunks/node.js:7208:19
+ ❯ TransformPluginContext.transform ../../../../../../../Users/momoshell/Dev/dt-t55g-run-decision-banner/ui/node_modules/vite/dist/node/chunks/node.js:7280:26
+ ❯ EnvironmentPluginContainer.transform ../../../../../../../Users/momoshell/Dev/dt-t55g-run-decision-banner/ui/node_modules/vite/dist/node/chunks/node.js:8172:51
+ ❯ loadAndTransform ../../../../../../../Users/momoshell/Dev/dt-t55g-run-decision-banner/ui/node_modules/vite/dist/node/chunks/node.js:19634:26
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  10:28:05
+   Duration  420ms (worker 97%, environment 3%)
+

@@ -42,7 +42,7 @@ for the period is unmeasured. Hand-finish fork token totals before b1214 were no
 - **`finish-triage`** gives the builder the escalation (from the lane's `task.json`, including a driver crash
   that wrote no `escalate:*` stage), the lane's own accepted plan and gate, and any open review findings. The
   builder writes the smallest fix, with the same contract as the `repair` shape's triage
-  (`crew/variants.mjs:106`) but against the lane's build instead of CI output.
+  (the `repair` entry of `EXECUTABLE_SHAPES` in `crew/variants.mjs`) but against the lane's build instead of CI output.
 - **`gate`** re-runs the lane's already-proven gate. A gate check the finish run changes must be re-proven by
   mutation, as in any lane.
 - **`review`** is Sol through the roster's reviewer seat, capped at three rounds; after the third, only a
@@ -101,7 +101,7 @@ stage. It is fixed in its own lane (b1219-acpbusy), not by `finish`.
 
 ## Lanes
 
-1. **The shape and its stages:** `finish` in `crew/variants.mjs`, the executor path, `finish-triage`, the
+1. **The shape and its stages:** the `finish` entry of `EXECUTABLE_SHAPES` in `crew/variants.mjs`, the executor path, `finish-triage`, the
    reuse of the lane's gate, and the review cap.
 2. **The decision surface:** the finish report, `crew finish --accept | --return | --abandon`, the
    `finish-decision` row, and notes folded into the PR body.

@@ -7,26 +7,25 @@
 Nothing below builds a runtime. Five facts, all verified in this checkout on
 2026-08-30, are what these decisions govern:
 
-- `crew/capabilities.schema.json:50-77` declares the `local_providers` register
+- the `local_providers` property of `crew/capabilities.schema.json` declares the register
   and types `base_url` with a pattern admitting both schemes and imposing no
   host restriction. That pattern is what decision 1 turns from an oversight into
   a decision.
-- `classifyAdvisorCell` (`crew/crew.mjs:183-198`) admits an advisor endpoint only
+- `classifyAdvisorCell` in `crew/crew.mjs` admits an advisor endpoint only
   on `127.0.0.1`, `localhost` or `[::1]`. It tests scheme and locality first and
   the URL's credentials second, so the two refusals it can return are ordered,
   not interchangeable — decision 1 states that ordering exactly rather than
   paraphrasing it.
-- `crew/model-ladder.json:5-41` declares four bands — `frontier`, `workhorse`,
-  `utility`, `basement` — and `assertBandFloors` (`crew/crew.mjs:816-830`)
+- the `bands` array of `crew/model-ladder.json` declares four bands — `frontier`, `workhorse`,
+  `utility`, `basement` — and `assertBandFloors` in `crew/crew.mjs`
   refuses a seat only when its band ranks strictly **below** the tier floor.
   Every band at or above the floor is admitted.
-- `crew/model-ladder.json:42-46` sets `tier_floors.judge` to `utility`. A judge
+- the `tier_floors` of `crew/model-ladder.json` sets `tier_floors.judge` to `utility`. A judge
   seat therefore accepts `utility`, `workhorse` and `frontier` alike today.
-- `scripts/factory/ledger.mjs:4776-4780` already separates *unpriced* from
+- `evalsReadout` in `scripts/factory/ledger.mjs` already separates *unpriced* from
   *free*: a cell with no rate carries a null cost and the absent reason
   `unpriced, never free`. Token volume is kept four ways — input, output,
-  cache-read and cache-write (`scripts/factory/ledger.mjs:1790-1793`,
-  `:1876-1879`) — and no aggregate column exists. Decision 3 is what keeps a
+  cache-read and cache-write (`scripts/factory/ledger.mjs`, the `billed_input_tokens`, `billed_output_tokens`, `billed_cache_read_tokens` and `billed_cache_write_tokens` columns) — and no aggregate column exists. Decision 3 is what keeps a
   local cell from counterfeiting the other side of that distinction.
 
 ## 2. Decision 1 — the LAN trust boundary
@@ -61,8 +60,7 @@ is admitted on exactly these terms and no wider.
   needs one is asserting a trust boundary this record has already drawn
   elsewhere.
 - **What the runtime enforces today, stated exactly and not paraphrased.**
-  `classifyAdvisorCell`
-  checks scheme and locality before credentials (`crew/crew.mjs:190-194`), so a
+  `classifyAdvisorCell` in `crew/crew.mjs` checks scheme and locality before credentials, so a
   non-loopback URL carrying credentials is refused as `endpoint-not-local`, and
   only an otherwise-acceptable loopback URL ever reaches `endpoint-credentials`.
   The prohibition in the bullet above is normative and wider than that check;
@@ -114,9 +112,8 @@ membership is the only thing that lets it hold a seat with a floor.
   is measurement.
 - **The closed frontier band
   does not by itself keep a local model out of a judge seat**, and this record
-  says so rather than implying otherwise. `crew/model-ladder.json:42-46` sets
-  `tier_floors.judge` to `utility`, and `assertBandFloors`
-  (`crew/crew.mjs:816-830`) admits every band at or above the floor, so a local
+  says so rather than implying otherwise. The `tier_floors` of `crew/model-ladder.json` sets
+  `tier_floors.judge` to `utility`, and `assertBandFloors` in `crew/crew.mjs` admits every band at or above the floor, so a local
   model promoted to `utility` or `workhorse` would already clear the judge floor
   with the `frontier` band still closed to it.
 - **The prerequisite this record binds on L0.** Before any local model is

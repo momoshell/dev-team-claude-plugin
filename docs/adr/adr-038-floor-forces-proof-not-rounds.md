@@ -142,7 +142,7 @@ operator actually wants the round and cannot get it.
 
 - **Classify criticality from the brief (model or heuristic).** A prediction
   from prose about a diff that does not exist; unfalsifiable at decision
-  time. `proposeShape` (`scripts/factory/make-brief.mjs:1229`) already shows
+  time. `proposeShape` in `scripts/factory/make-brief.mjs` already shows
   the failure mode — it counts protected hits and restates the floor, adding
   no information about the change.
 - **Raise the round caps or budgets instead.** Spends more on the same

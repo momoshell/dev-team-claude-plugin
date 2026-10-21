@@ -1743,6 +1743,31 @@ test('SA8 ADR-048 Amendment 2 pins the scaled budget and attributed denominators
   assert.match(index, /^- \*\*ADR-048[^\n]*amended 2026-10-03/m)
 })
 
+// MUTATION KT3: rename one cited symbol in ADR-048, or re-add a :line to one cited path, and the section no longer cites exactly the six defined symbols without line numbers.
+test('KT3 ADR-048 build-steps section cites crew and scripts symbols without line numbers', () => {
+  const adr = readFileSync(new URL('../docs/adr/adr-048-ordered-build-steps.md', import.meta.url), 'utf8')
+  const start = adr.indexOf('A program shape already exists')
+  const end = adr.indexOf('carve_slices` is a third')
+  assert.ok(start >= 0 && end > start, 'ADR-048 build-steps section markers must exist')
+  const section = adr.slice(start, end)
+  assert.doesNotMatch(section, /\b(?:crew|scripts)\/[^\s`]*:\d|`:\d/)
+  const expected = [
+    ['validateChunks', 'crew/drive.mjs'],
+    ['chunkGateVerdict', 'crew/drive.mjs'],
+    ['chunkDeferredRows', 'crew/drive.mjs'],
+    ['readChunkProgram', 'scripts/factory/dispatch-batch.mjs'],
+    ['chunkCtxFromArgs', 'crew/crew.mjs'],
+    ['runCommand', 'scripts/factory/dispatch-batch.mjs'],
+  ]
+  const found = [...section.matchAll(/`([A-Za-z_$][\w$]*)` in `([^`]+)`/g)].map((m) => [m[1], m[2]])
+  const key = (pairs) => pairs.map(([s, p]) => `${s} ${p}`).sort().join('|')
+  assert.equal(key(found), key(expected))
+  for (const [symbol, path] of expected) {
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), 'utf8')
+    assert.match(source, new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm'), `${symbol} must be defined in ${path}`)
+  }
+})
+
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.
 test('AR1 ADR register next free number is one past the largest minted number', () => {
   const index = readFileSync(new URL('../docs/adr/README.md', import.meta.url), 'utf8')

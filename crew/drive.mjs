@@ -3700,7 +3700,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv, brief = null, 
   const boundPromoted = boundIssue === null ? [] : promoted.filter((ref) => ref === `#${boundIssue}` && !normalizeIssues([...normalizeIssues(planEnv?.details?.closes), ...normalizeIssues(builderEnv?.details?.closes)]).includes(ref) && !askClosingIssues(brief).includes(ref))
   try { if (boundPromoted.length) onBoundIssuePromotion?.(boundPromoted) } catch {}
   const issues = normalizeIssues([...normalizeIssues(planEnv?.details?.issues), ...explicitRefs]).filter((ref) => !closes.includes(ref))
-  const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
+  const closesTrailer = closes.length ? closes.map((ref) => `Closes: ${ref}`).join('\n') : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
   return [subject, bodyPart, closesTrailer, refs].filter(Boolean).join('\n\n')
 }

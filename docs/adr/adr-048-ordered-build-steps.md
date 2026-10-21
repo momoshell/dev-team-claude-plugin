@@ -28,7 +28,7 @@ through the same loop: `build-fix` `:10541`, `lane-fix` `:10583`, `gate-fix` `:1
 The builder charter says "You execute `plan.md` exactly" (`crew/roles/builder.md:3-4`).
 
 **A program shape already exists: `details.chunks`.** It arrived with `c2301a07` (2026-09-19) and is not mentioned
-in the planner charter. `validateChunks` (`crew/drive.mjs:2484-2553`) enforces all of the following:
+in the planner charter. `validateChunks` in `crew/drive.mjs` enforces all of the following:
 
 - ids match `CHUNK_ID` and are unique;
 - each chunk's `files_in_scope` is non-empty and inside the plan's scope;
@@ -38,14 +38,14 @@ in the planner charter. `validateChunks` (`crew/drive.mjs:2484-2553`) enforces a
 - exemptions form a third bucket;
 - the first chunk is buildable alone (`chunk-first-unbuildable`).
 
-`chunkGateVerdict` (`:2600`) adjudicates the gate per owned check and *defers* reds owned by another chunk
-(`chunkDeferredRows`, `:2589`).
+`chunkGateVerdict` in `crew/drive.mjs` adjudicates the gate per owned check and *defers* reds owned by another chunk
+(`chunkDeferredRows` in `crew/drive.mjs`).
 
 **Today a chunk program runs across lanes, never inside one.** `dispatch-batch --from-plan` compiles a parent
-planner envelope's `details.chunks` into one request per chunk (`readChunkProgram`, `scripts/factory/dispatch-batch.mjs:907-915`).
+planner envelope's `details.chunks` into one request per chunk (`readChunkProgram` in `scripts/factory/dispatch-batch.mjs`).
 When a plan has no chunks, it derives them from `carve_slices`. Each request carries `adopt` of the parent,
 `assurance: quick` and dependency lane names, and records the wave (`skills/crew-dispatch/references/batch.md:38-42`).
-Each chunk lane boots with `--chunked --chunk <id>` (`chunkCtxFromArgs`, `crew/crew.mjs:4882-4885`; `runCommand`, `scripts/factory/dispatch-batch.mjs:3947`) and runs
+Each chunk lane boots with `--chunked --chunk <id>` (`chunkCtxFromArgs` in `crew/crew.mjs`; `runCommand` in `scripts/factory/dispatch-batch.mjs`) and runs
 a full lane of its own: build, review, suite and publish.
 
 **`carve_slices` is a third, human-routed split.** A plan revision may answer `carve`, and a carve always escalates

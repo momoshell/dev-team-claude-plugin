@@ -1,0 +1,17 @@
+10:23:57 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+10:23:57 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+
+ RUN  v5.0.1 /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy
+
+ ↓ |node| src/probe/probe.test.ts > outer group > nested passes
+ ↓ |node| src/probe/probe.test.ts > outer group > nested fails
+ ↓ |node| src/probe/probe.test.ts > top passes
+ ↓ |node| src/probe/probe.test.ts > top skipped
+ ↓ |node| src/probe/probe.test.ts > top todo
+ ↓ |node| src/probe/probe.test.ts > console noise
+
+ Test Files  1 skipped (1)
+      Tests  6 skipped (6)
+   Start at  10:23:57
+   Duration  250ms (transform 57%, import 28%, worker 15%)
+

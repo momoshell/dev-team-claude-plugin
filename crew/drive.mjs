@@ -6120,7 +6120,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
   let fatal = null
   const proveEntry = (entry) => {
     let active = null
-    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, file: entry.file, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why, ctx.testRunner) : why })
+    const row = (outcome, why) => ({ finding: entry.finding, test: entry.test, file: entry.file, name: entry.name, outcome, why: entry.invocation !== undefined ? invocationWhy(entry, why, hardeningEntryRunner(ctx.testRunner, entry.file)) : why })
     // MUTATION P6: let a prescribed finding close through an invocation and it is closed by
     // a runner that is not the new top-level test(...) its brief required.
     // MUTATION P18: skip the placement rule and a prescribed guard may live in the pinned
@@ -6128,7 +6128,7 @@ function proveHardeningEntries({ entries, hardenWitness, ctx, io, hardenRun, dir
     const misplaced = prescribed?.has(entry.finding) === true && entry.invocation === undefined ? placement?.(entry) ?? null : null   // ANCHOR P18
     if (misplaced) return row('guard-misplaced', misplaced)
     if (entry.invocation !== undefined && prescribed?.has(entry.finding) === true) return row('name-absent', `a pinned-test-prescription finding must close with a new top-level node test(...) named ${entry.name}, not an invocation`)   // ANCHOR P6
-    if (entry.invocation !== undefined) { const proof = proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, dirtyAfterFailure }); fatal = proof.fatal; return proof.row }
+    if (entry.invocation !== undefined) { const proof = proveInvocationEntry({ entry, ctx: { ...ctx, testRunner: hardeningEntryRunner(ctx.testRunner, entry.file) }, io, hardenRun, hardenWitness, row, dirtyAfterFailure }); fatal = proof.fatal; return proof.row }
     try {
       const witness = hardenWitness?.get(entry.finding)
       const W = witness?.get(entry.test)
@@ -15407,12 +15407,17 @@ export function hardeningAppealRequest(entry) {
   return hardeningOf(entry) === 'ungateable' ? entry.hardening_why.trim() : null
 }
 
-// lean: lexical lane classification (cargo, node --test, pytest, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
+// lean: lexical lane classification (cargo, node --test, pytest, vitest as one && step, python -m unittest|pytest after no-value flags only); a runner-aware shell grammar if env-prefixed or wrapped lanes must classify
 export function laneHardeningRunner(lane, suiteRunner) {
   const { shape, words } = laneCommandShape(lane)
+  const basis = `lane validation_lane: ${lane}`
+  // #1920: a UI lane is `cd ui && test -f x.test.ts && ./node_modules/.bin/vitest run x.test.ts`, so its runner
+  // is the executable of one && step, not the first word; `suite` keeps the suite's runner for non-UI files.
+  const steps = [[]]
+  for (const word of words) if (word === '&&') steps.push([]); else steps.at(-1).push(word)
+  if (shape !== 'unparsable' && words.every((word) => word === '&&' || !/[&|;<>\x60$]/.test(word)) && steps.some(([head]) => head?.slice(head.lastIndexOf('/') + 1) === 'vitest')) return { runner: 'vitest', basis, suite: suiteRunner }
   if (shape === 'unparsable' || words.some((word) => /[&|;<>\x60$]/.test(word))) return suiteRunner
   const executable = words[0]?.slice(words[0].lastIndexOf('/') + 1)
-  const basis = `lane validation_lane: ${lane}`
   if (executable === 'cargo') return { runner: 'cargo', basis }
   if (shape === 'node-test') return normalizeTestRunner(suiteRunner).runner === 'unparsed' ? suiteRunner : { runner: 'node', basis }
   const moduleAt = words.indexOf('-m')
@@ -15424,7 +15429,9 @@ export function cargoLintInvocation(invocation) {
   const { words, defect } = shellWords(invocation)
   return !defect && words[0]?.slice(words[0].lastIndexOf('/') + 1) === 'cargo' && ['clippy', 'fmt'].includes(words[1]) && words.every((word) => !/[&|;<>\x60$]/.test(word))
 }
-export const TEST_RUNNERS = Object.freeze(['node', 'cargo', 'python', 'unparsed'])
+export const TEST_RUNNERS = Object.freeze(['node', 'cargo', 'python', 'vitest', 'unparsed'])
+// #1920: a vitest lane's guard runner follows the finding's file; a file vitest does not load keeps the suite's runner.
+export const hardeningEntryRunner = (testRunner, file) => testRunner?.runner === 'vitest' && !/\.(?:[cm]?[jt]sx?|svelte)$/.test(String(file)) ? testRunner.suite : testRunner
 export function normalizeTestRunner(testRunner) {
   const rawRunner = testRunner?.runner
   if (rawRunner === undefined) return { runner: 'node', basis: 'legacy node runner · no runner context' }
@@ -15435,6 +15442,7 @@ export function hardeningRunnerSentence(testRunner) {
   const runner = normalizeTestRunner(testRunner)
   const lintClause = 'A finding that names a lint or formatter rule (clippy, rustfmt, ruff) is guarded by an invocation of that exact lint command narrowed to the crate or file and never chained with the suite; file is the linted file, even when it is a test file; its find/replace re-introduces the linted shape; a whitespace-only mutation is admitted for an invocation.'
   if (runner.runner === 'cargo') return `the declared runner is cargo (${runner.basis}); a guard is a #[test] fn declared through invocation with the exact command that runs it; file is the implementation the mutation edits, never the guard home; name is the test fn cargo reports; an inline guard in the #[cfg(test)] module of file is accepted only while the non-test code of file is unchanged since review, otherwise put the guard in a separate test file; a .test.mjs path is refused. ${lintClause}`
+  if (runner.runner === 'vitest') return `the declared runner is vitest (${runner.basis}) for a finding in a .js, .ts or .svelte file; its guard is a named test in a vitest test file, declared through invocation with the exact vitest run command and --reporter=verbose so vitest prints one line per test; file is the implementation the mutation edits, never the test file; name is the test title vitest prints after the file (describe > title, or the title alone); a .test.mjs path is refused. For a finding in any other file, ${hardeningRunnerSentence(testRunner.suite)}`
   if (runner.runner === 'python') return `the declared runner is python (${runner.basis}); a guard is a named test the lane's runner loads, declared through invocation with the exact command that runs only it; a .test.mjs path is refused. ${lintClause}`
   if (runner.runner === 'unparsed') return `blind spot: the runner could not be classified (${runner.basis}), so a .test.mjs guard's presence in the repo suite is unverified; invocation is the form whose run is proven. ${lintClause}`
   return 'test is a repo-relative .test.mjs path run by node --test; any other runner goes in invocation with the exact command that runs it.'
@@ -15559,6 +15567,29 @@ export function cargoNameVerdict(output, name) {
   if (reported > summarized) return null
   if (hits.length === 0) return 'absent'
   return hits[0] === 'ignored' ? 'skipped' : hits[0] === 'ok' ? 'passed' : 'failed'
+}
+// #1920: the same adjudication over vitest's verbose reporter, recorded from vitest 5.0.1 in
+// test/fixtures/vitest/: one ` ✓|×|↓|□ [|project| ]<file> > [describe > ]<title>[ 3ms]` line per test and a
+// `      Tests  1 failed | 3 passed | 1 skipped | 1 todo (6)` summary. Test stdout is printed too, so result
+// lines that differ from the summaries' totals are unmeasured: a forged line, or a reporter that omits passing tests.
+export function vitestNameVerdict(output, name) {
+  const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
+  const summaries = text.match(/^ +Tests {2}.* \(\d+\)$/gm) ?? []
+  if (summaries.length === 0) return null
+  const summarized = summaries.reduce((sum, line) => sum + Number(/\((\d+)\)$/.exec(line)[1]), 0)
+  let reported = 0
+  const hits = []
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^ ([✓×↓□]) (?:\|[^|]+\| )?(.+)$/.exec(line)
+    if (!match) continue
+    reported++
+    const label = '✓×'.includes(match[1]) ? match[2].replace(/ \d+(?:\.\d+)?m?s$/, '') : match[2]
+    if (label === String(name) || label.endsWith(` > ${name}`)) hits.push(match[1])
+  }
+  if (hits.length > 1) return 'ambiguous'
+  if (reported !== summarized) return null
+  if (hits.length === 0) return 'absent'
+  return hits[0] === '✓' ? 'passed' : hits[0] === '×' ? 'failed' : 'skipped'
 }
 
 // lean: conservative lexical Rust items; use a Rust parser if unsupported cfg or macro-generated test shapes must certify.
@@ -16011,7 +16042,6 @@ export function hardeningTestPath(file) {
 }
 
 export function validateHardened(details, owed, inScope, testRunner) {
-  const runner = normalizeTestRunner(testRunner)
   const wanted = Array.isArray(owed) ? owed : []
   const wantedIds = wanted.map(({ id }) => id)
   const wantedSet = new Set(wantedIds)
@@ -16076,6 +16106,7 @@ export function validateHardened(details, owed, inScope, testRunner) {
       refuse(id, 'class-unknown', `the hardened entry for finding ${id} declares class ${JSON.stringify(entry.class)}; the closed set is ${HARDENING_CLASSES.join(' or ')}`)
       continue
     }
+    const runner = normalizeTestRunner(hardeningEntryRunner(testRunner, entry.file))
     const namesTest = entry.test !== undefined
     const namesInvocation = entry.invocation !== undefined
     if (namesTest && namesInvocation) {
@@ -16093,6 +16124,10 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'invocation-invalid', `cargo-output-uncaptured: the hardened invocation for finding ${id} passes ${uncaptured[1]}, which lets a test's own output forge the libtest result line; run the guard with default capture and the pretty format`)
         continue
       }
+      if (runner.runner === 'vitest' && !/(?:^|\s)--reporter[= ]verbose(?:\s|$)/.test(entry.invocation)) {
+        refuse(id, 'invocation-invalid', `vitest-reporter-not-verbose: the hardened invocation for finding ${id} must pass --reporter=verbose, the only vitest reporter that prints a line for every test`)
+        continue
+      }
     } else {
       if (!hardeningTestPath(entry.test)) {
         refuse(id, 'test-path-invalid', `the hardened test ${entry.test ?? '(missing)'} for finding ${id} must be a non-empty path ending in .test.mjs${namesTest ? '; for a guard run by any runner other than node --test, declare invocation with the exact command that runs it' : ''}`)
@@ -16102,7 +16137,7 @@ export function validateHardened(details, owed, inScope, testRunner) {
         refuse(id, 'test-not-in-scope', `the hardened test ${entry.test ?? '(missing)'} must be a concrete repo-relative literal path`)
         continue
       }
-      if (runner.runner === 'cargo' || runner.runner === 'python') {
+      if (runner.runner !== 'node' && runner.runner !== 'unparsed') {
         refuse(id, 'test-runner-mismatch', `the declared ${runner.runner} runner (${runner.basis}) cannot run a .test.mjs guard; declare invocation with the exact command that runs it`)
         continue
       }
@@ -16321,6 +16356,7 @@ const INVOCATION_LIMIT = 'the result is based only on process exit status and ca
 const invocationWhy = (entry, why, testRunner = null) => {
   const base = why ?? `the invocation ${entry.invocation} left no measured reason`
   if (normalizeTestRunner(testRunner).runner === 'cargo' && !cargoLintInvocation(entry.invocation)) return `${base}; cargo named-test result; novelty checked only in review-time lane scope files`
+  if (normalizeTestRunner(testRunner).runner === 'vitest') return `${base}; vitest named-test result on control and mutant`
   return `${base}; ${INVOCATION_LIMIT}`
 }
 
@@ -16595,6 +16631,9 @@ function proveInvocationEntry({ entry, ctx, io, hardenRun, hardenWitness, row, d
     }
   }
 const invoke = () => hardenRun(entry.invocation, { reap: true })
+  const vitest = normalizeTestRunner(ctx.testRunner).runner === 'vitest'
+  // #1920: a vitest guard is adjudicated on its own named line, so a mutant that breaks the test file's load is not a kill.
+  const named = (output) => vitestNameVerdict(output, entry.name)
   let fatal = null
   let active = null
   const run = () => {
@@ -16632,7 +16671,9 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (preRun.thrown !== null) return row('unproven', `invocation-pre-repair-unrunnable:threw-${preRun.thrown?.message ?? String(preRun.thrown)}`)
     const preClass = classifyInvocationResult(preRun.result)
     if (!preClass.runnable) return row('unproven', `invocation-pre-repair-unrunnable:${preClass.reason}`)
-    if (preRun.result.status === 0) return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair exited ${preRun.result.status}`)
+    const pre = vitest ? named(preRun.result.output) : preRun.result.status === 0 ? 'passed' : 'failed'
+    if (pre === 'passed') return row('pre-repair-green', `the invocation guard does not fail on the witnessed pre-repair ${entry.file}: pre-repair ${vitest ? 'passed by name' : `exited ${preRun.result.status}`}`)
+    if (pre !== 'failed') return row('unproven', `vitest named test ${pre ?? 'unmeasured'} on the witnessed pre-repair ${entry.file}; the guard must fail by name there`)
     const controlRun = invokeAndRestore({ ctx, io, invoke, snapshot, entry, fileAbs, fileBytes: repairedFile })
     if (controlRun.fatal !== null) { fatal = controlRun.fatal; return row('unproven', controlRun.fatal) }
     const controlSideEffected = checkSideEffects('control', controlRun.outside)
@@ -16640,7 +16681,11 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (controlRun.thrown !== null) return row('unproven', `invocation-control-unrunnable:threw-${controlRun.thrown?.message ?? String(controlRun.thrown)}`)
     const controlClass = classifyInvocationResult(controlRun.result)
     if (!controlClass.runnable) return row('unproven', `invocation-control-unrunnable:${controlClass.reason}`)
-    if (controlRun.result.status !== 0) return row('control-red', `the invocation guard exited ${controlRun.result.status} on control`)
+    const control = vitest ? named(controlRun.result.output) : controlRun.result.status === 0 ? 'passed' : 'failed'
+    if (control === null) return row('unproven', 'vitest named test result was unmeasured on control: its per-test lines did not match the Tests summary')
+    if (control === 'absent' || control === 'ambiguous') return row(`name-${control}`, 'the invocation must run vitest with --reporter=verbose so it prints one line per test, and name exactly one of them')
+    if (control === 'skipped') return row('control-skipped', 'vitest named test was skipped on control')
+    if (control === 'failed' || controlRun.result.status !== 0) return row('control-red', `the invocation guard ${control === 'failed' && vitest ? 'failed by name' : `exited ${controlRun.result.status}`} on control`)
     active = { abs: fileAbs, original: repairedFile, writeAttempted: false }
     let mutantRun = null
     try {
@@ -16655,10 +16700,10 @@ const invoke = () => hardenRun(entry.invocation, { reap: true })
     if (mutantRun.thrown !== null) return row('unproven', `invocation-mutant-unrunnable:threw-${mutantRun.thrown?.message ?? String(mutantRun.thrown)}`)
     const mutantClass = classifyInvocationResult(mutantRun.result)
     if (!mutantClass.runnable) return row('unproven', `invocation-mutant-unrunnable:${mutantClass.reason}`)
-    const mutant = { ok: mutantRun.result.status === 0, status: mutantRun.result.status }
-    const observed = `control ${controlRun.result.status} mutant ${mutant.status}`
-    if (mutant.ok) return row('survived', observed)
-    return row('killed', observed)
+    const mutant = vitest ? named(mutantRun.result.output) : mutantRun.result.status === 0 ? 'passed' : 'failed'
+    const observed = vitest ? `vitest named test ${mutant ?? 'unmeasured'} under mutation` : `control ${controlRun.result.status} mutant ${mutantRun.result.status}`
+    if (mutant === null) return row('unproven', observed)
+    return row(mutant === 'failed' ? 'killed' : 'survived', observed)
   }
   try {
     return { row: run(), fatal }

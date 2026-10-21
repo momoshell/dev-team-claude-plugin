@@ -9,7 +9,7 @@ import {
   acceptanceCoverage, acceptanceIds, ACCEPTANCE_UNMEASURED, ACCEPTANCE_REFUSALS, ACCEPT_FINDINGS, gateCheckIds,
   B376_FILES, B376_FINDING, B376_GREEN, B376_HARDENED, B376_IMPL_FILE, B376_MUT_RED, B376_PRE_RED, B376_TEST_FILE, B384_CORRECTED_FIND, B384_CORRECTED_REPLACE, B384_GREEN, B384_MUTATION, B384_RED, B384_REFACTORED_BUILDER, B384_REFACTORED_UNCORRECTED_BUILDER, B44_LEADLESS_CTX, CHECK_BUILT, CHECK_CLEAN, CHECK_ENVELOPES, CHECK_FILE, CHECK_MUTATION, CHECK_PLAN, CHECK_RUNS, CONVERGE_CTX, CONVERGE_GATE, CONVERGE_PLAN, CTX, CTX_DIRECTED, CTX_FINISH, CTX_REPAIR, DIRECTED_FILES, FINISH_FILES, D_ASK, D_AUTO, ENVELOPE_FIELD_KINDS, EXECUTIONS, FAILURE_UPGRADE, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER, GATE_SUMMARY_PREFIX, HARDENING_MARKS, HARDENING_OUTCOMES, HARDENING_REFUSALS, MODIFIER_OUTCOMES, MUTATIONS_MAX, MUTATION_BINDING_FAILURES, MUTATION_CORRECTION_REFUSALS, MUTATION_OUTCOMES, PARTIAL_REVIEWED, RED, SENSITIVITY_FLOOR, SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, TD, THREW, TRIAGE_FILES, TRIAGE_NOTE, UNIVERSAL_STAGE_HEADS, VALIDATION_LANE_UNLOADABLE, VARIANTS, VARIANT_NAMES, WRITE_SURFACES, applyMutationAnchor, applyPrescriptionLines, b127GatePaths, b127PidAlive, b318Builders, b318SiteA, b376Build, b376DiskProofIo, b376ProofIo, b376Review, b376StageStack, b384Io, b384RefactoredIo, b44AssertLeadlessGate, b44GatePlan, bindMutationAnchor, buildEnv, chmodSync, collapseStages, dispositionIo, driveTask, existsSync, fakeIo, fenceBase, fenceDiff, fenceSpan, gateReapCommand, gateReapFresh, gateReapOriginal, gateReapSweepCommand, gateReapVerdict, hardenCommand, hardenWitnessCommand, hardeningBounceLines, hardeningBriefLines, hardeningDebt, hardeningOf, join, laneFence, leadEnv, mutationChangesTokens, outOfScopeFiles, planEnv, protectedPlanEnv, readFileSync, resumeGreen, resumeRed, reviewConvergeRun, reviewEnv, reviewFindings, rmSync, s843Ctx, s843Io, s843PlanEnv, s843Rows, scopeMatcher, scopedPath, scratchDir, shapeDefect, spawnSync, stageShape, suiteRefusalEnv, treeDigest, triageEnv, undeclaredStage, validateHardened, validateMutations, validationPlan, validationProbeRun, validationRows, writeFileSync,
 } from './drive-fixtures.mjs'
-import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation } from './drive.mjs'
+import { CENSUS_CARRIER_FILES, CHECK_MATCHES, FROZEN_FACTORY_ENV_FILE, FROZEN_INVENTORY_FILE, HARDENING_APPEAL_SHAPE, HARDENING_CLASSES, HARDENING_PRESCRIPTION_REASONS, HARDENING_PRESCRIPTION_RESOLUTION, HARDENING_PROVEN, HARDENING_REFUTED, HARDENING_UNMEASURED, LIMITS, POST_COMMIT_FROZEN_REPAIR_MAX, bindMutationDeclarations, classifyFrozenInventoryDelta, hardeningAppealLines, hardeningAppealRequest, hardeningClassOf, hardeningInvocation, hardeningPrescriptionConflict, hardeningRowBucket, hardeningStageCleared, hardeningTestPath, cargoNameVerdict, rustNonTestRegion, mutationProofScope, mutantParseDefect, preRepairGreenOutcome, preRepairRefutes, composeFinishReport, composePrBody, mergeCarriedCorrections, normalizeTestRunner, hardeningRunnerSentence, HARDENING_BLIND_SPOTS, laneHardeningRunner, cargoLintInvocation, vitestNameVerdict, hardeningEntryRunner } from './drive.mjs'
 import { openLedger, MUTATION_ANCHOR_REFUSALS } from '../scripts/factory/ledger.mjs'
 import { CENSUS_QUALIFYING_FILES, runCensusExhibits, selectCensusExhibits } from './census-exhibits.mjs'
 import { emitAdapter } from './seat-io.mjs'
@@ -12196,6 +12196,98 @@ test('HL4 whitespace invocation exception does not weaken named-test mutations',
   assert.equal(validateHardened({ hardened: [invocation] }, owed, scope).entries.length, 1)
   assert.equal(validateHardened({ hardened: [{ ...invocation, replace: invocation.find }] }, owed, scope).refusals[0]?.reason, 'replace-identical')
   assert.equal(validateHardened({ hardened: [{ ...entry, replace: 'const  guard = false' }] }, owed, scope).refusals[0]?.reason, 'replace-identical')
+})
+
+// #1920: UI lanes in the-power (t265i, t265k, t55f) chain fmt/clippy before vitest; the guard runner is the vitest step.
+const vitestCapture = (name) => readFileSync(new URL(`../test/fixtures/vitest/${name}.txt`, import.meta.url), 'utf8')
+const VITEST_LANE = 'cd ui && test -f src/banner.test.ts && ./node_modules/.bin/vitest run --reporter=verbose src/banner.test.ts'
+
+test('HV1 a vitest step of an && validation lane sets the runner, and only UI files take it', () => {
+  // MUTATION: drop the vitest step branch in laneHardeningRunner and this lane maps back to the cargo suite.
+  assert.deepEqual(laneHardeningRunner(VITEST_LANE, CARGO_RUNNER), { runner: 'vitest', basis: `lane validation_lane: ${VITEST_LANE}`, suite: CARGO_RUNNER })
+  for (const lane of ['cd ui && test -f x.ts', 'cd ui && vitest run | cat', 'echo vitest && cargo test', 'cd ui&&vitest run']) assert.equal(laneHardeningRunner(lane, CARGO_RUNNER), CARGO_RUNNER, lane)
+  const runner = laneHardeningRunner(VITEST_LANE, CARGO_RUNNER)
+  // MUTATION: return testRunner unconditionally from hardeningEntryRunner and the .rs finding is told to write a vitest guard.
+  for (const file of ['ui/src/a.ts', 'ui/src/A.svelte', 'ui/src/a.js', 'ui/src/a.tsx']) assert.equal(hardeningEntryRunner(runner, file), runner, file)
+  for (const file of ['crates/a/src/lib.rs', 'ui/src/a.css']) assert.equal(hardeningEntryRunner(runner, file), CARGO_RUNNER, file)
+  const sentence = hardeningRunnerSentence(runner)
+  assert.match(sentence, /^the declared runner is vitest \(lane validation_lane: cd ui && /)
+  assert.match(sentence, /--reporter=verbose/)
+  assert.match(sentence, /For a finding in any other file, the declared runner is cargo \(fixture cargo runner\)/)
+  // MUTATION: leave vitest out of the test-runner-mismatch refusal and a .test.mjs guard for a .ts finding is accepted.
+  const ui = { ...entry, file: 'ui/src/a.ts' }
+  assert.equal(validateHardened({ hardened: [ui] }, owed, scope, runner).refusals[0]?.reason, 'test-runner-mismatch')
+  // MUTATION: drop the vitest-reporter-not-verbose refusal and a reporter that hides passing tests is accepted.
+  const { test: _test, ...invocationEntry } = ui
+  const declare = (invocation) => validateHardened({ hardened: [{ ...invocationEntry, invocation }] }, owed, scope, runner)
+  assert.match(declare('./node_modules/.bin/vitest run src/a.test.ts').refusals[0]?.why ?? '', /^vitest-reporter-not-verbose/)
+  for (const verbose of ['./node_modules/.bin/vitest run --reporter=verbose src/a.test.ts', './node_modules/.bin/vitest run --reporter verbose src/a.test.ts']) assert.equal(declare(verbose).entries.length, 1, verbose)
+})
+
+test('HV2 vitest verdicts come from recorded verbose captures', () => {
+  const mixed = vitestCapture('mixed-verbose')
+  const cases = [
+    [vitestCapture('overview-verbose'), 'recovery retries reads and never describes a load error as a failed run', 'passed'],
+    [vitestCapture('overview-verbose'), 'src/inspector/overview.dom.test.ts > does not offer a node action when the definition is unavailable', 'passed'],
+    [mixed, 'nested passes', 'passed'], [mixed, 'outer group > nested fails', 'failed'],
+    [mixed, 'top skipped', 'skipped'], [mixed, 'top todo', 'skipped'], [mixed, 'passes', 'absent'], [mixed, 'top missing', 'absent'],
+    [vitestCapture('filtered-verbose'), 'top passes', 'skipped'],
+    // MUTATION: bound the result lines by > instead of !== and a forged line in a default-reporter run (which prints
+    // no line for a passing test) reads as a passing guard.
+    [vitestCapture('mixed-default'), 'top passes', null],
+    [vitestCapture('mixed-default').replace('\n\n Test Files', '\n ✓ |node| src/probe/probe.test.ts > top passes 0ms\n\n Test Files'), 'top passes', null],
+    [vitestCapture('guard-passed'), 'keeps the decision banner', 'passed'], [vitestCapture('guard-failed'), 'keeps the decision banner', 'failed'],
+    [`${mixed}\n${mixed}`, 'top passes', 'ambiguous'],
+    // MUTATION: drop the reported > summarized bound and the test's own stdout line forges a result.
+    [vitestCapture('spoof-verbose'), 'top passes', null],
+    // MUTATION: treat a summary-less run as measured and a load failure reads as an absent name.
+    [vitestCapture('load-failed'), 'keeps the decision banner', null],
+  ]
+  // MUTATION: keep the duration suffix on the label and every passed or failed test reads as absent.
+  for (const [output, name, verdict] of cases) assert.equal(vitestNameVerdict(output, name), verdict, name)
+})
+
+test('HV3 a vitest guard is proven through invocation by name, and a load failure is not a kill', () => {
+  const invocation = './node_modules/.bin/vitest run --reporter=verbose src/banner.test.ts'
+  const file = 'ui/src/banner.ts'
+  // The exit status each capture was recorded with.
+  const exits = { 'guard-failed': 1, 'guard-passed': 0, 'filtered-verbose': 0, 'load-failed': 1, 'guard-passed-other-failed': 1 }
+  const prove = (mutant, control = 'guard-passed', pre = 'guard-failed') => {
+    const outputs = [pre, control, mutant].map((capture) => [capture, exits[capture]])
+    const vitestEntry = b863InvocationEntry({ invocation, name: 'keeps the decision banner', file })
+    const io = invocationProofIo({ lane: VITEST_LANE, entry: vitestEntry, files: { [`${CTX.checkout}/${file}`]: 'const guard = false\n' }, changed: [file], scopeFiles: [file, 'ui/src/banner.test.ts'],
+      runFn: (_text, n) => ({ ...b863Green(outputs[n - 1][1]), output: vitestCapture(outputs[n - 1][0]) }) })
+    driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+    return { io, row: invocationRows(io).find((candidate) => candidate.round === 2) }
+  }
+  // Red before #1920: the lane mapped to cargo, cargoNameVerdict read no `test result:` line, and the row was unproven.
+  const { io, row } = prove('guard-failed')
+  assert.equal(row?.outcome, 'killed', JSON.stringify(row))
+  assert.match(row.why, /vitest named test failed under mutation/)
+  // MUTATION: drop the vitest arm of invocationWhy and the row claims the proof read exit status only.
+  assert.doesNotMatch(row.why, /based only on process exit status/)
+  const reviewBounce = Object.values(io.calls.writes).find((content) => typeof content === 'string' && content.startsWith('# Review bounce (round 1)'))
+  assert.ok(reviewBounce?.includes(`For each guard, the declared runner is vitest (lane validation_lane: ${VITEST_LANE})`), reviewBounce)
+  // MUTATION: adjudicate the vitest mutant on exit status and a test file that fails to load is recorded killed.
+  assert.equal(prove('load-failed').row?.outcome, 'unproven')
+  // MUTATION: adjudicate the vitest control on exit status and a green run that never printed the guard passes control.
+  assert.equal(prove('guard-failed', 'filtered-verbose').row?.outcome, 'name-absent')
+  // MUTATION: adjudicate the vitest pre-repair on exit status and a guard that passed while another test failed is not refuted.
+  assert.equal(prove('guard-failed', 'guard-passed', 'guard-passed-other-failed').row?.outcome, 'pre-repair-green')
+  // MUTATION: accept a named pass on a red control run and a guard is proven while another test fails.
+  assert.equal(prove('guard-failed', 'guard-passed-other-failed').row?.outcome, 'control-red')
+  // MUTATION: let a pre-repair run that never printed the guard proceed and a guard never seen failing is recorded killed.
+  assert.equal(prove('guard-failed', 'guard-passed', 'filtered-verbose').row?.outcome, 'unproven')
+})
+
+test('HV4 a Rust finding in a vitest lane is still proven as a cargo guard', () => {
+  const rustEntry = cargoEntry()
+  let n = 0
+  const io = invocationProofIo({ lane: VITEST_LANE, entry: rustEntry, files: { [`${CTX.checkout}/src/lib.rs`]: cargoSource }, changed: ['src/lib.rs'], scopeFiles: ['src/lib.rs'],
+    runFn: () => ({ ...b863Green(0), output: ++n === 1 ? cargoSummary : cargoOutput('guard_fn', n === 2 ? 'ok' : 'FAILED') }) })
+  driveTask({ ...CTX, testRunner: CARGO_RUNNER, limits: { build_rounds: 2 } }, io)
+  // MUTATION: pass the lane runner to proveInvocationEntry instead of the entry's and this cargo guard is read as vitest: unproven.
+  assert.equal(invocationRows(io).find((candidate) => candidate.round === 2)?.outcome, 'killed')
 })
 
 test('HL5 cargo lint invocation is isolated from named-test evidence', () => {

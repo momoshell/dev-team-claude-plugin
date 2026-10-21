@@ -1,0 +1,43 @@
+10:23:54 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+10:23:54 AM [vite-plugin-svelte] no Svelte config found at /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy - using default configuration.
+
+ RUN  v5.0.1 /private/tmp/claude-501/-Users-momoshell-Dev-the-power/abff5355-1c58-4e68-8ad3-11fb1cf6266c/scratchpad/uicopy
+
+stdout | src/probe/probe.test.ts > console noise
+ ✓ src/probe/probe.test.ts > fake line
+
+ ✓ |node| src/probe/probe.test.ts > outer group > nested passes 1ms
+ × |node| src/probe/probe.test.ts > outer group > nested fails 3ms
+   → expected 1 to be 2 // Object.is equality
+ ✓ |node| src/probe/probe.test.ts > top passes 0ms
+ ↓ |node| src/probe/probe.test.ts > top skipped
+ □ |node| src/probe/probe.test.ts > top todo
+ ✓ |node| src/probe/probe.test.ts > console noise 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |node| src/probe/probe.test.ts > outer group > nested fails
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ src/probe/probe.test.ts:4:40
+      2| describe('outer group', () => {
+      3|   it('nested passes', () => { expect(1).toBe(1) })
+      4|   it('nested fails', () => { expect(1).toBe(2) })
+       |                                        ^
+      5| })
+      6| it('top passes', () => { expect(true).toBe(true) })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 3 passed | 1 skipped | 1 todo (6)
+   Start at  10:23:55
+   Duration  212ms (transform 41%, import 29%, tests 19%, worker 11%)
+

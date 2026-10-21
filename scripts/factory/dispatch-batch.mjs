@@ -5270,6 +5270,15 @@ function launchDispatchWave(compiled, launchedLanes) {
       d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} run pid=${pid ?? 'none'} command=node ${watchArgs.join(' ')}`)
       runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
     } catch (error) {
+      try { d.log(`dispatch-batch: run-failure lane=${item.lane} reason=${error?.reason ?? 'unknown'} error=${error?.message || String(error)}`) } catch { /* instrumentation is never load-bearing */ }
+      if (!launchedLanes.has(item.lane)) {
+        teardownBetweenAttempts({ item, deps: d })
+        removeWorktrees({
+          plans: createdWorktrees.filter((plan) => plan.lane === item.lane),
+          branches: attachedBranches.filter((plan) => plan.lane === item.lane),
+          checkout: root, deps: d,
+        })
+      }
       if (!waveRefusal) waveRefusal = error
     }
   }

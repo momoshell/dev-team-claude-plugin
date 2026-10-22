@@ -21,11 +21,15 @@ and an absent or malformed summary is not evidence that checks ran.
 
 The changes commissioned by this ADR stay dependency-injected and bounded.
 They add no new unbounded loop: proof runs are bounded by the existing
-`gate_repairs` limit, and plan-check remains bounded by `LIMITS` (`crew/drive.mjs:17-25`).
+`gate_repairs` limit, and plan-check remains bounded by `LIMITS` in `crew/drive.mjs`.
 The implementation must degrade sanely when no lead or no tech-lead is seated.
 In particular, a missing lead must continue to escalate rather than invent an
 answer, and a missing tech-lead must not make the driver manufacture a
 plan-check verdict. This is a decision record, not a code change.
+
+Except where §10 or a citation says otherwise, every citation in §§0–9 was read at `ffabab75`, where this
+ADR was proposed. Each code citation names the top-level definition that holds the cited code at `d09933fd`,
+so the citations of the module §11 renames name `crew/seat-io.mjs`.
 
 ## 1. Context — the acceptance signal is graded by the seat it grades
 
@@ -38,7 +42,7 @@ escalate:plan-check`: three planning rounds, including one extra round, and
 zero build rounds. Four of six round-three findings were gate defects, not plan
 defects. One concrete example was G61, which claimed that P2 enqueued nothing
 while calling `acquireLeases`, a function that takes no enqueue parameter, so
-the assertion could not fail (#142; `crew/drive.mjs:367-420`).
+the assertion could not fail (#142; the plan loop in `runTask` in `crew/drive.mjs`).
 
 The same failure appeared in the acceptance artifact. On 2026-08-14 a
 34-check gate returned byte-identical per-check output with and without the
@@ -87,15 +91,15 @@ check can fail. G61 remains a residual risk, as does omitted coverage: no check
 can flip for behavior that the gate never wrote. Those risks are carried by
 Decision 2's re-entry condition rather than hidden by the authorship answer.
 The no-fixed-point outcome in #142 is addressed by Decisions 3 and 4: plan-check
-must converge before any gate runs (`crew/drive.mjs:367-420`, compared with the
-first gate read at `:452` and per-round run at `:571-573`), so a proof cannot
+must converge before any gate runs (the plan loop in `runTask` in `crew/drive.mjs`, compared with
+its first read of `gate_cmd` and its per-round `gate:r` run later in the same function), so a proof cannot
 repair a run that spent zero build rounds in an unconverged plan loop.
 
 This decision does not depend on a lead. If no lead is seated,
 `consultLead` already returns `escalate` with zero assignments
-(`crew/drive.mjs:240-244`); planner authorship and the driver's mechanical proof
+(the no-lead branch of `consultLead`, inside `runTask` in `crew/drive.mjs`); planner authorship and the driver's mechanical proof
 remain facts, while a human decision still escalates. If no tech-lead is seated,
-the plan-check block is skipped (`crew/drive.mjs:383`), but the planner still
+the plan-check block is skipped (the `tech-lead` seat check before the `check:r` stage, inside `runTask` in `crew/drive.mjs`), but the planner still
 produces the gate and the driver can run the proof. No tier substitutes a lead
 or tech-lead merely to change who owns this artifact.
 This paragraph is about authorship only: since #334/PR #348 the *repair* of an
@@ -108,9 +112,9 @@ accepted plan**—that would serialize plan to gate before any build, require a
 new pre-build assignment, a charter change, and a repair owner, while buying no
 guarantee that the reviewer's gate discriminates; the property would still need
 mechanical proof; (c) **tech-lead authors it**—only the `judge` tier seats a
-tech-lead (`crew/roster.json:52-83`), so the gate author would disappear for two
+tech-lead (the `judge` tier of `crew/roster.json`), so the gate author would disappear for two
 of three tiers, and the driver already skips the entire plan-check block when
-that seat is empty (`crew/drive.mjs:383`).
+that seat is empty (the `tech-lead` seat check before the `check:r` stage, inside `runTask` in `crew/drive.mjs`).
 
 ## 3. Decision 2 — the driver proves discrimination mechanically
 
@@ -127,28 +131,28 @@ and uses one predicate everywhere.
   increments whenever a **custodian**-returned replacement is accepted on the
   repair path (`GATE_CUSTODIAN`, §10)—even when the command string is identical. The repair brief explicitly
   permits returning an identical command, and editing `gate.mjs` in place leaves
-  `node …/gate.mjs` byte-identical (`crew/drive.mjs:583-588`). Command text or a
+  `node …/gate.mjs` byte-identical (the gate-repair bounce inside `runTask` in `crew/drive.mjs`). Command text or a
   hash is therefore not identity. `details.gate`, the journal line, the emitter
   payload, and #169's ledger rows and queries all key on `{run, gate_generation}`.
   This is the driver's identity, not a fact inferred by a caller.
 - **Proof invariant:** run the pristine proof at the first green of each gate
   generation. It is bounded by `1 + gate_repairs`, hence at most two pristine
-  runs under today's frozen `LIMITS` (`crew/drive.mjs:17-25`;
-  `crew/drive.test.mjs:1142-1147`). It is never rerun for every build round.
+  runs under today's frozen `LIMITS` in `crew/drive.mjs`
+  (the test "DECISIONS and LIMITS are the frozen public contract", in `crew/drive-review.test.mjs` at HEAD). It is never rerun for every build round.
 - **One predicate everywhere:** the pristine command must exit non-zero, emit a
   parseable `GATE-SUMMARY`, have `errored === 0`, and have `failed >= 1`. This is
-  `baselineGateDefect` (`crew/drive.mjs:76-82`) reused for the repair re-proof.
+  `baselineGateDefect` in `crew/drive.mjs` reused for the repair re-proof.
   A missing summary, a crash, or an errored check is not discrimination. This
   corrects the current `gate-reverify` path, which trusts only `pristine.ok`
-  (`crew/drive.mjs:595-603`).
+  (the driver's `gate-reverify` path at `ffabab75`).
 - **Routing:** a failed proof is a gate defect.
   The driver bounces the **gate custodian** — `GATE_CUSTODIAN = 'lead'`
-  (`crew/drive.mjs:218`) — consumes the existing single `gate_repairs` budget,
+  (`GATE_CUSTODIAN` in `crew/drive.mjs`) — consumes the existing single `gate_repairs` budget,
   and never bounces the builder for evidence about the gate. A second failed
   proof escalates. The repair consumes no builder round, as the repair path
-  does (`crew/drive.mjs:2085-2142`). A crew booted without that custodian
+  does (`settleFailedProof`, inside `runTask` in `crew/drive.mjs`). At commit `2ce11bc8`, where this bullet was written, the cited span was exactly `settleFailedProof`. A crew booted without that custodian
   assigns nobody: `noGateCustodian()` escalates with the site's own diagnosis
-  attached (`crew/drive.mjs:1246-1253`). *(Routing amended 2026-08-19 — §10;
+  attached (`noGateCustodian()`, inside `runTask` in `crew/drive.mjs`). *(Routing amended 2026-08-19 — §10;
   the three invariants in this bullet are unchanged.)*
 - **Cost and record:** there are at most two extra gate runs per task. Each is
   recorded on `details.gate` beside `reverified`, and the named journal,
@@ -174,19 +178,19 @@ and uses one predicate everywhere.
 - **Interaction with #153:** `errored: 0` makes a red pristine run mean that
   every check ran and adjudicated, rather than that the gate crashed. #153
   enforced this at baseline and deliberately left post-build runs unchanged;
-  this decision closes that gap (`#153/PR #154`, `crew/drive.mjs:76-82`).
+  this decision closes that gap (`#153/PR #154`, `baselineGateDefect` in `crew/drive.mjs`).
 - **Availability is not tier degradation.** Production always drives on the
-  outer `realIo`: `crew/crew.mjs:459` passes it to `driveTask`, transports are
+  outer `realIo`: `runCmd` in `crew/crew.mjs` passes it to `driveTask`, transports are
   used only inside assignment/wait, and `runClean` is on the outer object
-  (`crew/realio.mjs:178-207,252-268`). A headless-transport seat therefore still
+  (`seatIo` in `crew/seat-io.mjs`). A headless-transport seat therefore still
   has `runClean`. The `unproven` fallback is only for a direct or custom DI
   caller that omits the optional member; that run records
   `discrimination: 'unproven'` and proceeds. Production has no such caller.
   A DI test must pin the outer-`realIo` behavior.
 - **The measurement must be built before it can be read.** #130 makes gate
   verdicts durable but has no discrimination outcome and no durable review
-  verdict or must-fix count (`scripts/factory/ledger.mjs:187-200`,
-  `crew/realio.mjs:91-108`). [deprecated 2026-08-21 — superseded by §12: both outcomes are durable] Decision 2 commissions #169 to add a durable
+  verdict or must-fix count (the gate_results entry of `TABLES` in `scripts/factory/ledger.mjs`,
+  `emitAdapter` in `crew/seat-io.mjs`). [deprecated 2026-08-21 — superseded by §12: both outcomes are durable] Decision 2 commissions #169 to add a durable
   discrimination outcome keyed by `{run, gate_generation}` and a durable review
   outcome carrying at least a normalized verdict and `must_fix` count. Each has
   a named journal line, emitter call, ledger column, and DI tests.
@@ -200,8 +204,8 @@ and uses one predicate everywhere.
 - The trigger is the first eligible task whose review returns `must_fix > 0`
   after that task's gate has passed its proof. `must_fix` is used exactly: the
   reviewer records severity counts and has no correctness/category field
-  (`crew/roles/reviewer.md:31-33`), while a must-fix already is the runtime's
-  “not safe to accept” class (`crew/roles/reviewer.md:25-28`). This ADR does
+  (the "Envelope details fields" section of `crew/roles/reviewer.md`), while a must-fix already is the runtime's
+  “not safe to accept” class (the "Verdict contract" section of `crew/roles/reviewer.md`). This ADR does
   not commission a correctness field; a future slice that wants one must add
   and own it rather than infer it from a count.
 - The future design must not require every check to flip. An invariant check can
@@ -213,7 +217,7 @@ and uses one predicate everywhere.
 With no lead seated, the driver still records the mechanical proof, but the
 repair it would route needs the gate custodian: `noGateCustodian()` turns that
 site into an escalation carrying the site's own diagnosis, and
-no other seat is substituted (`crew/drive.mjs:1246-1253`; amended 2026-08-19 —
+no other seat is substituted (`noGateCustodian()`, inside `runTask` in `crew/drive.mjs`; amended 2026-08-19 —
 §10). With no tech-lead seated, plan-check is absent, but the driver's gate
 generation and pristine proof remain available for every production tier.
 Neither absence is described as a missing `runClean` capability.
@@ -224,7 +228,7 @@ proof at every gate round—the property cannot change unless the gate generatio
 changes; bouncing the **builder** on a failed proof—the evidence is about the
 gate, and #153's incident shows that misrouting a gate defect burns nine stages;
 keying identity on the command string or its hash—identical commands are
-explicitly permitted on repair (`crew/drive.mjs:583-588`); and mutation-testing
+explicitly permitted on repair (the gate-repair bounce inside `runTask` in `crew/drive.mjs`); and mutation-testing
 the gate now—stronger proof would require a harness that does not exist and
 would spend build budget on that harness. [deprecated 2026-08-21 — superseded by §12: the mutation harness shipped in #420]
 
@@ -256,13 +260,13 @@ four in-scope files needs no ratio at all. This amends the threshold's
 denominator, not the evidence-only character of the signal; the rejected
 alternatives below stand unchanged.
 
-Plan bytes come from `details.plan_path` (`crew/drive.mjs:422`). Gate bytes
+Plan bytes come from `details.plan_path` (`runTask` in `crew/drive.mjs`, where `planPath` is read from `details.plan_path`). Gate bytes
 come from a new explicit `details.gate_path`, which is task-directory-contained
 and validated when supplied; when absent or unmeasurable, the measurement is
 reported as `null`. The driver does not parse `gate_cmd`: it is a command, and
 shell quoting, wrappers, environment prefixes, and multiple path arguments make
 path extraction ambiguous and untestable. Because plan-check runs entirely
-before any build (`crew/drive.mjs:367-420`, before `:571`), “no build in sight”
+before any build (the plan loop in `runTask` in `crew/drive.mjs`, before its first `gate:r` run), “no build in sight”
 is the ambient condition, not a `build_rounds_used` field. This is
 instrumentation, never load-bearing under ADR-026: a failed measurement changes
 neither an outcome nor the escalation route.
@@ -277,7 +281,7 @@ from having read three plans.” The measured 73,308-byte plan, 102,241-byte gat
 and approximately 500-line build are the motivating numbers (#142).
 
 If no tech-lead is seated, the plan-check block does not run at all
-(`crew/drive.mjs:383`), so no `divergent` check verdict is manufactured. The
+(the `tech-lead` seat check before the `check:r` stage, inside `runTask` in `crew/drive.mjs`), so no `divergent` check verdict is manufactured. The
 signal may still be present in the journal and emission for an escalation
 payload, where nobody consumes it at that tier. If no lead is seated, the
 signal remains evidence and a lead consultation follows the existing
@@ -308,7 +312,7 @@ and before `check:r{n}`. On revision rounds it validates the enum. `carve`
 validates the slice list, then escalates carrying those slices as the human
 handoff. A missing or out-of-enum value is an invalid decision and escalates;
 the driver must not silently treat it as `proceed`. The existing
-`crew/drive.mjs:430-442` block is post-loop scope/lane validation after a plan
+post-loop `files_in_scope` and lane validation inside `runTask` in `crew/drive.mjs` runs after a plan
 has already been accepted, not this per-round branch, and must not be cited as
 an implementation of this route. Direction 4 of #142 states: “**A carve verdict
 the planner can return.** ... An offer in prose is weaker than an enum.” This
@@ -316,24 +320,24 @@ makes the escape hatch reachable without letting the driver invent issue scope.
 
 The escalation handoff exists at every tier. With no tech-lead, there is no
 `check:r{n}`, but a plan **revision** is still reachable through the round-1
-status bounce (`crew/drive.mjs:367-383`): the planner can return
+status bounce in the plan loop of `runTask` in `crew/drive.mjs`: the planner can return
 `status: insufficient`, the lead can bounce it, and round 2 assigns
 `plan-revision` even without a tech-lead. The carve branch therefore applies at
-`build`, which has a seated lead but no tech-lead (`crew/roster.json:26-51`). At
+`build`, which has a seated lead but no tech-lead (the `build` tier of `crew/roster.json`). At
 `mechanical`, the missing lead makes `consultLead` escalate on that same bounce
-(`crew/drive.mjs:240-244`), so round 2 is never reached and the rule is vacuous
+(the no-lead branch of `consultLead`, inside `runTask` in `crew/drive.mjs`), so round 2 is never reached and the rule is vacuous
 there. A planner-provided slice can be carried as context rather than accepted
 as an automatic split. This is deliberate degradation, not a tier-specific
 alternate schema.
 
-**Rejected:** adding a fourth member to `DECISIONS` (`crew/drive.mjs:34`)—that
+**Rejected:** adding a fourth member to `DECISIONS` in `crew/drive.mjs`—that
 enum is the lead's answer surface, consumed through `askLead` subsets
-(`crew/drive.mjs:329-332`), while carve knowledge belongs to the plan author;
+(`askLead`, inside `runTask` in `crew/drive.mjs`), while carve knowledge belongs to the plan author;
 letting the driver split the task itself—the driver has no authority over issue
 scope and would mint work nobody owns; and keeping `status: insufficient` as
 the only route—that is a whole-envelope failure mode, forcing a planner whose
 plan is correct but too large to misreport in order to request a carve, which
-is why the prose escape hatch was never taken (#142).
+is why the prose escape hatch was never taken (#142). `DECISIONS` held three members at `ffabab75` and holds six at `d09933fd`; none is a carve.
 
 ## 6. Decision 5 — accept-with-residuals must classify its residuals
 
@@ -350,9 +354,9 @@ enforcement half rests on a single incident.
 - **Phase 1 — commissioned (#170).** The reviewer contract returns a findings
   array with a stable per-review ID and severity alongside the existing counts.
   This is a runtime-wide contract migration: `SEAT_DEFAULTS` gives every crew
-  the shared `reviewer.md` (`crew/crew.mjs:69-74`), every crew requires a
+  the shared `reviewer.md` (`SEAT_DEFAULTS` in `crew/crew.mjs`), every crew requires a
   reviewer because the driver assigns one unconditionally
-  (`crew/crew.mjs:427-429`), and the shared role contract, envelope validation,
+  (`assertSeats` in `crew/crew.mjs`), and the shared role contract, envelope validation,
   fixtures and contract tests move together. Phase 1 is **pure addition**: no
   acceptance path changes, nothing fails closed, and #169's "was the gate green
   while review found a must-fix" query needs exactly this data regardless of
@@ -373,7 +377,7 @@ which would otherwise wait behind a contract migration it does not need.
 Everything below specifies phase 2 and is ratified as the design to build when
 its start condition is met — not as work to start now.
 
-At exhaustion (`crew/drive.mjs:628-646,661-679`), every unresolved finding from
+At exhaustion (the review-exhaustion and build-exhaustion consults inside `runTask` in `crew/drive.mjs`), every unresolved finding from
 the last review must appear exactly once across one of these two arrays:
 
 - `residuals: [{id, type}]`, where `type` is exactly
@@ -389,20 +393,20 @@ residual escalates.
 An unknown, duplicate, or omitted ID, an invalid type, empty evidence, or
 missing details makes the decision invalid. An invalid `accept` fails closed to
 `escalate`; `askLead` already coerces out-of-subset answers to escalation
-(`crew/drive.mjs:329-332`). Silence is not converted into a synthetic residual:
+(`askLead`, inside `runTask` in `crew/drive.mjs`). Silence is not converted into a synthetic residual:
 manufacturing a finding would corrupt the record. The residual/refuted result
 gets its own named journal line and ledger row, owned by #170. If it shares a
 ledger primitive with #169's measurement rows, that is a dependency, not a
 transfer of ownership.
 
 This turns the lead charter's existing prose—“Accept is for should-fix-later,
-never for must-fix-now” (`crew/roles/lead.md:43-45`)—into a mechanical boundary.
+never for must-fix-now” (the **accept** bullet under "How to judge" in `crew/roles/lead.md`)—into a mechanical boundary. The quoted wording held at `ffabab75`; commit `c9f0092a` rewrote the bullet, which now reads "accept is never for must-fix-now".
 It also preserves the lesson of #144/PR #162: the reviewer was right, and the
 lead's call was reasonable on what it could see, but the residual was an
 unnoticed runtime compatibility defect rather than a documentation fix.
 
 With no lead seated, `consultLead` already returns `escalate` with zero assigns
-(`crew/drive.mjs:240-244`), so there is no accept path to constrain in the
+(the no-lead branch of `consultLead`, inside `runTask` in `crew/drive.mjs`), so there is no accept path to constrain in the
 `mechanical` tier. With no tech-lead, plan-check is independently skipped; if a
 lead is available at review exhaustion, this validation still applies. No
 special tier branch weakens the severity rule.
@@ -422,11 +426,11 @@ while type is the lead's claim about the risk of not fixing it; and removing
 
 | Gap | Evidence | How this ADR decides around it |
 |---|---|---|
-| No observations exist today | Neither a discrimination outcome nor a review outcome is durable today (`scripts/factory/ledger.mjs:187-200`, `crew/realio.mjs:91-108`) [deprecated 2026-08-21 — superseded by §12: both outcomes accrue] | The Decision 2 horizon has not started and cannot start until #168 and #169 land. The first denominator is then the next 20 eligible tasks, not ratification or historical anecdotes. |
-| `runClean` stash isolation has not been tested against writes outside git's view | `crew/realio.mjs:252-268` stashes `--include-untracked`; no cited test covers ignored paths or `node_modules` | A DI test is commissioned; a direct caller omitting `runClean` records `discrimination: 'unproven'`. Production uses outer `realIo`. |
+| No observations exist today | Neither a discrimination outcome nor a review outcome is durable today (the gate_results entry of `TABLES` in `scripts/factory/ledger.mjs`, `emitAdapter` in `crew/seat-io.mjs`) [deprecated 2026-08-21 — superseded by §12: both outcomes accrue] | The Decision 2 horizon has not started and cannot start until #168 and #169 land. The first denominator is then the next 20 eligible tasks, not ratification or historical anecdotes. |
+| `runClean` stash isolation has not been tested against writes outside git's view | `seatIo` in `crew/seat-io.mjs` stashes `--include-untracked`; no cited test covers ignored paths or `node_modules` | A DI test is commissioned; a direct caller omitting `runClean` records `discrimination: 'unproven'`. Production uses outer `realIo`. |
 | Per-check and omitted-check adequacy are unmeasured | The commissioned proof is whole-gate only; G61 in #142 is an example of a check that could not fail, and omitted coverage has no check to flip | The ADR does not claim per-check discrimination. The #168/#169 horizon and `must_fix > 0` trigger are the re-entry condition for stronger work. |
-| The `cosmetic` / `correctness-unverified` split has only one data point | #144/PR #162 supplies the residual-accepted incident; the reviewer currently records severity counts only (`crew/roles/reviewer.md:31-33`) | #170 first creates stable finding IDs and severity, then validates typed residuals and refutations. No correctness category is inferred from severity. |
-| A direct DI caller may omit `runClean` | `runClean` is optional in the DI contract (`crew/drive.mjs:163-165`); production reaches it through `realIo` (`crew/crew.mjs:459`) | Such a run is explicitly `unproven` and proceeds because instrumentation is non-load-bearing under ADR-026. It does not count as an eligible durable proof observation. |
+| The `cosmetic` / `correctness-unverified` split has only one data point | #144/PR #162 supplies the residual-accepted incident; the reviewer currently records severity counts only (the "Envelope details fields" section of `crew/roles/reviewer.md`) | #170 first creates stable finding IDs and severity, then validates typed residuals and refutations. No correctness category is inferred from severity. |
+| A direct DI caller may omit `runClean` | `runClean` is optional in the DI contract (the io contract comment before `driveTask` in `crew/drive.mjs`); production reaches it through `realIo` (`runCmd` in `crew/crew.mjs`) | Such a run is explicitly `unproven` and proceeds because instrumentation is non-load-bearing under ADR-026. It does not count as an eligible durable proof observation. |
 
 ## 8. Consequences and owner slices
 
@@ -503,22 +507,21 @@ no-lead paragraph (§3), Decision 1's no-lead paragraph (§2), and §8's #168
 consequence row. Decisions 1 and 3–5 are not reopened.
 
 Decision 2's former repair routing is what this amendment retires. #334 moved
-all four post-acceptance gate sites — a failed discrimination proof
-(`crew/drive.mjs:2214`), a vacuous green baseline (`:2265`), a gate that did not
-RUN (`:2286`), and the reviewer-triaged mid-run gate defect (`:2604`) — to
-`GATE_CUSTODIAN` (`crew/drive.mjs:218`), each guarded by `noGateCustodian()` so
+all four post-acceptance gate sites — a failed discrimination proof, a vacuous green baseline,
+a gate that did not RUN, and the reviewer-triaged mid-run gate defect, all four inside `runTask` in `crew/drive.mjs` — to
+`GATE_CUSTODIAN` in `crew/drive.mjs`, each guarded by `noGateCustodian()` so
 a crew booted without that seat escalates with the site's own diagnosis attached
-rather than assigning anybody (`crew/drive.mjs:1246-1253`). The assignment and
-confinement expressions are pinned at `crew/drive.test.mjs:5145-5168` — exactly
+rather than assigning anybody (`noGateCustodian()`, inside `runTask` in `crew/drive.mjs`). The assignment and
+confinement expressions are pinned at the two tests in `crew/drive.test.mjs` whose titles begin "the planner is confined to its own stages" and "every gate site assigns the lead" — exactly
 two `planner` assignments remain in the driver, and neither is a gate site — and
-the lead-less diagnostic escalations at `crew/drive.test.mjs:5170-5216`.
+the lead-less diagnostic escalations at the four tests whose titles begin "lead-less: a baseline-green gate", "lead-less: a gate that did not RUN" and "lead-less: a failed discrimination proof" (all in `crew/drive.test.mjs`) and "lead-less: a reviewer-triaged gate defect" (in `crew/drive-build.test.mjs`).
 
 *(Anchors re-derived 2026-08-20 at commit `0999743` — #406. Every line number in
 this section, and this amendment's `GATE_CUSTODIAN` and `noGateCustodian()`
 references in Decision 2 (§3), was re-read on that checkout: the numbers
 ratified on 2026-08-19 had drifted and resolved to unrelated modifier, mutation
 and review code. The amendment's routing, substance and verdict are unchanged.
-Not re-anchored here: Decision 2's `crew/drive.mjs:2085-2142` reference to the
+Not re-anchored here: Decision 2's reference to the
 builder-round-consuming repair path, which has drifted too but whose referent
 cannot be re-derived from the sentence, and the ratification-era citations
 elsewhere in this document, which this note neither re-anchors nor audits.)*

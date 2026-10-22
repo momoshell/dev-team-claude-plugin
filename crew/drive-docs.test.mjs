@@ -1808,7 +1808,6 @@ test('AD3 ADR-048 no longer claims file:line citations and still names the read-
 
 const ADR_PENDING_FILE_LINE = [
   'adr-029-headless-observability-interjection.md',
-  'adr-030-acceptance-authorship.md',
 ]
 const adrDirFiles = () => readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => f.endsWith('.md')).sort()
 const adrFileLineTokens = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /\.[A-Za-z][A-Za-z0-9]*:\d/.test(t) || /^:\d/.test(t))
@@ -1817,7 +1816,7 @@ const readAdrFile = (f) => readFileSync(new URL('../docs/adr/' + f, import.meta.
 const namesTopLevelDefinition = (source, symbol) => new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm').test(source)
 
 // MUTATION CZ1: expanding "at commit `53e326ef`" in ADR-040 to add a backticked crew/drive-docs.test.mjs:574 token makes a cleaned file carry a token again.
-test('CZ1 ADR file-and-line citations survive only in the two PENDING files', () => {
+test('CZ1 ADR file-and-line citations survive only in the one PENDING file', () => {
   assert.deepEqual(adrFileLineTokens('`crew/drive.mjs:12`'), ['crew/drive.mjs:12'])
   assert.deepEqual(adrFileLineTokens('`surface:27` `[::1]` `2026-10-18T07:28:19Z`'), [])
   assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), ADR_PENDING_FILE_LINE)
@@ -1981,6 +1980,60 @@ test('CX5 ADR-047 no longer claims file:line citations and still names the read-
   const adr = readAdrFile('adr-047-the-advisor-is-a-roster-seat.md')
   assert.equal(adr.includes('Every `file:line` below'), false)
   assert.ok(adr.includes('Every repository citation below was read at `46594dad`.'))
+})
+
+// MUTATION CW1: re-adding a backticked file-and-line token after "gives every crew" in ADR-030 makes its token list non-empty again.
+test('CW1 ADR-030 carries no file-and-line tokens', () => {
+  assert.deepEqual(adrFileLineTokens(readAdrFile('adr-030-acceptance-authorship.md')), [])
+})
+
+// MUTATION CW2: citing DECISIONS at crew/crew.mjs instead of crew/drive.mjs in ADR-030 removes a required drive.mjs pair.
+test('CW2 ADR-030 cites the six required crew/drive.mjs symbol pairs', () => {
+  const required = [
+    ['LIMITS', 'crew/drive.mjs'],
+    ['runTask', 'crew/drive.mjs'],
+    ['baselineGateDefect', 'crew/drive.mjs'],
+    ['GATE_CUSTODIAN', 'crew/drive.mjs'],
+    ['DECISIONS', 'crew/drive.mjs'],
+    ['driveTask', 'crew/drive.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-030-acceptance-authorship.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CW3: citing assertSeats at crew/drive.mjs instead of crew/crew.mjs in ADR-030 removes a required other-file pair.
+test('CW3 ADR-030 cites the six required other-file symbol pairs', () => {
+  const required = [
+    ['runCmd', 'crew/crew.mjs'],
+    ['SEAT_DEFAULTS', 'crew/crew.mjs'],
+    ['assertSeats', 'crew/crew.mjs'],
+    ['seatIo', 'crew/seat-io.mjs'],
+    ['emitAdapter', 'crew/seat-io.mjs'],
+    ['TABLES', 'scripts/factory/ledger.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-030-acceptance-authorship.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CW4: changing the read-at commit ffabab75 to ffabab76 in ADR-030 removes the exact read-at sentence.
+test('CW4 ADR-030 names the read-at commit', () => {
+  const adr = readAdrFile('adr-030-acceptance-authorship.md')
+  assert.ok(adr.replace(/\s+/g, ' ').includes('Except where \u00a710 or a citation says otherwise, every citation in \u00a7\u00a70\u20139 was read at `ffabab75`, where this ADR was proposed. Each code citation names the top-level definition that holds the cited code at `d09933fd`, so the citations of the module \u00a711 renames name `crew/seat-io.mjs`.'))
+})
+
+// MUTATION CW5: changing the credit hash 2ce11bc8 to 2ce11bc9 in ADR-030 removes a required commit credit.
+test('CW5 ADR-030 carries the two commit credits', () => {
+  const adr = readAdrFile('adr-030-acceptance-authorship.md')
+  assert.equal(adr.includes('`2ce11bc8`'), true)
+  assert.equal(adr.includes('`c9f0092a`'), true)
+})
+
+// MUTATION CW6: citing the frozen contract test at crew/drive.test.mjs instead of crew/drive-review.test.mjs in ADR-030 loses the current-file citation.
+test('CW6 ADR-030 proof invariant cites the frozen contract test in drive-review', () => {
+  const adr = readAdrFile('adr-030-acceptance-authorship.md')
+  assert.ok(adr.replace(/\s+/g, ' ').includes('(the test "DECISIONS and LIMITS are the frozen public contract", in `crew/drive-review.test.mjs` at HEAD).'))
 })
 
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.

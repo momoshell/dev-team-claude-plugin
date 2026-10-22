@@ -3,17 +3,17 @@
   "name": "dev-team",
   "description": "Local marketplace for the dev-team Claude Code plugin",
   "owner": {
-    "name": "Momcilo"
+    "name": "momoshell"
   },
   "metadata": {
     "description": "Local marketplace for the dev-team plugin",
-    "version": "0.9.0"
+    "version": "0.9.1"
   },
   "plugins": [
     {
       "name": "dev-team",
       "author": {
-        "name": "Momcilo"
+        "name": "momoshell"
       },
       "category": "development",
       "source": {

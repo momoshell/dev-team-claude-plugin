@@ -1806,9 +1806,6 @@ test('AD3 ADR-048 no longer claims file:line citations and still names the read-
   assert.ok(adr.includes('Every description below, except the dated amendments, was read at `46594dad`.'))
 })
 
-const ADR_PENDING_FILE_LINE = [
-  'adr-029-headless-observability-interjection.md',
-]
 const adrDirFiles = () => readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => f.endsWith('.md')).sort()
 const adrFileLineTokens = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /\.[A-Za-z][A-Za-z0-9]*:\d/.test(t) || /^:\d/.test(t))
 const adrSymbolPairs = (text) => [...text.matchAll(/`([A-Za-z_$][\w$]*)` in `([^`]+)`/g)].map((m) => [m[1], m[2]]).filter(([, p]) => /\.(mjs|js|ts)$/.test(p))
@@ -1816,10 +1813,10 @@ const readAdrFile = (f) => readFileSync(new URL('../docs/adr/' + f, import.meta.
 const namesTopLevelDefinition = (source, symbol) => new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm').test(source)
 
 // MUTATION CZ1: expanding "at commit `53e326ef`" in ADR-040 to add a backticked crew/drive-docs.test.mjs:574 token makes a cleaned file carry a token again.
-test('CZ1 ADR file-and-line citations survive only in the one PENDING file', () => {
+test('CZ1 no ADR file carries file-and-line citations', () => {
   assert.deepEqual(adrFileLineTokens('`crew/drive.mjs:12`'), ['crew/drive.mjs:12'])
   assert.deepEqual(adrFileLineTokens('`surface:27` `[::1]` `2026-10-18T07:28:19Z`'), [])
-  assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), ADR_PENDING_FILE_LINE)
+  assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), [])
 })
 
 // MUTATION CZ2: citing FIFO_RETRIES at crew/drive.mjs instead of crew/headless-rpc.mjs names no definition there — the finish/EXECUTABLE_SHAPES probes pin definition-vs-mention.
@@ -2034,6 +2031,72 @@ test('CW5 ADR-030 carries the two commit credits', () => {
 test('CW6 ADR-030 proof invariant cites the frozen contract test in drive-review', () => {
   const adr = readAdrFile('adr-030-acceptance-authorship.md')
   assert.ok(adr.replace(/\s+/g, ' ').includes('(the test "DECISIONS and LIMITS are the frozen public contract", in `crew/drive-review.test.mjs` at HEAD).'))
+})
+
+// MUTATION CU1: re-adding a backticked crew/drive.mjs:12 token after "launches interactive pi, not `--mode rpc`" in ADR-029 makes a cleaned file carry a token again.
+test('CU1 ADR-029 carries no file-and-line tokens', () => {
+  assert.deepEqual(adrFileLineTokens(readAdrFile('adr-029-headless-observability-interjection.md')), [])
+})
+
+// MUTATION CU2: citing fakeIo at crew/drive.mjs instead of crew/drive-fixtures.mjs in ADR-029 removes a required pair.
+test('CU2 ADR-029 cites the eight required symbol pairs', () => {
+  const required = [
+    ['driveTask', 'crew/drive.mjs'],
+    ['runTask', 'crew/drive.mjs'],
+    ['fakeIo', 'crew/drive-fixtures.mjs'],
+    ['sendLine', 'crew/driver.mjs'],
+    ['seatIo', 'crew/seat-io.mjs'],
+    ['waitForEnvelope', 'crew/seat-io.mjs'],
+    ['paneAlive', 'crew/seat-io.mjs'],
+    ['emitAdapter', 'crew/seat-io.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-029-headless-observability-interjection.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CU3: citing modelString at crew/crew.mjs instead of crew/adapters/adapter-pi.mjs in ADR-029 removes a required pair.
+test('CU3 ADR-029 cites the nine required symbol pairs', () => {
+  const required = [
+    ['runCmd', 'crew/crew.mjs'],
+    ['statusCmd', 'crew/crew.mjs'],
+    ['bootCmd', 'crew/crew.mjs'],
+    ['resolveAdapters', 'crew/crew.mjs'],
+    ['assertCapabilities', 'crew/crew.mjs'],
+    ['seatCommand', 'crew/adapters/adapter-pi.mjs'],
+    ['modelString', 'crew/adapters/adapter-pi.mjs'],
+    ['EVENT_TYPES', 'scripts/factory/ledger.mjs'],
+    ['PAYLOAD_KEYS', 'scripts/factory/ledger.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-029-headless-observability-interjection.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+// MUTATION CU4: changing the read-at hash 42df8d2d to 42df8d2e in the section 11 citation note breaks the exact sentence.
+test('CU4 ADR-029 names the read-at commit', () => {
+  const adr = readAdrFile('adr-029-headless-observability-interjection.md')
+  assert.ok(adr.replace(/\s+/g, ' ').includes('Except where a citation names another commit, every citation in \u00a7\u00a70\u20139 was read at `42df8d2d`, where this ADR was drafted. Each code citation names the top-level definition that holds the cited code at `7b3c6f90`, each spike-document citation names the section that held the cited lines, and a test named by its title is named as it stood at `42df8d2d`.'))
+})
+
+// MUTATION CU5: changing the credit hash d57c4059 to d57c4058 in ADR-029 removes a required commit credit.
+test('CU5 ADR-029 carries the two commit credits', () => {
+  const adr = readAdrFile('adr-029-headless-observability-interjection.md')
+  assert.equal(adr.includes('`d57c4059`'), true)
+  assert.equal(adr.includes('`2fac235d`'), true)
+})
+
+// MUTATION CU6: restoring crew/crew.test.mjs on line 183 of ADR-029 loses the current-file citation.
+test('CU6 ADR-029 cites the shipped-capability test in crew-adapters', () => {
+  const adr = readAdrFile('adr-029-headless-observability-interjection.md')
+  assert.ok(adr.includes("`crew/crew-adapters.test.mjs`'s test"))
+  assert.equal(adr.includes("`crew/crew.test.mjs`'s test"), false)
+})
+
+// MUTATION CU7: replacing the both-adapter capabilitiesFor consequence with the flat assertCapabilities call replacing the flat export reverses the ratified decision.
+test('CU7 ADR-029 keeps the resolved-profile consequence for both adapters', () => {
+  const adr = readAdrFile('adr-029-headless-observability-interjection.md')
+  const consequence = adr.split('\n').find((line) => line.startsWith('| Headless `io` and daemon:'))
+  assert.ok(consequence?.includes('`capabilitiesFor({transport})` in both adapters replacing the flat `assertCapabilities` call inside `resolveAdapters` in `crew/crew.mjs`'))
 })
 
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.

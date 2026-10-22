@@ -6289,7 +6289,7 @@ function runTask(ctx, io, crash) {
   const stepCheckpoint = ctx.resume_checkpoint?.kind === 'step' ? ctx.resume_checkpoint : null
   const stepCheckpointDefect = stepCheckpoint ? resumeCheckpointDefect(stepCheckpoint) : null
   if (stepCheckpointDefect) throw fail('build', `resume checkpoint is unusable: ${stepCheckpointDefect}`)
-  const S = { consults: 0, stages: [], flakes: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, panelContributors: [] }
+  const S = { consults: 0, stages: [], flakes: [], commit: null, leadDecisions: [], bounceDecisionSinceBuild: false, buildRound: null, nonDoneBounce: null, dissents: [], grants: [], growth: [], modifiers: [], enforcements: [], acceptFindings: null, lastReview: null, seqHighWater: 0, planAccept: null, carried: [], carriedCleared: new Set(), returns: { planner: null, builder: null, reviewer: null }, commitMessage: null, commitSubject: null, laneIntent: null, panelContributors: [] }
   const finishState = { verdicts: [], capped: false, openFindings: [], gateBytes: null, gateFile: null, escalation: null, gateOk: null, gateDiscrimination: null, planBytes: null, envelopeBytes: null }
   let postCommitFrozenRepairs = 0
   // These counters belong to the whole accepted lane, including every suite,
@@ -7360,7 +7360,7 @@ function runTask(ctx, io, crash) {
       },
       commit: kind === 'step'
         ? { oid: null, pending: true, files: [], message: '', subject: '' }
-        : { oid: details.commit ?? null, pending: details.commit == null, files: committedFiles, message: S.commitMessage || '', subject: S.commitSubject || '' },
+        : { oid: details.commit ?? null, pending: details.commit == null, files: committedFiles, message: S.commitMessage || '', subject: S.commitSubject || '', ...(typeof S.laneIntent === 'string' ? { intent: S.laneIntent } : {}) },
       proof: {
         gate_cmd: activeGateCmd, gate_path: acceptedGatePath,
         summary: parseGateSummary(lastGateOutput) || details.gate?.summary || {},
@@ -8323,7 +8323,7 @@ function runTask(ctx, io, crash) {
       const resumeBriefText = (() => { try { const value = resumeIo.readFile(resumeCtx.briefFile); return typeof value === 'string' ? value : null } catch { return null } })()
       const resumeIssueDefect = issueStatementDefect({ brief: resumeBriefText, details: checkpoint.returns?.planner?.details })
       if (resumeIssueDefect) return refusePublish(PUBLISH_REFUSALS.issueStatement, resumeIssueDefect)
-      const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: resumePromptClaim?.citation_only ?? null, body: resumePromptClaim ? (resumePromptClaim.claim ?? '') : composePrBody({ intent: commitIntent(checkpoint.commit.message) }) })
+      const resumeIntent = typeof checkpoint.commit.intent === 'string' ? checkpoint.commit.intent : commitIntent(checkpoint.commit.message); if (typeof checkpoint.commit.intent !== 'string') { try { resumeIo.log(recordRow({ at: resumeIo.now(), resume_intent: { source: 'commit-message', reason: 'checkpoint-lacks-lane-intent' } })) } catch { /* instrumentation is never load-bearing */ } } const promptDefect = promptMeasurementDefect({ files: publishFiles, citation_only: resumePromptClaim?.citation_only ?? null, body: resumePromptClaim ? (resumePromptClaim.claim ?? '') : composePrBody({ intent: resumeIntent }) })
       if (promptDefect) return refusePublish(PUBLISH_REFUSALS.promptMeasurement, promptDefect)
       let ghMissing
       try { ghMissing = resumeIo.run('command -v gh') } catch (error) { ghMissing = { ok: false, output: error?.message ?? String(error) } }
@@ -8353,7 +8353,7 @@ function runTask(ctx, io, crash) {
         let resumeDiffRows = []
         try { resumeDiffRows = journalRowsSinceRunStart(resumeIo.readFile(resumeCtx.journal || journal)).map((row) => row?.diff_mutation_proof).filter((row) => row && typeof row === 'object' && !Array.isArray(row)) } catch { resumeDiffRows = [] }
         const bodyRecord = {
-          intent: commitIntent(checkpoint.commit.message),
+          intent: resumeIntent,
           ...(resumePromptClaim ? { prompt_claim: resumePromptClaim.claim } : {}),
           closes: issueTrailers(checkpoint.commit.message).closes,
           issues: issueTrailers(checkpoint.commit.message).refs,
@@ -12823,6 +12823,7 @@ function runTask(ctx, io, crash) {
   const subject = String(message).split('\n')[0]
   S.commitMessage = message
   S.commitSubject = subject
+  S.laneIntent = commitIntent(composeCommitMessage({ task: ctx.task, planEnv, builderEnv: laneIntentEnv ?? builderEnv, brief: briefText }))
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   let commitChanged = null
@@ -13655,9 +13656,9 @@ function runTask(ctx, io, crash) {
     const gateNow = gateBlock()
     // The record IS the narrator's prompt. Driver-composed fields are path-clean: the
     // cold checkout stays in the journal and the gate command renders checkout-relative.
-    // `intent` is recomposed from the FIRST accepted builder envelope (never a later round's repair text) and is still builder prose verbatim, so an absolute path it carries reaches the body; trailers come from the real commit message.
+    // `intent` (S.laneIntent) was composed at commit time from the FIRST accepted builder envelope (never a later round's repair text), is still builder prose verbatim so an absolute path it carries reaches the body, and is the same text the resume checkpoint persists; trailers come from the real commit message.
     const record = {
-      intent: commitIntent(composeCommitMessage({ task: ctx.task, planEnv, builderEnv: laneIntentEnv ?? builderEnv, brief: briefText })),
+      intent: S.laneIntent,
       ...(promptClaim ? { prompt_claim: promptClaim.claim } : {}),
       closes: trailers.closes,
       issues: trailers.refs,

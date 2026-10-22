@@ -4317,3 +4317,50 @@ test('PW3 main publication sources What from the first builder envelope', () => 
   assert.equal(what, 'Round one: the whole lane change');
   assert.match(run.io.calls.commits.at(-1).message, /round two repair only/);
 });
+
+// Mutation: bodyRecord `intent: resumeIntent` -> `intent: commitIntent(checkpoint.commit.message)`; persist `...(typeof S.laneIntent === 'string' ? { intent: S.laneIntent } : {})` -> `...({} : {})`.
+test('RW1 resumed two-round lane publishes the first-round What', () => {
+  let gateCalls = 0;
+  const run = runPublished(widePublicationOptions(FINAL_CODE_FILES, { fingerprint: true, fingerprintFiles: WIDE_PROMPT_FENCE, commands: { 'gh pr create': { ok: false, output: 'create refused' } }, gateResult: () => (++gateCalls === 1 ? { ok: false, output: REBASE_RED } : { ok: true, output: REBASE_GREEN }), envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: WIDE_PROMPT_FENCE, gate_cmd: 'gate-cmd', prompt_claim: 'not applicable — citation-only; no seat-behaviour change intended.' } }), 'builder:1': buildEnv({ details: { files_changed: WIDE_PROMPT_FENCE, commit_message: 'Round one: the whole lane change' } }), 'reviewer:1': reviewEnv('changes-needed'), 'builder:2': buildEnv({ details: { files_changed: WIDE_PROMPT_FENCE, commit_message: 'fix(test): round two repair only' } }), 'reviewer:2': reviewEnv('pass') } }));
+  assert.equal(run.result.status, 'escalation');
+  const checkpoint = run.result.details.resume_checkpoint;
+  assert.ok(checkpoint);
+  assert.match(checkpoint.commit.message, /round two repair only/);
+  const resumed = runWideResume(FINAL_CODE_FILES, { checkpoint });
+  assert.equal(resumed.result.status, 'done');
+  const resumedBody = resumed.io.calls.writes[TD + '/pr-body.md'];
+  const start = resumedBody.indexOf('## What\n');
+  const rest = resumedBody.slice(start + '## What\n'.length);
+  const end = rest.indexOf('\n## Why');
+  const what = (end < 0 ? rest : rest.slice(0, end)).trim();
+  assert.equal(what, 'Round one: the whole lane change');
+});
+
+// Mutation: legacy-fallback guard `typeof checkpoint.commit.intent !== 'string'` -> `if (false)`.
+test('RW2 legacy checkpoint without lane intent falls back to the commit message and journals why', () => {
+  const checkpoint = wideResumeCheckpoint({ message: 'feat: resume\n\nOlder checkpoint body' });
+  const run = runWideResume(FINAL_CODE_FILES, { checkpoint });
+  assert.equal(run.result.status, 'done');
+  const body = run.io.calls.writes[TD + '/pr-body.md'];
+  const start = body.indexOf('## What\n');
+  const rest = body.slice(start + '## What\n'.length);
+  const end = rest.indexOf('\n## Why');
+  const what = (end < 0 ? rest : rest.slice(0, end)).trim();
+  assert.equal(what, 'Older checkpoint body');
+  assert.deepEqual(run.io.calls.logs.filter((row) => row.resume_intent).map((row) => row.resume_intent), [{ source: 'commit-message', reason: 'checkpoint-lacks-lane-intent' }]);
+});
+
+// Mutation: `resumeIntent` ternary -> `commitIntent(checkpoint.commit.message)`.
+test('RW3 resume prefers the checkpoint lane intent over the last-round commit body', () => {
+  const checkpoint = wideResumeCheckpoint({ message: 'feat: resume\n\nLast round body' });
+  checkpoint.commit.intent = 'First round body';
+  const run = runWideResume(FINAL_CODE_FILES, { checkpoint });
+  assert.equal(run.result.status, 'done');
+  const body = run.io.calls.writes[TD + '/pr-body.md'];
+  const start = body.indexOf('## What\n');
+  const rest = body.slice(start + '## What\n'.length);
+  const end = rest.indexOf('\n## Why');
+  const what = (end < 0 ? rest : rest.slice(0, end)).trim();
+  assert.equal(what, 'First round body');
+  assert.equal(run.io.calls.logs.filter((row) => row.resume_intent).length, 0);
+});

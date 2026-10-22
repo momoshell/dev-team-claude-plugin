@@ -1540,6 +1540,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   // triage row, in source order: a resumed lane narrates too, and an inventory listing
   // one site while the driver has two is an inventory nobody can trust.
   ["recordRow", "event='prompt-claim'", "at source citation_only reason files"],
+  ["recordRow", "", "at resume_intent"],
   ["recordRow", "", "at narration"],
   ["recordRow", "", "at triage"],
   ["recordRow", "", "at directed"],

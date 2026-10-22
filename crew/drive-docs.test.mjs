@@ -1809,7 +1809,6 @@ test('AD3 ADR-048 no longer claims file:line citations and still names the read-
 const ADR_PENDING_FILE_LINE = [
   'adr-029-headless-observability-interjection.md',
   'adr-030-acceptance-authorship.md',
-  'adr-047-the-advisor-is-a-roster-seat.md',
 ]
 const adrDirFiles = () => readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => f.endsWith('.md')).sort()
 const adrFileLineTokens = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /\.[A-Za-z][A-Za-z0-9]*:\d/.test(t) || /^:\d/.test(t))
@@ -1818,7 +1817,7 @@ const readAdrFile = (f) => readFileSync(new URL('../docs/adr/' + f, import.meta.
 const namesTopLevelDefinition = (source, symbol) => new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm').test(source)
 
 // MUTATION CZ1: expanding "at commit `53e326ef`" in ADR-040 to add a backticked crew/drive-docs.test.mjs:574 token makes a cleaned file carry a token again.
-test('CZ1 ADR file-and-line citations survive only in the three PENDING files', () => {
+test('CZ1 ADR file-and-line citations survive only in the two PENDING files', () => {
   assert.deepEqual(adrFileLineTokens('`crew/drive.mjs:12`'), ['crew/drive.mjs:12'])
   assert.deepEqual(adrFileLineTokens('`surface:27` `[::1]` `2026-10-18T07:28:19Z`'), [])
   assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), ADR_PENDING_FILE_LINE)
@@ -1908,6 +1907,80 @@ test('CY4 ADR-050 no longer claims file:line citations and still names the read-
   const adr = readAdrFile('adr-050-seat-skills-are-granted-not-pasted.md')
   assert.equal(adr.includes('Every repository `file:line` below'), false)
   assert.ok(adr.includes('Every repository citation below was read at `be85b8c3`.'))
+})
+
+// MUTATION CX1: re-adding a backticked crew/crew.mjs:165 token after "It is not in `ROLE_ORDER` in `crew/crew.mjs`" in ADR-047 reddens CX1 (and CZ1).
+test('CX1 ADR-047 carries no file-and-line tokens', () => {
+  assert.deepEqual(adrFileLineTokens(readAdrFile('adr-047-the-advisor-is-a-roster-seat.md')), [])
+})
+
+// MUTATION CX2: citing TIER0_KINDS at crew/crew.mjs instead of crew/pi/extensions/advisor.ts in ADR-047 removes a required pair.
+test('CX2 ADR-047 cites the fifteen required advisor.ts symbol pairs', () => {
+  const required = [
+    ['TIER0_KINDS', 'crew/pi/extensions/advisor.ts'],
+    ['redactDelta', 'crew/pi/extensions/advisor.ts'],
+    ['createAdvisor', 'crew/pi/extensions/advisor.ts'],
+    ['CADENCE_CALLS', 'crew/pi/extensions/advisor.ts'],
+    ['TIER1_MAX_CONSULTS', 'crew/pi/extensions/advisor.ts'],
+    ['CONSULT_TIMEOUT_MS', 'crew/pi/extensions/advisor.ts'],
+    ['BUILDER_SYSTEM_PROMPT', 'crew/pi/extensions/advisor.ts'],
+    ['PLANNER_SYSTEM_PROMPT', 'crew/pi/extensions/advisor.ts'],
+    ['requestUrl', 'crew/pi/extensions/advisor.ts'],
+    ['classifyAdvisorCell', 'crew/pi/extensions/advisor.ts'],
+    ['classifyAdvisorModel', 'crew/pi/extensions/advisor.ts'],
+    ['advisorCell', 'crew/pi/extensions/advisor.ts'],
+    ['ADVISOR_GRANT_ENV', 'crew/pi/extensions/advisor.ts'],
+    ['attachAdvisor', 'crew/pi/extensions/advisor.ts'],
+    ['ADVISED_ROLES', 'crew/pi/extensions/advisor.ts'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-047-the-advisor-is-a-roster-seat.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CX3: citing advisorBootRecord at crew/pi/extensions/advisor.ts instead of crew/crew.mjs in ADR-047 removes a required pair.
+test('CX3 ADR-047 cites the thirteen required crew.mjs symbol pairs', () => {
+  const required = [
+    ['advisorBootRecord', 'crew/crew.mjs'],
+    ['assertAdvisorCellLive', 'crew/crew.mjs'],
+    ['advisorJournalRecord', 'crew/crew.mjs'],
+    ['classifyAdvisorCell', 'crew/crew.mjs'],
+    ['ADVISED_ROLES', 'crew/crew.mjs'],
+    ['LADDER_PATH', 'crew/crew.mjs'],
+    ['resolveTier', 'crew/crew.mjs'],
+    ['resolveSeatModels', 'crew/crew.mjs'],
+    ['bootCmd', 'crew/crew.mjs'],
+    ['ROLE_ORDER', 'crew/crew.mjs'],
+    ['runCmd', 'crew/crew.mjs'],
+    ['advisorManifest', 'crew/crew.mjs'],
+    ['assertAdvisorManifest', 'crew/crew.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-047-the-advisor-is-a-roster-seat.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CX4: citing cellKey at crew/crew.mjs instead of crew/breaker.mjs in ADR-047 removes a required pair.
+test('CX4 ADR-047 cites the seven required other-file symbol pairs', () => {
+  const required = [
+    ['piRpcSeatParts', 'crew/adapters/adapter-pi.mjs'],
+    ['seatCommand', 'crew/adapters/adapter-pi.mjs'],
+    ['PI_PROVIDERS', 'crew/adapters/adapter-pi.mjs'],
+    ['ADVISOR_SPEND_COVERAGE', 'scripts/factory/ledger.mjs'],
+    ['TABLES', 'scripts/factory/ledger.mjs'],
+    ['cellKey', 'crew/breaker.mjs'],
+    ['PROTECTED_PATHS', 'crew/protected-paths.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-047-the-advisor-is-a-roster-seat.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CX5: restoring "Every `file:line` below was read at `46594dad`." in ADR-047 brings the retired read-at claim back.
+test('CX5 ADR-047 no longer claims file:line citations and still names the read-at commit', () => {
+  const adr = readAdrFile('adr-047-the-advisor-is-a-roster-seat.md')
+  assert.equal(adr.includes('Every `file:line` below'), false)
+  assert.ok(adr.includes('Every repository citation below was read at `46594dad`.'))
 })
 
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.

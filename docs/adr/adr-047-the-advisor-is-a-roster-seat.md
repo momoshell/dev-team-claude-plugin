@@ -8,71 +8,72 @@ The operator's direction, 2026-09-27, verbatim: *"same as the rest of the roster
 from the list and it should behave the same way; no matter if its local or provider."*
 
 This record works out what that direction means in code, recommends one shape, and names what it does not decide.
-Every `file:line` below was read at `46594dad`.
+Every repository citation below was read at `46594dad`.
 
 ## What the advisor is today
 
 **Two layers, one extension.** `crew/pi/extensions/advisor.ts` watches a pi seat's tool boundaries.
 
-- **Tier 0** is deterministic and has no model: `TIER0_KINDS` = `scope-breach`, `tripwire-touch`,
-  `repeated-failure`, `growth-divergence` (`advisor.ts:48-52`), fired from `processCall`/`processResult`.
+- **Tier 0** is deterministic and has no model: `TIER0_KINDS` in `crew/pi/extensions/advisor.ts` lists `scope-breach`, `tripwire-touch`,
+  `repeated-failure`, `growth-divergence`, fired from `processCall`/`processResult`.
 - **Tier 1** is a model judgment over a scrubbed delta of the seat's recent reads and edits. Each entry is scrubbed by
-  `redactDelta` (`advisor.ts:513`) at the one point every delta source passes through (`advisor.ts:845`). A consult
-  runs on a tier-0 note or every `CADENCE_CALLS` = 25 tool calls (`advisor.ts:60`). The cap is `TIER1_MAX_CONSULTS` = 20
-  consults per epoch (`advisor.ts:61`), and each one times out after `CONSULT_TIMEOUT_MS` = 20 s (`advisor.ts:75`). The
-  system prompt comes from the role: `BUILDER_SYSTEM_PROMPT` / `PLANNER_SYSTEM_PROMPT` (`advisor.ts:671-676`).
+  `redactDelta` in `crew/pi/extensions/advisor.ts` at the one call point every delta source passes through, `createAdvisor` in `crew/pi/extensions/advisor.ts`. A consult
+  runs on a tier-0 note or every `CADENCE_CALLS` in `crew/pi/extensions/advisor.ts` = 25 tool calls. The cap is `TIER1_MAX_CONSULTS` in `crew/pi/extensions/advisor.ts` = 20
+  consults per epoch, and each one times out after `CONSULT_TIMEOUT_MS` in `crew/pi/extensions/advisor.ts` = 20 s. The
+  system prompt comes from the role: `BUILDER_SYSTEM_PROMPT` in `crew/pi/extensions/advisor.ts` / `PLANNER_SYSTEM_PROMPT` in `crew/pi/extensions/advisor.ts`.
 
 **Advice has no authority.** A note carries no verdict, no interruption severity, no automatic resume and no
-mid-turn poke; it is delivered only at a tool boundary (`advisor.ts:13-16`), as a `steer` message
-(`advisor.ts:998`), and a delivery failure is swallowed (`advisor.ts:999-1000`).
+mid-turn poke; it is delivered only at a tool boundary described in the opening comment of `crew/pi/extensions/advisor.ts`, as a `steer` message
+sent by `createAdvisor` in `crew/pi/extensions/advisor.ts`, and a delivery failure is swallowed there.
 
 **Tier 1 already has two transports, chosen by one environment variable.** The brief this record was drafted from
 described one. The code has two:
 
 | | HTTP channel | pi-child channel ("model-only") |
 |---|---|---|
-| selected when | `CREW_ADVISOR_ENDPOINT` is non-empty (`advisor.ts:1059`) | it is empty (`advisor.ts:1089`) |
-| call | `POST <endpoint>/chat/completions` (`advisor.ts:667-669`) with `headers: { 'content-type': 'application/json' }` and nothing else (`advisor.ts:1060-1063`) | `pi -p --mode json --no-session --model <CREW_ADVISOR_MODEL> --tools read,grep,find,ls --exclude-tools edit,write,bash --no-extensions --no-skills` (`advisor.ts:1098-1099`) |
+| selected when | `CREW_ADVISOR_ENDPOINT` is non-empty | it is empty |
+| call | `POST <endpoint>/chat/completions` with `headers: { 'content-type': 'application/json' }` and nothing else | `pi -p --mode json --no-session --model <CREW_ADVISOR_MODEL> --tools read,grep,find,ls --exclude-tools edit,write,bash --no-extensions --no-skills` |
 | auth | none, so a provider API cannot be reached | pi's own, inherited from the seat's environment |
-| model check | `SAFE_MODEL` only (`advisor.ts:596`) | must be a `provider/id` key of the roster `models` catalog, passed in `CREW_ADVISOR_MODELS` (`advisor.ts:573-581`, `:600-606`) |
-| priced usage | none: `advisor_consult`/`advisor_usage` spend is written only when the endpoint is unset (`advisor.ts:1207`, `:1214-1220`); `ADVISOR_SPEND_COVERAGE` says so (`scripts/factory/ledger.mjs:1879`) | an `advisor_usage` row per consult (`scripts/factory/ledger.mjs:1541-1556`) |
+| model check | `SAFE_MODEL` only | must be a `provider/id` key of the roster `models` catalog, passed in `CREW_ADVISOR_MODELS` |
+| priced usage | none: `advisor_consult`/`advisor_usage` spend is written only when the endpoint is unset; `ADVISOR_SPEND_COVERAGE` says so | an `advisor_usage` row per consult |
+
+In code, the channel branch, the request, the pi child and both usage rows are in `createAdvisor` in `crew/pi/extensions/advisor.ts`, the URL is built by `requestUrl` in `crew/pi/extensions/advisor.ts`, the HTTP model check is `classifyAdvisorCell` in `crew/pi/extensions/advisor.ts`, the pi-child catalog check is `classifyAdvisorModel` in `crew/pi/extensions/advisor.ts` and `advisorCell` in `crew/pi/extensions/advisor.ts`, the coverage note is `ADVISOR_SPEND_COVERAGE` in `scripts/factory/ledger.mjs`, and the `advisor_usage` row shape is the `advisor_usage` entry of `TABLES` in `scripts/factory/ledger.mjs`.
 
 So option (a) below is already half built, for pi and for pi only.
 
 **Configuration is four environment variables, not the roster.** `CREW_ADVISOR` is the activation flag
-(`advisor.ts:32`, checked at `:1271`). `CREW_ADVISOR_ENDPOINT` and `CREW_ADVISOR_MODEL` are operator exports that
-`advisorBootRecord` reads from the boot environment (`crew/crew.mjs:353-371`). `CREW_ADVISOR_MODELS` is the catalog
-the boot hands down. The pi adapter writes all four into the seat's environment: the rpc/acp launch at
-`crew/adapters/adapter-pi.mjs:279-284` and the pane command at `:420-426`. At boot the endpoint is probed
-(`crew/crew.mjs:411-423`). The journal gets a projection with host and port only (`crew/crew.mjs:376-384`), and the
+named by `ADVISOR_GRANT_ENV` in `crew/pi/extensions/advisor.ts`, checked in `attachAdvisor` in `crew/pi/extensions/advisor.ts`. `CREW_ADVISOR_ENDPOINT` and `CREW_ADVISOR_MODEL` are operator exports that
+`advisorBootRecord` in `crew/crew.mjs` reads from the boot environment. `CREW_ADVISOR_MODELS` is the catalog
+the boot hands down. The pi adapter writes all four into the seat's environment: the rpc/acp launch in
+`piRpcSeatParts` in `crew/adapters/adapter-pi.mjs` and the pane command in `seatCommand` in `crew/adapters/adapter-pi.mjs`. At boot the endpoint is probed
+in `assertAdvisorCellLive` in `crew/crew.mjs`. The journal gets a projection with host and port only from `advisorJournalRecord` in `crew/crew.mjs`, and the
 #809 comment records that the endpoint's host is not part of the safety boundary. Only the scheme, the absence of
-credentials and `SAFE_MODEL` are closed (`crew/crew.mjs:315-322`).
+credentials and `SAFE_MODEL` are closed in `classifyAdvisorCell` in `crew/crew.mjs`.
 
-**The grant is per seat and is off everywhere.** `crew/capabilities.json` carries `"advisor": false` on all five
-seats: lead `:54`, planner `:77`, builder `:112`, reviewer `:152`, tech-lead `:173`. The boot admits a grant only on
-the roles in `ADVISED_ROLES` = builder, planner (`crew/crew.mjs:294`, `:405`; the extension's own copy is at
-`advisor.ts:46`). It also admits it only on a pi adapter (`adapter-unsupported`, `crew/crew.mjs:407`), because the
-extension is loaded with pi's `-e` (`crew/adapters/adapter-pi.mjs:265`, `:273`).
+**The grant is per seat and is off everywhere.** `crew/capabilities.json` carried `"advisor": false` on all five seats at `46594dad`, lead, planner, builder, reviewer and tech-lead. At HEAD the builder seat carries `"advisor": true`. The boot admits a grant only on
+the roles in `ADVISED_ROLES` in `crew/crew.mjs` = builder, planner, with the role refusal inside `assertAdvisorCellLive` in `crew/crew.mjs`; the extension's own copy is
+`ADVISED_ROLES` in `crew/pi/extensions/advisor.ts`. It also admits it only on a pi adapter (`adapter-unsupported`, refused inside `assertAdvisorCellLive` in `crew/crew.mjs`), because the
+extension is loaded with pi's `-e` by `piRpcSeatParts` in `crew/adapters/adapter-pi.mjs`.
 
 **Nothing that resolves a seat ever sees the advisor.** The roster's tiers seat lead, planner, builder, reviewer
-and tech-lead (`crew/roster.json:4-92`). No tier has an advisor cell, so none of these reach it: the tier floor,
-the ratified ladder (`crew/crew.mjs:1165-1169`), the `--model-<role>`/`--agent-<role>`/`--effort-<role>` overrides
-(`crew/crew.mjs:1083-1085`), the routing policy (`crew/routing-policy.json`) or the adapter's model translation
-(`resolveSeatModels`, `crew/crew.mjs:1128-1140`). Three results:
+and tech-lead in the `tiers` object of `crew/roster.json`. No tier had an advisor cell at `46594dad`; at HEAD the tiers carry an `advisor` key, so none of these reach it: the tier floor,
+the ratified ladder in `LADDER_PATH` in `crew/crew.mjs`, the `--model-<role>`/`--agent-<role>`/`--effort-<role>` overrides
+resolved in `resolveTier` in `crew/crew.mjs`, the routing policy (`crew/routing-policy.json`) or the adapter's model translation
+in `resolveSeatModels` in `crew/crew.mjs`. Three results:
 
 - **Model spelling differs from a seat's.** A seat's cell is translated by its adapter, and pi spells `openai` as
   `openai-codex` and `meta` as `meta`, the Muse Code subscription (`openrouter/meta` until 2026-10-16)
-  (`PI_PROVIDERS`, `crew/adapters/adapter-pi.mjs:109`). The pi-child
-  channel passes the roster key raw to `pi --model` (`advisor.ts:1098`). *Not measured here:* whether
+  in `PI_PROVIDERS` in `crew/adapters/adapter-pi.mjs`. The pi-child
+  channel passes the roster key raw to `pi --model` in `createAdvisor` in `crew/pi/extensions/advisor.ts`. *Not measured here:* whether
   `openai/gpt-6-sol` resolves inside pi. The seat path exists because nobody assumes that it does.
 - **The breaker cannot see the advisor.** A dead endpoint records a synthetic cell
-  `{agent: 'advisor', provider: 'local', id: <model>}` (`crew/crew.mjs:416-420`). No roster cell can equal it, because
-  the breaker keys on `(provider, id, agent, effort)` (`crew/breaker.mjs:76`).
-- **The record is incomplete.** `crew.json` carries the advisor record (`crew/crew.mjs:3310`), but no `run_seats`
+  `{agent: 'advisor', provider: 'local', id: <model>}` built by `assertAdvisorCellLive` in `crew/crew.mjs`. No roster cell can equal it, because
+  the breaker keys on `(provider, id, agent, effort)` in `cellKey` in `crew/breaker.mjs`.
+- **The record is incomplete.** `crew.json` carries the advisor record written by `bootCmd` in `crew/crew.mjs`, but no `run_seats`
   row names an advisor cell, so no ledger query can join advisor spend to a seat.
 
 **The advisor child reads the checkout, not only the delta.** The pi child is granted `read,grep,find,ls` and runs
-with `cwd` set to the seat's worktree (`advisor.ts:1098-1099`). `redactDelta` therefore bounds what the consult is
+with `cwd` set to the seat's worktree in `createAdvisor` in `crew/pi/extensions/advisor.ts`. `redactDelta` therefore bounds what the consult is
 *sent*, not what the child can *read*. The boundary a provider advisor would have is the one every seat on that
 provider already has. It is not a new, narrower one.
 
@@ -90,7 +91,7 @@ provider already has. It is not a new, narrower one.
 - The resolved cell is recorded like a seat's: `crew.json` `seats.advisor`, the boot journal's run configuration,
   and a `run_seats` row with role `advisor`. It is translated by its adapter's `modelString`, never passed raw.
 - **It is a consult cell, not a process.** Under the recommended transport (§2) nothing is spawned at boot for it.
-  It is not in `ROLE_ORDER` (`crew/crew.mjs:165`), so pane layout, the daemon's seat count and the turn census are
+  It is not in `ROLE_ORDER` in `crew/crew.mjs`, so pane layout, the daemon's seat count and the turn census are
   unchanged.
 
 ### 2. A consult is a one-shot adapter print, the same path for local and provider
@@ -99,10 +100,10 @@ Three transports were weighed. A consult happens at a tool boundary, is bounded 
 answer is asynchronous advice nobody waits on. So latency matters less than identical behaviour does.
 
 - **(a) One-shot adapter print per consult — recommended.** For `agent: pi` this is the existing child
-  (`advisor.ts:1098-1099`) with its `--model` taken from the cell's adapter translation, not the raw key. For
+  spawned by `createAdvisor` in `crew/pi/extensions/advisor.ts` with its `--model` taken from the cell's adapter translation, not the raw key. For
   `agent: claude` it is `claude -p --output-format json`, which is new. **The child gets no tools** (operator decision 5): it answers from the scrubbed delta it is sent, so `redactDelta` bounds everything the advisor can see. The existing pi child's `read,grep,find,ls` grant is removed. Auth,
   model spelling and provider selection are whatever the adapter does for a seat. Pricing comes from the stream
-  reducer that already produces `advisor_usage` (`advisor.ts:1100`, `:1214-1220`). A llama-swap cell and a provider cell
+  reducer that already produces `advisor_usage` in `createAdvisor` in `crew/pi/extensions/advisor.ts`. A llama-swap cell and a provider cell
   differ only in their roster entry. The cost is a process spawn and a cold context per consult (`--no-session`), and
   the 20 s timeout was sized for a LAN model. It is unmeasured against a provider model; it stays 20 s until the first model-channel lane measures it (operator decision 6).
 - **(b) The adapter hands endpoint and credentials to the extension's HTTP client — rejected.** The builder seat's
@@ -115,7 +116,7 @@ answer is asynchronous advice nobody waits on. So latency matters less than iden
   turn-census gap that `57647f5c` answered by leaving ACP seats unceilinged. Reconsider it only if (a) measures badly
   on latency or cost.
 
-**Which builders can be advised.** The extension loads only into a pi seat (`crew/adapters/adapter-pi.mjs:265`), so
+**Which builders can be advised.** The extension loads only into a pi seat via `piRpcSeatParts` in `crew/adapters/adapter-pi.mjs`, so
 the *advised* seat must be pi. The *advisor cell* may be pi or claude, because under (a) the pi extension spawns
 whichever print command the cell names. Every tier seats its builder on pi today (`crew/roster.json`), so this
 excludes only a `--agent-builder claude` override. The boot keeps refusing that grant with `adapter-unsupported`.
@@ -129,9 +130,9 @@ place the advisor does not behave like a seat, and it follows from the invariant
 ### 3. Which seats are advised
 
 - **Builder: yes.** Grant it per seat in `crew/capabilities.json`, which stays on the protected floor
-  (`crew/protected-paths.mjs:12`). The grant is its own decision. This record does not flip it.
+  named by `PROTECTED_PATHS` in `crew/protected-paths.mjs`. The grant is its own decision. This record does not flip it.
 - **Planner: not yet.** A plan already passes the planner's own gate baseline, plan-check and the lead. The planner is
-  the quota cost: `docs/decisions-needed.md:27` puts its fixed overhead at 169 s per assignment, 19.4 h over 414
+  the quota cost: section 2, "Effort per stage, not per seat?", of `docs/decisions-needed.md` puts its fixed overhead at 169 s per assignment, 19.4 h over 414
   assignments. `PLANNER_SYSTEM_PROMPT` and planner admission stay in code, ungranted.
 - **Reviewer, lead, tech-lead, scout: no.** They are judgment seats whose output is already reviewed or adjudicated.
   An advisor there advises the adjudicator.
@@ -153,12 +154,12 @@ place the advisor does not behave like a seat, and it follows from the invariant
   refuses a boot whose environment sets either one, with a new closed refusal `advisor-env-retired` naming
   `--model-advisor`. Silently ignoring them was rejected: a stale shell export would then disagree with the boot record
   and nobody would see it. Kill-mutation: delete the check, and an env-configured endpoint receives the delta again.
-- The cell reaches the extension through `advisor-manifest.json` (`crew/crew.mjs:3713-3737`), which already sits in
+- The cell reaches the extension through `advisor-manifest.json` written by `runCmd` in `crew/crew.mjs`, which already sits in
   the task dir and which the extension already re-reads each epoch. The manifest gains the resolved cell and its
   adapter's command. `CREW_ADVISOR_MODELS` goes, because the manifest carries the one translated model.
   `CREW_ADVISOR=1` may stay as the adapter's activation signal.
 - Consequence: today a granted run with no `Tripwire tests:` section in its brief refuses
-  (`advisor-manifest-unavailable`, `crew/crew.mjs:427-456`). Once the manifest carries the cell, an empty tripwire
+  (`advisor-manifest-unavailable`, refused by `advisorManifest` in `crew/crew.mjs` and `assertAdvisorManifest` in `crew/crew.mjs`). Once the manifest carries the cell, an empty tripwire
   list must become a valid manifest. Otherwise the model channel stays hostage to tier 0's inputs.
 
 ## Measurement plan

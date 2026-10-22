@@ -4742,7 +4742,7 @@ test('AP5 hardeningAppealMarks reads the appeal fields and ignores severity', ()
 test('hardening appeal non-done envelope writes no appeal-declined', () => {
   const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
   const io = b376ProofIo({
-    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, files: { ...B376_FILES },
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: tentative, files: { ...B376_FILES },
   })
   const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
   assert.equal(result.status, 'escalation')
@@ -4800,10 +4800,10 @@ test('#900 an exemption claim that is not the request shape spends no appeal', (
 test('#900 a non-done appeal envelope waives nothing', () => {
   const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
   const io = b376ProofIo({
-    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, files: { ...B376_FILES },
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: tentative, files: { ...B376_FILES },
   })
   const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
-  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 2)
   assert.equal(io.calls.logs.some((entry) => entry.finding_hardened?.outcome === 'ungateable'), false)
   assert.equal(result.status, 'escalation')
 })
@@ -14113,4 +14113,66 @@ test('round-1 lead gate-defect with no accepted repair escalates naming the diag
   assert.equal(res.details.escalation.where, 'build')
   assert.match(res.details.escalation.why, /the gate custodian returned no accepted repair/)
   assert.ok(res.details.escalation.why.includes(B1316_LEAD_REASON))
+})
+
+test('UA1 a non-done appeal answer is re-asked in place and a grant finishes done', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), files: { ...B376_FILES },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 2)
+  assert.equal(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').length, 1)
+})
+
+test('UA2 the re-ask journals unruled then granted appeal rows', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), files: { ...B376_FILES },
+  })
+  driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  const rows = io.calls.logs.filter((entry) => entry.hardening_appeal).map((entry) => entry.hardening_appeal)
+  assert.deepEqual(rows, [{ round: 2, ask: 1, finding: 'F1', ruling: 'unruled', status: 'insufficient' }, { round: 2, ask: 2, finding: 'F1', ruling: 'granted', status: 'done' }])
+})
+
+test('UA3 two unruled answers spend exactly two appeal turns', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: tentative, files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 2)
+})
+
+test('UA4 two unruled answers escalate with unruled rulings and waive nothing', () => {
+  const tentative = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: tentative, reviewer3: tentative, files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io)
+  assert.equal(result.status, 'escalation')
+  const rows = io.calls.logs.filter((entry) => entry.hardening_appeal).map((entry) => entry.hardening_appeal)
+  assert.deepEqual(rows.map((row) => row.ruling), ['unruled', 'unruled'])
+  assert.equal(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').length, 0)
+  assert.equal(Object.values(io.calls.writes).some((text) => /appeal-declined/.test(text)), false)
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
+  assert.match(bounce, /F1: builder-exemption/)
+})
+
+test('UA5 a done decline journals one declined appeal row and keeps appeal-declined', () => {
+  const { io } = appealDeclineRun()
+  assert.equal(io.calls.assign.filter(({ role, note }) => role === 'reviewer' && note === 'harden-appeal').length, 1)
+  const rows = io.calls.logs.filter((entry) => entry.hardening_appeal).map((entry) => entry.hardening_appeal)
+  assert.deepEqual(rows, [{ round: 2, ask: 1, finding: 'F1', ruling: 'declined', status: 'done' }])
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
+  assert.match(bounce, /F1: appeal-declined/)
+})
+
+test('UA6 the unruled-appeal bound and ruling set are frozen exports', async () => {
+  const drive = await import('./drive.mjs')
+  assert.deepEqual(drive.HARDEN_APPEAL_RULINGS, ['granted', 'declined', 'unruled'])
+  assert.equal(Object.isFrozen(drive.HARDEN_APPEAL_RULINGS), true)
+  assert.equal(drive.HARDEN_APPEAL_UNRULED_MAX, 1)
+  assert.equal(drive.HARDEN_APPEAL_MAX, 1)
 })

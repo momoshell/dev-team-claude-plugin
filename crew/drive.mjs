@@ -12086,7 +12086,18 @@ function runTask(ctx, io, crash) {
         stage(`lane:harden-appeal:r${round}`)
         const appealBrief = art(`harden-appeal-r${round}.md`)
         io.writeFile(appealBrief, hardeningAppealLines(round, hardenOwed.owed, refusals, rows).join('\n'))
-        const appeal = assignAndWait('reviewer', appealBrief, 'harden-appeal', { reviewSemantics: false })
+        const appealed = refusals.filter((refusal) => hardeningAppealable([refusal])).map((refusal) => refusal.finding)
+        let appeal = null
+        let ask = 0
+        // #1946 — a non-done envelope is not a ruling: it is journalled unruled and re-asked
+        // in place, at most HARDEN_APPEAL_UNRULED_MAX times, inside this same stage.
+        // MUTATION UA1: drop the re-ask and a non-done answer again spends the appeal unruling.
+        while (ask <= HARDEN_APPEAL_UNRULED_MAX && appeal?.status !== 'done') {
+          ask += 1
+          appeal = assignAndWait('reviewer', appealBrief, 'harden-appeal', { reviewSemantics: false })
+          // MUTATION UA2: journal a non-done answer as declined and unruled is no longer apart from declined.
+          if (appeal?.status !== 'done') for (const finding of appealed) panelLog({ hardening_appeal: { round, ask, finding, ruling: 'unruled', status: typeof appeal?.status === 'string' ? appeal.status : null } })
+        }
         // R2-2 — a mark is authorised ONLY by an envelope that says the reviewer decided.
         // `assignAndWait` accepts any string status (crew/drive.mjs:938-943), so without this
         // a reviewer that says it was insufficient to adjudicate still permanently waives the
@@ -12099,6 +12110,8 @@ function runTask(ctx, io, crash) {
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
         settleBlindSpots(marks.map(({ id }) => id))
         excused = new Set(marks.map(({ id }) => id))
+        // MUTATION UA5: journal a done decline as unruled and declined is no longer apart from unruled.
+        if (ruled) for (const finding of appealed) panelLog({ hardening_appeal: { round, ask, finding, ruling: excused.has(finding) ? 'granted' : 'declined', status: 'done' } })
         for (const id of excused) hardenWitness.delete(id)
         hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !excused.has(id)), exempt: [...hardenOwed.exempt, ...marks] }
         stageComplete()
@@ -15936,6 +15949,8 @@ export function hardeningPrescriptionConflict(details, witness, authored = new M
 }
 
 export const HARDEN_APPEAL_MAX = 1
+export const HARDEN_APPEAL_UNRULED_MAX = 1
+export const HARDEN_APPEAL_RULINGS = Object.freeze(['granted', 'declined', 'unruled'])
 export const HARDEN_FINAL_BOUNCE_MAX = 1
 export const HARDEN_PRESERVATION_BOUNCE_MAX = 1
 // #910/#900 — the ONE state a bounce provably cannot fix. `builder-exemption` is the

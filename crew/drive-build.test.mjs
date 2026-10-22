@@ -4748,7 +4748,7 @@ test('hardening appeal non-done envelope writes no appeal-declined', () => {
   assert.equal(result.status, 'escalation')
   assert.equal(Object.values(io.calls.writes).some((text) => /appeal-declined/.test(text)), false)
   const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
-  assert.match(bounce, /F1: builder-exemption/)
+  assert.match(bounce, /F1: appeal-unruled/)
 })
 
 test('hardeningAppealMarks grants critical and should-fix and keeps the first grant', () => {
@@ -14157,7 +14157,7 @@ test('UA4 two unruled answers escalate with unruled rulings and waive nothing', 
   assert.equal(io.calls.logs.filter((entry) => entry.finding_hardened?.outcome === 'ungateable').length, 0)
   assert.equal(Object.values(io.calls.writes).some((text) => /appeal-declined/.test(text)), false)
   const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
-  assert.match(bounce, /F1: builder-exemption/)
+  assert.match(bounce, /F1: appeal-unruled/)
 })
 
 test('UA5 a done decline journals one declined appeal row and keeps appeal-declined', () => {
@@ -14175,4 +14175,40 @@ test('UA6 the unruled-appeal bound and ruling set are frozen exports', async () 
   assert.equal(Object.isFrozen(drive.HARDEN_APPEAL_RULINGS), true)
   assert.equal(drive.HARDEN_APPEAL_UNRULED_MAX, 1)
   assert.equal(drive.HARDEN_APPEAL_MAX, 1)
+})
+
+const unruledAppealRun = () => {
+  const unruled = { ...b376Review('changes-needed', [{ ...B376_APPEAL_MARK }]), status: 'insufficient' }
+  const io = b376ProofIo({
+    hardened: [{ ...B376_APPEAL_REQUEST }], reviewer2: unruled, reviewer3: unruled, files: { ...B376_FILES }, limits: { build_rounds: 3 },
+  })
+  return { io, result: driveTask({ ...CTX, limits: { build_rounds: 3, review_rounds: 3 } }, io) }
+}
+
+test('UB1 a twice-unruled appeal bounces appeal-unruled not builder-exemption', () => {
+  const { io } = unruledAppealRun()
+  const bounce = io.calls.writes[`${TD}/build-bounce-r2.md`] ?? ''
+  assert.match(bounce, /F1: appeal-unruled/)
+  assert.equal(/F1: builder-exemption/.test(bounce), false)
+})
+
+test('UB2 no bounce after a spent unruled appeal tells the builder to wait', () => {
+  const { io } = unruledAppealRun()
+  const from = io.calls.writeLog.findIndex(({ path }) => path === `${TD}/build-bounce-r2.md`)
+  assert.notEqual(from, -1)
+  assert.equal(io.calls.writeLog.slice(from).some(({ content }) => String(content).includes('grants nothing until the reviewer approves it')), false)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r2.md`] ?? '', /the appeal is spent and nothing was waived/)
+})
+
+test('UB3 the harden escalation after a spent unruled appeal states appeal-unruled', () => {
+  const { result } = unruledAppealRun()
+  const why = result.details.escalation?.why ?? ''
+  assert.match(why, /F1: appeal-unruled/)
+  assert.equal(why.includes('grants nothing until the reviewer approves it'), false)
+})
+
+test('UB4 a done decline never writes appeal-unruled', () => {
+  const { io } = appealDeclineRun()
+  assert.equal(Object.values(io.calls.writes).some((text) => String(text).includes('appeal-unruled')), false)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r2.md`] ?? '', /F1: appeal-declined/)
 })

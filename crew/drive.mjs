@@ -11360,6 +11360,9 @@ function runTask(ctx, io, crash) {
   // The round whose hardening appeal came back done for the current debt generation;
   // reset with hardenAppeals where Gate C arms a newly reviewed debt.
   let hardenAppealRuled = null
+  // The round whose hardening appeal ended with no done answer for the current debt
+  // generation; reset with hardenAppeals where Gate C arms a newly reviewed debt.
+  let hardenAppealUnruled = null
   const witnessTree = (files) => {
     const witness = new Map()
     for (const file of Array.isArray(files) ? files : []) {
@@ -12106,6 +12109,7 @@ function runTask(ctx, io, crash) {
         // MUTATION C6: drop the status guard and a NON-done appeal envelope waives the debt.
         const ruled = appeal?.status === 'done'
         if (ruled) hardenAppealRuled = round
+        if (!ruled) hardenAppealUnruled = round
         const marks = ruled ? hardeningAppealMarks(appeal.details, hardenOwed.owed) : []   // ANCHOR HA5
         for (const { id, why } of marks) logHardened(round, { finding: id, test: null, name: null, outcome: 'ungateable', why })
         settleBlindSpots(marks.map(({ id }) => id))
@@ -12118,7 +12122,9 @@ function runTask(ctx, io, crash) {
       }
       // MUTATION AP4: keep the pre-appeal builder-exemption wording after a done ruling and
       // the builder is bounced to wait for a ruling the driver already holds.
-      const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding)).map((refusal) => hardenAppealRuled !== null && refusal.reason === 'builder-exemption' ? { ...refusal, reason: 'appeal-declined', why: `the reviewer ruled in the round-${hardenAppealRuled} hardening appeal and did not mark ${refusal.finding} ungateable; the appeal is spent — a permanent named guard proven by its declared mutation is owed` } : refusal)
+      // MUTATION UB1: drop the appeal-unruled branch and the builder is bounced to wait for
+      // a ruling the spent appeal can never give.
+      const liveRefusals = refusals.filter((refusal) => !excused.has(refusal.finding)).map((refusal) => hardenAppealRuled !== null && refusal.reason === 'builder-exemption' ? { ...refusal, reason: 'appeal-declined', why: `the reviewer ruled in the round-${hardenAppealRuled} hardening appeal and did not mark ${refusal.finding} ungateable; the appeal is spent — a permanent named guard proven by its declared mutation is owed` } : hardenAppealRuled === null && hardenAppealUnruled !== null && refusal.reason === 'builder-exemption' ? { ...refusal, reason: 'appeal-unruled', why: `the reviewer answered the round-${hardenAppealUnruled} hardening appeal ${1 + HARDEN_APPEAL_UNRULED_MAX} times without a ruling and did not mark ${refusal.finding} ungateable; the appeal is spent and nothing was waived — a permanent named guard proven by its declared mutation is owed` } : refusal)
       const liveRows = rows.filter((row) => !excused.has(row.finding))
       const finalHardenBounce = plans && finalRound() && hardenFinalBounces < HARDEN_FINAL_BOUNCE_MAX
       if (hardenCleared(liveRefusals, liveRows)) {
@@ -12337,6 +12343,7 @@ function runTask(ctx, io, crash) {
         if (debt.owed.length > 0 || debt.exempt.length > 0) {
           hardenAppeals = 0
           hardenAppealRuled = null
+          hardenAppealUnruled = null
           const tree = witnessTree(scopeFiles)
           const exempted = new Set(debt.exempt.map(({ id }) => id))
           hardenOwed = { owed: hardenOwed.owed.filter(({ id }) => !exempted.has(id)), exempt: hardenOwed.exempt }

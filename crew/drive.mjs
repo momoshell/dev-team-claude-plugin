@@ -16819,17 +16819,17 @@ function carrierInventory(io, directories) {
   return { ok: true, carriers: [...carriers].sort(), tracked: trackedSet }
 }
 
-export const EXECUTION_DEFAULT_REASONS = Object.freeze(['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default'])
+export const EXECUTION_DEFAULT_REASONS = Object.freeze(['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default', 'selector-failed'])
 
 export function steppedExecutor(io, { variant, ctx = {}, details = {}, scope = [], mutations = [], gateCmd = null, budget = 0, stepCheckpoint = null } = {}) {
-  const finish = (executor, reason) => {
-    if (!EXECUTION_DEFAULT_REASONS.includes(reason)) return { executor: 'single', reason: 'chunks-invalid' }
+  const finish = (executor, reason, defect = null) => {
+    if (!EXECUTION_DEFAULT_REASONS.includes(reason)) return { executor: 'single', reason: 'selector-failed' }
     if ((Array.isArray(details.chunks) && details.chunks.length > 0) || executor === 'stepped') {
       try {
         const at = io.now()
         const source = ctx.execution_source ?? 'migration_default'
         // requested = ctx.variant, the effective shape; the resolver's requested value does not reach ctx
-        io.log(recordRow({ at, event: 'execution-default', requested: variant, source, executor, reason }))
+        io.log(recordRow({ at, event: 'execution-default', requested: variant, source, executor, reason, defect }))
       } catch { /* instrumentation must not alter executor selection */ }
     }
     return { executor, reason }
@@ -16843,12 +16843,12 @@ export function steppedExecutor(io, { variant, ctx = {}, details = {}, scope = [
     if (stepCheckpoint) return finish('stepped', 'step-checkpoint')
     if (!Array.isArray(details.chunks) || details.chunks.length < 2) return finish('single', 'fewer-than-two-chunks')
     const validated = validateChunks(details, { scope, checkLabels: mutations.map((mutation) => mutation?.check).filter((label) => typeof label === 'string'), mutations })
-    if (validated.defect) return finish('single', 'chunks-invalid')
+    if (validated.defect) return finish('single', 'chunks-invalid', validated.defect)
     if (!gateCmd) return finish('single', 'no-gate-cmd')
     if (details.chunks.length > budget) return finish('single', 'steps-exceed-budget')
     return finish('stepped', 'stepped-default')
   } catch {
-    return finish('single', 'chunks-invalid')
+    return finish('single', 'selector-failed')
   }
 }
 

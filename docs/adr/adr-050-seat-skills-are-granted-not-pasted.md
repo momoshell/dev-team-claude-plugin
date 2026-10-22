@@ -8,24 +8,20 @@ A crew seat receives plugin skills in two ways, and nearly all of the bytes go t
 record decides how a skill is chosen for a seat on a task, how it reaches the seat, and how we learn whether
 the seat used it. It also fixes how third-party skills enter the plugin.
 
-Every repository `file:line` below was read at `be85b8c3`.
+Every repository citation below was read at `be85b8c3`.
 
 ## How seats get skills today (measured 2026-10-16)
 
-**Selection.** `skills/skill-map.json` holds rules keyed by role and by path glob. `resolveSeatSkills`
-(`hooks/skill-gate.mjs:60`) returns the skills whose rule matches the seat's role and the lane's fenced files.
-`reachableSeatSkills` (`hooks/skill-gate.mjs:69`) returns every skill a role could ever receive.
+**Selection.** `skills/skill-map.json` holds rules keyed by role and by path glob. `resolveSeatSkills` in `hooks/skill-gate.mjs` returns the skills whose rule matches the seat's role and the lane's fenced files. `reachableSeatSkills` in `hooks/skill-gate.mjs` returns every skill a role could ever receive.
 
-**Delivery, eager.** `renderSeatSkills` (`crew/crew.mjs:2890`) strips each selected skill's frontmatter and
-pastes the whole body into the seat's system prompt (`role-<role>.md`), up to `SKILLS_BYTE_BUDGET = 32768`
-(`crew/crew.mjs:2864`). It is called once per role at boot (`crew/crew.mjs:3456`).
+**Delivery, eager.** `renderSeatSkills` in `crew/crew.mjs` strips each selected skill's frontmatter and pastes the whole body into the seat's system prompt (`role-<role>.md`), up to `SKILLS_BYTE_BUDGET` in `crew/crew.mjs` (32768 at `be85b8c3`). It is called once per role at boot, inside `bootCmd` in `crew/crew.mjs`.
 
 **Delivery, native.** `crew/capabilities.json` grants `skills/lean-build/SKILL.md` to every role through
 `by_agent.<agent>.skills`. pi receives it as `--skill <path>`; claude receives it through a per-role plugin
-directory (`crew/adapters/adapter-claude.mjs:262`). A native grant puts only the skill's name and description
+directory (`skillsPluginDir` in `crew/adapters/adapter-claude.mjs`). A native grant puts only the skill's name and description
 in context; the seat loads the body when it chooses to.
 
-**Cost.** `rolePromptBytes()` (`crew/crew.mjs:5312`) reports the worst-case prompt per role, with every
+**Cost.** `rolePromptBytes` in `crew/crew.mjs` reports the worst-case prompt per role, with every
 reachable skill pasted:
 
 | Role | Prompt bytes | Pasted skill bytes | Share |
@@ -84,7 +80,7 @@ A seat's inline content is its role pack. Everything else that matches is grante
 | tech-lead | `pr-review#falsification` — plan-check is falsification | `qa-test-writing#gates` |
 | lead | none | none |
 
-The planner, lead and tech-lead lose `code-less`: the ladder itself is in `crew/roles/_shared.md:57` and every
+The planner, lead and tech-lead lose `code-less`: the ladder itself is in the "The ladder (before any new code)" section of `crew/roles/_shared.md` and every
 seat already receives it. The planner's worst-case pasted skill bytes fall from 18,317 to about 6,000.
 
 ### 1b. `lean-build` is renamed `code-less`
@@ -149,7 +145,7 @@ rate falls stays `inline`, and this record is amended.
 If a role's load rate is below the threshold, enforcement exists for both agents:
 
 - **claude seats:** `hooks/skill-gate.mjs` already denies an edit to a mapped path until that path's skills
-  are loaded; it is switched off for every worker (`hooks/skill-gate.mjs:151`, `DEVTEAM_WORKER=1`). The
+  are loaded; it is switched off for every worker (`main` in `hooks/skill-gate.mjs` returns early when `DEVTEAM_WORKER=1`). The
   change is to keep it on for builder seats.
 - **pi seats:** a builder extension does the same, alongside `crew/pi/extensions/builderloop.ts`.
 

@@ -1809,9 +1809,7 @@ test('AD3 ADR-048 no longer claims file:line citations and still names the read-
 const ADR_PENDING_FILE_LINE = [
   'adr-029-headless-observability-interjection.md',
   'adr-030-acceptance-authorship.md',
-  'adr-044-declared-topologies-name-executor-paths.md',
   'adr-047-the-advisor-is-a-roster-seat.md',
-  'adr-050-seat-skills-are-granted-not-pasted.md',
 ]
 const adrDirFiles = () => readdirSync(new URL('../docs/adr/', import.meta.url)).filter((f) => f.endsWith('.md')).sort()
 const adrFileLineTokens = (text) => [...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((t) => /\.[A-Za-z][A-Za-z0-9]*:\d/.test(t) || /^:\d/.test(t))
@@ -1820,7 +1818,7 @@ const readAdrFile = (f) => readFileSync(new URL('../docs/adr/' + f, import.meta.
 const namesTopLevelDefinition = (source, symbol) => new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function|const|let|class)\\s+${symbol}\\b`, 'm').test(source)
 
 // MUTATION CZ1: expanding "at commit `53e326ef`" in ADR-040 to add a backticked crew/drive-docs.test.mjs:574 token makes a cleaned file carry a token again.
-test('CZ1 ADR file-and-line citations survive only in the five PENDING files', () => {
+test('CZ1 ADR file-and-line citations survive only in the three PENDING files', () => {
   assert.deepEqual(adrFileLineTokens('`crew/drive.mjs:12`'), ['crew/drive.mjs:12'])
   assert.deepEqual(adrFileLineTokens('`surface:27` `[::1]` `2026-10-18T07:28:19Z`'), [])
   assert.deepEqual(adrDirFiles().filter((f) => adrFileLineTokens(readAdrFile(f)).length > 0), ADR_PENDING_FILE_LINE)
@@ -1865,6 +1863,51 @@ test('CZ3 cleaned ADRs cite the eight required symbol pairs', () => {
   ]
   const missing = required.filter(([f, symbol, path]) => !adrSymbolPairs(readAdrFile(f)).some(([s, p]) => s === symbol && p === path))
   assert.deepEqual(missing, [])
+})
+
+// MUTATION CY1: re-adding a backticked crew/drive.mjs:12 token after "supplies sequencing." in ADR-044 reddens CY1 (and CZ1).
+test('CY1 ADR-044 and ADR-050 carry no file-and-line tokens', () => {
+  assert.deepEqual(adrFileLineTokens(readAdrFile('adr-044-declared-topologies-name-executor-paths.md')), [])
+  assert.deepEqual(adrFileLineTokens(readAdrFile('adr-050-seat-skills-are-granted-not-pasted.md')), [])
+})
+
+// MUTATION CY2: citing stageEnabled at crew/crew.mjs instead of crew/drive.mjs in ADR-044 removes a required pair.
+test('CY2 ADR-044 cites the six required symbol pairs', () => {
+  const required = [
+    ['stageEnabled', 'crew/drive.mjs'],
+    ['undeclaredStage', 'crew/drive.mjs'],
+    ['PARTIAL_REVIEWED', 'crew/drive.mjs'],
+    ['runTask', 'crew/drive.mjs'],
+    ['EXECUTOR_TOPOLOGIES', 'crew/shape-validator.mjs'],
+    ['EXECUTABLE_SHAPES', 'crew/variants.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-044-declared-topologies-name-executor-paths.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CY3: citing resolveSeatSkills at crew/crew.mjs instead of hooks/skill-gate.mjs in ADR-050 removes a required pair.
+test('CY3 ADR-050 cites the eight required symbol pairs', () => {
+  const required = [
+    ['resolveSeatSkills', 'hooks/skill-gate.mjs'],
+    ['reachableSeatSkills', 'hooks/skill-gate.mjs'],
+    ['main', 'hooks/skill-gate.mjs'],
+    ['renderSeatSkills', 'crew/crew.mjs'],
+    ['SKILLS_BYTE_BUDGET', 'crew/crew.mjs'],
+    ['bootCmd', 'crew/crew.mjs'],
+    ['rolePromptBytes', 'crew/crew.mjs'],
+    ['skillsPluginDir', 'crew/adapters/adapter-claude.mjs'],
+  ]
+  const pairs = adrSymbolPairs(readAdrFile('adr-050-seat-skills-are-granted-not-pasted.md'))
+  const missing = required.filter(([symbol, path]) => !pairs.some(([s, p]) => s === symbol && p === path))
+  assert.deepEqual(missing, [])
+})
+
+// MUTATION CY4: restoring "Every repository `file:line` below" in ADR-050 brings the retired read-at claim back.
+test('CY4 ADR-050 no longer claims file:line citations and still names the read-at commit', () => {
+  const adr = readAdrFile('adr-050-seat-skills-are-granted-not-pasted.md')
+  assert.equal(adr.includes('Every repository `file:line` below'), false)
+  assert.ok(adr.includes('Every repository citation below was read at `be85b8c3`.'))
 })
 
 // MUTATION AR1: a stale header number (back to 050) no longer equals one past the largest minted number.

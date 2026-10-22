@@ -11421,7 +11421,7 @@ test('RV1-2 stepped acceptance feedback runs diagnostics once', () => {
 })
 
 test('execution selector and section helpers pin closed outcomes', () => {
-  assert.deepEqual(EXECUTION_DEFAULT_REASONS, ['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default'])
+  assert.deepEqual(EXECUTION_DEFAULT_REASONS, ['operator-stepped', 'not-full', 'chunked-lane', 'operator-single', 'step-checkpoint', 'fewer-than-two-chunks', 'chunks-invalid', 'no-gate-cmd', 'steps-exceed-budget', 'stepped-default', 'selector-failed'])
   assert.equal(Object.isFrozen(EXECUTION_DEFAULT_REASONS), true)
   assert.deepEqual(STEP_SECTION_UNAVAILABLE, ['plan-unreadable', 'section-absent'])
   assert.equal(Object.isFrozen(STEP_SECTION_UNAVAILABLE), true)
@@ -11508,6 +11508,60 @@ test('SD6', () => {
   checkpoint.step.builder_attempts = 1
   const { io } = sdRun({ resumeGateOutput: steppedGreen(), seedFiles: sourceIo.calls.writes }, { head: 'abcdef123456', limits: { build_rounds: 2 }, resume_checkpoint: checkpoint })
   assert.deepEqual(sdBriefs(io), ['step-c2-r1.md'])
+})
+
+// MUTATION CD1: pass null instead of validated.defect, or drop defect from the recordRow payload.
+test('CD1 execution-default row carries the chunk defect', () => {
+  const { io } = sdRun({ chunks: [{ ...steppedChunks[0], checks_owned: 'A1' }, steppedChunks[1]] })
+  const result = sdRow(io)
+  assert.deepEqual(result && { executor: result.executor, reason: result.reason, defect: result.defect }, { executor: 'single', reason: 'chunks-invalid', defect: 'chunk-checks-not-array' })
+})
+
+// MUTATION CD2: restore chunks-invalid in the steppedExecutor catch return.
+test('CD2 selector exception returns selector-failed', () => {
+  const io = { now: () => 'now', log: () => {} }
+  assert.deepEqual(steppedExecutor(io, { variant: 'full', ctx: {}, details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: {}, gateCmd: 'gate', budget: 2 }), { executor: 'single', reason: 'selector-failed' })
+})
+
+// MUTATION CD3: make the catch path pass any defect string to finish.
+test('CD3 selector-failed row carries a null defect', () => {
+  const logs = []
+  const io = { now: () => 'now', log: (entry) => logs.push(entry) }
+  steppedExecutor(io, { variant: 'full', ctx: {}, details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: {}, gateCmd: 'gate', budget: 2 })
+  const rows = logs.filter(({ event }) => event === 'execution-default')
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0] && { reason: rows[0].reason, defect: rows[0].defect }, { reason: 'selector-failed', defect: null })
+})
+
+// MUTATION CD4: remove the try/catch around the io.log call in finish.
+test('CD4 throwing io.log cannot change selector-failed', () => {
+  const io = { now: () => 'now', log() { throw Error('logger') } }
+  assert.deepEqual(steppedExecutor(io, { variant: 'full', ctx: {}, details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: {}, gateCmd: 'gate', budget: 2 }), { executor: 'single', reason: 'selector-failed' })
+})
+
+// MUTATION SD13: change finish's defect default from null to a guessed string.
+test('SD13', () => {
+  const { io } = sdRun({}, { execution_source: 'explicit' })
+  const result = sdRow(io)
+  assert.deepEqual(result && { executor: result.executor, reason: result.reason, defect: result.defect }, { executor: 'single', reason: 'operator-single', defect: null })
+})
+
+// MUTATION SD14: make finish's instrumentation catch return selector-failed instead of swallowing.
+test('SD14', () => {
+  const valid = { variant: 'full', ctx: {}, details: { chunks: steppedChunks }, scope: ['a.mjs', 'b.mjs'], mutations: steppedMutations, gateCmd: 'gate', budget: 2 }
+  assert.equal(steppedExecutor({ now() { throw Error('clock') }, log() {} }, valid).reason, 'stepped-default')
+  assert.equal(steppedExecutor({ now: () => 'now', log() { throw Error('logger') } }, valid).reason, 'stepped-default')
+  const defectInput = { variant: 'full', ctx: {}, details: { chunks: [{ ...steppedChunks[0], checks_owned: 'A1' }, steppedChunks[1]] }, scope: ['a.mjs', 'b.mjs'], mutations: steppedMutations, gateCmd: 'gate', budget: 2 }
+  assert.deepEqual(steppedExecutor({ now: () => 'now', log() { throw Error('logger') } }, defectInput), { executor: 'single', reason: 'chunks-invalid' })
+})
+
+// lean: source pin for the private guard; use a behavioural witness if a caller can supply unknown reasons
+// MUTATION SD15: restore chunks-invalid in the unknown-reason guard line.
+test('SD15', () => {
+  const source = readFileSync(`${ROOT}/crew/drive.mjs`, 'utf8')
+  const slice = source.slice(source.indexOf('export function steppedExecutor'), source.indexOf('export const STEP_SECTION_UNAVAILABLE'))
+  const line = slice.split('\n').find((entry) => entry.includes('!EXECUTION_DEFAULT_REASONS.includes(reason)'))
+  assert.equal(line.trim(), "if (!EXECUTION_DEFAULT_REASONS.includes(reason)) return { executor: 'single', reason: 'selector-failed' }")
 })
 
 // MUTATION SD7: remove execution_source from runCmd ctx.
@@ -12885,11 +12939,13 @@ test('RC4', () => {
   assert.equal(isolatedTestCommand('cargo test --workspace && cargo test --doc', 'cargo', 'app::t', 'crates/a/src/lib.rs', shell, template), "cargo test --workspace -- --exact 'app::t'")
   assert.equal(isolatedTestCommand('cargo test --workspace --nocapture', 'cargo', 'a$&b', 'crates/a/src/lib.rs', shell, template), "cargo test --workspace -- --exact 'a$&b'")
   const bin = scratchDir('rv1-cargo-bin-')
-  writeFileSync(join(bin, 'cargo'), '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)))\n', { mode: 0o755 })
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nprintf "%s\\0" "$@"\n', { mode: 0o755 })
   const hostile = "a'b $(printf injected); echo escaped"
   const command = isolatedTestCommand('cargo clippy --workspace && cargo test --workspace', 'cargo', hostile, 'crates/a/src/lib.rs', shell, template)
   const run = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env: { ...process.env, PATH: bin + ':' + process.env.PATH }, timeout: 5000 })
-  assert.deepEqual(JSON.parse(run.stdout.trim()), ['test', '--workspace', '--', '--exact', hostile])
+  assert.equal(run.error, undefined)
+  assert.equal(run.status, 0, run.stderr)
+  assert.deepEqual(run.stdout.split('\0'), ['test', '--workspace', '--', '--exact', hostile, ''])
   assert.equal(isolatedTestCommand('cargo test --workspace && cargo test --doc', 'cargo', 'app::t', 'crates/a/src/lib.rs', shell), null)
 })
 

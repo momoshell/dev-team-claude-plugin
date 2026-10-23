@@ -129,6 +129,7 @@ const WHERE_READ_FAILED = 'where-read-failed'
 const CREATES_PATH_UNSAFE = 'creates-path-unsafe'
 const CREATES_STAT_FAILED = 'creates-stat-failed'
 const NOT_A_GIT_REPO = 'not-a-git-repo'
+const GIT_TIMEOUT = 'git-timeout'
 const OUT_DIR_MISSING = 'out-dir-missing'
 const OUT_EXISTS = 'out-exists'
 const BAD_FENCES = 'bad-fences'
@@ -164,6 +165,7 @@ export const REFUSAL_REASONS = Object.freeze([
   CREATES_PATH_UNSAFE,
   CREATES_STAT_FAILED,
   NOT_A_GIT_REPO,
+  GIT_TIMEOUT,
   OUT_DIR_MISSING,
   OUT_EXISTS,
   BAD_FENCES,
@@ -183,6 +185,7 @@ export const REFUSAL_REASONS = Object.freeze([
   BRIEF_SIZE_UNMEASURED,
   BRIEF_PREMISE_STALE,
 ])
+export const GIT_READ_TIMEOUT_MS = 60_000
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
 export const SLOT_MARKER = 'UNFILLED SLOT'
@@ -644,16 +647,30 @@ function normaliseRepoPath(value) {
   return normal.startsWith('./') ? normal.slice(2) : normal
 }
 
+// A non-positive or non-integer DEVTEAM_MAKE_BRIEF_GIT_TIMEOUT_MS is ignored;
+// the exported constant stays the bound. Tests lower it to prove the
+// git-timeout refusals without waiting out the real bound.
+function gitReadTimeoutMs() {
+  const parsed = Number(process.env.DEVTEAM_MAKE_BRIEF_GIT_TIMEOUT_MS)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : GIT_READ_TIMEOUT_MS
+}
+
 function gitRoot(checkout) {
   const cwd = realpathOr(resolve(checkout || process.cwd()))
+  const timeoutMs = gitReadTimeoutMs()
   let result
   try {
     result = spawnSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: timeoutMs,
     })
   } catch {
     refuseUsage(`checkout is not a git repository: ${cwd}`, NOT_A_GIT_REPO)
+  }
+  // MUTATION GT1: route this timeout branch to NOT_A_GIT_REPO and a killed
+  // rev-parse on a valid checkout is again reported as not-a-git-repo.
+  if (result?.error?.code === 'ETIMEDOUT') {
+    refuseUsage(`git rev-parse timed out after ${timeoutMs / 1000} s in ${cwd}; the checkout was not measured`, GIT_TIMEOUT)
   }
   if (!result || result.status !== 0 || !nonEmptyString(result.stdout)) {
     refuseUsage(`checkout is not a git repository: ${cwd}`, NOT_A_GIT_REPO)
@@ -970,14 +987,20 @@ function listDirectoryFiles(checkout, repoRoot, entry) {
   const absolute = absoluteWhere(checkout, entry.path)
   const relativeEntry = repoRelative(repoRoot, absolute)
   const pathspec = relativeEntry === '.' ? '.' : relativeEntry
+  const timeoutMs = gitReadTimeoutMs()
   let result
   try {
     result = spawnSync('git', ['-C', checkout, 'ls-files', '-z', '--', pathspec], {
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: timeoutMs,
     })
   } catch {
     refuseUsage(`cannot list files under ${entry.path}`, NOT_A_GIT_REPO)
+  }
+  // MUTATION GT2: route this timeout branch to NOT_A_GIT_REPO and a killed
+  // ls-files is again reported as cannot-list-files / not-a-git-repo.
+  if (result?.error?.code === 'ETIMEDOUT') {
+    refuseUsage(`git ls-files timed out after ${timeoutMs / 1000} s in ${checkout}; the checkout was not measured`, GIT_TIMEOUT)
   }
   if (!result || result.status !== 0) {
     refuseUsage(`cannot list files under ${entry.path}`, NOT_A_GIT_REPO)

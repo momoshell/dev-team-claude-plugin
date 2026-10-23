@@ -6,6 +6,6 @@
   "crew/crew.mjs:4208": "escalation -> NEVER teardown",
   "crew/crew.mjs:4875": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
   "crew/crew.mjs:4762": "const seats = rows.length",
-  "scripts/factory/make-brief.mjs:1187": "function colourNeutralEnv(base = process.env)",
-  "crew/drive.mjs:9600": "const completeCheckProof = (label, options = {}) => {"
+  "crew/drive.mjs:9600": "const completeCheckProof = (label, options = {}) => {",
+  "scripts/factory/make-brief.mjs:1210": "function colourNeutralEnv(base = process.env)"
 }

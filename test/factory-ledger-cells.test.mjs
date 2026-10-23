@@ -31,10 +31,25 @@ test('A1 turns breakdown separates two transports', () => {
   assert.notEqual(json.insufficient_with_turns.numerator, rpc.insufficient_with_turns.numerator)
 })
 
+function checkedTurnRates(payload) {
+  let checked = 0
+  for (const role of payload.by_role) {
+    for (const axis of ['by_transport', 'by_provider', 'by_model']) {
+      for (const cell of role[axis]) {
+        for (const name of ['insufficient_with_turns', 'zero_turn', 'overlap']) {
+          if (cell[name].rate !== null) checked += 1
+        }
+      }
+    }
+  }
+  return checked
+}
+
 test('C1 every turns rate carries numerator and denominator', () => {
   const root = scratchDir('turns-corpus-c1-')
   writeTurnsCorpusJournal(root, 'lane', Array.from({ length: CELL_RATE_FLOOR }, (_, index) => ({ turns: index % 2, status: index % 3 === 0 ? 'insufficient' : 'done' })))
   const payload = turnsCorpusPayload(root)
+  assert.ok(payload.by_role.length > 0)
   for (const role of payload.by_role) {
     for (const axis of ['by_transport', 'by_provider', 'by_model']) {
       for (const cell of role[axis]) {
@@ -47,6 +62,15 @@ test('C1 every turns rate carries numerator and denominator', () => {
       }
     }
   }
+  assert.ok(checkedTurnRates(payload) > 0, 'expected at least one measured rate')
+})
+
+test('QA3 checkedTurnRates counts only measured rates', () => {
+  assert.equal(checkedTurnRates({ by_role: [] }), 0)
+  const root = scratchDir('turns-corpus-qa3-')
+  writeTurnsCorpusJournal(root, 'lane', Array.from({ length: CELL_RATE_FLOOR }, (_, index) => ({ turns: index % 2, status: index % 3 === 0 ? 'insufficient' : 'done' })))
+  const payload = turnsCorpusPayload(root)
+  assert.ok(checkedTurnRates(payload) > 0)
 })
 
 test('D1 below-floor turns cell is unmeasured with named floor', () => {

@@ -76,11 +76,15 @@ test('an all-zero measured ledger reports a null share with the zero denominator
 })
 
 test('report refuses malformed records instead of corrupting a batch', () => {
-  assert.throws(() => reportBatches([{ ...BASE, role: 'warm' }]))
-  assert.throws(() => reportBatches([BASE, { ...OK1, strategy: 'other' }]))
-  assert.throws(() => reportBatches([OK1]))
-  assert.throws(() => reportBatches([BASE, BASE]))
-  assert.throws(() => reportBatches([BASE, { ...OK1, status: 'running' }]))
+  assert.throws(() => reportBatches([{ ...BASE, role: 'warm' }]), /has invalid role "warm"/)
+  assert.throws(() => reportBatches([BASE, { ...OK1, strategy: 'other' }]), /mixes strategies "claude-fork" and "other"/)
+  assert.throws(() => reportBatches([OK1]), /must hold exactly one base row, found 0/)
+  assert.throws(() => reportBatches([BASE, BASE]), /must hold exactly one base row, found 2/)
+  assert.throws(() => reportBatches([BASE, { ...OK1, status: 'running' }]), /has invalid status "running"/)
+})
+
+test('QA2 zero-base matcher rejects a TypeError stand-in', () => {
+  assert.throws(() => assert.throws(() => { throw new TypeError("x.map is not a function") }, /must hold exactly one base row, found 0/))
 })
 
 test('CLI text names the share with its token and item denominators', () => {

@@ -177,3 +177,4 @@ Diff proof spends the unchanged 720000ms total deadline on one green baseline (v
 - **2026-10-19** — Added closed refusal `HOST_LOAD_SATURATED` from `scripts/factory/dispatch-batch.mjs`. *Why:* The lane changed the closed-refusals documented surface.
 - **2026-10-19** — Added closed refusal `HOST_LOAD_UNMEASURED` from `scripts/factory/dispatch-batch.mjs`. *Why:* The lane changed the closed-refusals documented surface.
 - **2026-10-19** — Added closed refusal `suite-timeout` from `scripts/factory/closeout.mjs`. *Why:* The lane changed the closed-refusals documented surface.
+- **2026-10-23** — Added closed refusal `GIT_TIMEOUT` from `scripts/factory/make-brief.mjs`. *Why:* The lane changed the closed-refusals documented surface.

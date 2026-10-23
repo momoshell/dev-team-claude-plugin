@@ -370,7 +370,13 @@ test('abort interrupts a production runner and records no lane patch', async () 
     },
   })
   const pending = loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root, signal: controller.signal })
-  await new Promise((resolve) => setTimeout(resolve, 30))
+  // Abort only once the runner has actually spawned: poll for the captured pid
+  // instead of guessing the spawn happened within a fixed sleep.
+  const spawnDeadline = Date.now() + 5000
+  while (!captured?.pid && Date.now() < spawnDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.ok(captured?.pid, 'the runner must spawn within 5s before abort is exercised')
   controller.abort()
   assert.equal(await pending, undefined)
   assert.ok(captured?.pid)

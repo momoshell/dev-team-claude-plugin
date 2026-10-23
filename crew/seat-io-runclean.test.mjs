@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, turnCeilingValues,
+  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, psSnapshot, statIsZombie, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
 } from './seat-io.mjs'
@@ -898,6 +898,226 @@ test('cold suite timeout refuses with remedies and retains the kept worktree', (
     const missing = runColdFailure({ error: Object.assign(new Error('shell missing'), { code: 'ENOENT' }) })
     assert.match(missing.thrown.message, /could not be spawned/)
     assert.doesNotMatch(missing.thrown.message, /suite timeout/)
+  })
+})
+
+// MUTATION PG1: remove detached: true from the warm spawn options and the timed-out shell shares the driver's own process group again.
+test('PG1 both suite spawns are detached', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const seen = []
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) === '/bin/sh') {
+          seen.push(options)
+          return { pid: seen.length === 1 ? 4242 : 4343, status: 0, stdout: 'ok', stderr: '' }
+        }
+        return realSpawnSync(bin, argv, options)
+      },
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    io.run('true')
+    const warmOptions = seen.at(-1)
+    let cold = null
+    try {
+      cold = io.runCold('true')
+    } finally {
+      const cwd = seen.at(-1)?.cwd
+      if (cwd && cwd !== warmOptions.cwd && existsSync(cwd)) git(fixture.checkout, 'worktree', 'remove', '--force', cwd)
+    }
+    assert.equal(cold.ok, true)
+    assert.equal(seen.length, 2)
+    for (const options of seen) {
+      assert.equal(options.detached, true)
+      assert.ok(options.maxBuffer > 0)
+    }
+  })
+})
+
+// MUTATION PG2: send SIGTERM twice instead of SIGKILL on the second ladder rung and the member that ignored TERM is never killed.
+test('PG2 a warm timeout settles the group on the TERM-then-KILL ladder', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    let rows = new Map([[5000, { pid: 5000, ppid: 4242, pgid: 4242, stat: 'S', start: 'gate' }]])
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]); if (signal === 'SIGKILL') rows = new Map() },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    })
+    const result = io.run('true')
+    assert.deepEqual(kills, [[-4242, 'SIGTERM'], [-4242, 'SIGKILL']])
+    assert.deepEqual(result.group_kill, { pgid: 4242, survivors: [] })
+    assert.ok(result.output.includes('[process group 4242 signalled TERM then KILL; survivors: none]'))
+    assert.equal(result.timed_out, true)
+  })
+})
+
+// MUTATION PG3: sort survivors descending and the two survivors are named in the wrong order, not the ascending pid order the report promises.
+test('PG3 a survivor is named by pid', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const rows = new Map([
+      [5001, { pid: 5001, ppid: 4242, pgid: 4242, stat: 'S', start: 'gate' }],
+      [5000, { pid: 5000, ppid: 4242, pgid: 4242, stat: 'S', start: 'gate' }],
+    ])
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    })
+    const result = io.run('true')
+    assert.deepEqual(kills, [[-4242, 'SIGTERM'], [-4242, 'SIGKILL']])
+    assert.deepEqual(result.group_kill.survivors, [5000, 5001])
+    assert.ok(result.output.includes('survivors: 5000, 5001'))
+  })
+})
+
+// MUTATION PG4: force coldGroupKill to null so the cold timeout throws without settling.
+test('PG4 a cold timeout settles the group before it throws', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const policy = { seconds: 1800, source: 'profile', basis: 'profile suite_timeout_s' }
+    const kills = []
+    let coldPath = null
+    const io = makeIo(fixture, {
+      suiteTimeout: policy,
+      suiteTimeoutMs: 1_800_000,
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) !== '/bin/sh') return realSpawnSync(bin, argv, options)
+        coldPath = options.cwd
+        return { pid: 4343, status: null, signal: 'SIGTERM', stdout: '', stderr: '', error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }
+      },
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    let thrown = null
+    try {
+      io.runCold('true')
+    } catch (error) { thrown = error } finally {
+      if (coldPath) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath)
+    }
+    assert.ok(thrown)
+    assert.match(thrown.message, /cold suite exceeded the 1800 s suite timeout/)
+    assert.ok(thrown.message.includes('process group 4343'))
+    assert.deepEqual(kills[0], [-4343, 'SIGTERM'])
+  })
+})
+
+// MUTATION PG5: settle on every run, not only timeouts, and a command that exited on its own has its (possibly reused) group signalled.
+test('PG5 a run that was not killed is untouched', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4444, status: 0, stdout: 'ok', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    const result = io.run('true')
+    assert.equal(result.group_kill, undefined)
+    assert.deepEqual(kills, [])
+    assert.deepEqual(result, { ok: true, output: 'ok', status: 0, stderr: '' })
+  })
+})
+
+// MUTATION: skip the second rung when TERM alone clears the group, so a settled group is reported as TERM then KILL.
+test('a warm timeout cleared by TERM alone reports TERM without KILL', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    const result = io.run('true')
+    assert.deepEqual(kills, [[-4242, 'SIGTERM']])
+    assert.deepEqual(result.group_kill, { pgid: 4242, survivors: [] })
+    assert.ok(result.output.includes('[process group 4242 signalled TERM; survivors: none]'))
+  })
+})
+
+// MUTATION: report an unreadable snapshot as zero survivors, so unknown reads as a measured death.
+test('an unreadable snapshot reports unknown survivors and still escalates to KILL', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: false, rows: new Map() }),
+    })
+    const result = io.run('true')
+    assert.deepEqual(kills, [[-4242, 'SIGTERM'], [-4242, 'SIGKILL']])
+    assert.deepEqual(result.group_kill, { pgid: 4242, survivors: null, reason: 'snapshot-unreadable' })
+    assert.ok(result.output.includes('survivors: unknown (snapshot-unreadable)'))
+  })
+})
+
+// MUTATION: settle timeouts without a shell pid, so a reaped shell with no pid signals the driver's own group.
+test('a timeout with no shell pid settles nothing', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    const result = io.run('true')
+    assert.equal(result.group_kill, undefined)
+    assert.deepEqual(kills, [])
+    assert.doesNotMatch(result.output, /process group/)
+    assert.equal(result.timed_out, true)
+  })
+})
+
+// MUTATION: only profile timeouts settle the group, so a caller timeout orphans its tree.
+test('a caller timeout settles the group and keeps its source', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const kills = []
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => String(bin) === '/bin/sh'
+        ? { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' }
+        : realSpawnSync(bin, argv, options),
+      kill: (target, signal) => { kills.push([target, signal]) },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    })
+    const result = io.run('true', { timeoutMs: 1234 })
+    assert.equal(result.timeout_source, 'caller')
+    assert.deepEqual(result.group_kill, { pgid: 4242, survivors: [] })
+    assert.deepEqual(kills, [[-4242, 'SIGTERM']])
+  })
+})
+
+// MUTATION: spawn the suite attached and the shell shares the driver's group, so the timeout kills only the shell.
+test('a real timed-out suite leaves no running group behind', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const io = makeIo(fixture)
+    const result = io.run('sleep 30 & echo $!; wait', { timeoutMs: 1000 })
+    assert.equal(result.timed_out, true)
+    assert.deepEqual(result.group_kill.survivors, [])
+    const echoed = result.output.split('\n').map((line) => line.trim()).find((line) => /^\d+$/.test(line))
+    assert.ok(echoed)
+    const row = psSnapshot().rows.get(Number(echoed))
+    assert.equal(!row || statIsZombie(row.stat), true)
   })
 })
 

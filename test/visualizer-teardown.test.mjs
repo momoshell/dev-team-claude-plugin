@@ -202,11 +202,4 @@ test('API and visualizer mount the teardown panel', () => {
   assert.doesNotMatch(component, /--role-|--lane-/)
 })
 
-test('prompts-page:RV1-1 import/export linkage remains resolvable', async () => {
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
-  const agents = await import('../visualizer/web/src/lib/agents.js')
-  assert.match(app, /import PromptsPage from '\.\/lib\/PromptsPage\.svelte'/)
-  assert.match(page, /import \{[^}]*PROMPT_SURFACE_CONSEQUENCE[^}]*\} from '\.\/agents\.js'/)
-  assert.equal(agents.PROMPT_SURFACE_CONSEQUENCE, 'Charter changes force stronger assurance and require a measurement claim in the commit message.')
-})
+

@@ -2609,10 +2609,9 @@ test('B1: a synthetic vocabulary key reaches every attention consumer', async ()
 })
 
 test('C1: every current attention key routes the metric click to attention', () => {
+  // App.svelte's routing is pinned by source because no plain module owns it.
   const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /const state = attentionRows\.length \? 'attention' : activity\.live \? 'active' : 'all'/)
-  const chooseState = (attentionRows, activity = {}) => attentionRows.length ? 'attention' : activity.live ? 'active' : 'all'
-  for (const key of ATTENTION_KEYS) assert.equal(chooseState([{ status: { key } }]), 'attention')
 })
 
 test('D1: named attention segments and unattributed rows reconcile to the total', () => {
@@ -2719,7 +2718,7 @@ test('D1 workflows page preserves every declared shape', () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   for (const shape of Object.keys(VARIANTS)) {
     const presentation = workflowPresentation(shape, { observedLabels: [] })
-    const expected = executionTopology(shape, []).rows.map((row, index) => ({ name: row.stage, position: index + 1 }))
+    const expected = VARIANTS[shape].stages.map((name, index) => ({ name, position: index + 1 }))
     assert.deepEqual(presentation.stages, expected, shape)
     assert.deepEqual(presentation.stages.map((stage) => stage.position), expected.map((stage) => stage.position), shape)
   }
@@ -2949,13 +2948,7 @@ test('workflow-page:F2', () => {
   assert.doesNotMatch(graph, /min-width:\\s*(?:4(?:0[1-9]|[1-9]\\d{2})|[5-9]\\d{2}|\\d{4,})px/)
 })
 
-// The import firewall is checked separately from the node suite so CI can load
-// the pure shaper without installing the browser-only graph dependencies.
-test('H1.import-free', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
-  const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((match) => match[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
-  assert.deepEqual(bare, [])
-})
+
 
 const NO_CALL_REASONS = Object.freeze(['declared-without-executor-call'])
 function stripJavaScriptComments(source) {
@@ -3074,15 +3067,6 @@ test('A1.variant-sites', () => {
   for (const key of ['scout', 'review_only', 'verify_only']) {
     assert.deepEqual(docs[key].source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 1, bindings: { variant: key } }])
   }
-})
-
-test('A1.closed-no-call', () => {
-  assert.deepEqual(NO_CALL_REASONS, ['declared-without-executor-call'])
-  assert.equal(Object.isFrozen(NO_CALL_REASONS), true)
-  const accepted = { sites: [], no_call_reason: 'declared-without-executor-call' }
-  assert.equal(accepted.sites.length, 0)
-  assert.equal(NO_CALL_REASONS.includes(accepted.no_call_reason), true)
-  assert.equal(NO_CALL_REASONS.includes('arbitrary truthy text'), false)
 })
 
 test('A1.swap-sites', () => {

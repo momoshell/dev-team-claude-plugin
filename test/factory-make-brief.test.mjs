@@ -13,7 +13,7 @@ import { forAll, git, ROOT, scratchDir } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, admitBrief, BRIEF_BYTE_LIMIT, BROAD_KEY_HIT_LIMIT, BriefUsageError, CONVENTIONS_BLOCK, CONVENTIONS_IDIOM_BYTE_LIMIT, CONVENTIONS_IDIOM_LIMIT, CREATES_MARK, DEFAULT_PROTECTED_PATHS,
   DISCOVERY_PROGRESS_PREFIX, DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
-  PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
+  GIT_READ_TIMEOUT_MS, PREMISE_UNMEASURED_REASONS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, exportEntries, extractKeys, extractPremiseClaims, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main, symbolIndexFor,
   MUTATION_CONTRACT_BLOCK, PACK_ABSENT_REASONS, PORTABLE_ACCEPTANCE_GATE_BLOCK, PORTABLE_CONVENTIONS_BLOCK, PORTABLE_HOSTILE_ENV_BLOCK, PORTABLE_MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, PROPOSAL_V2_KEYS, profileField, proposeTier,
   laneFenceFor, measureBrief, readLadderBands, renderBrief, renderProposalBlock, renderProposedTier, resolveIntent, resolveWriteSurface, standingBlocksFor, SYMBOL_INDEX_ENTRY_LIMIT,
@@ -2863,7 +2863,7 @@ test('proposal-v2 K1', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 30)
+  assert.equal(REFUSAL_REASONS.length, 31)
   for (const retired of [
     'missing-path', 'creates-parent-missing', 'coupled-source-unfenced', 'reads-unresolved', 'stale-read-ack',
     'scope-entry-invalid', 'fence-not-arrived', 'fence-count-mismatch', 'fence-register-mismatch',
@@ -4637,4 +4637,45 @@ test('whitespace head citation still binds comment form and drops the metadata l
   assert.equal(claim.path, 'lib/widget.mjs')
   assert.equal(claim.binding, 'comment')
   assert.equal(claim.quote, 'const answer = 1\nconst other = 2')
+})
+
+function slowGitEnv(verb) {
+  const real = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+  assert.ok(real.length > 0)
+  const dir = join(fixtureRoot, `shim-${verb}-${++fixtureNumber}`)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'git'), ['#!/bin/sh', `case " $* " in *" ${verb} "*) sleep 15 ;; esac`, `exec ${real} "$@"`, ''].join('\n'), { mode: 0o755 })
+  return { PATH: `${dir}:${process.env.PATH}`, DEVTEAM_MAKE_BRIEF_GIT_TIMEOUT_MS: '300' }
+}
+
+test('GT1: rev-parse timeout refuses git-timeout', () => {
+  const root = fixture('gt1-timeout')
+  const result = run(root, ['--request', request(root), '--checkout', root, '--out', join(root, 'brief.md')], slowGitEnv('rev-parse'))
+  assert.notEqual(result.status, 0)
+  assert.ok(result.stderr.includes('[reason: git-timeout]'), result.stderr)
+  assert.ok(result.stderr.includes('timed out after 0.3 s'), result.stderr)
+  assert.equal(result.stderr.includes('not a git repository'), false)
+})
+
+test('GT2: ls-files timeout refuses git-timeout', () => {
+  const root = fixture('gt2-timeout')
+  const result = run(root, ['--request', request(root, { where: ['lib'] }), '--checkout', root, '--out', join(root, 'brief.md')], slowGitEnv('ls-files'))
+  assert.notEqual(result.status, 0)
+  assert.ok(result.stderr.includes('[reason: git-timeout]'), result.stderr)
+  assert.ok(result.stderr.includes('timed out after 0.3 s'), result.stderr)
+  assert.equal(result.stderr.includes('cannot list files'), false)
+})
+
+test('GT3: real non-repo refuses not-a-git-repo', () => {
+  const root = nextRoot('gt3-nonrepo')
+  put(root, 'file.txt', 'x\n')
+  const result = run(root, ['--request', request(root, { where: ['file.txt'] }), '--checkout', root, '--out', join(root, 'brief.md')])
+  assert.notEqual(result.status, 0)
+  assert.ok(result.stderr.includes('[reason: not-a-git-repo]'), result.stderr)
+})
+
+test('GT4: git-timeout is a closed reason and the bound is 60 s', () => {
+  assert.equal(GIT_READ_TIMEOUT_MS, 60000)
+  assert.equal(REFUSAL_REASONS.includes('git-timeout'), true)
+  assert.equal(REFUSAL_REASONS.includes('not-a-git-repo'), true)
 })

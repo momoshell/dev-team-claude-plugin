@@ -4644,7 +4644,7 @@ function slowGitEnv(verb) {
   assert.ok(real.length > 0)
   const dir = join(fixtureRoot, `shim-${verb}-${++fixtureNumber}`)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'git'), ['#!/bin/sh', `case " $* " in *" ${verb} "*) sleep 15 ;; esac`, `exec ${real} "$@"`, ''].join('\n'), { mode: 0o755 })
+  writeFileSync(join(dir, 'git'), ['#!/bin/sh', `case " $* " in *" ${verb} "*) exec sleep 15 ;; esac`, `exec ${real} "$@"`, ''].join('\n'), { mode: 0o755 })
   return { PATH: `${dir}:${process.env.PATH}`, DEVTEAM_MAKE_BRIEF_GIT_TIMEOUT_MS: '300' }
 }
 

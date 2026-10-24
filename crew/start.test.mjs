@@ -99,7 +99,11 @@ test('a good brief makes the worktree from the default branch, boots headless at
   const run = spawned(calls, 'run')
   assert.deepEqual(run[2].slice(1, 9), ['run', '--task', 'b1', '--checkout', '/repo/dt-b1', '--brief-file', '/home/.crew/briefs/started/b1.md', '--keep'])
   assert.equal(run[2].includes('--execution'), false)
-  assert.deepEqual(run[3], { cwd: '/repo/dt-b1', log: '/home/.crew/briefs/started/b1.run.log' })
+  const { env, ...where } = run[3]
+  assert.deepEqual(where, { cwd: '/repo/dt-b1', log: '/home/.crew/briefs/started/b1.run.log' })
+  // MUTATION: drop the env and the run queues for a suite slot shared with every project on the host.
+  assert.equal(env.CREW_SUITE_SLOTS, '0')
+  assert.equal(env.PATH, process.env.PATH)
   assert.deepEqual(written(calls, '/b1.md'), ['write', '/home/.crew/briefs/started/b1.md', runBrief(BRIEF, 1961)])
   assert.equal(result.rosterPath, '/home/.crew/briefs/started/b1.roster.json')
 })

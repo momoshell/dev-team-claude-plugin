@@ -838,7 +838,7 @@ function spawnBackground({ file, args, cwd, env, logPath }) {
   }
 }
 
-export const ADVISOR_ROTATION_REASONS = Object.freeze(['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
+export const ADVISOR_ROTATION_REASONS = Object.freeze(['not-build', 'explicit-model', 'tier-unseated', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
 export const ADVISOR_RESERVATION_MAX_AGE_MS = 60000
 export const ADVISOR_LEASE_WAIT_MS = 5000
 const ADVISOR_LEASE_POLL_MS = 50
@@ -2711,7 +2711,7 @@ export function checkDirectedBrief({ lane, variant, briefPath, deps } = {}) {
   return { lane: name, variant: resolved, checked: true, gate_cmd: parsed.gate_cmd, files_in_scope: parsed.files_in_scope }
 }
 
-export function seatRolesUnseated({ seats, tier, deps } = {}) {
+function ratifiedTier(tier, deps) {
   const d = normalDeps(deps)
   let roster
   try {
@@ -2722,7 +2722,11 @@ export function seatRolesUnseated({ seats, tier, deps } = {}) {
   if (!plainObject(roster) || !plainObject(roster.tiers) || !plainObject(roster.tiers[tier])) {
     refuse(`cannot read ratified roster ${ROSTER_PATH}: missing tiers.${tier}`, SEAT_FLOOR_CONFLICT)
   }
-  const tierRoster = roster.tiers[tier]
+  return roster.tiers[tier]
+}
+
+export function seatRolesUnseated({ seats, tier, deps } = {}) {
+  const tierRoster = ratifiedTier(tier, deps)
   return [...seatMaps(seats).keys()].filter((role) => !Object.hasOwn(tierRoster, role) || tierRoster[role] == null)
 }
 
@@ -4981,8 +4985,10 @@ async function compileDispatchWave(prepared) {
     })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
     const advisorExplicit = Object.hasOwn(seats.advisor ?? {}, 'model')
-    const advisorEligible = result.tier === 'build' && !advisorExplicit
-    let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : 'explicit-model', waited_ms: 0 }
+    // A rotated arm on a tier that seats no advisor is refused below as seat-floor-conflict, so rotation abstains.
+    const advisorUnseated = result.tier === 'build' && !advisorExplicit && ratifiedTier(result.tier, d).advisor == null
+    const advisorEligible = result.tier === 'build' && !advisorExplicit && !advisorUnseated
+    let rotation = { readout: null, reason: advisorEligible ? 'ledger-unreadable' : result.tier !== 'build' ? 'not-build' : advisorExplicit ? 'explicit-model' : 'tier-unseated', waited_ms: 0 }
     if (advisorEligible) rotation = rotateAdvisorForLane(d, item.lane)
     if (rotation.reserved) advisorReservations.push(rotation.reserved)
     const arm = rotation.readout?.next_arm ?? null

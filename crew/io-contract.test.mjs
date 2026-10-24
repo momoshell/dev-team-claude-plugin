@@ -1357,7 +1357,8 @@ test('RE9', () => {
       const climbs = role === 'planner' ? tier === 'mechanical' : tier === 'build'
       assert.deepEqual([role, seat.applied, seat.applied ? seat.rung : seat.reason, seat.to?.id ?? cell.id],
         [role, climbs, climbs ? `${tier}→${tier === 'mechanical' ? 'build' : 'judge'}` : 'exhausted', cell.id])
-      // A climb moves the effort to the next tier's cell, both in the result and in the crew record it persists.
+      // A climb moves the effort to the next tier's cell, in the result and in the in-memory crew record
+      // (the crew.json write is not observed here).
       const effortAfter = climbs ? SHIPPED_ROSTER.tiers[tier === 'mechanical' ? 'build' : 'judge'][role].effort : cell.effort
       if (climbs) assert.notEqual(effortAfter, cell.effort, `${tier}/${role} climb must change effort`)
       assert.deepEqual([seat.to?.effort ?? cell.effort, fixture.crew.seats[role].effort], [effortAfter, effortAfter], `${tier}/${role} effort`)

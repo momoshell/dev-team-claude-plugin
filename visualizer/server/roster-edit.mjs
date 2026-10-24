@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { SEAT_DEFAULTS, assertCapabilities, DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS } from '../../crew/crew.mjs'
 import { normalizeRoster, serializeRosterV2 } from '../../crew/roster.mjs'
+import { bootRefusals } from '../../crew/roster-validate.mjs'
 
 export const SCHEMA_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'roster.schema.json')
 export const ADAPTERS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'adapters')
@@ -255,7 +256,7 @@ export async function capabilityRefusals({ tier, role, cell, adaptersDir = ADAPT
   return [...deduped.values()]
 }
 
-export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json', readError = null, tier, role, cell, seatSchema } = {}) {
+export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json', readError = null, tier, role, cell, seatSchema, validateBoot = true } = {}) {
   let roster
   if (typeof rosterText !== 'string') {
     const message = readError || `unable to read roster: unknown read error, at ${rosterPath}`
@@ -351,6 +352,7 @@ export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json',
 
   }
 
+  if (validateBoot && refusals.length === 0) refusals.push(...await bootRefusals(afterRoster))
   if (refusals.length) return { ok: false, refusals, diff: null, before, after: null }
   const canonicalAfter = serializeRosterV2(afterRoster)
   const afterText = rosterText.endsWith('\n') ? `${canonicalAfter}\n` : canonicalAfter

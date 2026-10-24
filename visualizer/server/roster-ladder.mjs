@@ -5,6 +5,7 @@ import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
 import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from '../../crew/roster.mjs'
 import { breakerPolicy, cellHealth } from '../../crew/breaker.mjs'
 import { ADVISOR_FLOOR_BAND, materialiseRoutingChoice } from '../../crew/crew.mjs'
+import { bootRefusals } from '../../crew/roster-validate.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 export const LADDER_PATH = resolve(SERVER_DIR, '..', '..', 'crew', 'model-ladder.json')
@@ -881,7 +882,7 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
   for (const move of requested) {
     let result
     try {
-      result = await proposeEdit({ rosterText: evolvingText, rosterPath, readError, tier: move?.tier, role: move?.role, cell: move?.cell })
+      result = await proposeEdit({ rosterText: evolvingText, rosterPath, readError, tier: move?.tier, role: move?.role, cell: move?.cell, validateBoot: false })
     } catch (err) {
       result = { ok: false, refusals: [{ code: 'proposal_error', message: err?.message || String(err) }] }
     }
@@ -896,6 +897,7 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
     }
   }
 
+  if (candidate && refusals.length === 0) refusals.push(...await bootRefusals(candidate))
   const checks = []
   checks.push(bandFloorCheck(requested, ladder))
   checks.push(vendorDiversityCheck(requested, candidate))

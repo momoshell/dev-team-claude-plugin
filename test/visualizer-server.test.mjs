@@ -2586,7 +2586,9 @@ test('roster ladder apply updates only the configured local roster for the next 
   const rosterPath = join(dir, 'roster.json')
   const ledgerDb = join(dir, 'ledger.db')
   const sourcePath = join(ROOT, 'crew', 'roster.json')
-  writeFileSync(rosterPath, JSON.stringify(serverRosterFixture(), null, 2))
+  const seeded = serverRosterFixture()
+  seeded.models['openai/gpt-6.1-sol'].cost_out_per_mtok = 26
+  writeFileSync(rosterPath, JSON.stringify(seeded, null, 2))
   fixture(ledgerDb)
   const originalProjectDigest = digest(sourcePath)
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
@@ -2611,22 +2613,36 @@ test('roster ladder apply updates only the configured local roster for the next 
     assert.equal(vendorApply.json.commit_subject, undefined)
     assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.build.reviewer.effort, effort)
 
-    const warningMove = { tier:'build', role:'builder', cell:{ provider:'anthropic', id:'claude-haiku-4-5', agent:'claude', effort:'medium' } }
-    const warned = await json(handles.base, '/api/roster/ladder/apply', {
-      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves:[warningMove] }),
+    const applyBody = (moves, allowWarnings) => ({
+      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves, ...(allowWarnings ? { allow_warnings:true } : {}) }),
     })
+    const beforeBelowFloor = readFileSync(rosterPath, 'utf8')
+    const belowFloorMove = { tier:'build', role:'builder', cell:{ provider:'anthropic', id:'claude-haiku-4-5', agent:'claude', effort:'medium' } }
+    for (const allowWarnings of [false, true]) {
+      const refused = await json(handles.base, '/api/roster/ladder/apply', applyBody([belowFloorMove], allowWarnings))
+      assert.equal(refused.status, 200)
+      assert.equal(refused.json.applied, false)
+      assert.equal(refused.json.local_apply_allowed, false)
+      assert.equal(refused.json.requires_warning_override, false)
+      assert.ok(refused.json.blocking_refusals.some((row) => row.code === 'boot_refused' && row.reason === 'band-below-floor'))
+      assert.equal(readFileSync(rosterPath, 'utf8'), beforeBelowFloor)
+    }
+
+    const warningMove = { tier:'build', role:'builder', cell:{ provider:'openai', id:'gpt-6.1-sol', agent:'pi', effort:'high' } }
+    const warned = await json(handles.base, '/api/roster/ladder/apply', applyBody([warningMove], false))
     assert.equal(warned.status, 200)
     assert.equal(warned.json.applied, false)
     assert.equal(warned.json.requires_warning_override, true)
     assert.equal(warned.json.local_apply_allowed, true)
+    assert.equal(warned.json.checks.find((row) => row.check === 'cost_ceiling').ok, false)
+    assert.deepEqual(warned.json.refusals.filter((row) => row.code === 'boot_refused'), [])
 
-    const overridden = await json(handles.base, '/api/roster/ladder/apply', {
-      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves:[warningMove], allow_warnings:true }),
-    })
+    const overridden = await json(handles.base, '/api/roster/ladder/apply', applyBody([warningMove], true))
     assert.equal(overridden.status, 200)
     assert.equal(overridden.json.ok, true)
     assert.equal(overridden.json.policy_ok, false)
     assert.equal(overridden.json.applied, true)
+    assert.equal(overridden.json.changed, true)
     assert.equal(overridden.json.warnings_overridden, true)
     assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.build.builder.provider, warningMove.cell.provider)
     assert.equal(digest(sourcePath), originalProjectDigest)

@@ -1,12 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
-import { join } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities } from '../crew/crew.mjs'
+import { normalizeRoster, serializeRosterV2 } from '../crew/roster.mjs'
+import { bootRefusals } from '../crew/roster-validate.mjs'
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
 import { applyMoves, composeMoves, ladderView, readLadder, readReference, rosterPickView, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
@@ -653,4 +655,87 @@ test('estimated rates fail closed on ceilings and ride chips as flags', async ()
   const meas = view.chips.find((chip) => chip.key === 'anthropic/claude-opus-5-5')
   assert.deepEqual([est.rate_estimated, est.rate_estimate_reason], [true, 'borrowed-rate-unbounded'])
   assert.deepEqual([meas.rate_estimated, meas.rate_estimate_reason], [false, null])
+})
+
+// ---- roster boot validation (#1961) ----------------------------------------
+const bootShippedText = readFileSync(shippedRosterPath, 'utf8')
+const bootShipped = JSON.parse(bootShippedText)
+const bootAdvisor = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' }
+const bootPiBuilder = { ...bootAdvisor, effort: 'high' }
+const bootFallbackBuilder = { ...bootShipped.tiers.build.builder, fallback: [bootPiBuilder] }
+const bootAdvisorRoster = () => { const r = structuredClone(bootShipped); r.tiers.build.advisor = bootAdvisor; return r }
+const bootFallbackRoster = () => { const r = structuredClone(bootShipped); r.tiers.build.builder = bootFallbackBuilder; return r }
+const bootRows = (rows) => rows.map(({ code, reason, tier, transport, role }) => ({ code, reason, tier, transport, role })).sort((a, b) => a.transport.localeCompare(b.transport))
+const bootExpected = (reason, role) => ['default', 'headless-all'].map((transport) => ({ code: 'boot_refused', reason, tier: 'build', transport, role }))
+
+// MUTATION RV1: append a spurious refusal to bootRefusals' return; the shipped roster stops being accepted.
+test('RV1 the shipped roster boots in every tier and transport, raw v1 or serialized v2', async () => {
+  assert.deepEqual(await bootRefusals(structuredClone(bootShipped)), [])
+  const v2 = JSON.parse(serializeRosterV2(normalizeRoster(structuredClone(bootShipped))))
+  assert.ok(v2.assurances && !v2.tiers)
+  assert.deepEqual(await bootRefusals(v2), [])
+})
+
+// MUTATION RV2: replace error?.reason with null in the refusal record; both boot errors lose their closed reasons.
+test('RV2 bootRefusals reports one closed-reason record per failing tier and transport', async () => {
+  const advisorRows = await bootRefusals(bootAdvisorRoster())
+  assert.deepEqual(bootRows(advisorRows), bootExpected('adapter-unsupported', 'builder'))
+  const fallbackRows = await bootRefusals(bootFallbackRoster())
+  assert.deepEqual(bootRows(fallbackRows).map(({ role, ...rest }) => rest), bootExpected('fallback-agent-change', null).map(({ role, ...rest }) => rest))
+  for (const row of [...advisorRows, ...fallbackRows]) assert.ok(row.message.length > 0)
+})
+
+// MUTATION RV3: disable proposeEdit's final-roster boot guard; the previously refused edits return ok:true.
+test('RV3 proposeEdit refuses edits the boot resolvers reject and still accepts a bootable one', async () => {
+  for (const [role, cell, reason] of [['advisor', bootAdvisor, 'adapter-unsupported'], ['builder', bootFallbackBuilder, 'fallback-agent-change']]) {
+    const result = await proposeEdit({ rosterText: bootShippedText, tier: 'build', role, cell })
+    assert.deepEqual({ ok: result.ok, diff: result.diff, after: result.after }, { ok: false, diff: null, after: null })
+    assert.deepEqual(bootRows(result.refusals.filter((row) => row.code === 'boot_refused')).map(({ role: _role, ...rest }) => rest), bootExpected(reason, null).map(({ role: _role, ...rest }) => rest))
+  }
+  const accepted = await proposeEdit({ rosterText: bootShippedText, tier: 'build', role: 'builder', cell: bootPiBuilder })
+  assert.equal(accepted.ok, true)
+  assert.match(accepted.diff, /gpt-6\.1-sol/)
+})
+
+// MUTATION RV4: disable stageMoves' final-roster boot guard; an invalid final roster becomes locally writable.
+test('RV4 stageMoves validates only the final roster and applyMoves cannot override a boot refusal', async () => {
+  const config = { rosterText: bootShippedText, ladder: readLadder(), readBreaker: () => null }
+  const advisorMove = { tier: 'build', role: 'advisor', cell: bootAdvisor }
+  const blocked = await stageMoves({ ...config, moves: [advisorMove] })
+  assert.equal(blocked.local_apply_allowed, false)
+  assert.deepEqual(bootRows(blocked.blocking_refusals.filter((row) => row.code === 'boot_refused')), bootExpected('adapter-unsupported', 'builder'))
+  let writes = 0
+  const writeRoster = () => { writes++; return { ok: true, changed: true } }
+  const denied = await applyMoves({ ...config, moves: [advisorMove], allowWarnings: true, writeRoster })
+  assert.deepEqual({ applied: denied.applied, writes }, { applied: false, writes: 0 })
+  const composed = await stageMoves({ ...config, moves: [advisorMove, { tier: 'build', role: 'builder', cell: bootPiBuilder }] })
+  assert.deepEqual(
+    { allowed: composed.local_apply_allowed, boot: composed.refusals.filter((row) => row.code === 'boot_refused') },
+    { allowed: true, boot: [] },
+  )
+  assert.match(composed.local_diff, /gpt-6\.1-sol/)
+  const low = await applyMoves({ ...config, moves: [{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }], allowWarnings: true, writeRoster })
+  assert.deepEqual({ applied: low.applied, allowed: low.local_apply_allowed, writes }, { applied: false, allowed: false, writes: 0 })
+  assert.ok(low.blocking_refusals.some((row) => row.code === 'boot_refused' && row.reason === 'band-below-floor'))
+})
+
+// MUTATION RV5: make the CLI exit 0 on refusals; the invalid-file status loses its failure signal.
+test('RV5 the roster-validate CLI prints one JSON line per refusal and exits nonzero', () => {
+  const dir = scratchDir('roster-validate-cli-')
+  const cli = resolve(ROOT, 'crew', 'roster-validate.mjs')
+  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { cwd: ROOT, encoding: 'utf8', timeout: 60000 })
+  const write = (name, text) => { const path = join(dir, name); writeFileSync(path, text); return path }
+  const good = run(write('good.json', bootShippedText))
+  assert.deepEqual({ status: good.status, stdout: good.stdout, stderr: good.stderr }, { status: 0, stdout: '', stderr: '' })
+  const bad = run(write('bad.json', JSON.stringify(bootFallbackRoster(), null, 2)))
+  assert.equal(bad.status, 1)
+  const lines = bad.stdout.trim().split('\n').map((line) => JSON.parse(line))
+  assert.deepEqual(lines.map(({ code, reason, tier, transport }) => ({ code, reason, tier, transport })).sort((a, b) => a.transport.localeCompare(b.transport)),
+    bootExpected('fallback-agent-change', null).map(({ role, ...rest }) => rest))
+  for (const args of [[], [join(dir, 'missing.json')], [write('empty.json', '')], [write('malformed.json', '{"tiers":')]]) {
+    const failed = run(...args)
+    assert.equal(failed.status, 1)
+    assert.equal(failed.stdout, '')
+    assert.ok(failed.stderr.length > 0)
+  }
 })

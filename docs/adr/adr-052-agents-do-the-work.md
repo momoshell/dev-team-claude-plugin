@@ -79,42 +79,48 @@ tripwire, coupled-file or convention file.
 | P2 | Seat envelope | JSON per role: `role`, `id`, `status` (`done`, `insufficient`, `escalate`), `summary`, role `details` (plan: plan and gate paths, acceptance ids covered; build: summary; review: verdict and typed findings; lead: one closed decision) |
 | P3 | Acceptance gate | `task/gate.mjs` prints `FAIL <id>` per failing check; red at baseline, green after; one kill-mutation per check |
 | P4 | Journal and sessions | One append-only JSONL per lane (stage start and end, envelope, verdict, check result, commit, PR) and one JSONL per seat session holding its full ACP update stream |
-| P5 | Agent definition | `agents/<role>.md` frontmatter, below |
+| P5 | Agent definition | `crew/agents/<role>.md` frontmatter, below |
 
 `shape` is `standard`, `stepped` (ADR-048) or `finish` (ADR-051). Adding a protocol, or a field that code
 reads, needs an amendment to this record.
 
 ### 4. Agent definitions replace the roster and the grant tables
 
-Each seat is one file, `agents/<role>.md`. Its frontmatter is the only place a seat's model and powers are
+Each seat is one file, `crew/agents/<role>.md` (Amendment 1). Its frontmatter is the only place a seat's model and powers are
 written; its body is the charter.
 
 ```yaml
 ---
 name: planner
 description: Plans one lane from its brief and writes the acceptance gate.
-role: planner              # lead | planner | builder | reviewer | tech-lead
-writes: task-dir           # none | task-dir | repo
-envelope: plan             # P2 role schema
-agent: pi                  # claude | pi
+role: planner
+writes: task-dir
+envelope: plan
+agent: pi
 model: openai/gpt-6.1-sol
 effort: high
-fallback: []               # same agent only
+fallback: []
 skills: [plan, qa-test-writing]
-requires: [qa-test-writing]  # loaded before the first write, or the envelope is refused
+requires: [qa-test-writing]
 tools: [read, grep, bash]
-extensions: [readgate, lab]  # kept arms: readgate, lab, builderloop, reminders, skeletonread, subagent, fff
-advisor: null              # or { agent, model, effort } (ADR-047)
-edit_assist: false         # ADR-049
+extensions: [readgate, lab]
+advisor: null
+edit_assist: false
 codemode: false
 memory: false
 rounds: 2
 wait_s: 1800
-tiers:                     # the three tiers: mechanical | build | judge
-  mechanical: { effort: medium }
-  judge: { effort: xhigh }
+tiers: {"mechanical": {"effort": "medium"}, "judge": {"effort": "xhigh"}}
 ---
 ```
+
+Each field is one line. Objects and object lists are JSON (Amendment 1). `role` is one of lead, planner,
+builder, reviewer, tech-lead; `writes` is none, task-dir or repo; `envelope` names the P2 role schema; `agent`
+is claude or pi. A `fallback` entry stays on the seat's agent. A seat loads its `requires` skills before its
+first write, or its envelope is refused. `extensions` draws from the kept arms: readgate, lab, builderloop,
+reminders, skeletonread, subagent, fff. `advisor` is null or `{"agent", "model", "effort"}` (ADR-047), and
+`edit_assist` is ADR-049. `tiers` keys are the three tiers; a null value unseats the role at that tier, and an
+object overrides how the seat runs there.
 
 This replaces `crew/roster.json`, the grant policy in `crew/capabilities.json`, `skills/skill-map.json`,
 `crew/workflows.mjs`, and most of `crew/variants.mjs`, `crew/assurances.mjs`, `crew/task-profiles.mjs` and
@@ -167,3 +173,14 @@ throws. The protected floor. Worktree isolation (ADR-043). Scope as context (ADR
 Whether each arm stays: advisor, edit assist, codemode, lab, readgate, builderloop, reminders, skeletonread,
 subagent, memory, the stepped shape and the finish shape. Those are decided in a later phase. Moving any
 other project to the new path is out of scope.
+
+## Amendment 1 (2026-10-24): seat files live in `crew/agents/`
+
+Seat definitions move from the repository-root `agents/` folder to `crew/agents/<role>.md`. Claude Code
+loads a plugin's root `agents/` folder as subagents of the operator's own session, so seat files there would
+offer planner, builder and the rest as operator subagents with models Claude Code cannot run. The root
+folder keeps operator-side agents such as `agents/brief-writer.md`.
+
+Each frontmatter field is one line, with JSON for objects and object lists, and carries no trailing comment.
+Section 4's example is written in that form, so the P5 parser reads it as it stands.
+Nothing else in section 4 changes.

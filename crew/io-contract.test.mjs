@@ -1286,8 +1286,8 @@ test('RE4', () => {
     assert.equal(nextModelRung(roster, cell, { ceiling: 10 }), null)
     assert.equal(nextModelRung(roster, cell).cell.id, 'b')
   }
-  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.reviewer, { ceiling: 25 }), null)
-  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.reviewer).cell.id, 'gpt-6-astra')
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner, { ceiling: 25 }), null)
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner).cell.id, 'gpt-6-astra')
 })
 
 // Kill mutation: read judge's ceiling instead of crew.tier's ceiling.
@@ -1322,35 +1322,44 @@ test('RE5', () => {
 // Kill mutation: discard the declared fallback lookup.
 test('RE9', () => {
   const ladder = JSON.parse(fsReadFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
-  for (const tier of ['mechanical', 'build', 'judge']) {
+  const solFallback = [{ provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' }]
+  // The shipped roster declares a fallback only on the build and judge leads: Astra falls back to Sol.
+  for (const tier of ['build', 'judge']) {
     const boot = resolveTier(SHIPPED_ROSTER, tier)
-    const cell = SHIPPED_ROSTER.tiers[tier].builder
-    assert.deepEqual(cell.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }])
-    assert.deepEqual(boot.seats.builder.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }])
-    const out = makeTierFixture({ role: 'builder', tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat('builder')
-    if (tier === 'mechanical') {
-      assert.deepEqual([out.applied, out.to?.provider, out.to?.id, out.to?.effort, out.rung],
-        [true, 'meta', 'muse-spark-1.3-contributor', 'xhigh', 'mechanical→build'])
+    const cell = SHIPPED_ROSTER.tiers[tier].lead
+    assert.deepEqual(cell.fallback, solFallback)
+    assert.deepEqual(boot.seats.lead.fallback, solFallback)
+    const out = makeTierFixture({ role: 'lead', tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat('lead')
+    assert.deepEqual([out.applied, out.to?.provider, out.to?.id, out.to?.effort, out.rung],
+      [true, 'openai', 'gpt-6.1-sol', 'high', 'declared:gpt-6-astra→gpt-6.1-sol'])
+  }
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    // No builder declares a fallback: mechanical and judge climb Sonnet to Opus inside the ceiling, build takes the tier step.
+    const builder = SHIPPED_ROSTER.tiers[tier].builder
+    assert.equal(builder.fallback, undefined)
+    assert.equal(resolveTier(SHIPPED_ROSTER, tier).seats.builder.fallback, undefined)
+    const climbed = makeTierFixture({ role: 'builder', tier, cell: builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat('builder')
+    if (tier === 'build') {
+      assert.deepEqual([climbed.applied, climbed.to?.id, climbed.to?.effort, climbed.rung], [true, 'claude-sonnet-5-5', 'xhigh', 'build→judge'])
     } else {
-      assert.deepEqual([out.applied, out.to?.provider, out.to?.id, out.to?.effort, out.rung],
-        [true, 'openai', 'gpt-6.1-sol', cell.effort, `declared:${cell.id}→gpt-6.1-sol`])
+      assert.deepEqual([climbed.applied, climbed.to?.provider, climbed.to?.id, climbed.to?.effort, climbed.rung],
+        [true, 'anthropic', 'claude-opus-5-5', builder.effort, 'model:claude-sonnet-5-5→claude-opus-5-5'])
     }
-    // The Wonder planners and the Sol reviewer have no in-ceiling upgrade on the shipped roster:
-    // no planner declares a fallback, and Sol's next rung (Astra) is over every tier ceiling.
+    // The Sol planners and Opus reviewers declare no fallback and have no in-ceiling model upgrade
+    // (Sol's next rung, Astra, is over every tier ceiling): only the build tier step moves their effort.
     for (const role of ['planner', 'reviewer']) {
-      assert.equal(SHIPPED_ROSTER.tiers[tier][role].fallback, undefined)
-      const seat = makeTierFixture({
-        role, tier, cell: SHIPPED_ROSTER.tiers[tier][role],
-        readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder,
-      }).io.reseat(role)
-      assert.deepEqual([role, seat.applied, seat.reason], [role, false, 'exhausted'])
-      assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers[tier][role], { ceiling: ladder.cost_ceilings[tier] }), null)
+      const cell = SHIPPED_ROSTER.tiers[tier][role]
+      assert.equal(cell.fallback, undefined)
+      const seat = makeTierFixture({ role, tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat(role)
+      assert.deepEqual([role, seat.applied, seat.applied ? seat.rung : seat.reason, seat.to?.id ?? cell.id],
+        [role, tier === 'build', tier === 'build' ? 'build→judge' : 'exhausted', cell.id])
+      assert.equal(nextModelRung(SHIPPED_ROSTER, cell, { ceiling: ladder.cost_ceilings[tier] }), null)
     }
   }
   // A seat already on its declared target is never upgraded onto itself again.
-  const twice = makeTierFixture({ role: 'builder', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
-  assert.deepEqual([twice.io.reseat('builder').to?.id, twice.crew.seats.builder.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
-  assert.deepEqual([twice.io.reseat('builder').applied, twice.crew.seats.builder.id], [false, 'gpt-6.1-sol'])
+  const twice = makeTierFixture({ role: 'lead', tier: 'build', cell: SHIPPED_ROSTER.tiers.build.lead, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+  assert.deepEqual([twice.io.reseat('lead').to?.id, twice.crew.seats.lead.id], ['gpt-6.1-sol', 'gpt-6.1-sol'])
+  assert.deepEqual([twice.io.reseat('lead').applied, twice.crew.seats.lead.id], [false, 'gpt-6.1-sol'])
   // Sol pass 3: a walk from the stale roster cell picked a cheaper model than the live one.
   const walkRoster = {
     tiers: { mechanical: { builder: { provider: 'openai', id: 'a', effort: 'medium', agent: 'pi', fallback: [{ provider: 'openai', id: 'b', agent: 'pi' }] } }, build: { builder: { provider: 'openai', id: 'c', effort: 'medium', agent: 'pi' } }, judge: {} },
@@ -1362,11 +1371,11 @@ test('RE9', () => {
   }
   const walk = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: walkRoster.tiers.mechanical.builder, readRoster: () => walkRoster, readLadder: () => ({ cost_ceilings: { mechanical: 10 } }) })
   assert.deepEqual([1, 2, 3].map(() => [walk.io.reseat('builder').applied, walk.crew.seats.builder.id]), [[true, 'c'], [false, 'c'], [false, 'c']])
-  // Repeated reseats are monotonic: the mechanical tier step never pulls a Sol seat back to Spark.
+  // Repeated reseats are monotonic: the mechanical tier step never pulls an Opus seat back to Sonnet.
   const climb = makeTierFixture({ role: 'builder', tier: 'mechanical', cell: SHIPPED_ROSTER.tiers.mechanical.builder, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
   const steps = [1, 2, 3, 4].map(() => { const out = climb.io.reseat('builder'); return [out.applied, climb.crew.seats.builder.id, climb.crew.seats.builder.effort] })
   assert.deepEqual(steps, [
-    [true, 'muse-spark-1.3-contributor', 'xhigh'], [true, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'], [false, 'gpt-6.1-sol', 'medium'],
+    [true, 'claude-opus-5-5', 'high'], [false, 'claude-opus-5-5', 'high'], [false, 'claude-opus-5-5', 'high'], [false, 'claude-opus-5-5', 'high'],
   ])
   const cell = (provider, id, effort = 'medium', agent = 'pi') => ({ provider, id, effort, agent })
   const fixture = () => ({

@@ -867,6 +867,7 @@ async function dispatchFixture({
   sleep = null,
   headFor = null,
   readObserver = () => {},
+  rosterValue = null,
   home = root,
   existsProbe = null,
   // A caller whose subject WRITES through the seam (adoption) passes real
@@ -924,6 +925,7 @@ async function dispatchFixture({
     readFileSync: (path, encoding) => {
       const text = String(path)
       readObserver(text)
+      if (text === ROSTER_PATH && rosterValue) return JSON.stringify(rosterValue)
       if (text.endsWith('/crew.json') && crewRecorderRead && ['recordPiCodemode', 'recordEditAssist'].some((name) => new Error().stack.includes(name))) return crewRecorderRead(text)
       if (text.endsWith('advisor-reservations.json') || text.endsWith('edit-assist-reservations.json')) {
         if (rotationFiles.has(text)) return rotationFiles.get(text)

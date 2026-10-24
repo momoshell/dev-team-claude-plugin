@@ -898,11 +898,19 @@ test('resolveAdapters refuses a recorded proposal stub before checking its adapt
   assert.equal(existsCalls, 0)
 })
 
+// The shared fixture already seats a claude lead and pi builder/reviewer on build; a pi planner makes pi the first
+// unavailable agent, without the shipped roster's pi lead entering the selection.
+const piPlannerRoster = () => {
+  const value = structuredClone(roster)
+  value.tiers.build.planner = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' }
+  return value
+}
+
 test('bootCmd refuses an unavailable selected roster cell before workspace creation', async () => {
   const home = scratchDir('crew-roster-admission-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-roster-admission-checkout-')
   const task = 'crew-roster-admission'
-  const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const rawRoster = piPlannerRoster()
   const base = capabilityRegister()
   const register = capabilityRegister({ coding_agents: {
     pi: { ...base.coding_agents.pi, availability: 'discovered-unavailable', availability_reason: 'discovered-unavailable' },
@@ -936,7 +944,7 @@ test('RV1-2 bootCmd admits selected cells despite unavailable unselected roster 
   const home = scratchDir('crew-selected-roster-admission-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-selected-roster-admission-checkout-')
   const task = 'crew-selected-roster-admission'
-  const rawRoster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  const rawRoster = piPlannerRoster()
   rawRoster.tiers.build.planner = { ...rawRoster.tiers.build.planner, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   rawRoster.tiers.build.builder = { ...rawRoster.tiers.build.builder, provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
   delete rawRoster.tiers.build.builder.fallback
@@ -972,9 +980,8 @@ test('ADR047 P1 an unavailable advisor agent refuses only when a granted seat wi
   // Operator decision 8 (2026-09-28): the advisor agent's availability is admitted only
   // when a consult will actually happen. A null cell, --model-advisor none, or no granted
   // seat never blocks a boot; a granted seat with a non-null cell does.
-  const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
   const claudeSeated = (advisor) => {
-    const value = structuredClone(shipped)
+    const value = piPlannerRoster()
     for (const role of ['planner', 'builder', 'reviewer']) {
       value.tiers.build[role] = { ...value.tiers.build[role], provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude' }
       delete value.tiers.build[role].fallback
@@ -1125,13 +1132,15 @@ test('SEAT_DEFAULTS requires subagents for the planner ALONE — the scout-comma
 
 test('every roster tier still boots its seats — the requirement cannot strand a shipped tier', async () => {
   const roster = shippedRoster()
-  for (const tier of ['mechanical', 'build', 'judge']) assert.equal(roster.tiers[tier]?.builder?.agent, 'pi', `${tier} builder must remain pi`)
+  for (const tier of ['mechanical', 'build', 'judge']) assert.equal(roster.tiers[tier]?.builder?.agent, 'claude', `${tier} builder must be claude`)
   for (const tier of Object.keys(roster.tiers)) {
-    const { roles, seats } = resolveTier(roster, tier, {})
-    await assert.doesNotReject(
-      () => resolveAdapters(roles, {}, seats),
-      `tier "${tier}" must boot with no shortfall override`,
-    )
+    for (const args of [{}, { 'headless-all': true }]) {
+      const { roles, seats } = resolveTier(roster, tier, args)
+      await assert.doesNotReject(
+        () => resolveAdapters(roles, args, seats),
+        `tier "${tier}" must boot with no shortfall override (${JSON.stringify(args)})`,
+      )
+    }
   }
 })
 

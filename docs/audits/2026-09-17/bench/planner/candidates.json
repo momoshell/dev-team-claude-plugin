@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "role": "planner",
-  "production": "meta/muse-wonder-1.0-contributor",
+  "production": "openai/gpt-6.1-sol",
   "candidates": [
     {
-      "provider": "meta",
-      "id": "muse-wonder-1.0-contributor",
+      "provider": "openai",
+      "id": "gpt-6.1-sol",
       "agent": "pi",
-      "effort": "medium",
+      "effort": "high",
       "source": "models.dev"
     },
     {

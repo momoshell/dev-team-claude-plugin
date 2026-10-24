@@ -2108,6 +2108,11 @@ test('all-headless tier boot makes no cmux calls and records daemon-acceptable s
   }
 })
 
+// Transport topology fixed at claude lead, pi planner, pi builder and pi reviewer, whatever the shipped tiers seat.
+const transportRoster = structuredClone(roster)
+transportRoster.tiers.build.planner = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' }
+const readTransportRoster = () => JSON.stringify(transportRoster)
+
 test('--headless-all with a per-seat transport flag still boots — no workspace, nothing to be invisible inside', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-mode-factory-seat-home-'))
   const { root: checkoutRoot, checkout } = testCheckout('crew-mode-factory-seat-checkout-')
@@ -2116,7 +2121,7 @@ test('--headless-all with a per-seat transport flag still boots — no workspace
   try {
     await withHome(home, () => bootCmd(
       { task, checkout, tier: 'build', 'headless-all': true, 'headless-rpc': 'builder', 'claude-bin': process.execPath },
-      { cmux, tree: callCounter(), renameTab: callCounter() },
+      { cmux, tree: callCounter(), renameTab: callCounter(), readRosterFile: readTransportRoster },
     ))
     const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
     assert.equal(crew.workspace_id, null)
@@ -2137,7 +2142,7 @@ test('an explicit ACP builder persists to crew state and boot journal without ch
   try {
     await withHome(home, () => bootCmd(
       { task, checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath },
-      { cmux, tree, renameTab },
+      { cmux, tree, renameTab, readRosterFile: readTransportRoster },
     ))
     assert.equal(cmux.calls.length, 0)
     assert.equal(tree.calls.length, 0)
@@ -2173,7 +2178,7 @@ async function acpCeilingBoot(task, flags = {}) {
   const home = scratchDir('crew-acp-ceiling-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-checkout-')
   try {
-    await withHome(home, () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, ...flags }, {}))
+    await withHome(home, () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, ...flags }, { readRosterFile: readTransportRoster }))
     return { home, checkoutRoot, checkout, dir: testCrewDir(home, checkout, task) }
   } catch (error) { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); throw error }
 }
@@ -2191,14 +2196,14 @@ test('A3', async () => {
   const home = scratchDir('crew-acp-ceiling-refuse-home-'); const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-refuse-checkout-')
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
-    await withHome(home, () => assert.rejects(() => bootCmd({ task: 'acp-ceiling-refuse', checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, 'max-turns-builder': '40' }, { cmux, tree, renameTab }), (error) => error.code === ACP_TURN_CEILING_UNMEASURED && /builder.*40.*acp/i.test(error.message)))
+    await withHome(home, () => assert.rejects(() => bootCmd({ task: 'acp-ceiling-refuse', checkout, tier: 'build', 'headless-all': true, acp: 'builder', 'claude-bin': process.execPath, 'max-turns-builder': '40' }, { cmux, tree, renameTab, readRosterFile: readTransportRoster }), (error) => error.code === ACP_TURN_CEILING_UNMEASURED && /builder.*40.*acp/i.test(error.message)))
     assert.equal(existsSync(testCrewDir(home, checkout, 'acp-ceiling-refuse')), false); assert.equal(cmux.calls.length + tree.calls.length + renameTab.calls.length, 0)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 test('A4', async () => {
   const home = scratchDir('crew-acp-ceiling-rpc-home-'); const { root: checkoutRoot, checkout } = testCheckout('crew-acp-ceiling-rpc-checkout-')
   try {
-    await withHome(home, () => bootCmd({ task: 'acp-ceiling-rpc', checkout, tier: 'build', 'headless-all': true, 'headless-rpc': 'builder', 'claude-bin': process.execPath }, {}))
+    await withHome(home, () => bootCmd({ task: 'acp-ceiling-rpc', checkout, tier: 'build', 'headless-all': true, 'headless-rpc': 'builder', 'claude-bin': process.execPath }, { readRosterFile: readTransportRoster }))
     const c = JSON.parse(readFileSync(join(testCrewDir(home, checkout, 'acp-ceiling-rpc'), 'crew.json'), 'utf8')).turn_ceilings
     assert.equal(c.builder, 200); assert.equal(c.source.builder, 'default')
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }

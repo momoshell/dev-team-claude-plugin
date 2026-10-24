@@ -1223,12 +1223,14 @@ const reviewedCandidateShas = {
   // openai/gpt-6.1-sol to meta/muse-wonder-1.0-contributor at medium; the local
   // candidate set is unchanged. The operator ratified the seat, not this file: no separate review.
   // (Updated 2026-09-30: production moved to openai/gpt-6.1-sol. 2026-09-23, PR #1507: to gpt-6-sol.)
-  planner: '034010b26759c55f58dd6a12febea57b7f2f62c22155119b2a2e189eb46640e9',
+  // Updated 2026-10-24 by the operator-ratified roster: production returns to openai/gpt-6.1-sol, now at high.
+  planner: 'bb7e5aebcc68d19a26a755557a8303db8bb490b94e5279f560e5dd4222ad4644',
   // Updated 2026-10-16 by the operator-ratified builder reseat: production moves from
   // openai/gpt-6-luna back to meta/muse-spark-1.3-contributor at medium. The file returns to the
   // exact bytes the operator re-reviewed on 2026-09-20 (builder effort low -> medium), so this
   // digest is that reviewed one. (2026-09-25: Luna seated. 2026-09-19: `"tier": "mechanical"`.)
-  builder: '061c879340054af7221a8dba80019dbe0f1042e8104ab1c3e337b8ff8a8a74e5',
+  // Updated 2026-10-24 by the operator-ratified roster: production moves to anthropic/claude-sonnet-5-5 on claude at high.
+  builder: '17fca7fd3920e8b9f78b75c559ee72a6b9dbe40a21b8ce6d943863e5953492a4',
 }
 const PLANNER_TARGET = ['bench', 'sha', 'mismatch'].join('-')
 const BUILDER_README = `${ROLE_BENCH_ROOT}/builder/README.md`

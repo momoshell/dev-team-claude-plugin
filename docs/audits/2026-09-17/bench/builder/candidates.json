@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "role": "builder",
-  "production": "meta/muse-spark-1.3-contributor",
+  "production": "anthropic/claude-sonnet-5-5",
   "tier": "mechanical",
   "candidates": [
     {
-      "provider": "meta",
-      "id": "muse-spark-1.3-contributor",
-      "agent": "pi",
-      "effort": "medium",
+      "provider": "anthropic",
+      "id": "claude-sonnet-5-5",
+      "agent": "claude",
+      "effort": "high",
       "source": "models.dev"
     },
     {

@@ -57,7 +57,7 @@ import { pluginProvenance, repoKeyRecord } from './provenance.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  seatIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT,
+  seatIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, settleRecordedSuiteGroup, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, ACP_TRANSPORT,
 } from './seat-io.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
@@ -4773,6 +4773,11 @@ export function teardownCore(paths, crew, deps = {}) {
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'seat-root-settle-failed', error: err.message }) } catch {} }
   try { descendants = reclaimFn({ taskDir: descendantTaskDir, log: io?.log, emit: io?.emit }) }
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} } try { (deps.pruneCacheDirs || pruneCacheDirs)({ taskDir: descendantTaskDir, log: io?.log }, deps) } catch {}
+  // lean: fingerprintWithheld does not consume suite_group, so an unsettled suite group does not withhold the baseline; add suite_group to fingerprintWithheld
+  const settleSuiteGroupFn = deps.settleRecordedSuiteGroup || settleRecordedSuiteGroup
+  let suiteGroup = null
+  try { suiteGroup = settleSuiteGroupFn({ taskDir: descendantTaskDir, deps }) }
+  catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'suite-group-settle-failed', error: err.message }) } catch {} }
   // INVARIANT — one writer at a time, CONDITIONALLY. Three sweeps have just run
   // over this crew's writers: the pane seats, then their seat ROOTS, then their
   // descendant groups. Whether they SETTLED them is exactly what
@@ -4839,7 +4844,7 @@ export function teardownCore(paths, crew, deps = {}) {
   // absolute path recordTreeFingerprint returned named the pre-rename dir and
   // does not exist any more.
   if (fingerprint?.recorded === true) fingerprint = { ...fingerprint, path: join(archived, FINGERPRINT_FILE), file: FINGERPRINT_FILE }
-  return { archived, seats, seats_absent: seatsAbsent, roots, descendants, fingerprint, drain }
+  return { archived, seats, seats_absent: seatsAbsent, roots, descendants, fingerprint, drain, suite_group: suiteGroup }
 }
 export function teardownCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
@@ -4867,7 +4872,7 @@ export function teardownCmd(args, deps = {}) {
   finally { try { emitter?.dispose() } catch { /* instrumentation is never load-bearing */ } }
   const { archived, seats } = record
   const tally = seats ? { seats: seats.seats, proven: seats.proven, failed: seats.failed, unproven: seats.unproven, recorded: seats.recorded, record_failed: seats.record_failed } : null
-  process.stdout.write(`${JSON.stringify({ archived, seats: tally, seats_absent: record.seats_absent ?? null, fingerprint: record.fingerprint ?? null })}\n`)
+  process.stdout.write(`${JSON.stringify({ archived, seats: tally, seats_absent: record.seats_absent ?? null, fingerprint: record.fingerprint ?? null, suite_group: record.suite_group ?? null })}\n`)
   // A seat this verb could not prove dead — `failed` (measured alive) and
   // `unproven` (unknown) alike — or a row that never reached the ledger, is a
   // RESULT, not a silent success. `proven !== seats` covers both non-proven
@@ -5103,6 +5108,9 @@ export async function stopCmd(args, deps = {}) {
       sigkillRequired = true
       if (!(await stopWaitForDeath(pidNum, deps))) stopRefusal('could not positively observe process death after SIGKILL')
     }
+    const settleSuiteGroupFn = deps.settleRecordedSuiteGroup || settleRecordedSuiteGroup
+    let suiteGroup = null
+    try { suiteGroup = settleSuiteGroupFn({ taskDir: paths.taskDir || join(paths.dir, 'task'), deps }) } catch (err) { suiteGroup = { found: null, error: String(err?.message ?? err) } }
 
     let finalSession
     try { finalSession = ledger?.getSession?.(sidecar.adw_id) } catch (err) { stopRefusal(`could not re-read session ${sidecar.adw_id} (${err.message})`) }
@@ -5131,6 +5139,7 @@ export async function stopCmd(args, deps = {}) {
       terminal_reason: finalSession.terminal_reason ?? null,
       terminal_actor: finalSession.terminal_actor ?? null,
       sigkill_required: sigkillRequired,
+      suite_group: suiteGroup,
     }
     const stdout = deps.stdout || process.stdout
     stdout.write(`${JSON.stringify(result)}\n`)

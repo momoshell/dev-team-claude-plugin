@@ -114,7 +114,7 @@ node crew/crew.mjs teardown --task <slug> --checkout <dir>
 Read the exit status and the JSON, in that order:
 
 - Teardown **exits non-zero when a seat was not proven dead**:
-  `crew/crew.mjs:4875` compares `proven` and `recorded` against `seats` and
+  `crew/crew.mjs:4880` compares `proven` and `recorded` against `seats` and
   sets `process.exitCode = 1`.
 - **Exit 0 is not proof on its own.** That guard reads
   `if (seats && …)`, so a `seats: null` payload — teardown measured NO seats,

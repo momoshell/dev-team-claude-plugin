@@ -10,7 +10,7 @@ shape: standard
 acceptance: [RV1]
 out_of_scope: the visualizer
 ---
-# Ask
+## The ask
 
 Refuse roster edits that cannot boot.
 
@@ -22,7 +22,7 @@ Closes #1961
 `
 
 // Every effect is a recorded call; nothing touches git, the disk or a process.
-function fakes({ brief = BRIEF, exists = () => false, bootStatus = 0, worktreeStatus = 0, originHead = 'origin/main' } = {}) {
+function fakes({ brief = BRIEF, exists = () => false, bootStatus = 0, worktreeStatus = 0, originHead = 'origin/main', inGit = true } = {}) {
   const calls = []
   const deps = {
     readFileSync: () => brief,
@@ -33,7 +33,7 @@ function fakes({ brief = BRIEF, exists = () => false, bootStatus = 0, worktreeSt
       calls.push(['spawn', file, args, options?.cwd ?? null])
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
       if (file === 'git' && args.includes('worktree')) return { status: worktreeStatus, stdout: '' }
-      if (file === 'git' && args.includes('rev-parse')) return { status: 0, stdout: '/repo/checkout\n' }
+      if (file === 'git' && args.includes('rev-parse')) return inGit ? { status: 0, stdout: '/repo/checkout\n' } : { status: 128, stdout: '' }
       return { status: bootStatus, stdout: '', stderr: bootStatus ? 'seat-floor-conflict' : '' }
     },
     spawnDetached: (file, args, options) => { calls.push(['detached', file, args, options]); return 4242 },
@@ -116,4 +116,10 @@ test('main reports usage, refusals and success as exit codes', () => {
   assert.equal(main(['a.md', 'b.md'], fakes().deps), 2)
   assert.equal(main(['/d/b1.md', '--check'], fakes().deps), 0)
   assert.equal(main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ bootStatus: 1 }).deps), 1)
+})
+
+// MUTATION: resolve the checkout before --check and a brief cannot be validated outside a repo.
+test('--check works outside a git checkout; a real start there is refused', () => {
+  assert.equal(main(['/d/b1.md', '--check'], fakes({ inGit: false }).deps), 0)
+  assert.equal(main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
 })

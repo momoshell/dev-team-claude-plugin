@@ -36,7 +36,7 @@ shape: standard
 acceptance: [RT1, RT2]
 out_of_scope: the visualizer and crew/roster.json itself
 ---
-# Ask
+## The ask
 
 What to change and why, in a few sentences. State the invariant the change must hold.
 
@@ -53,10 +53,12 @@ Closes #1962
 - (RT2) another
 ```
 
-Field rules (the validator refuses anything else):
+The body needs a `## The ask` section and a `## Acceptance` section; text inside a code fence is an
+example and counts as neither. Field rules (the validator refuses anything else):
 
 - `source`: the issue or the request the lane starts from.
-- `closes`: one issue number, or `null`. When set, the body carries `Closes #N` alone on its own line. No
+- `closes`: one issue number, or `null`. When set, `## The ask` carries `Closes #N` alone on its own line
+  (the driver promotes a `Closes:` trailer only from there). No
   other `#N` appears anywhere in the body; write "issue 1961" or "PR 1968" instead, because the driver binds
   issues off `#N`.
 - `tier`: `mechanical`, `build` or `judge`. Use `judge` when the change touches the protected floor

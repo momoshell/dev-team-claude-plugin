@@ -85,8 +85,9 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
   const d = { ...defaultDeps(), ...deps }
-  const checkout = at >= 0 ? resolve(argv[at + 1]) : git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
-  if (!checkout) { process.stderr.write('crew start: not inside a git checkout; pass --checkout <dir>\n'); return 2 }
+  // --check reads only the brief, so it needs no checkout.
+  const checkout = at >= 0 ? resolve(argv[at + 1]) : check ? null : git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
+  if (!checkout && !check) { process.stderr.write('crew start: not inside a git checkout; pass --checkout <dir>\n'); return 2 }
   try {
     startLane({ briefPath: resolve(rest[0]), checkout, check, deps })
     return 0

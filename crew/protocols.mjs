@@ -18,16 +18,20 @@ function value(raw) {
   return quoted ? quoted[2] : text
 }
 
-// The ids that open items in the body's `## Acceptance` section, the same heading the driver reads.
-function acceptanceHeads(body) {
-  const ids = []
-  let inside = false
+// The body's lines grouped by level-1 or level-2 heading, skipping fenced text: a
+// heading or item quoted inside a fence is an example, as the driver reads it.
+function sections(body) {
+  const out = new Map()
+  let current = null
+  let fence = null
   for (const line of body.split('\n')) {
-    if (/^#{1,2}\s+/.test(line)) { inside = /^##\s+Acceptance\s*$/.test(line); continue }
-    const head = inside && /^\s*[-*]\s+\(([^)]+)\)/.exec(line)
-    if (head) ids.push(head[1])
+    const mark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) { if (mark && mark[0] === fence[0] && mark.length >= fence.length) fence = null; continue }
+    if (mark) { fence = mark; continue }
+    if (/^#{1,2}\s+/.test(line)) { current = line.trim(); if (!out.has(current)) out.set(current, []); continue }
+    if (current) out.get(current).push(line)
   }
-  return ids
+  return out
 }
 
 // Returns { fields, body, defects }. An empty defects list is a brief code can start.
@@ -55,12 +59,16 @@ export function parseBrief(text) {
   const acceptance = Array.isArray(fields.acceptance) ? fields.acceptance : []
   if (acceptance.length === 0 || !acceptance.every((id) => typeof id === 'string' && ID.test(id))) defects.push('acceptance lists the gate ids, each a letter then letters, digits, . _ or -')
   else if (new Set(acceptance).size !== acceptance.length) defects.push('acceptance repeats an id')
-  const heads = acceptanceHeads(body)
+  const parts = sections(body)
+  const heads = (parts.get('## Acceptance') ?? []).map((line) => /^\s*[-*]\s+\(([^)]+)\)/.exec(line)?.[1]).filter(Boolean)
   if (acceptance.length && heads.join(' ') !== acceptance.join(' ')) defects.push(`the ## Acceptance items open with (${heads.join(') (') || 'none'}), not the frontmatter ids (${acceptance.join(') (')})`)
-  // The driver binds issues off `#N` in the brief, so the only one allowed is the closing line.
+  // The driver binds issues off `#N` in the brief, so the only one allowed is the closing
+  // line, and it promotes a Closes trailer only from that line under `## The ask`.
+  if (!parts.has('## The ask')) defects.push('the body has a ## The ask section')
   const closing = body.split('\n').filter((line) => /^Closes #\d+$/.test(line.trim()))
   const want = Number.isInteger(fields.closes) ? `Closes #${fields.closes}` : null
-  if (want && !(closing.length === 1 && closing[0].trim() === want)) defects.push(`the body carries the line "${want}" alone, exactly once`)
+  const inAsk = (parts.get('## The ask') ?? []).filter((line) => line === want)
+  if (want && !(closing.length === 1 && inAsk.length === 1)) defects.push(`the ## The ask section carries the line "${want}" alone, exactly once`)
   if (!want && closing.length) defects.push('closes is null but the body carries a Closes line')
   const stray = body.split('\n').filter((line) => line.trim() !== want).join('\n').match(/#\d+/g)
   if (stray) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N" instead, so nothing but the Closes line binds an issue`)

@@ -604,16 +604,61 @@ test('shapeRunSet marks a degraded ledger read absent with the flag read after t
   }
 })
 
-test('the run-set route reads the feed degraded flag after the query it reports on', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/server/server.mjs'), 'utf8')
-  const routeStart = source.indexOf("if (url.pathname === '/api/run-set')")
-  const routeEnd = source.indexOf("if (url.pathname === '/api/", routeStart + 1)
-  assert.ok(routeStart >= 0)
-  assert.ok(routeEnd > routeStart)
-  const route = source.slice(routeStart, routeEnd)
-  assert.match(route, /degraded: runSetHealth\?\.degraded === true/)
-  assert.match(route, /degraded_reason: runSetReason/)
-  assert.ok(route.indexOf('feed.runSet(') < route.indexOf('feed.health()'))
+test('the run-set route reads the feed degraded flag after the query it reports on', async () => {
+  async function requestRunSet(feed) {
+    const { server } = startServer({ feed, port: 0, host: '127.0.0.1' })
+    let listening = false
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject)
+        server.once('listening', resolve)
+      })
+      listening = true
+      const address = server.address()
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/run-set?since=${encodeURIComponent(start)}&until=${encodeURIComponent(end)}`)
+      assert.equal(response.status, 200)
+      return await response.json()
+    } finally {
+      if (listening) await new Promise((resolve) => server.close(resolve))
+    }
+  }
+  const budgetWindow = () => ({ measured: false, total: null, sessions: null, absent: 'not measured in this fixture' })
+  // ledger-feed.mjs names `absent` on a failed open (:363); this fake answers no
+  // rows and names no reason, so the route must borrow _reason(), which holds the
+  // query's latch only if it is read after runSet(). The response cannot show
+  // health() order (server.mjs:865 discards feedHealth.degraded), so every
+  // health() call is recorded against whether runSet() had already run.
+  let postQueried = false
+  let postLatched = null
+  const postHealthSawQueried = []
+  const postQuery = await requestRunSet({
+    runSet: () => { postQueried = true; postLatched = 'post-query-degraded'; return { rows: null, transports: [], absent: null } },
+    health: () => { postHealthSawQueried.push(postQueried); return { degraded: postLatched !== null } },
+    _reason: () => postLatched,
+    budgetWindow,
+    close: () => {},
+  })
+  assert.equal(postHealthSawQueried.length > 0 && postHealthSawQueried.every((seen) => seen === true), true)
+  assert.equal(postQuery.degraded, true)
+  assert.equal(postQuery.degraded_reason, 'post-query-degraded')
+  assert.equal(postQuery.runs, null)
+  // QV4's named case: health() reports degraded only before runSet(). The
+  // response stays healthy either way (server.mjs:865), so the recorded health()
+  // calls are what fail if the route reads health() first.
+  let preQueried = false
+  let preLatched = 'pre-query-degraded'
+  const preHealthSawQueried = []
+  const preQuery = await requestRunSet({
+    runSet: () => { preQueried = true; preLatched = null; return { rows: [{ status: 'ok' }], transports: [], absent: null } },
+    health: () => { preHealthSawQueried.push(preQueried); return { degraded: preLatched !== null } },
+    _reason: () => preLatched,
+    budgetWindow,
+    close: () => {},
+  })
+  assert.equal(preHealthSawQueried.length > 0 && preHealthSawQueried.every((seen) => seen === true), true)
+  assert.equal(preQuery.degraded, false)
+  assert.equal(preQuery.degraded_reason, null)
+  assert.equal(preQuery.runs, 1)
 })
 
 test('the run-set route keeps healthy ledger rows measured when triage is degraded', async () => {

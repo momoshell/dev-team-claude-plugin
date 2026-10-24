@@ -125,14 +125,17 @@ command, and deferred waves re-emit the authored values on their resume line.
 
 ### Host-load gate
 
-`--max-load 0.5` per core is the CLI default — raw 8 on this 16-core host, and
-per-core so the number travels to hosts with different core counts. `--load-wait 1800`
-is the CLI default wait budget in seconds, matching SLOT_WAIT_CEILING_MS. off disables the gate: `--max-load off` leaves the gate off, and a programmatic
-dispatchBatch without max-load leaves the gate off, so the 193 hermetic fixtures
+The gate is off by default (ADR-052: no gate holds work). `--max-load <per-core>`
+turns it on, for example `--max-load 0.5` (raw 8 on a 16-core host); per-core so the
+number travels to hosts with different core counts. `--load-wait 1800` is the CLI
+default wait budget in seconds, matching SLOT_WAIT_CEILING_MS. A programmatic
+dispatchBatch without max-load also leaves the gate off, so the hermetic fixtures
 boot with no host-load read at all. The gate is dispatcher-side only and is never
 forwarded to boot or run commands.
 
 the gate decides whether a LANE boots; slots queue SUITES inside lanes that are already running. A suite queued behind a slot adds no load, so the gate can admit a lane while both slots are full.
+
+No suite runs before boot: every compile is handed `--no-baseline` (ADR-052), and an operator `--baseline` is reused only when it matches the lane's commit and command.
 
 CREW_LOAD_THRESHOLD is a separate, opt-in boot refusal inside crew boot, with the same basis (`os.loadavg()[0] / os.cpus().length`).
 
@@ -155,7 +158,7 @@ the line it prints last:
 > or run outcome. A green dry run is not a validated dispatch.
 
 It cannot see a compiler refusal for a concrete reason: the dry-run branch
-returns before `measureBatchBaseline` and before any lane is compiled at all.
+returns before any lane is compiled at all.
 
 Nor is a dry run what keeps a bad register from leaving branches behind.
 `checkFences` and `resolveAdoptions` run before worktrees, and `resolveAdoptions`

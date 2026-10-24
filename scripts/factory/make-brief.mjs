@@ -3096,7 +3096,10 @@ function formatBaseline(baseline, profile = null, supplied = null) {
   const laneBasis = baseline.laneBasis
     || profile?.testCommand?.basis
     || 'package.json scripts.test — no profile consulted'
-  return `${line}\nlane basis: ${laneBasis}\n${formatCountBasis(profile?.baseline, supplied)}`
+  const countBasis = baseline.reason === 'not-measured-at-dispatch'
+    ? `count basis: not measured — no suite runs before boot (ADR-052); the gate baseline is the red proof${supplied?.offered === true ? ` (supplied baseline not reused: ${supplied.reason})` : ''}`
+    : formatCountBasis(profile?.baseline, supplied)
+  return `${line}\nlane basis: ${laneBasis}\n${countBasis}`
 }
 
 function keyList(discovery) {
@@ -3762,7 +3765,7 @@ function renderValidation(baseline, discovery, pack) {
   const count = baseline.status === 'unknown'
     ? `unknown (${baseline.reason})`
     : `pass ${baseline.pass}, fail ${baseline.fail}`
-  const basis = baseline.reused === true ? 'reused baseline' : 'measured baseline'
+  const basis = baseline.reused === true ? 'reused baseline' : baseline.reason === 'not-measured-at-dispatch' ? 'baseline' : 'measured baseline'
   return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count} · driver-owned: no seat runs it`
 }
 
@@ -3919,7 +3922,7 @@ function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads', 'pack', 'issue-body', 'pack-omission'])
-  const booleanFlags = new Set(['force', 'require-profile'])
+  const booleanFlags = new Set(['force', 'require-profile', 'no-baseline'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -4060,8 +4063,10 @@ function compile(flags) {
   const coupling = crossCheckCoupling({ discovery, writeSurface })
   const command = resolveBaselineCommand({ checkout, lane })
   const reuse = reuseBaseline({ checkout, command, laneBasis, path: flags.baseline ?? null })
-  const baseline = reuse.baseline || gatherBaseline({ checkout, lane, laneBasis })
-  if (!reuse.baseline) process.stderr.write(`brief: baseline reap: outcome=${baseline.reap?.outcome ?? 'not-spawned'} reason=${baseline.reap?.reason ?? baseline.reap_absent_reason} signals=${baseline.reap?.signals ?? 'not-spawned'}\n`)
+  // --no-baseline (ADR-052): the dispatcher runs no suite before boot; the driver's gate baseline is the lane's red proof.
+  const skipped = !reuse.baseline && flags['no-baseline'] === true
+  const baseline = reuse.baseline || (skipped ? unknownBaseline(command, 'not-measured-at-dispatch', laneBasis) : gatherBaseline({ checkout, lane, laneBasis }))
+  if (!reuse.baseline && !skipped) process.stderr.write(`brief: baseline reap: outcome=${baseline.reap?.outcome ?? 'not-spawned'} reason=${baseline.reap?.reason ?? baseline.reap_absent_reason} signals=${baseline.reap?.signals ?? 'not-spawned'}\n`)
   let fromProfile
   try {
     fromProfile = profileProtectedPaths(profileResult.profile, { path: profileResult.path })

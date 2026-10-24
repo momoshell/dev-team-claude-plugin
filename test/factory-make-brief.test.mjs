@@ -1527,6 +1527,32 @@ test('a malformed supplied baseline is refused and measured', () => {
   assert.match(body, /malformed-baseline/)
 })
 
+// MUTATION: ignore --no-baseline in make-brief and the suite runs (marker written) with a measured count.
+test('--no-baseline runs no suite and records the baseline as unmeasured', () => {
+  const fx = committedFixture('no-baseline')
+  const { brief } = compileCommitted(fx, ['--no-baseline'])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), false)
+  assert.match(body, /unknown · reason: not-measured-at-dispatch/)
+  assert.match(body, /count basis: not measured/)
+  assert.doesNotMatch(body, /· pass \d+ · fail/)
+  // MUTATION: hand the unprofiled null lane to unknownBaseline and this reads "no full test lane · measured baseline".
+  assert.ok(section(brief, '## Validation lane').includes(`full: ${fx.command} · baseline unknown (not-measured-at-dispatch)`))
+})
+
+// MUTATION: measure when a supplied baseline is refused despite --no-baseline, and the marker appears.
+test('--no-baseline with a refused supplied baseline still runs no suite', () => {
+  const fx = committedFixture('no-baseline-mismatch')
+  const path = suppliedBaseline('no-baseline-mismatch', { sha: '0'.repeat(40), command: fx.command, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path, '--no-baseline'])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), false)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /not-measured-at-dispatch/)
+  // MUTATION: drop the supplied refusal from the unmeasured count basis and the sha-mismatch reason disappears.
+  assert.match(body, /supplied baseline not reused: sha-mismatch/)
+})
+
 test('a compile without a supplied baseline keeps the measured count basis', () => {
   const fx = committedFixture('no-supply')
   const { brief } = compileCommitted(fx)

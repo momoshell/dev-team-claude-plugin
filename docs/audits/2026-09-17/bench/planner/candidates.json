@@ -2,6 +2,7 @@
   "schema": 1,
   "role": "planner",
   "production": "openai/gpt-6.1-sol",
+  "tier": "mechanical",
   "candidates": [
     {
       "provider": "openai",

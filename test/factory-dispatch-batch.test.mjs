@@ -3957,14 +3957,15 @@ test('factoryStateRoot is relocatable and baselineCacheRoot keeps its suffix', (
   assert.equal(baselineCacheRoot(deps), join(fallback, '.dev-team', 'factory', 'baselines'))
 })
 
-test('a four-lane batch measures the baseline once', async () => {
+// MUTATION: drop --no-baseline from compileCommand, or restore the batch measurement, and a suite runs before boot.
+test('a four-lane batch runs no baseline suite and compiles every lane with --no-baseline', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d']
   const result = await fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
-  // Measured mechanism: four lanes cost four suite runs before this lane and one after.
-  assert.equal(result.measures.length, 1)
+  assert.equal(result.measures.length, 0)
   assert.equal(result.compiles.length, 4)
   assert.equal(result.discovers.length, 4)
-  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--no-baseline')), true)
+  assert.equal(result.compiles.some(({ args }) => (args || []).map(String).includes('--baseline')), false)
   assert.equal(result.report.lanes.length, 4)
 })
 
@@ -4548,24 +4549,12 @@ test('dispatcharms default read uses a temporary read-only ledger and counts res
   assert.equal(fsExistsSync(absent), false)
 })
 
-test('a failed batch measurement never refuses the batch', async () => {
-  const names = ['lane-a', 'lane-b', 'lane-c']
-  const result = await fakedDispatch({
-    label: 'failed-measurement', names, shaFor: () => 'a'.repeat(40), measurementStatus: 1,
-  })
-  assert.equal(result.measures.length, 1)
-  assert.equal(result.compiles.length, 3)
-  assert.equal(result.discovers.length, 3)
-  assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
-  assert.equal(result.report.lanes.length, 3)
-})
-
-test('dispatcharms single-lane batch measures once and hands --baseline to compile', async () => {
+test('dispatcharms single-lane batch measures nothing and hands --no-baseline to compile', async () => {
   const result = await fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
-  assert.equal(result.measures.length, 1)
+  assert.equal(result.measures.length, 0)
   assert.equal(result.compiles.length, 1)
   assert.equal(result.discovers.length, 1)
-  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--no-baseline')), true)
   assert.equal(result.report.lanes.length, 1)
 })
 
@@ -4582,7 +4571,7 @@ test('A1', async () => {
 
 test('B1', async () => {
   const result = await fakedDispatch({ label: 'b878-sites', names: ['lane-a', 'lane-b'], shaFor: () => 'a'.repeat(40) })
-  assert.equal(result.measures.length, 1)
+  assert.equal(result.measures.length, 0)
   assert.equal(result.discovers.length, 2)
   assert.equal(result.compiles.length, 2)
   for (const call of [...result.measures, ...result.discovers, ...result.compiles]) {
@@ -4593,7 +4582,7 @@ test('B1', async () => {
 
 test('C1', async () => {
   const result = await fakedDispatch({ label: 'b878-checkout', names: ['lane-a', 'lane-b'], shaFor: () => 'a'.repeat(40) })
-  assert.equal(result.measures.length, 1)
+  assert.equal(result.measures.length, 0)
   assert.equal(result.discovers.length, 2)
   assert.equal(result.compiles.length, 2)
   for (const call of [...result.measures, ...result.discovers, ...result.compiles]) {
@@ -4613,7 +4602,7 @@ test('D1', async () => {
   const laneDir = call.args[call.args.indexOf('--checkout') + 1]
   const registerPath = call.args[call.args.indexOf('--fences') + 1]
   const outPath = call.args[call.args.indexOf('--out') + 1]
-  assert.deepEqual(call.args, [compiler, '--request', requestPath, '--checkout', laneDir, '--fences', registerPath, '--lane', 'lane-a', '--out', outPath, '--force', '--pack', result.out])
+  assert.deepEqual(call.args, [compiler, '--request', requestPath, '--checkout', laneDir, '--fences', registerPath, '--lane', 'lane-a', '--out', outPath, '--force', '--pack', result.out, '--no-baseline'])
   assert.equal(call.cwd, laneDir)
   assert.equal(result.report.lanes.length, 1)
   assert.equal(result.report.lanes[0].lane, 'lane-a')
@@ -4657,115 +4646,6 @@ test('three lanes start compiling before any compile returns', async () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
-test('at-risk compiles are serialised with a host quiet consult between them', async () => {
-  const baseline = join(root, 'at-risk-baseline.json')
-  put(baseline, JSON.stringify({ sha: 'b'.repeat(40) }))
-  const events = []
-  const result = await dispatchFixture({
-    label: 'at-risk-serial',
-    home: join(root, 'at-risk-serial-home'),
-    headFor: () => 'a'.repeat(40),
-    runFlags: { baseline },
-    assertQuiet: () => { events.push('quiet') },
-    spawnAsync: async (call) => {
-      const lane = compilerLane(call.args)
-      events.push(`start:${lane}`)
-      events.push(`end:${lane}`)
-      return { status: 0, stdout: '', stderr: '' }
-    },
-  })
-  assert.deepEqual(events, [
-    'quiet', 'start:lane-a', 'end:lane-a',
-    'quiet', 'start:lane-b', 'end:lane-b',
-  ])
-  assert.equal(result.report.lanes.length, 2)
-})
-
-test('a matching-sha baseline with a different command is serialised as a fallback', async () => {
-  const sha = 'a'.repeat(40)
-  const baseline = join(root, 'at-risk-command-baseline.json')
-  put(baseline, JSON.stringify({ sha, command: 'npm run other-suite', pass: 1, fail: 0, status: 'green' }))
-  const events = []
-  const result = await dispatchFixture({
-    label: 'at-risk-command',
-    home: join(root, 'at-risk-command-home'),
-    headFor: () => sha,
-    runFlags: { baseline },
-    assertQuiet: () => { events.push('quiet') },
-    spawnAsync: async (call) => {
-      const lane = compilerLane(call.args)
-      events.push(`start:${lane}`)
-      events.push(`end:${lane}`)
-      return { status: 0, stdout: '', stderr: '' }
-    },
-  })
-  assert.deepEqual(events, [
-    'quiet', 'start:lane-a', 'end:lane-a',
-    'quiet', 'start:lane-b', 'end:lane-b',
-  ])
-  assert.equal(result.report.lanes.length, 2)
-})
-
-test('a matching sha and command cache hit skips measurement and reaches every compiler', async () => {
-  const sha = 'a'.repeat(40)
-  const home = join(root, 'cache-hit-home')
-  const entryPath = cachePath(home, sha)
-  put(entryPath, JSON.stringify({ sha, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
-  const result = await dispatchFixture({
-    label: 'cache-hit',
-    home,
-    headFor: () => sha,
-  })
-  const measures = result.spawned.filter(({ args }) => args.includes('--measure-baseline'))
-  const compilerCalls = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
-  const discovers = compilerCalls.filter(({ args }) => args.includes('--discover-reads'))
-  const compiles = compilerCalls.filter(({ args }) => args.includes('--out'))
-  assert.equal(measures.length, 0)
-  assert.equal(discovers.length, 2)
-  assert.equal(compiles.length, 2)
-  assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === entryPath), true)
-})
-
-test('a cache record for another sha is replaced by a fresh measurement', async () => {
-  const sha = 'a'.repeat(40)
-  const home = join(root, 'cache-sha-miss-home')
-  const entryPath = cachePath(home, sha)
-  put(entryPath, JSON.stringify({ sha: 'b'.repeat(40), command: 'npm test', pass: 1, fail: 0, status: 'green' }))
-  const result = await dispatchFixture({
-    label: 'cache-sha-miss',
-    home,
-    headFor: () => sha,
-    spawnResult: (args) => {
-      if (args.includes('--measure-baseline')) {
-        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
-      }
-      return { status: 0, stdout: '', stderr: '' }
-    },
-  })
-  assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 1)
-  assert.equal(JSON.parse(readFileSync(entryPath, 'utf8')).sha, sha)
-})
-
-test('a cache record for another command is replaced by a fresh measurement', async () => {
-  const sha = 'a'.repeat(40)
-  const home = join(root, 'cache-command-miss-home')
-  const entryPath = cachePath(home, sha)
-  put(entryPath, JSON.stringify({ sha, command: 'npm run other-suite', pass: 1, fail: 0, status: 'green' }))
-  const result = await dispatchFixture({
-    label: 'cache-command-miss',
-    home,
-    headFor: () => sha,
-    spawnResult: (args) => {
-      if (args.includes('--measure-baseline')) {
-        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
-      }
-      return { status: 0, stdout: '', stderr: '' }
-    },
-  })
-  assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 1)
-  assert.equal(JSON.parse(readFileSync(entryPath, 'utf8')).command, 'npm test')
-})
-
 test('an operator baseline wins over a valid cache hit', async () => {
   const sha = 'a'.repeat(40)
   const home = join(root, 'operator-baseline-home')
@@ -4787,25 +4667,7 @@ test('an operator baseline wins over a valid cache hit', async () => {
   assert.equal(compiles.length, 2)
   assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === supplied), true)
   assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] !== cached), true)
-})
-
-test('relocated baseline cache writes under DEVTEAM_LEDGER_DIR, not home', async () => {
-  const sha = 'a'.repeat(40)
-  const home = join(root, 'relocated-cache-home')
-  const result = await dispatchFixture({
-    label: 'relocated-cache',
-    home,
-    headFor: () => sha,
-    spawnResult: (args) => {
-      if (args.includes('--measure-baseline')) {
-        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
-      }
-      return { status: 0, stdout: '', stderr: '' }
-    },
-  })
-  assert.equal(fsExistsSync(cachePath(home, sha)), true)
-  assert.equal(fsExistsSync(join(home, '.dev-team')), false)
-  assert.equal(result.report.lanes.length, 2)
+  assert.equal(compiles.every(({ args }) => args.includes('--no-baseline')), true)
 })
 
 test('bootCommand hands every lane the dispatching checkout roster path', () => {
@@ -5583,7 +5445,7 @@ test('briefMeasure reports UTF-8 bytes and the largest section, or null', () => 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'baseBranch', 'cpus', 'env', 'existsSync', 'factoryRoot', 'home', 'loadavg', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readEditAssistArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'baseBranch', 'cpus', 'env', 'existsSync', 'factoryRoot', 'home', 'loadavg', 'log', 'lstatSync', 'mkdirSync', 'now', 'random', 'randomUUID', 'readAdvisorArms', 'readEditAssistArms', 'readFileSync', 'readdirSync', 'realpathSync', 'renameSync', 'rmSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'statSync', 'symlinkSync', 'worktreeSetup', 'writeFileSync'])
 })
 
 test('C1 an unacknowledged read does not stop batch dispatch', async () => {

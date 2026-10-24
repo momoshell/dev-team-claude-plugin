@@ -11,7 +11,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { acceptanceIds, parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, shapeDefect, VARIANT_NAMES, VARIANTS, TURN_CEILING_FLAGS, WAITS_S } from '../../crew/drive.mjs'
 import { resolveTaskReturn } from '../../crew/crew.mjs'
-import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
+import { hostLoad, withSuiteSlot } from '../../crew/host-load.mjs'
 import { slotStore } from '../../crew/reclaim.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptSurfacePaths } from '../../crew/protected-paths.mjs'
@@ -1142,7 +1142,6 @@ export function normalDeps(deps = {}) {
     worktreeSetup: deps.worktreeSetup || ((options) => checkoutWorktreeSetup({ ...options, factoryRoot: deps.factoryRoot })),
     env: deps.env || process.env,
     spawnAsync: deps.spawnAsync || deps.spawn || spawnAsyncDefault,
-    assertQuiet: deps.assertQuiet || ((env) => assertHostQuiet(hostLoad({ policy: loadPolicy(env) }))),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
     // Suite-slot seams (#825): pass-through only. withSuiteSlot owns their
     // defaults, so an absent seam must stay `undefined` rather than become null.
@@ -1406,11 +1405,11 @@ export function parseLoadGate(runFlags) {
   return { threshold, waitMs: waitSeconds * 1000 }
 }
 
-// 0.5 = operator raw-8 on a 16-core host, per-core so it travels; 1800 matches SLOT_WAIT_CEILING_MS (crew/host-load.mjs:92).
+// The host-load gate is off unless asked for (ADR-052: no gate holds work); 1800 matches SLOT_WAIT_CEILING_MS (crew/host-load.mjs:92).
 export function cliLoadDefaults(flags = {}) {
   return {
     ...flags,
-    'max-load': flags['max-load'] ?? '0.5',
+    'max-load': flags['max-load'] ?? 'off',
     'load-wait': flags['load-wait'] ?? '1800',
   }
 }
@@ -3361,6 +3360,8 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
     '--pack', outDir,
   ]
   if (typeof baselinePath === 'string' && baselinePath.trim()) args.push('--baseline', baselinePath)
+  // ADR-052: a compile never runs the suite; a supplied baseline is reused only when it matches.
+  args.push('--no-baseline')
   if (typeof issueBodyPath === 'string' && issueBodyPath.trim()) args.push('--issue-body', issueBodyPath)
   if (packOmission !== null && packOmission !== undefined) args.push('--pack-omission', packOmission)
   return { file: 'node', args, cwd: laneDir }
@@ -4832,10 +4833,10 @@ async function compileDispatchWave(prepared) {
   }
 
   createWorktrees({ plans, checkout: root, created: createdWorktrees, deps: d })
-  const heads = laneHeads({ plans, deps: d })
   const supplied = typeof runFlags.baseline === 'string' && runFlags.baseline.trim() ? resolve(runFlags.baseline) : null
   if (supplied) d.log(`dispatch-batch: operator supplied baseline path=${supplied}`)
-  const baselinePath = supplied || measureBatchBaseline({ plans, outDir: outputDir, checkout: root, heads, deps: d })
+  // ADR-052: no suite runs before boot. An operator-supplied baseline is still handed through.
+  const baselinePath = supplied
   // The compiler's request schema is closed, so every lane is compiled from a
   // copy of its request with the dispatch-only keys removed. The copy is named
   // so it can never be mistaken for an authored request, even when --out points
@@ -4847,37 +4848,6 @@ async function compileDispatchWave(prepared) {
       refuse(`cannot write compiler request ${requestPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
     compileRequests.set(lane.lane, requestPath)
-  }
-
-  // SCHEDULING ONLY. make-brief owns baseline acceptance (reuseBaseline,
-  // scripts/factory/make-brief.mjs) and still decides reuse for every lane; this predicate never
-  // changes what a lane is handed. It answers the one question the scheduler must answer BEFORE it
-  // spawns: can this compile run a full suite? A lane handed no baseline, or one recorded for a
-  // different commit than its own worktree carries, is at risk, and N of those at once is N suites.
-  const atRisk = (plan) => {
-    if (!baselinePath) return true
-    const head = heads?.get(plan.lane) || null
-    if (!head) return true
-    let record
-    try { record = JSON.parse(textOf(d.readFileSync(baselinePath, 'utf8'))) } catch { return true }
-    const command = laneCommandForPlan({ plan, fallbackDir: root, deps: d })
-    return !record || typeof record !== 'object' || Array.isArray(record)
-      || record.sha !== head
-      || !command || record.command !== command
-      || !Number.isInteger(record.pass) || record.pass < 0
-      || !Number.isInteger(record.fail) || record.fail < 0
-  }
-
-  let serial = Promise.resolve()
-  const runSerialised = (fn) => {
-    const next = serial.then(async () => {
-      try { await d.assertQuiet(d.env) } catch (err) {
-        refuse(`refusing to measure a lane baseline on a saturated host: ${err?.message || String(err)}`, COMPILE_REFUSED)
-      }
-      return fn()
-    })
-    serial = next.then(() => {}, () => {})
-    return next
   }
 
   const plannerSymbolsArms = new Map()
@@ -4919,7 +4889,7 @@ async function compileDispatchWave(prepared) {
           : null,
       deps: d,
     })
-    return atRisk(plan) ? runSerialised(compile) : compile()
+    return compile()
   }
 
   const compiled = []

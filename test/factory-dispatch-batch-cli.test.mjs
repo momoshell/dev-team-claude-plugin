@@ -568,8 +568,9 @@ test('host-load RV2-1 deferred resumes serialize blank load flags as off and zer
   }
 })
 
-test('load gate CLI defaults apply 0.5 and 1800 only when absent', () => {
-  assert.deepEqual(cliLoadDefaults({}), { 'max-load': '0.5', 'load-wait': '1800' })
+// MUTATION: restore the 0.5 default and every CLI dispatch waits on host load again.
+test('load gate CLI defaults leave the gate off and apply 1800 only when absent', () => {
+  assert.deepEqual(cliLoadDefaults({}), { 'max-load': 'off', 'load-wait': '1800' })
   assert.deepEqual(cliLoadDefaults({ 'max-load': 'off', 'load-wait': '5' }), { 'max-load': 'off', 'load-wait': '5' })
   assert.deepEqual(cliLoadDefaults({ 'max-load': '0.25' }), { 'max-load': '0.25', 'load-wait': '1800' })
 })

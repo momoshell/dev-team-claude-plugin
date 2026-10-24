@@ -2,12 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, rmSync, cpSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { AGENT_ROLES, TIERS, parseAgent } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-const AGENTS_DIR = new URL('./agents/', import.meta.url).pathname
+const AGENTS_DIR = fileURLToPath(new URL('./agents/', import.meta.url))
 
 // A private copy of the committed definitions, so a test can edit them.
 function scratch() {

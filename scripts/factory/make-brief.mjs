@@ -1784,7 +1784,7 @@ function proposeShape(protectedHits) {
 // above the mechanical column is a MISCLASSIFICATION, not a cheap reinforcement:
 // the compiler says so and asks for the shape to be reproposed. It rewrites
 // neither proposal — "a tier is proposed, never decided".
-const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
+export const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
 
 // MUTATION M2: widen this guard and the note stops discriminating — it becomes
 // a line every reinforced brief carries.

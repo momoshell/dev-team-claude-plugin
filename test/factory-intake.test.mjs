@@ -860,9 +860,14 @@ test('an unreadable dispatch stays in the adjudicated verdict history', () => {
   ledger.close()
 })
 
-test('intake source never names updatedAt as rescope evidence', () => {
-  const source = readFileSync(join(ROOT, 'scripts/factory/intake.mjs'), 'utf8')
-  assert.equal(source.includes('updatedAt'), false)
+test('QC2 intake decision is unchanged when only updatedAt changes', () => {
+  const first = runIntake([issue({ number: 70, body: intakeBody(), content: { updatedAt: '2026-01-01T00:00:00Z' } })])
+  const second = runIntake([issue({ number: 70, body: intakeBody(), content: { updatedAt: '2026-06-01T00:00:00Z' } })])
+  assert.deepEqual(
+    { picked: first.result.sweep.picked, refusals: first.result.sweep.refusals },
+    { picked: second.result.sweep.picked, refusals: second.result.sweep.refusals },
+  )
+  assert.equal(first.result.dispatch.outcome, second.result.dispatch.outcome)
 })
 
 test('a picked issue compiles one brief, boots once, runs once, and claims the work column', () => {

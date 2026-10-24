@@ -21,7 +21,7 @@ import { openRun } from './emit.mjs'
 import { checkoutBaseBranch, checkoutWorktreeSetup, validateWorktreeSetup, runWorktreeSetup, removeWorktreeExcludes } from './probe-repo.mjs'
 import { ADVISOR_ARMS, ADVISOR_SOURCES, EDIT_ASSIST_VALUES, EDIT_ASSIST_SOURCES, PI_CODEMODE_VALUES, advisorArmsReadout, chunkProgress, openLedger, upsertChunkRun } from './ledger.mjs'
 import { PI_CODEMODE_ENV } from '../../crew/adapters/adapter-pi.mjs'
-import { BRIEF_BYTE_LIMIT, LADDER_BANDS, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherProfile, isTripwireFile, issueBindingFor, laneFromProfile, profileField, validateRequest } from './make-brief.mjs'
+import { BRIEF_BYTE_LIMIT, LADDER_BANDS, MISCLASSIFIED_PREFIX, PROPOSAL_BLOCK, PROPOSAL_V2_KEYS, TIER_NAMES, extractSymbols, gatherProfile, isTripwireFile, issueBindingFor, laneFromProfile, profileField, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -250,7 +250,7 @@ export const ADOPT_FINDINGS_CLAUSE = [
 // crew/crew.mjs:2488) and the request-key spelling of each. Mirrored rather
 // than imported: importing crew/crew.mjs would pull the whole boot graph into
 // a dispatcher that only needs four names. test/factory-dispatch-batch.test.mjs
-// pins the two surfaces together, exactly as MISCLASSIFIED_PREFIX is pinned.
+// pins the two surfaces together.
 export const SEAT_FIELDS = Object.freeze({
   agent: 'agent-', model: 'model-', effort: 'effort-', allow_shortfall: 'allow-shortfall-',
 })
@@ -308,9 +308,7 @@ const OPERATOR_SPELLING_AXES = Object.freeze(['execution', 'assurance'])
 // Absence is not zero: a brief carrying no proposal block records null, never a
 // stand-in shape. The word the log prints for that null.
 export const STAFFING_ABSENT = 'absent'
-// A copy of make-brief.mjs:1178, which is not exported and whose file this lane may
-// not touch. test/factory-dispatch-batch.test.mjs pins the two surfaces together.
-export const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
+export { MISCLASSIFIED_PREFIX }
 const ABSENT_STAFFING = Object.freeze({ shape: null, strength: null, misclassification: null })
 const ASSURANCE_NAMES = Object.freeze(['quick', 'standard', 'rigorous'])
 const ASSURANCE_TO_TIER = Object.freeze({ quick: 'mechanical', standard: 'build', rigorous: 'judge' })

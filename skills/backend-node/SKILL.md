@@ -27,7 +27,7 @@ before relaxing the rule; the references carry the measured cost and the gap.
 
 ## Critical rules
 
-- Keep each module on `node:` builtins unless an explicit first-party allowlist admits an exception; enforce the boundary per module. Exhibit: `crew/pi/extensions/subagent.test.mjs:174` and `test/factory-intake.test.mjs:1115`. Cost: a repository-wide scan would miss a newly introduced dependency inside one file.
+- Keep each module on `node:` builtins unless an explicit first-party allowlist admits an exception; enforce the boundary per module. Exhibit: `crew/pi/extensions/subagent.test.mjs:174` and `test/factory-intake.test.mjs:1120`. Cost: a repository-wide scan would miss a newly introduced dependency inside one file.
 - Pin each daemon-admitted leaf exception (`crew/slug.mjs`, `crew/escalation-policy.mjs`, `crew/variants.mjs`, `crew/task-profiles.mjs`, `crew/assurances.mjs`, and `crew/run-configuration.mjs`) as import-free; intentional non-leaf helpers such as `crew/headless-rpc.mjs` are outside that leaf rule. Exhibit: `crew/daemon.test.mjs:264`, `crew/daemon.test.mjs:266`, and `crew/daemon.test.mjs:268`. Cost: an allowlist without a leaf assertion turns one safe edge into a transitive escape hatch.
 - Model a closed enum as frozen data that the code consults, and assert both its values and its frozen state. Exhibit: `crew/drive.mjs:569` and `crew/drive-review.test.mjs:1630`. Cost: a value-only test survives a mutation that makes callers able to alter the vocabulary.
 - Make every verb refuse a flag it does not read, with the refusal carrying the usage exit status. Exhibit: `scripts/factory/ledger.mjs:8668` and `test/factory-emit.test.mjs:1849`. Cost: the one-letter `--untill` defect silently removed a window bound (#443).

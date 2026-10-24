@@ -28,7 +28,7 @@ test('ADR047 K1 the shipped register grants the advisor to the builder only', ()
   }
 })
 
-test('G1T freezes the exhaustive first-party extension declaration table and matches registrars', () => {
+test('QC1 freezes the exhaustive first-party extension declaration table and matches registrars', async () => {
   const expected = {
     'crew/pi/extensions/advisor.ts': [],
     'crew/pi/extensions/builderloop.ts': [],
@@ -43,19 +43,19 @@ test('G1T freezes the exhaustive first-party extension declaration table and mat
   assert.equal(Object.isFrozen(PI_FIRST_PARTY_EXTENSION_TOOLS), true)
   for (const value of Object.values(PI_FIRST_PARTY_EXTENSION_TOOLS)) assert.equal(Object.isFrozen(value), true)
 
-  const source = (name) => readFileSync(new URL(`./pi/extensions/${name}.ts`, import.meta.url), 'utf8')
-  const submit = source('submit')
-  assert.match(submit, /name: 'submit_envelope'/)
-  const subagent = source('subagent')
-  const skeletonread = source('skeletonread')
-  const lab = source('lab')
-  assert.match(subagent, /AGENT_TOOL_NAME = 'agent'/)
-  assert.match(subagent, /registerTool\(createAgentTool\(\)\)/)
-  assert.match(skeletonread, /RETRIEVE_TOOL_NAME = 'retrieve'/)
-  assert.match(skeletonread, /registerTool\(skeleton\.retrieve\)/)
-  assert.match(lab, /LAB_TOOL_NAME = 'lab'/)
-  assert.match(lab, /registerTool\(createLabTool\(\)\)/)
-  for (const name of ['advisor', 'builderloop', 'readgate', 'reminders']) assert.doesNotMatch(source(name), /registerTool\s*\(/)
+  const savedAdvisor = process.env.CREW_ADVISOR
+  delete process.env.CREW_ADVISOR
+  try {
+    for (const [path, names] of Object.entries(PI_FIRST_PARTY_EXTENSION_TOOLS)) {
+      const mod = await import(new URL('./' + path.replace('crew/', ''), import.meta.url))
+      const tools = []
+      await mod.default({ registerTool: (tool) => tools.push(tool), on: () => {}, sendMessage: () => {} })
+      assert.deepEqual(tools.map((tool) => tool.name), names, path)
+    }
+  } finally {
+    if (savedAdvisor === undefined) delete process.env.CREW_ADVISOR
+    else process.env.CREW_ADVISOR = savedAdvisor
+  }
 })
 
 function capabilityRegister(overrides = {}) {

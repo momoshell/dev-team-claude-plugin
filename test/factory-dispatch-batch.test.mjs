@@ -159,7 +159,7 @@ import { promptSurfacePaths } from '../crew/protected-paths.mjs'
 import { slotStore } from '../crew/reclaim.mjs'
 import { ADVISOR_ARMS, openLedger } from '../scripts/factory/ledger.mjs'
 import { partitionShifts } from '../skills/qa-test-writing/anchor-pin.mjs'
-import { crossCheckCoupling, discoverTripwires, issueBindingFor, laneFenceFor, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
+import { crossCheckCoupling, discoverTripwires, issueBindingFor, laneFenceFor, proposeTier, renderBrief, resolveWriteSurface, verifyWhere, writePack } from '../scripts/factory/make-brief.mjs'
 import { ROOT, git, scratchDir } from './helpers.mjs'
 import { defaultProfilePath, ProfileRefusal, repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 import { fileURLToPath } from 'node:url'
@@ -6376,9 +6376,17 @@ test('staffing absence records null axes and never invents a shape', async () =>
   }
 })
 
-test('dispatcher misclassification literal stays pinned to the compiler', () => {
-  const source = readFileSync(join(repoRoot, 'scripts', 'factory', 'make-brief.mjs'), 'utf8')
-  assert.equal(source.includes(MISCLASSIFIED_PREFIX), true)
+test("QC3 a mechanical shape priced above its column starts with the dispatcher's misclassification prefix", () => {
+  const proposal = proposeTier({
+    where: Array.from({ length: 5 }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: 5 }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths: [],
+  })
+  assert.ok(proposal.misclassification.startsWith(MISCLASSIFIED_PREFIX))
 })
 
 test('staffing fields append to the existing settled dispatch log line', async () => {

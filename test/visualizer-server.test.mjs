@@ -20,6 +20,7 @@ import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 import { createShipStateResolver } from '../visualizer/server/ship-state.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { deriveStatus } from '../visualizer/web/src/lib/fleet.js'
+import * as webApi from '../visualizer/web/src/lib/api.js'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { readLadder, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
@@ -580,14 +581,36 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
     })
     assert.equal(rawStatus(originless), 200)
     assert.equal(rawJson(originless).ok, true)
-
-    const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
-    const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
-    assert.equal(posts.length, 12)
-    assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
   } finally {
     if (server) await stopServer(server.child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('QC4 api.js POST helpers send POST with a JSON content type', async () => {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => { calls.push([url, options]); return { ok: true, json: async () => ({}) } }
+  try {
+    await webApi.proposeAgent('n', {})
+    await webApi.proposeSkills('r', [])
+    await webApi.proposePrompt('r', 't')
+    await webApi.proposeAssuranceChange('d', 'standard')
+    await webApi.proposeWorkflowEdit({ workflow: 'full', edit: {}, tier: 'build' })
+    await webApi.setIntakeBrake(true, 'ops')
+    await webApi.postTriage('a', true)
+    await webApi.proposeRosterEdit('build', 'planner', null)
+    await webApi.setModelCatalogKey('k')
+    await webApi.stageRosterLadder([])
+    await webApi.composeRosterLadder([])
+    await webApi.applyRosterLadder([])
+    assert.equal(calls.length, 12)
+    for (const [, options] of calls) {
+      assert.equal(options.method, 'POST')
+      assert.equal(options.headers['content-type'], 'application/json')
+    }
+  } finally {
+    globalThis.fetch = original
   }
 })
 
@@ -820,12 +843,6 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
     if (server) await stopServer(server.child)
     rmSync(dir, { recursive: true, force: true })
   }
-})
-
-test('server direct invocation is import.meta.main; realpathOr stays for its other uses', () => {
-  const source = readFileSync(SERVER_SCRIPT, 'utf8')
-  assert.match(source, /const invokedDirectly = import\.meta\.main/,)
-  assert.match(source, /function realpathOr\(path\)[\s\S]*realpathSync\(path\)/)
 })
 
 test('the visualizer CLI announces a port through a symlinked repository path', { skip: SKIP }, async () => {
@@ -3367,8 +3384,6 @@ test('workflow-page:C2', async () => {
     assert.equal(get.json.evidence.measured, false)
     assert.match(get.json.evidence.error, /ledger denied/i)
     assert.equal(feedReads, 1)
-    const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
-    assert.match(api, /proposeWorkflowEdit = \(\{ workflow, edit, tier \}\) => request\('\/api\/workflows\/propose'/)
     assert.equal((await json(server.base, '/api/workflows?unknown=1')).status, 400)
     assert.equal((await json(server.base, '/api/workflows', { method: 'POST' })).status, 405)
     assert.equal((await json(server.base, '/api/workflows/propose')).status, 405)
@@ -3384,6 +3399,21 @@ test('workflow-page:C2', async () => {
     assert.equal(treeDigest(root), beforeDigest)
   } finally {
     await stopInProcess(server.server)
+  }
+})
+
+test('QC5 proposeWorkflowEdit posts workflow, edit and tier as JSON to /api/workflows/propose', async () => {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, options) => { calls.push([url, options]); return { ok: true, json: async () => ({}) } }
+  try {
+    await webApi.proposeWorkflowEdit({ workflow: 'full', edit: { stage: 'plan' }, tier: 'build' })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0][0], '/api/workflows/propose')
+    assert.equal(calls[0][1].method, 'POST')
+    assert.deepEqual(JSON.parse(calls[0][1].body), { workflow: 'full', edit: { stage: 'plan' }, tier: 'build' })
+  } finally {
+    globalThis.fetch = original
   }
 })
 
@@ -3600,14 +3630,6 @@ test('RV1-2 accepts a bounded large assurance proposal document', async () => {
     if (server) await stopInProcess(server)
     rmSync(root, { recursive: true, force: true })
   }
-})
-
-test('assurance body overflow classification uses its error sentinel', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/server/server.mjs'), 'utf8')
-  assert.match(source, /const BODY_TOO_LARGE = 'body_too_large'/)
-  assert.match(source, /error\.code = BODY_TOO_LARGE/)
-  assert.match(source, /err\?\.code === BODY_TOO_LARGE/)
-  assert.doesNotMatch(source, /message\.startsWith\('body too large'\)/)
 })
 
 test('RV2-1 bounds multi-line assurance proposal documents before diffing', async () => {

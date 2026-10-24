@@ -1,6 +1,6 @@
 # ADR-052 — Agents do the work; code keeps it correct
 
-**Status:** *proposed* 2026-10-24, operator direction · **Owner:** operator ·
+**Status:** *ratified* 2026-10-24, operator decision (D1-D9 in `docs/plan-lean-runtime.md`) · **Owner:** operator ·
 **Relates to:** ADR-029 (headless observability), ADR-035 (run configuration axes), ADR-036 (ACP seat transport),
 ADR-044 (declared topologies), ADR-045 (scope is context), ADR-047 (advisor seat), ADR-048 (ordered build steps),
 ADR-049 (edit assist), ADR-050 (seat skills), ADR-051 (finish shape), epic #1964 (roster swap as one edit)

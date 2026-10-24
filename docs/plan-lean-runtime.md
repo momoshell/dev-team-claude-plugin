@@ -145,7 +145,7 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 - [ ] 0.1 Host-load gate off by default in `dispatch-batch.mjs`. `~/.crew/dispatch-defaults.sh` is shared
       with other projects and is left alone (D8).
 - [ ] 0.2 Drop the dispatch-time baseline suite; the driver's own gate baseline already runs.
-- [ ] 0.3 Ratify ADR-052.
+- [x] 0.3 Ratify ADR-052 (2026-10-24).
 
 ### Phase 1: the lean entry (source, brief, planner)
 

@@ -1346,13 +1346,16 @@ test('RE9', () => {
         [true, 'anthropic', 'claude-opus-5-5', builder.effort, 'model:claude-sonnet-5-5→claude-opus-5-5'])
     }
     // The Sol planners and Opus reviewers declare no fallback and have no in-ceiling model upgrade
-    // (Sol's next rung, Astra, is over every tier ceiling): only the build tier step moves their effort.
+    // (Sol's next rung, Astra, is over every tier ceiling): only a tier step to a higher effort moves them.
     for (const role of ['planner', 'reviewer']) {
       const cell = SHIPPED_ROSTER.tiers[tier][role]
       assert.equal(cell.fallback, undefined)
       const seat = makeTierFixture({ role, tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat(role)
+      // The planner runs medium on mechanical and high on build and judge, so only the mechanical planner
+      // climbs; the reviewer runs high below judge's xhigh, so only the build reviewer climbs.
+      const climbs = role === 'planner' ? tier === 'mechanical' : tier === 'build'
       assert.deepEqual([role, seat.applied, seat.applied ? seat.rung : seat.reason, seat.to?.id ?? cell.id],
-        [role, tier === 'build', tier === 'build' ? 'build→judge' : 'exhausted', cell.id])
+        [role, climbs, climbs ? `${tier}→${tier === 'mechanical' ? 'build' : 'judge'}` : 'exhausted', cell.id])
       assert.equal(nextModelRung(SHIPPED_ROSTER, cell, { ceiling: ladder.cost_ceilings[tier] }), null)
     }
   }

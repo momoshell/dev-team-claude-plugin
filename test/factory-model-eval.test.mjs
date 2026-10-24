@@ -1224,7 +1224,7 @@ const reviewedCandidateShas = {
   // candidate set is unchanged. The operator ratified the seat, not this file: no separate review.
   // (Updated 2026-09-30: production moved to openai/gpt-6.1-sol. 2026-09-23, PR #1507: to gpt-6-sol.)
   // Updated 2026-10-24 by the operator-ratified roster: production returns to openai/gpt-6.1-sol, now at high.
-  planner: 'bb7e5aebcc68d19a26a755557a8303db8bb490b94e5279f560e5dd4222ad4644',
+  planner: 'ffd4453393dce0bb21528771ffee1f22d5f3c09a0b2d2cbbe74375a3c6f1d76d',
   // Updated 2026-10-16 by the operator-ratified builder reseat: production moves from
   // openai/gpt-6-luna back to meta/muse-spark-1.3-contributor at medium. The file returns to the
   // exact bytes the operator re-reviewed on 2026-09-20 (builder effort low -> medium), so this

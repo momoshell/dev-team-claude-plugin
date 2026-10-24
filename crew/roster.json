@@ -9,7 +9,7 @@
         "provider": "openai",
         "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "high"
+        "effort": "medium"
       },
       "builder": {
         "provider": "anthropic",
@@ -79,7 +79,7 @@
         "provider": "openai",
         "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "xhigh"
+        "effort": "high"
       },
       "builder": {
         "provider": "anthropic",

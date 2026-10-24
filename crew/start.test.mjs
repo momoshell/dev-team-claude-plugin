@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { laneName, main, startLane, StartRefusal } from './start.mjs'
+import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
+import { acceptanceIds, composeCommitMessage, issueStatementDefect } from './drive.mjs'
 
 const BRIEF = `---
 source: issue 1961
@@ -14,21 +15,20 @@ out_of_scope: the visualizer
 
 Refuse roster edits that cannot boot.
 
-Closes #1961
-
 ## Acceptance
 
 - (RV1) an edit that cannot boot is refused
 `
 
 // Every effect is a recorded call; nothing touches git, the disk or a process.
-function fakes({ brief = BRIEF, exists = () => false, bootStatus = 0, worktreeStatus = 0, originHead = 'origin/main', inGit = true } = {}) {
+function fakes({ brief = BRIEF, exists = () => false, bootStatus = 0, worktreeStatus = 0, originHead = 'origin/main', inGit = true, driverReads } = {}) {
   const calls = []
   const deps = {
     readFileSync: () => brief,
     existsSync: (path) => exists(path),
     mkdirSync: (path) => calls.push(['mkdir', path]),
-    copyFileSync: (from, to) => calls.push(['copy', from, to]),
+    writeFileSync: (path, text) => calls.push(['write', path, text]),
+    ...(driverReads ? { driverReads } : {}),
     spawnSync: (file, args, options) => {
       calls.push(['spawn', file, args, options?.cwd ?? null])
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
@@ -71,8 +71,8 @@ test('a good brief makes the worktree from the default branch, boots headless at
   const result = startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   assert.equal(result.worktree, '/repo/dt-b1')
   assert.equal(result.pid, 4242)
-  const order = calls.filter(([kind]) => kind === 'spawn' || kind === 'detached' || kind === 'copy').map(([kind, file, args]) => kind === 'copy' ? 'copy' : `${kind}:${file === 'git' ? args[2] : args[1]}`)
-  assert.deepEqual(order, ['spawn:symbolic-ref', 'spawn:worktree', 'copy', `spawn:boot`, 'detached:run'])
+  const order = calls.filter(([kind]) => kind === 'spawn' || kind === 'detached' || kind === 'write').map(([kind, file, args]) => kind === 'write' ? 'write' : `${kind}:${file === 'git' ? args[2] : args[1]}`)
+  assert.deepEqual(order, ['spawn:symbolic-ref', 'spawn:worktree', 'write', `spawn:boot`, 'detached:run'])
   assert.deepEqual(spawned(calls, 'worktree')[2], ['-C', '/repo/checkout', 'worktree', 'add', '-b', 'b1', '/repo/dt-b1', 'main'])
   const boot = spawned(calls, 'boot')[2]
   assert.deepEqual(boot.slice(1, 8), ['boot', '--task', 'b1', '--checkout', '/repo/dt-b1', '--tier', 'build'])
@@ -82,7 +82,7 @@ test('a good brief makes the worktree from the default branch, boots headless at
   assert.deepEqual(run[2].slice(1, 9), ['run', '--task', 'b1', '--checkout', '/repo/dt-b1', '--brief-file', '/home/.crew/briefs/started/b1.md', '--keep'])
   assert.equal(run[2].includes('--execution'), false)
   assert.deepEqual(run[3], { cwd: '/repo/dt-b1', log: '/home/.crew/briefs/started/b1.run.log' })
-  assert.deepEqual(calls.find(([kind]) => kind === 'copy'), ['copy', '/d/b1.md', '/home/.crew/briefs/started/b1.md'])
+  assert.deepEqual(calls.find(([kind]) => kind === 'write'), ['write', '/home/.crew/briefs/started/b1.md', runBrief(BRIEF, 1961)])
 })
 
 // MUTATION: drop the shape mapping and a stepped brief runs single-chunk.
@@ -122,4 +122,21 @@ test('main reports usage, refusals and success as exit codes', () => {
 test('--check works outside a git checkout; a real start there is refused', () => {
   assert.equal(main(['/d/b1.md', '--check'], fakes({ inGit: false }).deps), 0)
   assert.equal(main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
+})
+
+// MUTATION: drop the bound-issue slot and the driver publishes the lane with no Closes trailer.
+test('the run brief carries the driver header, and the driver reads it as P1 says', () => {
+  const run = runBrief(BRIEF, 1961)
+  assert.equal(run.split('\n').slice(0, 2).join('\n'), '# Task\n<!-- crew:bound-issue #1961 -->')
+  assert.deepEqual(acceptanceIds(run), ['RV1'])
+  assert.match(issueStatementDefect({ brief: run, details: {} }), /issue-bound lane must declare/)
+  assert.match(composeCommitMessage({ task: 'b1', planEnv: { summary: 'refuse', details: { issues: ['1961'] } }, builderEnv: { summary: 'done' }, brief: run }), /^Closes: #1961$/m)
+  assert.equal(runBrief(BRIEF.replace('closes: 1961', 'closes: null'), null).split('\n')[1], '')
+})
+
+// MUTATION: skip the driver check and a brief the driver reads differently starts a lane.
+test('a brief the driver reads differently is refused before any git call', () => {
+  const { deps, calls } = fakes({ driverReads: () => ({ acceptance: null, bound: '1961' }) })
+  assert.throws(() => startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps }), /the driver reads brief \/d\/b1.md differently: acceptance null/)
+  assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [])
 })

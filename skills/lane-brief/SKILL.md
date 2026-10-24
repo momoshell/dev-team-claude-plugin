@@ -21,8 +21,9 @@ fence register, symbol index, tripwire list or baseline. The format is protocol 
 4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
    `node crew/start.mjs <brief> --check`. Fix every defect it names.
 5. Start: the same command without `--check`. It creates `../dt-<lane>`, boots the crew headless at the
-   brief's tier and starts the run detached. It prints the worktree, the brief snapshot, the run log and the
-   status command.
+   brief's tier and starts the run detached on a snapshot of the brief. Both steps also check the brief
+   with the driver's own parsers and refuse if the driver would read it differently. It prints the
+   worktree, the brief snapshot, the run log and the status command.
 6. Close the lane out after its PR merges with the `crew-recovery` skill, as before.
 
 ## Format
@@ -40,8 +41,6 @@ out_of_scope: the visualizer and crew/roster.json itself
 
 What to change and why, in a few sentences. State the invariant the change must hold.
 
-Closes #1962
-
 ## Context
 
 - `crew/roster-validate.mjs` `bootRefusals`: what it already checks.
@@ -53,14 +52,13 @@ Closes #1962
 - (RT2) another
 ```
 
-The body needs a `## The ask` section and a `## Acceptance` section; text inside a code fence is an
-example and counts as neither. Field rules (the validator refuses anything else):
+The body needs a `## Acceptance` section, once; text inside a code fence is an example and does not count.
+Field rules (the validator refuses anything else):
 
 - `source`: the issue or the request the lane starts from.
-- `closes`: one issue number, or `null`. When set, `## The ask` carries `Closes #N` alone on its own line
-  (the driver promotes a `Closes:` trailer only from there). No
-  other `#N` appears anywhere in the body; write "issue 1961" or "PR 1968" instead, because the driver binds
-  issues off `#N`.
+- `closes`: one issue number, or `null`. It is the only issue binding: `crew start` writes it into the
+  driver's bound-issue header, the driver refuses to publish until the plan declares the issue, and the
+  merged PR closes it. The body carries no `#N` at all; write "issue 1961" or "PR 1968".
 - `tier`: `mechanical`, `build` or `judge`. Use `judge` when the change touches the protected floor
   (`crew/drive.mjs`, `crew/crew.mjs`, `docs/adr/`, `crew/roles/`); the driver raises it at plan time anyway.
 - `shape`: `standard`, or `stepped` for a build that must land in ordered steps. `finish` is not started

@@ -4,12 +4,18 @@
 // brief, creates the lane worktree, boots the crew headless and starts the run detached,
 // handing the brief to the planner as its whole input. No compile, no baseline, no gate.
 // The lane name is the brief's file name. --check validates the brief and stops.
+//
+// Until phase 3 the lane runs on today's driver, so the brief the run reads carries the
+// driver's fixed header (`# Task`, then the bound-issue slot when `closes` is set) and is
+// checked with the driver's own parsers: the driver refuses to publish an issue-bound lane
+// whose plan declares no issue, and promotes the bound issue to a Closes trailer.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief } from './protocols.mjs'
+import { acceptanceIds, boundIssueOf } from './drive.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const CREW = join(HOME, 'crew', 'crew.mjs')
@@ -23,8 +29,13 @@ export function laneName(briefPath) {
   return lane
 }
 
+export function runBrief(text, closes) {
+  return `# Task\n${closes ? `<!-- crew:bound-issue #${closes} -->\n` : ''}\n${text}`
+}
+
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, copyFileSync, openSync, closeSync,
+  readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync,
+  driverReads: (text) => ({ acceptance: acceptanceIds(text), bound: boundIssueOf(text) }),
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', ...options }),
   spawnDetached: (file, args, { cwd, log }) => {
     const out = openSync(log, 'a')
@@ -46,8 +57,15 @@ function git(d, checkout, args) {
 export function startLane({ briefPath, checkout, check = false, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const lane = laneName(briefPath)
-  const { fields, defects } = parseBrief(d.readFileSync(briefPath, 'utf8'))
+  const text = d.readFileSync(briefPath, 'utf8')
+  const { fields, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
+  const run = runBrief(text, fields.closes)
+  const driver = d.driverReads(run)
+  const bound = fields.closes === null ? null : String(fields.closes)
+  if (JSON.stringify(driver.acceptance) !== JSON.stringify(fields.acceptance) || driver.bound !== bound) {
+    throw new StartRefusal(`the driver reads brief ${briefPath} differently: acceptance ${JSON.stringify(driver.acceptance)} and bound issue ${driver.bound ?? 'none'}, against ${JSON.stringify(fields.acceptance)} and ${bound ?? 'none'}`)
+  }
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
   if (check) { d.log(`crew start: brief ok lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
 
@@ -60,14 +78,14 @@ export function startLane({ briefPath, checkout, check = false, deps = {} }) {
   const started = join(d.crewRoot, 'briefs', 'started')
   d.mkdirSync(started, { recursive: true })
   const brief = join(started, `${lane}.md`)
-  d.copyFileSync(briefPath, brief)
+  d.writeFileSync(brief, run)
 
   const boot = d.spawnSync(process.execPath, [CREW, 'boot', '--task', lane, '--checkout', worktree, '--tier', fields.tier, '--roster', join(HOME, 'crew', 'roster.json'), '--headless-all'], { cwd: worktree })
   if (boot.status !== 0) throw new StartRefusal(`crew boot refused lane ${lane} (exit ${boot.status}):\n${String(boot.stderr || boot.stdout).trim()}\nthe worktree ${worktree} and branch ${lane} are left for inspection`)
 
   const log = join(started, `${lane}.run.log`)
-  const run = [CREW, 'run', '--task', lane, '--checkout', worktree, '--brief-file', brief, '--keep', ...(fields.shape === 'stepped' ? ['--execution', 'stepped'] : [])]
-  const pid = d.spawnDetached(process.execPath, run, { cwd: worktree, log })
+  const args = [CREW, 'run', '--task', lane, '--checkout', worktree, '--brief-file', brief, '--keep', ...(fields.shape === 'stepped' ? ['--execution', 'stepped'] : [])]
+  const pid = d.spawnDetached(process.execPath, args, { cwd: worktree, log })
   d.log(`crew start: lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   d.log(`  worktree ${worktree}`)
   d.log(`  brief    ${brief}`)

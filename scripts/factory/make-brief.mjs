@@ -3097,7 +3097,7 @@ function formatBaseline(baseline, profile = null, supplied = null) {
     || profile?.testCommand?.basis
     || 'package.json scripts.test — no profile consulted'
   const countBasis = baseline.reason === 'not-measured-at-dispatch'
-    ? 'count basis: not measured — no suite runs before boot (ADR-052); the gate baseline is the red proof'
+    ? `count basis: not measured — no suite runs before boot (ADR-052); the gate baseline is the red proof${supplied?.offered === true ? ` (supplied baseline not reused: ${supplied.reason})` : ''}`
     : formatCountBasis(profile?.baseline, supplied)
   return `${line}\nlane basis: ${laneBasis}\n${countBasis}`
 }

@@ -1549,6 +1549,8 @@ test('--no-baseline with a refused supplied baseline still runs no suite', () =>
   assert.equal(existsSync(fx.marker), false)
   assert.doesNotMatch(body, /pass 4242/)
   assert.match(body, /not-measured-at-dispatch/)
+  // MUTATION: drop the supplied refusal from the unmeasured count basis and the sha-mismatch reason disappears.
+  assert.match(body, /supplied baseline not reused: sha-mismatch/)
 })
 
 test('a compile without a supplied baseline keeps the measured count basis', () => {

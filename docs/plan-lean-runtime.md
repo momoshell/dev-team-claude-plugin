@@ -142,19 +142,19 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 ### Phase 0: stop the bleeding
 
-- [ ] 0.1 Host-load gate off by default in `dispatch-batch.mjs`. `~/.crew/dispatch-defaults.sh` is shared
+- [x] 0.1 Host-load gate off by default in `dispatch-batch.mjs`. `~/.crew/dispatch-defaults.sh` is shared
       with other projects and is left alone (D8).
-- [ ] 0.2 Drop the dispatch-time baseline suite; the driver's own gate baseline already runs.
+- [x] 0.2 Drop the dispatch-time baseline suite; the driver's own gate baseline already runs.
 - [x] 0.3 Ratify ADR-052 (2026-10-24).
 
 ### Phase 1: the lean entry (source, brief, planner)
 
-- [ ] 1.1 P1 brief schema and validator in `crew/protocols.mjs`.
-- [ ] 1.2 `lane-brief` skill and `agents/brief-writer.md`: issue or command in, P1 brief out; premises
+- [x] 1.1 P1 brief schema and validator in `crew/protocols.mjs`.
+- [x] 1.2 `lane-brief` skill and `agents/brief-writer.md`: issue or command in, P1 brief out; premises
       checked on main or marked unmeasured; acceptance ids in `(ID)` form.
-- [ ] 1.3 `crew start <brief.md>`: worktree, journal header, boot on today's driver with the brief as the
+- [x] 1.3 `crew start <brief.md>`: worktree, journal header, boot on today's driver with the brief as the
       planner's whole input. No compile, no baseline, no warnings pass.
-- [ ] 1.4 `/dispatch` routes to 1.2 then 1.3.
+- [x] 1.4 `/dispatch` routes to 1.2 then 1.3.
 - Done means: 3 lanes in this repo started from issues reach a PR.
 
 ### Phase 2: seats as agent files

@@ -4308,7 +4308,7 @@ test('advisor-lease child processes serialize rotation through one real slotStor
 })
 
 test('dispatcharms rotation reasons are a frozen closed vocabulary', () => {
-  assert.deepEqual(ADVISOR_ROTATION_REASONS, ['not-build', 'explicit-model', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
+  assert.deepEqual(ADVISOR_ROTATION_REASONS, ['not-build', 'explicit-model', 'tier-unseated', 'ledger-absent', 'ledger-degraded', 'ledger-refused', 'ledger-unreadable', 'readout-invalid', 'lease-timeout'])
   assert.equal(Object.isFrozen(ADVISOR_ROTATION_REASONS), true)
 })
 
@@ -4381,6 +4381,15 @@ test('dispatcharms explicit and non-build lanes do not consume rotation slots', 
   const standard = await advisorDispatchFixture({ label: 'dispatcharms-standard-alias', names: ['lane-a'], batchTier: 'mechanical', requests: { 'lane-a': requestFor('lane-a', { assurance: 'standard' }) }, readAdvisorArms: () => ({ readout: { arms: ADVISOR_ARMS.map((arm) => ({ arm })), next_arm: 'none' }, reason: null }) })
   assert.equal(dispatchRecordFor(standard).tier.settled, 'build')
   assert.equal(dispatchRecordFor(standard).advisor_rotation.arm, 'none')
+})
+
+// MUTATION AU1: dropping the unseated-tier abstention rotates an arm onto a tier that seats no advisor, and the lane refuses seat-floor-conflict.
+test('dispatcharms a build tier that seats no advisor abstains without reading arms', async () => {
+  assert.equal(fixtureRoster.tiers.build.advisor ?? null, null)
+  const result = await dispatchFixture({ label: 'dispatcharms-unseated', names: ['lane-a'], batchTier: 'build', readAdvisorArms: () => { throw new Error('should not read') } })
+  assert.equal(result.spawned.some(({ args }) => args.includes('boot') && args.includes('--model-advisor')), false)
+  assert.deepEqual(dispatchRecordFor(result, 'lane-a').advisor_rotation, { arm: null, source: null, reason: 'tier-unseated' })
+  assert.ok(result.logs.some((line) => line.includes('advisor_arm=unmeasured advisor_from=none advisor_reason=tier-unseated')))
 })
 
 test('dispatcharms malformed and unavailable readouts abstain with closed reasons', async () => {

@@ -3,6 +3,7 @@
 //
 //   crew <crew.mjs verb> [...]   run crew/crew.mjs; the current folder stays the checkout
 //   crew start <brief.md>        run crew/start.mjs: start a lane from a P1 brief (ADR-052)
+//   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
 //   crew ctl [...]               run crew/factoryctl.mjs
 //   crew ledger [...]            run scripts/factory/ledger.mjs
 //   crew viz                     serve the visualizer from the crew home
@@ -21,7 +22,7 @@ export function crewHome(env = process.env, self = fileURLToPath(import.meta.url
   return env.CREW_HOME ? resolve(env.CREW_HOME) : dirname(dirname(realpathSync(self)))
 }
 
-const ENTRY = { ctl: 'crew/factoryctl.mjs', ledger: 'scripts/factory/ledger.mjs', start: 'crew/start.mjs' }
+const ENTRY = { ctl: 'crew/factoryctl.mjs', ledger: 'scripts/factory/ledger.mjs', start: 'crew/start.mjs', show: 'crew/show.mjs' }
 
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts })

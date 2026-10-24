@@ -130,6 +130,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'crew/protocols.test.mjs',
     'crew/seat-io-acp.test.mjs',
     'crew/seat-runtime-tmpdir.test.mjs',
+    'crew/show.test.mjs',
     'crew/start.test.mjs',
     'skills/code-less/exhibits.test.mjs',
     'skills/frontend-svelte/exhibits.test.mjs',

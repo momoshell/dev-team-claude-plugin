@@ -10,7 +10,7 @@ import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, psSnapshot, statIsZombie, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
-  SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus,
+  SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus, RUN_MAX_BUFFER_BYTES,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, PANE_NO_INTERCEPT, SEAT_REFUSALS, SEAT_SUITE_POLICY_EVENT, claudeCensus } from './headless.mjs'
 import { JOURNAL_CHANNEL_NAMES, RESUME_CHECKPOINT_VERSION, resumeTask, resumeWorktreeSha256, settleRetriedCold, SENSITIVITY_FLOOR } from './drive.mjs'
@@ -663,12 +663,24 @@ test('SS4', () => {
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
-  const source = readFileSync(join(ROOT, 'crew/seat-io.mjs'), 'utf8')
-  const gitSpawns = source.split('\n').filter((line) => line.includes("spawnSync('git'"))
-  const shellSpawns = source.split('\n').filter((line) => line.includes("spawnSync('/bin/sh'"))
-  assert.equal(gitSpawns.filter((line) => line.includes('maxBuffer')).length, 0)
-  assert.equal(shellSpawns.length, 2)
-  assert.equal(shellSpawns.filter((line) => line.includes('maxBuffer: RUN_MAX_BUFFER_BYTES')).length, 2)
+  withRepo({ dirty: false }, (fixture) => {
+    const spawns = []
+    const recordingSpawnSync = (bin, argv, options) => {
+      spawns.push({ bin: String(bin), argv, options })
+      if (String(bin) === '/bin/sh') return { status: 0, stdout: '', stderr: '' }
+      return realSpawnSync(bin, argv, options)
+    }
+    const io = makeIo(fixture, { spawnSync: recordingSpawnSync })
+    io.run('true')
+    io.runCold('true')
+    io.runClean('true')
+    const shellSpawns = spawns.filter((spawn) => spawn.bin === '/bin/sh')
+    const gitSpawns = spawns.filter((spawn) => spawn.bin === 'git')
+    assert.equal(shellSpawns.length, 3)
+    for (const spawn of shellSpawns) assert.equal(spawn.options.maxBuffer, RUN_MAX_BUFFER_BYTES)
+    assert.ok(gitSpawns.length > 0, 'expected runCold or runClean to spawn git')
+    for (const spawn of gitSpawns) assert.equal(spawn.options?.maxBuffer, undefined)
+  })
 })
 
 // MUTATION ST3: restore a fixed 900_000 ms timeout at either shell spawn.

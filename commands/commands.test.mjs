@@ -14,7 +14,7 @@ const SKILLS = join(ROOT, 'skills')
 
 // command file -> the skills whose procedure it dispatches to
 const DISPATCHES_TO = {
-  'dispatch.md': ['crew-dispatch'],
+  'dispatch.md': ['lane-brief', 'crew-dispatch'],
   'close-out.md': ['crew-recovery'],
   'status.md': ['devops', 'crew-recovery'],
   'onboard.md': ['crew-onboard'],

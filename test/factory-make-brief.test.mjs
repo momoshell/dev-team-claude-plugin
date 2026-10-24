@@ -1535,7 +1535,9 @@ test('--no-baseline runs no suite and records the baseline as unmeasured', () =>
   assert.equal(existsSync(fx.marker), false)
   assert.match(body, /unknown · reason: not-measured-at-dispatch/)
   assert.match(body, /count basis: not measured/)
-  assert.doesNotMatch(body, /pass \d/)
+  assert.doesNotMatch(body, /· pass \d+ · fail/)
+  // MUTATION: hand the unprofiled null lane to unknownBaseline and this reads "no full test lane · measured baseline".
+  assert.ok(section(brief, '## Validation lane').includes(`full: ${fx.command} · baseline unknown (not-measured-at-dispatch)`))
 })
 
 // MUTATION: measure when a supplied baseline is refused despite --no-baseline, and the marker appears.

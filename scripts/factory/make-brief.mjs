@@ -3765,7 +3765,7 @@ function renderValidation(baseline, discovery, pack) {
   const count = baseline.status === 'unknown'
     ? `unknown (${baseline.reason})`
     : `pass ${baseline.pass}, fail ${baseline.fail}`
-  const basis = baseline.reused === true ? 'reused baseline' : 'measured baseline'
+  const basis = baseline.reused === true ? 'reused baseline' : baseline.reason === 'not-measured-at-dispatch' ? 'baseline' : 'measured baseline'
   return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count} · driver-owned: no seat runs it`
 }
 
@@ -4065,7 +4065,7 @@ function compile(flags) {
   const reuse = reuseBaseline({ checkout, command, laneBasis, path: flags.baseline ?? null })
   // --no-baseline (ADR-052): the dispatcher runs no suite before boot; the driver's gate baseline is the lane's red proof.
   const skipped = !reuse.baseline && flags['no-baseline'] === true
-  const baseline = reuse.baseline || (skipped ? unknownBaseline(lane, 'not-measured-at-dispatch', laneBasis) : gatherBaseline({ checkout, lane, laneBasis }))
+  const baseline = reuse.baseline || (skipped ? unknownBaseline(command, 'not-measured-at-dispatch', laneBasis) : gatherBaseline({ checkout, lane, laneBasis }))
   if (!reuse.baseline && !skipped) process.stderr.write(`brief: baseline reap: outcome=${baseline.reap?.outcome ?? 'not-spawned'} reason=${baseline.reap?.reason ?? baseline.reap_absent_reason} signals=${baseline.reap?.signals ?? 'not-spawned'}\n`)
   let fromProfile
   try {

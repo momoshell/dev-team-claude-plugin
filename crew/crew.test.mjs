@@ -2813,7 +2813,8 @@ test('RE2', () => {
   }
 })
 
-// MUTATION QW1: lower the judge planner's effort from xhigh to high; the literal seating assertion fails.
+// MUTATION QW1: raise the judge planner's effort from high to xhigh, or the mechanical planner's from medium
+// to high; the literal seating assertion fails.
 test('QW1', () => {
   const shipped = shippedRoster()
   const seats = (tier, role) => { const cell = shipped.tiers[tier][role]; return cell && [cell.provider, cell.id, cell.agent, cell.effort].join('/') }

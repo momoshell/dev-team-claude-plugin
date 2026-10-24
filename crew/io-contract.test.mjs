@@ -1350,12 +1350,17 @@ test('RE9', () => {
     for (const role of ['planner', 'reviewer']) {
       const cell = SHIPPED_ROSTER.tiers[tier][role]
       assert.equal(cell.fallback, undefined)
-      const seat = makeTierFixture({ role, tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder }).io.reseat(role)
+      const fixture = makeTierFixture({ role, tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
+      const seat = fixture.io.reseat(role)
       // The planner runs medium on mechanical and high on build and judge, so only the mechanical planner
       // climbs; the reviewer runs high below judge's xhigh, so only the build reviewer climbs.
       const climbs = role === 'planner' ? tier === 'mechanical' : tier === 'build'
       assert.deepEqual([role, seat.applied, seat.applied ? seat.rung : seat.reason, seat.to?.id ?? cell.id],
         [role, climbs, climbs ? `${tier}→${tier === 'mechanical' ? 'build' : 'judge'}` : 'exhausted', cell.id])
+      // A climb moves the effort to the next tier's cell, both in the result and in the crew record it persists.
+      const effortAfter = climbs ? SHIPPED_ROSTER.tiers[tier === 'mechanical' ? 'build' : 'judge'][role].effort : cell.effort
+      if (climbs) assert.notEqual(effortAfter, cell.effort, `${tier}/${role} climb must change effort`)
+      assert.deepEqual([seat.to?.effort ?? cell.effort, fixture.crew.seats[role].effort], [effortAfter, effortAfter], `${tier}/${role} effort`)
       assert.equal(nextModelRung(SHIPPED_ROSTER, cell, { ceiling: ladder.cost_ceilings[tier] }), null)
     }
   }

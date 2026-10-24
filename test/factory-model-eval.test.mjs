@@ -415,10 +415,11 @@ test('A1 role benches contain every required valid input', () => {
     const declaration = readJson(spec.path)
     assert.equal(typeof declaration, 'object')
     assert.equal(Array.isArray(declaration), false)
-    // The builder bench stands in for ONE roster tier (the builder is seated differently
-    // across tiers), so it names it; a bench whose role is seated alike everywhere need not.
+    // The builder and planner benches each stand in for ONE roster tier (both roles are seated
+    // at different efforts across tiers), so they name it; a bench whose role is seated alike
+    // everywhere need not.
     assert.deepEqual(Object.keys(declaration).filter((key) => key !== 'tier').sort(), topKeys)
-    if (role === 'builder') assert.equal(declaration.tier, 'mechanical')
+    if (role === 'builder' || role === 'planner') assert.equal(declaration.tier, 'mechanical')
     else assert.equal(Object.prototype.hasOwnProperty.call(declaration, 'tier'), false)
     assert.equal(declaration.schema, 1)
     assert.equal(declaration.role, role)
@@ -1224,7 +1225,7 @@ const reviewedCandidateShas = {
   // candidate set is unchanged. The operator ratified the seat, not this file: no separate review.
   // (Updated 2026-09-30: production moved to openai/gpt-6.1-sol. 2026-09-23, PR #1507: to gpt-6-sol.)
   // Updated 2026-10-24 by the operator-ratified roster: production returns to openai/gpt-6.1-sol, now at high.
-  planner: 'bb7e5aebcc68d19a26a755557a8303db8bb490b94e5279f560e5dd4222ad4644',
+  planner: '17390b4fb575a2f073d33e2b3a834bd8dedac6f2f8e8efe8463d1e11b9f33b37',
   // Updated 2026-10-16 by the operator-ratified builder reseat: production moves from
   // openai/gpt-6-luna back to meta/muse-spark-1.3-contributor at medium. The file returns to the
   // exact bytes the operator re-reviewed on 2026-09-20 (builder effort low -> medium), so this

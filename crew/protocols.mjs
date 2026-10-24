@@ -59,7 +59,7 @@ export function parseBrief(text) {
   for (const key of BRIEF_FIELDS) if (!Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
   const body = lines.slice(end + 1).join('\n')
   if (typeof fields.source !== 'string' || !fields.source) defects.push('source names the issue or operator command the lane starts from')
-  if (fields.closes !== null && !(Number.isInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
+  if (fields.closes !== null && !(Number.isSafeInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
   if (!TIERS.includes(fields.tier)) defects.push(`tier is one of ${TIERS.join(', ')}`)
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')

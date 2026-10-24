@@ -41,6 +41,8 @@ test('tier, shape and closes take only their closed values', () => {
   assert.ok(parseBrief(brief({ tier: 'rigorous' })).defects.includes('tier is one of mechanical, build, judge'))
   assert.ok(parseBrief(brief({ shape: 'chunked' })).defects.includes('shape is one of standard, stepped, finish'))
   assert.ok(parseBrief(brief({ closes: '0' })).defects.includes('closes is null or one issue number'))
+  // MUTATION: accept any integer and 9007199254740993 rounds to a different issue.
+  assert.ok(parseBrief(brief({ closes: '9007199254740993' })).defects.includes('closes is null or one issue number'))
 })
 
 // MUTATION: compare the acceptance ids as sets, or not at all, and a gate id with no item passes.

@@ -26,6 +26,8 @@ import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkReco
 import { WORKFLOW_REFUSALS, SEAT_BEARING_STAGES, loadWorkflow, validateWorkflow } from './workflows.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, capabilityRegister, capabilityFixtureRoot } from './crew-test-helpers.mjs'
 
+const LEDGER_FLOOR_SKIP = 'requires a Node version meeting the ledger floor (NODE_FLOOR)'
+
 const seatSkillsSection = (role) => renderSeatSkills({ root: ROOT, mapResult: loadMap(ROOT), role, files: null }).section
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
@@ -263,8 +265,7 @@ test('ADR047 R1 a consult is launched with the adapter spelling while the record
     { endpoint: 'http://127.0.0.1:9/advise', model: 'adv-1', models: undefined })
 })
 
-test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the builder transport', async () => {
-  if (!nodeMeetsLedgerFloor) return
+test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the builder transport', { skip: !nodeMeetsLedgerFloor && LEDGER_FLOOR_SKIP }, async () => {
   const rows = await bootSeatRows({ task: 'adr047-f1', rosterValue: advisorRoster() })
   const advisorRows = rows.filter((row) => row.role === 'advisor')
   assert.equal(advisorRows.length, 1)
@@ -282,8 +283,7 @@ test('ADR047 F1 a non-null advisor writes exactly one run_seats row on the build
   assert.equal(none.some((candidate) => candidate.role === 'advisor'), false)
 })
 
-test('ADR047 S1 an advisor cell on a crew that seats no builder boots and reports a null transport', async () => {
-  if (!nodeMeetsLedgerFloor) return
+test('ADR047 S1 an advisor cell on a crew that seats no builder boots and reports a null transport', { skip: !nodeMeetsLedgerFloor && LEDGER_FLOOR_SKIP }, async () => {
   const value = advisorRoster()
   delete value.tiers.build.builder
   const rows = await bootSeatRows({ task: 'adr047-s1', rosterValue: value })
@@ -2116,8 +2116,7 @@ test('runOutcome preserves legacy status and maps every typed terminal outcome',
   }
 })
 
-test('child ledger rows match the shared runOutcome table', () => {
-  if (!nodeMeetsLedgerFloor) return
+test('child ledger rows match the shared runOutcome table', { skip: !nodeMeetsLedgerFloor && LEDGER_FLOOR_SKIP }, () => {
   const root = scratchDir('crew-child-outcome-agreement-')
   const dbPath = join(root, 'ledger', 'ledger.db')
   const cases = [
@@ -4496,8 +4495,7 @@ test('boundary resolver makes the latest scoped path exclusive in live and archi
   assert.equal(archivedReturn(paths, archiveDeps), newestTask)
 })
 
-test('E1 attended CLI ledger keeps declared execution axis', async () => {
-  if (!nodeMeetsLedgerFloor) return
+test('E1 attended CLI ledger keeps declared execution axis', { skip: !nodeMeetsLedgerFloor && LEDGER_FLOOR_SKIP }, async () => {
   const home = scratchDir('crew-run-config-e1-home-')
   const { root: checkoutRoot, checkout } = testCheckout('crew-run-config-e1-checkout-')
   const task = 'run-config-e1'

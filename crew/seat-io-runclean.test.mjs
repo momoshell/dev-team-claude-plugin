@@ -5261,7 +5261,7 @@ test('pre-spawn settle runs before the suite spawn', () => {
 });
 test('settleRecordedSuiteGroup table', () => {
   const scratch = () => {
-    const root = mkdtempSync(join(tmpdir(), 'suitegroup-table-'));
+    const root = scratchDir('suitegroup-table-');
     const taskDir = join(root, 'task');
     mkdirSync(taskDir, { recursive: true });
     return { root: root, taskDir: taskDir, record: join(taskDir, 'suite-group.json') };

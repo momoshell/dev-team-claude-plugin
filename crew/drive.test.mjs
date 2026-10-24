@@ -768,8 +768,8 @@ test('a per-repo protected-path list adds to the floor and can never shrink it',
   assert.ok(additions.includes('db/migrations/'))
   for (const path of PROTECTED_PATHS) assert.ok(additions.includes(path), `${path} was removed`)
   assert.equal(resolveProtectedPaths(), PROTECTED_PATHS)
-  assert.throws(() => resolveProtectedPaths('db/migrations/'))
-  assert.throws(() => resolveProtectedPaths(['  ']))
+  assert.throws(() => resolveProtectedPaths('db/migrations/'), /additions must be an array of non-blank strings/)
+  assert.throws(() => resolveProtectedPaths(['  ']), /additions\[0\] must be a non-blank string/)
 })
 
 test('A1 adversary none skips every plan check stage', () => {
@@ -6263,4 +6263,8 @@ test('suite timeout policy follows normal and resumed cold verdicts', () => {
   const resumed = resumeTask({ ...CTX, suiteTimeout: { seconds: 1800 } }, resumeIo, checkpoint)
   assert.equal(resumed.details.cold_suite.timeout_s, 1800)
   assert.equal(resumeIo.calls.logs.some((row) => row.cold_suite), false)
+})
+
+test('QA1 protected-path matcher rejects a TypeError stand-in', () => {
+  assert.throws(() => assert.throws(() => { throw new TypeError("x.map is not a function") }, /additions must be an array of non-blank strings/))
 })

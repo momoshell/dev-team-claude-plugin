@@ -60,7 +60,7 @@ const SEAT_IO_MODULE = ['seat-io', 'mjs'].join('.')
 // fence, so this conversion stays line-count neutral — the same device as
 // the block at lines 25-30.
 // The per-file SKIP message stays where it is.
-const LEDGER_SQLITE_OK = Number.parseInt(process.versions.node, 10) >= Number.parseInt(NODE_FLOOR, 10) && sqliteAvailable()
+const LEDGER_SQLITE_OK = Number.parseInt(process.versions.node, 10) >= Number.parseInt(NODE_FLOOR, 10) && sqliteAvailable(); const LEDGER_SQLITE_SKIP_REASON = 'node:sqlite unavailable below the ledger floor'
 
 // The rpc wrapper is spawned detached and unrefed, so this test cannot retain
 // its ChildProcess object. Keep the cleanup scope to the recorded process
@@ -1514,8 +1514,7 @@ test('usageWindow fails closed below the emitter floor and keeps its at-floor fa
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('a present but unreadable mirror is unmeasured and says so differently from a deleted mirror beside a ledger authority', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('a present but unreadable mirror is unmeasured and says so differently from a deleted mirror beside a ledger authority', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const ledgerDir = scratchDir('daemon-mirror-cases-')
   const dbPath = join(ledgerDir, 'ledger.db')
   const since = '2026-01-01T00:00:00.000Z'
@@ -2662,8 +2661,7 @@ function replayDaemonOutcomeRows(dbPath) {
   }
 }
 
-test('daemon child replays record typed outcomes for b357, b360, and done', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('daemon child replays record typed outcomes for b357, b360, and done', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const root = scratchDir('daemon-outcome-replays-')
   const dbPath = join(root, 'ledger', 'ledger.db')
   const replay = replayDaemonOutcomeRows(dbPath)
@@ -2688,8 +2686,7 @@ test('daemon child replays record typed outcomes for b357, b360, and done', () =
   }
 })
 
-test('daemon-only escalationWindow returns both causes and all three ended rows', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('daemon-only escalationWindow returns both causes and all three ended rows', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const root = scratchDir('daemon-outcome-window-')
   const dbPath = join(root, 'ledger', 'ledger.db')
   const replay = replayDaemonOutcomeRows(dbPath)
@@ -2747,8 +2744,7 @@ test('runChild records to the explicit ledger and honors spec.ledger_db', () => 
   } finally { f.cleanup() }
 })
 
-test('runChild wires the resolved brief into the session proposal without a crew.json brief_file', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild wires the resolved brief into the session proposal without a crew.json brief_file', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const task = 'child-proposal'
   const dbPath = join(f.dir, 'proposal-ledger', 'ledger.db')
@@ -2773,8 +2769,7 @@ test('runChild wires the resolved brief into the session proposal without a crew
   } finally { f.cleanup() }
 })
 
-test('runChild records null proposal fields for a blockless brief', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild records null proposal fields for a blockless brief', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const task = 'child-blockless-proposal'
   const dbPath = join(f.dir, 'blockless-ledger', 'ledger.db')
@@ -2802,8 +2797,7 @@ test('runChild records null proposal fields for a blockless brief', () => {
   } finally { f.cleanup() }
 })
 
-test('runChild records null proposal fields when no brief is supplied', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild records null proposal fields when no brief is supplied', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const task = 'child-no-proposal-brief'
   const dbPath = join(f.dir, 'no-brief-ledger', 'ledger.db')
@@ -2828,8 +2822,7 @@ test('runChild records null proposal fields when no brief is supplied', () => {
   } finally { f.cleanup() }
 })
 
-test('runChild keeps the crew.json brief_file proposal fallback', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild keeps the crew.json brief_file proposal fallback', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const task = 'child-crew-json-proposal'
   const dbPath = join(f.dir, 'crew-json-ledger', 'ledger.db')
@@ -2857,8 +2850,7 @@ test('runChild keeps the crew.json brief_file proposal fallback', () => {
   } finally { f.cleanup() }
 })
 
-test('runChild does not backfill a seeded session proposal', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild does not backfill a seeded session proposal', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const task = 'child-fresh-proposal'
   const historical = 'child-historical-proposal'
@@ -2895,8 +2887,7 @@ test('runChild does not backfill a seeded session proposal', () => {
   } finally { f.cleanup() }
 })
 
-test('runChild carries run_id into the ledger association and keeps it distinct from adw_id', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild carries run_id into the ledger association and keeps it distinct from adw_id', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const dbPath = join(f.dir, 'run-identity-ledger', 'ledger.db')
   const runId = 'daemon-child-run-A'
@@ -2922,8 +2913,7 @@ test('runChild carries run_id into the ledger association and keeps it distinct 
   } finally { f.cleanup() }
 })
 
-test('two runChild calls against one crew dir append links to the adopted sidecar session', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('two runChild calls against one crew dir append links to the adopted sidecar session', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const dbPath = join(f.dir, 'run-identity-shared', 'ledger.db')
   const first = 'daemon-child-run-one'
@@ -2956,8 +2946,7 @@ test('two runChild calls against one crew dir append links to the adopted sideca
   } finally { f.cleanup() }
 })
 
-test('runChild without run_id writes no run_links row', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('runChild without run_id writes no run_links row', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const dbPath = join(f.dir, 'run-identity-absent', 'ledger.db')
   try {
@@ -3742,8 +3731,7 @@ test('a never-started daemon still admits an enqueue', async () => {
   }
 })
 
-test('A1 daemon child ledger records declared execution axis', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('A1 daemon child ledger records declared execution axis', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const ledgerRoot = scratchDir('daemon-child-axis-a1-')
   const dbPath = join(ledgerRoot, 'ledger.db')
@@ -3796,8 +3784,7 @@ test('B1 daemon child journals run configuration before startRun', () => {
   assert.ok(appendOffset < startOffset, 'run configuration must be journaled before the ledger session starts')
 })
 
-test('C1 daemon child leaves absent execution axis unmeasured', () => {
-  if (!LEDGER_SQLITE_OK) return
+test('C1 daemon child leaves absent execution axis unmeasured', { skip: !LEDGER_SQLITE_OK && LEDGER_SQLITE_SKIP_REASON }, () => {
   const f = fixture()
   const ledgerRoot = scratchDir('daemon-child-axis-c1-')
   const dbPath = join(ledgerRoot, 'ledger.db')
@@ -4071,4 +4058,12 @@ test('LG3 default seat command root resolves the daemon send FIFO under TMPDIR c
     }
     assert.equal(process.env.TMPDIR, previousTmpdir)
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('QA4 sqlite-gated daemon tests skip instead of silently passing', () => {
+  const src = readFileSync(new URL('./daemon.test.mjs', import.meta.url), 'utf8')
+  const earlyReturn = 'if (!LEDGER_SQLITE_OK) ' + 'return'
+  const skipDecl = '{ skip: !LEDGER_SQLITE_OK ' + '&& LEDGER_SQLITE_SKIP_REASON }'
+  assert.equal(src.split(earlyReturn).length - 1, 0)
+  assert.ok(src.split(skipDecl).length - 1 >= 13)
 })

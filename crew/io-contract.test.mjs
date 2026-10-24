@@ -742,10 +742,6 @@ test('seatIo passes a guarded transport emitter that routes through io.emit', ()
   assert.doesNotThrow(() => received.deps.emit({ kind: 'usage', usage: null }))
 })
 
-test('seatIo exposes reseat and teardown as optional functions', () => {
-  const io = makeSeatIo().io
-})
-
 test('pane reseat refuses with a transport-specific explanation', () => {
   const f = makeTierFixture({ role: 'reviewer', tier: 'build', transport: 'pane', agent: 'pi' })
   const result = f.io.reseat('reviewer', { reason: 'lane' })
@@ -1719,4 +1715,11 @@ test('OR1 override successor equal to its tier cell remains eligible', () => {
   assert.equal(result.to.id, 'sol-fixture')
   assert.equal(result.to.effort, 'medium')
   assert.equal(result.to.model, 'wire:openai/sol-fixture')
+})
+
+test('QA5 no empty seatIo optional-functions test remains', () => {
+  const src = fsReadFileSync(new URL('./io-contract.test.mjs', import.meta.url), 'utf8')
+  const emptyTest = "test('" + 'seatIo exposes reseat and teardown as optional ' + 'functions' + "'"
+  assert.equal(src.includes(emptyTest), false)
+  assert.equal(src.includes("test('pane reseat refuses with a transport-specific explanation'"), true)
 })

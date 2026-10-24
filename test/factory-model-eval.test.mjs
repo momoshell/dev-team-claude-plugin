@@ -23,6 +23,8 @@ import {
 import { EVAL_ABSENT_REASONS, evalsReadout } from '../scripts/factory/ledger.mjs'
 import { PI_PROVIDERS } from '../crew/adapters/adapter-pi.mjs'
 import { archivedLanes, discoverLanes } from '../scripts/factory/lane-watch.mjs'
+import { resolveAdapters as realResolveAdapters } from '../crew/crew.mjs'
+import { capabilityRegister } from '../crew/crew-test-helpers.mjs'
 
 const SQLITE = sqliteAvailable()
 const SKIP = SQLITE ? false : 'node:sqlite unavailable below the shared floor'
@@ -926,21 +928,26 @@ test('D1 crew fallback keeps adapter-composed candidate model', async () => {
 // Kills RV1-2 (b1103): the seat re-resolution dropping the env makes an operator's CREW_PI_CODEMODE=off read as on.
 test('D2 seat re-resolution sees the same CREW_PI_CODEMODE the boot subprocess inherits', async () => {
   const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'medium' }
-  const seen = []
+  const produced = []
   const prior = process.env.CREW_PI_CODEMODE
   process.env.CREW_PI_CODEMODE = 'off'
+  let result
   try {
-    const result = await runFixtureSeat(candidate, {
-      resolveAdapters: (roles, args, seats, deps) => {
-        seen.push({ seats: Boolean(seats), codemode: deps?.env?.CREW_PI_CODEMODE ?? null })
-        return fixtureAdapters(roles, args, seats)
+    result = await runFixtureSeat(candidate, {
+      resolveAdapters: async (roles, args, seats, deps) => {
+        if (seats) return fixtureAdapters(roles, args, seats)
+        const adapters = await realResolveAdapters(roles, args, seats, { ...deps, register: capabilityRegister() })
+        produced.push(adapters)
+        return adapters
       },
     })
     await result.seat.cleanup()
   } finally {
     if (prior === undefined) delete process.env.CREW_PI_CODEMODE; else process.env.CREW_PI_CODEMODE = prior
   }
-  assert.deepEqual(seen.filter(({ seats }) => !seats).map(({ codemode }) => codemode), ['off'])
+  assert.equal(produced.length, 1)
+  assert.equal(produced[0].builder.grants.extensions.includes('builtin:codemode'), false)
+  assert.equal(result.seat.envelope?.status, 'done')
 })
 
 test('E1 unsupported candidate provider refuses before boot', async () => {

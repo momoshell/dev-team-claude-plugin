@@ -182,5 +182,5 @@ offer planner, builder and the rest as operator subagents with models Claude Cod
 folder keeps operator-side agents such as `agents/brief-writer.md`.
 
 Each frontmatter field is one line, with JSON for objects and object lists, and carries no trailing comment.
-Section 4's example is written in that form, so `parseAgent` in `crew/protocols.mjs` reads it as it stands.
+Section 4's example is written in that form, so the P5 parser reads it as it stands.
 Nothing else in section 4 changes.

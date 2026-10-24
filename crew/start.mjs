@@ -20,6 +20,7 @@ import { parseBrief, TIERS } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { bootRefusals } from './roster-validate.mjs'
 import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from './roster.mjs'
+import { SLOT_ENV } from './reclaim.mjs'
 import { acceptanceIds, boundIssueOf } from './drive.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -42,10 +43,10 @@ const defaultDeps = () => ({
   readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, resolveAgents, bootRefusals,
   driverReads: (text) => ({ acceptance: acceptanceIds(text), bound: boundIssueOf(text) }),
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', ...options }),
-  spawnDetached: (file, args, { cwd, log }) => {
+  spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
     try {
-      const child = spawn(file, args, { cwd, detached: true, stdio: ['ignore', out, out] })
+      const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', out, out] })
       child.unref()
       return child.pid
     } finally { closeSync(out) }
@@ -124,7 +125,10 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
 
   const log = join(started, `${lane}.run.log`)
   const args = [CREW, 'run', '--task', lane, '--checkout', worktree, '--brief-file', brief, '--keep', ...(fields.shape === 'stepped' ? ['--execution', 'stepped'] : [])]
-  const pid = d.spawnDetached(process.execPath, args, { cwd: worktree, log })
+  // No suite slot queue (ADR-052 D9, operator 2026-10-25): the slots are shared with every
+  // project on the host, and a lane that waited out the 30-minute ceiling ran unslotted anyway.
+  const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
+  const pid = d.spawnDetached(process.execPath, args, { cwd: worktree, log, env })
   d.log(`crew start: lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   d.log(`  worktree ${worktree}`)
   d.log(`  brief    ${brief}`)

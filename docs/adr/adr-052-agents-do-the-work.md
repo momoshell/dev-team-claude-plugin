@@ -93,28 +93,34 @@ written; its body is the charter.
 ---
 name: planner
 description: Plans one lane from its brief and writes the acceptance gate.
-role: planner              # lead | planner | builder | reviewer | tech-lead
-writes: task-dir           # none | task-dir | repo
-envelope: plan             # P2 role schema
-agent: pi                  # claude | pi
+role: planner
+writes: task-dir
+envelope: plan
+agent: pi
 model: openai/gpt-6.1-sol
 effort: high
-fallback: []               # same agent only
+fallback: []
 skills: [plan, qa-test-writing]
-requires: [qa-test-writing]  # loaded before the first write, or the envelope is refused
+requires: [qa-test-writing]
 tools: [read, grep, bash]
-extensions: [readgate, lab]  # kept arms: readgate, lab, builderloop, reminders, skeletonread, subagent, fff
-advisor: null              # or { agent, model, effort } (ADR-047)
-edit_assist: false         # ADR-049
+extensions: [readgate, lab]
+advisor: null
+edit_assist: false
 codemode: false
 memory: false
 rounds: 2
 wait_s: 1800
-tiers:                     # the three tiers: mechanical | build | judge
-  mechanical: { effort: medium }
-  judge: { effort: xhigh }
+tiers: {"mechanical": {"effort": "medium"}, "judge": {"effort": "xhigh"}}
 ---
 ```
+
+Each field is one line. Objects and object lists are JSON (Amendment 1). `role` is one of lead, planner,
+builder, reviewer, tech-lead; `writes` is none, task-dir or repo; `envelope` names the P2 role schema; `agent`
+is claude or pi. A `fallback` entry stays on the seat's agent. A seat loads its `requires` skills before its
+first write, or its envelope is refused. `extensions` draws from the kept arms: readgate, lab, builderloop,
+reminders, skeletonread, subagent, fff. `advisor` is null or `{"agent", "model", "effort"}` (ADR-047), and
+`edit_assist` is ADR-049. `tiers` keys are the three tiers; a null value unseats the role at that tier, and an
+object overrides how the seat runs there.
 
 This replaces `crew/roster.json`, the grant policy in `crew/capabilities.json`, `skills/skill-map.json`,
 `crew/workflows.mjs`, and most of `crew/variants.mjs`, `crew/assurances.mjs`, `crew/task-profiles.mjs` and
@@ -173,4 +179,5 @@ other project to the new path is out of scope.
 Seat definitions move from the repository-root `agents/` folder to `crew/agents/<role>.md`. Claude Code
 loads a plugin's root `agents/` folder as subagents of the operator's own session, so seat files there would
 offer planner, builder and the rest as operator subagents with models Claude Code cannot run. The root
-folder keeps operator-side agents such as `agents/brief-writer.md`. Nothing else in section 4 changes.
+folder keeps operator-side agents such as `agents/brief-writer.md`. Nothing else in section 4 changes. Each frontmatter field is one line, with JSON for objects and object lists, and carries no
+trailing comment; section 4's example is written in that form, so it parses as it stands.

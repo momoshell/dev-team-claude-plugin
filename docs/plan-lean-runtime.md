@@ -27,13 +27,13 @@ Decision record: `docs/adr/adr-052-agents-do-the-work.md`. Every test file and i
 source (issue | operator command)
   -> operator session or brief-writer subagent, skill lane-brief      writes brief.md (P1)
   -> crew start brief.md                                               worktree + journal + boot
-  -> planner   (agents/planner.md)   explores, writes plan + gate      envelope P2
+  -> planner   (crew/agents/planner.md)   explores, writes plan + gate      envelope P2
   -> gate baseline must be red                                         code
-  -> builder   (agents/builder.md)   edits the repo                    envelope P2
+  -> builder   (crew/agents/builder.md)   edits the repo                    envelope P2
   -> gate must be green, kill-mutations must kill                      code
-  -> reviewer  (agents/reviewer.md)  verdict + findings                envelope P2
+  -> reviewer  (crew/agents/reviewer.md)  verdict + findings                envelope P2
   -> full suite green -> commit -> PR                                  code
-  lead (agents/lead.md) answers escalations with one closed decision
+  lead (crew/agents/lead.md) answers escalations with one closed decision
   every seat: ACP session, full update stream saved (P4), readable with crew show
 ```
 
@@ -41,7 +41,7 @@ Core code surface:
 
 | Piece | Job | Budget |
 |---|---|---|
-| `crew start` | read brief, create worktree, write journal header, boot seats from `agents/*.md` | 300 lines |
+| `crew start` | read brief, create worktree, write journal header, boot seats from `crew/agents/*.md` | 300 lines |
 | `crew/agents.mjs` | parse and validate P5 frontmatter, resolve tiers, run `bootRefusals` | 400 |
 | `crew/protocols.mjs` | P1 and P2 schemas and validators, closed reason enums | 400 |
 | `crew/loop.mjs` | the loop, the `stepped` and `finish` shapes, bounded rounds, lead consults, journal rows | 1,800 |
@@ -129,7 +129,7 @@ New-path tests follow `qa-test-writing`: behaviour only, a kill-mutation per gua
 
 ## Skills and agents
 
-New: `agents/lead.md`, `agents/planner.md`, `agents/builder.md`, `agents/reviewer.md`, `agents/tech-lead.md`
+New: `crew/agents/lead.md`, `crew/agents/planner.md`, `crew/agents/builder.md`, `crew/agents/reviewer.md`, `crew/agents/tech-lead.md`
 (from `crew/roles/*.md`), `agents/brief-writer.md`, and skills `lane-brief` and `plan`.
 Kept: `code-less`, `qa-test-writing`, `pr-review`, `prose-plain`, `backend-node`, `frontend-svelte`,
 `ui-design`, `ux`. At the switch: `crew-dispatch` is replaced by `lane-brief`; `crew-recovery`, `devops` and
@@ -160,7 +160,7 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 ### Phase 2: seats as agent files
 
 - [ ] 2.1 P5 schema and `crew/agents.mjs`, with `bootRefusals` from `roster-validate.mjs` run on every
-      edit. `crew start` boots from `agents/*.md`; the old path keeps reading `crew/roster.json`.
+      edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `crew/roster.json`.
 - [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check.
 - Done means: a roster swap on the new path is one frontmatter edit; one lane per role boots from it.
 
@@ -183,7 +183,7 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 - [ ] 4.2 P4 journal writer from `emit.mjs`, never throws.
 - [ ] 4.3 One `closeout.mjs` and one `status.mjs` for the new path.
 - [ ] 4.4 Visualizer reads journals and session files instead of the ledger; its roster editor edits
-      `agents/*.md`.
+      `crew/agents/*.md`.
 
 ### Phase 5: switch and delete
 

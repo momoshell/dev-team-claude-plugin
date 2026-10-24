@@ -79,14 +79,14 @@ tripwire, coupled-file or convention file.
 | P2 | Seat envelope | JSON per role: `role`, `id`, `status` (`done`, `insufficient`, `escalate`), `summary`, role `details` (plan: plan and gate paths, acceptance ids covered; build: summary; review: verdict and typed findings; lead: one closed decision) |
 | P3 | Acceptance gate | `task/gate.mjs` prints `FAIL <id>` per failing check; red at baseline, green after; one kill-mutation per check |
 | P4 | Journal and sessions | One append-only JSONL per lane (stage start and end, envelope, verdict, check result, commit, PR) and one JSONL per seat session holding its full ACP update stream |
-| P5 | Agent definition | `agents/<role>.md` frontmatter, below |
+| P5 | Agent definition | `crew/agents/<role>.md` frontmatter, below |
 
 `shape` is `standard`, `stepped` (ADR-048) or `finish` (ADR-051). Adding a protocol, or a field that code
 reads, needs an amendment to this record.
 
 ### 4. Agent definitions replace the roster and the grant tables
 
-Each seat is one file, `agents/<role>.md`. Its frontmatter is the only place a seat's model and powers are
+Each seat is one file, `crew/agents/<role>.md` (Amendment 1). Its frontmatter is the only place a seat's model and powers are
 written; its body is the charter.
 
 ```yaml
@@ -167,3 +167,10 @@ throws. The protected floor. Worktree isolation (ADR-043). Scope as context (ADR
 Whether each arm stays: advisor, edit assist, codemode, lab, readgate, builderloop, reminders, skeletonread,
 subagent, memory, the stepped shape and the finish shape. Those are decided in a later phase. Moving any
 other project to the new path is out of scope.
+
+## Amendment 1 (2026-10-24): seat files live in `crew/agents/`
+
+Seat definitions move from the repository-root `agents/` folder to `crew/agents/<role>.md`. Claude Code
+loads a plugin's root `agents/` folder as subagents of the operator's own session, so seat files there would
+offer planner, builder and the rest as operator subagents with models Claude Code cannot run. The root
+folder keeps operator-side agents such as `agents/brief-writer.md`. Nothing else in section 4 changes.

@@ -3555,11 +3555,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     run(cmd, opts = {}) {
       const timeoutMs = Number.isFinite(opts?.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : suiteTimeoutMs
       const callerTimeout = Number.isFinite(opts?.timeoutMs) && opts.timeoutMs > 0
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, detached: true, encoding: 'utf8', timeout: timeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
+      try { settleRecordedSuiteGroup({ taskDir: paths?.taskDir, deps: { ...deps, spawnSync, sleep } }) } catch { /* a predecessor's orphan is settled best-effort, never a spawn blocker */ }
+      const res = spawnSync('/bin/sh', suiteSpawnArgs(cmd, paths?.taskDir), { cwd: checkout, detached: true, encoding: 'utf8', timeout: timeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       let output = `${res.stdout || ''}${res.stderr || ''}`
       const overflowed = res.error?.code === 'ENOBUFS'
       const warmTimedOut = res.error?.code === 'ETIMEDOUT'
       const groupKill = warmTimedOut ? settleSuiteGroup(res.pid, { ...deps, spawnSync, sleep }) : null
+      clearSuiteGroupRecord(paths?.taskDir)
       if (warmTimedOut && callerTimeout) output += `\n[killed: exceeded the ${timeoutMs / 1000} s caller timeout]`
       else if (warmTimedOut) output += `\n[killed: exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis})]`
       else if (res.error) output += `\n[spawn error: ${res.error.message}]`
@@ -3640,10 +3642,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         try { removeColdTree(spawnSync, checkout, path) } catch (cleanupError) { throw new Error(`runCold: worktree-setup-failed: ${error.message}; cleanup failed: ${cleanupError.message}`) }
         throw new Error(`runCold: worktree-setup-failed: ${error?.message || String(error)}`)
       }
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, detached: true, encoding: 'utf8', timeout: suiteTimeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
+      try { settleRecordedSuiteGroup({ taskDir: paths?.taskDir, deps: { ...deps, spawnSync, sleep } }) } catch { /* a predecessor's orphan is settled best-effort, never a spawn blocker */ }
+      const res = spawnSync('/bin/sh', suiteSpawnArgs(cmd, paths?.taskDir), { cwd: path, detached: true, encoding: 'utf8', timeout: suiteTimeoutMs, maxBuffer: RUN_MAX_BUFFER_BYTES, env: { ...colorNeutralEnv(deps.env || process.env), DEVTEAM_LEDGER_DIR: join(path, '.dev-team', 'factory') } })
       let output = `${res.stdout || ''}${res.stderr || ''}`
       const coldTimedOut = res.error?.code === 'ETIMEDOUT'
       const coldGroupKill = coldTimedOut ? settleSuiteGroup(res.pid, { ...deps, spawnSync, sleep }) : null
+      clearSuiteGroupRecord(paths?.taskDir)
       if (coldTimedOut) throw new Error(`runCold: cold suite exceeded the ${suiteTimeout.seconds} s suite timeout (source: ${suiteTimeout.basis}) in ${path} (kept for inspection); increase profile suite_timeout_s or set DEVTEAM_SUITE_TIMEOUT_S${coldGroupKill ? ' ' + coldGroupKill.marker : ''}`)
       if (res.signal) output += `\n[killed by ${res.signal}]`
       if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)
@@ -4139,6 +4143,69 @@ function settleSuiteGroup(pgid, groupDeps = {}) {
         .sort((a, b) => a - b) }
   const clause = group_kill.survivors === null ? `unknown (${group_kill.reason})` : group_kill.survivors.length ? group_kill.survivors.join(', ') : 'none'
   return { group_kill, marker: `[process group ${pgid} signalled ${killed ? 'TERM then KILL' : 'TERM'}; survivors: ${clause}]` }
+}
+
+// The on-disk identity of a still-running suite group: while spawnSync blocks,
+// the driver can record nothing itself, so the detached suite shell writes its
+// own group identity (its pid IS its pgid under detached:true) before it execs
+// the real command, and the driver clears the record when spawnSync returns.
+// A record that survives its driver is how stop/teardown find the group.
+// The real command and the task dir arrive as positional arguments, never
+// interpolated into the wrapper text; a failed record write never blocks the suite.
+const SUITE_GROUP_WRAPPER = "_s=$(ps -o lstart= -p $$ 2>/dev/null | sed 's/^ *//; s/ *$//'); { printf '{\"pgid\":%s,\"pid\":%s,\"start\":\"%s\",\"owner_pid\":%s}\n' \"$$\" \"$$\" \"$_s\" \"$PPID\" > \"$1/suite-group.json.tmp\" && mv \"$1/suite-group.json.tmp\" \"$1/suite-group.json\"; } 2>/dev/null; exec /bin/sh -c \"$2\""
+
+function suiteGroupRecordPath(taskDir) {
+  return taskDir ? join(taskDir, 'suite-group.json') : null
+}
+
+function suiteSpawnArgs(cmd, taskDir) {
+  return taskDir ? ['-c', SUITE_GROUP_WRAPPER, 'suite-group', taskDir, cmd] : ['-c', cmd]
+}
+
+function clearSuiteGroupRecord(taskDir) {
+  const path = suiteGroupRecordPath(taskDir)
+  if (!path) return
+  try { fsUnlinkSync(path) } catch { /* the record is a locator, never load-bearing */ }
+}
+
+// Settle a suite group whose driver is gone. The record binds the group by
+// pid/pgid/start through verifyGroup, so a reused pid is never signalled, and
+// a group whose recorded owner is not proven dead (alive, EPERM, or unknown)
+// is never touched. The record is removed only when the group is proven dead:
+// verifyGroup says probe-dead, or the settle ladder ends with zero survivors.
+export function settleRecordedSuiteGroup({ taskDir, deps = {} } = {}) {
+  const path = suiteGroupRecordPath(taskDir)
+  if (!path) return { found: false }
+  let raw
+  try { raw = fsReadFileSync(path, 'utf8') } catch (err) {
+    if (err?.code === 'ENOENT') return { found: false }
+    return { found: true, settled: false, reason: 'record-unreadable' }
+  }
+  let parsed
+  try { parsed = JSON.parse(String(raw)) } catch { return { found: true, settled: false, reason: 'record-invalid' } }
+  const record = (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : {}
+  if (![record.pid, record.pgid, record.owner_pid].every((v) => Number.isSafeInteger(v) && v > 1) || typeof record.start !== 'string' || !record.start) {
+    return { found: true, settled: false, reason: 'record-invalid' }
+  }
+  const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
+  // lean: owner liveness is kill(owner_pid, 0) with no start binding, so a reused owner pid reads alive and defers settlement; record and bind the owner's lstart
+  let ownerAlive = true
+  try { kill(record.owner_pid, 0) } catch (err) {
+    if (err?.code === 'ESRCH') ownerAlive = false
+    else if (err?.code !== 'EPERM') return { found: true, settled: false, reason: 'owner-unknown' }
+  }
+  if (ownerAlive) return { found: true, owner_alive: true }
+  // lean: start binds by ps lstart text, which is TZ/LC_TIME-dependent, so a settler env unlike the driver's fails closed as evidence-mismatch; pin LC_ALL=C TZ=UTC in the wrapper and psSnapshot together
+  const anchor = { pid: record.pid, pgid: record.pgid, start: record.start }
+  const verdict = verifyGroup({ pgid: record.pgid, anchors: [anchor] }, freshDescendantSnapshot(deps), deps)
+  if (!verdict.signalable) {
+    if (verdict.liveness === LIVENESS.DEAD) clearSuiteGroupRecord(taskDir)
+    return { found: true, settled: false, reason: verdict.reason }
+  }
+  const settled = settleSuiteGroup(record.pgid, deps)
+  const groupKill = settled?.group_kill ?? null
+  if (Array.isArray(groupKill?.survivors) && groupKill.survivors.length === 0) clearSuiteGroupRecord(taskDir)
+  return { found: true, settled: true, group_kill: groupKill }
 }
 
 // One record per `git status --porcelain -uall -z` entry: x and y are the index

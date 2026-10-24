@@ -90,7 +90,7 @@ function makeSeatIo() {
         if (argv[1] === 'drop') return { status: 0, stdout: `Dropped stash@{0} (${STASH_SHA})\n`, stderr: '' }
       }
       if (argv?.[0] === '-c') {
-        const command = argv[1]
+        const command = argv.at(-1)
         if (command === 'fail') return { status: 3, stdout: 'bad\n', stderr: 'err\n' }
         if (command === 'signal') return { status: null, stdout: '', stderr: '', signal: 'SIGTERM', error: new Error('timeout') }
       }
@@ -436,7 +436,7 @@ test('seatIo run neutralises colour while preserving the inherited environment',
 test('seatIo runClean skips stash on a clean tree and restores dirty work on command failure', () => {
   const f = makeSeatIo()
   f.io.runClean.call(f.io, 'ok')
-  assert.deepEqual(f.commands.filter((x) => x.kind === 'spawn').map((x) => x.argv), [['-c', 'ok']])
+  assert.deepEqual(f.commands.filter((x) => x.kind === 'spawn').map((x) => x.argv.at(-1)), ['ok'])
 
   f.setDirty(true)
   const originalRun = f.io.run
@@ -672,7 +672,7 @@ test('outer seatIo keeps runClean available for headless-json and headless-rpc s
     )
     assert.deepEqual(io.runClean.call(io, 'outer-seat-io-run'), { ok: true, output: '', status: 0, stderr: '' })
   }
-  assert.deepEqual(executed, [['-c', 'outer-seat-io-run'], ['-c', 'outer-seat-io-run']])
+  assert.deepEqual(executed.map((argv) => argv.at(-1)), ['outer-seat-io-run', 'outer-seat-io-run'])
 })
 
 test('emitAdapter writes usage measurements to agent_sessions with explicit null context fields', () => {

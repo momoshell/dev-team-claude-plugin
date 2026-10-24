@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, psSnapshot, statIsZombie, turnCeilingValues,
+  providerConditionDetail, paneUsageFrames, paneSeatPolicyRow, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, awaitSeatsReadyChild, reaskBrief, SEAT_SESSION_KEPT_REASONS, seatIo, seatRetryDecision, settleSeatTeardown, settleRecordedSuiteGroup, verifyGroup, psSnapshot, statIsZombie, turnCeilingValues,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision, paneTurnCensus, RUN_MAX_BUFFER_BYTES,
 } from './seat-io.mjs'
@@ -5087,4 +5087,316 @@ test('RS4 pane seat ignores a resume request and respawns', () => {
     assert.equal(last.outcome, 'fresh');
     assert.equal(last.why, null);
   } finally { f.cleanup(); }
+});
+test('SG1 suite spawn records its group', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const seen = [];
+    const stubIo = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) === '/bin/sh') {
+          seen.push({ bin: bin, argv: Array.from(argv), options: options });
+          return { pid: 111, status: 0, stdout: '', stderr: '' };
+        }
+        return realSpawnSync(bin, argv, options);
+      },
+    });
+    const distinctive = 'echo SG1MARK';
+    stubIo.run(distinctive);
+    const shell = seen.find((x) => x.bin === '/bin/sh');
+    assert.ok(shell);
+    const argv = shell.argv || [];
+    assert.ok(typeof argv[1] === 'string' && argv[1].includes('suite-group.json'));
+    assert.ok(typeof argv[1] === 'string' && !argv[1].includes(distinctive));
+    assert.equal(argv.at(-1), distinctive);
+    assert.equal(shell.options.detached, true);
+    const copy = join(fixture.root, 'copy.json');
+    const psFile = join(fixture.root, 'ps.txt');
+    const realIo = makeIo(fixture, {});
+    const recordPath = join(fixture.paths.taskDir, 'suite-group.json');
+    const cmd = 'cp ' + "'" + recordPath + "'" + ' ' + "'" + copy + "'" + ' && ps -eo pid=,ppid=,pgid=,stat=,lstart= > ' + "'" + psFile + "'";
+    const result = realIo.run(cmd);
+    assert.equal(result.ok, true);
+    assert.equal(existsSync(copy), true);
+    const rec = JSON.parse(readFileSync(copy, 'utf8'));
+    assert.ok(Number.isSafeInteger(rec.pid) && rec.pid > 1);
+    assert.equal(rec.pid, rec.pgid);
+    assert.equal(rec.owner_pid, process.pid);
+    const snap = psSnapshot({ spawnSync: () => ({ status: 0, stdout: readFileSync(psFile, 'utf8') }) });
+    const verdict = verifyGroup({ pgid: rec.pgid, anchors: [{ pid: rec.pid, pgid: rec.pgid, start: rec.start }] }, snap, { kill: () => {} });
+    assert.equal(verdict.signalable, true);
+    const cleared = realIo.run('true');
+    assert.equal(cleared.ok, true);
+    assert.equal(existsSync(recordPath), false);
+  });
+});
+
+function sgOrphanDeps(ownerAlive, rowStart) {
+  const kills = [];
+  let rows = new Map([[7100, { pid: 7100, ppid: 1, pgid: 7100, stat: 'S', start: rowStart }]]);
+  const esrch = () => Object.assign(new Error('no such process'), { code: 'ESRCH' });
+  const kill = (target, signal) => {
+    kills.push([target, signal]);
+    if (target === 7000 && !ownerAlive) throw esrch();
+    if (signal === 'SIGKILL') rows = new Map();
+  };
+  const deps = { kill: kill, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map(rows) }) };
+  return { kills: kills, deps: deps };
+}
+
+test('SG2 a recorded orphan is settled', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const built = sgOrphanDeps(false, 'S');
+    const out = settleRecordedSuiteGroup({ taskDir: taskDir, deps: built.deps });
+    assert.equal(out.settled, true);
+    assert.ok(built.kills.some((pair) => pair[0] === -7100 && pair[1] === 'SIGTERM'));
+    assert.equal(existsSync(join(taskDir, 'suite-group.json')), false);
+  });
+});
+
+test('SG3 a live owner is never touched', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const built = sgOrphanDeps(true, 'S');
+    const out = settleRecordedSuiteGroup({ taskDir: taskDir, deps: built.deps });
+    assert.deepEqual(out, { found: true, owner_alive: true });
+    assert.equal(built.kills.filter((pair) => typeof pair[0] === 'number' && pair[0] < 0).length, 0);
+  });
+});
+
+test('SG4 a reused pid is never signalled', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const built = sgOrphanDeps(false, 'OTHER');
+    const out = settleRecordedSuiteGroup({ taskDir: taskDir, deps: built.deps });
+    const signalled = built.kills.filter((pair) => pair[1] === 'SIGTERM' || pair[1] === 'SIGKILL');
+    assert.equal(signalled.length, 0);
+    assert.ok(out.settled !== true);
+  });
+});
+test('suite spawn is unwrapped without a taskDir', () => {
+  const seen = [];
+  const io = seatIo({ members: {} }, { dir: '/tmp/no-task-dir' }, '/tmp/no-task-dir', null, null, {}, {
+    spawnSync: (bin, argv, options) => {
+      seen.push({ bin: bin, argv: Array.from(argv), options: options });
+      return { pid: 111, status: 0, stdout: '', stderr: '' };
+    },
+  });
+  io.run('echo hi');
+  const shell = seen.find((x) => x.bin === '/bin/sh');
+  assert.ok(shell);
+  assert.deepEqual(shell.argv, ['-c', 'echo hi']);
+});
+
+test('warm timeout clears the suite record', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 4242, pid: 4242, start: 'S', owner_pid: process.pid }));
+    const kills = [];
+    let rows = new Map([[5000, { pid: 5000, ppid: 4242, pgid: 4242, stat: 'S', start: 'gate' }]]);
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) === '/bin/sh') {
+          return { pid: 4242, status: null, signal: 'SIGTERM', error: Object.assign(new Error('injected timeout'), { code: 'ETIMEDOUT' }), stdout: 'warm', stderr: '' };
+        }
+        return realSpawnSync(bin, argv, options);
+      },
+      kill: (target, signal) => { kills.push([target, signal]); if (signal === 'SIGKILL') rows = new Map(); },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    });
+    const result = io.run('true');
+    assert.equal(existsSync(join(taskDir, 'suite-group.json')), false);
+    assert.deepEqual(result.group_kill, { pgid: 4242, survivors: [] });
+  });
+});
+
+test('cold timeout clears the suite record before throwing', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 4343, pid: 4343, start: 'S', owner_pid: process.pid }));
+    let coldPath = null;
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) !== '/bin/sh') return realSpawnSync(bin, argv, options);
+        coldPath = options.cwd;
+        return { pid: 4343, status: null, signal: 'SIGTERM', stdout: '', stderr: '', error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) };
+      },
+      kill: () => {},
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    });
+    let thrown = null;
+    try {
+      io.runCold('true');
+    } catch (error) {
+      thrown = error;
+    } finally {
+      if (coldPath) git(fixture.checkout, 'worktree', 'remove', '--force', coldPath);
+    }
+    assert.ok(thrown);
+    assert.equal(existsSync(join(taskDir, 'suite-group.json')), false);
+  });
+});
+
+test('pre-spawn settle runs before the suite spawn', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const taskDir = fixture.paths.taskDir;
+    writeFileSync(join(taskDir, 'suite-group.json'), JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const order = [];
+    const esrch = () => Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    let rows = new Map([[7100, { pid: 7100, ppid: 1, pgid: 7100, stat: 'S', start: 'S' }]]);
+    const io = makeIo(fixture, {
+      spawnSync: (bin, argv, options) => {
+        if (String(bin) === '/bin/sh') {
+          order.push('spawn');
+          return { pid: 111, status: 0, stdout: '', stderr: '' };
+        }
+        return realSpawnSync(bin, argv, options);
+      },
+      kill: (target, signal) => {
+        if (target === -7100 && signal === 'SIGTERM') order.push('term');
+        if (target === 7000) throw esrch();
+        if (signal === 'SIGKILL') rows = new Map();
+      },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    });
+    io.run('true');
+    assert.ok(order.indexOf('term') !== -1);
+    assert.ok(order.indexOf('spawn') !== -1);
+    assert.ok(order.indexOf('term') < order.indexOf('spawn'));
+  });
+});
+test('settleRecordedSuiteGroup table', () => {
+  const scratch = () => {
+    const root = scratchDir('suitegroup-table-');
+    const taskDir = join(root, 'task');
+    mkdirSync(taskDir, { recursive: true });
+    return { root: root, taskDir: taskDir, record: join(taskDir, 'suite-group.json') };
+  };
+  const clean = (s) => rmSync(s.root, { recursive: true, force: true });
+  const errWith = (code) => Object.assign(new Error(code), { code: code });
+
+  let s = scratch();
+  try {
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: () => { throw new Error('must not signal'); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: false });
+    assert.equal(existsSync(s.record), false);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    mkdirSync(s.record);
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: (t, sig) => { kills.push([t, sig]); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: true, settled: false, reason: 'record-unreadable' });
+    assert.deepEqual(kills, []);
+    assert.equal(existsSync(s.record), true);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, '{');
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: (t, sig) => { kills.push([t, sig]); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: true, settled: false, reason: 'record-invalid' });
+    assert.deepEqual(kills, []);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 'x', pid: 7100, start: '', owner_pid: 7000 }));
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: (t, sig) => { kills.push([t, sig]); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: true, settled: false, reason: 'record-invalid' });
+    assert.deepEqual(kills, []);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: (t, sig) => { kills.push([t, sig]); throw errWith('EPERM'); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: true, owner_alive: true });
+    assert.equal(kills.filter((p) => typeof p[0] === 'number' && p[0] < 0).length, 0);
+    assert.equal(existsSync(s.record), true);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: { kill: (t, sig) => { kills.push([t, sig]); throw errWith('EINVAL'); }, sleep: () => {}, snapshot: () => ({ ok: true, rows: new Map() }) } });
+    assert.deepEqual(out, { found: true, settled: false, reason: 'owner-unknown' });
+    assert.equal(kills.filter((p) => typeof p[0] === 'number' && p[0] < 0).length, 0);
+    assert.equal(existsSync(s.record), true);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7100, pid: 7100, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: {
+      kill: (t, sig) => { kills.push([t, sig]); throw errWith('ESRCH'); },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map() }),
+    } });
+    assert.deepEqual(out, { found: true, settled: false, reason: 'probe-dead' });
+    assert.equal(existsSync(s.record), false);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7300, pid: 7300, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    let rows = new Map([[7300, { pid: 7300, ppid: 1, pgid: 7300, stat: 'S', start: 'S' }]]);
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: {
+      kill: (t, sig) => { kills.push([t, sig]); if (t === 7000) throw errWith('ESRCH'); if (sig === 'SIGKILL') rows = new Map(); },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    } });
+    assert.equal(out.settled, true);
+    assert.deepEqual(out.group_kill, { pgid: 7300, survivors: [] });
+    assert.deepEqual(kills.filter((p) => p[1] === 'SIGTERM' || p[1] === 'SIGKILL'), [[-7300, 'SIGTERM'], [-7300, 'SIGKILL']]);
+    assert.equal(existsSync(s.record), false);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7400, pid: 7400, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    const rows = new Map([[5000, { pid: 5000, ppid: 7400, pgid: 7400, stat: 'S', start: 'S' }], [7400, { pid: 7400, ppid: 1, pgid: 7400, stat: 'Z', start: 'S' }]]);
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: {
+      kill: (t, sig) => { kills.push([t, sig]); if (t === 7000) throw errWith('ESRCH'); },
+      sleep: () => {},
+      snapshot: () => ({ ok: true, rows: new Map(rows) }),
+    } });
+    assert.equal(out.settled, true);
+    assert.deepEqual(out.group_kill, { pgid: 7400, survivors: [5000] });
+    assert.equal(existsSync(s.record), true);
+  } finally { clean(s); }
+
+  s = scratch();
+  try {
+    writeFileSync(s.record, JSON.stringify({ pgid: 7500, pid: 7500, start: 'S', owner_pid: 7000 }));
+    const kills = [];
+    let calls = 0;
+    const boundRows = new Map([[7500, { pid: 7500, ppid: 1, pgid: 7500, stat: 'S', start: 'S' }]]);
+    const out = settleRecordedSuiteGroup({ taskDir: s.taskDir, deps: {
+      kill: (t, sig) => { kills.push([t, sig]); if (t === 7000) throw errWith('ESRCH'); },
+      sleep: () => {},
+      snapshot: () => {
+        calls += 1;
+        if (calls === 1) return { ok: true, rows: new Map(boundRows) };
+        return { ok: false, rows: new Map() };
+      },
+    } });
+    assert.equal(out.settled, true);
+    assert.deepEqual(out.group_kill, { pgid: 7500, survivors: null, reason: 'snapshot-unreadable' });
+    assert.equal(existsSync(s.record), true);
+  } finally { clean(s); }
 });

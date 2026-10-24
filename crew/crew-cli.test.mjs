@@ -10,7 +10,7 @@ import { openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { defaultProfilePath, probeRepo, writeProfile } from '../scripts/factory/probe-repo.mjs'
 import { TURN_CEILING_FLAGS } from './drive.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, chunkCtxFromArgs } from './crew.mjs'
+import { SEAT_DEFAULTS, FANOUT_TOOLS, ROLE_ORDER, resolveAdapters, resolveTier, loadLadder, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, loadRoutingPolicy, materialiseRoutingChoice, replayRoutingChoice, ROUTING_EXCLUSION_REASONS, ROUTING_PRECEDENCE, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, resolveValidationLane, awaitSeatsReady, teardownCore, stopCmd, installExitMarker, installRunFinalizers, writeTerminalLine, terminalLineSeen, runScopedPaths, returnsInheritanceRecord, RETURNS_INHERITANCE_REASONS, resolveTaskReturn, archivedReturn, UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage, parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT, MEMORY_ROLES, CHARTER_CEILINGS, CAPABILITY_REFUSALS, loadCapabilities, grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, effectiveTools, persistedAdapters, GRANT_SNAPSHOT_REFUSAL, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell, advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive, advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL, PANE_TURN_CEILING_UNMEASURED, paneTurnCeilingRefusals, resumeCmd, validateResumeState, RESUME_REFUSALS, RESUME_REFUSAL_NAMES, refuseResume, chunkCtxFromArgs } from './crew.mjs'
 import { runCmdFixture } from './drive-fixtures.mjs'
 import { composeRolePrompt, renderSeatSkills } from './crew.mjs'
 import { loadMap } from '../hooks/skill-gate.mjs'
@@ -5494,3 +5494,61 @@ test('resume reloads suite timeout policy and refuses invalid ratification befor
     rmSync(factoryRoot, { recursive: true, force: true })
   }
 })
+test('SG5 crew stop reports the suite group', async () => {
+  const root = scratchDir('suitegroup-sg5-');
+  const taskDir = join(root, 'task');
+  mkdirSync(taskDir, { recursive: true });
+  const sentinel = { found: true, settled: true, group_kill: { pgid: 7100, survivors: [] } };
+  const seen = [];
+  const sessions = [{ status: 'running' }, { status: 'running' }, { status: 'aborted', outcome: 'aborted', terminal_reason: 'operator-stop', terminal_actor: 'operator' }];
+  let index = 0;
+  const alive = [false];
+  let printed = '';
+  const deps = {
+    pathsFor: () => ({ dir: root, taskDir: taskDir }),
+    loadCrew: () => ({ checkout: '/checkout' }),
+    assertSameCheckout: () => {},
+    existsSync: () => true,
+    readFileSync: () => JSON.stringify({ adw_id: 'unit-run', db_path: '/tmp/unit-ledger.db' }),
+    openLedger: () => ({ getSession: () => sessions[Math.min(index++, sessions.length - 1)], endSession: () => {}, close: () => {} }),
+    psCommand: () => '/checkout/crew/crew.mjs run --task unit-stop',
+    isAlive: () => alive.length ? alive.shift() : true,
+    processKill: () => {},
+    delay: async () => {},
+    deathGraceMs: 0,
+    stdout: { write: (t) => { printed += String(t); } },
+    settleRecordedSuiteGroup: (arg) => { seen.push(arg); return sentinel; },
+  };
+  const result = await stopCmd({ task: 'unit-stop', pid: '42', checkout: '/checkout' }, deps);
+  const parsed = JSON.parse(printed.trim());
+  assert.deepEqual(parsed.suite_group, sentinel);
+  assert.deepEqual(result.suite_group, sentinel);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].taskDir, taskDir);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('SG6 teardownCore settles before the rename', () => {
+  const dir = join(scratchDir('crew-fingerprint-'), 'crew');
+  mkdirSync(join(dir, 'task'), { recursive: true });
+  const sentinel = { found: true, settled: true, group_kill: { pgid: 7100, survivors: [] } };
+  const order = [];
+  const seen = [];
+  const record = teardownCore({ dir: dir, taskDir: join(dir, 'task') }, { task: 'gate', checkout: dir, workspace_id: null, members: {} }, {
+    closeSurface: () => true,
+    closeWorkspace: () => true,
+    renameSync: () => { order.push('rename'); },
+    settleSeatRoots: () => ({ records: 0, settled: 0, already_dead: 0, unidentified: 0, failed: 0, unproven: 0 }),
+    reclaimDescendants: () => ({ sweep_id: 'gate', records: 0, swept: 0, skipped: 0, retryable: 0, snapshot_ok: true, groups: 0, reclaimed: 0, live: 0, identity_refused: 0, probe_unknown: 0, signalled: 0, recorded: 0, record_failed: 0, incomplete: 0, coverage_outcome: 'unproven' }),
+    settleRecordedSuiteGroup: (arg) => { order.push('settle'); seen.push(arg); return sentinel; },
+    probe: () => false,
+    sleep: () => {},
+    io: { log: () => {}, emit: () => true },
+  });
+  assert.ok(order.indexOf('settle') !== -1);
+  assert.ok(order.indexOf('rename') !== -1);
+  assert.ok(order.indexOf('settle') < order.indexOf('rename'));
+  assert.deepEqual(record.suite_group, sentinel);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].taskDir, join(dir, 'task'));
+});

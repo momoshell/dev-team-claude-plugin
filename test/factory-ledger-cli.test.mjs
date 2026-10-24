@@ -743,7 +743,6 @@ test('B1', async () => {
   const crewDir = scratchDir('settle-b1-')
   const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }))
   try {
-    await new Promise((resolve) => setTimeout(resolve, 200))
     settleWriteSidecar(crewDir, adwId, child.pid)
     const dbPath = settleSeedDb(adwId, crewDir)
     const before = settleReadSession(dbPath, adwId)

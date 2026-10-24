@@ -54,7 +54,6 @@ test('S8: kill refuses when the recorded command does not match the live process
   const dbPath = join(dir, 'ledger.db')
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
   const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 200))
   ledger.startProcess({
     adw_id: 'mismatch-1', dispatch_id: 'd', pid: child.pid, command: 'totally-not-the-real-command --deliberately-wrong',
   })
@@ -87,9 +86,17 @@ test('kill happy path terminates a test-spawned child whose recorded command mat
   const dbPath = join(dir, 'ledger.db')
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
   const child = trackChild(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 200))
-  const psRes = spawnSync('ps', ['-ww', '-p', String(child.pid), '-o', 'command='], { encoding: 'utf8' })
-  const command = (psRes.stdout || '').trim()
+  // Poll ps until the OS reports the child's command — the value startProcess
+  // must record — instead of guessing it is visible after a fixed sleep.
+  let command = ''
+  const psDeadline = Date.now() + 10000
+  while (Date.now() < psDeadline) {
+    const psRes = spawnSync('ps', ['-ww', '-p', String(child.pid), '-o', 'command='], { encoding: 'utf8' })
+    command = (psRes.stdout || '').trim()
+    if (command) break
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.notEqual(command, '', 'ps must report the spawned child command within 10s')
   ledger.startProcess({ adw_id: 'kill-me', dispatch_id: 'd', pid: child.pid, command })
   ledger.close()
 
@@ -117,10 +124,21 @@ test('kill escalates to SIGKILL when the target traps and ignores SIGTERM', { sk
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  const readyPath = join(dir, 'sigterm-trap-installed')
   const child = trackChild(spawn(process.execPath, [
-    '-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)',
+    '-e', `process.on("SIGTERM", () => {}); const { writeFileSync, renameSync } = require("node:fs"); writeFileSync(${JSON.stringify(readyPath)} + ".tmp", "ok"); renameSync(${JSON.stringify(readyPath)} + ".tmp", ${JSON.stringify(readyPath)}); setInterval(() => {}, 1000)`,
   ], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 200))
+  // Wait for the marker the child publishes only AFTER installing its SIGTERM
+  // trap (the AC-11 pattern below): a fixed sleep can expire before the trap
+  // exists, and SIGTERM then kills by default disposition — "terminated", not
+  // the "killed" this test asserts.
+  let trapInstalled = false
+  const trapDeadline = Date.now() + 10000
+  while (Date.now() < trapDeadline) {
+    if (existsSync(readyPath)) { trapInstalled = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(trapInstalled, true, 'the child must install its SIGTERM trap within 10s')
   const psRes = spawnSync('ps', ['-ww', '-p', String(child.pid), '-o', 'command='], { encoding: 'utf8' })
   const command = (psRes.stdout || '').trim()
   ledger.startProcess({ adw_id: 'kill-trap', dispatch_id: 'd', pid: child.pid, command })

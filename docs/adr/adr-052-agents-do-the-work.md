@@ -179,5 +179,8 @@ other project to the new path is out of scope.
 Seat definitions move from the repository-root `agents/` folder to `crew/agents/<role>.md`. Claude Code
 loads a plugin's root `agents/` folder as subagents of the operator's own session, so seat files there would
 offer planner, builder and the rest as operator subagents with models Claude Code cannot run. The root
-folder keeps operator-side agents such as `agents/brief-writer.md`. Nothing else in section 4 changes. Each frontmatter field is one line, with JSON for objects and object lists, and carries no
-trailing comment; section 4's example is written in that form, so it parses as it stands.
+folder keeps operator-side agents such as `agents/brief-writer.md`.
+
+Each frontmatter field is one line, with JSON for objects and object lists, and carries no trailing comment.
+Section 4's example is written in that form, so `parseAgent` in `crew/protocols.mjs` reads it as it stands.
+Nothing else in section 4 changes.

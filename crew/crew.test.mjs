@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct } from './crew.mjs'
+import { composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct, resolveAdapters } from './crew.mjs'
 import { specExecution } from './child.mjs'
 import { resolveRunConfig as resolveDaemonRunConfig } from './daemon.mjs'
 import { resolveRunConfig as resolveFactoryRunConfig, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
@@ -25,21 +25,27 @@ import { CACHE_SIGNATURE, isCacheDir, pruneCacheDirs } from './cache-prune.mjs'
 import { shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter } from './crew-test-helpers.mjs'
 
 // Keep lexical import reach visible before byte-pinned regex test bodies.
-void [test, assert, createHash, appendFileSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct]
+void [test, assert, createHash, appendFileSync, readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync, execSync, spawn, tmpdir, join, fileURLToPath, openLedger, openRun, _resetNoticeGuardsForTest, composeLayout, DEFAULT_ROLES, bootAllocation, resolveWorkerBin, docOpenArgs, resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, ROSTER_TRANSPORTS, assertRosterTransportPolicies, offCriticalPathStages, rosterSourcePath, loadRosterSource, writeRosterSnapshot, rosterSnapshotReader, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, assertSeats, parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, RUN_START_EVENT, assignmentsFromJournal, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installRunFinalizers, writeTerminalLine, BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants, loadCapabilities, reviewIdentityFromArgs, specExecution, resolveDaemonRunConfig, resolveFactoryRunConfig, parseFactoryArgs, runVerb, TASK_PROFILES, ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, reclaimStore, claudeModelString, piModelString, seatIo, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS, testCheckout, scratchDir, shippedRoster, roster, nodeMeetsLedgerFloor, withHome, testCrewDir, callCounter, KNOWN_FLAGS, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS, assertUsage, assertPanelAgentsDistinct, resolveAdapters]
 
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 
+// The shipped roster seats no advisor, so populated-cell behaviour runs on a clone of the shared fixture.
+const advisorFixture = structuredClone(roster)
+for (const tier of ['build', 'judge']) advisorFixture.tiers[tier].advisor = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' }
+
 test('ADR047 A1 build roster resolves its canonical nullable advisor cell without seating it', () => {
-  const resolved = resolveTier(shippedRoster(), 'build')
+  const resolved = resolveTier(advisorFixture, 'build')
   assert.deepEqual(resolved.advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: null })
   assert.equal(resolved.roles.includes('advisor'), false)
+  assert.equal(resolveTier(shippedRoster(), 'build').advisor, null)
 })
-test('ADR047 build advisor roster literal remains pinned to sol', () => {
-  assert.deepEqual(shippedRoster().tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
+test('ADR047 shipped roster seats no advisor on any tier', () => {
+  for (const tier of ['mechanical', 'build', 'judge']) assert.equal(shippedRoster().tiers[tier].advisor, null, tier)
 })
 test('ADR047 A2 judge resolves sol and mechanical keeps advisor explicitly null', () => {
-  assert.deepEqual(resolveTier(shippedRoster(), 'judge').advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: null })
-  assert.equal(resolveTier(shippedRoster(), 'mechanical').advisor, null)
+  assert.deepEqual(resolveTier(advisorFixture, 'judge').advisor, { agent: 'pi', effort: 'medium', provider: 'openai', id: 'gpt-6.1-sol', model: null })
+  assert.equal(resolveTier(advisorFixture, 'mechanical').advisor, null)
+  for (const tier of ['mechanical', 'build', 'judge']) assert.equal(resolveTier(shippedRoster(), tier).advisor, null, tier)
 })
 test('ADR047 A3 advisor is not a process role and canonical override is honored', () => {
   const resolved = resolveTier(shippedRoster(), 'build', { 'model-advisor': 'openai/gpt-6-sol' })
@@ -53,11 +59,13 @@ test('ADR047 B1 none clears advisor and noncanonical values refuse', () => {
 })
 test('ADR047 Q1 none refuses an agent or effort flag it would silently discard', () => {
   for (const extra of [{ 'agent-advisor': 'claude' }, { 'effort-advisor': 'high' }]) {
-    assert.throws(() => resolveTier(shippedRoster(), 'build', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
-    assert.throws(() => resolveTier(shippedRoster(), 'judge', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
-    assert.throws(() => resolveTier(shippedRoster(), 'mechanical', { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
+    assert.throws(() => resolveTier(advisorFixture, 'build', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
+    assert.throws(() => resolveTier(advisorFixture, 'judge', { 'model-advisor': 'none', ...extra }), /with --model-advisor none/)
+    assert.throws(() => resolveTier(advisorFixture, 'mechanical', { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
+    for (const tier of ['build', 'judge']) assert.throws(() => resolveTier(shippedRoster(), tier, { 'model-advisor': 'none', ...extra }), /has no advisor cell/)
   }
-  assert.equal(resolveTier(shippedRoster(), 'build', { 'effort-advisor': 'high' }).advisor.effort, 'high')
+  assert.equal(resolveTier(advisorFixture, 'build', { 'effort-advisor': 'high' }).advisor.effort, 'high')
+  assert.throws(() => resolveTier(shippedRoster(), 'build', { 'effort-advisor': 'high' }), /has no advisor cell/)
 })
 
 // Focused test-local schema evaluator for the fallback fixtures. The production
@@ -2396,30 +2404,21 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Opus, Fable and Sonnet successors, the Muse planner and builder, and the Sol reviewer', () => {
+test('shipped roster and ladder seat the ratified Sol, Astra, Sonnet and Opus cells, Fable as tech-lead fallback, and no advisor', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-10-17')
-  // pi cannot seat anthropic models, so the advisor is the workhorse-band terra (operator, 2026-09-30).
-  assert.deepEqual(shipped.tiers.build.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
-  // Operator, 2026-10-16: Spark builds at xhigh on build and judge; mechanical stays medium.
-  assert.equal(shipped.tiers.build.builder.effort, 'xhigh')
-  assert.equal(shipped.tiers.judge.builder.effort, 'xhigh')
-  assert.equal(shipped.tiers.mechanical.builder.effort, 'medium')
-  assert.deepEqual(shipped.tiers.judge.advisor, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' })
-  assert.equal(shipped.tiers.mechanical.advisor, null)
-  for (const tier of ['mechanical', 'build', 'judge']) {
-    // Operator, 2026-10-16: the planner and builder seats move onto the Muse Code subscription.
-    // Operator, 2026-10-17: the judge planner is Wonder Full; mechanical and build keep Wonder.
-    const plannerId = tier === 'judge' ? 'muse-wonder-full-1.0-contributor' : 'muse-wonder-1.0-contributor'
-    assert.deepEqual([shipped.tiers[tier].planner.provider, shipped.tiers[tier].planner.id, shipped.tiers[tier].planner.agent], ['meta', plannerId, 'pi'])
-    assert.deepEqual([shipped.tiers[tier].builder.provider, shipped.tiers[tier].builder.id, shipped.tiers[tier].builder.agent], ['meta', 'muse-spark-1.3-contributor', 'pi'])
-    // Operator, 2026-10-16: Sol reviews on every tier, through pi, at high.
-    assert.deepEqual(shipped.tiers[tier].reviewer, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' })
-  }
-  for (const tier of ['build', 'judge']) {
-    assert.equal(shipped.tiers[tier].lead.id, 'claude-opus-5-5')
-  }
-  assert.deepEqual(shipped.tiers.judge['tech-lead'], { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh', fallback: [{ provider: 'anthropic', id: 'claude-fable-5-1', agent: 'claude', effort: 'medium' }] })
+  assert.equal(shipped.updated_at, '2026-10-24')
+  // Operator, 2026-10-24: Sol plans through pi, Sonnet builds and Opus reviews through claude, Astra leads
+  // build and judge through pi with Sol behind it; judge raises every seat but the lead to xhigh; no advisor.
+  const sol = (effort) => ({ provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort })
+  const sonnet = (effort) => ({ provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'claude', effort })
+  const opus = (effort) => ({ provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort })
+  const astraLead = { provider: 'openai', id: 'gpt-6-astra', agent: 'pi', effort: 'high', fallback: [sol('high')] }
+  assert.deepEqual(shipped.tiers.mechanical, { advisor: null, lead: null, planner: sol('high'), builder: sonnet('high'), reviewer: opus('high') })
+  assert.deepEqual(shipped.tiers.build, { advisor: null, lead: astraLead, planner: sol('high'), builder: sonnet('high'), reviewer: opus('high') })
+  assert.deepEqual(shipped.tiers.judge, {
+    advisor: null, lead: astraLead, planner: sol('xhigh'), builder: sonnet('xhigh'), reviewer: opus('xhigh'),
+    'tech-lead': { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh', fallback: [{ provider: 'anthropic', id: 'claude-fable-5-1', agent: 'claude', effort: 'medium' }] },
+  })
   // Fable is reached by explicit seating only: its override-only tag keeps the failure-upgrade
   // reseat from climbing onto it from a cheaper anthropic seat.
   assert.ok(shipped.models['anthropic/claude-fable-5-1'].tags.includes('override-only'))
@@ -2808,7 +2807,50 @@ test('RE2', () => {
     ],
   )
   for (const tier of ['mechanical', 'build', 'judge']) {
-    assert.deepEqual(shipped.tiers[tier].builder.fallback, [{ agent: 'pi', provider: 'openai', id: 'gpt-6.1-sol' }], `${tier}/builder`)
+    assert.equal(shipped.tiers[tier].builder.fallback, undefined, `${tier}/builder`)
     assert.equal(shipped.tiers[tier].planner.fallback, undefined, `${tier}/planner`)
+  }
+})
+
+// MUTATION QW1: lower the judge planner's effort from xhigh to high; the literal seating assertion fails.
+test('QW1', () => {
+  const shipped = shippedRoster()
+  const seats = (tier, role) => { const cell = shipped.tiers[tier][role]; return cell && [cell.provider, cell.id, cell.agent, cell.effort].join('/') }
+  const effort = { mechanical: 'high', build: 'high', judge: 'xhigh' }
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    assert.equal(seats(tier, 'planner'), `openai/gpt-6.1-sol/pi/${effort[tier]}`, `${tier}/planner`)
+    assert.equal(seats(tier, 'builder'), `anthropic/claude-sonnet-5-5/claude/${effort[tier]}`, `${tier}/builder`)
+    assert.equal(seats(tier, 'reviewer'), `anthropic/claude-opus-5-5/claude/${effort[tier]}`, `${tier}/reviewer`)
+    assert.equal(shipped.tiers[tier].advisor, null, `${tier}/advisor`)
+    assert.equal(shipped.tiers[tier].builder.fallback, undefined, `${tier}/builder fallback`)
+  }
+  assert.equal(shipped.tiers.mechanical.lead, null)
+  assert.equal(Object.hasOwn(shipped.tiers.mechanical, 'tech-lead'), false)
+  for (const tier of ['build', 'judge']) {
+    assert.equal(seats(tier, 'lead'), 'openai/gpt-6-astra/pi/high', `${tier}/lead`)
+    assert.deepEqual(shipped.tiers[tier].lead.fallback, [{ provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high' }], `${tier}/lead fallback`)
+  }
+  assert.equal(Object.hasOwn(shipped.tiers.build, 'tech-lead'), false)
+  assert.equal(seats('judge', 'tech-lead'), 'anthropic/claude-opus-5-5/claude/xhigh')
+  assert.deepEqual(shipped.tiers.judge['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-fable-5-1', agent: 'claude', effort: 'medium' }])
+})
+
+// MUTATION QW2: seat the judge builder on pi; it resolves to headless-rpc instead of claude on headless-json.
+test('QW2', async () => {
+  const shipped = shippedRoster()
+  const expected = {
+    mechanical: { planner: 'pi', builder: 'claude', reviewer: 'claude' },
+    build: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'claude' },
+    judge: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'claude', 'tech-lead': 'claude' },
+  }
+  for (const [tier, agents] of Object.entries(expected)) {
+    const args = { 'headless-all': true }
+    const resolved = await resolveTier(shipped, tier, args)
+    const adapters = await resolveAdapters(resolved.roles, args, resolved.seats)
+    assert.deepEqual([...resolved.roles].sort(), Object.keys(agents).sort(), tier)
+    for (const [role, agent] of Object.entries(agents)) {
+      assert.equal(resolved.seats[role].agent, agent, `${tier}/${role} agent`)
+      assert.equal(adapters[role].transport, agent === 'pi' ? 'headless-rpc' : 'headless-json', `${tier}/${role} transport`)
+    }
   }
 })

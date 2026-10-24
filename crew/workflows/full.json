@@ -4,8 +4,8 @@
     "plan": {
       "role": "planner",
       "agent": "pi",
-      "provider": "meta",
-      "id": "muse-wonder-1.0-contributor",
+      "provider": "openai",
+      "id": "gpt-6.1-sol",
       "effort": "high",
       "skills": [],
       "extensions": [
@@ -15,31 +15,27 @@
     },
     "build": {
       "role": "builder",
-      "agent": "pi",
-      "provider": "meta",
-      "id": "muse-spark-1.3-contributor",
-      "effort": "xhigh",
+      "agent": "claude",
+      "provider": "anthropic",
+      "id": "claude-sonnet-5-5",
+      "effort": "high",
       "skills": [],
-      "extensions": [
-        "crew/pi/extensions/builderloop.ts",
-        "crew/pi/extensions/readgate.ts",
-        "crew/pi/extensions/skeletonread.ts"
-      ]
+      "extensions": []
     },
     "gate-repair": {
       "role": "lead",
-      "agent": "claude",
-      "provider": "anthropic",
-      "id": "claude-opus-5-5",
+      "agent": "pi",
+      "provider": "openai",
+      "id": "gpt-6-astra",
       "effort": "high",
       "skills": [],
       "extensions": []
     },
     "review": {
       "role": "reviewer",
-      "agent": "pi",
-      "provider": "openai",
-      "id": "gpt-6.1-sol",
+      "agent": "claude",
+      "provider": "anthropic",
+      "id": "claude-opus-5-5",
       "effort": "high",
       "skills": [],
       "extensions": []

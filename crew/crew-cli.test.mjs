@@ -1784,10 +1784,14 @@ test('B1 boot crew record remains profile and assurance only', async () => {
   execSync('git init -q', { cwd: checkout })
   const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
   let seen = null
+  // The shipped roster seats no advisor; the shared fixture gets a judge advisor so the journal's resolved cell is exercised.
+  const judgeRoster = structuredClone(roster)
+  judgeRoster.tiers.judge.advisor = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'medium' }
+  judgeRoster.tiers.judge['tech-lead'] = { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh' }
   try {
     await withHome(home, async () => {
       await bootCmd({ task, checkout, profile: 'investigation', assurance: 'rigorous', 'headless-all': true, 'claude-bin': process.execPath }, {
-        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), readRosterFile: () => JSON.stringify(judgeRoster),
       })
       const dir = testCrewDir(home, checkout, task)
       const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
@@ -2890,7 +2894,7 @@ test('bootCmd refuses a below-floor raw override before state or driver side eff
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
     await withBreakerEnv({}, () => withHome(home, () => assert.rejects(
-      () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'anthropic/claude-haiku-4-5' }, { cmux, tree, renameTab }),
+      () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'anthropic/claude-haiku-4-5' }, { cmux, tree, renameTab, readRosterFile: () => JSON.stringify(roster) }),
       (err) => {
         assert.equal(err.reason, 'band-below-floor')
         assert.match(err.message, /builder/)
@@ -2914,7 +2918,7 @@ test('bootCmd accepts an at-floor raw override and preserves its untranslated re
   try {
     await withBreakerEnv({}, () => withHome(home, () => bootCmd(
       { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'openai-codex/gpt-6-luna' },
-      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), readRosterFile: () => JSON.stringify(roster) },
     )))
     const record = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
     assert.equal(record.members.builder.provider, null)
@@ -4803,10 +4807,10 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
-  assert.equal(resolved.seats.planner.id, 'muse-wonder-1.0-contributor')
-  assert.equal(resolved.seats.lead.id, 'claude-opus-5-5')
-  assert.equal(resolved.seats.reviewer.id, 'gpt-6.1-sol')
-  assert.equal(resolved.seats.builder.id, 'muse-spark-1.3-contributor')
+  assert.equal(resolved.seats.planner.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.lead.id, 'gpt-6-astra')
+  assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
+  assert.equal(resolved.seats.builder.id, 'claude-sonnet-5-5')
 })
 
 test('D1-codes workflow refusal set is frozen and every validator code is reachable', () => {
@@ -4949,9 +4953,9 @@ test('E1-mismatch named workflow seat drift refuses before side effects', async 
       () => bootCmd(args, { cmux, tree, workflowDir: join(ROOT, 'crew/workflows') }),
       (error) => error?.reason === 'workflow-seat-mismatch'
         && error.role === 'builder'
-        && error.expected?.agent === 'pi'
+        && error.expected?.agent === 'claude'
         && error.expected?.effort === shippedRoster().tiers.build.builder.effort
-        && error.actual?.agent === 'pi'
+        && error.actual?.agent === 'claude'
         && error.actual?.effort === 'max'
         && error.message.includes('builder')
         && error.message.includes('workflow-seat-mismatch'),

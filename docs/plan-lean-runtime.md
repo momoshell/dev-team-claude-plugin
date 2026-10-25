@@ -21,6 +21,15 @@ Decision record: `docs/adr/adr-052-agents-do-the-work.md`. Every test file and i
 | D8 | Work stays in this repository. No other project (the-power included) is touched. |
 | D9 | No gates or measurements while working: no host-load gate, no dispatch-time baseline, no timing yardstick, no lane-count comparison before the switch. The operator switches when satisfied. The lane's correctness checks (acceptance gate, kill-mutations, suite, commit on green) stay. |
 
+Decisions 2026-10-25:
+
+| Id | Decision |
+|---|---|
+| D10 | `crew start` runs its lane with `CREW_SUITE_SLOTS=0`. The slot pool is shared with every project on the host, and a lane that waited out the 30-minute ceiling ran unslotted anyway (PR #1977). |
+| D11 | The seat files are the roster source. `crew roster generate` writes `crew/roster.json` from `crew/agents/*.md`, and the parity test becomes "`roster.json` equals the generated roster". Until 4.4, a roster edit made in the visualizer is overwritten by the next generate. |
+| D12 | 2.2 moves to phase 3: the skill proof needs the per-seat ACP session files from 3.1. |
+| D13 | Phase 3 starts with a hand probe for 3.1 (does `claude-agent-acp` load plugin skills and agent definitions). Then 3.1, 3.3 and 3.4 run as parallel lanes, and 3.5 follows. |
+
 ## Target shape
 
 ```
@@ -154,21 +163,25 @@ Sol review, because the current factory is what is being replaced. From phase 4,
       checked on main or marked unmeasured; acceptance ids in `(ID)` form.
 - [x] 1.3 `crew start <brief.md>`: worktree, journal header, boot on today's driver with the brief as the
       planner's whole input. No compile, no baseline, no warnings pass.
-- [x] 1.4 `/dispatch` routes to 1.2 then 1.3.
+- [x] 1.4 `/dispatch` routes to 1.2 then 1.3. Reverted for the next release so that `/dispatch` in other
+      projects keeps the batch path; `crew start` and the brief-writer agent are used directly until the switch.
 - Done means: 3 lanes in this repo started from issues reach a PR.
 
 ### Phase 2: seats as agent files
 
-- [ ] 2.1 P5 schema and `crew/agents.mjs`, with `bootRefusals` from `roster-validate.mjs` run on every
+- [x] 2.1 P5 schema and `crew/agents.mjs`, with `bootRefusals` from `roster-validate.mjs` run on every
       edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `crew/roster.json`.
-- [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check.
+      Built in #1975 and #1976: `crew start` generates the roster in memory. `crew roster generate` (D11) is
+      not built yet.
+- [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check. Moved to phase 3 (D12).
 - Done means: a roster swap on the new path is one frontmatter edit; one lane per role boots from it.
 
 ### Phase 3: ACP seats and the minimal loop
 
 - [ ] 3.1 `crew/acp/`: client, claude and pi launch, a session file per seat (P4). First check: whether
       `claude-agent-acp` loads plugin skills and agent definitions as the headless claude seat does.
-- [ ] 3.2 `crew show <lane> [seat]` prints a seat's full session from its file.
+- [ ] 3.2 `crew show <lane> [seat]` prints a seat's full session from its file. `crew show` over today's
+      headless streams shipped in #1974; it moves to the session files once 3.1 exists.
 - [ ] 3.3 P2 envelope schemas per role in `crew/protocols.mjs`.
 - [ ] 3.4 `crew/checks.mjs`: gate red and green, mutation kill, suite with timeout and process-group kill,
       commit, rebase, PR.

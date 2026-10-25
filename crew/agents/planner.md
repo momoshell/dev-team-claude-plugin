@@ -9,4 +9,18 @@ effort: high
 advisor: null
 tiers: {"mechanical":{"effort":"medium"}}
 ---
-Read and follow [the planner charter](../roles/planner.md).
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `plan_path`, `gate_path`, `acceptance`, `mutations`.

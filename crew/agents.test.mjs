@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, rmSync, cpSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AGENT_ROLES, TIERS, parseAgent } from './protocols.mjs'
+import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, FINDING_SEVERITIES, LEAD_DECISIONS } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
@@ -25,14 +25,48 @@ function withScratch(fn) {
   try { return fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
 }
 
-test('the five committed definitions parse clean and link their own charter', () => {
+test('the five committed definitions parse clean with standalone lean charters', () => {
   for (const role of AGENT_ROLES) {
     const { fields, body, defects } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
     assert.deepEqual(defects, [], role)
     assert.equal(fields.name, role)
     assert.equal(fields.role, role)
-    assert.equal(body, `Read and follow [the ${role} charter](../roles/${role}.md).\n`)
+    assert.ok(body.startsWith(`You are the lean ${role}.`), role)
+    assert.doesNotMatch(body, /\]\([^)]*roles\//, role)
   }
+})
+
+// MUTATION: add a key to a Details keys line, drop a vocabulary entry, or hand a loop stage to the seat and a body drifts from P2.
+test('lean charter declarations match the P2 schemas and loop ownership', () => {
+  const vocabulary = {
+    reviewer: [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
+    'tech-lead': [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
+    lead: [['Lead decisions', LEAD_DECISIONS]],
+  }
+  for (const role of AGENT_ROLES) {
+    const { fields, body } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
+    const declared = (label) => {
+      const lines = body.split('\n').filter((line) => line.startsWith(`${label}:`))
+      assert.equal(lines.length, 1, `${role}: one ${label} line`)
+      const value = lines[0].slice(label.length + 1)
+      assert.equal(value.replace(/`[A-Za-z0-9_.-]+`/g, '').replace(/[,.\s]/g, ''), '', `${role}: ${label} is only backtick tokens`)
+      return [...value.matchAll(/`([A-Za-z0-9_.-]+)`/g)].map((match) => match[1]).sort()
+    }
+    // DETAIL_KEYS is private; the validator names every required key of an empty details.
+    const detailKeys = validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: {} }).defects
+      .map((defect) => /^details\.([a-z_]+) is required$/.exec(defect)?.[1]).filter(Boolean)
+    assert.ok(detailKeys.length > 0, role)
+    for (const [label, expected] of [['Details keys', detailKeys], ['Envelope keys', ENVELOPE_FIELDS], ['Statuses', ENVELOPE_STATUSES], ...(vocabulary[role] ?? [])]) {
+      assert.deepEqual(declared(label), [...expected].sort(), `${role}: ${label}`)
+    }
+    assert.ok(body.includes(`writes: ${fields.writes}`), `${role}: write boundary`)
+    assert.ok(body.includes('The loop runs the gate at baseline, after the build and under mutation.'), role)
+    assert.ok(body.includes('Do not run those stages yourself.'), role)
+  }
+  const planner = parseAgent(readFileSync(join(AGENTS_DIR, 'planner.md'), 'utf8')).body
+  assert.match(planner, /one `FAIL <id>` line per failing acceptance id/)
+  assert.match(planner, /must be red on the unchanged tree/)
+  assert.match(planner, /exactly \{check, file, find, replace\}/)
 })
 
 // MUTATION: change any model, effort, fallback or null tier in a definition and this tier drifts from the roster.

@@ -17,6 +17,8 @@ const DEFAULT_TOOLS = Object.freeze({
   'task-dir': 'Read,Glob,Grep,Bash,Write',
   none: 'Read,Glob,Grep',
 })
+// Tools claude-agent-acp would run without asking when listed in allowedTools.
+const UNASKED_TOOLS = Object.freeze(['Write', 'Edit', 'NotebookEdit', 'Bash'])
 const EFFORTS =Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const MODEL = /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/
 const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
@@ -181,6 +183,13 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
       launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model })
+      if (writes !== 'repo') {
+        // `default` (Manual) asks before every change; acceptEdits would take an edit in cwd silently.
+        // Listed tools stay available but lose auto-approval, so each write or shell call reaches onPermission.
+        launch.mode = 'default'
+        const options = launch.sessionParams._meta.claudeCode.options
+        options.allowedTools = options.allowedTools.filter((tool) => !UNASKED_TOOLS.includes(tool.split('(')[0].trim()))
+      }
     } else {
       for (const file of grantedSkills) {
         if (!statSync(file).isFile()) throw new Error(`granted skill ${JSON.stringify(file)} is not a file`)

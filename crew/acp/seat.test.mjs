@@ -618,16 +618,62 @@ const TOOL_DEFAULTS = {
   none: ['Read', 'Glob', 'Grep'],
 }
 
+const MUTATORS = ['Write', 'Edit', 'NotebookEdit', 'Bash']
+const approved = (tools) => tools.filter((tool) => !MUTATORS.includes(tool))
+
 test('a Claude seat without tools launches the writes-based defaults, none being read and search only', () => {
   for (const [writes, expected] of Object.entries(TOOL_DEFAULTS)) {
     use('claude-turn', { definition: { writes } }, (run) => {
       assert.equal(run.error, undefined, writes)
       const launched = launchTools(run)
-      assert.deepEqual(launched.allowedTools, expected, writes)
+      assert.deepEqual(launched.allowedTools, writes === 'repo' ? expected : approved(expected), writes)
       assert.deepEqual(launched.tools, expected, writes)
     })
   }
   use('claude-turn', {}, (run) => assert.deepEqual(launchTools(run).allowedTools, TOOL_DEFAULTS.none))
+})
+
+const setModes = (run) => run.sent.filter((frame) => frame.method === 'session/set_mode').map((frame) => frame.params.modeId)
+
+test('a Claude seat asks for every edit unless its definition writes repo, whatever its role or tools', () => {
+  const explicit = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash', 'NotebookEdit']
+  for (const role of ['reviewer', 'lead', 'tech-lead', 'builder']) {
+    for (const tools of [undefined, explicit]) {
+      for (const [writes, mode] of [['task-dir', 'default'], ['none', 'default'], [undefined, 'default'], ['bogus', 'default'], ['repo', 'acceptEdits']]) {
+        const definition = { role, writes, ...(tools ? { tools } : {}) }
+        use('claude-turn', { definition }, (run) => {
+          const label = JSON.stringify(definition)
+          assert.equal(run.error, undefined, label)
+          assert.deepEqual(setModes(run), [mode], label)
+          const launched = launchTools(run)
+          const available = tools ?? TOOL_DEFAULTS[['task-dir', 'repo'].includes(writes) ? writes : 'none']
+          assert.deepEqual(launched.tools, available, label)
+          assert.deepEqual(launched.allowedTools, writes === 'repo' ? available : approved(available), label)
+        })
+      }
+    }
+  }
+})
+
+test('a refused set_mode starts no prompt and still tears the client down', () => {
+  const events = []
+  const root = scratchDir('acp-seat-mode-refusal-')
+  try {
+    assert.throws(() => runAcpSeat({
+      definition: { agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high', role: 'reviewer', skills: [], writes: 'task-dir' },
+      cwd: root, taskDir: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'),
+      binaries: { claudeAcp: BIN, claude: BIN },
+      deps: { clientFactory: () => ({
+        start() { events.push('start') },
+        initialize() { events.push('initialize') },
+        newSession() { events.push('new') },
+        setMode() { events.push('mode'); throw new Error('mode refused') },
+        beginPrompt() { events.push('prompt') },
+        close() { events.push('close'); return { outcome: 'proven' } },
+      }) },
+    }), /mode refused/)
+    assert.deepEqual(events, ['start', 'initialize', 'new', 'mode', 'close'])
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('task-dir seats deny Edit and NotebookEdit even when the explicit tools list Edit', () => {

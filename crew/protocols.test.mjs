@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseBrief, parseAgent, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES } from './protocols.mjs'
+import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
 
 const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n\n## Acceptance\n\n- (RV1) an edit that cannot boot is refused\n- (RV2) a bootable edit is accepted\n'
 const brief = (overrides = {}, body = BODY) => {
@@ -191,4 +191,151 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
   assert.deepEqual(parseAgent(agent({ tiers: { judge: { agent: 'claude', model: 'anthropic/claude-opus-5-5', fallback: [] } }, fallback: [{ agent: 'pi', model: 'openai/spare' }] })).defects, [])
   // A tier giving the seat the base fallback's model makes it its own fallback.
   assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/spare' }], tiers: { build: { model: 'openai/spare' } } }, 'tiers.build.fallback[0].model is the seat').length)
+})
+
+// P2, the seat envelope.
+const DETAILS = {
+  planner: { plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'] },
+  builder: { summary: 'Implemented the change.' },
+  reviewer: { verdict: 'pass', findings: [] },
+  'tech-lead': { verdict: 'pass', findings: [] },
+  lead: { decision: 'accept' },
+}
+const envelope = (role, overrides = {}) => ({ role, id: 'd1', status: 'done', summary: 'Completed.', details: structuredClone(DETAILS[role]), ...overrides })
+const finding = (overrides = {}) => ({ id: 'RV1-1', severity: 'should-fix', location: 'crew/protocols.mjs:1', summary: 'Malformed input is accepted.', ...overrides })
+const review = (findings, verdict = 'changes-needed', role = 'reviewer') => envelope(role, { details: { verdict, findings } })
+const refusedFor = (role, value, needle) => validateEnvelope(role, value).defects.filter((d) => d.includes(needle))
+
+test('P2 vocabularies are closed and frozen', () => {
+  assert.deepEqual(ENVELOPE_FIELDS, ['role', 'id', 'status', 'summary', 'details'])
+  assert.deepEqual(ENVELOPE_STATUSES, ['done', 'insufficient', 'escalate'])
+  assert.deepEqual(REVIEW_VERDICTS, ['pass', 'changes-needed'])
+  assert.deepEqual(LEAD_DECISIONS, ['bounce', 'accept', 'escalate'])
+  assert.deepEqual(FINDING_SEVERITIES, ['must-fix', 'should-fix', 'consider'])
+  assert.deepEqual(FINDING_DISPOSITIONS, ['auto-fix', 'ask-user', 'no-op'])
+  for (const list of [ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS]) assert.ok(Object.isFrozen(list))
+})
+
+// MUTATION: return a copy or null on success and the loop acts on a value it never validated.
+test('P2 accepts every role and status, returning the input untouched', () => {
+  for (const role of AGENT_ROLES) for (const status of ENVELOPE_STATUSES) {
+    const value = envelope(role, { status })
+    const snapshot = structuredClone(value)
+    const result = validateEnvelope(role, value)
+    assert.deepEqual(result.defects, [], `${role}/${status}`)
+    assert.equal(result.envelope, value)
+    assert.deepEqual(value, snapshot)
+  }
+  for (const decision of LEAD_DECISIONS) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision } })).defects, [])
+  for (const verdict of REVIEW_VERDICTS) for (const role of ['reviewer', 'tech-lead']) assert.deepEqual(validateEnvelope(role, review([], verdict, role)).defects, [])
+})
+
+// MUTATION: add blocked to ENVELOPE_STATUSES and a stale status is accepted.
+test('P2 refuses a status outside done, insufficient, escalate', () => {
+  for (const status of ['blocked', 'ok', '', null, 4]) assert.ok(refusedFor('builder', envelope('builder', { status }), 'status').length, String(status))
+})
+
+// MUTATION: drop the role comparison and a seat can return another seat's envelope.
+test('P2 refuses a role that is not the expected one', () => {
+  assert.ok(refusedFor('builder', envelope('planner'), 'role must match').length)
+  assert.ok(refusedFor('scout', envelope('builder'), 'role').length)
+  const unsupported = validateEnvelope('scout', envelope('scout'))
+  assert.ok(unsupported.defects.some((d) => d.startsWith('role is one of')))
+  assert.equal(validateEnvelope('__proto__', envelope('builder')).envelope.id, 'd1')
+})
+
+// MUTATION: drop gate_path from the planner keys and a plan without a gate is accepted.
+test('P2 planner details name the plan, the gate and the acceptance ids', () => {
+  for (const key of Object.keys(DETAILS.planner)) {
+    const value = envelope('planner'); delete value.details[key]
+    assert.deepEqual(refusedFor('planner', value, `details.${key} is required`).length, 1, key)
+  }
+  for (const key of ['plan_path', 'gate_path']) for (const bad of ['', null, 5]) {
+    const value = envelope('planner'); value.details[key] = bad
+    assert.ok(refusedFor('planner', value, `details.${key}`).length, key)
+  }
+  for (const acceptance of [[], ['EV1', 'EV1'], ['9bad'], 'EV1', [null], undefined]) {
+    const value = envelope('planner'); value.details.acceptance = acceptance
+    assert.ok(refusedFor('planner', value, 'details.acceptance').length, JSON.stringify(acceptance))
+  }
+})
+
+// MUTATION: add approved to REVIEW_VERDICTS or retry to LEAD_DECISIONS and the closed enum opens.
+test('P2 refuses a verdict or decision outside the closed lists', () => {
+  for (const role of ['reviewer', 'tech-lead']) assert.ok(refusedFor(role, review([], 'approved', role), 'details.verdict').length)
+  assert.ok(refusedFor('lead', envelope('lead', { details: { decision: 'retry' } }), 'details.decision').length)
+  assert.ok(refusedFor('builder', envelope('builder', { details: { summary: '' } }), 'details.summary').length)
+})
+
+// MUTATION: drop the top-level unknown-key check and the old assignment_id shape passes.
+test('P2 refuses unknown top-level fields, including a parsed __proto__', () => {
+  for (const key of ['surprise', 'assignment_id', '__proto__']) {
+    const value = JSON.parse(JSON.stringify(envelope('builder')).replace(/}$/, `,${JSON.stringify(key)}:true}`))
+    assert.ok(refusedFor('builder', value, `unknown field ${key}`).length, key)
+  }
+})
+
+// MUTATION: throw or return null for a bad root and one malformed envelope halts the loop.
+test('P2 malformed roots and common fields are refused without throwing', () => {
+  for (const input of [null, [], 'json', 7, undefined]) assert.deepEqual(validateEnvelope('builder', input), { envelope: null, defects: ['envelope is a JSON object'] })
+  for (const key of ENVELOPE_FIELDS) {
+    const value = envelope('builder'); delete value[key]
+    assert.ok(refusedFor('builder', value, `missing field ${key}`).length, key)
+  }
+  for (const key of ['id', 'summary']) for (const bad of ['', null, 5, []]) assert.ok(refusedFor('builder', envelope('builder', { [key]: bad }), key).length, key)
+  for (const details of [null, [], 'details', 5]) for (const role of AGENT_ROLES) assert.ok(refusedFor(role, envelope(role, { details }), 'details is an object').length, role)
+  const several = validateEnvelope('builder', envelope('builder', { id: '', summary: '', status: 'blocked' }))
+  assert.ok(several.defects.length >= 3)
+})
+
+// MUTATION: skip the unknown-key loop over details and extra payload rides along.
+test('P2 role details are exactly the listed keys', () => {
+  for (const role of AGENT_ROLES) {
+    for (const key of Object.keys(DETAILS[role])) {
+      const value = envelope(role); delete value.details[key]
+      assert.ok(refusedFor(role, value, `details.${key} is required`).length, `${role}.${key}`)
+    }
+    const extra = envelope(role); extra.details.surprise = true
+    assert.ok(refusedFor(role, extra, 'details.surprise is not a field').length, role)
+  }
+})
+
+// MUTATION: skip the findings item checks and a malformed finding is dropped silently.
+test('P2 typed findings are accepted in every documented form', () => {
+  for (const role of ['reviewer', 'tech-lead']) {
+    for (const disposition of [undefined, 'no-op', 'ask-user', 'auto-fix']) {
+      const entry = finding(disposition ? { disposition } : {})
+      if (disposition === 'auto-fix') entry.patch = '--- a/x\n+++ b/x\n'
+      assert.deepEqual(validateEnvelope(role, review([entry], 'changes-needed', role)).defects, [], String(disposition))
+    }
+    for (const severity of FINDING_SEVERITIES) assert.deepEqual(validateEnvelope(role, review([finding({ severity })], 'changes-needed', role)).defects, [])
+    assert.deepEqual(validateEnvelope(role, review([finding({ severity: 'must-fix' })], 'changes-needed', role)).defects, [])
+  }
+})
+
+test('P2 typed findings are refused by nested path', () => {
+  for (const role of ['reviewer', 'tech-lead']) {
+    const bad = (findings, needle, verdict = 'changes-needed') => assert.ok(refusedFor(role, review(findings, verdict, role), needle).length, `${role} ${needle}`)
+    bad(null, 'details.findings')
+    bad({}, 'details.findings')
+    bad(['x', null, []], 'details.findings[0] is an object')
+    bad([finding({ severity: 'critical' })], 'details.findings[0].severity')
+    bad([finding({ disposition: 'apply' })], 'details.findings[0].disposition')
+    bad([finding({ id: '../escape' })], 'details.findings[0].id')
+    bad([finding({ id: 'a'.repeat(65) })], 'details.findings[0].id')
+    bad([finding(), finding()], 'details.findings[1].id repeats')
+    bad([finding({ location: '' })], 'details.findings[0].location')
+    bad([finding({ summary: '' })], 'details.findings[0].summary')
+    bad([finding({ disposition: 'auto-fix' })], 'details.findings[0].patch is required')
+    bad([finding({ disposition: 'auto-fix', patch: '' })], 'details.findings[0].patch')
+    bad([finding({ disposition: 'no-op', patch: 'diff' })], 'details.findings[0].patch is only allowed')
+    bad([finding({ patch: 'diff' })], 'details.findings[0].patch is only allowed')
+    bad([finding({ surprise: true })], 'details.findings[0].surprise')
+    bad([finding(), finding({ id: 'ok', severity: 'bad' })], 'details.findings[1].severity')
+    for (const key of ['id', 'severity', 'location', 'summary']) {
+      const entry = finding(); delete entry[key]
+      bad([entry], `details.findings[0].${key} is required`)
+    }
+    bad([finding({ severity: 'must-fix' })], 'details.verdict is pass', 'pass')
+  }
 })

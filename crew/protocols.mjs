@@ -204,3 +204,91 @@ export function parseAgent(text) {
   const body = lines.slice(end + 1).join('\n')
   return { fields, body, defects: agentDefects }
 }
+
+// P2, the seat envelope: JSON per role, validated as a parsed value. Paths in it declare
+// artifacts; nothing here reads or runs them.
+export const ENVELOPE_FIELDS = Object.freeze(['role', 'id', 'status', 'summary', 'details'])
+export const ENVELOPE_STATUSES = Object.freeze(['done', 'insufficient', 'escalate'])
+export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
+export const LEAD_DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
+export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
+export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-op'])
+const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
+const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
+const DETAIL_KEYS = Object.freeze({
+  planner: ['plan_path', 'gate_path', 'acceptance'],
+  builder: ['summary'],
+  reviewer: REVIEW_KEYS,
+  'tech-lead': REVIEW_KEYS,
+  lead: ['decision'],
+})
+const DETAIL_RULES = {
+  plan_path: [nonempty, 'is a nonempty string'],
+  gate_path: [nonempty, 'is a nonempty string'],
+  summary: [nonempty, 'is a nonempty string'],
+  verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
+  decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
+}
+const FINDING_REQUIRED = Object.freeze(['id', 'severity', 'location', 'summary'])
+const FINDING_RULES = {
+  id: [(v) => typeof v === 'string' && FINDING_ID.test(v), 'is 1-64 letters, digits, _ or -'],
+  severity: [(v) => FINDING_SEVERITIES.includes(v), `is one of ${FINDING_SEVERITIES.join(', ')}`],
+  location: [nonempty, 'is a nonempty string'],
+  summary: [nonempty, 'is a nonempty string'],
+  disposition: [(v) => FINDING_DISPOSITIONS.includes(v), `is one of ${FINDING_DISPOSITIONS.join(', ')}`],
+  patch: [nonempty, 'is a nonempty string'],
+}
+
+// Returns { envelope, defects }. An empty defects list is an envelope the loop can act on;
+// a refused object root is still returned, a non-object root is null.
+export function validateEnvelope(role, envelope) {
+  if (!plain(envelope)) return { envelope: null, defects: ['envelope is a JSON object'] }
+  const defects = []
+  for (const key of Object.keys(envelope)) {
+    if (!ENVELOPE_FIELDS.includes(key)) defects.push(`unknown field ${key}`)
+  }
+  for (const key of ENVELOPE_FIELDS) if (!Object.hasOwn(envelope, key)) defects.push(`missing field ${key}`)
+  if (!AGENT_ROLES.includes(envelope.role)) defects.push(`role is one of ${AGENT_ROLES.join(', ')}`)
+  if (envelope.role !== role) defects.push('role must match the expected role')
+  if (!nonempty(envelope.id)) defects.push('id is a nonempty string')
+  if (!ENVELOPE_STATUSES.includes(envelope.status)) defects.push(`status is one of ${ENVELOPE_STATUSES.join(', ')}`)
+  if (!nonempty(envelope.summary)) defects.push('summary is a nonempty string')
+  const required = AGENT_ROLES.includes(role) ? DETAIL_KEYS[role] : null
+  const details = envelope.details
+  if (required && Object.hasOwn(envelope, 'details')) {
+    if (!plain(details)) defects.push(`details is an object with ${required.join(', ')}`)
+    else {
+      for (const key of Object.keys(details)) if (!required.includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
+      for (const key of required) {
+        if (!Object.hasOwn(details, key)) { defects.push(`details.${key} is required`); continue }
+        const v = details[key]
+        if (Object.hasOwn(DETAIL_RULES, key)) { if (!DETAIL_RULES[key][0](v)) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
+        else if (key === 'acceptance') {
+          const validAcceptance = Array.isArray(v) && v.length > 0 && v.every((id) => typeof id === 'string' && ID.test(id)) && new Set(v).size === v.length
+          if (!validAcceptance) defects.push('details.acceptance is a nonempty list of unique acceptance ids')
+        } else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
+        else if (key === 'findings') {
+          const seen = new Set()
+          v.forEach((finding, index) => {
+            const path = `details.findings[${index}]`
+            if (!plain(finding)) { defects.push(`${path} is an object with ${FINDING_REQUIRED.join(', ')}`); return }
+            for (const key of Object.keys(finding)) {
+              if (!Object.hasOwn(FINDING_RULES, key)) defects.push(`${path}.${key} is not a finding field`)
+              else if (!FINDING_RULES[key][0](finding[key])) defects.push(`${path}.${key} ${FINDING_RULES[key][1]}`)
+            }
+            for (const key of FINDING_REQUIRED) if (!Object.hasOwn(finding, key)) defects.push(`${path}.${key} is required`)
+            if (FINDING_RULES.id[0](finding.id)) {
+              if (seen.has(finding.id)) defects.push(`${path}.id repeats ${finding.id}`)
+              seen.add(finding.id)
+            }
+            const hasPatch = Object.hasOwn(finding, 'patch')
+            if (finding.disposition === 'auto-fix' && !hasPatch) defects.push(`${path}.patch is required for disposition auto-fix`)
+            if (hasPatch && finding.disposition !== 'auto-fix') defects.push(`${path}.patch is only allowed with disposition auto-fix`)
+          })
+          if (details.verdict === 'pass' && v.some((finding) => plain(finding) && finding.severity === 'must-fix')) defects.push('details.verdict is pass but the findings include a must-fix')
+        }
+      }
+    }
+  }
+  return { envelope, defects }
+}

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { constants, cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -417,13 +418,21 @@ async function readCheckout(git, cwd) {
   const lines = paths.split('\n').filter((line) => line !== '')
   if (!HEX_OID.test(head.trim()) || lines.length !== GIT_PATHS.length) return { problem: unmeasured('invalid-remote-data') }
   const where = (name) => resolve(cwd, lines[GIT_PATHS.indexOf(name)])
+  // Status labels say a path changed, not what it holds; the bytes of every path status names are compared too.
+  const named = (parseStatus(status) ?? []).flatMap((entry) => (entry.from === null ? [entry.path] : [entry.path, entry.from]))
+  const digest = createHash('sha256')
+  for (const path of [...new Set(named)].sort()) {
+    let bytes = null
+    try { bytes = lstatSync(join(cwd, path)).isFile() ? readFileSync(join(cwd, path)) : null } catch {}
+    digest.update(`${path}\0${bytes === null ? 'absent' : createHash('sha256').update(bytes).digest('hex')}\0`)
+  }
   return {
-    head: head.trim(), branch: branch.trim(), status, entries, indexPath: where('index'),
+    head: head.trim(), branch: branch.trim(), status, entries, contents: digest.digest('hex'), indexPath: where('index'),
     busy: GIT_PATHS.filter((name) => name !== 'index' && existsSync(where(name))),
   }
 }
 
-const sameCheckout = (a, b) => a.head === b.head && a.branch === b.branch && a.status === b.status && a.entries === b.entries
+const sameCheckout = (a, b) => a.head === b.head && a.branch === b.branch && a.status === b.status && a.entries === b.entries && a.contents === b.contents
 
 // Puts HEAD and the index back to the captured state, then proves it by reading the checkout again.
 async function restoreCheckout(git, cwd, before, indexBefore) {
@@ -515,9 +524,11 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     const before = await readCheckout(git, cwd)
     if (before.problem) return notGreen(before.problem, 'rebase-failed')
     if (before.busy.length > 0 || before.status !== '') return red('dirty-worktree', { busy: before.busy })
-    // A bare name can resolve to a tag of the same name; rebase onto the branch it names, local first.
+    if (before.branch === 'HEAD') return unmeasured('invalid-input', { detail: 'a detached HEAD has no lane branch to rebase' })
+    // A bare name can resolve to a tag of the same name, so it is resolved to a branch: the remote-tracking
+    // origin/<base> first, because a local base may lag it. The caller fetches before rebasing.
     let target = null
-    for (const ref of [`refs/heads/${base}`, `refs/remotes/${base}`]) {
+    for (const ref of [`refs/remotes/origin/${base}`, `refs/remotes/${base}`, `refs/heads/${base}`]) {
       if ((await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).status === 'green') { target = ref; break }
     }
     if (target === null) return red('rebase-failed', { detail: `${base} is neither a local nor a remote-tracking branch` })
@@ -525,7 +536,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
       const onBase = await git(['merge-base', '--is-ancestor', target, 'HEAD'])
-      if (!after.problem && after.busy.length === 0 && after.status === '' && onBase.status === 'green') return { status: 'green', reason: null, head: after.head }
+      if (!after.problem && after.busy.length === 0 && after.status === '' && after.branch === before.branch && onBase.status === 'green') return { status: 'green', reason: null, head: after.head }
       return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean and on its base' })
     }
     const listed = outcome.status === 'red' ? await git(['diff', '--name-only', '--diff-filter=U', '-z']) : null
@@ -533,7 +544,12 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     if (mid.problem || mid.busy.some((name) => name.startsWith('rebase-'))) {
       await git(['rebase', '--abort'])
     }
-    const final = await readCheckout(git, cwd)
+    let final = await readCheckout(git, cwd)
+    // A runner can report failure after git finished the rebase: the branch moved with no rebase left to abort.
+    if (!final.problem && final.busy.length === 0 && final.status === '' && final.branch === before.branch && final.head !== before.head) {
+      await git(['reset', '-q', '--keep', before.head])
+      final = await readCheckout(git, cwd)
+    }
     if (final.problem || final.busy.length > 0 || !sameCheckout(before, final)) {
       return unmeasured('cleanup-unproven', { cause: outcome.reason, detail: 'the checkout is not proven back at its pre-rebase state' })
     }

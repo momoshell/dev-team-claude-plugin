@@ -1292,3 +1292,65 @@ test('openPullRequest finds the lane PR on any base and refuses to open a second
   assert.equal(f.count('gh', 'create'), 0)
   assert.ok(f.calls.filter((spec) => spec.args[1] === 'list').every((spec) => !spec.args.includes('--base')))
 })
+
+// MUTATION: compare status labels only and a failed commit that left different bytes reads as restored.
+test('commitChanges never reports a measured failure when the bytes of a changed file are not restored', async () => {
+  const cwd = laneRepo()
+  writeFileSync(join(cwd, 'a.txt'), 'requested\n')
+  const run = through(async (spec) => {
+    if (!has(spec, 'commit')) return undefined
+    writeFileSync(join(cwd, 'a.txt'), 'tampered\n')
+    return FAKE_BAD
+  })
+  const result = await commitChanges({ cwd, files: ['a.txt'], subject: 'feat: fails' }, { run })
+  assert.equal(result.status, 'unmeasured')
+  assert.equal(reasonOf(result), 'cleanup-unproven')
+})
+
+// MUTATION: prefer the local base and a lane rebased onto a stale local main reads as on its base.
+test('rebaseBranch rebases onto origin/<base> when the local base lags it', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n' })
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, 'b.txt'), 'remote moved\n')
+  git(cwd, 'add', 'b.txt')
+  git(cwd, 'commit', '-qm', 'remote moves')
+  git(cwd, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+  git(cwd, 'reset', '-q', '--hard', 'HEAD~1')
+  git(cwd, 'checkout', '-q', 'lane')
+  const result = await rebaseBranch({ cwd, base: 'main' })
+  assert.equal(result.status, 'green', JSON.stringify(result))
+  assert.equal(gitResult(cwd, 'merge-base', '--is-ancestor', 'refs/remotes/origin/main', 'HEAD').status, 0)
+})
+
+// MUTATION: drop the detached refusal and a rebase moves HEAD while the lane branch stays behind.
+test('rebaseBranch refuses a detached HEAD without moving anything', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n' })
+  git(cwd, 'checkout', '-q', '--detach')
+  const before = snapshot(cwd)
+  const result = await rebaseBranch({ cwd, base: 'main' })
+  assert.equal(result.status, 'unmeasured')
+  assert.equal(reasonOf(result), 'invalid-input')
+  assert.deepEqual(snapshot(cwd), before)
+})
+
+// MUTATION: skip the reset and a rebase whose runner failed after git finished leaves the branch moved.
+test('rebaseBranch puts the branch back when its runner reports failure after git finished', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n' })
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, 'b.txt'), 'main moved\n')
+  git(cwd, 'add', 'b.txt')
+  git(cwd, 'commit', '-qm', 'main moves')
+  git(cwd, 'checkout', '-q', 'lane')
+  writeFileSync(join(cwd, 'c.txt'), 'lane\n')
+  git(cwd, 'add', 'c.txt')
+  git(cwd, 'commit', '-qm', 'lane work')
+  const before = snapshot(cwd)
+  const run = through(async (spec) => {
+    if (!(has(spec, 'rebase') && !spec.args.includes('--abort'))) return undefined
+    await runSuite(spec)
+    return FAKE_BAD
+  })
+  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+  assert.notEqual(result.status, 'green')
+  assert.deepEqual(snapshot(cwd), before)
+})

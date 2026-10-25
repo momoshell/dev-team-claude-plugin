@@ -3,14 +3,15 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { CHECK_REASONS, proveMutations } from './checks.mjs'
+import { CHECK_REASONS } from './checks.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
 const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
-const STAGES = ['plan', 'baseline', 'build', 'gate', 'mutations', 'review', 'suite', 'commit', 'fetch', 'rebase', 'publish']
-const SUCCESS = ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'seat:reviewer', 'suite', 'commit', 'fetch', 'rebase', 'publish']
+const STAGES = ['plan', 'baseline', 'build', 'gate', 'mutations', 'review', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const SUCCESS = ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'seat:reviewer', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
@@ -19,13 +20,12 @@ function fakes(options = {}) {
   let reviewTurns = 0
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: 'operator task',
-    acceptance: ['A1'], mutations: [{ check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }],
-    files: ['lib.mjs'], subject: 'feat: lane', branch: 'lane', base: 'main', body: 'why', closes: [12], refs: [13],
+    acceptance: ['A1'], subject: 'feat: lane', branch: 'lane', base: 'main', body: 'why', closes: [12], refs: [13],
     suite: { command: 'node', args: ['--test', 'lane.test.mjs'] }, timeoutMs: 5000, ...options.spec,
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { plan_path: '/virtual/task/plan.md', gate_path: '/virtual/task/gate.mjs', acceptance: ['A1'] }
+    details: request.role === 'planner' ? { plan_path: '/virtual/task/plan.md', gate_path: '/virtual/task/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] }
       : request.role === 'builder' ? { summary: 'built' }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate' }
       : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
@@ -58,7 +58,9 @@ function fakes(options = {}) {
     proveMutations: measured('mutations', 'proof' in options ? options.proof : { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }] }),
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
-    run: measured('fetch', options.fetch ?? green()),
+    run: (input) => input.args.includes('status')
+      ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))(input)
+      : measured('fetch', options.fetch ?? green())(input),
     rebaseBranch: measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'b'.repeat(40) }),
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
     ...options.deps,
@@ -76,8 +78,9 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.mkdir, ['/virtual/task', { recursive: true }])
   assert.deepEqual(f.seen.baseline, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', timeoutMs: 5000 })
   assert.deepEqual(f.seen.gate, f.seen.baseline)
-  assert.deepEqual(f.seen.mutations, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', checks: ['A1'], mutations: f.spec.mutations, timeoutMs: 5000 })
+  assert.deepEqual(f.seen.mutations, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', checks: ['A1'], mutations: [MUTATION], timeoutMs: 5000 })
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs: 5000 })
   assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'feat: lane', body: 'why', closes: [12], refs: [13], timeoutMs: 5000 })
   assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'], timeoutMs: 5000 })
   assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main', timeoutMs: 5000 })
@@ -254,9 +257,6 @@ test('a surviving, unmeasured, missing, duplicate, wrong-check or thrown proof n
   const thrown = fakes({ throwCheck: 'mutations' })
   assert.deepEqual(await thrown.go(), stopped('runner-threw'))
   assert.equal(count(thrown, 'reviewer'), 0)
-  const empty = fakes({ spec: { mutations: [] }, deps: { proveMutations: (input) => proveMutations(input) } })
-  assert.deepEqual(await empty.go(), stopped('invalid-mutations'))
-  assert.equal(count(empty, 'reviewer'), 0)
 })
 
 // MUTATION: trust a non-green gate and the review and commit run on a build that does not pass.
@@ -360,7 +360,7 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
   assert.deepEqual(events('envelope').map((r) => [r.role, r.id, r.parsed.status, r.defects, r.error]), [
     ['planner', 'lane.planner.1', 'done', [], null], ['builder', 'lane.builder.2', 'done', [], null], ['reviewer', 'lane.reviewer.3', 'done', [], null],
   ])
-  assert.deepEqual(events('check').map((r) => r.check), ['baseline', 'gate', 'mutations', 'suite', 'commit', 'fetch', 'rebase', 'publish'])
+  assert.deepEqual(events('check').map((r) => r.check), ['baseline', 'gate', 'mutations', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
   assert.deepEqual(events('check')[0].result.result.failingIds, ['A1'])
   assert.deepEqual(events('verdict').map((r) => [r.status, r.verdict]), [['reviewed', 'pass']])
   assert.deepEqual(events('commit').map((r) => r.head), ['a'.repeat(40)])
@@ -384,7 +384,7 @@ test('an unsupported shape, invalid input or unsound seam is refused before any 
     [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'unsupported-shape'], [{ shape: undefined }, 'unsupported-shape'],
     [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
     [{ brief: '' }, 'invalid-input'], [{ acceptance: [] }, 'invalid-input'], [{ acceptance: ['A1', 'A1'] }, 'invalid-input'],
-    [{ files: [] }, 'invalid-input'], [{ mutations: null }, 'invalid-input'], [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
+    [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
     [{ subject: '' }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
     [{ timeoutMs: 0 }, 'invalid-input'], [{ timeoutMs: -1 }, 'invalid-input'], [{ timeoutMs: 1.5 }, 'invalid-input'], [{ timeoutMs: Infinity }, 'invalid-input'],
     [{ closes: 12 }, 'invalid-input'], [{ title: 3 }, 'invalid-input'],
@@ -431,13 +431,79 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 test('every stopped reason is a member of the closed enum', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
   for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason))
-  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'accept-unmeasured', 'round-bound']) assert.ok(LOOP_REASONS.includes(reason))
+  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured']) assert.ok(LOOP_REASONS.includes(reason))
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })
 
+// MUTATION: forward spec.mutations to the proof and a caller-written declaration replaces the planner's.
+test('the proof receives the planner declarations and a caller-supplied files or mutations list is ignored', async () => {
+  const planned = { ...MUTATION, find: 'planned-find' }
+  const f = fakes({
+    spec: { files: ['caller-lie.mjs'], mutations: [{ ...MUTATION, find: 'caller-lie' }] },
+    edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, mutations: [planned] } } : v,
+  })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.seen.mutations.mutations, [planned])
+  assert.deepEqual(f.seen.commit.files, ['lib.mjs'])
+  const refused = fakes({ edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, mutations: [] } } : v })
+  assert.deepEqual(await refused.go(), stopped('envelope-refused'))
+  assert.equal(refused.calls.includes('baseline'), false)
+})
+
+// MUTATION: send the caller's list or an unparsed line to commit and a rename end, an odd name or a deletion is left out.
+test('the commit receives the paths git reports after the suite, both rename ends included', async () => {
+  const cases = [
+    [' M src/a.mjs\0?? new file.txt\0R  renamed.mjs\0old.mjs\0 D deleted.mjs\0', ['src/a.mjs', 'new file.txt', 'renamed.mjs', 'old.mjs', 'deleted.mjs']],
+    ['C  copy.mjs\0src.mjs\0', ['copy.mjs', 'src.mjs']],
+    [' R renamed-in-tree.mjs\0before.mjs\0', ['renamed-in-tree.mjs', 'before.mjs']],
+    ['MM both.mjs\0A  both.mjs\0', ['both.mjs']],
+    ['?? line\nbreak.txt\0?? "quoted".txt\0', ['line\nbreak.txt', '"quoted".txt']],
+    ['', []],
+  ]
+  for (const [paths, files] of cases) {
+    const f = fakes({ paths })
+    assert.equal((await f.go()).status, 'done', paths)
+    assert.deepEqual(f.seen.commit.files, files, paths)
+    const order = f.calls.filter((c) => ['suite', 'paths', 'commit'].includes(c))
+    assert.deepEqual(order, ['suite', 'paths', 'commit'])
+  }
+})
+
+// MUTATION: commit anyway when the status read is unusable and unmeasured paths are committed as an empty list.
+test('a changed-path read that is denied, interrupted, non-green or malformed stops before the commit', async () => {
+  const bad = (fields) => ({ pathsResult: { ...green(), stdout: ' M a.mjs\0', ...fields } })
+  const cases = {
+    'EPERM': { throwCheck: 'paths' },
+    'ENOENT': bad({ status: 'unmeasured', reason: 'spawn-failed', code: null, stdout: '' }),
+    'EINTR': bad({ status: 'unmeasured', reason: 'interrupted', code: null, signal: 'SIGINT' }),
+    'red': bad({ status: 'red', reason: 'exit-nonzero', code: 128 }),
+    'signal': bad({ signal: 'SIGKILL' }),
+    'timeout': bad({ timedOut: true }),
+    'nonzero green': bad({ code: 1 }),
+    'no stdout': bad({ stdout: undefined }),
+    'truncated': { paths: ' M a.mjs' },
+    'dangling rename': { paths: 'R  new.mjs\0' },
+    'empty source': { paths: 'R  new.mjs\0\0' },
+    'short record': { paths: ' M\0' },
+    'bad status': { paths: 'xx a.mjs\0' },
+    'quoted line': { paths: ' M "a b.mjs"\n' },
+    'absolute': { paths: ' M /etc/passwd\0' },
+    'parent': { paths: ' M ../a.mjs\0' },
+    'git dir': { paths: ' M .git/config\0' },
+    'directory': { paths: '?? dir/\0' },
+  }
+  for (const [name, options] of Object.entries(cases)) {
+    const f = fakes(options)
+    assert.deepEqual(await f.go(), stopped('paths-unmeasured'), name)
+    assert.equal(f.calls.includes('commit'), false, name)
+    assert.equal(f.calls.includes('fetch'), false, name)
+    assert.equal(f.rows.find((r) => r.event === 'verdict' && r.status === 'stopped').reason, 'paths-unmeasured', name)
+  }
+})
+
 // MUTATION: import an old runtime module, or wire the loop into one, and the isolated lane is no longer isolated.
-test('the loop imports only builtins and the three contract modules, and no old-path module imports it', () => {
+test('the loop imports only builtins and the three contract modules, and only the lean bridge imports it', () => {
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
@@ -446,5 +512,5 @@ test('the loop imports only builtins and the three contract modules, and no old-
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))
     .filter((path) => /['"][^'"]*\/loop\.mjs['"]/.test(readFileSync(path, 'utf8')))
-  assert.deepEqual(importers, [])
+  assert.deepEqual(importers, [join(dir, 'lean.mjs')])
 })

@@ -14,7 +14,7 @@ import { TIERS, validateEnvelope } from './protocols.mjs'
 export const DEFAULT_ROUNDS = 2
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'accept-unmeasured', 'round-bound',
+  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -23,13 +23,31 @@ const strings = (v) => Array.isArray(v) && v.every(text)
 const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
+// `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
+// source. Returns every path named, or null when the output is truncated, mis-framed or names an unsafe path.
+function parseChangedPaths(stdout) {
+  const parts = stdout.split('\0')
+  if (parts.pop() !== '') return null
+  const paths = new Set()
+  const safe = (path) => path !== '' && !path.startsWith('/') && !/[\\\0]/.test(path)
+    && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
+  for (let at = 0; at < parts.length; at++) {
+    const record = parts[at]
+    if (!/^[ MTADRCU?!]{2} /.test(record)) return null
+    const named = [record.slice(3)]
+    if ('RC'.includes(record[0]) || 'RC'.includes(record[1])) named.push(parts[++at])
+    if (!named.every((path) => typeof path === 'string' && safe(path))) return null
+    for (const path of named) paths.add(path)
+  }
+  return [...paths]
+}
+
 export async function runLoop(spec, deps = {}) {
   // Nothing is read or run until every field and seam is sound.
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return refusal('invalid-input')
   if (spec.shape !== 'standard') return refusal('unsupported-shape')
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.subject, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && strings(spec.acceptance) && spec.acceptance.length > 0 && new Set(spec.acceptance).size === spec.acceptance.length
-    && strings(spec.files) && spec.files.length > 0 && Array.isArray(spec.mutations)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && [spec.body, spec.title].every((v) => v === undefined || typeof v === 'string')
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
@@ -150,6 +168,7 @@ export async function runLoop(spec, deps = {}) {
     const planned = await stage('plan', () => seatTurn('planner'))
     if (planned.halt) return planned.halt
     const { acceptance } = planned.envelope.details
+    const mutations = planned.envelope.details.mutations
     planPath = planned.envelope.details.plan_path
     gatePath = planned.envelope.details.gate_path
     if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
@@ -165,7 +184,7 @@ export async function runLoop(spec, deps = {}) {
       const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
       if (gate.status !== 'green') return stop(gate.reason, gate)
 
-      const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations: spec.mutations, timeoutMs }))
+      const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
       const rows = Array.isArray(proof.rows) ? proof.rows : []
       const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
         && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
@@ -185,8 +204,13 @@ export async function runLoop(spec, deps = {}) {
     const suite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs }, { command: true }))
     if (suite.status !== 'green') return stop(suite.reason, suite)
 
+    // The commit names what git reports changed now, never a list the caller wrote before the build.
+    const status = await stage('paths', () => callCheck('paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
+    const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
+    if (!files) return stop('paths-unmeasured', status)
+
     const committed = await stage('commit', () => callCheck('commit', d.commitChanges, {
-      cwd, files: spec.files, subject: spec.subject, body: spec.body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
+      cwd, files, subject: spec.subject, body: spec.body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
     }))
     if (committed.status !== 'green' || !text(committed.head)) return stop(committed.reason ?? 'runner-threw', committed)
     await emit('commit', { head: committed.head })

@@ -1,9 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
+import { main as leanMain, runLean } from './lean.mjs'
+import { parseAgent } from './protocols.mjs'
 import { acceptanceIds, composeCommitMessage, issueStatementDefect } from './drive.mjs'
 import { resolveAgents } from './agents.mjs'
 import { bootRefusals } from './roster-validate.mjs'
@@ -342,4 +345,271 @@ test('a denied or partial snapshot write stops boot and run and names the left w
       assert.equal(spawned(calls, 'run'), undefined)
     }
   }
+})
+
+const LEAN = fileURLToPath(new URL('./lean.mjs', import.meta.url))
+const leanLaunch = (calls) => calls.find(([kind, , args]) => kind === 'detached' && args[0] === LEAN)
+
+// MUTATION: force the lean decision false and the lane detaches crew run, with no spec or lean members.
+test('--loop lean detaches the bridge on a measured spec and boots nothing', async () => {
+  const { deps, calls } = fakes()
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps })
+  const launch = leanLaunch(calls)
+  assert.deepEqual(launch.slice(1, 3), [process.execPath, [LEAN, '/home/.crew/dt-b1/b1/task/lean.json']])
+  assert.equal(launch[3].cwd, '/repo/dt-b1')
+  assert.equal(launch[3].log, '/home/.crew/briefs/started/b1.run.log')
+  assert.equal(spawned(calls, 'boot'), undefined)
+  assert.equal(spawned(calls, 'run'), undefined)
+  assert.equal(result.pid, 4242)
+  assert.deepEqual(JSON.parse(written(calls, '/task/lean.json')[2]), {
+    id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961),
+    acceptance: ['RV1'], subject: 'feat: b1', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'] },
+  })
+  const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
+  const { seats } = resolveAgents('build')
+  assert.deepEqual(Object.keys(members), Object.keys(seats))
+  for (const [role, cell] of Object.entries(seats)) assert.deepEqual(members[role], { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' })
+  const unbound = fakes({ brief: BRIEF.replace('closes: 1961', 'closes: null') })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: unbound.deps })
+  assert.deepEqual(JSON.parse(written(unbound.calls, '/task/lean.json')[2]).closes, [])
+})
+
+// MUTATION: ignore --loop in main and the flag starts the legacy run.
+test('main forwards --loop lean and refuses a missing, duplicate or unknown loop as usage', async () => {
+  const lean = fakes()
+  assert.equal(await main(['/d/b1.md', '--loop', 'lean', '--checkout', '/repo/checkout'], lean.deps), 0)
+  assert.ok(leanLaunch(lean.calls))
+  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
+    const refused = fakes()
+    assert.equal((await mainWithStderr(argv, refused.deps)).code, 2, argv.join(' '))
+    assert.deepEqual(effects(refused.calls), [], argv.join(' '))
+  }
+  const plain = fakes()
+  await main(['/d/b1.md', '--checkout', '/repo/checkout'], plain.deps)
+  assert.equal(leanLaunch(plain.calls), undefined)
+  assert.ok(spawned(plain.calls, 'run'))
+})
+
+// MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
+test('--loop lean refuses a non-standard shape before any git call', async () => {
+  const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /--loop lean runs the standard shape only/)
+  assert.deepEqual(effects(calls), [])
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean/)
+})
+
+// MUTATION: swallow the metadata failure and the bridge launches without a spec.
+test('a denied lean metadata write stops the launch and names the left worktree', async () => {
+  for (const [failing, at] of [['mkdir', 2], ['write', 3], ['write', 4]]) {
+    // mkdir 1 and write 1-2 are the existing snapshot; the lean directory and its two files follow.
+    const seen = { mkdir: 0, write: 0 }
+    const { deps, calls } = fakes({ write: (kind) => { if (++seen[kind] === at && kind === failing) throw Object.assign(new Error('EPERM injected'), { code: 'EPERM' }) } })
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), (error) => error instanceof StartRefusal && error.message.includes('EPERM') && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message), `${failing} ${at}`)
+    assert.equal(calls.some(([kind]) => kind === 'detached'), false, `${failing} ${at}`)
+  }
+})
+
+// ---- crew/lean.mjs: the detached bridge, over a fake ACP seat and fake loop checks ----
+
+const LEAN_MUTATION = { check: 'RV1', file: 'src/a.mjs', find: 'before', replace: 'after' }
+const GREEN = { status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false }
+const EINTR = Object.assign(new Error('turn interrupted'), { code: 'EINTR' })
+const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
+
+// A lane's whole loop with every outside effect faked: seats answer by envelope id, recordings are real files.
+function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, status = ' M src/a.mjs\0' } = {}) {
+  const dir = scratchDir('lean-')
+  const spec = {
+    id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF, acceptance: ['RV1'],
+    subject: 'feat: lane', branch: 'lane', base: 'main', suite: { command: 'npm', args: ['test'] },
+  }
+  mkdirSync(spec.cwd, { recursive: true })
+  const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
+  let review = 0
+  const envelope = (role, id) => {
+    const n = Number(id.split('.').at(-1))
+    const own = answers[`${role}.${n}`]
+    const details = role === 'planner' ? { plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+      : role === 'builder' ? { summary: 'built' }
+      : role === 'lead' ? { decision: 'bounce' }
+      : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this' }] : [] }
+    return { role, id, status: own ?? 'done', summary: 'fixture', details }
+  }
+  const fakeAcp = acp ?? (async (input) => {
+    requests.push(input)
+    const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+    const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+    // The real seat swallows a failed append and never tells its caller.
+    try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `chunk-${id}` } } })}\n`, 'utf8') } catch {}
+    mkdirSync(spec.taskDir, { recursive: true })
+    writeFileSync(path, JSON.stringify(envelope(input.definition.role, id)))
+  })
+  const options = {
+    log: (line) => logs.push(line),
+    runAcpSeat: (input) => { if (!acp) return fakeAcp(input); requests.push(input); return fakeAcp(input) },
+    loopDeps: {
+      journal: async () => {},
+      checkBaseline: async () => ({ accepted: true, reason: 'gate-failed', result: { ...GREEN, status: 'red', code: 1, reason: 'gate-failed', failingIds: ['RV1'] } }),
+      runGate: async () => GREEN,
+      proveMutations: async () => ({ status: 'green', reason: null, rows: [{ check: 'RV1', outcome: 'killed', reason: null }] }),
+      runSuite: async () => GREEN,
+      commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
+      rebaseBranch: async () => ({ status: 'green', reason: null, head: 'b'.repeat(40) }),
+      openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
+      run: async (input) => input.args.includes('status') ? { ...GREEN, stdout: status } : GREEN,
+      ...loopDeps,
+    },
+    ...deps,
+  }
+  const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
+  return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
+}
+const terminal = (logs) => logs.map((line) => JSON.parse(line)).filter((row) => row.event === 'loop-result')
+
+// MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.
+test('every turn gets its role definition, the complete brief and P2, and its own recording', async () => {
+  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
+  const result = await f.go()
+  assert.equal(result.status, 'done')
+  const roles = ['planner', 'builder', 'reviewer', 'builder', 'reviewer']
+  assert.deepEqual(f.requests.map((r) => r.definition.role), roles)
+  const { seats } = resolveAgents('build')
+  f.requests.forEach((request, index) => {
+    const role = roles[index]
+    const id = `lane.${role}.${index + 1}`
+    const returnPath = join(f.spec.taskDir, `${role}-${index + 1}.json`)
+    const source = join(AGENTS, `${role}.md`)
+    const { body } = parseAgent(readFileSync(source, 'utf8'))
+    const cell = seats[role]
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, skills: [], body })
+    assert.equal(request.cwd, f.spec.cwd)
+    assert.notEqual(f.spec.taskDir, request.cwd)
+    assert.equal(request.sessionFile, f.sessionOf(role, index + 1))
+    for (const wanted of [body, BRIEF, `Envelope id: ${id}`, `Return path: ${returnPath}`, `Task directory: ${f.spec.taskDir}`, `Definition source: ${source}`, join(AGENTS, '..', 'roles', `${role}.md`), 'no submit_envelope', `"role": "${role}"`, `"id": "${id}"`]) {
+      assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
+    }
+    const lines = readFileSync(request.sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.deepEqual(lines[0], { type: 'prompt', text: request.prompt })
+    assert.equal(lines[1].update.content.text, `chunk-${id}`)
+    assert.equal(lines.length, 2)
+  })
+  assert.match(f.requests[0].prompt, /"mutations"/)
+  assert.match(f.requests[1].prompt, /"summary"/)
+  assert.match(f.requests[2].prompt, /"findings"/)
+  assert.doesNotMatch(f.requests[1].prompt, /redo-this/)
+  assert.match(f.requests[3].prompt, /redo-this/)
+  assert.equal(new Set(f.requests.map((r) => r.sessionFile)).size, 5)
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.
+test('a consulted lead gets its own definition and decision shape', async () => {
+  const f = leanFixture({ answers: { 'planner.1': 'insufficient' } })
+  const result = await f.go()
+  assert.equal(result.status, 'done')
+  const roles = f.requests.map((r) => r.definition.role)
+  assert.deepEqual(roles.slice(0, 3), ['planner', 'lead', 'planner'])
+  const lead = f.requests[1]
+  assert.equal(lead.definition.model, `${resolveAgents('build').seats.lead.provider}/${resolveAgents('build').seats.lead.id}`)
+  assert.match(lead.prompt, /"decision"/)
+  assert.match(lead.prompt, /insufficient/)
+  assert.ok(lead.prompt.includes(`Task directory: ${f.spec.taskDir}`))
+  assert.equal(lead.sessionFile, f.sessionOf('lead', 2))
+})
+
+// MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.
+test('a tier override applies and an unseating override refuses the turn', async () => {
+  const mechanical = leanFixture({ tier: 'mechanical' })
+  assert.equal((await mechanical.go()).status, 'done')
+  assert.equal(mechanical.requests[0].definition.effort, resolveAgents('mechanical').seats.planner.effort)
+  assert.notEqual(mechanical.requests[0].definition.effort, parseAgent(readFileSync(join(AGENTS, 'planner.md'), 'utf8')).fields.effort)
+  const seat = resolveAgents('build').seats.lead
+  const unseated = leanFixture({ tier: 'mechanical', answers: { 'planner.1': 'insufficient' }, loopDeps: { resolveAgents: (tier) => ({ ...resolveAgents(tier), seats: { ...resolveAgents(tier).seats, lead: seat } }) } })
+  const result = await unseated.go()
+  assert.deepEqual(result, { status: 'stopped', reason: 'lead-refused', pr: null })
+  assert.deepEqual(unseated.requests.map((r) => r.definition.role), ['planner'])
+})
+
+// MUTATION: append to an existing recording instead of creating it exclusively and an old turn is overwritten or mixed.
+test('a recording that already exists is never reused: the turn stops before the seat starts', async () => {
+  const f = leanFixture()
+  mkdirSync(join(f.spec.taskDir, 'lean', 'planner'), { recursive: true })
+  writeFileSync(f.sessionOf('planner', 1), 'earlier turn\n')
+  const result = await f.go()
+  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(f.requests.length, 0)
+  assert.equal(readFileSync(f.sessionOf('planner', 1), 'utf8'), 'earlier turn\n')
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: ignore a failed directory or prompt write and the seat runs with nothing recorded.
+test('a denied recording directory or initial write stops the turn before the seat starts', async () => {
+  for (const effect of ['mkdirSync', 'writeFileSync']) {
+    const f = leanFixture({ deps: { [effect]: () => { throw EPERM } } })
+    const result = await f.go()
+    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, effect)
+    assert.equal(f.requests.length, 0, effect)
+    assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }], effect)
+  }
+})
+
+// MUTATION: pass the bridge's append straight through and the seat's swallowed recording failure goes unseen.
+test('a recording append that fails, even once, stops the turn although the seat swallowed it', async () => {
+  let appends = 0
+  const f = leanFixture({ deps: { appendFileSync: (...args) => { if (++appends === 1) throw EPERM; return appendFileSyncReal(...args) } } })
+  const result = await f.go()
+  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(f.requests.length, 1)
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: treat a thrown or rejected turn as returned and the loop reads a missing envelope as success.
+test('a turn that throws or rejects stops with a terminal row', async () => {
+  for (const acp of [async () => { throw EINTR }, () => { throw EINTR }]) {
+    const f = leanFixture({ acp })
+    const result = await f.go()
+    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+    assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+  }
+})
+
+test('the terminal row repeats a stopped loop result and a throwing log is not swallowed', async () => {
+  const f = leanFixture({ loopDeps: { run: async () => { throw EPERM } } })
+  const result = await f.go()
+  assert.deepEqual(result, { status: 'stopped', reason: 'paths-unmeasured', pr: null })
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+  const broken = leanFixture({ deps: { log: () => { throw EPERM } } })
+  await assert.rejects(broken.go(), (error) => error === EPERM)
+})
+
+// MUTATION: launch the loop on an unreadable spec and a seat starts with no input.
+test('the bridge entry reads one spec file; a malformed or unreadable spec is one invalid-input row and no seat', async () => {
+  const dir = scratchDir('lean-main-')
+  const bad = join(dir, 'bad.json')
+  writeFileSync(bad, '{"id":')
+  const rows = []
+  const acp = async () => { throw new Error('a seat was launched') }
+  for (const path of [bad, join(dir, 'missing.json')]) {
+    assert.equal(await leanMain([path], { log: (line) => rows.push(line), runAcpSeat: acp }), 1)
+  }
+  assert.deepEqual(rows.map((row) => JSON.parse(row)), Array(2).fill({ event: 'loop-result', status: 'stopped', reason: 'invalid-input', pr: null }))
+  assert.equal(await leanMain([], { log: () => {} }), 2)
+  assert.equal(await leanMain([bad, bad], { log: () => {} }), 2)
+  const good = leanFixture()
+  const specPath = join(dir, 'spec.json')
+  writeFileSync(specPath, JSON.stringify(good.spec))
+  assert.equal(await leanMain([specPath], good.options), 0)
+  assert.equal(existsSync(good.sessionOf('planner', 1)), true)
+  const stoppedRows = []
+  const failing = leanFixture({ loopDeps: { run: async () => { throw EPERM } } })
+  const failingPath = join(dir, 'failing.json')
+  writeFileSync(failingPath, JSON.stringify(failing.spec))
+  assert.equal(await leanMain([failingPath], { ...failing.options, log: (line) => stoppedRows.push(line) }), 1)
+  assert.equal(JSON.parse(stoppedRows.at(-1)).reason, 'paths-unmeasured')
+})
+
+test('importing the bridge launches nothing', () => {
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(LEAN).href)})`], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.stdout, '')
 })

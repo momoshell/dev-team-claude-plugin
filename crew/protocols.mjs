@@ -216,7 +216,7 @@ export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-o
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
 const DETAIL_KEYS = Object.freeze({
-  planner: ['plan_path', 'gate_path', 'acceptance'],
+  planner: ['plan_path', 'gate_path', 'acceptance', 'mutations'],
   builder: ['summary'],
   reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
@@ -229,6 +229,7 @@ const DETAIL_RULES = {
   verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
 }
+const MUTATION_KEYS = Object.freeze(['check', 'file', 'find', 'replace'])
 const FINDING_REQUIRED = Object.freeze(['id', 'severity', 'location', 'summary'])
 const FINDING_RULES = {
   id: [(v) => typeof v === 'string' && FINDING_ID.test(v), 'is 1-64 letters, digits, _ or -'],
@@ -237,6 +238,32 @@ const FINDING_RULES = {
   summary: [nonempty, 'is a nonempty string'],
   disposition: [(v) => FINDING_DISPOSITIONS.includes(v), `is one of ${FINDING_DISPOSITIONS.join(', ')}`],
   patch: [nonempty, 'is a nonempty string'],
+}
+
+// One declaration per acceptance id, each exactly {check, file, find, replace}; whether the file and
+// the find resolve in the checkout is the mutation proof's to measure, not this schema's.
+function mutationDefects(v, acceptance) {
+  if (!Array.isArray(v)) return ['details.mutations is a list of {check, file, find, replace} declarations']
+  const out = []
+  const seen = new Set()
+  v.forEach((entry, index) => {
+    const path = `details.mutations[${index}]`
+    if (!plain(entry)) { out.push(`${path} is an object with ${MUTATION_KEYS.join(', ')}`); return }
+    for (const key of Object.keys(entry)) if (!MUTATION_KEYS.includes(key)) out.push(`${path}.${key} is not a mutation field`)
+    for (const key of MUTATION_KEYS) {
+      if (!Object.hasOwn(entry, key)) out.push(`${path}.${key} is required`)
+      else if (typeof entry[key] !== 'string') out.push(`${path}.${key} is a string`)
+    }
+    if (entry.find === '') out.push(`${path}.find is a nonempty string`)
+    else if (entry.replace === entry.find) out.push(`${path}.replace differs from find`)
+    if (typeof entry.check === 'string') {
+      if (seen.has(entry.check)) out.push(`${path}.check repeats ${entry.check}`)
+      seen.add(entry.check)
+      if (Array.isArray(acceptance) && !acceptance.includes(entry.check)) out.push(`${path}.check ${entry.check} is not a declared acceptance id`)
+    }
+  })
+  if (Array.isArray(acceptance)) for (const id of acceptance) if (!seen.has(id)) out.push(`details.mutations has no declaration for acceptance ${id}`)
+  return out
 }
 
 // Returns { envelope, defects }. An empty defects list is an envelope the loop can act on;
@@ -266,7 +293,8 @@ export function validateEnvelope(role, envelope) {
         else if (key === 'acceptance') {
           const validAcceptance = Array.isArray(v) && v.length > 0 && v.every((id) => typeof id === 'string' && ID.test(id)) && new Set(v).size === v.length
           if (!validAcceptance) defects.push('details.acceptance is a nonempty list of unique acceptance ids')
-        } else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
+        } else if (key === 'mutations') defects.push(...mutationDefects(v, details.acceptance))
+        else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
         else if (key === 'findings') {
           const seen = new Set()
           v.forEach((finding, index) => {

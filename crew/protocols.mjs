@@ -216,13 +216,16 @@ export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-o
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
 const DETAIL_KEYS = Object.freeze({
-  planner: ['plan_path', 'gate_path', 'acceptance', 'mutations'],
+  planner: ['subject', 'plan_path', 'gate_path', 'acceptance', 'mutations'],
   builder: ['summary'],
   reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
   lead: ['decision'],
 })
 const DETAIL_RULES = {
+  subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
+    && /^(?:chore|ci|crew|docs|feat|fix|merge|perf|refactor|revert|spike|test|wip|workflow)(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: \S(?:.*\S)?$/.test(v),
+  'is a conventional-commit subject of at most 72 characters: type(scope): summary'],
   plan_path: [nonempty, 'is a nonempty string'],
   gate_path: [nonempty, 'is a nonempty string'],
   summary: [nonempty, 'is a nonempty string'],

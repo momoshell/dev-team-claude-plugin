@@ -196,7 +196,7 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
 // P2, the seat envelope.
 const DETAILS = {
   planner: {
-    plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'],
+    subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'],
     mutations: [{ check: 'EV1', file: 'a.mjs', find: 'x', replace: 'y' }, { check: 'EV2', file: 'b.mjs', find: 'p', replace: 'q' }],
   },
   builder: { summary: 'Implemented the change.' },
@@ -260,6 +260,22 @@ test('P2 planner details name the plan, the gate and the acceptance ids', () => 
   for (const acceptance of [[], ['EV1', 'EV1'], ['9bad'], 'EV1', [null], undefined]) {
     const value = envelope('planner'); value.details.acceptance = acceptance
     assert.ok(refusedFor('planner', value, 'details.acceptance').length, JSON.stringify(acceptance))
+  }
+})
+
+// MUTATION: bypass DETAIL_RULES for subject and a malformed, overlong or control-bearing subject is accepted.
+test('P2 planner subject is a conventional-commit subject of at most 72 characters', () => {
+  const types = ['chore', 'ci', 'crew', 'docs', 'feat', 'fix', 'merge', 'perf', 'refactor', 'revert', 'spike', 'test', 'wip', 'workflow']
+  const accepted = ['fix: x', 'feat!: breaking change', 'fix(crew)!: scoped breaking', 'fix(a.b_c/d-e): scoped', `fix: ${'x'.repeat(67)}`, 'fix: two  spaces inside', ...types.map((t) => `${t}(crew): measured change`)]
+  for (const subject of accepted) {
+    const value = envelope('planner'); value.details.subject = subject
+    assert.deepEqual(validateEnvelope('planner', value).defects, [], subject)
+  }
+  const refused = ['', 'plain summary', 'unknown: summary', 'Fix: capital type', 'fix:', 'fix: ', 'fix:summary', 'fix : summary', 'fix(): summary', 'fix(-a): summary', 'fix(a b): summary',
+    'fix(a)(b): summary', 'fix: summary ', 'fix:  leading space', ' fix: summary', 'fix: summary\nnext', 'fix: summary\0', 'fix: x\ty', 'fix: x\x7f', `fix: ${'x'.repeat(68)}`, null, 7, ['fix: x'], { subject: 'fix: x' }]
+  for (const subject of refused) {
+    const value = envelope('planner'); value.details.subject = subject
+    assert.ok(refusedFor('planner', value, 'details.subject ').length, JSON.stringify(subject))
   }
 })
 

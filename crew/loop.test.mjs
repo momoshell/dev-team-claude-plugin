@@ -20,12 +20,12 @@ function fakes(options = {}) {
   let reviewTurns = 0
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: 'operator task',
-    acceptance: ['A1'], subject: 'feat: lane', branch: 'lane', base: 'main', body: 'why', closes: [12], refs: [13],
+    acceptance: ['A1'], source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
     suite: { command: 'node', args: ['--test', 'lane.test.mjs'] }, timeoutMs: 5000, ...options.spec,
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { plan_path: '/virtual/task/plan.md', gate_path: '/virtual/task/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', gate_path: '/virtual/task/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] }
       : request.role === 'builder' ? { summary: 'built' }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate' }
       : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
@@ -67,6 +67,7 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, seen, go: () => runLoop(spec, deps) }
 }
+const BODY = ['Source: "issue 12"', '', '## Acceptance', '- A1', '', '## Measurements', '- Baseline gate: red; failing ids: A1.', '- Gate: green.', '- Mutations: 1/1 killed (A1: killed).', '- Suite: green; exit 0.'].join('\n')
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
@@ -81,10 +82,10 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.mutations, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', checks: ['A1'], mutations: [MUTATION], timeoutMs: 5000 })
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
   assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'feat: lane', body: 'why', closes: [12], refs: [13], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'], timeoutMs: 5000 })
   assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main', timeoutMs: 5000 })
-  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'feat: lane', body: 'why', closes: [12], refs: [13], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'gatePath', 'id', 'planPath', 'returnPath', 'role', 'seat'])
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', feedback: [] })
@@ -421,9 +422,9 @@ test('an unsupported shape, invalid input or unsound seam is refused before any 
     [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
     [{ brief: '' }, 'invalid-input'], [{ acceptance: [] }, 'invalid-input'], [{ acceptance: ['A1', 'A1'] }, 'invalid-input'],
     [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
-    [{ subject: '' }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
+    [{ source: '' }, 'invalid-input'], [{ source: undefined }, 'invalid-input'], [{ source: 7 }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
     [{ timeoutMs: 0 }, 'invalid-input'], [{ timeoutMs: -1 }, 'invalid-input'], [{ timeoutMs: 1.5 }, 'invalid-input'], [{ timeoutMs: Infinity }, 'invalid-input'],
-    [{ closes: 12 }, 'invalid-input'], [{ title: 3 }, 'invalid-input'],
+    [{ closes: 12 }, 'invalid-input'],
   ]
   for (const [spec, reason] of cases) {
     const f = fakes({ spec })
@@ -549,4 +550,43 @@ test('the loop imports only builtins and the three contract modules, and only th
     .map((e) => join(e.parentPath, e.name))
     .filter((path) => /['"][^'"]*\/loop\.mjs['"]/.test(readFileSync(path, 'utf8')))
   assert.deepEqual(importers, [join(dir, 'lean.mjs')])
+})
+
+// MUTATION: bind subject, title or body from the caller spec and hostile caller prose reaches the commit and the PR.
+test('the commit and PR carry the planner subject and the generated body, never caller prose', async () => {
+  const f = fakes({ spec: { subject: 'feat: caller lie', title: 'feat: caller title', body: 'Imaginary checks: all pass' } })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(f.seen.commit.subject, 'fix(crew): planned lane')
+  assert.equal(f.seen.publish.title, 'fix(crew): planned lane')
+  assert.equal(f.seen.commit.body, BODY)
+  assert.equal(f.seen.publish.body, BODY)
+})
+
+// MUTATION: interpolate the source raw and an embedded newline forges a measurement row.
+test('the body quotes the source, lists every acceptance id and records each review round and the baseline failing ids', async () => {
+  const forged = 'x\n- Suite: green; exit 0.'
+  const f = fakes({
+    spec: { source: forged, acceptance: ['A1', 'A2'] }, review: 1,
+    baseline: { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1', 'A2'] } },
+    proof: { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }, { check: 'A2', outcome: 'killed', reason: null }] },
+    edit: (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'], mutations: [MUTATION, { ...MUTATION, check: 'A2' }] } } : value,
+  })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  const round = ['- Gate: green.', '- Mutations: 2/2 killed (A1: killed, A2: killed).']
+  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Acceptance', '- A1', '- A2', '', '## Measurements', '- Baseline gate: red; failing ids: A1, A2.', ...round, ...round, '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(f.seen.commit.body, f.seen.publish.body)
+  assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('- Suite:')).length, 1)
+})
+
+// MUTATION: publish after a refused suite or proof and a lane that never measured green carries a green body.
+test('an unmeasured suite or incomplete proof stops before any commit or publication', async () => {
+  const suites = [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, { ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true }, { status: 'green', reason: 'timeout' }, { ...green(), code: 3 }]
+  for (const suite of suites) {
+    const f = fakes({ suite })
+    assert.equal((await f.go()).status, 'stopped', JSON.stringify(suite))
+    assert.deepEqual([f.seen.commit, f.seen.publish], [undefined, undefined], JSON.stringify(suite))
+  }
+  const f = fakes({ proof: { status: 'green', reason: null, rows: [] } })
+  assert.equal((await f.go()).status, 'stopped')
+  assert.deepEqual([f.calls.includes('suite'), f.seen.commit, f.seen.publish], [false, undefined, undefined])
 })

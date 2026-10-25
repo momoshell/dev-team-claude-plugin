@@ -46,11 +46,10 @@ export async function runLoop(spec, deps = {}) {
   // Nothing is read or run until every field and seam is sound.
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return refusal('invalid-input')
   if (spec.shape !== 'standard') return refusal('unsupported-shape')
-  const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.subject, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
+  const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && strings(spec.acceptance) && spec.acceptance.length > 0 && new Set(spec.acceptance).size === spec.acceptance.length
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
-    && [spec.body, spec.title].every((v) => v === undefined || typeof v === 'string')
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
     && (spec.timeoutMs === undefined || (Number.isSafeInteger(spec.timeoutMs) && spec.timeoutMs > 0))
   if (!sound) return refusal('invalid-input')
@@ -168,15 +167,17 @@ export async function runLoop(spec, deps = {}) {
 
     const planned = await stage('plan', () => seatTurn('planner'))
     if (planned.halt) return planned.halt
-    const { acceptance } = planned.envelope.details
+    const { acceptance, subject } = planned.envelope.details
     const mutations = planned.envelope.details.mutations
     planPath = planned.envelope.details.plan_path
     gatePath = planned.envelope.details.gate_path
     if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
 
+    const measurements = []
     const baseline = await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
     if (!baseline.accepted) return stop(baseline.reason, baseline)
     if (baseline.reason !== 'gate-failed' || baseline.result?.status !== 'red' || baseline.result.reason !== 'gate-failed' || !(baseline.result.failingIds?.length > 0)) return stop('runner-threw', baseline)
+    measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
 
     let feedback = []
     for (;;) {
@@ -184,12 +185,14 @@ export async function runLoop(spec, deps = {}) {
       if (built.halt) return built.halt
       const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
       if (gate.status !== 'green') return stop(gate.reason, gate)
+      measurements.push(`- Gate: ${gate.status}.`)
 
       const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
       const rows = Array.isArray(proof.rows) ? proof.rows : []
       const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
         && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
       if (!proofOK) return stop(proof.reason ?? 'mutation-unmeasured', proof)
+      measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
 
       const reviewed = await stage('review', () => seatTurn('reviewer'))
       if (reviewed.halt) return reviewed.halt
@@ -204,6 +207,8 @@ export async function runLoop(spec, deps = {}) {
 
     const suite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
     if (suite.status !== 'green') return stop(suite.reason, suite)
+    measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+    const body = [`Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance', ...acceptance.map((id) => `- ${id}`), '', '## Measurements', ...measurements].join('\n')
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.
     const status = await stage('paths', () => callCheck('paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
@@ -211,7 +216,7 @@ export async function runLoop(spec, deps = {}) {
     if (!files) return stop('paths-unmeasured', status)
 
     const committed = await stage('commit', () => callCheck('commit', d.commitChanges, {
-      cwd, files, subject: spec.subject, body: spec.body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
+      cwd, files, subject, body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
     }))
     if (committed.status !== 'green' || !text(committed.head)) return stop(committed.reason ?? 'runner-threw', committed)
     await emit('commit', { head: committed.head })
@@ -223,7 +228,7 @@ export async function runLoop(spec, deps = {}) {
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     const published = await stage('publish', () => callCheck('publish', d.openPullRequest, {
-      cwd, branch: spec.branch, base: spec.base, title: spec.title ?? spec.subject, body: spec.body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
+      cwd, branch: spec.branch, base: spec.base, title: subject, body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,
     }))
     if (published.status !== 'green' || !published.pr || typeof published.pr !== 'object') return stop(published.reason ?? 'runner-threw', published)
     await emit('pr', { pr: published.pr })

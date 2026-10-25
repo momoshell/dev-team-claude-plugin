@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { constants, cpSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { compareFingerprints, fingerprintTree } from './tree-fingerprint.mjs'
@@ -10,7 +10,8 @@ export const CHECK_REASONS = Object.freeze([
   'cleanup-unproven', 'gate-no-fail', 'gate-failed', 'gate-inconsistent', 'gate-invalid', 'baseline-green',
   'baseline-unmeasured', 'baseline-invalid', 'invalid-mutations', 'preproof-not-green', 'unsafe-target',
   'bind-fail', 'copy-failed', 'checkout-changed', 'runner-threw', 'gate-green', 'target-not-failed',
-  'mutations-survived', 'mutation-unmeasured',
+  'mutations-survived', 'mutation-unmeasured', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
+  'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
 ])
 
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -312,4 +313,290 @@ export async function proveMutations({ cwd, gatePath, checks, mutations, timeout
   if (rows.some((row) => row.outcome === 'survived')) return { status: 'red', reason: 'mutations-survived', rows }
   if (rows.some((row) => row.outcome !== 'killed')) return { status: 'unmeasured', reason: 'mutation-unmeasured', rows }
   return { status: 'green', reason: null, rows }
+}
+
+const HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+const ISSUE_TOKEN = /#(\d+)/g
+// A ref-like name that is never an option, never blank, never a control character.
+const SAFE_NAME = /^[^-\x00-\x20\x7f][^\x00-\x20\x7f]*$/
+const GIT_PATHS = ['index', 'index.lock', 'HEAD.lock', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false']
+
+const red = (reason, extra = {}) => ({ status: 'red', reason, ...extra })
+const guarded = async (work) => {
+  try { return await work() } catch (error) { return unmeasured('runner-threw', { error: describeError(error) }) }
+}
+const wellFormed = (r) => {
+  if (!r || typeof r !== 'object' || typeof r.stdout !== 'string' || typeof r.stderr !== 'string') return false
+  if (r.status === 'green') return r.code === 0 && r.reason === null && !r.signal && r.timedOut !== true
+  if (r.status === 'red') return Number.isInteger(r.code) && r.code !== 0 && typeof r.reason === 'string'
+  return r.status === 'unmeasured' && CHECK_REASONS.includes(r.reason)
+}
+
+// Every git and gh call goes through here, so a test or caller can replace the one process boundary.
+async function runCommand(spec, deps) {
+  let result
+  try { result = await (typeof deps.run === 'function' ? deps.run : runSuite)(spec) } catch (error) {
+    return unmeasured('runner-threw', { error: describeError(error) })
+  }
+  return wellFormed(result) ? result : unmeasured('runner-threw', { error: { code: null, message: 'the runner returned a malformed result' } })
+}
+
+// A command that did not come back green becomes the caller's closed reason: red stays measured, anything else stays unmeasured.
+function notGreen(result, reason) {
+  const detail = result.stderr.trim() || null
+  return result.status === 'red' ? red(reason, { detail }) : unmeasured(result.reason, { detail })
+}
+
+// Positive integer issue ids, deduplicated; null when any entry is not one.
+function issueList(list) {
+  if (!Array.isArray(list) || !list.every((issue) => Number.isSafeInteger(issue) && issue > 0)) return null
+  return [...new Set(list)]
+}
+
+function issueLines(closes, refs) {
+  const closingLines = closes.map((issue) => `Closes: #${issue}`)
+  const open = refs.filter((issue) => !closes.includes(issue))
+  return open.length === 0 ? closingLines : [...closingLines, `Refs: ${open.map((issue) => `#${issue}`).join(', ')}`]
+}
+
+const withoutIssueTokens = (text) => text.replace(ISSUE_TOKEN, 'issue $1')
+const joinBlocks = (blocks) => blocks.filter((block) => block !== '').join('\n\n')
+
+// Issue numbers appear only on the dedicated trailer lines, so prose can never close or reference an issue.
+function composeLaneMessage({ subject, body, closes, refs }) {
+  return joinBlocks([withoutIssueTokens(subject), withoutIssueTokens(body), issueLines(closes, refs).join('\n')])
+}
+
+function composeLanePrBody({ body, closes, refs }) {
+  const prose = body.replace(/#(\d+)/g, 'issue $1')
+  return joinBlocks([prose, issueLines(closes, refs).join('\n')])
+}
+
+const singleLine = (text) => typeof text === 'string' && text.trim() !== '' && !/[\r\n\0]/.test(text)
+
+// A name git itself accepts as a branch, so a validated name can never be read as an option.
+async function refProblem(git, name) {
+  if (typeof name !== 'string' || !SAFE_NAME.test(name)) return unmeasured('invalid-input')
+  const checked = await git(['check-ref-format', `refs/heads/${name}`])
+  return checked.status === 'green' ? null : unmeasured(checked.status === 'red' ? 'invalid-input' : checked.reason)
+}
+
+function parseStatus(stdout) {
+  const parts = stdout.split('\0')
+  if (parts.at(-1) === '') parts.pop()
+  const entries = []
+  for (let at = 0; at < parts.length; at++) {
+    const record = parts[at]
+    if (record.length < 4 || record[2] !== ' ') return null
+    const [x, y] = record
+    let from = null
+    if ('RC'.includes(x) || 'RC'.includes(y)) {
+      from = parts[++at]
+      if (from === undefined || from === '') return null
+    }
+    entries.push({ x, y, path: record.slice(3), from })
+  }
+  return entries
+}
+
+const isUnmerged = ({ x, y }) => x === 'U' || y === 'U' || (x === 'A' && y === 'A') || (x === 'D' && y === 'D')
+
+// HEAD, branch, git paths, status and index entries in one read; `problem` is the first command that did not come back green.
+async function readCheckout(git, cwd) {
+  const reads = [
+    await git(['rev-parse', 'HEAD']),
+    await git(['rev-parse', '--abbrev-ref', 'HEAD']),
+    await git(['rev-parse', ...GIT_PATHS.flatMap((name) => ['--git-path', name])]),
+    await git(['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+    await git(['ls-files', '--stage', '-z']),
+  ]
+  const bad = reads.find((read) => read.status !== 'green')
+  if (bad) return { problem: bad }
+  const [head, branch, paths, status, entries] = reads.map((read) => read.stdout)
+  const lines = paths.split('\n').filter((line) => line !== '')
+  if (!HEX_OID.test(head.trim()) || lines.length !== GIT_PATHS.length) return { problem: unmeasured('invalid-remote-data') }
+  const where = (name) => resolve(cwd, lines[GIT_PATHS.indexOf(name)])
+  return {
+    head: head.trim(), branch: branch.trim(), status, entries, indexPath: where('index'),
+    busy: GIT_PATHS.filter((name) => name !== 'index' && existsSync(where(name))),
+  }
+}
+
+const sameCheckout = (a, b) => a.head === b.head && a.branch === b.branch && a.status === b.status && a.entries === b.entries
+
+// Puts HEAD and the index back to the captured state, then proves it by reading the checkout again.
+async function restoreCheckout(git, cwd, before, indexBefore) {
+  const problems = []
+  const { indexPath } = before
+  const now = await git(['rev-parse', 'HEAD'])
+  const moved = now.status === 'green' ? now.stdout.trim() : null
+  if (moved === null) problems.push('HEAD unreadable')
+  else if (moved !== before.head) {
+    const back = await git(['update-ref', '-m', 'restore after a failed lane commit', 'HEAD', before.head, moved])
+    if (back.status !== 'green') problems.push('HEAD was not restored')
+  }
+  try {
+    if (indexBefore === null) rmSync(indexPath, { force: true })
+    else writeFileSync(indexPath, indexBefore)
+  } catch (error) { problems.push(`index was not restored: ${describeError(error).message}`) }
+  const after = await readCheckout(git, cwd)
+  if (after.problem || !sameCheckout(before, after)) problems.push('the checkout differs from its state before the commit')
+  return problems
+}
+
+// lean: one writer per checkout; add an explicit checkout lease before concurrent writers
+// Commits exactly the listed files that changed. Anything staged beside them stays staged, and a failed commit leaves HEAD, index and tree as found.
+export async function commitChanges(spec = {}, deps = {}) {
+  return guarded(async () => {
+    const { cwd, files: listed, subject, body = '', closes = [], refs = [], timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    deps ??= {}
+    const closing = issueList(closes)
+    const referenced = issueList(refs)
+    const files = Array.isArray(listed) ? [...new Set(listed)] : null
+    const valid = typeof cwd === 'string' && cwd !== '' && validTimeout(timeoutMs) && singleLine(subject) && typeof body === 'string'
+      && closing && referenced && files && files.every((file) => typeof file === 'string' && literalRelative(file))
+    if (!valid) return unmeasured('invalid-input')
+    for (const file of files) {
+      try { if (lstatSync(join(cwd, file)).isDirectory()) return unmeasured('invalid-input', { detail: `${file} is a directory` }) } catch {}
+    }
+    if (files.length === 0) return red('nothing-to-commit')
+    const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs }, deps)
+    const before = await readCheckout(git, cwd)
+    if (before.problem) return notGreen(before.problem, 'commit-failed')
+    const status = parseStatus(before.status)
+    if (!status) return unmeasured('invalid-remote-data')
+    if (before.busy.length > 0 || status.some(isUnmerged)) return red('dirty-worktree', { busy: before.busy })
+    for (const entry of status) {
+      if (entry.from !== null && files.includes(entry.path) !== files.includes(entry.from)) {
+        return unmeasured('invalid-input', { detail: `${entry.from} -> ${entry.path} must be committed together` })
+      }
+    }
+    // Added to the index then deleted from the tree (AD) is no change against HEAD, and a pathspec for it matches nothing.
+    const changed = status.filter((entry) => !(entry.x === 'A' && entry.y === 'D')).flatMap((entry) => (entry.from === null ? [entry.path] : [entry.path, entry.from]))
+    const present = files.filter((file) => changed.includes(file))
+    if (present.length === 0) return red('nothing-to-commit')
+    let indexBefore = null
+    try { indexBefore = readFileSync(before.indexPath) } catch (error) {
+      if (error?.code !== 'ENOENT') return unmeasured('commit-failed', { error: describeError(error) })
+    }
+    const toStage = present.filter((file) => status.some((entry) => entry.path === file && entry.y !== ' '))
+    const message = composeLaneMessage({ subject, body, closes: closing, refs: referenced })
+    let failure = null
+    if (toStage.length > 0) {
+      const staged = await git(['--literal-pathspecs', 'add', '--', ...toStage])
+      if (staged.status !== 'green') failure = staged
+    }
+    if (!failure) {
+      const made = await git(['--literal-pathspecs', ...NO_HOOKS, 'commit', '--only', '-m', message, '--', ...present])
+      if (made.status === 'green') {
+        const head = await git(['rev-parse', 'HEAD'])
+        if (head.status === 'green' && HEX_OID.test(head.stdout.trim()) && head.stdout.trim() !== before.head) {
+          return { status: 'green', reason: null, head: head.stdout.trim(), files: present }
+        }
+        failure = head.status === 'green' ? unmeasured('invalid-remote-data') : head
+      } else failure = made
+    }
+    const outcome = notGreen(failure, 'commit-failed')
+    const problems = await restoreCheckout(git, cwd, before, indexBefore)
+    return problems.length === 0 ? outcome : unmeasured('cleanup-unproven', { cause: outcome.reason, problems })
+  })
+}
+
+// Rebases the lane onto `base`; a rebase that stops is aborted and the checkout proven back to where it started.
+export async function rebaseBranch(spec = {}, deps = {}) {
+  return guarded(async () => {
+    const { cwd, base, timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    deps ??= {}
+    if (typeof cwd !== 'string' || cwd === '' || !validTimeout(timeoutMs)) return unmeasured('invalid-input')
+    const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs }, deps)
+    const bad = await refProblem(git, base)
+    if (bad) return bad
+    const before = await readCheckout(git, cwd)
+    if (before.problem) return notGreen(before.problem, 'rebase-failed')
+    if (before.busy.length > 0 || before.status !== '') return red('dirty-worktree', { busy: before.busy })
+    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', base])
+    if (outcome.status === 'green') {
+      const after = await readCheckout(git, cwd)
+      if (!after.problem && after.busy.length === 0 && after.status === '') return { status: 'green', reason: null, head: after.head }
+      return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean' })
+    }
+    const listed = outcome.status === 'red' ? await git(['diff', '--name-only', '--diff-filter=U', '-z']) : null
+    const mid = await readCheckout(git, cwd)
+    if (mid.problem || mid.busy.some((name) => name.startsWith('rebase-'))) {
+      await git(['rebase', '--abort'])
+    }
+    const final = await readCheckout(git, cwd)
+    if (final.problem || final.busy.length > 0 || !sameCheckout(before, final)) {
+      return unmeasured('cleanup-unproven', { cause: outcome.reason, detail: 'the checkout is not proven back at its pre-rebase state' })
+    }
+    if (outcome.status !== 'red') return outcome
+    if (listed.status !== 'green') return unmeasured('rebase-failed', { detail: 'the conflict list could not be read' })
+    const conflicts = listed.stdout.split('\0').filter((path) => path !== '')
+    if (conflicts.length > 0) return { status: 'red', reason: 'rebase-conflict', conflicts }
+    return red('rebase-failed', { detail: outcome.stderr.trim() || null })
+  })
+}
+
+function validPr(record, branch, base) {
+  if (!record || typeof record !== 'object' || !Number.isSafeInteger(record.number) || record.number <= 0) return false
+  try { if (new URL(record.url).protocol !== 'https:') return false } catch { return false }
+  return record.state === 'OPEN' && record.headRefName === branch && record.baseRefName === base && record.isCrossRepository === false
+}
+
+// Pushes the lane branch (never forced) and opens its PR, or returns the PR already open. Every claim is read back.
+export async function openPullRequest(spec = {}, deps = {}) {
+  return guarded(async () => {
+    const { cwd, branch, base, title, body = '', closes = [], refs = [], remote = 'origin', timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    deps ??= {}
+    const closing = issueList(closes)
+    const referenced = issueList(refs)
+    const valid = typeof cwd === 'string' && cwd !== '' && validTimeout(timeoutMs) && singleLine(title) && typeof body === 'string'
+      && closing && referenced && typeof remote === 'string' && /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(remote)
+    if (!valid) return unmeasured('invalid-input')
+    const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs }, deps)
+    const gh = (args) => runCommand({ cwd, command: 'gh', args, timeoutMs }, deps)
+    const bad = await refProblem(git, branch) ?? await refProblem(git, base)
+    if (bad) return bad
+    const headRead = await git(['rev-parse', 'HEAD'])
+    const current = await git(['symbolic-ref', '--short', 'HEAD'])
+    if (headRead.status !== 'green') return notGreen(headRead, 'push-unmeasured')
+    if (current.status !== 'green') return notGreen(current, 'push-unmeasured')
+    const head = headRead.stdout.trim()
+    if (!HEX_OID.test(head)) return unmeasured('invalid-remote-data')
+    if (current.stdout.trim() !== branch) return unmeasured('invalid-input', { detail: `checked out branch is ${current.stdout.trim()}, not ${branch}` })
+
+    // null is unknown (failed, malformed or ambiguous query), never an absent PR.
+    const openPrs = async () => {
+      const listed = await gh(['pr', 'list', '--state', 'open', '--head', branch, '--base', base, '--json', 'number,url,state,headRefName,baseRefName,isCrossRepository'])
+      if (listed.status !== 'green') return null
+      let records
+      try { records = JSON.parse(listed.stdout) } catch { return null }
+      if (!Array.isArray(records) || !records.every((record) => validPr(record, branch, base))) return null
+      return records.map(({ number, url, state, headRefName, baseRefName }) => ({ number, url, state, headRefName, baseRefName }))
+    }
+    // '' is a measured absent branch; null is unknown.
+    const remoteHead = async () => {
+      const listed = await git(['ls-remote', '--heads', remote, `refs/heads/${branch}`])
+      if (listed.status !== 'green') return null
+      const lines = listed.stdout.split('\n').filter((line) => line !== '')
+      if (lines.length === 0) return ''
+      const [oid, ref] = lines[0].split('\t')
+      return lines.length === 1 && ref === `refs/heads/${branch}` && HEX_OID.test(oid) ? oid : null
+    }
+
+    const existing = await openPrs()
+    if (existing === null || existing.length > 1) return unmeasured('pr-unmeasured')
+    let remoteOid = await remoteHead()
+    if (remoteOid !== head) {
+      await git(['push', remote, `HEAD:refs/heads/${branch}`])
+      remoteOid = await remoteHead()
+    }
+    if (remoteOid !== head) return unmeasured('push-unmeasured')
+    if (existing.length === 1) return { status: 'green', reason: null, pr: existing[0], reused: true }
+    await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composeLanePrBody({ body, closes: closing, refs: referenced })])
+    const confirmed = await openPrs() ?? []
+    if (confirmed.length !== 1) return unmeasured('pr-unmeasured')
+    return { status: 'green', reason: null, pr: confirmed[0], reused: false }
+  })
 }

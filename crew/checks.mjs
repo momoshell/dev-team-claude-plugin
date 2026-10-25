@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
@@ -153,7 +153,7 @@ function summaryInvalid(stdout, code, failingIds) {
   try { summary = JSON.parse(lines[0][1]) } catch { return true }
   const { total, failed, errored } = summary ?? {}
   if (![total, failed, errored].every((n) => Number.isSafeInteger(n) && n >= 0)) return true
-  return errored > 0 || failed > total || (failed > 0) !== (code !== 0) || failingIds.length > failed
+  return errored > 0 || failed > total || (failed > 0) !== (code !== 0) || failingIds.length !== failed
 }
 
 export async function runGate({ cwd, gatePath, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
@@ -219,8 +219,19 @@ function ancestorState(cwd, path) {
   return 'ok'
 }
 
+// Ignored paths the fingerprint does not inventory, collapsed to the outermost ignored
+// directory. A gate run that creates one is undone by removing it; a file written inside a
+// directory that was already ignored before the run is not seen (blind spot).
+function listIgnoredDefault(cwd) {
+  const listed = spawnSync('git', ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { cwd, encoding: 'utf8', maxBuffer: OUTPUT_LIMIT_BYTES })
+  if (listed.status !== 0) return null
+  return listed.stdout.split('\0').filter(Boolean).map((path) => path.replace(/\/$/, ''))
+}
+
 // lean: serial mutations with an in-memory checkout snapshot; use isolated byte copies if scale requires it
-function snapshotTree(cwd, measure) {
+function snapshotTree(cwd, measure, listIgnored) {
+  const ignored = listIgnored(cwd)
+  if (!ignored) return { ok: false, diagnostic: 'ignored paths unmeasured' }
   const before = measure(cwd)
   if (!before?.measured) return { ok: false, diagnostic: before?.detail ?? before?.cause ?? 'inventory unmeasured' }
   const nodes = new Map()
@@ -235,7 +246,7 @@ function snapshotTree(cwd, measure) {
   } catch (error) { return { ok: false, diagnostic: describeError(error).message } }
   const drift = compareFingerprints(before, measure(cwd)).outcome
   if (drift !== 'unchanged') return { ok: false, diagnostic: `checkout ${drift} during the snapshot` }
-  return { ok: true, measure, fingerprint: before, nodes }
+  return { ok: true, measure, listIgnored, ignored: new Set(ignored), fingerprint: before, nodes }
 }
 
 function nodeMatches(node, full, st) {
@@ -266,6 +277,13 @@ function restoreTreeDefault(cwd, snapshot) {
   const added = current?.measured ? Object.keys(current.entries).filter((path) => !snapshot.nodes.has(path)).sort(byDepth) : []
   for (const path of added) attempt(path, () => { if (ancestorState(cwd, path) === 'ok') rmSync(join(cwd, path), { force: true }) })
   for (const [path, node] of [...snapshot.nodes].sort(([a], [b]) => byDepth(a, b))) attempt(path, () => restoreNode(cwd, path, node))
+  const newIgnored = () => snapshot.listIgnored(cwd)?.filter((path) => !snapshot.ignored.has(path)) ?? null
+  for (const path of (newIgnored() ?? []).sort(byDepth).reverse()) {
+    attempt(path, () => { if (literalRelative(path) && ancestorState(cwd, path) === 'ok') rmSync(join(cwd, path), { recursive: true, force: true }) })
+  }
+  const left = newIgnored()
+  if (left === null) errors.push({ path: null, code: null, message: 'ignored paths unmeasured after restore' })
+  else for (const path of left) errors.push({ path, code: null, message: 'an ignored path the gate created is still present' })
   const verdict = compareFingerprints(snapshot.fingerprint, snapshot.measure(cwd))
   if (verdict.outcome !== 'unchanged') errors.push({ path: null, code: null, message: `fresh fingerprint is ${verdict.outcome}` })
   return { restored: errors.length === 0, errors }
@@ -287,10 +305,10 @@ function adjudicateMutation(check, result) {
 
 // One serial transaction: snapshot, apply, run, and ALWAYS restore before adjudicating anything.
 async function proveOne(ctx, { check, file, find, replace }) {
-  const { cwd, gatePath, timeoutMs, run, restoreTree, measure } = ctx
+  const { cwd, gatePath, timeoutMs, run, restoreTree, measure, listIgnored } = ctx
   const row = (outcome, reason, extra = {}) => ({ check, outcome, reason, ...extra })
   if (!literalRelative(file)) return row('unmeasured', 'unsafe-target')
-  const snapshot = snapshotTree(cwd, measure)
+  const snapshot = snapshotTree(cwd, measure, listIgnored)
   if (!snapshot.ok) return row('unmeasured', 'tree-unmeasured', { diagnostic: snapshot.diagnostic })
   const node = snapshot.nodes.get(file)
   if (node?.kind !== 'file' || ancestorState(cwd, file) !== 'ok') return row('unmeasured', 'unsafe-target')
@@ -324,11 +342,8 @@ export async function proveMutations({ cwd, gatePath, checks, mutations, timeout
   proofsInFlight.add(owner)
   try {
     const run = deps.runGate ?? runGate
-    let preflight
-    try { preflight = await run({ cwd, gatePath, timeoutMs }) } catch (error) { return refuse('unmeasured', 'preproof-not-green', { error: describeError(error) }) }
-    if (preflight?.status !== 'green' || preflight.reason !== null || preflight.timedOut === true) {
-      return refuse(preflight?.status === 'red' ? 'red' : 'unmeasured', 'preproof-not-green', { preflight })
-    }
+    const measure = deps.fingerprintTree ?? fingerprintTree
+    const listIgnored = deps.listIgnored ?? listIgnoredDefault
     const restoreImpl = deps.restoreTree ?? restoreTreeDefault
     const restoreTree = async (dir, snapshot) => {
       try {
@@ -336,7 +351,19 @@ export async function proveMutations({ cwd, gatePath, checks, mutations, timeout
         return done?.restored === true ? null : done?.errors ?? [{ message: 'restoration was not confirmed' }]
       } catch (error) { return [describeError(error)] }
     }
-    const ctx = { cwd, gatePath, timeoutMs, run, restoreTree, measure: deps.fingerprintTree ?? fingerprintTree }
+    // The preflight is a gate run too: whatever it writes is undone before the first mutant,
+    // so every mutant snapshot is the tree as the proof found it.
+    const original = snapshotTree(cwd, measure, listIgnored)
+    if (!original.ok) return refuse('unmeasured', 'tree-unmeasured', { diagnostic: original.diagnostic })
+    let preflight
+    try { preflight = await run({ cwd, gatePath, timeoutMs }) } catch (error) { preflight = { thrown: describeError(error) } }
+    const preflightFailure = await restoreTree(cwd, original)
+    if (preflightFailure) return refuse('unmeasured', 'tree-not-restored', { errors: preflightFailure, preflight })
+    if (preflight?.thrown) return refuse('unmeasured', 'preproof-not-green', { error: preflight.thrown })
+    if (preflight?.status !== 'green' || preflight.reason !== null || preflight.timedOut === true) {
+      return refuse(preflight?.status === 'red' ? 'red' : 'unmeasured', 'preproof-not-green', { preflight })
+    }
+    const ctx = { cwd, gatePath, timeoutMs, run, restoreTree, measure, listIgnored }
     const rows = []
     for (const id of checks) {
       rows.push(await proveOne(ctx, mutations.find((declaration) => declaration.check === id)))

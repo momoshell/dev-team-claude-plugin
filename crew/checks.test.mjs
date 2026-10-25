@@ -291,6 +291,7 @@ test('runGate validates an optional GATE-SUMMARY but never requires one', async 
     failing([summary(2, 1, 0)], 0),
     failing(['FAIL A1', 'FAIL A2', summary(2, 1, 0)]),
     failing(['GATE-SUMMARY null', 'FAIL A1']),
+    failing(['FAIL A1', summary(2, 2, 0)]),
   ]
   for (const source of bad) {
     const result = await runGate(gateIn(source))
@@ -634,7 +635,9 @@ test('proveMutations refuses proof when restoration is denied, unconfirmed or th
     async () => undefined,
     async () => { throw new Error('restore exploded') },
   ]
-  for (const restoreTree of restorers) {
+  for (const failing of restorers) {
+    let restores = 0
+    const restoreTree = async (...args) => (++restores === 1 ? { restored: true, errors: [] } : failing(...args))
     const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n' })
     const gate = fakeGate(cwd, () => redResult('A1', 'B1'))
     const spec = { ...gate.spec, checks: ['A1', 'B1'], mutations: [A1, { check: 'B1', file: 'other.txt', find: 'one', replace: 'two' }] }
@@ -651,12 +654,14 @@ test('proveMutations refuses proof when the inventory is unmeasured before or af
   const denied = () => ({ measured: false, cause: 'denied', detail: 'inventory denied' })
   const before = fakeGate(repo(), () => assert.fail('no mutation may run on an unmeasured tree'))
   const refused = await proveMutations(before.spec, { ...before.deps, fingerprintTree: denied })
-  assert.equal(rowOf(refused).reason, 'tree-unmeasured')
-  assert.equal(refused.reason, 'mutation-unmeasured')
-  assert.equal(before.calls.length, 1)
+  assert.equal(refused.status, 'unmeasured')
+  assert.equal(refused.reason, 'tree-unmeasured')
+  assert.deepEqual(refused.rows, [])
+  assert.equal(before.calls.length, 0, 'not even the preflight runs on an unmeasured tree')
   const cwd = repo()
   let measurements = 0
-  const flaky = (dir) => (++measurements <= 2 ? fingerprintTree(dir) : denied())
+  // two for the pre-preflight snapshot, two for its restore, two for the mutant snapshot
+  const flaky = (dir) => (++measurements <= 6 ? fingerprintTree(dir) : denied())
   const after = fakeGate(cwd, () => redResult('A1'))
   const result = await proveMutations(after.spec, { ...after.deps, fingerprintTree: flaky })
   assert.equal(rowOf(result).outcome, 'unmeasured')
@@ -673,7 +678,39 @@ test('proveMutations refuses a snapshot taken while the checkout drifts', async 
   }
   const gate = fakeGate(cwd, () => assert.fail('a drifting tree must not be mutated'))
   const result = await proveMutations(gate.spec, { ...gate.deps, fingerprintTree: drifting })
-  assert.equal(rowOf(result).reason, 'tree-unmeasured')
+  assert.equal(result.reason, 'tree-unmeasured')
+  assert.equal(gate.calls.length, 0)
+})
+
+// MUTATION: snapshot only after the preflight and its tracked write survives the proof.
+test('proveMutations undoes what the green preflight writes to a tracked file', async () => {
+  const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n' })
+  execFileSync('git', ['-C', cwd, 'add', '.'])
+  const gate = CAUGHT_GATE + "; import {writeFileSync as w} from 'node:fs'; if (!readFileSync('target.txt','utf8').includes('beta')) w('other.txt', 'rewritten by preflight\\n')"
+  const result = await proveMutations(realSpec(cwd, gate))
+  assert.equal(readFileSync(join(cwd, 'other.txt'), 'utf8'), 'one\n')
+  assert.equal(result.status, 'green')
+})
+
+// MUTATION: restore only the fingerprinted paths and an ignored file a mutant gate writes is left behind.
+test('proveMutations removes an ignored path a mutant gate creates', async () => {
+  const cwd = repo({ 'target.txt': 'alpha\n', '.gitignore': 'generated/\n' })
+  const gate = CAUGHT_GATE + "; import {mkdirSync as m, writeFileSync as w} from 'node:fs'; if (readFileSync('target.txt','utf8').includes('beta')) { m('generated', { recursive: true }); w('generated/cache.json', '{}') }"
+  const result = await proveMutations(realSpec(cwd, gate))
+  assert.equal(result.status, 'green')
+  assert.equal(existsSync(join(cwd, 'generated')), false)
+})
+
+// MUTATION: skip the ignored-path re-list and a path that cannot be removed is reported restored.
+test('proveMutations refuses proof when an ignored path the gate created cannot be removed', async () => {
+  const cwd = repo()
+  const gate = fakeGate(cwd, () => redResult('A1'))
+  let lists = 0
+  // one for the pre-preflight snapshot, two for its restore, one for the mutant snapshot
+  const listIgnored = () => (++lists >= 5 ? ['stuck'] : [])
+  const result = await proveMutations(gate.spec, { ...gate.deps, listIgnored })
+  assert.equal(result.reason, 'tree-not-restored')
+  assert.ok(rowOf(result).errors.some((error) => error.path === 'stuck'))
 })
 
 test('proveMutations refuses an overlapping proof of the same checkout and frees it afterwards', async () => {

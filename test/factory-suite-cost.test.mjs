@@ -128,6 +128,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'crew/checks.test.mjs',
     'crew/gate-lint.test.mjs',
     'crew/guidelines/gate-kit.test.mjs',
+    'crew/loop.test.mjs',
     'crew/pi/extensions/acp-server.test.mjs',
     'crew/pi/extensions/submit.test.mjs',
     'crew/protocols.test.mjs',

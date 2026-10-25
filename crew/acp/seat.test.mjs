@@ -41,6 +41,7 @@ function replaySeat(name, options = {}) {
   const kills = []
   let stream = null
   let clock = 1000
+  let groupGone = false
   const sessionFile = options.unwritable ? root : join(root, 'sessions', 'session.jsonl')
   if (!options.unwritable) {
     mkdirSync(dirname(sessionFile), { recursive: true })
@@ -109,6 +110,7 @@ function replaySeat(name, options = {}) {
       spawn: (...args) => {
         launches.push(args)
         if (options.spawnThrows) throw new Error('spawn denied')
+        writeFileSync(join(dirname(stream), 'pgid'), '901')
         return { pid: 901, unref() {} }
       },
       openSync: () => 7,
@@ -130,9 +132,15 @@ function replaySeat(name, options = {}) {
           writeFileSync(stream, '')
         }
       },
-      kill: (...args) => {
-        kills.push(args)
-        if (stream && !options.noExit) writeFileSync(join(dirname(stream), 'exit'), '0')
+      kill: (pid, signal) => {
+        kills.push([pid, signal])
+        if (pid !== -901) return true
+        if (signal === 0) {
+          if (groupGone) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+          return true
+        }
+        if (stream && !options.noExit) { writeFileSync(join(dirname(stream), 'exit'), '0'); groupGone = true }
+        return true
       },
       spawnSync: () => ({ status: 1, stdout: '' }),
       now: () => { clock += 1000; return clock },
@@ -751,7 +759,7 @@ test('Pi brings its own tools: an explicit empty list still launches', () => {
 })
 
 // A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
-function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null } = {}) {
+function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null } = {}) {
   const root = scratchDir('acp-seat-deadline-')
   let clock = 0
   const events = []
@@ -761,6 +769,7 @@ function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopRe
     start() {}, initialize() {}, newSession() {}, setMode() {},
     prompt() { throw new Error('the seat never calls the blocking prompt') },
     cancel() { events.push(['cancel-session', clock]) },
+    hasExitMarker() { return exitAt !== null && clock >= exitAt },
     beginPrompt() { events.push(['begin', clock]); pending = true; return 41 },
     pollPrompt(id) {
       events.push(['poll', id, clock])
@@ -825,6 +834,27 @@ test('an omitted wait_s expires at 2,400,000ms and malformed supplied values ref
     })
   }
   deadline({ wait_s: Number.MAX_SAFE_INTEGER, answerAt: 25 }, (run) => assert.equal(run.error, undefined))
+})
+
+test('a seat that exits before answering fails its turn at once, not at its deadline, for pi and claude', () => {
+  for (const agent of ['pi', 'claude']) {
+    deadline({ agent, wait_s: 60, exitAt: 100 }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-closed', agent)
+      assert.match(run.error.message, /planner exited before answering/, agent)
+      assert.equal(run.result, undefined, agent)
+      assert.ok(run.clock() >= 100 && run.clock() < 1000, `${agent} noticed at ${run.clock()}`)
+      assert.deepEqual(run.at('cancel'), [], agent)
+      assert.equal(run.at('close').length, 1, agent)
+    })
+  }
+})
+
+test('an answer that settled with the exit is returned, and a late exit does not outrank the deadline', () => {
+  deadline({ wait_s: 60, answerAt: 100, exitAt: 100 }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.deepEqual(run.result, { stopReason: 'end_turn', usage: null, refusal: null })
+  })
+  deadline({ wait_s: 1, exitAt: 5000 }, (run) => assert.equal(run.error?.reason, 'acp-seat-deadline'))
 })
 
 test('an answer at or after the deadline, even one that arrives inside the poll, is never returned', () => {

@@ -74,6 +74,7 @@ function replay(name, options = {}) {
   const responseIds = new Map()
   let cursor = 0
   let clock = 1000
+  let groupGone = false
   let cancelledBySink = false
   let corrupt = options.corruptAfterPrompt === true
   let promptMark = 0
@@ -148,12 +149,22 @@ function replay(name, options = {}) {
 
   const deps = {
     pid: 900,
-    spawn: () => ({ pid: 901, unref() {} }),
+    spawn: () => { writeFileSync(join(seatDir, 'pgid'), '901'); return { pid: 901, unref() {} } },
     openSync: () => 7,
     writeSync: (_fd, line) => receiveOutgoing(String(line)),
     closeSync: () => {},
     existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
-    kill: () => { writeFileSync(join(seatDir, 'exit'), '0') },
+    // The marker is only the leader's exit; the group is gone once a signal has landed.
+    kill: (target, signal) => {
+      if (target !== -901) return true
+      if (signal === 0) {
+        if (groupGone) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+        return true
+      }
+      writeFileSync(join(seatDir, 'exit'), '0')
+      groupGone = true
+      return true
+    },
     now: () => { clock += 1000; return clock },
     sleep: () => {},
     log: (row) => journal.push(row),
@@ -384,7 +395,7 @@ test('RV1-1 reused seat reads only records appended after its launch', () => {
     sinks: { agent_message_chunk: (payload) => delivered.push(payload) },
     deps: {
       pid: 900,
-      spawn: () => ({ pid: 901, unref() {} }),
+      ...exitOnSignal(seatDir, 901),
       openSync: () => 7,
       writeSync: (_fd, line) => {
         const frame = JSON.parse(String(line))
@@ -393,7 +404,6 @@ test('RV1-1 reused seat reads only records appended after its launch', () => {
       },
       closeSync: () => {},
       existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
-      kill: () => { writeFileSync(join(seatDir, 'exit'), '0') },
       seatCommandRoot: join(root, 'seat-runtime'),
       now: () => { clock += 1; return clock },
       sleep: () => {
@@ -437,6 +447,7 @@ test('E1', () => {
     rmSync(root, { recursive: true, force: true })
   }
 
+  let groupGone = false
   const deadRoot = scratchDir('acp-e1-dead-')
   const deadRuntime = scratchDir('acp-runtime-')
   try {
@@ -452,11 +463,16 @@ test('E1', () => {
       sinks: {},
       deps: {
         pid: 900,
-        spawn: () => ({ pid: 901, unref() {} }),
+        spawn: () => { writeFileSync(join(acpRoot, 'builder', 'pgid'), '901'); return { pid: 901, unref() {} } },
         openSync: () => 7,
         writeSync: () => {},
         closeSync: () => {},
-        kill: () => { writeFileSync(join(acpRoot, 'builder', 'exit'), '0') },
+        kill: (target, signal) => {
+          if (target !== -901) return true
+          if (signal === 0 && groupGone) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+          if (signal !== 0) { writeFileSync(join(acpRoot, 'builder', 'exit'), '0'); groupGone = true }
+          return true
+        },
         now: () => Date.now(),
         sleep: () => {},
         log: () => {},
@@ -525,12 +541,13 @@ test('RV1-1 runtime cleanup removes role and lane dirs only after proven ACP dea
     const runtimeRoot = join(root, 'seat-runtime')
     const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
     let clock = 0
+    let groupGone = false
     const api = acpClient({
       launch: { bin: '/bin/false', args: [], env: {} },
       dir: acpRoot, cwd: root,
       deps: {
-        pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
-        writeSync: () => {}, closeSync: () => {}, kill: () => true,
+        pid: 900, spawn: () => { writeFileSync(paths.pgid, '901'); return { pid: 901, unref() {} } }, openSync: () => 7,
+        writeSync: () => {}, closeSync: () => {}, kill: groupKill(() => groupGone),
         spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
         now: () => clock++, sleep: () => {}, seatCommandRoot: runtimeRoot,
       },
@@ -538,12 +555,13 @@ test('RV1-1 runtime cleanup removes role and lane dirs only after proven ACP dea
     try {
       api.start()
       writeFileSync(paths.fifo, '')
-      if (!delayed) writeFileSync(paths.exit, '0')
+      if (!delayed) { writeFileSync(paths.exit, '0'); groupGone = true }
       const closed = api.close()
       if (delayed) {
         assert.notEqual(closed.outcome, 'proven')
         for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), true)
         writeFileSync(paths.exit, '0')
+        groupGone = true
         assert.equal(api.reprove(50).outcome, 'proven')
       } else assert.equal(closed.outcome, 'proven')
       for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), false)
@@ -563,6 +581,109 @@ test('FO5 ACP production layout resolves under the runtime root outside the crew
     rmSync(crewRoot, { recursive: true, force: true })
   }
 })
+
+// Probe of the seat's group (-901, signal 0): live until the test says it is gone. Signals never end it.
+function groupKill(gone) {
+  return (target, signal) => {
+    if (target === -901 && signal === 0 && gone()) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+    return true
+  }
+}
+
+// A seat whose leader already exited (marker written) while `group` says what the rest of its process group is doing.
+function exitedLeader({ group = 'live', dies = null }) {
+  const root = scratchDir('acp-liveness-')
+  const acpRoot = join(root, 'acp')
+  const runtimeRoot = join(root, 'seat-runtime')
+  const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
+  const signals = []
+  let clock = 0
+  let state = group
+  const api = acpClient({
+    launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root,
+    deps: {
+      pid: 900, spawn: () => { writeFileSync(paths.pgid, '901'); writeFileSync(paths.exit, '0'); return { pid: 901, unref() {} } },
+      openSync: () => 7, writeSync: () => {}, closeSync: () => {}, seatCommandRoot: runtimeRoot,
+      kill: (target, signal) => {
+        if (target !== -901) return true
+        if (signal !== 0) {
+          signals.push(signal)
+          if (signal === dies) state = 'gone'
+          return true
+        }
+        if (state === 'gone') throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+        if (state === 'eperm' || state === 'eio') throw Object.assign(new Error(state), { code: state.toUpperCase() })
+        return true
+      },
+      spawnSync: () => ({ status: 0, stdout: state === 'gone' ? '' : '901 Zs\n901 S\n' }),
+      now: () => clock++, sleep: (ms) => { clock += ms }, log: () => {},
+    },
+  })
+  api.start()
+  writeFileSync(paths.fifo, '')
+  return { api, paths, signals, root, end() { state = 'gone' }, cleanup() { rmSync(root, { recursive: true, force: true }) } }
+}
+
+test('RW2 a teardown signals what remains of the seat group after the leader exits, TERM then KILL', () => {
+  for (const [dies, expected] of [['SIGTERM', ['SIGTERM']], ['SIGKILL', ['SIGTERM', 'SIGKILL']]]) {
+    const run = exitedLeader({ dies })
+    try {
+      assert.equal(existsSync(run.paths.exit), true)
+      assert.deepEqual(run.api.close(), { outcome: 'proven', reason: 'exit-marker' })
+      assert.deepEqual(run.signals, expected)
+    } finally { run.cleanup() }
+  }
+})
+
+test('RW2 a seat whose group is already gone is proven without a signal', () => {
+  const run = exitedLeader({ group: 'gone' })
+  try {
+    assert.deepEqual(run.api.close(), { outcome: 'proven', reason: 'exit-marker' })
+    assert.deepEqual(run.signals, [])
+  } finally { run.cleanup() }
+})
+
+test('RW3 the exit marker alone never proves a teardown: a live, EPERM or unknown group keeps its evidence', () => {
+  for (const [group, outcome] of [['live', 'failed'], ['eperm', 'failed'], ['eio', 'unproven']]) {
+    const run = exitedLeader({ group })
+    try {
+      const closed = run.api.close()
+      assert.equal(closed.outcome, outcome, group)
+      assert.deepEqual(run.signals, ['SIGTERM', 'SIGKILL'], group)
+      for (const path of [run.paths.fifo, join(dirname(run.paths.dir), '.builder.active.json')]) assert.equal(existsSync(path), true, group)
+      assert.deepEqual(run.api.close(), closed, 'a second close repeats the first')
+      assert.notEqual(run.api.reprove(100).outcome, 'proven', group)
+      assert.equal(existsSync(run.paths.fifo), true, group)
+      run.end()
+      assert.equal(run.api.reprove(100).outcome, 'proven', `${group}: ESRCH permits a later proof`)
+      assert.equal(existsSync(run.paths.fifo), false, group)
+      assert.equal(existsSync(join(dirname(run.paths.dir), '.builder.active.json')), false, group)
+    } finally { run.cleanup() }
+  }
+})
+
+test('RW3 a zombie leader beside a live peer is not a dead group', () => {
+  const run = exitedLeader({ group: 'eio' })
+  try { assert.notEqual(run.api.close().outcome, 'proven') } finally { run.cleanup() }
+})
+
+// A seat that exits on the first signal: the leader's marker lands and the group probe then reports ESRCH.
+function exitOnSignal(seatDir, pid) {
+  let gone = false
+  return {
+    spawn: () => { writeFileSync(join(seatDir, 'pgid'), String(pid)); return { pid, unref() {} } },
+    kill: (target, signal) => {
+      if (target !== -pid) return true
+      if (signal === 0) {
+        if (gone) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+        return true
+      }
+      writeFileSync(join(seatDir, 'exit'), '0')
+      gone = true
+      return true
+    },
+  }
+}
 
 function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {}) {
   const root = scratchDir('acp-write-')
@@ -584,9 +705,9 @@ function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {})
     appendFileSync(stream, `${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result })}\n`)
   })
   const api = acpClient({ launch: { bin: '/bin/false' }, dir: acpRoot, cwd: root, deps: {
-    pid: 99001, spawn: () => ({ pid: 99002, unref() {} }), openSync: () => 7,
+    pid: 99001, ...exitOnSignal(seatDir, 99002), openSync: () => 7,
     writeSync, closeSync: () => {}, existsSync: (p) => existsSync(p) || String(p).endsWith('cmd.fifo'),
-    kill: () => writeFileSync(join(seatDir, 'exit'), '0'), now: clock, sleep, log: (row) => journal.push(row),
+    now: clock, sleep, log: (row) => journal.push(row),
     seatCommandRoot: join(root, 'seat-runtime'),
   } })
   api.start(); api.initialize(); api.newSession()
@@ -1005,9 +1126,10 @@ test('RR1 refused close leaves runtime dirs', () => {
   const acpRoot = join(root, 'acp')
   const runtimeRoot = join(root, 'seat-runtime')
   let clock = 0
+  let groupGone = false
   const deps = {
-    pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
-    writeSync: () => {}, closeSync: () => {}, kill: () => true,
+    pid: 900, spawn: () => { writeFileSync(acpSeatPaths(acpRoot, 'builder', runtimeRoot).pgid, '901'); return { pid: 901, unref() {} } }, openSync: () => 7,
+    writeSync: () => {}, closeSync: () => {}, kill: groupKill(() => groupGone),
     spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
     now: () => clock++, sleep: () => {}, log: () => {}, seatCommandRoot: runtimeRoot,
   }
@@ -1025,6 +1147,7 @@ test('RR1 refused close leaves runtime dirs', () => {
     assert.equal(existsSync(roleDir), true)
     assert.equal(existsSync(keyDir), true)
     writeFileSync(paths.exit, '0')
+    groupGone = true
     assert.equal(first.close().outcome, 'proven')
     assert.equal(existsSync(roleDir), false)
     assert.equal(existsSync(keyDir), false)
@@ -1072,11 +1195,10 @@ test('LG2 default seat command root resolves the acp FIFO under TMPDIR crew-rpc'
       dir: acpRoot, cwd: root, role: 'builder',
       deps: {
         pid: 900,
-        spawn: () => ({ pid: 901, unref() {} }),
+        ...exitOnSignal(seatDir, 901),
         openSync: (path) => { opened.push(path); return 7 },
         writeSync: () => {},
         closeSync: () => {},
-        kill: () => { writeFileSync(join(seatDir, 'exit'), '0') },
         now: () => 1000,
         sleep: () => {},
         log: () => {},

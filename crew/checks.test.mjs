@@ -1,10 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
-import { fingerprintTree } from './tree-fingerprint.mjs'
 import { CHECK_REASONS, checkBaseline, proveMutations, runGate, runSuite } from './checks.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
@@ -36,7 +35,7 @@ const failing = (lines, code = 1) => `${lines.map((line) => `console.log(${JSON.
 test('the reason vocabulary is a frozen list of unique tokens', () => {
   assert.ok(Object.isFrozen(CHECK_REASONS))
   assert.equal(new Set(CHECK_REASONS).size, CHECK_REASONS.length)
-  assert.equal(CHECK_REASONS.length, 26)
+  assert.equal(CHECK_REASONS.length, 25)
 })
 
 test('runSuite reports exit 0 as green with a null reason and a real process group', async () => {
@@ -354,7 +353,7 @@ function fakeGate(cwd, onMutant) {
   const calls = []
   const runGate = async (spec) => {
     calls.push(spec)
-    return calls.length === 1 ? GREEN_RESULT : onMutant(calls.length - 1)
+    return calls.length === 1 ? GREEN_RESULT : onMutant(calls.length - 1, spec)
   }
   return { calls, deps: { runGate }, spec: { cwd, checks: ['A1'], mutations: [A1], timeoutMs: GATE_TIMEOUT_MS } }
 }
@@ -508,21 +507,21 @@ test('proveMutations splices only the matched bytes and leaves surrounding non-U
   const original = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00]), Buffer.from('alpha'), Buffer.from([0xc3, 0x28, 0x80])])
   const cwd = repo({ 'target.txt': original })
   let seen
-  const gate = fakeGate(cwd, () => { seen = readFileSync(join(cwd, 'target.txt')); return redResult('A1') })
+  const gate = fakeGate(cwd, (n, spec) => { seen = readFileSync(join(spec.cwd, 'target.txt')); return redResult('A1') })
   const result = await proveMutations(gate.spec, gate.deps)
   assert.deepEqual(seen, Buffer.concat([Buffer.from([0xff, 0xfe, 0x00]), Buffer.from('beta'), Buffer.from([0xc3, 0x28, 0x80])]))
   assert.equal(rowOf(result).outcome, 'killed')
   assert.deepEqual(readFileSync(join(cwd, 'target.txt')), original)
 })
 
-test('proveMutations refuses targets that escape, are links, are ignored or are absent', async () => {
+test('proveMutations refuses targets that escape, are links or are absent', async () => {
   const cwd = repo({ 'target.txt': 'alpha\n', '.gitignore': 'ignored.txt\n', 'ignored.txt': 'alpha\n', 'real/f.txt': 'alpha\n' })
   const outside = scratchDir('checks-outside-')
   writeFileSync(join(outside, 'secret.txt'), 'alpha\n')
   symlinkSync('target.txt', join(cwd, 'leaf-link'))
   symlinkSync('real', join(cwd, 'alias'))
   symlinkSync(join(outside, 'secret.txt'), join(cwd, 'out-link'))
-  const files = ['../secret.txt', join(outside, 'secret.txt'), '.git/config', 'a\\b', 'a//b', './target.txt', 'real/../target.txt', 'a\0b', '', 'leaf-link', 'out-link', 'alias/f.txt', 'ignored.txt', 'missing.txt', 'real']
+  const files = ['../secret.txt', join(outside, 'secret.txt'), '.git/config', 'a\\b', 'a//b', './target.txt', 'real/../target.txt', 'a\0b', '', 'leaf-link', 'out-link', 'alias/f.txt', 'missing.txt', 'real']
   for (const file of files) {
     const gate = fakeGate(cwd, () => assert.fail(`${file} must not reach the gate`))
     const result = await proveMutations({ ...gate.spec, mutations: [{ ...A1, file }] }, gate.deps)
@@ -533,7 +532,8 @@ test('proveMutations refuses targets that escape, are links, are ignored or are 
   assert.equal(readFileSync(join(cwd, 'ignored.txt'), 'utf8'), 'alpha\n')
 })
 
-test('proveMutations restores additions, deletions, symlinks, modes and binary collateral after every outcome', async () => {
+// MUTATION: run the mutant gate in the checkout itself and every write below lands there.
+test('proveMutations runs each mutant in a removed copy and leaves the checkout untouched after every outcome', async () => {
   const variants = {
     green: () => GREEN_RESULT,
     killed: () => redResult('A1'),
@@ -541,37 +541,34 @@ test('proveMutations restores additions, deletions, symlinks, modes and binary c
     throws: () => { throw new Error('runner interrupted') },
   }
   for (const [name, outcome] of Object.entries(variants)) {
-    const cwd = repo({ 'target.txt': 'alpha\n', 'bin/data.bin': Buffer.from([0, 255, 254, 10]), 'run.sh': '#!/bin/sh\n', 'doomed.txt': 'delete me', 'dir/nested/file.txt': 'nested' })
+    const cwd = repo({ 'target.txt': 'alpha\n', 'bin/data.bin': Buffer.from([0, 255, 254, 10]), 'run.sh': '#!/bin/sh\n', 'doomed.txt': 'delete me', 'dir/nested/file.txt': 'nested', '.gitignore': 'generated/\n', 'generated/cache.json': '{}' })
     chmodSync(join(cwd, 'run.sh'), 0o755)
     symlinkSync('target.txt', join(cwd, 'link'))
-    const outside = scratchDir('checks-outside-')
-    mkdirSync(join(outside, 'nested'))
-    writeFileSync(join(outside, 'nested', 'file.txt'), 'outside')
     const before = readTree(cwd)
-    const outsideBefore = readTree(outside)
-    const gate = fakeGate(cwd, () => {
-      assert.equal(readFileSync(join(cwd, 'target.txt'), 'utf8'), 'beta\n')
-      writeFileSync(join(cwd, 'bin/data.bin'), Buffer.from([0, 254, 255, 10]))
-      writeFileSync(join(cwd, 'extra.txt'), 'side effect')
-      mkdirSync(join(cwd, 'made/deeper'), { recursive: true })
-      writeFileSync(join(cwd, 'made/deeper/new.txt'), 'new')
-      rmSync(join(cwd, 'doomed.txt'))
-      chmodSync(join(cwd, 'run.sh'), 0o644)
-      rmSync(join(cwd, 'link'))
-      symlinkSync('doomed.txt', join(cwd, 'link'))
-      rmSync(join(cwd, 'dir'), { recursive: true })
-      symlinkSync(outside, join(cwd, 'dir'))
+    const copies = []
+    const gate = fakeGate(cwd, (n, spec) => {
+      const at = spec.cwd
+      copies.push(at)
+      assert.notEqual(at, cwd)
+      assert.equal(readFileSync(join(at, 'target.txt'), 'utf8'), 'beta\n')
+      writeFileSync(join(at, 'bin/data.bin'), Buffer.from([0, 254, 255, 10]))
+      writeFileSync(join(at, 'generated/cache.json'), '{"rewritten":true}')
+      mkdirSync(join(at, 'empty/dir'), { recursive: true })
+      writeFileSync(join(at, 'extra.txt'), 'side effect')
+      rmSync(join(at, 'doomed.txt'))
+      chmodSync(join(at, 'run.sh'), 0o644)
+      rmSync(join(at, 'link'))
+      rmSync(join(at, 'dir'), { recursive: true })
       return outcome()
     })
     const result = await proveMutations(gate.spec, gate.deps)
-    assert.notEqual(rowOf(result).reason, 'tree-not-restored', name)
     assert.equal(rowOf(result).outcome, name === 'killed' ? 'killed' : name === 'green' ? 'survived' : 'unmeasured', name)
-    assert.deepEqual(readTree(cwd), before, name)
-    assert.deepEqual(readTree(outside), outsideBefore, `${name}: nothing was written through the replaced parent`)
     assert.equal(rowOf(result).reason, { green: 'gate-green', killed: null, timeout: 'timeout', throws: 'runner-threw' }[name])
+    assert.deepEqual(readTree(cwd), before, name)
+    assert.equal(copies.length, 1, name)
+    assert.equal(existsSync(copies[0]), false, `${name}: the copy is removed`)
   }
 })
-
 test('proveMutations turns a runner throw into unmeasured runner-threw with the error kept', async () => {
   const cwd = repo()
   const gate = fakeGate(cwd, () => { throw new Error('runner interrupted') })
@@ -629,59 +626,6 @@ test('proveMutations accepts check ids that start with or contain any digit and 
   assert.deepEqual(result.rows.map((row) => [row.check, row.outcome]), [['9z', 'killed'], ['Z8.b_c-7', 'killed']])
 })
 
-test('proveMutations refuses proof when restoration is denied, unconfirmed or throws, and stops measuring', async () => {
-  const restorers = [
-    async () => ({ restored: false, errors: [{ path: 'target.txt', message: 'denied' }] }),
-    async () => undefined,
-    async () => { throw new Error('restore exploded') },
-  ]
-  for (const failing of restorers) {
-    let restores = 0
-    const restoreTree = async (...args) => (++restores === 1 ? { restored: true, errors: [] } : failing(...args))
-    const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n' })
-    const gate = fakeGate(cwd, () => redResult('A1', 'B1'))
-    const spec = { ...gate.spec, checks: ['A1', 'B1'], mutations: [A1, { check: 'B1', file: 'other.txt', find: 'one', replace: 'two' }] }
-    const result = await proveMutations(spec, { ...gate.deps, restoreTree })
-    assert.equal(result.status, 'unmeasured')
-    assert.equal(result.reason, 'tree-not-restored')
-    assert.deepEqual(result.rows.map((row) => [row.check, row.outcome, row.reason]), [['A1', 'unmeasured', 'tree-not-restored']])
-    assert.ok(rowOf(result).errors.length > 0, 'diagnostics are kept')
-    assert.equal(gate.calls.length, 2, 'preflight and A1 only; B1 was never measured')
-  }
-})
-
-test('proveMutations refuses proof when the inventory is unmeasured before or after the run', async () => {
-  const denied = () => ({ measured: false, cause: 'denied', detail: 'inventory denied' })
-  const before = fakeGate(repo(), () => assert.fail('no mutation may run on an unmeasured tree'))
-  const refused = await proveMutations(before.spec, { ...before.deps, fingerprintTree: denied })
-  assert.equal(refused.status, 'unmeasured')
-  assert.equal(refused.reason, 'tree-unmeasured')
-  assert.deepEqual(refused.rows, [])
-  assert.equal(before.calls.length, 0, 'not even the preflight runs on an unmeasured tree')
-  const cwd = repo()
-  let measurements = 0
-  // two for the pre-preflight snapshot, two for its restore, two for the mutant snapshot
-  const flaky = (dir) => (++measurements <= 6 ? fingerprintTree(dir) : denied())
-  const after = fakeGate(cwd, () => redResult('A1'))
-  const result = await proveMutations(after.spec, { ...after.deps, fingerprintTree: flaky })
-  assert.equal(rowOf(result).outcome, 'unmeasured')
-  assert.equal(result.reason, 'tree-not-restored')
-})
-
-test('proveMutations refuses a snapshot taken while the checkout drifts', async () => {
-  const cwd = repo()
-  let measurements = 0
-  const drifting = (dir) => {
-    const fingerprint = fingerprintTree(dir)
-    if (++measurements === 1) writeFileSync(join(dir, 'late.txt'), 'late')
-    return fingerprint
-  }
-  const gate = fakeGate(cwd, () => assert.fail('a drifting tree must not be mutated'))
-  const result = await proveMutations(gate.spec, { ...gate.deps, fingerprintTree: drifting })
-  assert.equal(result.reason, 'tree-unmeasured')
-  assert.equal(gate.calls.length, 0)
-})
-
 // MUTATION: snapshot only after the preflight and its tracked write survives the proof.
 test('proveMutations undoes what the green preflight writes to a tracked file', async () => {
   const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n' })
@@ -692,41 +636,56 @@ test('proveMutations undoes what the green preflight writes to a tracked file', 
   assert.equal(result.status, 'green')
 })
 
-// MUTATION: restore only the fingerprinted paths and an ignored file a mutant gate writes is left behind.
-test('proveMutations removes an ignored path a mutant gate creates', async () => {
-  const cwd = repo({ 'target.txt': 'alpha\n', '.gitignore': 'generated/\n' })
-  const gate = CAUGHT_GATE + "; import {mkdirSync as m, writeFileSync as w} from 'node:fs'; if (readFileSync('target.txt','utf8').includes('beta')) { m('generated', { recursive: true }); w('generated/cache.json', '{}') }"
-  const result = await proveMutations(realSpec(cwd, gate))
-  assert.equal(result.status, 'green')
-  assert.equal(existsSync(join(cwd, 'generated')), false)
+// MUTATION: run the gate in the checkout and the ignored writes and the empty directory stay behind.
+test('proveMutations leaves no ignored file, rewritten ignored file or empty directory from a mutant gate', async () => {
+  const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n', '.gitignore': 'generated/\nscratch/\n', 'generated/cache.json': '{}' })
+  const gate = CAUGHT_GATE + "; import {mkdirSync as m, writeFileSync as w} from 'node:fs'; if (readFileSync('target.txt','utf8').includes('beta')) { w('generated/cache.json', 'mutant'); m('scratch', { recursive: true }); w('scratch/new.json', '{}'); m('empty/dir', { recursive: true }) }"
+  const spec = realSpec(cwd, gate, { checks: ['A1', 'A2'], mutations: [A1, { check: 'A2', file: 'other.txt', find: 'one', replace: 'two' }] })
+  const before = readTree(cwd)
+  const result = await proveMutations(spec)
+  assert.deepEqual(readTree(cwd), before)
+  assert.equal(existsSync(join(cwd, 'empty')), false, 'the empty directory stayed in the copy')
+  assert.equal(existsSync(join(cwd, 'scratch')), false)
+  assert.equal(rowOf(result).outcome, 'killed')
 })
 
-// MUTATION: skip the ignored-path re-list and a path that cannot be removed is reported restored.
-test('proveMutations refuses proof when an ignored path the gate created cannot be removed', async () => {
+// MUTATION: let a copy failure fall through to the gate and a proof runs in the checkout.
+test('proveMutations refuses with copy-failed when a copy cannot be made, and never runs the gate there', async () => {
   const cwd = repo()
-  const gate = fakeGate(cwd, () => redResult('A1'))
-  let lists = 0
-  // one for the pre-preflight snapshot, two for its restore, one for the mutant snapshot
-  const listIgnored = () => (++lists >= 5 ? ['stuck'] : [])
-  const result = await proveMutations(gate.spec, { ...gate.deps, listIgnored })
-  assert.equal(result.reason, 'tree-not-restored')
-  assert.ok(rowOf(result).errors.some((error) => error.path === 'stuck'))
+  const failing = fakeGate(cwd, () => assert.fail('no mutant without a copy'))
+  const refused = await proveMutations(failing.spec, { ...failing.deps, copyTree: () => { throw Object.assign(new Error('no space'), { code: 'ENOSPC' }) } })
+  assert.equal(refused.status, 'unmeasured')
+  assert.equal(refused.reason, 'copy-failed')
+  assert.equal(refused.error.code, 'ENOSPC')
+  assert.equal(failing.calls.length, 0, 'not even the preflight runs')
+  let copiesMade = 0
+  const later = fakeGate(cwd, () => assert.fail('no mutant without a copy'))
+  const copyTree = (dir) => {
+    if (++copiesMade > 1) throw new Error('second copy failed')
+    const copy = scratchDir('checks-copy-')
+    cpSync(dir, copy, { recursive: true })
+    return copy
+  }
+  const result = await proveMutations(later.spec, { ...later.deps, copyTree })
+  assert.equal(rowOf(result).reason, 'copy-failed')
+  assert.equal(result.reason, 'mutation-unmeasured')
+})
+// MUTATION: share one copy between proofs and two proofs of one checkout see each other's mutants.
+test('two proofs of the same checkout at once each measure their own mutant', async () => {
+  const cwd = repo()
+  const [first, second] = await Promise.all([
+    proveMutations(realSpec(cwd, CAUGHT_GATE)),
+    proveMutations({ cwd, gatePath: join(cwd, 'gate.mjs'), checks: ['A1'], mutations: [A1], timeoutMs: GATE_TIMEOUT_MS }),
+  ])
+  assert.equal(first.status, 'green')
+  assert.equal(second.status, 'green')
+  assert.equal(readFileSync(join(cwd, 'target.txt'), 'utf8'), 'alpha\n')
 })
 
-test('proveMutations refuses an overlapping proof of the same checkout and frees it afterwards', async () => {
-  const cwd = repo()
-  let release
-  const held = new Promise((wake) => { release = wake })
-  const first = proveMutations({ cwd, checks: ['A1'], mutations: [A1], timeoutMs: GATE_TIMEOUT_MS }, { runGate: async () => { await held; return GREEN_RESULT } })
-  const overlap = await proveMutations({ cwd, checks: ['A1'], mutations: [A1], timeoutMs: GATE_TIMEOUT_MS }, { runGate: async () => assert.fail('overlap must not run') })
-  assert.equal(overlap.status, 'unmeasured')
-  assert.equal(overlap.reason, 'invalid-input')
-  release()
-  assert.equal((await first).reason, 'mutations-survived')
-  const once = fakeGate(cwd, () => redResult('A1'))
-  assert.equal((await proveMutations(once.spec, once.deps)).status, 'green')
-  const failing = proveMutations({ cwd, checks: ['A1'], mutations: [A1] }, { runGate: async () => { throw new Error('boom') } })
-  assert.equal((await failing).reason, 'preproof-not-green')
-  const again = fakeGate(cwd, () => redResult('A1'))
-  assert.equal((await proveMutations(again.spec, again.deps)).status, 'green', 'a failed proof also releases the checkout')
+// MUTATION: run a gate inside the checkout from the original and it imports the unmutated module.
+test('a gate inside the checkout runs from the copy, so its imports see the mutant', async () => {
+  const cwd = repo({ 'lib.mjs': "export const word = 'alpha'\n" })
+  const gate = "import { word } from './lib.mjs'; if (word !== 'alpha') { console.log('FAIL A1: word changed'); process.exitCode = 1 }"
+  const result = await proveMutations(realSpec(cwd, gate, { mutations: [{ check: 'A1', file: 'lib.mjs', find: 'alpha', replace: 'beta' }] }))
+  assert.equal(rowOf(result).outcome, 'killed')
 })

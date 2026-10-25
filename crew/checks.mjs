@@ -1,14 +1,14 @@
-import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { spawn } from 'node:child_process'
+import { constants, cpSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
-import { compareFingerprints, fingerprintTree } from './tree-fingerprint.mjs'
 
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
   'cleanup-unproven', 'gate-no-fail', 'gate-failed', 'gate-inconsistent', 'gate-invalid', 'baseline-green',
   'baseline-unmeasured', 'baseline-invalid', 'invalid-mutations', 'preproof-not-green', 'unsafe-target',
-  'bind-fail', 'tree-unmeasured', 'tree-not-restored', 'runner-threw', 'gate-green', 'target-not-failed',
+  'bind-fail', 'copy-failed', 'runner-threw', 'gate-green', 'target-not-failed',
   'mutations-survived', 'mutation-unmeasured',
 ])
 
@@ -179,9 +179,6 @@ export async function checkBaseline(spec = {}) {
   return { accepted: false, reason: 'baseline-invalid', result }
 }
 
-// Checkouts with a proof in flight: two concurrent proofs would snapshot and restore each other's mutants.
-const proofsInFlight = new Set()
-const byDepth = (a, b) => a.split('/').length - b.split('/').length || (a < b ? -1 : 1)
 
 function declarationProblem(checks, mutations) {
   if (!Array.isArray(checks) || checks.length === 0) return 'checks must be a nonempty array'
@@ -207,86 +204,42 @@ function literalRelative(file) {
   return file.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
 }
 
-// 'ok' when every ancestor is a real directory, 'missing' at the first absent one, else 'unsafe' (symlink, file, unreadable).
-function ancestorState(cwd, path) {
-  let dir = cwd
+// True when every ancestor of `path` under `root` is a real directory and the path is a regular file.
+function regularFileUnder(root, path) {
+  let dir = root
   for (const part of path.split('/').slice(0, -1)) {
     dir = join(dir, part)
-    let st
-    try { st = lstatSync(dir) } catch (error) { return error.code === 'ENOENT' ? 'missing' : 'unsafe' }
-    if (!st.isDirectory()) return 'unsafe'
+    try { if (!lstatSync(dir).isDirectory()) return false } catch { return false }
   }
-  return 'ok'
+  try { return lstatSync(join(root, path)).isFile() } catch { return false }
 }
 
-// Ignored paths the fingerprint does not inventory, collapsed to the outermost ignored
-// directory. A gate run that creates one is undone by removing it; a file written inside a
-// directory that was already ignored before the run is not seen (blind spot).
-function listIgnoredDefault(cwd) {
-  const listed = spawnSync('git', ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'], { cwd, encoding: 'utf8', maxBuffer: OUTPUT_LIMIT_BYTES })
-  if (listed.status !== 0) return null
-  return listed.stdout.split('\0').filter(Boolean).map((path) => path.replace(/\/$/, ''))
-}
-
-// lean: serial mutations with an in-memory checkout snapshot; use isolated byte copies if scale requires it
-function snapshotTree(cwd, measure, listIgnored) {
-  const ignored = listIgnored(cwd)
-  if (!ignored) return { ok: false, diagnostic: 'ignored paths unmeasured' }
-  const before = measure(cwd)
-  if (!before?.measured) return { ok: false, diagnostic: before?.detail ?? before?.cause ?? 'inventory unmeasured' }
-  const nodes = new Map()
+// Every gate run of a proof, the preflight included, runs in a throwaway copy of the checkout,
+// so nothing a gate writes (tracked, untracked, ignored, directories) can reach the checkout
+// and nothing has to be restored. The copy leaves out the top-level .git, so it is not a git
+// checkout: a gate that needs git metadata fails there, which reads as unmeasured, never killed.
+// Copies clone on copy-on-write filesystems and copy bytes elsewhere.
+function copyTreeDefault(cwd) {
+  const root = resolve(cwd)
+  const dir = mkdtempSync(join(tmpdir(), 'crew-proof-'))
   try {
-    for (const path of Object.keys(before.entries)) {
-      const full = join(cwd, path)
-      const st = lstatSync(full)
-      if (st.isSymbolicLink()) nodes.set(path, { kind: 'link', target: readlinkSync(full, 'buffer') })
-      else if (st.isFile()) nodes.set(path, { kind: 'file', mode: st.mode & 0o7777, bytes: readFileSync(full) })
-      else return { ok: false, diagnostic: `${path} is neither a regular file nor a symlink` }
-    }
-  } catch (error) { return { ok: false, diagnostic: describeError(error).message } }
-  const drift = compareFingerprints(before, measure(cwd)).outcome
-  if (drift !== 'unchanged') return { ok: false, diagnostic: `checkout ${drift} during the snapshot` }
-  return { ok: true, measure, listIgnored, ignored: new Set(ignored), fingerprint: before, nodes }
+    cpSync(root, dir, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE, filter: (source) => resolve(source) !== join(root, '.git') })
+  } catch (error) { rmSync(dir, { recursive: true, force: true }); throw error }
+  return dir
 }
 
-function nodeMatches(node, full, st) {
-  if (node.kind === 'link') return st.isSymbolicLink() && readlinkSync(full, 'buffer').equals(node.target)
-  return st.isFile() && (st.mode & 0o7777) === node.mode && readFileSync(full).equals(node.bytes)
+// A gate inside the checkout is run from the copy, so it sees the copy's code; one outside
+// (the lane's task dir) is run where it is, with the copy as its working directory.
+function gateIn(cwd, copy, gatePath) {
+  const gate = resolve(cwd, gatePath ?? 'task/gate.mjs')
+  const inside = relative(resolve(cwd), gate)
+  return inside && !inside.startsWith('..') && !isAbsolute(inside) ? join(copy, inside) : gate
 }
 
-function restoreNode(cwd, path, node) {
-  const full = join(cwd, path)
-  const state = ancestorState(cwd, path)
-  if (state === 'unsafe') throw new Error('an ancestor is not a real directory')
-  if (state === 'missing') mkdirSync(dirname(full), { recursive: true })
-  let current = null
-  try { current = lstatSync(full) } catch (error) { if (error.code !== 'ENOENT') throw error }
-  if (current && nodeMatches(node, full, current)) return
-  if (current) rmSync(full, { recursive: true, force: true })
-  if (node.kind === 'link') { symlinkSync(node.target, full); return }
-  writeFileSync(full, node.bytes, { flag: 'wx', mode: node.mode })
-  chmodSync(full, node.mode)
-}
-
-// Removes added paths, rewrites changed or deleted ones from raw bytes, then proves it with a fresh fingerprint.
-function restoreTreeDefault(cwd, snapshot) {
-  const errors = []
-  const attempt = (path, action) => { try { action() } catch (error) { errors.push({ path, ...describeError(error) }) } }
-  const current = snapshot.measure(cwd)
-  if (!current?.measured) errors.push({ path: null, code: null, message: `inventory unmeasured: ${current?.detail ?? current?.cause}` })
-  const added = current?.measured ? Object.keys(current.entries).filter((path) => !snapshot.nodes.has(path)).sort(byDepth) : []
-  for (const path of added) attempt(path, () => { if (ancestorState(cwd, path) === 'ok') rmSync(join(cwd, path), { force: true }) })
-  for (const [path, node] of [...snapshot.nodes].sort(([a], [b]) => byDepth(a, b))) attempt(path, () => restoreNode(cwd, path, node))
-  const newIgnored = () => snapshot.listIgnored(cwd)?.filter((path) => !snapshot.ignored.has(path)) ?? null
-  for (const path of (newIgnored() ?? []).sort(byDepth).reverse()) {
-    attempt(path, () => { if (literalRelative(path) && ancestorState(cwd, path) === 'ok') rmSync(join(cwd, path), { recursive: true, force: true }) })
-  }
-  const left = newIgnored()
-  if (left === null) errors.push({ path: null, code: null, message: 'ignored paths unmeasured after restore' })
-  else for (const path of left) errors.push({ path, code: null, message: 'an ignored path the gate created is still present' })
-  const verdict = compareFingerprints(snapshot.fingerprint, snapshot.measure(cwd))
-  if (verdict.outcome !== 'unchanged') errors.push({ path: null, code: null, message: `fresh fingerprint is ${verdict.outcome}` })
-  return { restored: errors.length === 0, errors }
+async function inCopy(ctx, work) {
+  let copy
+  try { copy = ctx.copyTree(ctx.cwd) } catch (error) { return { copyFailed: describeError(error) } }
+  try { return { value: await work(copy) } } finally { rmSync(copy, { recursive: true, force: true }) }
 }
 
 function adjudicateMutation(check, result) {
@@ -303,31 +256,23 @@ function adjudicateMutation(check, result) {
   return { check, outcome: 'survived', reason: 'target-not-failed', result }
 }
 
-// One serial transaction: snapshot, apply, run, and ALWAYS restore before adjudicating anything.
+// One mutant in its own copy: bind, apply, run, adjudicate; the copy is removed whatever happens.
 async function proveOne(ctx, { check, file, find, replace }) {
-  const { cwd, gatePath, timeoutMs, run, restoreTree, measure, listIgnored } = ctx
   const row = (outcome, reason, extra = {}) => ({ check, outcome, reason, ...extra })
   if (!literalRelative(file)) return row('unmeasured', 'unsafe-target')
-  const snapshot = snapshotTree(cwd, measure, listIgnored)
-  if (!snapshot.ok) return row('unmeasured', 'tree-unmeasured', { diagnostic: snapshot.diagnostic })
-  const node = snapshot.nodes.get(file)
-  if (node?.kind !== 'file' || ancestorState(cwd, file) !== 'ok') return row('unmeasured', 'unsafe-target')
-  const needle = Buffer.from(find)
-  const offsets = []
-  for (let at = node.bytes.indexOf(needle); at !== -1; at = node.bytes.indexOf(needle, at + 1)) offsets.push(at)
-  if (offsets.length !== 1) return row('unmeasured', 'bind-fail', { occurrences: offsets.length })
-  const mutant = Buffer.concat([node.bytes.subarray(0, offsets[0]), Buffer.from(replace), node.bytes.subarray(offsets[0] + needle.length)])
-  let outcome, failure
-  try {
-    writeFileSync(join(cwd, file), mutant)
-    outcome = adjudicateMutation(check, await run({ cwd, gatePath, timeoutMs }))
-  } catch (error) {
-    outcome = row('unmeasured', 'runner-threw', { error: describeError(error) })
-  } finally {
-    failure = await restoreTree(cwd, snapshot)
-  }
-  if (failure) return row('unmeasured', 'tree-not-restored', { errors: failure })
-  return outcome
+  const done = await inCopy(ctx, async (copy) => {
+    if (!regularFileUnder(copy, file)) return row('unmeasured', 'unsafe-target')
+    const bytes = readFileSync(join(copy, file))
+    const needle = Buffer.from(find)
+    const offsets = []
+    for (let at = bytes.indexOf(needle); at !== -1; at = bytes.indexOf(needle, at + 1)) offsets.push(at)
+    if (offsets.length !== 1) return row('unmeasured', 'bind-fail', { occurrences: offsets.length })
+    writeFileSync(join(copy, file), Buffer.concat([bytes.subarray(0, offsets[0]), Buffer.from(replace), bytes.subarray(offsets[0] + needle.length)]))
+    try {
+      return adjudicateMutation(check, await ctx.run({ cwd: copy, gatePath: gateIn(ctx.cwd, copy, ctx.gatePath), timeoutMs: ctx.timeoutMs }))
+    } catch (error) { return row('unmeasured', 'runner-threw', { error: describeError(error) }) }
+  })
+  return done.copyFailed ? row('unmeasured', 'copy-failed', { error: done.copyFailed }) : done.value
 }
 
 // Proves each declared mutation is caught by its own check on a gate that is green after the build.
@@ -337,42 +282,19 @@ export async function proveMutations({ cwd, gatePath, checks, mutations, timeout
   if (typeof cwd !== 'string' || cwd === '' || badGate || !validTimeout(timeoutMs)) return refuse('unmeasured', 'invalid-input')
   const problem = declarationProblem(checks, mutations)
   if (problem) return refuse('red', 'invalid-mutations', { diagnostic: problem })
-  const owner = resolve(cwd)
-  if (proofsInFlight.has(owner)) return refuse('unmeasured', 'invalid-input', { diagnostic: 'another proof owns this checkout' })
-  proofsInFlight.add(owner)
-  try {
-    const run = deps.runGate ?? runGate
-    const measure = deps.fingerprintTree ?? fingerprintTree
-    const listIgnored = deps.listIgnored ?? listIgnoredDefault
-    const restoreImpl = deps.restoreTree ?? restoreTreeDefault
-    const restoreTree = async (dir, snapshot) => {
-      try {
-        const done = await restoreImpl(dir, snapshot)
-        return done?.restored === true ? null : done?.errors ?? [{ message: 'restoration was not confirmed' }]
-      } catch (error) { return [describeError(error)] }
-    }
-    // The preflight is a gate run too: whatever it writes is undone before the first mutant,
-    // so every mutant snapshot is the tree as the proof found it.
-    const original = snapshotTree(cwd, measure, listIgnored)
-    if (!original.ok) return refuse('unmeasured', 'tree-unmeasured', { diagnostic: original.diagnostic })
-    let preflight
-    try { preflight = await run({ cwd, gatePath, timeoutMs }) } catch (error) { preflight = { thrown: describeError(error) } }
-    const preflightFailure = await restoreTree(cwd, original)
-    if (preflightFailure) return refuse('unmeasured', 'tree-not-restored', { errors: preflightFailure, preflight })
-    if (preflight?.thrown) return refuse('unmeasured', 'preproof-not-green', { error: preflight.thrown })
-    if (preflight?.status !== 'green' || preflight.reason !== null || preflight.timedOut === true) {
-      return refuse(preflight?.status === 'red' ? 'red' : 'unmeasured', 'preproof-not-green', { preflight })
-    }
-    const ctx = { cwd, gatePath, timeoutMs, run, restoreTree, measure, listIgnored }
-    const rows = []
-    for (const id of checks) {
-      rows.push(await proveOne(ctx, mutations.find((declaration) => declaration.check === id)))
-      if (rows.at(-1).reason === 'tree-not-restored') return { status: 'unmeasured', reason: 'tree-not-restored', rows }
-    }
-    if (rows.some((row) => row.outcome === 'survived')) return { status: 'red', reason: 'mutations-survived', rows }
-    if (rows.some((row) => row.outcome !== 'killed')) return { status: 'unmeasured', reason: 'mutation-unmeasured', rows }
-    return { status: 'green', reason: null, rows }
-  } finally {
-    proofsInFlight.delete(owner)
+  const ctx = { cwd, gatePath, timeoutMs, run: deps.runGate ?? runGate, copyTree: deps.copyTree ?? copyTreeDefault }
+  const preflight = await inCopy(ctx, async (copy) => {
+    try { return await ctx.run({ cwd: copy, gatePath: gateIn(cwd, copy, gatePath), timeoutMs }) } catch (error) { return { thrown: describeError(error) } }
+  })
+  if (preflight.copyFailed) return refuse('unmeasured', 'copy-failed', { error: preflight.copyFailed })
+  const green = preflight.value
+  if (green?.thrown) return refuse('unmeasured', 'preproof-not-green', { error: green.thrown })
+  if (green?.status !== 'green' || green.reason !== null || green.timedOut === true) {
+    return refuse(green?.status === 'red' ? 'red' : 'unmeasured', 'preproof-not-green', { preflight: green })
   }
+  const rows = []
+  for (const id of checks) rows.push(await proveOne(ctx, mutations.find((declaration) => declaration.check === id)))
+  if (rows.some((row) => row.outcome === 'survived')) return { status: 'red', reason: 'mutations-survived', rows }
+  if (rows.some((row) => row.outcome !== 'killed')) return { status: 'unmeasured', reason: 'mutation-unmeasured', rows }
+  return { status: 'green', reason: null, rows }
 }

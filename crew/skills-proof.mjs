@@ -89,10 +89,9 @@ function loadOf(name, input, { agent, role, required, skillsRoot, cwd }) {
 export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
   const required = definition?.requires ?? []
   if (required.length === 0) return null
-  let raw
-  try { raw = await readFile(sessionFile, 'utf8') } catch { return UNPROVEN }
   let calls
   try {
+    const raw = await readFile(sessionFile, 'utf8')
     if (typeof raw !== 'string' || raw.trim() === '') return UNPROVEN
     calls = foldCalls(raw)
   } catch { return UNPROVEN }
@@ -102,13 +101,13 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
   for (const call of calls) {
     const name = toolNameOf(call)
     const lower = name.toLowerCase()
+    // For a repo writer every shell call is a write boundary, including one that reads a SKILL.md.
+    const writes = WRITE_TOOLS.has(lower) || WRITE_KINDS.has(call.kind) || (lower === 'bash' && definition.writes === 'repo')
+    if (writes && firstWrite === null) firstWrite = call.seq
+    if (call.loadAt === null || call.status !== 'completed') continue
     for (const input of inputsOf(call)) {
-      const load = call.loadAt !== null && call.status === 'completed' ? loadOf(name, input, scope) : null
+      const load = loadOf(name, input, scope)
       if (load) tracker.observe(load[0], load[1], null, call.loadAt, call.id)
-      // For a repo writer every shell call is a write boundary, including one that reads a SKILL.md.
-      const shell = call.kind === 'execute' || lower === 'bash'
-      const writes = WRITE_TOOLS.has(lower) || WRITE_KINDS.has(call.kind) || (shell && definition.writes === 'repo')
-      if (writes && firstWrite === null) firstWrite = call.seq
     }
   }
   const { loads } = tracker.snapshot()

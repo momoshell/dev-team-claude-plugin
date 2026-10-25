@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process'
 import { constants, cpSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import { compareFingerprints, fingerprintTree } from './tree-fingerprint.mjs'
 import { stripVTControlCharacters } from 'node:util'
 
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
   'cleanup-unproven', 'gate-no-fail', 'gate-failed', 'gate-inconsistent', 'gate-invalid', 'baseline-green',
   'baseline-unmeasured', 'baseline-invalid', 'invalid-mutations', 'preproof-not-green', 'unsafe-target',
-  'bind-fail', 'copy-failed', 'runner-threw', 'gate-green', 'target-not-failed',
+  'bind-fail', 'copy-failed', 'checkout-changed', 'runner-threw', 'gate-green', 'target-not-failed',
   'mutations-survived', 'mutation-unmeasured',
 ])
 
@@ -236,10 +237,24 @@ function gateIn(cwd, copy, gatePath) {
   return inside && !inside.startsWith('..') && !isAbsolute(inside) ? join(copy, inside) : gate
 }
 
+// A copy is not a sealed boundary: a symlink in the checkout can lead a gate back into it. So
+// the checkout is fingerprinted around every run, and a run that changed it is never credited.
+// Blind spot: ignored paths are outside the fingerprint.
 async function inCopy(ctx, work) {
+  const before = ctx.measure(ctx.cwd)
+  if (!before?.measured) return { failed: { reason: 'checkout-changed', error: { code: null, message: `checkout unmeasured: ${before?.detail ?? before?.cause}` } } }
   let copy
-  try { copy = ctx.copyTree(ctx.cwd) } catch (error) { return { copyFailed: describeError(error) } }
-  try { return { value: await work(copy) } } finally { rmSync(copy, { recursive: true, force: true }) }
+  try { copy = ctx.copyTree(ctx.cwd) } catch (error) { return { failed: { reason: 'copy-failed', error: describeError(error) } } }
+  let value
+  try { value = await work(copy) } finally {
+    try { rmSync(copy, { recursive: true, force: true }) } catch (error) { value = { cleanupFailed: describeError(error) } }
+  }
+  if (value?.cleanupFailed) return { failed: { reason: 'cleanup-unproven', error: value.cleanupFailed, copy } }
+  const after = ctx.measure(ctx.cwd)
+  if (!after?.measured || compareFingerprints(before, after).outcome !== 'unchanged') {
+    return { failed: { reason: 'checkout-changed', error: { code: null, message: 'the checkout changed during a gate run in its copy' } } }
+  }
+  return { value }
 }
 
 function adjudicateMutation(check, result) {
@@ -272,7 +287,7 @@ async function proveOne(ctx, { check, file, find, replace }) {
       return adjudicateMutation(check, await ctx.run({ cwd: copy, gatePath: gateIn(ctx.cwd, copy, ctx.gatePath), timeoutMs: ctx.timeoutMs }))
     } catch (error) { return row('unmeasured', 'runner-threw', { error: describeError(error) }) }
   })
-  return done.copyFailed ? row('unmeasured', 'copy-failed', { error: done.copyFailed }) : done.value
+  return done.failed ? row('unmeasured', done.failed.reason, { error: done.failed.error }) : done.value
 }
 
 // Proves each declared mutation is caught by its own check on a gate that is green after the build.
@@ -282,11 +297,11 @@ export async function proveMutations({ cwd, gatePath, checks, mutations, timeout
   if (typeof cwd !== 'string' || cwd === '' || badGate || !validTimeout(timeoutMs)) return refuse('unmeasured', 'invalid-input')
   const problem = declarationProblem(checks, mutations)
   if (problem) return refuse('red', 'invalid-mutations', { diagnostic: problem })
-  const ctx = { cwd, gatePath, timeoutMs, run: deps.runGate ?? runGate, copyTree: deps.copyTree ?? copyTreeDefault }
+  const ctx = { cwd, gatePath, timeoutMs, run: deps.runGate ?? runGate, copyTree: deps.copyTree ?? copyTreeDefault, measure: deps.fingerprintTree ?? fingerprintTree }
   const preflight = await inCopy(ctx, async (copy) => {
     try { return await ctx.run({ cwd: copy, gatePath: gateIn(cwd, copy, gatePath), timeoutMs }) } catch (error) { return { thrown: describeError(error) } }
   })
-  if (preflight.copyFailed) return refuse('unmeasured', 'copy-failed', { error: preflight.copyFailed })
+  if (preflight.failed) return refuse('unmeasured', preflight.failed.reason, { error: preflight.failed.error })
   const green = preflight.value
   if (green?.thrown) return refuse('unmeasured', 'preproof-not-green', { error: green.thrown })
   if (green?.status !== 'green' || green.reason !== null || green.timedOut === true) {

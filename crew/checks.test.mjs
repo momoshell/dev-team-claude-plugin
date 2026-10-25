@@ -35,7 +35,7 @@ const failing = (lines, code = 1) => `${lines.map((line) => `console.log(${JSON.
 test('the reason vocabulary is a frozen list of unique tokens', () => {
   assert.ok(Object.isFrozen(CHECK_REASONS))
   assert.equal(new Set(CHECK_REASONS).size, CHECK_REASONS.length)
-  assert.equal(CHECK_REASONS.length, 25)
+  assert.equal(CHECK_REASONS.length, 26)
 })
 
 test('runSuite reports exit 0 as green with a null reason and a real process group', async () => {
@@ -688,4 +688,35 @@ test('a gate inside the checkout runs from the copy, so its imports see the muta
   const gate = "import { word } from './lib.mjs'; if (word !== 'alpha') { console.log('FAIL A1: word changed'); process.exitCode = 1 }"
   const result = await proveMutations(realSpec(cwd, gate, { mutations: [{ check: 'A1', file: 'lib.mjs', find: 'alpha', replace: 'beta' }] }))
   assert.equal(rowOf(result).outcome, 'killed')
+})
+
+// MUTATION: drop the checkout fingerprint and a gate writing through a symlink into the checkout is credited.
+test('a gate that writes through a symlink back into the checkout is never credited', async () => {
+  const cwd = repo({ 'target.txt': 'alpha\n', 'other.txt': 'one\n' })
+  symlinkSync(cwd, join(cwd, 'home'))
+  const gate = CAUGHT_GATE + "; import {writeFileSync as w} from 'node:fs'; if (readFileSync('target.txt','utf8').includes('beta')) w('home/other.txt', 'escaped')"
+  const result = await proveMutations(realSpec(cwd, gate))
+  assert.equal(rowOf(result).outcome, 'unmeasured')
+  assert.equal(rowOf(result).reason, 'checkout-changed')
+  assert.notEqual(result.status, 'green')
+})
+
+// MUTATION: let the copy removal throw and the proof rejects with no closed reason.
+test('a copy that cannot be removed is unmeasured cleanup-unproven, not a thrown proof', async () => {
+  const cwd = repo()
+  const copies = []
+  const gate = fakeGate(cwd, (n, spec) => {
+    mkdirSync(join(spec.cwd, 'locked/inner'), { recursive: true })
+    writeFileSync(join(spec.cwd, 'locked/inner/f'), 'x')
+    chmodSync(join(spec.cwd, 'locked'), 0o500)
+    copies.push(spec.cwd)
+    return redResult('A1')
+  })
+  try {
+    const result = await proveMutations(gate.spec, gate.deps)
+    assert.equal(rowOf(result).reason, 'cleanup-unproven')
+    assert.equal(result.reason, 'mutation-unmeasured')
+  } finally {
+    for (const copy of copies) { try { chmodSync(join(copy, 'locked'), 0o700) } catch {} rmSync(copy, { recursive: true, force: true }) }
+  }
 })

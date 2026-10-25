@@ -486,9 +486,11 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
     assert.equal(request.sessionFile, f.sessionOf(role, index + 1))
-    for (const wanted of [body, BRIEF, `Envelope id: ${id}`, `Return path: ${returnPath}`, `Task directory: ${f.spec.taskDir}`, `Definition source: ${source}`, join(AGENTS, '..', 'roles', `${role}.md`), 'no submit_envelope', `"role": "${role}"`, `"id": "${id}"`]) {
+    for (const wanted of [body, BRIEF, `Envelope id: ${id}`, `Return path: ${returnPath}`, `Task directory: ${f.spec.taskDir}`, `Definition source: ${source}`, 'no submit_envelope', `"role": "${role}"`, `"id": "${id}"`]) {
       assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
     }
+    assert.doesNotMatch(request.prompt, /^Charter file/m, id)
+    assert.doesNotMatch(request.prompt, /\]\([^)]*roles\//, id)
     const lines = readFileSync(request.sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     assert.deepEqual(lines[0], { type: 'prompt', text: request.prompt })
     assert.equal(lines[1].update.content.text, `chunk-${id}`)
@@ -532,6 +534,21 @@ test('a consulted lead gets its own definition and decision shape', async () => 
   assert.match(lead.prompt, /insufficient/)
   assert.ok(lead.prompt.includes(`Task directory: ${f.spec.taskDir}`))
   assert.equal(lead.sessionFile, f.sessionOf('lead', 2))
+})
+
+// MUTATION: restore an old role-charter link or first-generation field in a body and a dispatched prompt carries it.
+test('lean prompts contain only the lean contract', async () => {
+  const f = leanFixture({ answers: { 'planner.1': 'insufficient' } })
+  f.spec.brief = 'Implement the supplied task.'
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual([...new Set(f.requests.map((r) => r.definition.role))].sort(), ['builder', 'lead', 'planner', 'reviewer'])
+  for (const { prompt, definition } of f.requests) {
+    assert.doesNotMatch(prompt, /^Charter file/m, definition.role)
+    assert.doesNotMatch(prompt, /\]\([^)]*roles\//, definition.role)
+    for (const field of ['gate_cmd', 'validation_lane', 'files_in_scope', 'commit_subject', 'closes', 'exemplars', 'exemplars_none', 'consult_questions']) {
+      assert.doesNotMatch(prompt, new RegExp(`\\b${field}\\b`), `${definition.role}: ${field}`)
+    }
+  }
 })
 
 // MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.

@@ -122,10 +122,10 @@ test('the status command takes no argument', () => {
   }
 })
 
-test('each command names the skill it dispatches to', () => {
+test('each command names exactly the skills it dispatches to', () => {
   for (const [name, wanted] of Object.entries(DISPATCHES_TO)) {
-    const cited = citedSkills(parts(name).body)
-    for (const skill of wanted) assert.ok(cited.has(skill), `${name} must name the ${skill} skill`)
+    const cited = [...citedSkills(parts(name).body)].sort()
+    assert.deepEqual(cited, [...wanted].sort(), `${name} must name exactly ${wanted.join(', ')}`)
   }
 })
 

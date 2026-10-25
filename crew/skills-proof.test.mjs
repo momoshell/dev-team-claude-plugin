@@ -146,3 +146,9 @@ test('a claude seat proves a skill only by a Skill call under its own plugin', a
   assert.equal(await prove([skill('crew-skills-planner:alpha'), claudeWrite()], planner), null)
   assert.equal(await prove([skill('crew-skills-planner:alpha'), write()], { ...planner, agent: 'pi' }), 'required-skills-unproven')
 })
+
+// MUTATION: derive a read's input from its locations and a location-only read proves the skill.
+test('a read recorded with locations but no input is not a load', async () => {
+  const located = row({ sessionUpdate: 'tool_call', toolCallId: 'loc', title: 'read', kind: 'read', status: 'in_progress', locations: [{ path: '/c/skills/alpha/SKILL.md' }] })
+  assert.equal(await prove([located, update('loc', 'completed'), write()]), 'required-skills-unproven')
+})

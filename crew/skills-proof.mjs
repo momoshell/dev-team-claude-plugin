@@ -14,8 +14,8 @@ const UNPROVEN = 'required-skills-unproven'
 const WRITE_TOOLS = new Set(['edit', 'write', 'multiedit', 'notebookedit'])
 const WRITE_KINDS = new Set(['edit', 'delete', 'move'])
 
-// Fold tool_call and tool_call_update rows by call id: first-seen order, with metadata, input and
-// locations kept across partial updates. `seq` is the row a call first appears on (its write
+// Fold tool_call and tool_call_update rows by call id: first-seen order, with metadata and input
+// kept across partial updates. `seq` is the row a call first appears on (its write
 // boundary). A read counts as a load only once it has completed, and no earlier than the last row
 // that changed what it names: a pending call can arrive with empty or different input and name
 // its skill, or finish, only in a later update. `loadAt` is the later of those two rows.
@@ -31,7 +31,7 @@ function foldCalls(raw) {
     if (!update || (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update')) continue
     at += 1
     const id = typeof update.toolCallId === 'string' ? update.toolCallId : `anonymous-${++anonymous}`
-    if (!calls.has(id)) calls.set(id, { id, seq: at, inputAt: null, doneAt: null, title: null, kind: null, status: null, tool: null, input: null, locations: null })
+    if (!calls.has(id)) calls.set(id, { id, seq: at, inputAt: null, doneAt: null, title: null, kind: null, status: null, tool: null, input: null })
     const call = calls.get(id)
     if (typeof update.title === 'string') call.title = update.title
     if (typeof update.kind === 'string') call.kind = update.kind
@@ -41,10 +41,7 @@ function foldCalls(raw) {
     if (typeof tool === 'string' && tool !== '') call.tool = tool
     const input = update.rawInput
     const hasInput = input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length > 0
-    const hasLocations = Array.isArray(update.locations) && update.locations.length > 0
-    if (hasInput) call.input = input
-    if (Array.isArray(update.locations)) call.locations = update.locations
-    if (hasInput || hasLocations) call.inputAt = at
+    if (hasInput) { call.input = input; call.inputAt = at }
   }
   return [...calls.values()].map((call) => ({ ...call, loadAt: call.doneAt === null ? null : Math.max(call.inputAt ?? call.seq, call.doneAt) }))
 }
@@ -55,12 +52,6 @@ function toolNameOf(call) {
   if (call.kind === 'execute') return 'bash'
   if (call.title !== null && call.title !== '') return call.title
   return call.kind ?? 'other'
-}
-
-function inputsOf(call) {
-  if (call.input) return [call.input]
-  const located = (call.locations ?? []).map((l) => (typeof l === 'string' ? l : l?.path)).filter((p) => typeof p === 'string').map((path) => ({ path }))
-  return located.length ? located : [{}]
 }
 
 // The load a completed call shows, as [toolName, input] for the tracker, or null when it shows none.
@@ -104,11 +95,10 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
     // For a repo writer every shell call is a write boundary, including one that reads a SKILL.md.
     const writes = WRITE_TOOLS.has(lower) || WRITE_KINDS.has(call.kind) || (lower === 'bash' && definition.writes === 'repo')
     if (writes && firstWrite === null) firstWrite = call.seq
-    if (call.loadAt === null || call.status !== 'completed') continue
-    for (const input of inputsOf(call)) {
-      const load = loadOf(name, input, scope)
-      if (load) tracker.observe(load[0], load[1], null, call.loadAt, call.id)
-    }
+    // A load needs the recorded input: locations alone cannot show whether a read was whole.
+    if (call.loadAt === null || call.status !== 'completed' || !call.input) continue
+    const load = loadOf(name, call.input, scope)
+    if (load) tracker.observe(load[0], load[1], null, call.loadAt, call.id)
   }
   const { loads } = tracker.snapshot()
   for (const skill of required) {

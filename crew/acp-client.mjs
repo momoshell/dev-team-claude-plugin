@@ -345,16 +345,25 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return stats.length > 0 && stats.every((stat) => stat.startsWith('Z'))
   }
 
+  // One look at the seat's process group. The exit marker only says the leader left, so it never decides this.
+  function probeGroup() {
+    const liveness = store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid })
+    return { liveness, reason: liveness === LIVENESS.DEAD && exists(paths.exit) ? 'exit-marker' : 'probe' }
+  }
+  function probeOnce(pgid) {
+    const probe = probeGroup()
+    if (probe.liveness === LIVENESS.DEAD) return probe
+    if (groupAllZombie(pgid)) return { liveness: LIVENESS.DEAD, reason: 'zombie-group' }
+    return probe
+  }
+
   function probeBounded(windowMs, pgid) {
     const deadline = now() + windowMs
     const maxPolls = Math.ceil(windowMs / ACP_POLL_MS) + 1
     let last = { liveness: LIVENESS.UNKNOWN, reason: 'probe' }
     for (let poll = 0; poll < maxPolls && now() < deadline; poll += 1) {
-      if (exists(paths.exit)) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
-      const liveness = store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid })
-      if (liveness === LIVENESS.DEAD) return { liveness, reason: 'probe' }
-      if (groupAllZombie(pgid)) return { liveness: LIVENESS.DEAD, reason: 'zombie-group' }
-      last = { liveness, reason: 'probe' }
+      last = probeOnce(pgid)
+      if (last.liveness === LIVENESS.DEAD) return last
       sleep(ACP_POLL_MS)
     }
     return last
@@ -363,14 +372,15 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   function hasExitMarker() { return exists(paths.exit) }
 
   function proveDead() {
-    const exitProof = () => exists(paths.exit)
-    if (exitProof()) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
     const pgid = Number(child?.pid)
     if (!Number.isSafeInteger(pgid) || pgid <= 1) return { liveness: LIVENESS.UNKNOWN, reason: 'invalid-pgid' }
+    const gone = probeGroup()
+    if (gone.liveness === LIVENESS.DEAD) return gone
     try { kill(-pgid, 'SIGTERM') } catch {}
     const deadline = now() + 5000
     while (now() < deadline) {
-      if (exitProof()) return { liveness: LIVENESS.DEAD, reason: 'exit-marker' }
+      const proof = probeGroup()
+      if (proof.liveness === LIVENESS.DEAD) return proof
       sleep(ACP_POLL_MS)
     }
     try { kill(-pgid, 'SIGKILL') } catch (err) { if (err?.code === 'ESRCH') return { liveness: LIVENESS.DEAD, reason: 'signal-esrch' } }

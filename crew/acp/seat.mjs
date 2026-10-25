@@ -216,6 +216,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       const turn = client.pollPrompt(promptId)
       if (now() >= deadline) break
       if (turn) return turn
+      // A seat that died with no answer would otherwise hold the turn until its deadline.
+      if (client.hasExitMarker?.()) {
+        throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
+      }
       sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))
     }
     // The cancel is a courtesy: its answer is never awaited, and a failed write cannot replace the deadline.

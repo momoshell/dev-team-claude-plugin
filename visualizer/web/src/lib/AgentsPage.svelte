@@ -1,20 +1,16 @@
 <script>
-  import { getAgents, proposeAgent, proposePrompt, proposeSkills } from './api.js'
+  import { getAgents, proposeAgent } from './api.js'
   import { displayTone, displayValue, flagValue, normalizeAgentsPage } from './agents.js'
 
   let { } = $props()
   const tabs = Object.freeze(['agents', 'skills', 'prompts'])
-  const tabLabels = Object.freeze({ agents: 'Agents', skills: 'Skills', prompts: 'Prompts' })
-  const roles = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+  const tabLabels = Object.freeze({ agents: 'Capabilities', skills: 'Skill delivery', prompts: 'Prompt delivery' })
   let activeTab = $state('agents')
   let payload = $state({ agents: [], skills: [], matrix: [], prompts: [], reasons: [] })
   let loading = $state(true)
   let error = $state('')
   let result = $state(null)
   let agentDraft = $state({ name: '', providers: '', transports: 'pane', adapter: 'crew/adapters/adapter-', refuses: '' })
-  let selectedRole = $state('builder')
-  let skillDraft = $state('')
-  let promptDraft = $state({ role: 'builder', text: '' })
   let shaped = $derived(normalizeAgentsPage(payload))
 
   $effect(() => {
@@ -50,25 +46,12 @@
     } catch (cause) { result = { ok: false, diff: null, refusals: [{ message: cause.message || 'agent proposal failed' }] } }
   }
 
-  async function submitSkills(event) {
-    event.preventDefault()
-    result = null
-    try { result = await proposeSkills(selectedRole, splitList(skillDraft)) }
-    catch (cause) { result = { ok: false, diff: null, refusals: [{ message: cause.message || 'skill proposal failed' }] } }
-  }
-
-  async function submitPrompt(event) {
-    event.preventDefault()
-    result = null
-    try { result = await proposePrompt(promptDraft.role, promptDraft.text) }
-    catch (cause) { result = { ok: false, diff: null, refusals: [{ message: cause.message || 'prompt proposal failed' }] } }
-  }
 </script>
 
 <section class="agents-page" aria-label="Agents, skills, and prompts">
-  <div class="tabs" role="tablist" aria-label="Seat composition">
+  <div class="tabs" role="group" aria-label="Agent evidence">
     {#each tabs as tab}
-      <button type="button" role="tab" aria-selected={activeTab === tab} class:active={activeTab === tab} onclick={() => { activeTab = tab; result = null }}>{tabLabels[tab]}</button>
+      <button type="button" aria-pressed={activeTab === tab} class:active={activeTab === tab} onclick={() => { activeTab = tab; result = null }}>{tabLabels[tab]}</button>
     {/each}
   </div>
   <p class="proposal-note">Proposal only — nothing is applied.</p>
@@ -90,7 +73,7 @@
           <div class="flags"><span class="label">Capability flags</span>{#each Object.entries(agent.flags) as [name, value]}<span class="flag"><b>{name}</b>{flagValue(value)}</span>{/each}</div>
         </article>
       {/each}
-      {#if !shaped.agents.length}<p class="notice">No coding-agent register entries were measured.</p>{/if}
+      {#if !loading && !error && !shaped.agents.length}<p class="notice">No coding-agent register entries were measured.</p>{/if}
     </div>
     <form class="panel proposal-form" onsubmit={submitAgent}>
       <header><div><p class="eyebrow">Register proposal</p><h2>Create coding agent entry</h2></div><span class="tone neutral">availability: proposal-stub</span></header>
@@ -102,18 +85,14 @@
       <header><div><p class="eyebrow">Skill inventory</p><h2>Register grant vs last-seat delivery</h2><p>Register grant is policy; Last-seat delivery is evidence from the newest readable role command.</p></div></header>
       <div class="table-wrap"><table><thead><tr><th>Skill</th><th>Description</th><th>Role</th><th>Register grant</th><th>Last-seat delivery</th></tr></thead><tbody>{#each shaped.matrix as row (row.role)}{#each Object.entries(row.cells) as [name, cell] (row.role + name)}<tr><th scope="row">{name}</th><td>{shaped.skills.skills.find((skill) => skill.name === name)?.description || 'Unmeasured — frontmatter unavailable'}</td><td>{row.role}</td><td class={displayTone(cell.register_grant)}>{displayValue(cell.register_grant)}</td><td class={displayTone(cell.last_seat_delivery)}>{displayValue(cell.last_seat_delivery)}</td></tr>{/each}{/each}</tbody></table></div>
     </section>
-    <form class="panel proposal-form" onsubmit={submitSkills}>
-      <header><div><p class="eyebrow">Capabilities proposal</p><h2>Replace one role's skills</h2></div><span class="tone neutral">proposal diff only</span></header>
-      <div class="fields"><label>Role<select bind:value={selectedRole}>{#each roles as role}<option value={role}>{role}</option>{/each}</select></label><label class="wide-field">Skills<input bind:value={skillDraft} placeholder="frontend-svelte, ui-design" /></label></div>
-      <button type="submit">Propose skill grants</button>
-    </form>
+    <p class="editor-link"><a href="#/skills">Manage skills and role grants →</a></p>
   {:else}
     <section class="prompts">
       {#each shaped.prompts as prompt (prompt.role)}
-        <article class="panel prompt-card"><header><div><p class="eyebrow">Prompt surface</p><h2>{prompt.role}</h2></div><span class="tone {displayTone(prompt.arm)}">{displayValue(prompt.arm)}</span></header><div class="prompt-meta"><span>Source bytes: {displayValue(prompt.source_bytes)}</span><span>Last boot charter bytes: {displayValue(prompt.charter_bytes)}</span><span>Label: {prompt.protected}</span></div><pre>{prompt.text ?? `Unmeasured — ${prompt.role} charter text is unavailable`}</pre></article>
+        <article class="panel prompt-card"><header><div><p class="eyebrow">Prompt surface</p><h2>{prompt.role}</h2></div><span class="tone {displayTone(prompt.arm)}">{displayValue(prompt.arm)}</span></header><div class="prompt-meta"><span>Source bytes: {displayValue(prompt.source_bytes)}</span><span>Last boot charter bytes: {displayValue(prompt.charter_bytes)}</span><span>Label: {prompt.protected}</span></div></article>
       {/each}
     </section>
-    <form class="panel proposal-form" onsubmit={submitPrompt}><header><div><p class="eyebrow">Prompt proposal</p><h2>Replace charter text</h2></div><span class="tone neutral">protected: prompt-surface</span></header><div class="fields"><label>Role<select bind:value={promptDraft.role}>{#each ['_shared', ...roles] as role}<option value={role}>{role}</option>{/each}</select></label><label class="wide-field">Text<textarea bind:value={promptDraft.text} rows="8" required></textarea></label></div><button type="submit">Propose prompt change</button></form>
+    <p class="editor-link"><a href="#/prompts">Read and edit prompt charters →</a></p>
   {/if}
 
   {#if result}
@@ -122,6 +101,7 @@
 </section>
 
 <style>
+.editor-link a { color:var(--accent); font-size:.85rem; }
 .agents-page { display:grid; gap:1rem; }
 .tabs { display:flex; gap:.35rem; border-bottom:1px solid var(--line); }
 .tabs button { border:1px solid var(--line); border-bottom:0; border-radius:.55rem .55rem 0 0; background:var(--bg); color:var(--muted); padding:.55rem .85rem; cursor:pointer; }
@@ -151,8 +131,8 @@
 .proposal-form { display:grid; gap:.8rem; }
 .fields { display:flex; flex-wrap:wrap; gap:.7rem; }
 .fields label { display:grid; gap:.25rem; min-width:10rem; color:var(--muted); font-size:.65rem; }
-.fields .wide-field { flex:1 1 20rem; }
-input,select,textarea { min-width:0; border:1px solid var(--line); border-radius:.4rem; background:var(--bg); padding:.5rem .6rem; }
+
+input { min-width:0; border:1px solid var(--line); border-radius:.4rem; background:var(--bg); padding:.5rem .6rem; }
 button[type='submit'] { width:max-content; border:1px solid var(--accent); border-radius:.45rem; background:var(--accent); color:var(--bg); padding:.5rem .75rem; cursor:pointer; }
 .table-wrap { overflow:auto; margin-top:1rem; }
 table { width:100%; border-collapse:collapse; min-width:44rem; font-size:.68rem; }

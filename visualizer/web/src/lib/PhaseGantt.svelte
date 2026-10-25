@@ -267,4 +267,5 @@
 @media (max-width: 1100px) { .trace-guide-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.trace-guide-grid article:nth-child(3) { border-left:0; border-top:1px solid var(--line); }.trace-guide-grid article:nth-child(4) { border-top:1px solid var(--line); } }
 @media (max-width: 900px) { .steps-intro { grid-template-columns:1fr; align-items:start; }.guide-rules { width:100%; }.checkpoint { grid-template-columns:13rem minmax(20rem,1fr) 6rem; } }
 @media (max-width: 700px) { .panel-heading { align-items:start; }.legend { display:none; } }
+.waterfall-row.selected { background:var(--accent-surface); box-shadow:inset 4px 0 var(--accent); }.waterfall-row.selected .phase-copy strong { color:var(--accent); }.waterfall-row.selected .step { background:var(--accent-solid); color:var(--on-accent); border-radius:.3rem; padding:.3rem; }.waterfall-row.selected .track { outline:1px solid var(--accent-border); outline-offset:3px; }.round-row.selected-step { background:var(--accent-surface); box-shadow:inset 4px 0 var(--accent); }
 </style>

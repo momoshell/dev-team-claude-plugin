@@ -1,12 +1,12 @@
 <script>
-  import { tick } from 'svelte'
+  import { onMount, tick } from 'svelte'
+  import { ListTodo, Activity, Users, Bot, BookOpen, FileText, Workflow, ShieldCheck, RefreshCw } from 'lucide-svelte'
   import { getReturns, getSessions } from './lib/api.js'
-  import { attentionBreakdown, createSemaphore, deriveDisplayStatus, driverObservation, fleetActivity, needsAttention, runtimeActivitySummary } from './lib/fleet.js'
-  import { journalPulse } from './lib/live.js'
+  import { attentionBreakdown, createSemaphore, deriveDisplayStatus, fleetActivity, needsAttention } from './lib/fleet.js'
+  import { createRefreshLoop, journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
   import OperationsOverview from './lib/OperationsOverview.svelte'
-  import MetricsStrip from './lib/MetricsStrip.svelte'
   import CellHealthPanel from './lib/CellHealthPanel.svelte'
   import TeardownPanel from './lib/TeardownPanel.svelte'
   import RunSetPanel from './lib/RunSetPanel.svelte'
@@ -23,8 +23,8 @@
   const THEME_OPTIONS = [{ value:'ink', label:'Dark' }, { value:'paper', label:'Light' }, { value:'os', label:'System' }]
 
   let route = $state(parseHash(location.hash))
-  let themeValue = 'ink'
-  try { themeValue = localStorage.getItem('dt-theme') || 'ink' } catch {}
+  let themeValue = 'os'
+  try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}
   let theme = $state(themeValue)
   let runs = $state([])
   let envelopes = $state(new Map())
@@ -33,23 +33,20 @@
   let now = $state(Date.now())
   let taskFocus = $state(null)
   let refreshGeneration = 0
-  const returnRequestSemaphore = createSemaphore(6)
+  let refreshInFlight = false
+  let refreshing = $state(false)
+  let lastRead = $state(null)
+  let autoRefresh = $state(true)
+  let showDiagnostics = $state(false)
+  let refreshLoop
+  const returnRequestSemaphore = createSemaphore(2)
   const envelopeCache = new Map()
   const envelopeRuns = new Map()
   const envelopeQueue = []
   const envelopeQueued = new Set()
   let envelopeWorkers = 0
 
-  let anyRunning = $derived(runs.some((run) => run.running))
   let activity = $derived(fleetActivity(runs, now))
-  let runtimeSummary = $derived(runtimeActivitySummary(runs))
-  let driverEvidence = $derived(runs.reduce((summary, run) => {
-    const observation = driverObservation(run)
-    if (observation.measured) summary.measured += 1
-    else summary.unknown += 1
-    if (observation.source && !summary.sources.includes(observation.source)) summary.sources.push(observation.source)
-    return summary
-  }, { measured: 0, unknown: 0, sources: [] }))
   let runIndex = $derived(new Map(runs.map((run) => [run.adw_id, run])))
   let selectedRun = $derived(route.view === 'run' || route.view === 'phase' ? runIndex.get(route.adw_id) : null)
   let attentionRows = $derived(runs.map((run) => {
@@ -78,7 +75,7 @@
     try {
       const run = envelopeRuns.get(id)
       if (!run) return
-      const result = await returnRequestSemaphore.run(() => getReturns(run.repo_slug, run.goal, run.adw_id))
+      const result = await returnRequestSemaphore.run(() => getReturns(run.repo_slug, run.goal, run.adw_id, { signal: AbortSignal.timeout(10000) }))
       if (result?.task && typeof result.task === 'object') {
         envelopeCache.set(id, result.task)
         envelopes = new Map(envelopeCache)
@@ -91,7 +88,7 @@
   }
 
   function drainEnvelopeQueue() {
-    while (envelopeWorkers < 6 && envelopeQueue.length) {
+    while (envelopeWorkers < 2 && envelopeQueue.length) {
       const id = envelopeQueue.shift()
       envelopeWorkers += 1
       void fetchEnvelope(id)
@@ -112,14 +109,18 @@
   }
 
   async function refresh() {
+    if (refreshInFlight) return
+    refreshInFlight = true
     const generation = ++refreshGeneration
+    refreshing = true
     try {
-      const result = await getSessions()
+      const result = await getSessions({}, { signal: AbortSignal.timeout(15000) })
       if (generation !== refreshGeneration) return
       const nextRuns = Array.isArray(result?.runs) ? result.runs : []
       runs = nextRuns
       feedDegraded = result?.degraded === true
       now = Date.now()
+      lastRead = now
       error = ''
       probeEnvelopes(nextRuns)
       journalPulse.pulse()
@@ -128,13 +129,16 @@
         error = err.message || 'session request failed'
         feedDegraded = true
       }
+    } finally {
+      refreshInFlight = false
+      if (generation === refreshGeneration) refreshing = false
     }
   }
 
-  $effect(() => {
-    void refresh()
-    const timer = anyRunning ? setInterval(refresh, 3000) : null
-    return () => { if (timer) clearInterval(timer) }
+  onMount(() => {
+    refreshLoop = createRefreshLoop(refresh, { delay:30000, visible:() => !document.hidden })
+    void refreshLoop.refresh()
+    return () => { refreshGeneration += 1; refreshLoop.stop() }
   })
 
   function navigate(next) { location.hash = formatHash(next) }
@@ -146,56 +150,63 @@
     taskFocus = { state, revision: Date.now() }
     if (route.view !== 'fleet') navigate({ view: 'fleet' })
     await tick()
-    requestAnimationFrame(() => document.getElementById('task-board')?.scrollIntoView({ behavior:'smooth', block:'start' }))
+    requestAnimationFrame(() => document.getElementById('task-board')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block:'start' }))
   }
 </script>
 
 <svelte:head><title>{pageTitle}</title><meta name="description" content="Factory task execution, model roster, and operational health." /></svelte:head>
 
-<header class="topbar">
-  <a class="brand" href="#/" aria-label="Factory tasks">
-    <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span><strong>Factory</strong><small>developer operations</small></span>
-  </a>
+<a class="skip-link" href="#main-content" onclick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus() }}>Skip to content</a>
+<aside class="sidebar" aria-label="Factory navigation">
+  <a class="brand" href="#/" aria-label="Factory tasks"><span class="brand-mark" aria-hidden="true"><Workflow size={23} /></span><strong>Factory</strong></a>
   <nav aria-label="Primary navigation">
-    <button class:active={route.view === 'fleet' || route.view === 'run' || route.view === 'phase'} onclick={() => navigate({ view: 'fleet' })}>Tasks</button>
-    <button class:active={route.view === 'roster'} onclick={() => navigate({ view: 'roster' })}>Roster</button>
-    <button class:active={route.view === 'agents'} onclick={() => navigate({ view: 'agents' })}>Agents</button>
-    <button class:active={route.view === 'skills'} onclick={() => navigate({ view: 'skills' })}>Skills</button>
-    <button class:active={route.view === 'prompts'} onclick={() => navigate({ view: 'prompts' })}>Prompts</button>
-    <button class:active={route.view === 'workflows'} onclick={() => navigate({ view: 'workflows' })}>Workflows</button>
-    <button class:active={route.view === 'assurances'} onclick={() => navigate({ view: 'assurances' })}>Assurances</button>
-    <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
+    <span class="nav-label">Workspace</span>
+    <button class:active={route.view === 'fleet' || route.view === 'run' || route.view === 'phase'} onclick={() => navigate({ view:'fleet' })}><ListTodo size={18} aria-hidden="true" />Tasks</button>
+    <button class:active={route.view === 'ops'} onclick={() => navigate({ view:'ops' })}><Activity size={18} aria-hidden="true" />Operations</button>
+    <span class="nav-label">Configuration</span>
+    <button class:active={route.view === 'roster'} onclick={() => navigate({ view:'roster' })}><Users size={18} aria-hidden="true" />Roster</button>
+    <button class:active={route.view === 'agents'} onclick={() => navigate({ view:'agents' })}><Bot size={18} aria-hidden="true" />Agents</button>
+    <button class:active={route.view === 'skills'} onclick={() => navigate({ view:'skills' })}><BookOpen size={18} aria-hidden="true" />Skills</button>
+    <button class:active={route.view === 'prompts'} onclick={() => navigate({ view:'prompts' })}><FileText size={18} aria-hidden="true" />Prompts</button>
+    <button class:active={route.view === 'workflows'} onclick={() => navigate({ view:'workflows' })}><Workflow size={18} aria-hidden="true" />Workflows</button>
+    <button class:active={route.view === 'assurances'} onclick={() => navigate({ view:'assurances' })}><ShieldCheck size={18} aria-hidden="true" />Assurances</button>
   </nav>
-  <div class="tools">
-    <span class:degraded={feedDegraded} class:silent={!feedDegraded && (activity.silent || activity.unverified || activity.contradicted)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.contradicted ? `${activity.open} open · ${activity.contradicted} contradicted${activity.silent ? ` · ${activity.silent} stale` : ''}${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.silent ? `${activity.open} open · ${activity.silent} stale${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.unverified ? `${activity.open} open · ${activity.unverified} unverified` : activity.live ? `${activity.live} live` : 'Ledger ready'}</span>
-    <span class="driver-summary" title={driverEvidence.sources.length ? `Latest observation sources: ${driverEvidence.sources.join(', ')}` : 'No authoritative driver observations'}>{runtimeSummary} · {driverEvidence.unknown} unmeasured</span>
-    <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="5.2rem" variant="compact" /></label>
+  <div class="sidebar-footer">
+    <span class="connection" class:degraded={feedDegraded}>{feedDegraded ? 'Feed unavailable' : lastRead ? 'Ledger connected' : 'Connecting to ledger…'}</span>
+    <small>{lastRead ? `Read at ${new Date(lastRead).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}` : 'Waiting for the first reading'}</small>
+    <button class="refresh" onclick={() => refreshLoop?.refresh()} disabled={refreshing}><RefreshCw size={15} aria-hidden="true" />{refreshing ? 'Refreshing…' : 'Refresh now'}</button>
+    <label class="auto-refresh"><input type="checkbox" bind:checked={autoRefresh} onchange={(event) => refreshLoop?.setEnabled(event.currentTarget.checked)} />Auto-refresh</label>
+    <small>{autoRefresh ? 'Waits 30s after each reading' : 'Automatic ledger reads paused'}</small>
+    <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="6rem" variant="compact" /></label>
   </div>
-</header>
+</aside>
+<div class="workspace" id="main-content" tabindex="-1">
+{#if error}<p class="error-banner" role="alert">Could not refresh the ledger: {error}. Use Refresh to try again. Existing rows may be out of date.</p>{/if}
 
 {#if route.view === 'run' || route.view === 'phase'}
   {#if selectedRun}
     <RunDetail run={selectedRun} phase={route.phase} onback={backToTasks} onphase={openPhase} />
+  {:else if !lastRead && !error}
+    <main class="page"><section class="empty-state" role="status"><h1>Loading task…</h1><p>Reading the ledger and task evidence.</p></section></main>
+  {:else if error || feedDegraded}
+    <main class="page"><section class="empty-state"><h1>Task records unavailable</h1><p>Refresh the ledger before checking whether this task exists.</p></section></main>
   {:else}
     <main class="page"><section class="empty-state"><span>404</span><h1>Task not found</h1><p>The ledger no longer contains this run, or the URL is incomplete.</p><button onclick={backToTasks}>Return to tasks</button></section></main>
   {/if}
 {:else if route.view === 'ops'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Factory control room</p><h1>Operations</h1><p>See whether work is flowing, where reliability is slipping, and which evidence needs a closer look.</p></div><span class="updated">Live operating windows · refreshed automatically</span></div>
-    <OperationsOverview {runs} degraded={feedDegraded} {now} onopen={openRun} />
-    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} onactivity={focusActivity} /></details>
-    <div class="ops-section-heading"><div><p class="eyebrow">Subsystem evidence</p><h2>Go deeper</h2></div><p>Each readout keeps its own measurement window and clearly separates zero from unavailable.</p></div>
-    <div class="ops-grid"><CellHealthPanel /><RunSetPanel /><TeardownPanel /><IntakePanel /></div>
+    <div class="page-heading"><div><p class="eyebrow">Workspace health</p><h1>Operations</h1><p>Understand outcomes, resource usage, and runs that need a closer look.</p></div><span class="updated"></span></div>
+    <OperationsOverview loading={!lastRead && !error} {runs} {envelopes} degraded={feedDegraded} {now} onopen={openRun} />
+    <details class="diagnostics" bind:open={showDiagnostics}><summary>System diagnostics</summary>{#if showDiagnostics}<p>Each subsystem below reports its own measurement window and refreshes while this section is open.</p><div class="ops-grid"><CellHealthPanel /><RunSetPanel /><TeardownPanel /><IntakePanel /></div>{/if}</details>
   </main>
 {:else if route.view === 'roster'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Capability map</p><h1>Model roster</h1><p>Who fills each assurance preset, which models are suitable, and what is currently ratified.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Capability map</p><h1>Model roster</h1><p>Choose model assignments by role and review the current roster.</p></div></div>
     <RosterPanel />
   </main>
 {:else if route.view === 'agents'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents · Skills · Prompts</h1><p>Read the register, last-seat evidence, and charter surface without applying edits.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents</h1><p>Inspect agent capabilities and what reached their last recorded sessions.</p></div></div>
     <AgentsPage />
   </main>
 {:else if route.view === 'skills'}
@@ -216,36 +227,30 @@
   </main>
 {:else}
   <main class="page">
-    <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Factory tasks</h1><p>Follow work in progress, inspect completed runs, and open the full execution waterfall.</p></div><span class="updated">Live ledger · refreshed automatically</span></div>
-    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} onactivity={focusActivity} />
-    {#if error}<p class="error-banner">{error}</p>{/if}
+    <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Tasks</h1><p>Find a run, understand its outcome, and inspect the evidence.</p></div><span class="updated">{autoRefresh ? 'Automatic updates enabled' : 'Automatic updates paused'}</span></div>
     {#if attentionRows.length}
-      <details class="attention">
-        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionSummary.text}</small></span><span class="attention-total">{attentionSummary.total}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
-        <div class="attention-list" aria-label="Tasks needing attention">{#each attentionRows as row (row.run.adw_id)}<button onclick={() => openRun(row.run)}><span><strong>{row.run.goal || row.run.adw_id}</strong><small>{row.status.where || row.run.repo_slug || (row.status.key === 'fail' ? 'Failed run' : row.status.key === 'aborted' ? 'Aborted run' : 'Escalated')}</small></span><span class="rail-why">{row.why}</span><span class={`rail-status ${row.status.tone}`}>{row.status.word}</span><b>Open →</b></button>{/each}</div>
-      </details>
+      <div class="attention-notice"><div><strong>{attentionSummary.total} runs to review</strong><p>{attentionSummary.text} · unarchived history</p></div><button onclick={focusActivity}>Review tasks →</button></div>
     {/if}
-    <TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />
+    {#if !lastRead && !error}<p role="status">Loading task history…</p>{:else}<TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />{/if}
   </main>
 {/if}
 
+</div>
+
 <style>
-:global(*) { box-sizing:border-box; }
-.topbar { position:sticky; top:0; z-index:20; display:grid; grid-template-columns:minmax(13rem,1fr) auto minmax(13rem,1fr); align-items:center; gap:1rem; min-height:4.25rem; border-bottom:1px solid color-mix(in srgb,var(--line) 85%,transparent); padding:.6rem max(1rem,calc((100vw - 1440px)/2)); background:color-mix(in srgb,var(--bg) 88%,transparent); backdrop-filter:blur(18px); }
-.brand { display:flex; align-items:center; gap:.7rem; color:inherit; text-decoration:none; width:max-content; }.brand > span:last-child { display:grid; }.brand strong { font-size:.92rem; letter-spacing:.01em; }.brand small { color:var(--muted); font-size:.62rem; text-transform:uppercase; letter-spacing:.1em; margin-top:.1rem; }
-.brand-mark { display:grid; gap:3px; width:1.45rem; transform:skewX(-10deg); }.brand-mark i { display:block; height:4px; border-radius:1rem; }.brand-mark i:nth-child(1) { width:65%; background:var(--tech-lead-color); }.brand-mark i:nth-child(2) { width:100%; background:var(--planner-color); }.brand-mark i:nth-child(3) { width:48%; margin-left:25%; background:var(--builder-color); }
-nav { justify-self:center; display:flex; gap:.3rem; padding:.25rem; border:1px solid var(--line); border-radius:.65rem; background:color-mix(in srgb,var(--panel) 85%,transparent); }
-nav button { position:relative; border:0; border-radius:.45rem; background:transparent; color:var(--muted); padding:.45rem .8rem; font-size:.78rem; cursor:pointer; } nav button.active { color:inherit; background:var(--panel-raised); box-shadow:0 1px 6px rgba(0,0,0,.15); }
-.tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded,.connection.silent { color:var(--status-escalated); }.connection.degraded i,.connection.silent i { background:var(--status-escalated); box-shadow:none; }.driver-summary { color:var(--muted); font:500 .58rem var(--mono); white-space:nowrap; }
-.theme { display:flex; align-items:center; gap:.35rem; }.theme > span { position:absolute; width:1px; height:1px; overflow:hidden; }
-.page { position:relative; width:min(1440px,100%); margin:auto; padding:2rem 1.25rem 4rem; }.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }.page-heading .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.updated { color:var(--muted); font-size:.7rem; padding-bottom:.35rem; white-space:nowrap; }
-.ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }
-.ops-section-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin:2rem 0 .8rem; }.ops-section-heading h2 { margin:.12rem 0 0; font-size:1.15rem; }.ops-section-heading p { max-width:34rem; margin:0; color:var(--muted); font-size:.7rem; text-align:right; }
-.ops-baseline { border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--panel) 85%,transparent); padding:.7rem .8rem .15rem; }.ops-baseline summary { width:max-content; color:var(--muted); cursor:pointer; font-size:.65rem; }
-.error-banner { border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line)); background:color-mix(in srgb,var(--status-fail) 8%,var(--panel)); color:var(--status-fail); border-radius:var(--radius); padding:.8rem 1rem; }
-.attention { overflow:hidden; margin:0 0 1rem; border:1px solid color-mix(in srgb,var(--status-escalated) 42%,var(--line)); border-radius:var(--radius); background:color-mix(in srgb,var(--status-escalated) 5%,var(--panel)); }.attention summary { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:.7rem; min-height:3.35rem; padding:.6rem .8rem; cursor:pointer; list-style:none; }.attention summary::-webkit-details-marker { display:none; }.attention summary:hover { background:color-mix(in srgb,var(--status-escalated) 5%,transparent); }.attention-mark { width:1.8rem; height:1.8rem; display:grid; place-items:center; border-radius:50%; background:color-mix(in srgb,var(--status-escalated) 12%,var(--panel-raised)); color:var(--status-escalated); font:700 .75rem var(--mono); }.attention-title { min-width:0; display:grid; gap:.12rem; }.attention-title strong { font-size:.72rem; }.attention-title small { color:var(--muted); font-size:.6rem; }.attention-total { min-width:1.8rem; height:1.55rem; display:grid; place-items:center; border:1px solid color-mix(in srgb,var(--status-escalated) 35%,var(--line)); border-radius:2rem; color:var(--status-escalated); font:650 .62rem var(--mono); }.attention-action { display:flex; align-items:center; gap:.5rem; color:var(--status-escalated); font-size:.62rem; white-space:nowrap; }.attention-action i { width:.45rem; height:.45rem; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg) translateY(-2px); transition:transform .16s ease; }.attention[open] .attention-action i { transform:rotate(225deg) translate(-1px,-1px); }.attention-list { border-top:1px solid color-mix(in srgb,var(--status-escalated) 25%,var(--line)); }.attention button { width:100%; display:grid; grid-template-columns:minmax(12rem,1fr) minmax(16rem,2fr) auto auto; align-items:center; gap:1rem; border:0; border-top:1px solid color-mix(in srgb,var(--status-escalated) 18%,var(--line)); background:transparent; padding:.7rem .8rem; text-align:left; cursor:pointer; }.attention button:first-child { border-top:0; }.attention button:hover { background:color-mix(in srgb,var(--status-escalated) 6%,transparent); }.attention button > span:first-child { min-width:0; display:grid; gap:.15rem; }.attention button strong { overflow:hidden; font-size:.75rem; text-overflow:ellipsis; white-space:nowrap; }.attention button small,.rail-why { color:var(--muted); font-size:.62rem; }.rail-status { border:1px solid currentColor; border-radius:2rem; padding:.2rem .4rem; font-size:.55rem; white-space:nowrap; }.rail-status.serious { color:var(--status-escalated); }.rail-status.fail { color:var(--status-fail); }.rail-status.aborted { color:var(--status-running); }.attention button b { color:var(--status-escalated); font-size:.62rem; white-space:nowrap; }
-.empty-state { max-width:34rem; margin:8vh auto; text-align:center; }.empty-state > span { font:4rem/1 var(--mono); color:var(--line); }.empty-state h1 { margin:.8rem 0 .4rem; }.empty-state p { color:var(--muted); }.empty-state button { border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.55rem .8rem; cursor:pointer; }
-@media (max-width: 900px) { .topbar { grid-template-columns:1fr auto; }.topbar nav { grid-row:2; grid-column:1/-1; justify-self:stretch; justify-content:center; }.tools .connection { display:none; }.ops-grid { grid-template-columns:1fr; } }
-@media (max-width: 760px) { .attention button { grid-template-columns:minmax(0,1fr) auto; }.attention .rail-why { grid-column:1/-1; grid-row:2; }.rail-status { grid-column:2; grid-row:1; }.attention button b { display:none; } }
-@media (max-width: 620px) { .page { padding:1.4rem .75rem 3rem; }.brand small,.theme { display:none; }.topbar { padding:.55rem .75rem; }.page-heading,.ops-section-heading { align-items:start; }.ops-section-heading > p { display:none; }.updated { display:none; } nav button { flex:1; }.attention-action { font-size:0; }.attention-action i { margin-right:.15rem; } }
+.auto-refresh { display:flex; align-items:center; gap:.5rem; color:var(--muted); font-size:.75rem; }.auto-refresh input { margin:0; min-height:0; }
+.sidebar { position:fixed; inset:0 auto 0 0; width:13.5rem; display:flex; flex-direction:column; gap:1.75rem; padding:1.6rem 1rem; background:var(--panel); border-right:1px solid var(--line); z-index:20; overflow-y:auto; }
+.brand { display:flex; align-items:center; gap:.65rem; color:inherit; text-decoration:none; padding:.25rem .6rem; }.brand strong { font-size:1.1rem; font-weight:600; }.brand-mark { display:flex; }
+nav { display:flex; flex-direction:column; gap:.25rem; }.nav-label { font-size:.7rem; color:var(--muted); padding:0 .7rem .6rem; }.nav-label:not(:first-child) { margin-top:1.5rem; } nav button { display:flex; align-items:center; gap:.7rem; border:0; border-radius:var(--radius-sm); padding:.65rem .7rem; background:transparent; color:var(--muted); cursor:pointer; text-align:start; font-size:.85rem; }nav button.active { color:var(--accent); background:var(--accent-surface); box-shadow:inset 3px 0 var(--accent); font-weight:650; }
+.sidebar-footer { margin-top:auto; display:grid; gap:.65rem; padding:.6rem; }.sidebar-footer small { color:var(--muted); font-size:.7rem; }.connection { font-size:.75rem; }.connection.degraded { color:var(--status-fail); }.theme { display:flex; align-items:center; justify-content:space-between; gap:.5rem; font-size:.75rem; color:var(--muted); }.refresh { display:flex; align-items:center; gap:.5rem; border:1px solid var(--line); border-radius:var(--radius-sm); padding:.4rem .65rem; background:var(--panel); cursor:pointer; font-size:.75rem; }.refresh:disabled { opacity:.6; cursor:wait; }
+.workspace { margin-inline-start:13.5rem; min-width:0; }.page { width:min(1440px,100%); margin:auto; padding:2.5rem clamp(1rem,3vw,3rem) 4rem; }.page-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin-bottom:2rem; }.page-heading h1 { margin:.2rem 0 .5rem; font-size:1.65rem; font-weight:600; letter-spacing:-.03em; }.page-heading p { margin:0; color:var(--muted); font-size:.85rem; line-height:1.5; max-width:65ch; }.page-heading .eyebrow { display:none; }.updated { font-size:.7rem; color:var(--muted); }
+.attention-notice { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; padding:1rem 1.2rem; margin-bottom:1.25rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }.attention-notice strong { font-size:.85rem; font-weight:500; }.attention-notice p { margin:.35rem 0 0; color:var(--muted); font-size:.75rem; }.attention-notice button { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); padding:.4rem .65rem; font-size:.8rem; cursor:pointer; }
+.ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }.diagnostics { margin-top:2rem; }.diagnostics summary { cursor:pointer; font-size:.9rem; padding:.5rem 0; }.diagnostics > p { color:var(--muted); font-size:.8rem; }
+.error-banner { margin:1rem; border:1px solid var(--status-fail); color:var(--status-fail); border-radius:var(--radius); padding:1rem; font-size:.85rem; overflow-wrap:anywhere; }.empty-state { margin:4rem auto; max-width:34rem; text-align:center; }.empty-state p { color:var(--muted); }.empty-state button { padding:.5rem .8rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); cursor:pointer; }
+.skip-link { position:fixed; inset-block-start:.5rem; inset-inline-start:.5rem; z-index:100; padding:.6rem; background:var(--panel); color:var(--text); transform:translateY(-200%); }.skip-link:focus { transform:none; }
+.brand-mark { color:var(--accent); }.attention-notice { border-color:color-mix(in srgb,var(--status-escalated) 30%,var(--line)); border-inline-start:4px solid var(--status-escalated); background:var(--attention-surface); }.attention-notice strong { color:var(--status-escalated); font-size:1rem; font-weight:650; }.attention-notice button { background:var(--accent-solid); border-color:var(--accent-solid); color:var(--on-accent); font-weight:650; }
+@media (hover:hover) { nav button:hover,.refresh:hover { background:var(--panel-raised); color:var(--text); } }
+@media (max-width:1000px) { .ops-grid { grid-template-columns:1fr; } }
+@media (max-width:760px) { .sidebar { position:relative; width:100%; padding:1rem; gap:1rem; border-right:0; border-bottom:1px solid var(--line); overflow:visible; }nav { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.3rem; }.nav-label { display:none; }nav button { padding:.55rem .3rem; justify-content:center; font-size:.75rem; gap:.35rem; }.sidebar-footer { grid-template-columns:1fr auto; align-items:center; margin:0; padding:0; }.sidebar-footer small { display:none; }.theme { grid-column:1/-1; justify-content:start; }.workspace { margin:0; }.page { padding:1.5rem 1rem 3rem; }.updated { display:none; } }
+@media (max-width:420px) { nav { grid-template-columns:repeat(2,minmax(0,1fr)); }nav button { justify-content:start; padding:.5rem; }.page-heading { flex-wrap:wrap; } }
 </style>

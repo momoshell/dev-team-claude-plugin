@@ -4,7 +4,7 @@ The contract below is the checkable boundary recorded in `visualizer/web/src/lib
 
 ## T1 - component names only Tier-2 aliases
 
-A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the rail paints only aliases at `visualizer/web/src/App.svelte:246`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
+A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:249`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
 
 ## T2 - painted colour comes from a token
 
@@ -12,15 +12,15 @@ Make every painted foreground, background, border, marker, and fill resolve to a
 
 ## T3 - escalation goes through the alias
 
-Use `--status-escalated` in a component; treat `--serious` as raw. Both escalation exhibits are now alias-correct: `visualizer/web/src/App.svelte:246` paints the rail tones from `--status-escalated`, and `visualizer/web/src/lib/RosterPanel.svelte:706` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
+Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:249` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:703` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
 
 ## T4 - one owner writes the theme switch
 
-Only `visualizer/web/src/App.svelte:72` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:73` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:26` and `visualizer/web/src/App.svelte:27` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:74` persists the choice, and `visualizer/web/src/App.svelte:173` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:69`, and `visualizer/web/src/lib/theme.css:95` plus those App writes.
+Only `visualizer/web/src/App.svelte:69` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:70` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:26` and `visualizer/web/src/App.svelte:27` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:71` persists the choice, and `visualizer/web/src/App.svelte:180` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
 
 ## What the switch means
 
-The three blocks are a cascade, not three independent palettes: `:root[data-theme='paper']` at `visualizer/web/src/lib/theme.css:44` is the paper default; `:root[data-theme='ink']` at `visualizer/web/src/lib/theme.css:69` wins for explicit ink; and the guarded media block at `visualizer/web/src/lib/theme.css:94` with its inner selector at `visualizer/web/src/lib/theme.css:95` supplies ink values only when the OS is dark and paper was not explicitly selected. A component consumes aliases and never performs this selection itself.
+The three blocks are a cascade, not three independent palettes: `:root[data-theme='paper']` at `visualizer/web/src/lib/theme.css:44` is the paper default; `:root[data-theme='ink']` at `visualizer/web/src/lib/theme.css:71` wins for explicit ink; and the guarded media block at `visualizer/web/src/lib/theme.css:98` with its inner selector at `visualizer/web/src/lib/theme.css:99` supplies ink values only when the OS is dark and paper was not explicitly selected. A component consumes aliases and never performs this selection itself.
 
 ## What the suite enforces today
 

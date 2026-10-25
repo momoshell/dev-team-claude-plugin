@@ -4,15 +4,15 @@ async function request(path, options) {
   if (!response.ok) throw new Error(data.error || `request failed (${response.status})`)
   return data
 }
-export const getSessions = (filters = {}) => request(`/api/sessions?${new URLSearchParams(filters)}`)
-export const getEvents = (adwId, after = 0, limit, filters = {}) => {
+export const getSessions = (filters = {}, options) => request(`/api/sessions?${new URLSearchParams(filters)}`, options)
+export const getEvents = (adwId, after = 0, limit, filters = {}, options) => {
   const params = new URLSearchParams({ adw_id: adwId, after })
   if (limit != null) params.set('limit', limit)
   for (const key of ['type', 'role', 'phase_id']) if (filters[key] !== undefined && filters[key] !== '' && filters[key] !== null) params.set(key, filters[key])
-  return request(`/api/events?${params}`)
+  return request(`/api/events?${params}`, options)
 }
-export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
-export const getJournal = (repoSlug, taskSlug, adwId) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
+export const getReturns = (repoSlug, taskSlug, adwId, options) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
+export const getJournal = (repoSlug, taskSlug, adwId, options) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
 export const getRoster = () => request('/api/roster')
 export const getAgents = () => request('/api/agents')
 export const proposeAgent = (name, entry) => request('/api/agents/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, entry }) })

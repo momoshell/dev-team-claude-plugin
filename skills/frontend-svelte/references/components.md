@@ -10,29 +10,29 @@ Declare props with one destructuring `$props()` line and put defaults there:
 - `let { rows = [], onopen = () => {} } = $props()` — `visualizer/web/src/lib/FleetTable.svelte:2`.
 - `let { run, phase = null, returns = {}, events = [] } = $props()` — `visualizer/web/src/lib/PhasePanel.svelte:5`.
 
-Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:8` uses `onselectphase`; `visualizer/web/src/App.svelte:179` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
+Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:8` uses `onselectphase`; `visualizer/web/src/App.svelte:188` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
 
 ## Two-way state is explicit
 
-`$bindable(` occurs 5 times in 3 files (measured over visualizer/web/src/**/*.svelte, 34 files); `visualizer/web/src/lib/Filters.svelte:4` exhibits the idiom: `filters` and `viewFilters` are bindable props, while `hiddenLine` is an ordinary defaulted prop. Use that exact local idiom when the parent and child intentionally share writable filter state; do not make every prop bindable.
+`$bindable(` occurs 5 times in 3 files (measured over visualizer/web/src/**/*.svelte, 35 files); `visualizer/web/src/lib/Filters.svelte:4` exhibits the idiom: `filters` and `viewFilters` are bindable props, while `hiddenLine` is an ordinary defaulted prop. Use that exact local idiom when the parent and child intentionally share writable filter state; do not make every prop bindable.
 
 ## Snippets and rendering
 
-The census found `{#snippet` 4 times in 3 files and `{@render` 21 times in 3 files (measured over visualizer/web/src/**/*.svelte, 34 files). `visualizer/web/src/lib/PhasePanel.svelte:49-72` defines the `countMark` snippet and renders it; `visualizer/web/src/lib/AcceptPanel.svelte:16` renders evidence blocks through `MarkdownView`. Keep a snippet's input shape local and render it at the call site rather than duplicating markdown markup.
+The census found `{#snippet` 4 times in 3 files and `{@render` 21 times in 3 files (measured over visualizer/web/src/**/*.svelte, 35 files). `visualizer/web/src/lib/PhasePanel.svelte:49-72` defines the `countMark` snippet and renders it; `visualizer/web/src/lib/AcceptPanel.svelte:16` renders evidence blocks through `MarkdownView`. Keep a snippet's input shape local and render it at the call site rather than duplicating markdown markup.
 
 ## Events and bindings
 
-Use native `onclick=` attributes: the census found 69 across 19 files and zero `on:click` uses (measured over visualizer/web/src/**/*.svelte, 34 files). Exhibits include `visualizer/web/src/App.svelte:161`, `visualizer/web/src/lib/RunCard.svelte:56`, and `visualizer/web/src/lib/EventStream.svelte:44`. Existing form bindings are `bind:value` and `bind:checked`, with the filter state declared at `visualizer/web/src/lib/Filters.svelte:4`; follow the existing spelling and route uncertain binding semantics to the MCP.
+Use native `onclick=` attributes: the census found 77 across 18 files and zero `on:click` uses (measured over visualizer/web/src/**/*.svelte, 35 files). Exhibits include `visualizer/web/src/App.svelte:164`, `visualizer/web/src/lib/RunCard.svelte:56`, and `visualizer/web/src/lib/EventStream.svelte:44`. Existing form bindings are `bind:value` and `bind:checked`, with the filter state declared at `visualizer/web/src/lib/Filters.svelte:4`; follow the existing spelling and route uncertain binding semantics to the MCP.
 
 ## Runes census and effects
 
-The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 143 times in 22 files, `$derived` 177 times in 30 files, `$props()` 26 times in 26 files, `$effect` 32 times in 19 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:1018-1020` checks those strings across every `.svelte` file.
+The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 145 times in 22 files, `$derived` 155 times in 29 files, `$props()` 26 times in 26 files, `$effect` 30 times in 18 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:1018-1020` checks those strings across every `.svelte` file.
 
 A correct effect has a dependency and a cleanup boundary. `visualizer/web/src/lib/RunCard.svelte:20-22` carries the `state_referenced_locally` comment: `previousRunning` is left undefined until the effect's first pass so a true running-to-finished transition can trigger the final drain. Treat that comment's shape—local previous value, guarded work, returned cleanup—as the repo's measured effect idiom, not as a generic API tutorial.
 
 ## Scoped styles
 
-Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The `:global(*)` reset copy in `visualizer/web/src/App.svelte:233` is recorded duplication, not a pattern for ordinary component selectors. The repo has zero `{@html}` uses in the measured component suite.
+Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The scoped workspace layout in `visualizer/web/src/App.svelte:246` keeps shell positioning local; the single box-sizing reset lives in theme.css. The repo has zero `{@html}` uses in the measured component suite.
 
 ## Composition over cross-cutting colour
 

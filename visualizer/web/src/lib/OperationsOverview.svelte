@@ -1,213 +1,91 @@
 <script>
-  import { getCellHealth, getIntake, getIntakeBrake, getRunSet, getSeatTeardowns } from './api.js'
-  import { PANEL_REFRESH_MS, operationsHealthSummary, operationsPosture, operationsRunSummary, operationsTeardownSummary } from './panels.js'
-  import { operationsOverview } from './fleet.js'
+  import { activitySummary, ACTIVITY_PERIODS, OUTCOMES } from './activity.js'
+  import { deriveDisplayStatus, operationsOverview } from './fleet.js'
+  import MetricsStrip from './MetricsStrip.svelte'
 
-  let { runs = [], degraded = false, now = Date.now(), onopen = () => {} } = $props()
-  let operations = $derived(operationsOverview(runs))
-  let cellHealth = $state(null)
-  let teardowns = $state(null)
-  let runSet = $state(null)
-  let intake = $state(null)
-  let brake = $state(null)
-  let loading = $state(true)
-  let readAt = $state(null)
-  let errors = $state([])
-
-  const tokenFields = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
-
-  function number(value) {
-    return typeof value === 'number' && Number.isFinite(value)
-      ? Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value)
-      : '—'
-  }
-
-  function percent(value, total) {
-    return total > 0 && value != null ? Math.round(value / total * 100) : null
-  }
-
-  function ageLabel(timestamp) {
-    if (!timestamp) return 'awaiting first read'
-    const seconds = Math.max(0, Math.round((now - timestamp) / 1000))
-    return seconds < 60 ? `updated ${seconds}s ago` : `updated ${Math.floor(seconds / 60)}m ago`
-  }
-
-  function shortTime(value) {
-    if (!value) return 'time unavailable'
-    const date = new Date(value)
-    return Number.isFinite(date.valueOf()) ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : String(value)
-  }
-
-  async function refresh() {
-    const requests = [getCellHealth(), getSeatTeardowns(), getRunSet(), getIntake(), getIntakeBrake()]
-    const labels = ['Cell health', 'Seat teardown', 'Run set', 'Intake', 'Intake brake']
-    const results = await Promise.allSettled(requests)
-    const values = results.map((result) => result.status === 'fulfilled' ? result.value : null)
-    ;[cellHealth, teardowns, runSet, intake, brake] = values
-    errors = results.flatMap((result, index) => result.status === 'rejected' ? [`${labels[index]} unavailable`] : [])
-    readAt = Date.now()
-    loading = false
-  }
-
-  $effect(() => {
-    void refresh()
-    const timer = setInterval(refresh, PANEL_REFRESH_MS)
-    return () => clearInterval(timer)
-  })
-
-  let runSummary = $derived(operationsRunSummary(runSet))
-
-  let teardownSummary = $derived(operationsTeardownSummary(teardowns))
-
-  let healthSummary = $derived(operationsHealthSummary(cellHealth))
-
-  let coverage = $derived.by(() => {
-    const usage = runSet?.coverage || null
-    const recent = Array.isArray(runSet?.rows) ? runSet.rows : []
-    const gated = recent.filter((row) => runs.find((run) => run.adw_id === row.adw_id)?.gate_discrimination != null).length
-    return [
-      { label: 'Usage metering', value: usage?.measured ?? null, total: usage?.total ?? runSummary.total, note: 'runs with billed token evidence' },
-      { label: 'Seat teardown', value: teardownSummary.measuredRuns, total: teardownSummary.totalRuns, note: 'runs with reclamation evidence' },
-      { label: 'Gate proof', value: gated, total: recent.length, note: 'runs with discrimination evidence' },
-    ].map((item) => ({ ...item, pct: percent(item.value, item.total) }))
-  })
-
-  let totalTokens = $derived.by(() => {
-    if (!runSet?.usage) return null
-    return tokenFields.reduce((sum, field) => sum + (Number(runSet.usage[field]) || 0), 0)
-  })
-
-  let exceptions = $derived.by(() => {
-    const source = Array.isArray(runSet?.rows) ? [...runSet.rows] : []
-    const indexed = new Map(runs.map((run) => [run.adw_id, run]))
-    return source
-      .filter((run) => run.status === 'fail' || run.status === 'aborted')
-      .sort((a, b) => Date.parse(b.ended_at || b.started_at || 0) - Date.parse(a.ended_at || a.started_at || 0))
-      .slice(0, 5)
-      .map((run) => ({ ...run, source: indexed.get(run.adw_id) || null }))
-  })
-
-  let hourly = $derived.by(() => {
-    const end = now
-    const start = end - 24 * 60 * 60 * 1000
-    const buckets = Array.from({ length: 12 }, (_, index) => ({
-      start: start + index * 2 * 60 * 60 * 1000,
-      ok: 0,
-      fail: 0,
-      running: 0,
-    }))
-    for (const run of runs) {
-      const at = Date.parse(run.started_at || '')
-      if (!Number.isFinite(at) || at < start || at > end) continue
-      const index = Math.min(11, Math.floor((at - start) / (2 * 60 * 60 * 1000)))
-      if (run.status === 'ok') buckets[index].ok += 1
-      else if (run.status === 'fail' || run.status === 'aborted') buckets[index].fail += 1
-      else buckets[index].running += 1
-    }
-    const maximum = Math.max(1, ...buckets.map((bucket) => bucket.ok + bucket.fail + bucket.running))
-    return buckets.map((bucket) => ({ ...bucket, total: bucket.ok + bucket.fail + bucket.running, maximum }))
-  })
-
-  let posture = $derived(operationsPosture({ loading, degraded, errors, brake, runSummary, teardownSummary, healthSummary }))
-
-  function openException(row) {
-    if (row.source) onopen(row.source)
-  }
+  let { loading = false, runs = [], envelopes = new Map(), degraded = false, now = Date.now(), onopen = () => {} } = $props()
+  let period = $state('7')
+  let selectedBucket = $state(null)
+  let summary = $derived(activitySummary(runs, { period, envelopes, degraded, now }))
+  let operations = $derived(operationsOverview(summary.rows))
+  let maximum = $derived(Math.max(1, ...summary.buckets.map(bucket => bucket.count)))
+  let selected = $derived(selectedBucket == null ? null : summary.buckets[selectedBucket])
+  let inspectRows = $derived(selected ? selected.rows : summary.attention.map(row => row.run))
+  const number = (value) => value == null ? '—' : Intl.NumberFormat(undefined, { notation:'compact', maximumFractionDigits:1 }).format(value)
+  const stamp = (value) => new Intl.DateTimeFormat(undefined, { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }).format(value)
+  const bucketLabel = (value) => new Intl.DateTimeFormat(undefined, period === '1' ? { hour:'2-digit', minute:'2-digit' } : { month:'short', day:'numeric' }).format(value)
+  const usageFields = [{ key:'input', label:'Fresh input' }, { key:'output', label:'Output' }, { key:'cacheRead', label:'Cache reads' }, { key:'cacheWrite', label:'Cache writes' }]
+  function statusFor(run) { return deriveDisplayStatus(run, envelopes instanceof Map ? envelopes.get(run.adw_id) : envelopes?.[run.adw_id], now) }
 </script>
 
-<section class={`command ${posture.tone}`} aria-label="Operations command view">
-  <header class="command-head">
-    <div class="posture">
-      <span class="pulse" aria-hidden="true"></span>
-      <div><p class="eyebrow">Current posture</p><h2>{posture.label}</h2><p>{posture.message}</p></div>
-    </div>
-    <div class="readout"><span class:stale={errors.length}>{ageLabel(readAt)}</span><small>{errors.length ? errors.join(' · ') : 'five sources reporting'}</small></div>
-  </header>
+<section aria-label="Operations activity">
+  <div class="scope-row">
+    <div><h2>Run activity</h2><p>Runs started in this period, including archived history. Outcomes reflect the latest recorded evidence.</p></div>
+    <label>Period<select bind:value={period} onchange={() => selectedBucket = null}>{#each ACTIVITY_PERIODS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+  </div>
+  <p class="scope-note">{stamp(summary.start)} – {stamp(summary.end)} · local time{#if summary.undated} · {summary.undated} records with missing or future start times {period === 'all' ? 'included in totals, omitted from the chart' : 'excluded'}{/if}</p>
+  {#if degraded}<p class="error" role="alert">{summary.unavailable} Use Refresh in the sidebar.</p>{/if}
+  {#if loading}<p class="empty" role="status">Loading run activity…</p>{:else}
+  <MetricsStrip {summary} />
 
-  <div class="brief-grid">
-    <article class="flow-card">
-      <div class="section-title"><div><p class="eyebrow">Last 24 hours</p><h3>Production flow</h3></div><span>{runSet?.window?.label || 'window loading'}</span></div>
-      <div class="flow">
-        <div><strong>{runSummary.total ?? '—'}</strong><span>started</span></div><i>→</i>
-        <div><strong>{runSummary.terminal ?? '—'}</strong><span>settled</span></div><i>→</i>
-        <div class="good"><strong>{runSummary.ok ?? '—'}</strong><span>successful</span></div><i>→</i>
-        <div class:good={teardownSummary.clean}><strong>{teardownSummary.proven ?? '—'}</strong><span>seats reclaimed</span></div>
-      </div>
-      <div class="outcome-bar" aria-label={`${runSummary.ok} successful, ${runSummary.fail} unsuccessful, ${runSummary.running} running`}>
-        <span class="ok" style={`--share:${percent(runSummary.ok, runSummary.total) ?? 0}%`}></span>
-        <span class="fail" style={`--share:${percent(runSummary.fail, runSummary.total) ?? 0}%`}></span>
-        <span class="running" style={`--share:${percent(runSummary.running, runSummary.total) ?? 0}%`}></span>
-      </div>
-      <div class="legend"><span><i class="ok"></i>{runSummary.pass ?? '—'}% completion quality</span><span><i class="fail"></i>{runSummary.fail ?? '—'} unsuccessful</span><span><i class="running"></i>{runSummary.running ?? '—'} running</span></div>
-    </article>
-
-    <article class="score-card">
-      <p class="eyebrow">Proof, not promises</p><h3>Operational confidence</h3>
-      <div class="score-row"><div><strong>{teardownSummary.coverage ?? '—'}%</strong><span>teardown coverage</span></div><div><strong>{teardownSummary.failed ?? '—'}</strong><span>reclamation failures</span></div><div><strong>{number(totalTokens)}</strong><span>measured tokens</span></div></div>
-      <div class="coverage-list">
-        {#each coverage as item (item.label)}
-          <div class="coverage-item"><div><span>{item.label}</span><strong>{item.pct == null ? 'not measured' : `${item.value}/${item.total}`}</strong></div><div class="meter"><i style={`--coverage:${item.pct ?? 0}%`}></i></div><small>{item.note}</small></div>
-        {/each}
-      </div>
-    </article>
-
-    <article class="throughput-card">
-      <div class="section-title"><div><p class="eyebrow">Start volume</p><h3>Two-hour cadence</h3></div><span>rolling 24h</span></div>
-      <div class="histogram" aria-label="Task starts by two-hour interval">
-        {#each hourly as bucket, index (bucket.start)}
-          <div class="bar-column" title={`${shortTime(bucket.start)} · ${bucket.total} started`}>
-            <div class="bar-stack" style={`--height:${Math.max(bucket.total ? 10 : 2, bucket.total / bucket.maximum * 100)}%`}>
-              {#if bucket.running}<i class="running" style={`--segment:${bucket.running / bucket.total * 100}%`}></i>{/if}
-              {#if bucket.fail}<i class="fail" style={`--segment:${bucket.fail / bucket.total * 100}%`}></i>{/if}
-              {#if bucket.ok}<i class="ok" style={`--segment:${bucket.ok / bucket.total * 100}%`}></i>{/if}
+  {#if !degraded && summary.total === 0}
+    <p class="empty">No runs started in this period. Choose a wider period or open Tasks to see your history.</p>
+  {:else if !degraded}
+    <div class="chart-grid">
+      <article class="panel starts">
+        <header><h3>Runs started over time</h3><span>{summary.buckets.length} intervals</span></header>
+        <p class="hint">Select a bar to inspect its runs.</p>
+        <div class="chart" aria-label="Run starts by interval">
+          <div class="axis"><span>{maximum} runs</span><span>0</span></div>
+          <div class="plot">
+            <div class="bars">
+              {#each summary.buckets as bucket, index}
+                <button class:selected={selectedBucket === index} aria-pressed={selectedBucket === index} aria-label={`${stamp(bucket.start)} to ${stamp(bucket.end)}: ${bucket.count} ${bucket.count === 1 ? 'run' : 'runs'}. Inspect runs.`} onclick={() => selectedBucket = selectedBucket === index ? null : index}>
+                  <span class="bar" style={`height:${bucket.count / maximum * 100}%`}></span>
+                  <span class="bar-value">{bucket.count}</span>
+                </button>
+              {/each}
             </div>
-            {#if index % 3 === 0}<span>{shortTime(bucket.start)}</span>{/if}
+            <div class="x-labels"><span>{bucketLabel(summary.start)}</span><span>{bucketLabel(summary.end)}</span></div>
           </div>
-        {/each}
-      </div>
-    </article>
-
-    <article class="intake-card">
-      <div class="section-title"><div><p class="eyebrow">Next work</p><h3>Intake posture</h3></div><span class:clear={brake?.state === 'clear'} class:stopped={brake?.state === 'engaged'}>{brake?.state === 'clear' ? 'brake clear' : brake?.state === 'engaged' ? 'brake engaged' : 'brake unknown'}</span></div>
-      <strong class="intake-state">{intake?.loop?.state === 'never-swept' ? 'Automation has not started' : intake?.loop?.state ? intake.loop.state.replaceAll('-', ' ') : 'Reading intake'}</strong>
-      <p>{intake?.loop?.why || 'Waiting for the intake ledger.'}</p>
-      <div class="intake-counts"><span><strong>{intake?.loop?.swept ?? '—'}</strong>sweeps</span><span><strong>{intake?.loop?.picked ?? '—'}</strong>picked</span><span><strong>{intake?.loop?.parked ?? '—'}</strong>parked</span></div>
-    </article>
-  </div>
-
-  <div class="evidence-grid">
-    <article class="faults">
-      <div class="section-title"><div><p class="eyebrow">Concentrated risk</p><h3>Fault domains</h3></div><span>{healthSummary.failures ?? '—'} events · {cellHealth?.window?.label || 'window loading'}</span></div>
-      {#if healthSummary.faultDomains.length}
-        <div class="fault-list">
-          {#each healthSummary.faultDomains as fault (fault.key)}
-            <div class="fault-row"><span class="fault-count">{fault.failures}</span><div><strong>{fault.model}</strong><small>{fault.agent} · {fault.effort} · {fault.roles}</small></div><span class="fault-kind">{fault.kind}</span></div>
-          {/each}
         </div>
-      {:else}{#if healthSummary.absent}<p class="empty">Unmeasured — {healthSummary.absent}</p>{:else}<p class="empty">No cell failures recorded in this window.</p>{/if}{/if}
-    </article>
-
-    <article class="exceptions">
-      <div class="section-title"><div><p class="eyebrow">Act on evidence</p><h3>Recent exceptions</h3></div><span>{exceptions.length} shown</span></div>
-      {#if exceptions.length}
-        <div class="exception-list">
-          {#each exceptions as row (row.adw_id)}
-            <button disabled={!row.source} onclick={() => openException(row)}>
-              <span class="exception-status">{row.status}</span><span><strong>{row.task_slug || row.adw_id}</strong><small>{row.repo_slug || 'repository unavailable'} · {shortTime(row.ended_at)}</small></span><b>{row.source ? 'Inspect →' : 'Not in task feed'}</b>
-            </button>
-          {/each}
+        <details class="chart-data"><summary>View interval counts</summary><div class="table-scroll"><table><thead><tr><th>Interval start (local time)</th><th>Runs started</th></tr></thead><tbody>{#each summary.buckets as bucket, index}<tr><td>{stamp(bucket.start)}</td><td><button class="clear" aria-pressed={selectedBucket === index} onclick={() => selectedBucket = index}>Inspect {bucket.count} runs</button></td></tr>{/each}</tbody></table></div></details>
+      </article>
+      <article class="panel">
+        <header><h3>Run outcomes</h3><span>{summary.total} runs</span></header>
+        <p class="hint">Open means no terminal outcome; it does not establish liveness.</p>
+        <div class="outcomes">{#each OUTCOMES as outcome}<div class={`outcome ${outcome.tone}`}><span>{outcome.label}</span><div class="track"><i style={`width:${summary.counts[outcome.key] / Math.max(1, summary.total) * 100}%`}></i></div><strong>{summary.counts[outcome.key]}</strong></div>{/each}</div>
+      </article>
+      <article class="panel usage">
+        <header><h3>Token breakdown</h3><span>Recorded usage · tokens</span></header>
+        {#if summary.usage.total == null}<p class="empty">Usage has not been recorded for these runs. Open a run to inspect its measurement notes.</p>
+        {:else}
+          <div class="usage-grid">{#each usageFields as field}<div><span>{field.label}</span><strong>{number(summary.usage[field.key])}</strong></div>{/each}</div>
+          <p class="hint">{summary.usage.complete} fully measured · {summary.usage.measured - summary.usage.complete} partly measured · {summary.total - summary.usage.measured} unmeasured runs. Totals include recorded fields only.</p>
+        {/if}
+        <p class="hint">Cost unavailable: token counts do not establish subscription or provider charges.</p>
+      </article>
+      <article class="panel review" class:needs-review={!selected && inspectRows.length > 0}>
+        <header><h3>{selected ? 'Runs in selected interval' : 'Runs to review'}</h3><span>{inspectRows.length} runs</span></header>
+        <p class="hint">{selected ? `${stamp(selected.start)} – ${stamp(selected.end)}` : 'Unarchived runs in this period that need attention.'}</p>
+        {#if selected}<button class="clear" onclick={() => selectedBucket = null}>Clear interval selection</button>{/if}
+        <div class="run-list" aria-live="polite">
+          {#each inspectRows.slice(0, 8) as run (run.adw_id)}
+            {@const status = statusFor(run)}
+            <button onclick={() => onopen(run)}><span><strong>{run.goal || run.adw_id}</strong><small>{run.repo_slug || 'Repository not recorded'}</small></span><span class={status.tone}>{status.word} →</span></button>
+          {:else}<p class="empty">{selected ? 'No runs started in this interval.' : 'No unarchived runs need attention in this period.'}</p>{/each}
         </div>
-      {:else}<p class="empty">No failed or aborted tasks in this window.</p>{/if}
-    </article>
-  </div>
-
+        {#if inspectRows.length > 8}<p class="hint">Showing 8 of {inspectRows.length}. <a href="#/">Open Tasks for the full history</a>.</p>{/if}
+      </article>
+    </div>
+    <details class="provenance"><summary>Configuration and runtime evidence for this period</summary><p class="hint">These diagnostics use recorded settlement fields. Legacy envelope fallbacks used in the overview may be unavailable here.</p>
   <div class="operations-grid" aria-label="Measured operations evidence">
     {#each operations.dimensions as dimension (dimension.key)}
       <article class="operations-card dimension-card">
-        <div class="section-title"><div><p class="eyebrow">Throughput and outcomes</p><h3>{dimension.label}</h3></div><span>{dimension.rows.length} measured value{dimension.rows.length === 1 ? '' : 's'}</span></div>
+        <div class="section-title"><div><p class="eyebrow">Recorded configuration outcomes</p><h3>{dimension.label}</h3></div><span>{dimension.rows.length} measured value{dimension.rows.length === 1 ? '' : 's'}</span></div>
         <div class="table-wrap">
           <table class="operations-table">
-            <thead><tr><th>Value</th><th>Denominator</th><th>Success</th><th>Escalated</th><th>Aborted</th><th>Failed</th><th>Unsettled</th><th>Unknown</th></tr></thead>
+            <thead><tr><th>Value</th><th>Runs</th><th>Success</th><th>Escalated</th><th>Aborted</th><th>Failed</th><th>Unsettled</th><th>Unknown</th></tr></thead>
             <tbody>
               {#each dimension.rows as row (row.value)}
                 <tr><th scope="row">{row.label}</th><td>{row.denominator}</td><td>{row.outcomes.success}</td><td>{row.outcomes.escalated}</td><td>{row.outcomes.aborted}</td><td>{row.outcomes.failed}</td><td>{row.outcomes.unsettled}</td><td>{row.outcomes.unknown}</td></tr>
@@ -265,23 +143,27 @@
       {:else}<p class="empty">No measured effective-seat provenance in this window.</p>{/if}
     </article>
   </div>
+    </details>
+  {/if}
+  {/if}
 </section>
 
 <style>
-  .command { --posture:var(--muted); display:grid; gap:1rem; margin:1rem 0 1.5rem; }.command.ok { --posture:var(--status-ok); }.command.watch { --posture:var(--status-running); }.command.fail { --posture:var(--status-fail); }
-  .command-head { display:flex; justify-content:space-between; align-items:center; gap:1.5rem; border:1px solid color-mix(in srgb,var(--posture) 45%,var(--line)); border-radius:var(--radius-lg); background:linear-gradient(110deg,color-mix(in srgb,var(--posture) 9%,var(--panel)),var(--panel) 45%); padding:1rem 1.15rem; }
-  .posture { display:flex; align-items:center; gap:.9rem; }.pulse { flex:0 0 auto; width:.85rem; height:.85rem; border-radius:50%; background:var(--posture); box-shadow:0 0 0 .35rem color-mix(in srgb,var(--posture) 12%,transparent),0 0 18px color-mix(in srgb,var(--posture) 55%,transparent); }
-  .eyebrow { margin:0 0 .25rem; color:var(--muted); font-size:.62rem; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }.posture h2 { margin:0; color:var(--posture); font-size:1.05rem; }.posture p:last-child { margin:.25rem 0 0; color:var(--muted); font-size:.76rem; }.readout { flex:0 0 auto; display:grid; justify-items:end; gap:.18rem; color:var(--muted); font:600 .68rem/1.3 var(--mono); }.readout small { font:400 .62rem/1.3 var(--sans); }.readout .stale { color:var(--status-fail); }
-  .brief-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(19rem,.8fr); gap:1rem; }.brief-grid > article,.evidence-grid > article { min-width:0; border:1px solid var(--line); border-radius:var(--radius-lg); background:color-mix(in srgb,var(--panel) 93%,transparent); padding:1rem; }
-  .section-title { display:flex; align-items:start; justify-content:space-between; gap:1rem; }.section-title h3,.score-card h3 { margin:0; font-size:.9rem; }.section-title > span { color:var(--muted); font:500 .62rem/1.4 var(--mono); text-align:right; }
-  .flow { display:grid; grid-template-columns:repeat(4,1fr auto); align-items:center; gap:.5rem; margin:1.5rem 0 1.15rem; }.flow > div { display:grid; gap:.2rem; }.flow strong { font:650 clamp(1.35rem,2vw,2rem)/1 var(--mono); }.flow span { color:var(--muted); font-size:.64rem; }.flow i { color:var(--line); font:normal 1rem var(--mono); }.flow .good strong { color:var(--status-ok); }
-  .outcome-bar { display:flex; width:100%; height:.55rem; overflow:hidden; border-radius:2rem; background:var(--bg); }.outcome-bar span { width:var(--share); }.ok { background:var(--status-ok); }.fail { background:var(--status-fail); }.running { background:var(--status-running); }.legend { display:flex; flex-wrap:wrap; gap:.8rem; margin-top:.55rem; color:var(--muted); font-size:.62rem; }.legend span { display:flex; align-items:center; gap:.3rem; }.legend i { width:.4rem; height:.4rem; border-radius:50%; }
-  .score-row { display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; margin:1.1rem 0; }.score-row div { min-width:0; display:grid; gap:.2rem; }.score-row strong { font:650 1.2rem/1 var(--mono); }.score-row span { color:var(--muted); font-size:.58rem; }.coverage-list { display:grid; gap:.65rem; padding-top:.8rem; border-top:1px solid var(--line); }.coverage-item { display:grid; gap:.24rem; }.coverage-item > div:first-child { display:flex; justify-content:space-between; gap:1rem; font-size:.65rem; }.coverage-item strong { color:var(--muted); font:500 .62rem var(--mono); }.coverage-item small { color:var(--muted); font-size:.56rem; }.meter { height:.25rem; border-radius:1rem; background:var(--bg); overflow:hidden; }.meter i { display:block; width:var(--coverage); height:100%; background:var(--accent); border-radius:inherit; }
-  .histogram { position:relative; height:9rem; display:grid; grid-template-columns:repeat(12,1fr); align-items:stretch; gap:.35rem; margin-top:1rem; }.histogram::before { content:''; position:absolute; inset:0 0 1.15rem; border-bottom:1px solid var(--line); background:repeating-linear-gradient(to top,transparent 0,transparent calc(33% - 1px),color-mix(in srgb,var(--line) 45%,transparent) 33%); pointer-events:none; }.bar-column { position:relative; z-index:1; height:100%; display:grid; grid-template-rows:minmax(0,1fr) 1.15rem; justify-items:center; }.bar-column > span { grid-row:2; align-self:end; height:1rem; padding-top:.28rem; color:var(--muted); font:500 .5rem var(--mono); white-space:nowrap; }.bar-stack { grid-row:1; align-self:end; width:min(1.25rem,70%); height:var(--height); max-height:100%; min-height:2px; display:flex; flex-direction:column; justify-content:end; border-radius:.2rem .2rem 0 0; overflow:hidden; background:var(--line); }.bar-stack i { display:block; flex:0 0 var(--segment); width:100%; }
-  .intake-card .clear { color:var(--status-ok); }.intake-card .stopped { color:var(--status-fail); }.intake-state { display:block; margin:1.2rem 0 .35rem; font-size:1rem; }.intake-card > p { min-height:2.2rem; margin:0; color:var(--muted); font-size:.7rem; line-height:1.5; }.intake-counts { display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; margin-top:1rem; padding-top:.8rem; border-top:1px solid var(--line); }.intake-counts span { display:grid; gap:.15rem; color:var(--muted); font-size:.58rem; }.intake-counts strong { color:inherit; font:650 1rem var(--mono); }
-  .evidence-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }.fault-list,.exception-list { display:grid; margin-top:.8rem; }.fault-row { display:grid; grid-template-columns:2.2rem minmax(0,1fr) auto; align-items:center; gap:.7rem; padding:.6rem 0; border-top:1px solid var(--line); }.fault-count { width:2rem; height:2rem; display:grid; place-items:center; border-radius:.5rem; background:color-mix(in srgb,var(--status-fail) 10%,var(--panel-raised)); color:var(--status-fail); font:650 .8rem var(--mono); }.fault-row > div { min-width:0; display:grid; gap:.12rem; }.fault-row strong { overflow:hidden; text-overflow:ellipsis; font-size:.7rem; }.fault-row small { overflow:hidden; text-overflow:ellipsis; color:var(--muted); font-size:.58rem; white-space:nowrap; }.fault-kind,.exception-status { border:1px solid color-mix(in srgb,var(--status-fail) 35%,var(--line)); border-radius:2rem; color:var(--status-fail); padding:.2rem .45rem; font:500 .56rem var(--mono); white-space:nowrap; }
-  .exception-list button { width:100%; display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:.7rem; border:0; border-top:1px solid var(--line); background:transparent; padding:.63rem 0; text-align:left; cursor:pointer; }.exception-list button:disabled { cursor:default; }.exception-list button > span:nth-child(2) { min-width:0; display:grid; gap:.12rem; }.exception-list strong { overflow:hidden; text-overflow:ellipsis; font-size:.7rem; }.exception-list small { overflow:hidden; text-overflow:ellipsis; color:var(--muted); font-size:.58rem; white-space:nowrap; }.exception-list b { color:var(--accent); font-size:.58rem; }.exception-list button:disabled b { color:var(--muted); }.empty { margin:1rem 0 0; color:var(--muted); font-size:.7rem; }
-  .operations-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }.operations-card { min-width:0; border:1px solid var(--line); border-radius:var(--radius-lg); background:color-mix(in srgb,var(--panel) 93%,transparent); padding:1rem; }.dimension-card { grid-column:span 2; }.table-wrap { overflow-x:auto; margin-top:.8rem; }.operations-table { width:100%; border-collapse:collapse; font-size:.62rem; }.operations-table th,.operations-table td { padding:.48rem .35rem; border-top:1px solid var(--line); color:var(--muted); text-align:right; white-space:nowrap; }.operations-table th:first-child,.operations-table td:first-child { text-align:left; }.operations-table th { color:var(--text); font-weight:600; }.operations-table tbody th { color:var(--text); font-weight:600; }.operations-list { display:grid; margin-top:.8rem; }.operations-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.35rem .8rem; align-items:center; padding:.62rem 0; border-top:1px solid var(--line); font-size:.65rem; }.operations-row strong { overflow:hidden; text-overflow:ellipsis; }.operations-row span { color:var(--muted); font:500 .6rem var(--mono); text-align:right; }.operations-row small { grid-column:1 / -1; color:var(--muted); font-size:.58rem; }.operations-stat { display:grid; gap:.25rem; margin-top:1rem; }.operations-stat strong { font:650 1.8rem/1 var(--mono); color:var(--status-fail); }.operations-stat span,.operations-stat small { color:var(--muted); font-size:.64rem; }.operations-stat small { font-family:var(--mono); }.state-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:.6rem; margin-top:1rem; }.state-grid div { display:grid; gap:.25rem; padding:.7rem; border:1px solid var(--line); border-radius:.5rem; }.state-grid strong { font:650 1.3rem/1 var(--mono); }.state-grid span { color:var(--muted); font-size:.62rem; }
-  @media (max-width: 980px) { .brief-grid,.evidence-grid,.operations-grid { grid-template-columns:1fr; }.dimension-card { grid-column:auto; }.flow { grid-template-columns:repeat(4,1fr); }.flow > i { display:none; } }
-  @media (max-width: 620px) { .command-head { align-items:start; }.readout { display:none; }.flow { gap:.3rem; }.flow strong { font-size:1.15rem; }.score-row { grid-template-columns:1fr 1fr; }.fault-row { grid-template-columns:2.2rem minmax(0,1fr); }.fault-kind { grid-column:2; width:max-content; }.exception-list button { grid-template-columns:auto minmax(0,1fr); }.exception-list b { display:none; } }
+h2,h3,p { margin:0; } h2 { font-size:1.05rem; } h3 { font-size:.95rem; font-weight:600; }
+.scope-row { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; }.scope-row p { margin-top:.4rem; color:var(--muted); font-size:.85rem; max-width:65ch; line-height:1.5; }.scope-row label { display:flex; align-items:center; gap:.6rem; font-size:.8rem; }.scope-row select { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius-sm); padding:.5rem; }
+.scope-note,.hint { color:var(--muted); font-size:.75rem; line-height:1.5; }.scope-note { margin-top:.75rem; }.hint { margin:.6rem 0 1rem; }
+.chart-grid { display:grid; grid-template-columns:minmax(0,1.3fr) minmax(0,1fr); gap:1rem; }
+.panel { padding:1.25rem; border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--panel); min-width:0; }
+header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.5rem; } header > span { font-size:.75rem; color:var(--muted); }
+.chart { display:flex; height:13rem; gap:.65rem; margin-top:1.3rem; }.axis { display:flex; flex-direction:column; justify-content:space-between; padding-bottom:1.65rem; min-width:3rem; font-size:.7rem; color:var(--muted); }.plot { flex:1; min-width:0; }.bars { display:flex; align-items:stretch; height:calc(100% - 1.6rem); gap:4px; border-bottom:1px solid var(--line); background:repeating-linear-gradient(to top,transparent 0,transparent calc(25% - 1px),var(--line) 25%); }.bars button { flex:1; min-width:0; position:relative; display:flex; align-items:end; padding:0; background:transparent; border:0; cursor:pointer; }.bar { width:100%; background:var(--accent); opacity:.9; border-radius:3px 3px 0 0; }.selected .bar { opacity:1; }.selected { outline:2px solid var(--accent); outline-offset:1px; }.bar-value { display:none; position:absolute; top:0; left:50%; transform:translateX(-50%); background:var(--panel-raised); color:inherit; padding:.2rem .35rem; border:1px solid var(--line); border-radius:4px; font-size:.75rem; z-index:1; }.bars button:focus-visible .bar-value,.bars button:hover .bar-value { display:block; }.x-labels { display:flex; justify-content:space-between; padding-top:.5rem; font-size:.7rem; color:var(--muted); }
+.chart-data { margin-top:1rem; font-size:.75rem; } summary { cursor:pointer; padding:.4rem 0; } table { width:100%; border-collapse:collapse; } td,th { padding:.5rem; text-align:start; border-bottom:1px solid var(--line); font-size:.75rem; }.table-scroll { overflow:auto; }
+.outcomes { display:grid; gap:1rem; margin-top:1.5rem; }.outcome { display:grid; grid-template-columns:6rem minmax(0,1fr) 3rem; align-items:center; gap:.7rem; font-size:.8rem; }.outcome > span,.outcome strong { color:var(--text); }.outcome strong { text-align:end; font-weight:500; font-variant-numeric:tabular-nums; }.track { height:.45rem; background:var(--panel-raised); }.track i { display:block; height:100%; background:currentColor; }
+.ok { color:var(--status-ok); }.serious { color:var(--status-escalated); }.fail { color:var(--status-fail); }.aborted,.busy { color:var(--status-running); }.quiet { color:var(--muted); }
+.usage-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1.5rem; margin:1.5rem 0; }.usage-grid > div { display:grid; gap:.5rem; }.usage-grid span { color:var(--muted); font-size:.8rem; }.usage-grid strong { font-size:1.4rem; font-weight:500; font-variant-numeric:tabular-nums; }
+.run-list button { width:100%; display:flex; justify-content:space-between; gap:1rem; text-align:start; border:0; border-top:1px solid var(--line); background:transparent; padding:.8rem 0; cursor:pointer; font-size:.8rem; }.run-list button > span { min-width:0; overflow-wrap:anywhere; }.run-list button > span:first-child { flex:1; }.run-list small { display:block; margin-top:.3rem; color:var(--muted); }.run-list strong { font-weight:500; }.clear { border:1px solid var(--line); border-radius:var(--radius-sm); padding:.3rem .6rem; background:var(--panel); cursor:pointer; font-size:.75rem; }
+.empty { padding:1.5rem 0; color:var(--muted); font-size:.85rem; line-height:1.5; }.error { padding:1rem; color:var(--status-fail); border:1px solid var(--line); border-radius:var(--radius); }
+.provenance { margin-top:1.5rem; }.provenance > summary { color:var(--muted); font-size:.85rem; }.operations-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:1rem; }.operations-card { min-width:0; padding:1rem; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); }.section-title,.operations-stat,.state-grid { display:flex; flex-wrap:wrap; gap:.6rem; margin-bottom:.6rem; }.section-title span,.eyebrow,.operations-row small,.operations-stat small { color:var(--muted); font-size:.75rem; }.operations-row { display:flex; flex-wrap:wrap; gap:.5rem; padding:.65rem 0; border-top:1px solid var(--line); font-size:.8rem; }.operations-row small { flex-basis:100%; }.operations-list { overflow-wrap:anywhere; }.state-grid > div { display:grid; gap:.3rem; padding:.5rem; }.table-wrap { overflow:auto; } a { color:var(--accent); }
+@media (max-width:1000px) { .chart-grid,.operations-grid { grid-template-columns:1fr; } }
+@media (max-width:480px) { .panel { padding:.85rem; }.scope-row select { font-size:1rem; }.outcome { grid-template-columns:5rem minmax(0,1fr) 2.5rem; }.bars { gap:2px; }.run-list button { flex-wrap:wrap; } }
+.panel.starts { border-top:3px solid var(--accent); }.panel.review.needs-review { border-top:3px solid var(--status-escalated); }.panel.review.needs-review header h3 { color:var(--status-escalated); }.panel.review.needs-review header > span { color:var(--status-escalated); background:var(--attention-surface); border-radius:.35rem; padding:.25rem .5rem; font-weight:650; }
 </style>

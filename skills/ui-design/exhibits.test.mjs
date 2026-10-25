@@ -18,14 +18,14 @@ const MIN_ANCHORS = 46;
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
   ["visualizer/web/index.html", 2, "<meta charset=\"UTF-8\">"],
-  ["visualizer/web/src/App.svelte", 26, "let themeValue = 'ink'"],
-  ["visualizer/web/src/App.svelte", 27, "localStorage.getItem('dt-theme')"],
-  ["visualizer/web/src/App.svelte", 72, "document.documentElement.dataset.theme = theme"],
-  ["visualizer/web/src/App.svelte", 73, "delete document.documentElement.dataset.theme"],
-  ["visualizer/web/src/App.svelte", 74, "localStorage.setItem('dt-theme', theme)"],
-  ["visualizer/web/src/App.svelte", 173, "Dropdown bind:value={theme}"],
-  ["visualizer/web/src/App.svelte", 233, ":global(*) { box-sizing:border-box; }"],
-  ["visualizer/web/src/App.svelte", 246, ".rail-status.fail { color:var(--status-fail); }"],
+  ["visualizer/web/src/App.svelte", 26, "let themeValue = 'os'"],
+  ["visualizer/web/src/App.svelte", 27, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
+  ["visualizer/web/src/App.svelte", 69, "document.documentElement.dataset.theme = theme"],
+  ["visualizer/web/src/App.svelte", 70, "delete document.documentElement.dataset.theme"],
+  ["visualizer/web/src/App.svelte", 71, "localStorage.setItem('dt-theme', theme)"],
+  ["visualizer/web/src/App.svelte", 180, "<Dropdown bind:value={theme}"],
+  ["visualizer/web/src/App.svelte", 246, ".workspace { margin-inline-start:13.5rem;"],
+  ["visualizer/web/src/App.svelte", 249, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
   ["visualizer/web/src/lib/AcceptPanel.svelte", 23, ".chip.held { color:#166534; background:#dcfce7; }"],
   ["visualizer/web/src/lib/EnvelopeInspector.svelte", 85, ".error { border:1px solid color-mix(in srgb,var(--status-fail) 40%,var(--line));"],
   ["visualizer/web/src/lib/FleetTable.svelte", 14, "status ${row.status.tone}"],
@@ -48,30 +48,30 @@ const UNPINNABLE_PINS = [
   ["visualizer/web/src/lib/PhasePanel.svelte", 99, ".chip.unproven { color:#92400e; background:#fef3c7; }"],
   ["visualizer/web/src/lib/RoleTag.svelte", 4, "--role-color: var(--role-${role})"],
   ["visualizer/web/src/lib/RoleTag.svelte", 9, ".swatch { width:.65rem; height:.65rem; background:var(--role-color);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 706, ".notice strong { color:var(--status-fail); }"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 721, ".source-setup input { min-width:0; border:1px solid var(--line);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 734, ".pick-evidence pre { max-height:12rem;"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 703, ".notice strong { color:var(--status-fail); }"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 718, ".source-setup input { min-width:0; border:1px solid var(--line);"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 731, ".pick-evidence pre { max-height:12rem;"],
   ["visualizer/web/src/lib/RunCard.svelte", 53, "status ${status.tone}"],
   ["visualizer/web/src/lib/RunCard.svelte", 65, ".status-dot { width:.55rem; height:.55rem; background:currentColor;"],
   ["visualizer/web/src/lib/RunCard.svelte", 66, ".status.ok { color:var(--status-ok); }"],
   ["visualizer/web/src/lib/RunCard.svelte", 69, ".status.serious { color:var(--status-escalated); }"],
   ["visualizer/web/src/lib/RunCard.svelte", 71, ".events { white-space:nowrap; padding:.5rem; border-top:1px solid var(--line); }"],
-  ["visualizer/web/src/lib/RunDetail.svelte", 302, ".error-banner { margin:0; border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line));"],
+  ["visualizer/web/src/lib/RunDetail.svelte", 352, ".error-banner { border-left-color:var(--status-fail); }"],
   ["visualizer/web/src/lib/TeardownPanel.svelte", 63, ".chip.unproven { color:var(--status-running); }"],
-  ["visualizer/web/src/lib/theme.css", 2, "--ink-ground: #090d12;"],
-  ["visualizer/web/src/lib/theme.css", 3, "--ink-panel: #0f151d;"],
-  ["visualizer/web/src/lib/theme.css", 4, "--ink-panel-raised: #151d27;"],
-  ["visualizer/web/src/lib/theme.css", 5, "--ink-hairline: #25303d;"],
+  ["visualizer/web/src/lib/theme.css", 2, "--ink-ground: #111214;"],
+  ["visualizer/web/src/lib/theme.css", 3, "--ink-panel: #191a1d;"],
+  ["visualizer/web/src/lib/theme.css", 4, "--ink-panel-raised: #242529;"],
+  ["visualizer/web/src/lib/theme.css", 5, "--ink-hairline: #34363b;"],
   ["visualizer/web/src/lib/theme.css", 6, "--ink-text: #f3f5f7;"],
-  ["visualizer/web/src/lib/theme.css", 7, "--ink-muted: #8f9baa;"],
-  ["visualizer/web/src/lib/theme.css", 8, "--paper-ground: #f3f1eb;"],
-  ["visualizer/web/src/lib/theme.css", 9, "--paper-panel: #fffdf8;"],
-  ["visualizer/web/src/lib/theme.css", 10, "--paper-panel-raised: #ffffff;"],
-  ["visualizer/web/src/lib/theme.css", 11, "--paper-hairline: #d9d5cc;"],
+  ["visualizer/web/src/lib/theme.css", 7, "--ink-muted: #a1a5ae;"],
+  ["visualizer/web/src/lib/theme.css", 8, "--paper-ground: #fafafa;"],
+  ["visualizer/web/src/lib/theme.css", 9, "--paper-panel: #ffffff;"],
+  ["visualizer/web/src/lib/theme.css", 10, "--paper-panel-raised: #f2f3f5;"],
+  ["visualizer/web/src/lib/theme.css", 11, "--paper-hairline: #e6e7eb;"],
   ["visualizer/web/src/lib/theme.css", 12, "--paper-text: #15181c;"],
-  ["visualizer/web/src/lib/theme.css", 13, "--paper-muted: #626970;"],
-  ["visualizer/web/src/lib/theme.css", 14, "--spot-light: #6750d8;"],
-  ["visualizer/web/src/lib/theme.css", 15, "--spot-dark: #a898ff;"],
+  ["visualizer/web/src/lib/theme.css", 13, "--paper-muted: #626671;"],
+  ["visualizer/web/src/lib/theme.css", 14, "--spot-light: #5c63bd;"],
+  ["visualizer/web/src/lib/theme.css", 15, "--spot-dark: #a5acfa;"],
   ["visualizer/web/src/lib/theme.css", 16, "--role-planner-dark: #9c8cff;"],
   ["visualizer/web/src/lib/theme.css", 17, "--role-builder-dark: #52ced8;"],
   ["visualizer/web/src/lib/theme.css", 18, "--role-reviewer-dark: #6fdda0;"],
@@ -90,34 +90,34 @@ const UNPINNABLE_PINS = [
   ["visualizer/web/src/lib/theme.css", 31, "--status-running-raw: #f2bf62;"],
   ["visualizer/web/src/lib/theme.css", 32, "--status-skipped-raw: #7e8996;"],
   ["visualizer/web/src/lib/theme.css", 44, ":root[data-theme='paper'] {"],
-  ["visualizer/web/src/lib/theme.css", 48, "--bg: var(--paper-ground);"],
-  ["visualizer/web/src/lib/theme.css", 49, "--panel: var(--paper-panel);"],
-  ["visualizer/web/src/lib/theme.css", 51, "--line: var(--paper-hairline);"],
-  ["visualizer/web/src/lib/theme.css", 52, "--muted: var(--paper-muted);"],
-  ["visualizer/web/src/lib/theme.css", 53, "--accent: var(--spot-light);"],
-  ["visualizer/web/src/lib/theme.css", 55, "--neutral: var(--paper-muted);"],
-  ["visualizer/web/src/lib/theme.css", 56, "--status-ok: #16864f;"],
-  ["visualizer/web/src/lib/theme.css", 57, "--status-fail: #c83f49;"],
-  ["visualizer/web/src/lib/theme.css", 58, "--status-running: #a66900;"],
-  ["visualizer/web/src/lib/theme.css", 60, "--status-escalated: #d04f3a;"],
-  ["visualizer/web/src/lib/theme.css", 61, "--role-planner: var(--role-planner-light);"],
-  ["visualizer/web/src/lib/theme.css", 62, "--role-builder: var(--role-builder-light);"],
-  ["visualizer/web/src/lib/theme.css", 63, "--role-reviewer: var(--role-reviewer-light);"],
-  ["visualizer/web/src/lib/theme.css", 64, "--role-tech-lead: var(--role-tech-lead-light);"],
-  ["visualizer/web/src/lib/theme.css", 65, "--role-lead: var(--role-lead-light);"],
-  ["visualizer/web/src/lib/theme.css", 66, "--role-driver: var(--role-driver-light);"],
-  ["visualizer/web/src/lib/theme.css", 69, ":root[data-theme='ink'] {"],
-  ["visualizer/web/src/lib/theme.css", 94, "@media (prefers-color-scheme: dark) {"],
-  ["visualizer/web/src/lib/theme.css", 95, ":root:not([data-theme='paper']) {"],
-  ["visualizer/web/src/lib/theme.css", 122, "--lane-0: var(--role-planner);"],
-  ["visualizer/web/src/lib/theme.css", 123, "--lane-1: var(--role-builder);"],
-  ["visualizer/web/src/lib/theme.css", 124, "--lane-2: var(--role-reviewer);"],
-  ["visualizer/web/src/lib/theme.css", 125, "--lane-3: var(--role-tech-lead);"],
-  ["visualizer/web/src/lib/theme.css", 126, "--lane-4: var(--role-lead);"],
-  ["visualizer/web/src/lib/theme.css", 127, "--lane-5: var(--role-driver);"],
-  ["visualizer/web/src/lib/theme.css", 128, "--lane-6: var(--neutral);"],
-  ["visualizer/web/src/lib/theme.css", 129, "--lane-7: var(--muted);"],
-  ["visualizer/web/src/lib/theme.css", 141, "*, *::before, *::after { box-sizing: border-box; }"]
+  ["visualizer/web/src/lib/theme.css", 49, "--bg: var(--paper-ground);"],
+  ["visualizer/web/src/lib/theme.css", 50, "--panel: var(--paper-panel);"],
+  ["visualizer/web/src/lib/theme.css", 52, "--line: var(--paper-hairline);"],
+  ["visualizer/web/src/lib/theme.css", 53, "--muted: var(--paper-muted);"],
+  ["visualizer/web/src/lib/theme.css", 54, "--accent: var(--spot-light);"],
+  ["visualizer/web/src/lib/theme.css", 57, "--neutral: var(--paper-muted);"],
+  ["visualizer/web/src/lib/theme.css", 58, "--status-ok: #167346;"],
+  ["visualizer/web/src/lib/theme.css", 59, "--status-fail: #c83f49;"],
+  ["visualizer/web/src/lib/theme.css", 60, "--status-running: #875600;"],
+  ["visualizer/web/src/lib/theme.css", 62, "--status-escalated: #b44432;"],
+  ["visualizer/web/src/lib/theme.css", 63, "--role-planner: var(--role-planner-light);"],
+  ["visualizer/web/src/lib/theme.css", 64, "--role-builder: var(--role-builder-light);"],
+  ["visualizer/web/src/lib/theme.css", 65, "--role-reviewer: var(--role-reviewer-light);"],
+  ["visualizer/web/src/lib/theme.css", 66, "--role-tech-lead: var(--role-tech-lead-light);"],
+  ["visualizer/web/src/lib/theme.css", 67, "--role-lead: var(--role-lead-light);"],
+  ["visualizer/web/src/lib/theme.css", 68, "--role-driver: var(--role-driver-light);"],
+  ["visualizer/web/src/lib/theme.css", 71, ":root[data-theme='ink'] {"],
+  ["visualizer/web/src/lib/theme.css", 98, "@media (prefers-color-scheme: dark) {"],
+  ["visualizer/web/src/lib/theme.css", 99, ":root:not([data-theme='paper']) {"],
+  ["visualizer/web/src/lib/theme.css", 133, "--lane-0: var(--role-planner);"],
+  ["visualizer/web/src/lib/theme.css", 134, "--lane-1: var(--role-builder);"],
+  ["visualizer/web/src/lib/theme.css", 135, "--lane-2: var(--role-reviewer);"],
+  ["visualizer/web/src/lib/theme.css", 136, "--lane-3: var(--role-tech-lead);"],
+  ["visualizer/web/src/lib/theme.css", 137, "--lane-4: var(--role-lead);"],
+  ["visualizer/web/src/lib/theme.css", 138, "--lane-5: var(--role-driver);"],
+  ["visualizer/web/src/lib/theme.css", 139, "--lane-6: var(--neutral);"],
+  ["visualizer/web/src/lib/theme.css", 140, "--lane-7: var(--muted);"],
+  ["visualizer/web/src/lib/theme.css", 152, "*, *::before, *::after { box-sizing: border-box; }"]
   ,["visualizer/web/src/lib/theme.css", 165, ".mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }"],
 ];
 
@@ -160,17 +160,18 @@ const SKILL_DOC = join(HERE, 'SKILL.md')
 const COLOR_LITERAL_RE = /(?:#[\da-f]{3,8}\b|\b(?:white|black)\b|(?:rgb|rgba|hsl)\()/i
 const COLOR_PROP_RE = /(color|background|border|shadow|fill|stroke|outline)/i
 const TOKEN_HEX = {
-  '--bg': { paper: '#f3f1eb', ink: '#090d12' },
-  '--panel': { paper: '#fffdf8', ink: '#0f151d' },
-  '--panel-raised': { paper: '#ffffff', ink: '#151d27' },
-  '--line': { paper: '#d9d5cc', ink: '#25303d' },
-  '--muted': { paper: '#626970', ink: '#8f9baa' },
-  '--neutral': { paper: '#626970', ink: '#8f9baa' },
-  '--accent': { paper: '#6750d8', ink: '#a898ff' },
-  '--status-ok': { paper: '#16864f', ink: '#4dcc87' },
+  '--text': { paper: '#15181c', ink: '#f3f5f7' },
+  '--bg': { paper: '#fafafa', ink: '#111214' },
+  '--panel': { paper: '#ffffff', ink: '#191a1d' },
+  '--panel-raised': { paper: '#f2f3f5', ink: '#242529' },
+  '--line': { paper: '#e6e7eb', ink: '#34363b' },
+  '--muted': { paper: '#626671', ink: '#a1a5ae' },
+  '--neutral': { paper: '#626671', ink: '#a1a5ae' },
+  '--accent': { paper: '#5c63bd', ink: '#a5acfa' },
+  '--status-ok': { paper: '#167346', ink: '#4dcc87' },
   '--status-fail': { paper: '#c83f49', ink: '#ff6b6b' },
-  '--status-running': { paper: '#a66900', ink: '#f2bf62' },
-  '--status-escalated': { paper: '#d04f3a', ink: '#ff806f' },
+  '--status-running': { paper: '#875600', ink: '#f2bf62' },
+  '--status-escalated': { paper: '#b44432', ink: '#ff806f' },
   '--status-skipped': { paper: '#7e8996', ink: '#7e8996' },
 }
 
@@ -430,11 +431,11 @@ test('G1', () => {
   assert.equal(record.verdict, 'token')
   assert.equal(contrastFor(record, record.verdict), 'Unmeasured — rest ground is transparent')
   const hoverRes = stateResult(record.hover.foreground, record.hover.background, 'hover')
-  assert.equal(hoverRes.paper, '5.65')
-  assert.equal(hoverRes.ink, '6.95')
+  assert.equal(hoverRes.paper, '4.76')
+  assert.equal(hoverRes.ink, '7.20')
   const rows = registerRows()
-  assert.equal(rows.length, 24)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
+  assert.equal(rows.length, 23)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 10)
   for (const file of libFiles()) {
     const expected = extractHoverRules(styleTextOf(file))
     for (const rule of expected) {
@@ -458,7 +459,7 @@ test('H1', () => {
   const fixture = '.mix-a { background:var(--panel-raised); color:var(--muted); }\n.mix-a:hover { color:var(--accent); }\n.mix-b { background:transparent; color:var(--muted); }\n.mix-b:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); }'
   const records = extractHoverRules(fixture)
   assert.equal(records.length, 2)
-  assert.equal(contrastFor(records[0], records[0].verdict), 'paper 5.56 → 5.65; ink 6.01 → 6.95')
+  assert.equal(contrastFor(records[0], records[0].verdict), 'paper 5.17 → 4.76; ink 6.20 → 7.20')
   assert.ok(contrastFor(records[1], records[1].verdict).startsWith('Unmeasured —'))
   const roster = registerRows().filter((row) => row.file === 'RosterPanel.svelte')
   assert.equal(roster.length, 7, 'a mixed component keeps one row per hover rule')
@@ -587,8 +588,8 @@ test('pin-sweep D1', () => {
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.
 test('K1', () => {
   const { rows, measured } = assertHoverDenominators()
-  assert.equal(rows.length, 24)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
+  assert.equal(rows.length, 23)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 10)
   assert.equal(measured, 3)
 })
 

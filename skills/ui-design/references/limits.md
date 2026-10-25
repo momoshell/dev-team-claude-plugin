@@ -4,22 +4,18 @@ This reference preserves the limits measured from the raw block of `visualizer/w
 
 ## Contrast limit
 
-Known limit: status colour is theme-invariant, so all four status steps and --serious fall below 4.5:1 on the paper ground.
+The current palette uses distinct light and dark status values. The following ratios use the declared page ground in each theme, not a rendered-page measurement. Component backgrounds and translucent mixes require separate checks.
 
-The eight measured ratios below are computed from the declared literals, not from a rendered page:
+| Alias | Ink ground | Paper ground |
+|---|---:|---:|
+| `--status-escalated` | 7.65 | 5.28 |
+| `--status-running` | 11.07 | 5.99 |
+| `--status-ok` | 9.19 | 5.63 |
+| `--status-fail` | 6.75 | 4.72 |
 
-| Alias | Ink ground | Paper ground | What the table says |
-|---|---|---:|---|
-| `--status-escalated` / `--serious` | **6.78** | **2.24** | theme-invariant escalation |
-| `--status-running` | **5.99** | **2.53** | theme-invariant running |
-| `--status-ok` | **5.27** | **2.88** | theme-invariant success |
-| `--status-fail` | **4.04** | **3.75** | theme-invariant failure |
+The escalation raw token is declared at `visualizer/web/src/lib/theme.css:28` and its paper literal at `visualizer/web/src/lib/theme.css:62`. The skipped status remains 5.27:1 on ink and 3.41:1 on paper; the paper value remains below 4.5:1. Primary text, muted text and accent on their matching ground are: `--ink-text` 17.15:1, `--paper-text` 17.06:1, `--ink-muted` 7.59:1, `--paper-muted` 5.50:1, `--spot-dark` 8.82:1, `--spot-light` 5.06:1.
 
-The escalation raw token is declared at `visualizer/web/src/lib/theme.css:28` and its paper literal at `visualizer/web/src/lib/theme.css:60`. `--status-skipped` is also below 4.5:1 on both measured grounds (3.90 on ink and 3.89 on paper in register section 6), which is why the limit says all four status steps. By contrast, every theme-paired token clears 4.5:1 on its own ground: `--ink-text` is 14.72, `--paper-text` 15.63, `--ink-muted` 6.37, `--paper-muted` 6.54, `--spot-dark` 8.81, and `--spot-light` 4.59 in the declared-pair calculation.
-
-A second contrast limit belongs to lane blocks: `visualizer/web/src/lib/PhaseGantt.svelte:257` uses `.bar.failed` with `color:#fff`. The six paper role combinations range from 2.17 to 8.56 and the six ink combinations from 3.07 to 3.94; only **1 of 12 lane/ground combinations clears 4.5:1**. The `#fff` value is cited from the measured register, not introduced as a new palette value.
-
-Neither the status contrast problem nor the lane-block contrast problem is fixed by this lane. A new component must use the aliases and surface the limitation rather than claim that a theme switch makes a status colour safe.
+The existing lane-block treatment at `visualizer/web/src/lib/PhaseGantt.svelte:257` still uses white text on the failed-status fill. Role/lane colors and dense run-detail charts have not had a complete rendered contrast audit in this change. Do not extend these page-ground results to every chart label.
 
 ## Hover contrast — per-rule register
 
@@ -29,32 +25,32 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
-| `Dropdown.svelte` | `.dropdown-trigger:hover:not(:disabled),.dropdown-trigger[aria-expanded='true']` | `border-color: color-mix(in srgb,var(--accent) 62%,var(--line)); background: color-mix(in srgb,var(--accent) 6%,var(--bg))` | token | `var(--bg)` | `color-mix(in srgb,var(--accent) 6%,var(--bg))` | Unmeasured — foreground token --text has no source-declared value |
+| `Dropdown.svelte` | `.dropdown-trigger:hover:not(:disabled),.dropdown-trigger[aria-expanded='true']` | `border-color: color-mix(in srgb,var(--accent) 62%,var(--line)); background: color-mix(in srgb,var(--accent) 6%,var(--bg))` | token | `var(--bg)` | `color-mix(in srgb,var(--accent) 6%,var(--bg))` | Unmeasured — hover background is a color-mix, not a flat token value |
 | `Dropdown.svelte` | `.dropdown-menu button:hover,.dropdown-menu button.active` | `background: var(--accent-soft); color: var(--text)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
 
-### `EnvelopeInspector.svelte` — 1 rule
+### `EnvelopeInspector.svelte` — 1 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
 | `EnvelopeInspector.svelte` | `.roles button:hover,.roles button.active` | `border-color: color-mix(in srgb,var(--role-color) 55%,var(--line)); background: color-mix(in srgb,var(--role-color) 8%,var(--panel))` | token | `var(--bg)` | `color-mix(in srgb,var(--role-color) 8%,var(--panel))` | Unmeasured — rest foreground is inherited, not source-declared |
 
-### `EventStory.svelte` — 1 rule
+### `EventStory.svelte` — 1 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
-| `EventStory.svelte` | `.expand:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.65; ink 6.01 → 6.95 |
+| `EventStory.svelte` | `.expand:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 4.76; ink 6.20 → 7.20 |
 
-### `EventStream.svelte` — 1 rule
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `EventStream.svelte` | `.refresh:hover,.clear:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.65; ink 6.01 → 6.95 |
-
-### `MetricsStrip.svelte` — 1 rule
+### `EventStream.svelte` — 1 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
-| `MetricsStrip.svelte` | `.metric-card:hover` | `border-color: color-mix(in srgb,var(--accent) 45%,var(--line)); background: color-mix(in srgb,var(--accent) 4%,var(--panel))` | token | `color-mix(in srgb,var(--panel) 91%,transparent)` | `color-mix(in srgb,var(--accent) 4%,var(--panel))` | Unmeasured — rest background is a color-mix, not a flat token value |
+| `EventStream.svelte` | `.refresh:hover,.clear:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 4.76; ink 6.20 → 7.20 |
+
+### `OperationsOverview.svelte` — 1 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `OperationsOverview.svelte` | `.bars button:focus-visible .bar-value,.bars button:hover .bar-value` | `(none)` | none | `transparent` | `transparent` | Unmeasured — rule declares no color-affecting declaration |
 
 ### `PhaseGantt.svelte` — 6 rules
 
@@ -67,7 +63,7 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `PhaseGantt.svelte` | `.factory-steps > summary:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
 | `PhaseGantt.svelte` | `.checkpoint:hover,.checkpoint.selected-step` | `background: color-mix(in srgb,var(--accent) 7%,transparent)` | token | `transparent` | `color-mix(in srgb,var(--accent) 7%,transparent)` | Unmeasured — rest ground is transparent |
 
-### `PhasePanel.svelte` — 1 rule
+### `PhasePanel.svelte` — 1 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
@@ -85,12 +81,6 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `RosterPanel.svelte` | `.model-palette article:hover` | `border-color: color-mix(in srgb,var(--accent) 55%,var(--line))` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
 | `RosterPanel.svelte` | `.remove-model:hover` | `color: var(--status-fail)` | token | `transparent` | `transparent` | Unmeasured — rest ground is transparent |
 
-### `RunDetail.svelte` — 1 rule
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `RunDetail.svelte` | `.crew-seat > summary:hover` | `background: color-mix(in srgb,var(--accent) 5%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--accent) 5%,transparent)` | Unmeasured — no source-declared rest background |
-
 ### `TaskList.svelte` — 2 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
@@ -98,13 +88,13 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `TaskList.svelte` | `tbody tr:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
 | `TaskList.svelte` | `tr:hover .open` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
 
-### `WorkflowGraph.svelte` — 1 rule
+### `WorkflowGraph.svelte` — 1 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
-| `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.56 → 5.56; ink 6.01 → 6.01 |
+| `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 5.17; ink 6.20 → 6.20 |
 
-24 rules in 11/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+23 rules in 10/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 
@@ -118,7 +108,7 @@ Register section 9 names the conventions that cannot honestly be made into curre
 
 - the spacing scale (C5), because fourteen sub-1rem values exist and no preferred scale exists;
 - the type ramp, because nine ad-hoc sizes are not tokenised, even though the two weights and `.micro` usage are checkable;
-- corner radius (D10), until the global reset versus component practice is resolved;
+- corner radius (D10), because component values have not all been normalized;
 - the pill radius idiom (D3), a 3-3 tie with no governing principle;
 - panel-spacing ownership (D2), which depends on where a component is mounted;
 - tone completeness (D6), which needs the shaper's scattered tone vocabulary as an input.
@@ -129,9 +119,9 @@ The register section 8 floor does cover role/lane mapping, two exact FleetTable 
 
 Register section 10 records four absences, and none should be upgraded to a fact:
 
-1. No repo file establishes where the ratified role palette was ratified; the durable trace is the shape suite check and the lane alias block at `visualizer/web/src/lib/theme.css:122` through `visualizer/web/src/lib/theme.css:129`.
+1. No repo file establishes where the ratified role palette was ratified; the durable trace is the shape suite check and the lane alias block at `visualizer/web/src/lib/theme.css:133` through `visualizer/web/src/lib/theme.css:140`.
 2. No commit body explains why the role colours were chosen.
 3. No rendered-page observation was available; L10, L11, D2 consequences, and visual appearance are source-derived, while the ratios above are arithmetic.
 4. The recon did not trace whether the live ledger can carry `scout` or `advisor` in `agent_sessions.role`, and did not establish whether a skipped phase with no lane occurs.
 
-Neither limit - the paper-ground contrast finding nor the vacuous theme.css test - is fixed by this lane. Record the evidence boundary when a future change proposes to fix either one.
+The palette update improves status text on the page grounds; skipped-status text on light surfaces and the limits of theme-sheet tests remain. Record the evidence boundary when extending the work.

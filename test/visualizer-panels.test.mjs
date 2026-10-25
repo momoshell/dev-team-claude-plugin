@@ -23,7 +23,7 @@ import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import { getAssurances, getPluginWriteMode, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
-
+import { activitySummary } from '../visualizer/web/src/lib/activity.js'
 test('RO6', async () => {
   // MUTATION: change the getter URL; the behavioral fetch assertion must fail.
   const original = globalThis.fetch
@@ -352,7 +352,7 @@ test('G1 task detail state reports measured facts and independently missing fact
 
 test('H1 RunDetail composes plain detail helpers and renders each audited field', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.match(source, /import \{ deriveDisplayStatus, durationCell, gateCell, openRecordNote, profileEvidenceView, reviewCell, runDetailConfiguration, runDetailSeats, runDetailState, shipStatus, tokenCell \} from '\.\/fleet\.js'/)
+  assert.match(source, /import \{ durationCell, gateCell, profileEvidenceView, runDetailConfiguration, runDetailSeats, runDetailState, shipStatus, tokenCell \} from '\.\/fleet\.js'/)
   assert.match(source, /let configurationDetail = \$derived\(runDetailConfiguration\(run\)\)/)
   assert.match(source, /let seatPolicy = \$derived\(runDetailSeats\(run\)\)/)
   assert.match(source, /let runState = \$derived\(runDetailState\(run, events\)\)/)
@@ -389,8 +389,8 @@ test('operations aggregate carries a denominator on every readout', () => {
 
 test('Operations view delegates the aggregate to the fleet plain module', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
-  assert.match(source, /import \{ operationsOverview \} from '\.\/fleet\.js'/)
-  assert.match(source, /let operations = \$derived\(operationsOverview\(runs\)\)/)
+  assert.match(source, /import \{[^}]*operationsOverview[^}]*\} from '\.\/fleet\.js'/)
+  assert.match(source, /let operations = \$derived\(operationsOverview\(summary\.rows\)\)/)
   assert.doesNotMatch(source, /function operationsOverview\(/)
   for (const token of ['dimensions', 'outcomes.success', 'outcomes.escalated', 'outcomes.aborted', 'outcomes.failed', 'outcomes.unsettled', 'outcomes.unknown', 'configurationChanges', 'seatEvidence', 'alive', 'gone', 'unknown']) {
     assert.match(source, new RegExp(token.replace('.', '\\.' )))
@@ -530,38 +530,19 @@ test('fleetEscalationRate does not count a run that did not escalate', () => {
   assert.notEqual(result.percent, null)
 })
 
-test('the metrics strip renders the sessions derivations and derives nothing', () => {
+test('activity metrics have one home and share the selected cohort', () => {
   const root = join(ROOT, 'visualizer/web/src')
   const strip = readFileSync(join(root, 'lib/MetricsStrip.svelte'), 'utf8')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
-  const importLine = strip.split('\n').find((line) => line.includes("from './panels.js'"))
-  assert.ok(importLine)
-  for (const name of ['fleetPassRate', 'fleetMedianDuration', 'fleetPhasesPerRun', 'fleetEscalationRate']) {
-    assert.match(importLine, new RegExp(`\\b${name}\\b`))
-  }
-  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false, now = Date\.now\(\), onactivity = \(\) => \{\} \} = \$props\(\)/)
-  for (const needle of ['Activity now', 'open', 'live', 'unverified', 'onactivity']) assert.match(strip, new RegExp(needle))
-  for (const pattern of [/runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
-    assert.doesNotMatch(strip, pattern)
-  }
-  assert.match(strip, /runtimeActivity\(runs\)/)
-  assert.match(app, /runtimeActivitySummary\(runs\)/)
-  assert.match(app, /feedDegraded = result\?\.degraded === true/)
-  const mounts = app.match(/<MetricsStrip[^>]*>/g) || []
-  assert.equal(mounts.length, 2)
-  for (const mount of mounts) {
-    assert.match(mount, /envelopes=/)
-    assert.match(mount, /degraded=/)
-    assert.match(mount, /\{now\}/)
-    assert.match(mount, /onactivity=/)
-  }
-  assert.match(app, /function focusActivity\(\)/)
+  const overview = readFileSync(join(root, 'lib/OperationsOverview.svelte'), 'utf8')
+  assert.doesNotMatch(app, /<MetricsStrip/)
+  assert.match(overview, /<MetricsStrip \{summary\}/)
+  assert.match(overview, /activitySummary\(runs, \{ period, envelopes, degraded, now \}\)/)
+  for (const key of ['summary.settled', 'summary.durationMeasured', 'summary.usage.complete']) assert.ok(strip.includes(key))
+  assert.doesNotMatch(strip, /Completion quality|Workflow depth|Escalation rate/)
   assert.match(app, /focus=\{taskFocus\}/)
-  assert.match(taskList, /focus\?\.revision/)
-  assert.match(taskList, /id="task-board"/)
-  assert.match(strip, /padding:\.12rem 0 \.1rem/)
 })
+
 
 test('model directory pagination uses compact named controls', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
@@ -1222,7 +1203,7 @@ test('E1 agents page route nav and title are wired', () => {
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
   assert.match(app, /route\.view === 'agents'[^\n]*>Agents</)
-  assert.match(page, /role="tablist"/)
+  assert.match(page, /aria-label="Agent evidence"/)
 })
 
 test('skills-page:D1', () => {
@@ -1346,8 +1327,8 @@ test('F1 agents page uses only Tier-2 colour aliases', () => {
   assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
   assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
   assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
-  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.', 'protected: prompt-surface']) assert.ok(source.includes(token), token)
-  for (const tab of ['Agents', 'Skills', 'Prompts']) assert.ok(source.includes(tab), tab)
+  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.', 'href="#/prompts"', 'href="#/skills"']) assert.ok(source.includes(token), token)
+  for (const tab of ['Capabilities', 'Skill delivery', 'Prompt delivery']) assert.ok(source.includes(tab), tab)
 })
 
 test('fleet cells preserve honest absence and discriminate status evidence', () => {
@@ -1534,7 +1515,7 @@ test('return probing shares one six-request semaphore across refresh generations
   assert.equal(maximum, 2)
 })
 
-test('role colour stays isolated to RoleTag and escalations render their why in the rail', () => {
+test('role colour stays isolated and escalation reasons remain in task history', () => {
   const root = join(ROOT, 'visualizer/web/src')
   for (const file of ['App.svelte', 'lib/FleetTable.svelte', 'lib/RunCard.svelte', 'lib/Filters.svelte']) {
     assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /--role-|--lane-\d/)
@@ -1544,8 +1525,11 @@ test('role colour stays isolated to RoleTag and escalations render their why in 
   assert.match(tag, /\{\s*role\s*\}/)
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   assert.match(app, /\.filter\(\(row\) => needsAttention\(row\.status\.key\)/)
-  assert.match(app, /class="rail-why">\{row\.why\}/)
-  assert.match(app, /returnRequestSemaphore = createSemaphore\(6\)/)
+  const tasks = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
+  assert.match(tasks, /Why review\?/)
+  assert.match(tasks, /status\.why/)
+  assert.doesNotMatch(app, /class="attention-list"/)
+  assert.match(app, /returnRequestSemaphore = createSemaphore\(2\)/)
   assert.match(app, /returnRequestSemaphore\.run\(\(\) => getReturns/)
 })
 
@@ -1753,13 +1737,14 @@ test('phase inspection explains factory checkpoints and suppresses empty gate co
   assert.match(gateEntry.text, /Validation evidence is attached to/)
 })
 
-test('operations cadence keeps time labels below the chart baseline', () => {
+test('activity chart offers named intervals and readable counts without hover', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
-  assert.match(source, /\.histogram::before[^}]*inset:0 0 1\.15rem[^}]*border-bottom/)
-  assert.match(source, /\.bar-column[^}]*grid-template-rows:minmax\(0,1fr\) 1\.15rem/)
-  assert.match(source, /\.bar-column > span[^}]*grid-row:2/)
-  assert.match(source, /\.bar-stack[^}]*grid-row:1/)
+  assert.match(source, /View interval counts/)
+  assert.match(source, /aria-label=\{`\$\{stamp\(bucket.start\)\}/)
+  assert.match(source, /aria-pressed=\{selectedBucket === index\}/)
+  assert.match(source, /class="x-labels"/)
 })
+
 
 test('trace source tripwires keep route, role order, and server read-only', () => {
   const root = join(ROOT, 'visualizer')
@@ -2022,7 +2007,7 @@ test('factory step trace keeps checkpoints in distinct measured phases', () => {
 test('RunDetail places profile evidence before raw payloads and keeps topology plain', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
   const fleetSource = readFileSync(join(ROOT, 'visualizer/web/src/lib/fleet.js'), 'utf8')
-  assert.match(source, /profileEvidenceView\(configuration\.profile\.key, returns\)/)
+  assert.match(source, /profileEvidenceView\(configuration\.profile\.key, evidence\)/)
   assert.match(source, /executionTopology\(configuration\.execution\.key, observedStageLabels/)
   assert.match(source, /class="profile-evidence" aria-label="Profile evidence summary"/)
   assert.ok(source.indexOf('class="profile-evidence"') < source.indexOf('<EnvelopeInspector'))
@@ -2111,7 +2096,7 @@ test('task detail refreshes do not reset finished-run disclosures for an unchang
   assert.match(detail, /target\.adw_id === detailKey/)
   assert.match(detail, /key === journalKey/)
   assert.ok(detail.indexOf('key === journalKey') < detail.indexOf('journalState = initialJournalState()'))
-  assert.match(detail, /if \(!shouldRead\(\{ running:run\.running \}\)\) return/)
+  assert.doesNotMatch(detail, /if \(!shouldRead\(\{ running:run\.running \}\)\) return/)
   assert.match(trajectory, /id === trajectoryRunKey/)
 })
 
@@ -2578,17 +2563,19 @@ test('the contradiction heading is not the stale heading', () => {
   assert.equal(openRecordNote('unverified'), 'Open record not verified')
   assert.equal(openRecordNote('live'), null)
   const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.ok((detail.match(/openRecordNote\(status\.key\)/g) || []).length >= 2)
+  assert.ok(detail.includes('taskDetailSummary(run, returns'))
   assert.doesNotMatch(detail, /'Stale open record'/)
 })
 
-test('the metrics strip counts a contradiction without calling it a heartbeat', () => {
-  const strip = readFileSync(join(ROOT, 'visualizer/web/src/lib/MetricsStrip.svelte'), 'utf8')
-  assert.match(strip, /activity\.silent \+ activity\.unverified \+ activity\.contradicted/)
-  assert.match(strip, /activity\.contradicted \? ` · \$\{activity\.contradicted\} contradicted`/)
-  assert.match(strip, /activity\.contradicted.*crew state directory is archived/)
-  assert.match(strip, /activity\.contradicted} contradicted/)
+test('activity summary keeps contradicted open runs out of successful outcomes', async () => {
+  const { activitySummary } = await import('../visualizer/web/src/lib/activity.js')
+  const summary = activitySummary([{adw_id:'a', running:true, status:'running', started_at:'2026-10-25T10:00:00Z', crew_state:{archived:true}}], {now:Date.parse('2026-10-25T12:00:00Z')})
+  assert.equal(summary.counts.open, 1)
+  assert.equal(summary.successRate, null)
+  assert.equal(summary.attention[0].status.key, 'contradicted')
+  assert.match(summary.attention[0].status.why, /archived/)
 })
+
 
 test('B1: a synthetic vocabulary key reaches every attention consumer', async () => {
   const root = join(ROOT, 'visualizer/web/src')
@@ -3190,7 +3177,7 @@ test('PV9', () => {
   assert.match(component, /Not recorded:/)
   assert.match(component, /<ol class="step-timeline">/)
   assert.match(component, /aria-current=\{step\.state === 'active' \? 'step' : undefined\}/)
-  assert.match(detail, /\{#each stepView\.strip as entry \(entry\.id\)\}/)
+  assert.match(detail, /<PlanSteps \{journalState\} \/>/)
   assert.match(component, /if view\.steps\.length === 0/)
   assert.match(component, /Loading accepted plan/)
   assert.match(component, /Inspect the accepted planner return/)
@@ -3267,7 +3254,8 @@ test('VS8', () => {
  assert.deepEqual(v.strip.map(s=>[s.id,s.state,s.reason,s.tone]),v.steps.map(s=>[s.id,s.state,s.reason,s.tone]))
  const detail=readFileSync(new URL('../visualizer/web/src/lib/RunDetail.svelte',import.meta.url),'utf8')
  const header=detail.match(/<header class="task-header">([\s\S]*?)<\/header>/)?.[1] ?? ''
- assert.ok(header.includes('{#each stepView.strip as entry (entry.id)}'))
+ assert.equal(header.includes('step-strip'), false, 'plan progress has one home in Activity')
+ assert.ok(detail.includes('<PlanSteps {journalState} />'))
  const component=readFileSync(new URL('../visualizer/web/src/lib/PlanSteps.svelte',import.meta.url),'utf8')
  assert.match(component,/<ol\b[^>]*class="step-timeline"/)
  assert.match(component,/aria-current=\{step.state === 'active' \? 'step' : undefined\}/)
@@ -3311,7 +3299,7 @@ test('RV1-3 task strip mirrors ordered card state and absence metadata', () => {
  const view=stepped(steppedPayload([timelineStart(),{event:'step:red',step:'a',round:1,at:200,failed:['C1']}]))
  assert.deepEqual(view.strip.map(x=>[x.id,x.state,x.reason,x.tone]),view.steps.map(x=>[x.id,x.state,x.reason,x.tone]))
  const component=readFileSync(new URL('../visualizer/web/src/lib/RunDetail.svelte',import.meta.url),'utf8')
- assert.match(component,/{#each stepView\.strip as entry \(entry\.id\)}/)
+ assert.match(component,/<PlanSteps \{journalState\} \/>/)
 })
 test('RV1-5 timeline vocabularies are frozen and consulted', () => {
  const {STEP_TIMELINE_REASONS,STEP_TIMELINE_STATES,STEP_TIMELINE_OUTCOMES,STEP_TIMELINE_TONES}=steppedModule
@@ -3445,25 +3433,18 @@ test('operations summaries preserve measured failure arithmetic and reach watch'
  assert.equal(totals.badge_label, '2 failures')
 })
 
-test('OperationsOverview delegates unmeasured summaries to the panels module', () => {
- const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
- assert.match(source, /import \{[^}]*operationsRunSummary[^}]*\} from '\.\/panels\.js'/)
- assert.match(source, /import \{[^}]*operationsTeardownSummary[^}]*\} from '\.\/panels\.js'/)
- assert.match(source, /import \{[^}]*operationsHealthSummary[^}]*\} from '\.\/panels\.js'/)
- assert.match(source, /import \{[^}]*operationsPosture[^}]*\} from '\.\/panels\.js'/)
- assert.match(source, /let runSummary = \$derived\(operationsRunSummary\(runSet\)\)/)
- assert.match(source, /let teardownSummary = \$derived\(operationsTeardownSummary\(teardowns\)\)/)
- assert.match(source, /let healthSummary = \$derived\(operationsHealthSummary\(cellHealth\)\)/)
- assert.match(source, /let posture = \$derived\(operationsPosture\(\{/)
- assert.doesNotMatch(source, /settled\.running \?\? 0/)
- assert.doesNotMatch(source, /settled\.ok \?\? 0/)
- assert.doesNotMatch(source, /\(totals\.failed \?\? 0\) === 0/)
- assert.match(source, /\{runSummary\.fail \?\? '—'\}/)
- assert.match(source, /\{runSummary\.running \?\? '—'\}/)
- assert.match(source, /\{healthSummary\.failures \?\? '—'\}/)
- assert.match(source, /Unmeasured — \{healthSummary\.absent\}/)
- assert.match(source, /class:good=\{teardownSummary\.clean\}/)
+test('OperationsOverview uses the absence-aware activity summary and keeps diagnostics separate', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.match(source, /activitySummary/)
+  assert.match(source, /summary\.unavailable/)
+  assert.match(source, /summary\.usage\.total == null/)
+  assert.match(source, /else if !degraded/)
+  assert.match(source, /Loading run activity/)
+  assert.doesNotMatch(source, /getCellHealth|getRunSet|getSeatTeardowns/)
+  for (const panel of ['CellHealthPanel', 'RunSetPanel', 'TeardownPanel', 'IntakePanel']) assert.ok(app.includes('<' + panel + ' />'))
 })
+
 
 test('CellHealthPanel binds the unmeasured-aware totals badge', () => {
  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/CellHealthPanel.svelte'), 'utf8')
@@ -3764,7 +3745,7 @@ test('JR5 trajectory renders shaped journal with closed inspect', () => {
   assert.ok(traj.match(/<details(?![^>]*\bopen\b)[^>]*>\s*<summary>Inspect<\/summary>\s*<pre>\{line\.raw\}<\/pre>/))
   assert.ok(traj.split('journal.operationalCount').length - 1 >= 2)
   assert.ok(traj.includes('journalLines'))
-  assert.ok(detail.includes('<Trajectory {run} {journalState} {returns} />'))
+  assert.ok(detail.includes('<Trajectory {run} {journalState} returns={evidence} />'))
   assert.ok(traj.includes('No agent handoffs in this view'))
   assert.ok(traj.includes('No journal rows in this interval'))
 })
@@ -3881,11 +3862,12 @@ test('TS2 converge checkpoint is conditional with no missing defect', () => {
   assert.deepEqual(topo.defects, [])
   assert.equal(topo.rows.find((r) => r.stage === 'converge').status, 'conditional')
 })
-test('HS1 step strip translates unmeasured reasons with slug titles', () => {
+test('HS1 plan is presented once with readable absence reasons', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.ok(source.includes('reasonText(entry.reason)'))
-  assert.ok(source.includes('title={entry.reason'))
-  assert.equal(source.includes('Unmeasured — ${entry.reason}'), false)
+  const plan = readFileSync(join(ROOT, 'visualizer/web/src/lib/PlanSteps.svelte'), 'utf8')
+  assert.equal(source.split('<PlanSteps {journalState} />').length - 1, 1)
+  assert.ok(plan.includes('reasonText(check.reason)'))
+  assert.equal(source.includes('step-strip'), false)
 })
 test('PU2 plan step cards choose titles by precedence', () => {
   assert.ok(planCardsProbes && typeof planCardsProbes.planStepCards === 'function', 'expected planStepCards');
@@ -4106,4 +4088,202 @@ test('PP3 labels unpaired same-id dispatches with distinct role names', () => {
   assert.equal(entries.length, 2)
   assert.equal(new Set(entries.map((e) => e.label)).size, entries.length)
   assert.deepEqual(entries.map((e) => e.label).sort(), ['planner dispatch d1', 'tech lead dispatch d1'])
+})
+
+const now = Date.parse('2026-10-25T12:00:00Z')
+const run = (id, overrides = {}) => ({ adw_id:id, started_at:'2026-10-25T10:00:00Z', running:false, status:'ok', duration_ms:1000, ...overrides })
+
+test('activity shares task outcome precedence, period and terminal denominator', () => {
+  const rows = [run('a'), run('b', { settlement:{outcome:'escalated'} }), run('c', {status:'fail'}), run('d', {status:'aborted'}), run('e', {status:'running', running:true, duration_ms:999999}), run('f', {status:null, duration_ms:999999}), run('old', {started_at:'2026-09-01T00:00:00Z'})]
+  const result = activitySummary(rows, {now, period:'1'})
+  assert.equal(result.total, 6)
+  assert.deepEqual(result.counts, {success:1, escalated:1, fail:1, aborted:1, open:1, unknown:1})
+  assert.equal(result.settled, 4)
+  assert.equal(result.successRate, 25)
+  assert.equal(result.durationMeasured, 4)
+  assert.equal(result.median, 1000)
+  assert.equal(result.buckets.reduce((n,b) => n+b.count, 0), result.total)
+  assert.equal(result.attention.length, 4)
+  assert.equal(activitySummary(rows, {now, period:'all'}).total, 7)
+})
+
+test('activity honors escalation envelopes and keeps archives in history only', () => {
+  const rows = [run('a'), run('b', {status:'fail', triage:{reviewed_at:'2026-10-25'}})]
+  const result = activitySummary(rows, {now, envelopes:new Map([['a', {status:'escalation'}]])})
+  assert.equal(result.counts.escalated, 1)
+  assert.equal(result.counts.success, 0)
+  assert.equal(result.total, 2)
+  assert.deepEqual(result.attention.map(r=>r.run.adw_id), ['a'])
+})
+
+test('usage preserves missing and partial categories, and includes real zero', () => {
+  const rows = [run('a', {metrics:{billed_input_tokens:100, billed_output_tokens:20, billed_cache_read_tokens:200, billed_cache_write_tokens:0}}), run('b', {metrics:{billed_input_tokens:0}}), run('c')]
+  const {usage} = activitySummary(rows, {now})
+  assert.deepEqual(usage, {total:320, measured:2, complete:1, input:100, output:20, cacheWrite:0, cacheRead:200})
+  assert.equal(activitySummary([run('a')], {now}).usage.total, null)
+  assert.equal(activitySummary([run('a',{metrics:{billed_input_tokens:0}})], {now}).usage.total, 0)
+})
+
+test('degraded reads suppress all numerators, charts and drilldowns', () => {
+  for (const rows of [[],[run('a')]]) {
+    const result = activitySummary(rows, {now, degraded:true})
+    for (const key of ['total','counts','settled','successRate','median','usage','durationMeasured']) assert.equal(result[key], null, key)
+    assert.deepEqual(result.rows, [])
+    assert.deepEqual(result.buckets, [])
+    assert.deepEqual(result.attention, [])
+    assert.match(result.unavailable, /Retry/)
+  }
+})
+
+test('time boundaries and missing dates cannot silently become chart events', () => {
+  const rows = [run('start',{started_at:new Date(now-86400000).toISOString()}),run('end',{started_at:new Date(now).toISOString()}),run('future',{started_at:new Date(now+1).toISOString()}),run('unknown',{started_at:null}),run('before',{started_at:new Date(now-86400001).toISOString()})]
+  const scoped = activitySummary(rows, {now, period:'1'})
+  assert.equal(scoped.total, 2)
+  assert.equal(scoped.undated, 2)
+  assert.equal(scoped.buckets[0].count, 1)
+  assert.equal(scoped.buckets.at(-1).count, 1)
+  const all = activitySummary(rows, {now, period:'all'})
+  assert.equal(all.total, 5)
+  assert.equal(all.buckets.reduce((n,b)=>n+b.count,0), 3)
+  assert.equal(activitySummary([], {now}).successRate, null)
+})
+
+test('ledger refresh waits after completion, coalesces clicks and resets its pause', async () => {
+  const { createRefreshLoop } = await import('../visualizer/web/src/lib/live.js')
+  const timers = new Map()
+  let next = 0, reads = 0, finish
+  const loop = createRefreshLoop(() => { reads += 1; return new Promise(resolve => { finish = resolve }) }, {
+    setTimeout: (fn, delay) => { timers.set(++next, {fn, delay}); return next },
+    clearTimeout: id => timers.delete(id),
+  })
+  const first = loop.refresh()
+  await Promise.resolve()
+  assert.equal(reads, 1)
+  assert.equal(loop.refresh(), first)
+  assert.equal(timers.size, 0, 'a slow read must never have a periodic timer alongside it')
+  finish()
+  await first
+  assert.deepEqual([...timers.values()].map(t => t.delay), [30000])
+  const manual = loop.refresh()
+  await Promise.resolve()
+  assert.equal(timers.size, 0, 'manual refresh cancels the old scheduled read')
+  assert.equal(reads, 2)
+  finish()
+  await manual
+  assert.deepEqual([...timers.values()].map(t => t.delay), [30000])
+  loop.stop()
+  assert.equal(timers.size, 0)
+})
+
+test('paused, hidden and disposed ledger refreshes do not restart themselves', async () => {
+  const { createRefreshLoop } = await import('../visualizer/web/src/lib/live.js')
+  const timers = new Map()
+  let next = 0, reads = 0, finish, visible = false
+  const loop = createRefreshLoop(() => { reads += 1; return new Promise(resolve => { finish = resolve }) }, {
+    visible: () => visible,
+    setTimeout: (fn, delay) => { timers.set(++next, {fn, delay}); return next },
+    clearTimeout: id => timers.delete(id),
+  })
+  const tick = () => { const [id, timer] = [...timers][0]; timers.delete(id); timer.fn() }
+  const initial = loop.refresh()
+  await Promise.resolve(); finish(); await initial
+  tick(); await Promise.resolve()
+  assert.equal(reads, 1, 'hidden tabs skip the scheduled read')
+  assert.equal(timers.size, 1)
+  loop.setEnabled(false)
+  assert.equal(timers.size, 0)
+  const manual = loop.refresh()
+  await Promise.resolve(); finish(); await manual
+  assert.equal(reads, 2, 'manual refresh remains available while auto refresh is paused')
+  assert.equal(timers.size, 0)
+  loop.setEnabled(true)
+  visible = true
+  tick(); await Promise.resolve()
+  assert.equal(reads, 3)
+  const running = loop.refresh()
+  loop.setEnabled(false)
+  finish(); await running
+  assert.equal(timers.size, 0, 'pausing during a request must suppress its next timer')
+  const last = loop.refresh()
+  await Promise.resolve(); loop.stop(); finish(); await last
+  assert.equal(timers.size, 0, 'a completed read must not resurrect a disposed loop')
+  await loop.refresh()
+  assert.equal(reads, 4)
+})
+
+test('failed ledger reads wait before retrying and collapsed diagnostics do not poll', async () => {
+  const { createRefreshLoop } = await import('../visualizer/web/src/lib/live.js')
+  let delay
+  const loop = createRefreshLoop(async () => { throw new Error('feed unavailable') }, {setTimeout: (fn, ms) => { delay = ms; return 1 }, clearTimeout() {}})
+  await assert.rejects(loop.refresh(), /feed unavailable/)
+  assert.equal(delay, 30000)
+  loop.stop()
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.doesNotMatch(app, /setInterval\(refresh|anyRunning/)
+  assert.match(app, /onMount\(\(\) => \{\s*refreshLoop = createRefreshLoop\(refresh/)
+  assert.match(app, /visible:\(\) => !document.hidden/)
+  assert.match(app, /bind:checked=\{autoRefresh\} onchange=\{\(event\) => refreshLoop\?\.setEnabled\(event.currentTarget.checked\)\}/)
+  assert.match(app, /\{#if showDiagnostics\}[\s\S]*<CellHealthPanel \/><RunSetPanel \/><TeardownPanel \/><IntakePanel \/>[\s\S]*\{\/if\}<\/details>/)
+})
+
+// Task summary evidence boundaries: a finished assignment is never task acceptance.
+test('task overview distinguishes reported work, review and final outcome', async () => {
+  const { taskDetailSummary, verifiedTaskReturns } = await import('../visualizer/web/src/lib/task-detail.js')
+  const run = { running:true, status:'running', phases:[{ name:'build' }], runtime:{ driver_state:'unknown' }, settlement:{state:'unsettled'} }
+  const rows = [
+    {valid:true,role:'builder',dispatch_seq:10,status:'done',summary:'Later work',details:{files_changed:['a.js','b.js']}},
+    {valid:true,role:'reviewer',dispatch_seq:9,status:'done',summary:'Review',details:{verdict:'pass'}},
+    {valid:true,role:'builder',dispatch_seq:2,status:'done',summary:'Earlier work',details:{files_changed:['a.js']}},
+    {valid:false,role:'builder',dispatch_seq:11,summary:'Invalid report'},
+    {valid:true,role:'builder',dispatch_seq:null,summary:'Unordered report'},
+  ]
+  const verified = {verified:true,envelopes:rows,task:null}
+  const view = taskDetailSummary(run, verified)
+  assert.equal(view.report.summary,'Later work')
+  assert.equal(view.review.dispatch_seq,9)
+  assert.equal(view.status.key,'unverified')
+  assert.deepEqual(view.files,['a.js','b.js'])
+  for (const payload of [{...verified,verified:false},{...verified,degraded:true},{}]) {
+    const unknown = taskDetailSummary(run,payload)
+    assert.equal(unknown.report,null)
+    assert.equal(unknown.review,null)
+    assert.deepEqual(unknown.files,[])
+    assert.deepEqual(verifiedTaskReturns(payload),{envelopes:[],task:null})
+  }
+  const escalation={status:'escalation',details:{escalation:{why:'Gate could not run',question:{prompt:'Which environment should be used?'}}}}
+  assert.equal(taskDetailSummary(run,{...verified,task:escalation}).next,'Which environment should be used?')
+  assert.equal(taskDetailSummary(run,{...verified,verified:false,task:escalation}).status.key,'unverified')
+  assert.equal(taskDetailSummary({...run,settlement:{outcome:'success'}},{...verified,task:escalation}).status.key,'success')
+  assert.equal(verifiedTaskReturns({...verified,task:[]}).task,null)
+})
+
+test('missing round results are not presented as zero passed', () => {
+  const card = (extra) => planCardsProbes.planStepCards({plan:{chunks:[{id:'a',checks_owned:['C1','C2']}]}, rows:[
+    {event:'step:start',step:'a',round:1,at:1000},
+    {event:'step:red',step:'a',round:1,at:2000,...extra},
+  ]}).steps[0].rounds[0]
+  assert.match(card({}).label,/Pass count not recorded/)
+  assert.doesNotMatch(card({}).label,/0\/2/)
+  assert.match(card({passed:[],failed:['C1','C2']}).label,/0\/2 checks passed/)
+})
+
+test('detail refresh includes final settlement and preserves successful partial reads', async () => {
+  const {applyRead,createPulse,initialJournalState} = await import('../visualizer/web/src/lib/live.js')
+  const source=readFileSync(join(ROOT,'visualizer/web/src/lib/RunDetail.svelte'),'utf8')
+  const setup=source.slice(source.indexOf('  let returns = $state('),source.indexOf('  $effect(() => {\n    const requested = phase')).replace(/^  let \w+ = \$derived\([^\n]*\)\n/gm,'')
+  const effects=[],pulse=createPulse();let reads=0,failEvents=false
+  const instantiate=new Function('run','initialJournalState','applyRead','getReturns','getEvents','drainEvents','getJournal','journalPulse','$state','$effect',`${setup};return {snapshot(){return {returns,events,error,loading}},setRun(next){run=next}}`)
+  const run={adw_id:'a',repo_slug:'r',goal:'g',running:true}
+  const reader=instantiate(run,initialJournalState,applyRead,async()=>({verified:true,envelopes:[],task:{status:++reads===1?'running':'escalation'}}),async()=>{},async()=>{if(failEvents)throw Error('offline');return {events:[{id:1}]}},async()=>({rows:[]}),pulse,v=>v,f=>effects.push(f))
+  const tick=()=>new Promise(resolve=>setImmediate(resolve))
+  effects[0]();effects[1]();const unsubscribe=effects[2]()
+  try {
+    await tick();assert.equal(reader.snapshot().returns.task.status,'running')
+    reader.setRun({...run,running:false});failEvents=true;pulse.pulse();await tick()
+    assert.equal(reads,2)
+    assert.equal(reader.snapshot().returns.task.status,'escalation')
+    assert.deepEqual(reader.snapshot().events,[{id:1}])
+    assert.match(reader.snapshot().error,/Event history could not be refreshed/)
+    assert.equal(reader.snapshot().loading,false)
+  } finally {unsubscribe()}
 })

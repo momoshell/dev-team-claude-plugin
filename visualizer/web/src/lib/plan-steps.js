@@ -213,7 +213,8 @@ export function planStepCards(payload = {}) {
       } else {
         const den = owned?.length ?? round.passed?.length ?? 0;
         const num = owned ? owned.filter((id) => round.passed?.includes(id)).length : (round.passed?.length ?? 0);
-        const parts = ['Round ' + round.round, num + '/' + den + ' checks passed'];
+        const measured = Array.isArray(round.passed);
+        const parts = ['Round ' + round.round, measured ? num + '/' + den + ' checks passed' : 'Pass count not recorded'];
         const failedSegs = round.failed?.length ? ['failed: ' + round.failed.join(', ')] : [];
         const regressedSegs = round.regressed?.length ? ['regressed: ' + round.regressed.join(', ')] : [];
         parts.push(...failedSegs, ...regressedSegs);

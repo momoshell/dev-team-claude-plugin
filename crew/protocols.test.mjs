@@ -195,7 +195,10 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
 
 // P2, the seat envelope.
 const DETAILS = {
-  planner: { plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'] },
+  planner: {
+    plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'],
+    mutations: [{ check: 'EV1', file: 'a.mjs', find: 'x', replace: 'y' }, { check: 'EV2', file: 'b.mjs', find: 'p', replace: 'q' }],
+  },
   builder: { summary: 'Implemented the change.' },
   reviewer: { verdict: 'pass', findings: [] },
   'tech-lead': { verdict: 'pass', findings: [] },
@@ -258,6 +261,32 @@ test('P2 planner details name the plan, the gate and the acceptance ids', () => 
     const value = envelope('planner'); value.details.acceptance = acceptance
     assert.ok(refusedFor('planner', value, 'details.acceptance').length, JSON.stringify(acceptance))
   }
+})
+
+// MUTATION: drop the acceptance coverage comparison and a declaration set that skips or invents a check is accepted.
+test('P2 planner mutations declare exactly one {check, file, find, replace} per acceptance id', () => {
+  const [one, two] = DETAILS.planner.mutations
+  const refusedWith = (mutations, needle) => {
+    const value = envelope('planner'); value.details.mutations = mutations
+    return refusedFor('planner', value, needle).length > 0
+  }
+  assert.ok(refusedWith([one], 'no declaration for acceptance EV2'))
+  assert.ok(refusedWith([], 'no declaration for acceptance EV1'))
+  assert.ok(refusedWith([one, two, { ...two, check: 'EV3' }], 'is not a declared acceptance id'))
+  assert.ok(refusedWith([one, two, one], 'repeats EV1'))
+  assert.ok(refusedWith([one, { ...two, extra: 1 }], 'is not a mutation field'))
+  for (const key of ['check', 'file', 'find', 'replace']) {
+    const { [key]: gone, ...rest } = two
+    assert.ok(refusedWith([one, rest], `.${key} is required`), key)
+    assert.ok(refusedWith([one, { ...two, [key]: 5 }], `.${key} is a string`), key)
+  }
+  assert.ok(refusedWith([one, { ...two, find: '' }], 'find is a nonempty string'))
+  assert.ok(refusedWith([one, { ...two, replace: two.find }], 'replace differs from find'))
+  for (const bad of [null, 'x', {}, [null], [[]], [one, 7]]) assert.ok(refusedWith(bad, 'details.mutations'), JSON.stringify(bad))
+  assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [])
+  // Only the planner carries them.
+  const stray = envelope('builder'); stray.details.mutations = []
+  assert.ok(refusedFor('builder', stray, 'details.mutations is not a field').length)
 })
 
 // MUTATION: add approved to REVIEW_VERDICTS or retry to LEAD_DECISIONS and the closed enum opens.

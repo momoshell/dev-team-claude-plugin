@@ -383,3 +383,67 @@ test('CS6 listing, text and --json reads of live and archived lanes leave the cr
   assert.equal(fingerprint(crewRoot), before)
   assert.deepEqual(readdirSync(home), ['.crew'])
 })
+
+const frame = (update) => `${JSON.stringify({ sessionId: 's', update })}\n`
+const chunk = (sessionUpdate, text) => frame({ sessionUpdate, content: { type: 'text', text } })
+const LEAN = { builder: { agent: 'pi', model: 'test/model', transport: 'lean-acp' }, reviewer: { agent: 'claude', model: 'claude-opus-5', transport: 'lean-acp' } }
+
+function leanLane(crewRoot, name, turns, { suffix = '' } = {}) {
+  const dir = join(crewRoot, `dt-${name}`, `${name}${suffix}`)
+  put(join(dir, 'crew.json'), JSON.stringify({ members: LEAN }))
+  for (const [role, turn, raw] of turns) put(join(dir, 'task', 'lean', role, `${name}.${role}.${turn}.jsonl`), raw)
+  return dir
+}
+
+// MUTATION: sort the lean turn files lexically and turn 10 renders before turn 2.
+test('WL7 lean ACP turns list and render per role in numeric order, chunks joined, --json bytes untouched', () => {
+  const { crewRoot } = fixture()
+  const prompt = (text) => `${JSON.stringify({ type: 'prompt', text })}\n`
+  const second = prompt('PROMPT-TEN') + chunk('agent_message_chunk', 'ten ') + chunk('agent_message_chunk', 'done')
+  const first = prompt('PROMPT-TWO') + chunk('agent_thought_chunk', 'hm') + chunk('agent_thought_chunk', 'mm') + chunk('agent_message_chunk', 'two')
+    + frame({ sessionUpdate: 'tool_call', toolCallId: 'tc1', title: 'Read file', rawInput: { path: 'a.mjs' } })
+    + frame({ sessionUpdate: 'tool_call_update', toolCallId: 'tc1', status: 'completed', content: [{ type: 'text', text: 'ok' }] })
+    + frame({ sessionUpdate: 'usage_update', used: 3 })
+    + chunk('user_message_chunk', 'echo')
+  leanLane(crewRoot, 'lean1', [['builder', 10, second], ['builder', 2, first], ['reviewer', 1, prompt('REVIEW')]])
+  // Files that are not this role's turns are ignored.
+  put(join(crewRoot, 'dt-lean1', 'lean1', 'task', 'lean', 'builder', 'lean1.reviewer.3.jsonl'), 'ignored')
+  put(join(crewRoot, 'dt-lean1', 'lean1', 'task', 'lean', 'builder', 'notes.txt'), 'ignored')
+  const before = fingerprint(crewRoot)
+  assert.equal(showLane({ lane: 'lean1', deps: { crewRoot } }), [
+    'builder  pi  test/model  lean-acp',
+    '  task/lean/builder/lean1.builder.2.jsonl',
+    '  task/lean/builder/lean1.builder.10.jsonl',
+    'reviewer  claude  claude-opus-5  lean-acp',
+    '  task/lean/reviewer/lean1.reviewer.1.jsonl',
+    '',
+  ].join('\n'))
+  const text = showLane({ lane: 'lean1', role: 'builder', deps: { crewRoot } })
+  assert.ok(text.indexOf('PROMPT-TWO') < text.indexOf('PROMPT-TEN'))
+  assert.match(text, /THINKING\nhmmm\n\nASSISTANT\ntwo/)
+  assert.match(text, /ASSISTANT\nten done/)
+  assert.match(text, /TOOL Read file tc1\n\{\n  "path": "a\.mjs"\n\}/)
+  assert.match(text, /TOOL UPDATE tc1 completed/)
+  assert.match(text, /EVENT\n\{[^]*"usage_update"[^]*\}/)
+  assert.match(text, /USER\necho/)
+  assert.equal(showLane({ lane: 'lean1', role: 'builder', json: true, deps: { crewRoot } }), first + second)
+  assert.equal(fingerprint(crewRoot), before)
+})
+
+test('WL7 lean ACP archives resolve, and absent, empty, malformed and unreadable recordings are told apart', () => {
+  const { crewRoot } = fixture()
+  leanLane(crewRoot, 'lean2', [['builder', 1, chunk('agent_message_chunk', 'archived')]], { suffix: '.archive-2026-10-24T16-59-50-798Z' })
+  assert.match(showLane({ lane: 'lean2', role: 'builder', deps: { crewRoot } }), /ASSISTANT\narchived/)
+  leanLane(crewRoot, 'lean3', [['builder', 1, '']])
+  assert.throws(() => showLane({ lane: 'lean3', role: 'reviewer', deps: { crewRoot } }), /role reviewer has no session: no session file recorded/)
+  assert.throws(() => showLane({ lane: 'lean3', role: 'builder', deps: { crewRoot } }), /recorded no events/)
+  leanLane(crewRoot, 'lean4', [['builder', 1, `${chunk('agent_message_chunk', 'a')}{"sessionId":`]])
+  assert.throws(() => showLane({ lane: 'lean4', role: 'builder', deps: { crewRoot } }), /lean4\.builder\.1\.jsonl line 2 is not a complete JSON record/)
+  assert.equal(showLane({ lane: 'lean4', role: 'builder', json: true, deps: { crewRoot } }).endsWith('{"sessionId":'), true)
+  leanLane(crewRoot, 'lean5', [['builder', 1, chunk('agent_message_chunk', 'x')]])
+  for (const code of ['EACCES', 'EINTR', 'EPERM']) {
+    const denied = (needle, fn) => (path, ...rest) => { if (String(path).includes(needle)) throw Object.assign(new Error(code), { code }); return fn(path, ...rest) }
+    assert.throws(() => showLane({ lane: 'lean5', deps: { crewRoot, readdirSync: denied(join('task', 'lean', 'builder'), readdirSync) } }), new RegExp(`cannot read .*builder: ${code}`), code)
+    assert.throws(() => showLane({ lane: 'lean5', role: 'builder', deps: { crewRoot, readFileSync: denied('lean5.builder.1.jsonl', readFileSync) } }), new RegExp(`lean5\\.builder\\.1\\.jsonl: ${code}`), code)
+  }
+})

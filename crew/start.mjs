@@ -26,6 +26,7 @@ import { acceptanceIds, boundIssueOf } from './drive.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const CREW = join(HOME, 'crew', 'crew.mjs')
+const LEAN = join(HOME, 'crew', 'lean.mjs')
 const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 export class StartRefusal extends Error {}
@@ -61,8 +62,9 @@ function git(d, checkout, args) {
   return result.status === 0 ? String(result.stdout).trim() : null
 }
 
-export async function startLane({ briefPath, checkout, check = false, deps = {} }) {
+export async function startLane({ briefPath, checkout, check = false, loop, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
+  if (loop !== undefined && loop !== 'lean') throw Object.assign(new StartRefusal(`--loop takes lean, got ${JSON.stringify(loop)}`), { exitCode: 2 })
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
   const { fields, defects } = parseBrief(text)
@@ -74,6 +76,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     throw new StartRefusal(`the driver reads brief ${briefPath} differently: acceptance ${JSON.stringify(driver.acceptance)} and bound issue ${driver.bound ?? 'none'}, against ${JSON.stringify(fields.acceptance)} and ${bound ?? 'none'}`)
   }
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
+  if (loop === 'lean' && fields.shape !== 'standard') throw new StartRefusal(`--loop lean runs the standard shape only; brief ${briefPath} declares shape ${fields.shape}`)
 
   // The deployed roster.json supplies what the agent definitions do not carry; every seat
   // and the advisor come from the definitions (crew/roster-generate.mjs). The check runs on
@@ -113,14 +116,46 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     throw new StartRefusal(`cannot snapshot lane ${lane} into ${started}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
 
-  const boot = d.spawnSync(process.execPath, [CREW, 'boot', '--task', lane, '--checkout', worktree, '--tier', fields.tier, '--roster', rosterPath, '--headless-all'], { cwd: worktree })
-  if (boot.status !== 0) throw new StartRefusal(`crew boot refused lane ${lane} (exit ${boot.status}):\n${String(boot.stderr || boot.stdout).trim()}\nthe worktree ${worktree} and branch ${lane} are left for inspection`)
-
   const log = join(started, `${lane}.run.log`)
-  const args = [CREW, 'run', '--task', lane, '--checkout', worktree, '--brief-file', brief, '--keep', ...(fields.shape === 'stepped' ? ['--execution', 'stepped'] : [])]
   // No suite slot queue (ADR-052 D9, operator 2026-10-25): the slots are shared with every
   // project on the host, and a lane that waited out the 30-minute ceiling ran unslotted anyway.
   const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
+
+  // The lean loop has no boot: the crew directory holds the member metadata `crew show` reads
+  // and the spec the detached bridge runs, and the bridge plays each turn itself.
+  if (loop === 'lean') {
+    const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
+    const taskDir = join(crewDir, 'task')
+    const specPath = join(taskDir, 'lean.json')
+    const members = Object.fromEntries(Object.entries(roster.tiers[fields.tier])
+      .filter(([role, cell]) => role !== 'advisor' && cell)
+      .map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }]))
+    const spec = {
+      id: lane, cwd: worktree, taskDir, tier: fields.tier, shape: fields.shape, brief: run, acceptance: fields.acceptance,
+      subject: `feat: ${lane}`, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
+      suite: { command: 'npm', args: ['test'] },
+    }
+    try {
+      d.mkdirSync(taskDir, { recursive: true })
+      d.writeFileSync(join(crewDir, 'crew.json'), `${JSON.stringify({ members }, null, 2)}\n`)
+      d.writeFileSync(specPath, `${JSON.stringify(spec, null, 2)}\n`)
+    } catch (cause) {
+      throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
+    }
+    const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env })
+    d.log(`crew start: lane=${lane} loop=lean tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
+    d.log(`  worktree ${worktree}`)
+    d.log(`  brief    ${brief}`)
+    d.log(`  log      ${log}`)
+    d.log(`  spec     ${specPath}`)
+    d.log(`  sessions node ${join(HOME, 'bin', 'crew.mjs')} show ${lane} [<role>]`)
+    return { lane, fields, worktree, brief, rosterPath, log, pid, specPath }
+  }
+
+  const boot = d.spawnSync(process.execPath, [CREW, 'boot', '--task', lane, '--checkout', worktree, '--tier', fields.tier, '--roster', rosterPath, '--headless-all'], { cwd: worktree })
+  if (boot.status !== 0) throw new StartRefusal(`crew boot refused lane ${lane} (exit ${boot.status}):\n${String(boot.stderr || boot.stdout).trim()}\nthe worktree ${worktree} and branch ${lane} are left for inspection`)
+
+  const args = [CREW, 'run', '--task', lane, '--checkout', worktree, '--brief-file', brief, '--keep', ...(fields.shape === 'stepped' ? ['--execution', 'stepped'] : [])]
   const pid = d.spawnDetached(process.execPath, args, { cwd: worktree, log, env })
   d.log(`crew start: lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   d.log(`  worktree ${worktree}`)
@@ -133,15 +168,18 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const check = argv.includes('--check')
   const at = argv.indexOf('--checkout')
-  const rest = argv.filter((arg, index) => arg !== '--check' && (at < 0 || (index !== at && index !== at + 1)))
-  if (rest.length !== 1 || rest[0].startsWith('--') || (at >= 0 && !argv[at + 1])) {
-    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
+  const flagAt = argv.indexOf('--loop')
+  const valued = new Set([...(at >= 0 ? [at, at + 1] : []), ...(flagAt >= 0 ? [flagAt, flagAt + 1] : [])])
+  const rest = argv.filter((arg, index) => arg !== '--check' && !valued.has(index))
+  const badLoop = flagAt >= 0 && (argv[flagAt + 1] !== 'lean' || argv.indexOf('--loop', flagAt + 1) >= 0)
+  if (rest.length !== 1 || rest[0].startsWith('--') || (at >= 0 && !argv[at + 1]) || badLoop) {
+    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
     return 2
   }
   // --check needs no checkout, and a real start finds one only after the roster passes.
   const checkout = at >= 0 ? resolve(argv[at + 1]) : null
   try {
-    await startLane({ briefPath: resolve(rest[0]), checkout, check, deps })
+    await startLane({ briefPath: resolve(rest[0]), checkout, check, loop: flagAt >= 0 ? 'lean' : undefined, deps })
     return 0
   } catch (error) {
     if (!(error instanceof StartRefusal)) throw error

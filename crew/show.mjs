@@ -9,7 +9,8 @@
 // Claude seats (headless-json) record one stream per dispatch under task/headless/d<N>; the
 // seat is named by the CREW_ROLE the driver saved in that dispatch's cmd.json, because N is the
 // order dispatches were allocated in, not a role. Pi seats (headless-rpc) record one persistent
-// stream under task/headless-rpc/<role>. Other transports record nothing this reads.
+// stream under task/headless-rpc/<role>. Lean ACP seats (crew start --loop lean) record one JSONL
+// per turn under task/lean/<role>/<lane>.<role>.<turn>.jsonl. Other transports record nothing this reads.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -47,12 +48,41 @@ function renderContent(content, heading) {
   })
 }
 
+// ACP recordings: a {type:'prompt'} head record, then {sessionId, update} frames. Adjacent chunks of
+// one kind are one utterance, so their text joins without separators.
+function renderAcp(events) {
+  const parts = []
+  let open = null
+  const chunk = (heading, text) => {
+    if (open?.heading === heading) { open.text += text; return }
+    open = { heading, text }
+    parts.push(open)
+  }
+  for (const event of events) {
+    const update = event?.update
+    const kind = update?.sessionUpdate
+    const text = update?.content?.type === 'text' && typeof update.content.text === 'string' ? update.content.text : null
+    if (event?.type === 'prompt' && typeof event.text === 'string') { open = null; parts.push({ heading: 'USER', text: event.text }) }
+    else if (kind === 'user_message_chunk' && text !== null) chunk('USER', text)
+    else if (kind === 'agent_message_chunk' && text !== null) chunk('ASSISTANT', text)
+    else if (kind === 'agent_thought_chunk' && text !== null) chunk('THINKING', text)
+    else {
+      open = null
+      if (kind === 'tool_call') parts.push({ heading: `TOOL ${update.title ?? update.kind ?? ''} ${update.toolCallId ?? ''}`.trimEnd(), text: pretty(update.rawInput ?? update.content ?? null) })
+      else if (kind === 'tool_call_update') parts.push({ heading: `TOOL UPDATE ${update.toolCallId ?? ''}${update.status ? ` ${update.status}` : ''}`.trimEnd(), text: pretty(update.content ?? update.rawOutput ?? null) })
+      else parts.push({ heading: 'EVENT', text: pretty(event) })
+    }
+  }
+  return parts.map(({ heading, text }) => `${heading}\n${text}`)
+}
+
 function renderSession({ rel, raw, prompt }, transport) {
   const claude = transport === 'headless-json'
   const lines = raw.split('\n').flatMap((line, index) => (line.trim() === '' ? [] : [[index + 1, line]]))
   const events = lines.map(([number, line]) => {
     try { return JSON.parse(line) } catch (error) { throw new ShowRefusal(`${rel} line ${number} is not a complete JSON record (${error.message})`) }
   })
+  if (transport === 'lean-acp') return `=== ${rel} ===\n${(events.length ? renderAcp(events) : ['no recorded events']).join('\n\n')}\n`
   const parts = prompt === undefined ? [] : [`USER\n${prompt}`]
   // A failed pi turn is recorded with empty content, so its stopReason and errorMessage are all there is to show.
   const message = (m) => {
@@ -145,6 +175,12 @@ export function showLane({ lane, role, json = false, deps = {} }) {
   }
   const sessionsOf = (name, transport) => {
     if (transport === 'headless-json') return { files: dispatches.get(name) ?? [], reason: 'no session file recorded' }
+    if (transport === 'lean-acp') {
+      const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${name}\\.([0-9]+)\\.jsonl$`)
+      const turns = (attempt(join(crewDir, 'task', 'lean', name), d.readdirSync) ?? []).flatMap((file) => (turn.test(file) ? [[Number(file.match(turn)[1]), file]] : []))
+        .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1))
+      return { files: turns.map(([, file]) => ({ rel: `task/lean/${name}/${file}`, prompt: undefined })), reason: 'no session file recorded' }
+    }
     if (transport !== 'headless-rpc') return { files: [], reason: `no session file: transport ${transport} records none this reads` }
     const rel = `task/headless-rpc/${name}/stream.jsonl`
     return { files: stat(join(crewDir, rel)) ? [{ rel, prompt: undefined }] : [], reason: 'no session file recorded' }
